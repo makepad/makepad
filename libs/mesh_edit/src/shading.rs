@@ -1,3 +1,4 @@
+use makepad_csg_math::portable::PortableFloat;
 use crate::{context::invalid,geometry::*,*};
 use std::collections::{BTreeMap,BTreeSet,VecDeque};
 impl Mesh {
@@ -37,7 +38,7 @@ impl Mesh {
 }
 pub(crate) fn derive_normals(mesh:&mut Mesh,smooth:bool,angle:f64,ctx:&mut Context<'_>)->Result<()> {
     let adj=mesh.adjacency(ctx)?;let normals=mesh.faces.iter().map(|f|Ok((f.id,face_geometry(mesh,f.id,ctx)?.normal))).collect::<Result<BTreeMap<_,_>>>()?;
-    let mut results=BTreeMap::new();let cosine=angle.cos();
+    let mut results=BTreeMap::new();let cosine=angle.pcos();
     for (&vertex,faces) in &adj.vertex_faces{let mut remaining=faces.iter().copied().collect::<BTreeSet<_>>();
         while let Some(&seed)=remaining.first(){let mut queue=VecDeque::from([seed]);remaining.remove(&seed);let mut fan=Vec::new();let mut n=[0.;3];
             while let Some(face)=queue.pop_front(){ctx.checkpoint(1)?;fan.push(face);n=add(n,normals[&face]);if !smooth{continue;}

@@ -1,6 +1,7 @@
 //! Deterministic continuous material fields, baked by the document worker.
 //! Integral scale repeats exactly over the UV tile. Legacy cell noise keeps
 //! its old implementation and encoded tag, preserving existing source hashes.
+use makepad_csg_math::portable::PortableFloat;
 use super::PatternKind;
 use std::f64::consts::{FRAC_1_SQRT_2, TAU};
 
@@ -48,9 +49,9 @@ pub(super) fn sample(kind: PatternKind, x: f64, y: f64, scale: [f64; 2], seed: u
         PatternKind::Perlin => 0.5 + perlin(x, y, periods, seed),
         PatternKind::Fbm => 0.5 + fbm(x, y, periods, seed),
         PatternKind::Yarn => {
-            let warp = 0.18 * (TAU * y).sin() + 0.08 * fbm(x, y, periods, seed);
-            let strand = 0.5 + 0.5 * (TAU * (x + warp)).cos();
-            let fibers = 0.5 + 0.5 * (TAU * (x * 12. + y + warp)).cos();
+            let warp = 0.18 * (TAU * y).psin() + 0.08 * fbm(x, y, periods, seed);
+            let strand = 0.5 + 0.5 * (TAU * (x + warp)).pcos();
+            let fibers = 0.5 + 0.5 * (TAU * (x * 12. + y + warp)).pcos();
             (0.16 + 0.84 * strand.sqrt()) * (0.84 + 0.16 * fibers)
         }
         PatternKind::Bricks | PatternKind::Tiles | PatternKind::Planks => return masonry(kind, x, y, periods, seed),
@@ -73,8 +74,8 @@ pub(super) fn sample(kind: PatternKind, x: f64, y: f64, scale: [f64; 2], seed: u
             ((hex - 0.36) / 0.05).clamp(0., 1.)
         }
         PatternKind::Knurl => {
-            let a = (TAU * (x + y)).sin().abs();
-            let b = (TAU * (x - y)).sin().abs();
+            let a = (TAU * (x + y)).psin().abs();
+            let b = (TAU * (x - y)).psin().abs();
             0.35 + 0.65 * (a.min(b) * 1.6).min(1.)
         }
         PatternKind::Camo => {
@@ -127,7 +128,7 @@ fn foliage(x: f64, y: f64, scale: [f64; 2], periods: [i64; 2], seed: u64, needle
                 let keep = 1.0 - ((rim - 0.28) / 0.2).clamp(0.0, 1.0);
                 if r(3) > keep { continue; }
                 let angle = r(4) * TAU;
-                let (ca, sa) = (angle.cos(), angle.sin());
+                let (ca, sa) = (angle.pcos(), angle.psin());
                 let (dx, dy) = (x - px, y - py);
                 // Leaf frame: u along the blade, v across it.
                 let u = dx * ca + dy * sa;
@@ -186,7 +187,7 @@ fn masonry(kind: PatternKind, x: f64, y: f64, periods: [i64; 2], seed: u64) -> f
     let detail = match kind {
         PatternKind::Planks => {
             let grain = fbm(x * 0.5, y * 6., periods.map(|p| p.max(1)), seed ^ 0x51);
-            0.82 + 0.18 * (0.5 + 0.5 * (TAU * (y * 3. + grain * 2.5)).sin())
+            0.82 + 0.18 * (0.5 + 0.5 * (TAU * (y * 3. + grain * 2.5)).psin())
         }
         _ => 0.9 + 0.1 * (0.5 + fbm(x * 4., y * 4., periods.map(|p| p * 4), seed ^ 0x77)),
     };

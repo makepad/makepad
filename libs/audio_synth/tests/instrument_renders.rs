@@ -1,10 +1,9 @@
-//! Offline renders of every instrument playing a short phrase through the
-//! score sequencer, written as WAVs for listening (SYNTH_RENDER_DIR, with a
-//! scratch default) and checked for level, NaN and render speed.
+//! Offline renders of every instrument playing a short phrase, written as
+//! WAVs for listening (SYNTH_RENDER_DIR, with a scratch default) and checked
+//! for level, NaN and render speed.
 #![cfg(feature = "instruments")]
 
 use makepad_audio_synth::instruments::{build, parse_kind, InstrumentKind, SoundFontInstrument};
-use makepad_audio_synth::score::{Score, SeqEvent, Sequencer};
 use makepad_audio_synth::wav::stereo_wav_16;
 use makepad_audio_synth::{Control, Instrument};
 use std::time::Instant;
@@ -13,41 +12,63 @@ const RATE: f32 = 48_000.0;
 const DEFAULT_DIR: &str =
     "/private/tmp/claude-501/-Users-admin-makepad/bbb86735-3473-4fd6-ad57-d987802a0619/scratchpad/synth/instruments";
 
-/// Render `secs` of `score` on `inst`, splitting each block at event offsets
-/// so notes land sample-accurately. `pedal_bars` re-takes the sustain pedal at
-/// every bar line (a pianist's legato pedalling).
-fn render(inst: &mut dyn Instrument, score: &str, secs: f32, pedal_bars: bool) -> (Vec<f32>, Vec<f32>, f64) {
-    let mut seq = Sequencer::new(Score::parse(score).unwrap_or_else(|e| panic!("{score}: {e}")));
+/// A phrase: (beat, MIDI note, beats) at a tempo, looped or once.
+struct Phrase {
+    bpm: f32,
+    beats: f32,
+    looping: bool,
+    notes: &'static [(f32, u8, f32)],
+}
+
+const PIANO: Phrase = Phrase { bpm: 80.0, beats: 16.0, looping: false, notes: &[(0.0, 48, 4.0), (0.0, 55, 4.0), (0.0, 64, 4.0), (1.0, 67, 0.5), (1.5, 76, 0.5), (2.0, 74, 1.0), (3.0, 72, 1.0), (4.0, 45, 4.0), (4.0, 52, 4.0), (4.0, 60, 4.0), (5.0, 76, 0.5), (5.5, 72, 0.5), (6.0, 69, 2.0), (8.0, 41, 4.0), (8.0, 48, 4.0), (8.0, 57, 4.0), (9.0, 77, 0.5), (9.5, 81, 0.5), (10.0, 79, 1.0), (11.0, 77, 1.0), (12.0, 43, 4.0), (12.0, 50, 4.0), (12.0, 59, 4.0), (12.0, 74, 2.0), (14.0, 71, 2.0)] };
+const DRUMS: Phrase = Phrase { bpm: 110.0, beats: 8.0, looping: true, notes: &[(0.0, 36, 1.0), (0.0, 42, 0.5), (0.5, 42, 0.5), (1.0, 38, 1.0), (1.0, 42, 0.5), (1.5, 46, 0.5), (2.0, 36, 0.5), (2.0, 46, 0.5), (2.5, 36, 0.5), (2.5, 46, 0.5), (3.0, 38, 1.0), (3.0, 46, 0.5), (3.5, 46, 0.5), (4.0, 36, 1.0), (4.0, 42, 0.5), (4.5, 42, 0.5), (5.0, 38, 1.0), (5.0, 42, 0.5), (5.5, 42, 0.5), (6.0, 36, 0.5), (6.0, 42, 0.5), (6.5, 36, 0.5), (6.5, 42, 0.5), (7.0, 38, 0.5), (7.0, 49, 1.0), (7.5, 39, 0.5)] };
+const IRONFISH: Phrase = Phrase { bpm: 128.0, beats: 8.0, looping: true, notes: &[(0.0, 57, 0.5), (0.5, 57, 0.5), (1.0, 60, 0.5), (1.5, 57, 0.5), (2.0, 64, 0.5), (2.5, 57, 0.5), (3.0, 62, 0.5), (3.5, 60, 0.5), (4.0, 53, 0.5), (4.5, 53, 0.5), (5.0, 57, 0.5), (5.5, 53, 0.5), (6.0, 60, 0.5), (6.5, 53, 0.5), (7.0, 64, 0.5), (7.5, 62, 0.5)] };
+const RIFF: Phrase = Phrase { bpm: 100.0, beats: 8.0, looping: false, notes: &[(0.0, 60, 0.5), (0.5, 64, 0.5), (1.0, 67, 0.5), (1.5, 72, 0.5), (2.0, 71, 1.0), (3.0, 67, 1.0), (4.0, 69, 0.5), (4.5, 72, 0.5), (5.0, 76, 0.5), (5.5, 81, 0.5), (6.0, 79, 2.0)] };
+const CHORDS: Phrase = Phrase { bpm: 90.0, beats: 8.0, looping: false, notes: &[(0.0, 60, 2.0), (0.0, 64, 2.0), (0.0, 67, 2.0), (0.0, 71, 2.0), (2.0, 57, 2.0), (2.0, 60, 2.0), (2.0, 64, 2.0), (2.0, 67, 2.0), (4.0, 53, 2.0), (4.0, 57, 2.0), (4.0, 60, 2.0), (4.0, 64, 2.0)] };
+const BASS: Phrase = Phrase { bpm: 100.0, beats: 8.0, looping: false, notes: &[(0.0, 36, 0.5), (0.5, 36, 0.5), (1.0, 43, 0.5), (1.5, 36, 0.5), (2.0, 34, 0.5), (2.5, 36, 0.5), (3.0, 31, 1.0), (4.0, 29, 0.5), (4.5, 29, 0.5), (5.0, 36, 0.5), (5.5, 29, 0.5), (6.0, 31, 2.0)] };
+
+/// Render `secs` of `phrase` on `inst`, splitting each block at note on and
+/// off frames so notes land sample-accurately. `pedal_bars` re-takes the
+/// sustain pedal at every bar line (a pianist's legato pedalling).
+fn render(inst: &mut dyn Instrument, phrase: &Phrase, secs: f32, pedal_bars: bool) -> (Vec<f32>, Vec<f32>, f64) {
     let frames = (secs * RATE) as usize;
+    let per_beat = RATE * 60.0 / phrase.bpm;
+    // Every on (vel > 0) and off (vel 0) as (frame, note, vel), in order.
+    let mut events: Vec<(usize, u8, u8)> = Vec::new();
+    let mut offset = 0.0;
+    while (offset * per_beat) < frames as f32 {
+        for &(beat, note, dur) in phrase.notes {
+            events.push((((offset + beat) * per_beat) as usize, note, 100));
+            events.push((((offset + beat + dur) * per_beat) as usize, note, 0));
+        }
+        if !phrase.looping {
+            break;
+        }
+        offset += phrase.beats;
+    }
+    events.sort_by_key(|e| (e.0, e.2));
     let (mut l, mut r) = (vec![0.0f32; frames], vec![0.0f32; frames]);
-    let mut events: Vec<(usize, SeqEvent)> = Vec::with_capacity(64);
-    let mut last_bar = -1i64;
+    let bar = (per_beat * 4.0) as usize;
     let start = Instant::now();
     let mut at = 0;
+    let mut next = 0;
     while at < frames {
         let n = (frames - at).min(256);
-        if pedal_bars {
-            let bar = (seq.beat() / 4.0).floor() as i64;
-            if bar != last_bar {
-                inst.control(Control::Sustain, 0.0);
-                inst.control(Control::Sustain, 1.0);
-                last_bar = bar;
-            }
+        if pedal_bars && at % bar < n {
+            inst.control(Control::Sustain, 0.0);
+            inst.control(Control::Sustain, 1.0);
         }
-        events.clear();
-        seq.advance(n, RATE, &mut |f, e| events.push((f, e)));
-        let mut cursor = 0;
-        for &(f, e) in events.iter() {
+        let mut cursor = at;
+        while next < events.len() && events[next].0 < at + n {
+            let (f, note, vel) = events[next];
             if f > cursor {
-                inst.render(&mut l[at + cursor..at + f], &mut r[at + cursor..at + f]);
+                inst.render(&mut l[cursor..f], &mut r[cursor..f]);
                 cursor = f;
             }
-            match e {
-                SeqEvent::On { note, vel } => inst.note_on(note, vel),
-                SeqEvent::Off { note } => inst.note_off(note),
-            }
+            if vel > 0 { inst.note_on(note, vel) } else { inst.note_off(note) }
+            next += 1;
         }
-        inst.render(&mut l[at + cursor..at + n], &mut r[at + cursor..at + n]);
+        inst.render(&mut l[cursor..at + n], &mut r[cursor..at + n]);
         at += n;
     }
     let speed = secs as f64 / start.elapsed().as_secs_f64();
@@ -76,11 +97,11 @@ fn check_and_write(name: &str, gain: f32, l: &mut [f32], r: &mut [f32], speed: f
     }
 }
 
-fn run(name: &str, kind: InstrumentKind, score: &str, pedal: bool, gain: f32) {
+fn run(name: &str, kind: InstrumentKind, phrase: &Phrase, pedal: bool, gain: f32) {
     let t = Instant::now();
     let mut inst = build(&kind, RATE).unwrap_or_else(|e| panic!("{name}: {e}"));
     println!("{name:>16}: built in {:.0} ms", t.elapsed().as_secs_f64() * 1000.0);
-    let (mut l, mut r, speed) = render(inst.as_mut(), score, 6.0, pedal);
+    let (mut l, mut r, speed) = render(inst.as_mut(), phrase, 6.0, pedal);
     check_and_write(name, gain, &mut l, &mut r, speed);
 }
 
@@ -91,30 +112,27 @@ fn render_every_instrument() {
     run(
         "piano",
         kind("piano", None),
-        "bpm=80 [C3 G3 E4]:4 | [A2 E3 C4]:4 | [F2 C3 A3]:4 | [G2 D3 B3]:4 ; \
-         r:1 G4:1/2 E5 D5:1 C5 | r:1 E5:1/2 C5 A4:2 | r:1 F5:1/2 A5 G5:1 F5 | D5:2 B4:2",
+        &PIANO,
         true,
         1.0,
     );
     run(
         "drums",
         kind("drums", None),
-        "bpm=110 loop kick:1 snare kick:1/2 x snare:1 | kick:1 snare kick:1/2 kick snare:1/2 clap:1/2 ; \
-         hat:1/2 x x ohat x x x x | hat x x x x x crash:1",
+        &DRUMS,
         false,
         1.0,
     );
     run(
         "ironfish",
         kind("ironfish", Some("supersaw")),
-        "bpm=128 loop A3:1/2 A3 C4 A3 E4 A3 D4 C4 | F3 F3 A3 F3 C4 F3 E4 D4",
+        &IRONFISH,
         false,
         1.0,
     );
-    let riff = "bpm=100 C4:1/2 E4 G4 C5 B4:1 G4 | A4:1/2 C5 E5 A5 G5:2";
-    let chords = "bpm=90 [C4 E4 G4 B4]:2 | [A3 C4 E4 G4]:2 | [F3 A3 C4 E4]:2";
+    let (riff, chords) = (&RIFF, &CHORDS);
     run("synth_lead", kind("lead", None), riff, false, 1.0);
-    run("synth_bass", kind("bass", None), "bpm=100 C2:1/2 C2 G2 C2 Bb1 C2 G1:1 | F1:1/2 F1 C2 F1 G1:2", false, 1.0);
+    run("synth_bass", kind("bass", None), &BASS, false, 1.0);
     run("synth_pad", kind("pad", None), chords, false, 1.0);
     run("synth_pluck", kind("pluck", None), riff, false, 1.0);
     run("synth_epiano", kind("epiano", None), chords, false, 1.0);

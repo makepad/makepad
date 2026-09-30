@@ -1,5 +1,6 @@
 //! Bounded mesh factories and explicit derived-geometry construction. Factories
 //! return a new named object; existing sources are never destructively replaced.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{json::{self,Value},mesh::{Context,Mesh,Polygon,JointWeight},service::{array,fields,integer,need,text},Error,Limits,OperationResult,Result};
 use std::collections::BTreeMap;
 #[path="construction_fibers.rs"]
@@ -15,7 +16,7 @@ pub struct ConstructionOperation {object:String,kind:Construction}
 enum Construction {
     Fibers{source:String,count:u32,length:f64,width:f64,seed:u32,material:u32},
     Sweep{profile:Vec<[f64;2]>,path:Vec<[f64;3]>,caps:bool,material:u32},
-    Lathe{profile:Vec<[f64;2]>,axis:usize,segments:u32,caps:bool,material:u32},
+    Lathe{profile:Vec<[f64;2]>,axis:usize,segments:u32,caps:bool,material:u32,outward:bool},
     Loft{profiles:Vec<Vec<[f64;3]>>,closed:bool,caps:bool,material:u32},
     QuadStrip{a:Vec<[f64;3]>,b:Vec<[f64;3]>,closed:bool,material:u32},
     Boolean{a:String,b:String,mode:BooleanMode},
@@ -33,8 +34,8 @@ impl ConstructionOperation {
                 if !(1..=fibers::MAX_STRANDS).contains(&count)||!(0.0001..=1.).contains(&length)||!(0.00001..=0.1).contains(&width)||width>length*0.5{return Err(Error::Invalid("fiber_shell count/length/width"));}
                 Construction::Fibers{source:name(text(v,"source")?,limits)?,count,length,width,seed:integer(need(v,"seed")?)?,material:integer(need(v,"material")?)?}},
             "sweep"=>{fields(v,&["op","object","profile","path","caps","material"])?;Construction::Sweep{profile:vectors(need(v,"profile")?,3,128)?,path:vectors(need(v,"path")?,2,128)?,caps:flag(v,"caps")?,material:integer(need(v,"material")?)?}},
-            "lathe"=>{fields(v,&["op","object","profile","axis","segments","caps","material"])?;let segments=integer(need(v,"segments")?)?;let axis=integer(need(v,"axis")?)? as usize;
-                if !(3..=128).contains(&segments)||axis>2{return Err(Error::Invalid("lathe axis or segments"));}Construction::Lathe{profile:vectors(need(v,"profile")?,2,128)?,axis,segments,caps:flag(v,"caps")?,material:integer(need(v,"material")?)?}},
+            "lathe"=>{fields(v,&["op","object","profile","axis","segments","caps","material","outward"])?;let segments=integer(need(v,"segments")?)?;let axis=integer(need(v,"axis")?)? as usize;
+                if !(3..=128).contains(&segments)||axis>2{return Err(Error::Invalid("lathe axis or segments"));}Construction::Lathe{profile:vectors(need(v,"profile")?,2,128)?,axis,segments,caps:flag(v,"caps")?,material:integer(need(v,"material")?)?,outward:v.get("outward").is_some()&&flag(v,"outward")?}},
             "loft"=>{fields(v,&["op","object","profiles","closed","caps","material"])?;let p=need(v,"profiles")?.as_arr().filter(|a|(2..=128).contains(&a.len())).ok_or(Error::Invalid("loft profile count"))?;
                 Construction::Loft{profiles:p.iter().map(|p|vectors(p,2,128)).collect::<Result<Vec<_>>>()?,closed:flag(v,"closed")?,caps:flag(v,"caps")?,material:integer(need(v,"material")?)?}},
             "quad_strip"=>{fields(v,&["op","object","a","b","closed","material"])?;Construction::QuadStrip{a:vectors(need(v,"a")?,2,4096)?,b:vectors(need(v,"b")?,2,4096)?,closed:flag(v,"closed")?,material:integer(need(v,"material")?)?}},
@@ -52,7 +53,7 @@ impl ConstructionOperation {
         let(op,mut args)=match &self.kind{
             Construction::Fibers{source,count,length,width,seed,material}=>("fiber_shell",vec![("source",json::s(source)),("count",Value::Int(*count as i64)),("length",Value::F64(*length)),("width",Value::F64(*width)),("seed",Value::Int(*seed as i64)),("material",Value::Int(*material as i64))]),
             Construction::Sweep{profile,path,caps,material}=>("sweep",vec![("profile",vector_values(profile)),("path",vector_values(path)),("caps",Value::Bool(*caps)),("material",Value::Int(*material as i64))]),
-            Construction::Lathe{profile,axis,segments,caps,material}=>("lathe",vec![("profile",vector_values(profile)),("axis",Value::Int(*axis as i64)),("segments",Value::Int(*segments as i64)),("caps",Value::Bool(*caps)),("material",Value::Int(*material as i64))]),
+            Construction::Lathe{profile,axis,segments,caps,material,outward}=>{let mut args=vec![("profile",vector_values(profile)),("axis",Value::Int(*axis as i64)),("segments",Value::Int(*segments as i64)),("caps",Value::Bool(*caps)),("material",Value::Int(*material as i64))];if *outward{args.push(("outward",Value::Bool(true)));}("lathe",args)},
             Construction::Loft{profiles,closed,caps,material}=>("loft",vec![("profiles",Value::Arr(profiles.iter().map(|p|vector_values(p)).collect())),("closed",Value::Bool(*closed)),("caps",Value::Bool(*caps)),("material",Value::Int(*material as i64))]),
             Construction::QuadStrip{a,b,closed,material}=>("quad_strip",vec![("a",vector_values(a)),("b",vector_values(b)),("closed",Value::Bool(*closed)),("material",Value::Int(*material as i64))]),
             Construction::Boolean{a,b,mode}=>("boolean",vec![("a",json::s(a)),("b",json::s(b)),("mode",json::s(match mode{BooleanMode::Union=>"union",BooleanMode::Difference=>"difference",BooleanMode::Intersection=>"intersection"}))]),
@@ -69,7 +70,7 @@ impl ConstructionOperation {
         ctx.checkpoint(0)?;let mesh=match &self.kind{
             Construction::Fibers{source,count,length,width,seed,material}=>fibers::generate(objects.get(source).ok_or_else(||Error::MissingObject(source.clone()))?,*count,*length,*width,*seed,*material,ctx)?,
             Construction::Sweep{profile,path,caps,material}=>sweep(profile,path,*caps,*material,ctx)?,
-            Construction::Lathe{profile,axis,segments,caps,material}=>lathe(profile,*axis,*segments,*caps,*material,ctx)?,
+            Construction::Lathe{profile,axis,segments,caps,material,outward}=>lathe(profile,*axis,*segments,*caps,*material,*outward,ctx)?,
             Construction::Loft{profiles,closed,caps,material}=>loft(profiles,*closed,*caps,*material,ctx)?,
             Construction::QuadStrip{a,b,closed,material}=>quad_strip(a,b,*closed,*material,ctx)?,
             Construction::Boolean{a,b,mode}=>{
@@ -108,7 +109,7 @@ fn sub(a:[f64;3],b:[f64;3])->[f64;3]{std::array::from_fn(|d|a[d]-b[d])}
 fn mul(a:[f64;3],s:f64)->[f64;3]{a.map(|v|v*s)}
 fn dot(a:[f64;3],b:[f64;3])->f64{a.iter().zip(b).map(|(a,b)|a*b).sum()}
 fn cross(a:[f64;3],b:[f64;3])->[f64;3]{[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]}
-fn length(a:[f64;3])->f64{a[0].hypot(a[1]).hypot(a[2])}
+fn length(a:[f64;3])->f64{a[0].phypot(a[1]).phypot(a[2])}
 fn unit(a:[f64;3])->Result<[f64;3]>{let n=length(a);if !n.is_finite()||n<=1e-12{Err(Error::Invalid("degenerate construction direction"))}else{Ok(mul(a,1./n))}}
 fn admit(vertices:usize,faces:usize,corners:usize,ctx:&mut Context<'_>)->Result<()>{ctx.checkpoint((vertices+corners)as u64)?;if vertices>ctx.limits.max_vertices||faces>ctx.limits.max_faces||corners>ctx.limits.max_corners||vertices.saturating_mul(1024).saturating_add(corners.saturating_mul(1024))>ctx.limits.max_bytes{return Err(Error::Budget("construction geometry"));}Ok(())}
 fn loft(profiles:&[Vec<[f64;3]>],closed:bool,caps:bool,material:u32,ctx:&mut Context<'_>)->Result<Mesh>{
@@ -138,10 +139,15 @@ fn sweep(profile:&[[f64;2]],path:&[[f64;3]],caps:bool,material:u32,ctx:&mut Cont
     }loft(&rings,true,caps,material,ctx)
 }
 fn frame_normal(tangent:[f64;3])->Result<[f64;3]>{let axis=(0..3).min_by(|&a,&b|tangent[a].abs().total_cmp(&tangent[b].abs())).unwrap();let mut up=[0.;3];up[axis]=1.;unit(cross(tangent,up))}
-fn lathe(profile:&[[f64;2]],axis:usize,segments:u32,caps:bool,material:u32,ctx:&mut Context<'_>)->Result<Mesh>{
+/// `outward`: a closed solid (both profile ends on the axis) faces out
+/// whichever way its profile is written. The faces wind for a profile that
+/// runs counter-clockwise in (radius, height) (up the outside); one written
+/// top-down was inside out: a mushroom cap showed its underside and the
+/// stem through its dome. Off keeps older documents' meshes exactly.
+fn lathe(profile:&[[f64;2]],axis:usize,segments:u32,caps:bool,material:u32,outward:bool,ctx:&mut Context<'_>)->Result<Mesh>{
     let n=segments as usize;admit(n*profile.len(),n*(profile.len()-1)+2,4*n*profile.len(),ctx)?;let mut positions=Vec::new();let mut rings=Vec::new();
     for (i,&[radius,height]) in profile.iter().enumerate(){ctx.checkpoint(1)?;if radius<0.||(radius==0.&&i!=0&&i+1!=profile.len()){return Err(Error::Invalid("lathe radius must be positive except at endpoint poles"));}
-        let count=if radius==0.{1}else{n};let mut ring=Vec::new();for j in 0..count{let theta=j as f64/n as f64*std::f64::consts::TAU;let mut p=[0.;3];p[axis]=height;p[(axis+1)%3]=radius*theta.cos();p[(axis+2)%3]=radius*theta.sin();ring.push(positions.len()as u32);positions.push(p);}rings.push(ring);
+        let count=if radius==0.{1}else{n};let mut ring=Vec::new();for j in 0..count{let theta=j as f64/n as f64*std::f64::consts::TAU;let mut p=[0.;3];p[axis]=height;p[(axis+1)%3]=radius*theta.pcos();p[(axis+2)%3]=radius*theta.psin();ring.push(positions.len()as u32);positions.push(p);}rings.push(ring);
     }
     let mut polygons=Vec::new();for i in 0..rings.len()-1{let a=&rings[i];let b=&rings[i+1];if a.len()==1&&b.len()==1{return Err(Error::Invalid("lathe has no surface between adjacent poles"));}
         for j in 0..n{ctx.checkpoint(1)?;let k=(j+1)%n;let u=j as f64/n as f64;let u1=(j+1)as f64/n as f64;let v=i as f64/(rings.len()-1)as f64;let v1=(i+1)as f64/(rings.len()-1)as f64;
@@ -149,6 +155,10 @@ fn lathe(profile:&[[f64;2]],axis:usize,segments:u32,caps:bool,material:u32,ctx:&
         }
     }
     if caps{if rings[0].len()>1{polygons.push(cap_polygon(&positions,rings[0].iter().rev().copied().collect(),material)?);}if rings.last().unwrap().len()>1{polygons.push(cap_polygon(&positions,rings.last().unwrap().clone(),material)?);}}
+    // Signed area of the profile closed along the axis (shoelace in r, h).
+    let closed=profile.first().is_some_and(|p|p[0]==0.)&&profile.last().is_some_and(|p|p[0]==0.);
+    let area:f64=profile.windows(2).map(|w|w[0][0]*w[1][1]-w[1][0]*w[0][1]).sum();
+    if outward&&closed&&area<0.{for polygon in &mut polygons{polygon.vertices.reverse();polygon.uvs.reverse();}}
     Ok(Mesh::from_polygons(&positions,&polygons,ctx)?)
 }
 
@@ -284,6 +294,20 @@ mod tests {
         for name in ["tube","barrel","lofted"]{assert!(objects[name].validate(&mut ctx).unwrap().is_closed_manifold,"{name}");assert!(volume(&objects[name])>0.,"{name}");}
         assert!((volume(&objects["tube"])-8.).abs()<1e-10);assert_eq!(objects["ribbon"].faces().len(),2);
         let before=objects.clone();assert!(operation(r#"{"op":"lathe","object":"bad","profile":[[-1,0],[1,1]],"axis":1,"segments":16,"caps":true,"material":0}"#).apply(&mut objects,&limits,&mut ctx).is_err());assert_eq!(objects,before);
+    }
+    #[test]
+    fn an_outward_lathe_faces_out_whichever_way_its_profile_runs(){
+        // A mushroom cap written top-down (clockwise in radius/height).
+        let limits=Limits::default();let mut ctx=Context::default();let mut objects=BTreeMap::new();
+        let cap=r#"[[0,0.95],[0.3,0.92],[0.5,0.8],[0.6,0.62],[0.55,0.55],[0,0.58]]"#;
+        for (name,outward) in [("legacy",""),("out",r#","outward":true"#)] {
+            let op=operation(&format!(r#"{{"op":"lathe","object":"{name}","profile":{cap},"axis":1,"segments":20,"caps":true,"material":0{outward}}}"#));
+            assert_eq!(ConstructionOperation::parse(&op.value(),&limits).unwrap().unwrap(),op);op.apply(&mut objects,&limits,&mut ctx).unwrap();
+        }
+        // Older documents keep their (inside-out) mesh byte for byte.
+        assert!(volume(&objects["legacy"])<0.);
+        assert!(volume(&objects["out"])>0.);assert!((volume(&objects["out"])+volume(&objects["legacy"])).abs()<1e-9);
+        assert!(objects["out"].validate(&mut ctx).unwrap().is_closed_manifold);
     }
     #[test]
     fn overlapping_cube_boolean_transfers_materials_and_preserves_sources(){

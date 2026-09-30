@@ -138,38 +138,59 @@ script_mod! {
 
             // The game's moonless night dome. The bright day/afterglow term
             // is completely absent once nb reaches one at civil twilight.
+            // The HDR lane takes it at a fifth: night exposure runs two stops
+            // over noon, and at full value the dome metered as a grey-blue
+            // haze (sRGB ~60-80) instead of a night. It then meets the HDR
+            // night fog (sky.rs) at the horizon.
             let nsky = mix(
                 vec3(0.010, 0.012, 0.020),
                 vec3(0.002, 0.003, 0.006),
                 clamp(v.y * 1.4, 0.0, 1.0)
-            )
+            ) * mix(1.0, 0.2, hdr)
 
-            // Rotate into the celestial frame. A bound panorama enriches
-            // the catalogue; without one, both analytic point layers remain
-            // visible and follow the same rotation and twilight fade.
+            // Rotate into the panorama's (galactic) frame, turning with the
+            // clock (sun.rs star_rows).
             let sd = vec3(
                 dot(self.star_r0.xyz, v),
                 dot(self.star_r1.xyz, v),
                 dot(self.star_r2.xyz, v)
             )
+            let star_fade = nb * clamp(v.y * 6.0 + 0.1, 0.0, 1.0)
+            // The Milky Way: only the panorama's broad light, from a blurred
+            // mip. At full resolution a texel is 5' of arc, several screen
+            // pixels, and its stars drew as a magnified grey mottle; the
+            // stars come from the point layers below instead.
             let su = atan2(sd.z, sd.x) * 0.15915494 + 0.5
             let sv = 0.5 - asin(clamp(sd.y, 0.0 - 1.0, 1.0)) * 0.31830989
-            let star_fade = nb * clamp(v.y * 6.0 + 0.1, 0.0, 1.0)
-            let smap = self.star_tex.sample_as_bgra(vec2(su, sv)).xyz * self.star_r0.w
-            let lum = dot(smap, vec3(0.35, 0.5, 0.15))
-            let suv = vec2(su * 1600.0, sv * 800.0)
-            let sh = fract(sin(dot(floor(suv), vec2(127.1, 311.7))) * 43758.5453)
-            let spark = step(0.995 - lum * 0.35, sh)
-                * pow(clamp(1.0 - length(fract(suv) - vec2(0.5, 0.5)) * 2.0, 0.0, 1.0), 3.0)
-                * (0.3 + 0.7 * fract(sh * 57.31))
-            let suv2 = vec2(su * 400.0, sv * 200.0)
-            let sh2 = fract(sin(dot(floor(suv2), vec2(269.5, 183.3))) * 43758.5453)
-            let spark2 = step(0.992, sh2)
-                * pow(clamp(1.0 - length(fract(suv2) - vec2(0.5, 0.5)) * 2.4, 0.0, 1.0), 4.0)
-                * (0.5 + 0.5 * fract(sh2 * 43.7))
-            let stars = (smap * 0.18
-                + vec3(0.85, 0.9, 1.0) * spark
-                + vec3(1.0, 0.97, 0.9) * spark2) * star_fade
+            // (The panorama is stored sRGB-encoded: decode to linear light.)
+            let bc = self.star_tex.sample_lod(vec2(su, sv), 4.0).xyz
+            let band = bc * (bc * (bc * 0.305306011 + vec3(0.682171111, 0.682171111, 0.682171111))
+                + vec3(0.012522878, 0.012522878, 0.012522878)) * self.star_r0.w
+            let mw = max(dot(band, vec3(0.3, 0.5, 0.2)) - 0.004, 0.0)
+            // Point stars: hashed cells of a 3D grid over the sphere (no
+            // pinch at the poles), each star a Gaussian of a fixed PIXEL
+            // size (sky_fog.y = a pixel's angle): a 1-2 px point at any
+            // resolution and field of view, never a magnified blob. More
+            // stars along the Milky Way.
+            let psz = clamp(self.sky_fog.y * 1.0, 0.00002, 0.0012)
+            let c1 = floor(sd * 110.0)
+            var k1 = fract(c1 * vec3(0.1031, 0.103, 0.0973))
+            k1 = k1 + vec3(1.0, 1.0, 1.0) * dot(k1, k1.yzx + vec3(33.33, 33.33, 33.33))
+            k1 = fract((k1.xxy + k1.yzz) * k1.zyx)
+            let d1 = length(cross(sd, normalize(c1 + k1 * 0.5 + vec3(0.25, 0.25, 0.25)))) / psz
+            let b1 = fract(k1.x * 7.13 + k1.y * 3.71)
+            let s1 = step(0.72 - min(mw * 6.0, 0.3), fract(k1.z * 11.9 + k1.x * 5.3))
+                * (0.04 + 0.5 * b1 * b1 * b1) * exp(0.0 - d1 * d1)
+            let c2 = floor(sd * 36.0)
+            var k2 = fract(c2 * vec3(0.1031, 0.103, 0.0973))
+            k2 = k2 + vec3(1.0, 1.0, 1.0) * dot(k2, k2.yzx + vec3(33.33, 33.33, 33.33))
+            k2 = fract((k2.xxy + k2.yzz) * k2.zyx)
+            let d2 = length(cross(sd, normalize(c2 + k2 * 0.5 + vec3(0.25, 0.25, 0.25)))) / psz
+            let s2 = step(0.8, fract(k2.z * 11.9 + k2.x * 5.3))
+                * (0.4 + 2.0 * pow(fract(k2.x * 7.13 + k2.y * 3.71), 4.0)) * exp(0.0 - d2 * d2)
+            let stars = (vec3(0.62, 0.68, 0.95) * mw * 0.35
+                + mix(vec3(1.0, 0.86, 0.7), vec3(0.8, 0.88, 1.0), k1.y) * s1
+                + mix(vec3(1.0, 0.9, 0.78), vec3(0.85, 0.92, 1.0), k2.y) * s2) * star_fade
             let hash = fract(
                 sin(dot(v.xy + v.zz, vec2(12.9898, 78.233))) * 43758.5453
             )

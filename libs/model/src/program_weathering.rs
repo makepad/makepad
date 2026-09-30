@@ -3,6 +3,7 @@
 //! darken, flat panels dim slightly and bevelled edges stay bright, which is
 //! what makes hard-surface shapes read at game distance. One colour
 //! operation per object.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{json::{self, Value}, transform::*, Document};
 use std::collections::BTreeMap;
 
@@ -98,7 +99,7 @@ pub(crate) fn weathering_ops(doc: &Document, objects: Option<&[String]>, ao: f64
             for k in 0..samples {
                 // Cosine-weighted directions on a spiral.
                 let r = ((k as f64 + 0.5) / samples as f64).sqrt(); let a = golden * k as f64;
-                let d = add(add(mul(t1, r * a.cos()), mul(t2, r * a.sin())), mul(n, (1. - r * r).max(0.).sqrt()));
+                let d = add(add(mul(t1, r * a.pcos()), mul(t2, r * a.psin())), mul(n, (1. - r * r).max(0.).sqrt()));
                 if bvh.hit(origin, d, distance) { blocked += 1; }
             }
             let occlusion = blocked as f64 / samples.max(1) as f64;
@@ -108,7 +109,7 @@ pub(crate) fn weathering_ops(doc: &Document, objects: Option<&[String]>, ao: f64
                 s / list.len().max(1) as f64
             });
             let wear = (convex * 4.).clamp(0., 1.);
-            let value = ((1. - ao * occlusion.powf(1.3)) * (1. - edges * 0.14 * (1. - wear))).clamp(0.15, 1.);
+            let value = ((1. - ao * occlusion.ppowf(1.3)) * (1. - edges * 0.14 * (1. - wear))).clamp(0.15, 1.);
             if value >= 0.995 { continue; }
             ids.push(json::s(id.0.to_string()));
             // Multiply any authored vertex tint (faces, lips, iris shading).

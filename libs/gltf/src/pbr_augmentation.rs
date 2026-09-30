@@ -54,18 +54,24 @@ impl GlbFurMaterial {
 /// `clearcoat` lays a mirror-smooth lacquer over the base lobe (race paint)
 /// and `flake` sparkles metallic flakes under it. `impostor` (metres, 0 =
 /// none) marks the layer as the model's far stand-in: drawn from that
-/// distance on, when the model's other layers stop.
+/// distance on, when the model's other layers stop. `rim` is a soft
+/// Fresnel rim of sky and back-lit sun at the silhouette: glossy toy
+/// plastic with a clear coat, velvet or felt on a rough fabric.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct GlbShading {
     pub wind: f64,
     pub clearcoat: f64,
     pub flake: f64,
     pub impostor: f64,
+    pub rim: f64,
+    /// 1 = a number plate laid out by `stencil::stencil_plate`: its digit
+    /// cells show each copy's own number (the instance's plate number).
+    pub plate: f64,
 }
 
 impl GlbShading {
     pub fn valid(self) -> bool {
-        [self.wind, self.clearcoat, self.flake].iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
+        [self.wind, self.clearcoat, self.flake, self.rim, self.plate].iter().all(|v| v.is_finite() && (0.0..=1.0).contains(v))
             && self.impostor.is_finite() && (0.0..=100_000.0).contains(&self.impostor)
     }
 }
@@ -243,12 +249,21 @@ pub fn augment_glb_pbr(
             ]));
         }
         if let Some(s) = m.shading {
-            extras.insert("makepadShading".into(), object([
+            let mut shading = object([
                 ("wind", JsonValue::F64(s.wind)),
                 ("clearcoat", JsonValue::F64(s.clearcoat)),
                 ("flake", JsonValue::F64(s.flake)),
                 ("impostor", JsonValue::F64(s.impostor)),
-            ]));
+            ]);
+            // Written only when set, so every older shaded material keeps
+            // its bytes.
+            if let (JsonValue::Object(o), true) = (&mut shading, s.rim > 0.0) {
+                o.insert("rim".into(), JsonValue::F64(s.rim));
+            }
+            if let (JsonValue::Object(o), true) = (&mut shading, s.plate > 0.0) {
+                o.insert("plate".into(), JsonValue::F64(s.plate));
+            }
+            extras.insert("makepadShading".into(), shading);
         }
         if !mip_maps.is_empty() { extras.insert("makepadMips".into(), JsonValue::Object(mip_maps)); }
         root.insert("extras".into(), JsonValue::Object(extras));

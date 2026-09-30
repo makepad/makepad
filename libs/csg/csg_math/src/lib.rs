@@ -3,6 +3,7 @@
 pub mod bbox;
 pub mod mat4;
 pub mod plane;
+pub mod portable;
 pub mod robust;
 pub mod simd_vec3;
 pub mod thread_pool;

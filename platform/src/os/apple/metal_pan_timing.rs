@@ -236,6 +236,9 @@ pub(super) struct PanEncoder {
     pub(super) encoder:ObjcId,
     command:ObjcId,descriptor:ObjcId,viewport:MTLViewport,
     pub(super) frame:Option<PanFrame>,
+    /// The scissor last set and the encoder it was set on (a new encoder
+    /// starts with the whole target).
+    scissor:(ObjcId,Option<[u32;4]>),
 }
 impl PanEncoder {
     pub(super) fn new(command:ObjcId,descriptor:ObjcId,viewport:MTLViewport,frame:Option<PanFrame>)->Self {
@@ -251,7 +254,22 @@ impl PanEncoder {
         if let Some(f)=&frame {if f.stage(){f.attach(descriptor,0);}}
         let encoder:ObjcId=unsafe {msg_send![command,renderCommandEncoderWithDescriptor:descriptor]};
         unsafe {let _:()=msg_send![encoder,setViewport:viewport];}
-        Self {encoder,command,descriptor,viewport,frame}
+        Self {encoder,command,descriptor,viewport,frame,scissor:(encoder,None)}
+    }
+    /// A draw call's scissor (CxDrawShaderOptions::scissor), set only when
+    /// it changes; clamped to the target, as Metal requires.
+    pub(super) fn set_scissor(&mut self,encoder:ObjcId,rect:Option<[u32;4]>) {
+        if self.scissor==(encoder,rect) {return;}
+        let (tw,th)=(self.viewport.width.max(0.0) as u64,self.viewport.height.max(0.0) as u64);
+        let r=match rect {
+            Some([x,y,w,h])=>{
+                let (x,y)=((x as u64).min(tw),(y as u64).min(th));
+                MTLScissorRect {x,y,width:(w as u64).min(tw-x),height:(h as u64).min(th-y)}
+            }
+            None=>MTLScissorRect {x:0,y:0,width:tw,height:th},
+        };
+        unsafe {let _:()=msg_send![encoder,setScissorRect:r];}
+        self.scissor=(encoder,rect);
     }
     pub(super) fn group(&mut self,shader:usize,sh:&CxDrawShader)->ObjcId {
         let Some(f)=&mut self.frame else{return self.encoder;};

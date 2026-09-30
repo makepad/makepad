@@ -18,11 +18,24 @@ use super::*;
 #[derive(Default)]
 pub(super) struct OccluderFade {
     focus: Option<Vec3f>,
+    push: Option<(Vec3f, f32)>,
 }
 
 impl OccluderFade {
     pub(super) fn focus(&self) -> Option<Vec3f> {
         self.focus
+    }
+
+    /// The lanes' `occ_eye.w` and `occ_focus` from the fade and the foliage
+    /// push: (push radius, focus xyz, clear length). The push rides the
+    /// focus point (about 1 m over the feet); with no fade, the point is
+    /// the pushing feet lifted 1 m and the clear length 0 (fade off).
+    pub(super) fn uniforms(&self) -> (f32, Vec3f, f32) {
+        match (self.focus, self.push) {
+            (Some(f), push) => (push.map_or(0.0, |p| p.1), f, 0.8),
+            (None, Some((feet, r))) => (r, feet + vec3f(0.0, 1.0, 0.0), 0.0),
+            (None, None) => (0.0, Vec3f::default(), 0.0),
+        }
     }
 }
 
@@ -31,5 +44,13 @@ impl Renderer {
     /// space, or `None` to fade nothing. Call every frame.
     pub fn set_occluder_focus(&mut self, focus: Option<Vec3f>) {
         self.occluder.focus = focus;
+    }
+
+    /// The followed body's feet in TRUE world space and a radius (m):
+    /// swaying foliage (a `wind` layer: grass tufts, flowers, bushes) within
+    /// it bends away and dips, so a run through a meadow parts it. Device
+    /// local and per frame, like the fade; `None` bends nothing.
+    pub fn set_foliage_push(&mut self, feet: Option<Vec3f>, radius: f32) {
+        self.occluder.push = feet.filter(|_| radius > 0.0).map(|f| (f, radius));
     }
 }

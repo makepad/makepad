@@ -1,6 +1,7 @@
 //! Explicit global surface qualification. Broadphase is a deterministic AABB
 //! sweep; narrowphase uses robust orientation predicates and identity-aware
 //! boundary contact rules. Numerically unsupported pairs fail without a certificate.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{context::invalid,geometry::*,*};
 use makepad_csg_math::{dvec3,orient3d};
 use std::collections::{BTreeMap,BTreeSet,VecDeque};
@@ -155,7 +156,7 @@ fn shell_sign(tris:&[&Tri],ctx:&mut Context<'_>)->Result<i32>{
 fn inside_shell(point:[f64;3],tris:&[&Tri],ctx:&mut Context<'_>)->Result<bool>{
     let mut angle=0.;for tri in tris{ctx.checkpoint(1)?;let vectors=tri.points.map(|p|sub(p,point));let maximum=vectors.iter().map(|v|length(*v)).fold(0f64,f64::max);if maximum==0.{return Err(invalid("unresolved shell contact"));}
         let p=vectors.map(|v|mul(v,1./maximum));let lengths=p.map(length);if lengths.iter().any(|v|*v==0.){return Err(invalid("unresolved shell contact"));}
-        let determinant=dot(p[0],cross(p[1],p[2]));let denominator=lengths.iter().product::<f64>()+dot(p[0],p[1])*lengths[2]+dot(p[1],p[2])*lengths[0]+dot(p[2],p[0])*lengths[1];angle+=2.*determinant.atan2(denominator);
+        let determinant=dot(p[0],cross(p[1],p[2]));let denominator=lengths.iter().product::<f64>()+dot(p[0],p[1])*lengths[2]+dot(p[1],p[2])*lengths[0]+dot(p[2],p[0])*lengths[1];angle+=2.*determinant.patan2(denominator);
     }
     let winding=(angle/(4.*std::f64::consts::PI)).abs();if !winding.is_finite()||winding.min((winding-1.).abs())>1e-6{return Err(invalid("shell nesting is numerically unresolved"));}Ok(winding>0.5)
 }

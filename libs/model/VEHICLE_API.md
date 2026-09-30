@@ -80,3 +80,13 @@ replace gameplay seat placement or supply an opening-door interaction.
 `vehicle_wheel` accepts optional `visual:{steer_gain:0.55,steer_max:0.32,compression:0.08,droop:0.10}`. All fields are required together: gain 0..1, angle cap 0..1.2 radians, compression/droop 0..5 model metres. Display steering is clamp(physical steering*gain, -cap, cap); display suspension is clamped to -droop..compression. This affects only visible geometry. Turning radius, tire forces, physical suspension, anchors, radii and spin are unchanged. Without visual metadata, existing motion and source serialization remain unchanged.
 
 The authored limits travel with the shared asset and are used by both the game renderer and model.render. Preserve the intended body silhouette, select an appropriate display range, and verify real clearance within that range. Do not grow giant fenders solely to pass the legacy diagnostic pose.
+
+## Publishing as a vehicle
+
+Binding the four wheels is what makes the published model a VEHICLE: it
+publishes with kind vehicle and the `vehicle` + type tag (car/truck/bus/van/
+kart), shows under Vehicles and "car" in the Explorer, and drops into any
+game as a drivable car (E gets in and out). Name tyre objects by corner too
+(`front_left_tire`, `rear-right-tire`, `wheel_fl`): unbound but so named, they
+are bound at publish. Put "car", "truck", "van", "bus" or "kart" in the title.
+Optional: a `seat` socket at the driver's hips and a `steering_wheel` pivot.

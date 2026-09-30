@@ -1,3 +1,4 @@
+use makepad_csg_math::portable::PortableFloat;
 use crate::{context::invalid, geometry::*, mesh::*, *};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -767,8 +768,8 @@ impl Mesh {
                 let next = points[(i + 1) % n];
                 let a = [p[0] - prev[0], p[1] - prev[1]];
                 let b = [next[0] - p[0], next[1] - p[1]];
-                let la = a[0].hypot(a[1]);
-                let lb = b[0].hypot(b[1]);
+                let la = a[0].phypot(a[1]);
+                let lb = b[0].phypot(b[1]);
                 let na = [-a[1] / la, a[0] / la];
                 let nb = [-b[1] / lb, b[0] / lb];
                 let den = 1. + na[0] * nb[0] + na[1] * nb[1];

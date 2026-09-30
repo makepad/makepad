@@ -1,6 +1,7 @@
 //! Portable skin colors: one shared image and affine derived UV remaps.
 //! Source materials and corner UVs remain untouched. Periodic gutters preserve
 //! linear filtering; the export sampler intentionally does not generate mips.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{mesh::Context, Error, Limits, Material, Result, Texture};
 use std::collections::BTreeMap;
 
@@ -48,10 +49,10 @@ fn decode(material: &Material, limits: &Limits, ctx: &mut Context<'_>) -> Result
             for (channel, factor) in pixel.iter_mut().zip(material.color) {
                 let encoded = *channel as f64 / 255.0;
                 let linear = if encoded <= 0.04045 { encoded / 12.92 }
-                    else { ((encoded + 0.055) / 1.055).powf(2.4) };
+                    else { ((encoded + 0.055) / 1.055).ppowf(2.4) };
                 let tinted = linear * factor as f64;
                 let encoded = if tinted <= 0.0031308 { tinted * 12.92 }
-                    else { 1.055 * tinted.powf(1.0 / 2.4) - 0.055 };
+                    else { 1.055 * tinted.ppowf(1.0 / 2.4) - 0.055 };
                 *channel = (encoded.clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         }

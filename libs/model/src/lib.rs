@@ -27,6 +27,12 @@ pub use rig::*;
 pub use makepad_strict_json as json;
 
 pub const MODELING_API_DOC: &str = include_str!("../API.md");
+/// Version of what the model engine builds from a given program. Hosts that
+/// cache built products by program hash mix it into the key, so a change to
+/// generated geometry rebuilds them once. 2: portable transcendentals (the
+/// same bits on every platform, so a product built on one machine is the
+/// one every other machine would build).
+pub const MODEL_GENERATOR_VERSION: u32 = 2;
 pub use makepad_mesh_edit as mesh;
 
 mod schema;

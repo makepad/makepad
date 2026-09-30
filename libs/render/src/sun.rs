@@ -388,6 +388,32 @@ pub fn celestial_rows(hours: f32, latitude_deg: f32) -> [Vec4f; 3] {
     ]
 }
 
+/// Equatorial -> galactic (J2000), in the sky shader's axis order: `y` is
+/// the pole of each frame, `x` and `z` span its equator.
+const EQ_TO_GALACTIC: [[f32; 3]; 3] = [
+    [-0.054_875_56, -0.483_835_02, -0.873_437_1],
+    [-0.867_666_1, 0.455_983_78, -0.198_076_37],
+    [0.494_109_43, 0.746_982_24, -0.444_829_63],
+];
+
+/// World direction -> star PANORAMA direction for a local solar hour: the
+/// [`celestial_rows`] turned into the galactic frame the panorama is drawn
+/// in (the Milky Way along its equator). Without this turn the band lay
+/// along the celestial equator; with it the Milky Way crosses the sky at
+/// its true 63 degrees to the equator, and still wheels with the clock.
+pub fn star_rows(hours: f32, latitude_deg: f32) -> [Vec4f; 3] {
+    let r = celestial_rows(hours, latitude_deg);
+    let row = |g: [f32; 3], w: f32| {
+        let v = r[0] * g[0] + r[1] * g[1] + r[2] * g[2];
+        vec4f(v.x, v.y, v.z, w)
+    };
+    [
+        row(EQ_TO_GALACTIC[0], r[0].w),
+        row(EQ_TO_GALACTIC[1], 0.0),
+        row(EQ_TO_GALACTIC[2], 0.0),
+    ]
+}
+
 /// Resolved from the sim's [`makepad_scene::SunConfig`], which stores
 /// only what script asked for (the sim cannot depend on `makepad_draw`).
 ///
@@ -653,6 +679,27 @@ mod tests {
         let b = celestial_rows(18.0, 52.0)[0];
         let d = a.x * b.x + a.y * b.y + a.z * b.z;
         assert!(d.abs() < 1.0e-4, "quarter day should be a quarter turn: {d}");
+    }
+
+    /// The panorama frame is still a rotation, turning with the clock, and
+    /// the celestial pole lands at galactic latitude +27.1 degrees (the
+    /// Milky Way's tilt to the equator is 62.9).
+    #[test]
+    fn star_rows_turn_the_panorama_into_the_galactic_frame() {
+        let dot = |a: Vec4f, b: Vec4f| a.x * b.x + a.y * b.y + a.z * b.z;
+        let r = star_rows(21.0, 52.0);
+        for i in 0..3 {
+            assert!(approx(dot(r[i], r[i]), 1.0));
+            for j in 0..i {
+                assert!(dot(r[i], r[j]).abs() < 1.0e-4);
+            }
+        }
+        let p = celestial_pole(52.0);
+        let pole = vec4f(p.x, p.y, p.z, 0.0);
+        let gal_lat = dot(r[1], pole).asin().to_degrees();
+        assert!((gal_lat - 27.13).abs() < 0.1, "pole at galactic latitude {gal_lat}");
+        let later = star_rows(23.0, 52.0);
+        assert!(dot(r[0], later[0]) < 0.99, "the band wheels with the clock");
     }
 
     #[test]

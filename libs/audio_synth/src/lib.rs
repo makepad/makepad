@@ -15,8 +15,8 @@
 //! - [`engine`], [`vehicle`]: firing-pulse engine synthesis (cylinders,
 //!   firing order, exhaust/intake resonances, turbo, crackle, shifts,
 //!   starter), electric/turbine/rotor models, tyres, road and wind.
-//! - [`instrument`], [`poly`], [`score`]: the [`instrument::Instrument`]
-//!   trait, a recipe poly-synth, and scores with a sequencer.
+//! - [`instrument`], [`poly`]: the [`instrument::Instrument`] trait and a
+//!   recipe poly-synth (music is Stage's scores, `makepad-stage-score`).
 //! - [`bus`]: the game mixer that owns all of the above on the audio
 //!   thread with fixed voice pools and graceful stealing.
 //!
@@ -34,7 +34,6 @@ pub mod ironfish;
 pub mod poly;
 pub mod recipe;
 pub mod reverb;
-pub mod score;
 pub mod spatial;
 pub mod svf;
 pub mod vehicle;

@@ -26,12 +26,27 @@ pub struct MaterialSurface {
     pub wind: f32,
     pub clearcoat: f32,
     pub flake: f32,
+    /// A soft Fresnel rim of sky and back-lit sun (toy plastic, felt).
+    pub rim: f32,
     /// This layer is the model's far stand-in from this distance (metres,
     /// 0 = an ordinary layer): the other layers stop there (impostor.rs).
     pub impostor: f32,
+    /// A number plate (`stencil_plate` layout): its digit cells show each
+    /// copy's own number (`color_adjust.w` = -(1 + number)).
+    pub plate: bool,
+}
+impl MaterialSurface {
+    /// The shading terms packed for a spare float lane (`tex_mag.y` on the
+    /// PBR lane, `fur_layer.y` on the skinned one): rim * 255 * 65536 +
+    /// clearcoat * 255 * 256 + flake * 255, exact in an f32 (24 bits).
+    /// 0 = plain.
+    pub fn packed_shading(&self) -> f32 {
+        let q = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round();
+        q(self.rim) * 65536.0 + q(self.clearcoat) * 256.0 + q(self.flake)
+    }
 }
 impl Default for MaterialSurface {
-    fn default()->Self {Self{wind:0.0,clearcoat:0.0,flake:0.0,impostor:0.0,fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
+    fn default()->Self {Self{wind:0.0,clearcoat:0.0,flake:0.0,rim:0.0,impostor:0.0,plate:false,fur:None,normal_png:None,normal_scale:1.0,occlusion_png:None,occlusion_strength:1.0,
         emissive_png:None,emissive:[0.0;3],alpha_mode:0,alpha_cutoff:0.5,base_alpha:1.0,double_sided:false,triplanar:0.0}}
 }
 

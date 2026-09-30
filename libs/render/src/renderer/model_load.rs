@@ -101,6 +101,7 @@ impl Renderer {
         self.model_sdf_tex.remove(id);
         let ao=uploaded.ao.clone();
         let model = Self::uploaded_static_model(uploaded);
+        self.model_lod_chains_dirty = true;
         let previous = if let Some(at) = at { Some(std::mem::replace(&mut self.static_models[at].1, model)) }
             else { self.static_models.push((id.to_string(), model)); if transient { self.preview_new.insert(id.to_string()); } None };
         let old_ao_key = self.model_pack.iter().find(|(key, _)| key == id).map(|(_, key)| key.clone());
@@ -173,6 +174,7 @@ impl Renderer {
         self.model_sdf_tex.remove(id);
         let ao=uploaded.ao.clone();
         let model = Self::uploaded_static_model(uploaded);
+        self.model_lod_chains_dirty = true;
         if let Some((_, old)) = self.static_models.iter_mut().find(|(key, _)| key == id) { *old = model; }
         else { self.static_models.push((id.to_string(), model)); }
         self.model_pack.retain(|(key, _)| key != id);

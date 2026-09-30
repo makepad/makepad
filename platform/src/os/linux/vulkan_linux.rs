@@ -347,6 +347,8 @@ impl DesktopInit {
             requested_width: width,
             requested_height: height,
             texture_upload_count_this_frame: 0,
+            scissor_extent: [0, 0],
+            scissor_set: None,
             texture_upload_bytes_this_frame: 0,
             xr_packet_buffer_count_this_frame: 0,
             xr_packet_buffer_bytes_this_frame: 0,

@@ -306,6 +306,8 @@ pub(crate) struct LocalShadows {
     pass: Option<DrawPass>,
     list: Option<DrawList>,
     rigid: Option<DrawLmLampDepth>,
+    /// `rigid` without the face clip, for draws scissored to their tile.
+    inside: Option<DrawLmLampDepthInside>,
     skinned: Option<DrawLocalShadowSkinned>,
     clear_quad: Option<Geometry>,
     pub stats: LocalShadowStats,
@@ -343,6 +345,7 @@ impl Default for LocalShadows {
             pass: None,
             list: None,
             rigid: None,
+            inside: None,
             skinned: None,
             clear_quad: None,
             stats: LocalShadowStats::default(),
@@ -761,9 +764,10 @@ impl LocalShadows {
             return;
         }
         if self.rigid.is_none() {
-            let Some((rigid, skinned)) = cx.cx.try_with_vm(|vm| {
+            let Some((rigid, inside, skinned)) = cx.cx.try_with_vm(|vm| {
                 (
                     DrawLmLampDepth::script_new_with_default(vm),
+                    DrawLmLampDepthInside::script_new_with_default(vm),
                     DrawLocalShadowSkinned::script_new_with_default(vm),
                 )
             }) else {
@@ -780,6 +784,7 @@ impl LocalShadows {
                 return;
             };
             self.rigid = Some(rigid);
+            self.inside = Some(inside);
             self.skinned = Some(skinned);
         }
         // An initialized one-texel depth binding is still required when the
@@ -890,7 +895,14 @@ impl LocalShadows {
             })
             .geometry_id();
         let rigid = self.rigid.as_mut().unwrap();
+        let inside = self.inside.as_mut().unwrap();
         let skinned = self.skinned.as_mut().unwrap();
+        // Where the backend applies a per-draw scissor, every draw into a
+        // face is confined to the face's tile, so a caster that spans far
+        // past the face (a wall beside the lamp) rasterizes only the tile,
+        // and rigid casters take the discard-free pipeline. Elsewhere the
+        // face clip in the shader does the confining.
+        let scissored = cx.cx.gpu_backend().honors_scissor();
         for &f in &self.dirty {
             let face = self.faces[f];
             let record = self.records[face.light];
@@ -898,6 +910,12 @@ impl LocalShadows {
             let (gs, go) = local_generation_window(face.generation);
             // Depth generation in clip space: z * (1 - z_) + w_ * vz.
             let window = (1.0 - gs, go);
+            // The face's texels: its tile minus the one-texel border.
+            let (x, y, edge) = face.rect;
+            let scissor = scissored.then(|| [x as u32 + 1, y as u32 + 1, edge.saturating_sub(2) as u32, edge.saturating_sub(2) as u32]);
+            rigid.draw_vars.options.scissor = scissor;
+            inside.draw_vars.options.scissor = scissor;
+            skinned.base.draw_vars.options.scissor = scissor;
             rigid.tile_a = face.tile;
             rigid.set_morph(cx.cx,None);
             if !full {
@@ -917,14 +935,21 @@ impl LocalShadows {
             rigid.face_ry = face.ry;
             rigid.face_rz = face.rz;
             rigid.lamp_range = vec4(record.near, far, window.0, window.1);
+            inside.face_rx = face.rx;
+            inside.face_ry = face.ry;
+            inside.face_rz = face.rz;
+            inside.tile_a = face.tile;
+            inside.lamp_range = rigid.lamp_range;
+            inside.set_morph(cx.cx, None);
             for m in statics {
                 if !in_face(&face, record.near, far, m.min, m.max) {
                     continue;
                 }
-                rigid.transform = m.transform;
-                rigid.draw_vars.geometry_id = Some(m.geometry);
-                if rigid.draw_vars.can_instance() {
-                    cx.add_instance(&rigid.draw_vars);
+                let draw = if scissored { &mut inside.depth } else { &mut *rigid };
+                draw.transform = m.transform;
+                draw.draw_vars.geometry_id = Some(m.geometry);
+                if draw.draw_vars.can_instance() {
+                    cx.add_instance(&draw.draw_vars);
                     self.stats.caster_draws += 1;
                 }
             }
@@ -948,11 +973,12 @@ impl LocalShadows {
                         self.stats.caster_draws += 1;
                     }
                 } else {
-                    rigid.set_morph(cx.cx,m.morph.as_ref());
-                    rigid.transform = m.transform;
-                    rigid.draw_vars.geometry_id = Some(m.geometry);
-                    if rigid.draw_vars.can_instance() {
-                        cx.add_instance(&rigid.draw_vars);
+                    let draw = if scissored { &mut inside.depth } else { &mut *rigid };
+                    draw.set_morph(cx.cx,m.morph.as_ref());
+                    draw.transform = m.transform;
+                    draw.draw_vars.geometry_id = Some(m.geometry);
+                    if draw.draw_vars.can_instance() {
+                        cx.add_instance(&draw.draw_vars);
                         self.stats.caster_draws += 1;
                     }
                 }

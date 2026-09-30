@@ -40,6 +40,13 @@ pub struct CxDrawShaderOptions {
     /// `alpha_blend: false` must output alpha 1.0 or intend a raw write.
     pub alpha_blend: bool,
     pub backface_culling: bool,
+    /// Scissor rectangle (x, y, width, height) in target pixels, row 0 at
+    /// the top; `None` = the whole target. Fragments outside are dropped
+    /// before shading, which a `discard` cannot do: a pass that renders
+    /// several tiles of one target (the sun's shadow cascades) confines
+    /// each draw to its tile with it. Honoured by Metal and Vulkan; the
+    /// other backends ignore it, so a draw must stay correct without it.
+    pub scissor: Option<[u32; 4]>,
 }
 
 impl Default for CxDrawShaderOptions {
@@ -50,6 +57,7 @@ impl Default for CxDrawShaderOptions {
             depth_write: true,
             alpha_blend: true,
             backface_culling: false,
+            scissor: None,
         }
     }
 }

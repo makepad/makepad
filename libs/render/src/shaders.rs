@@ -135,6 +135,11 @@ pub struct DrawSceneTexture {
     /// exposure, w = exposure bias factor. The default is the stock look.
     #[live(vec4(1.0, 1.0, 1.6, 1.0))]
     pub grade: Vec4f,
+    /// Tilt-shift: x = strength (0 = off), y = the sharp band's centre in
+    /// uv (0 = top), z = its half-height. Needs the bloom texture (the
+    /// blurred image it softens toward).
+    #[live(vec4(0.0, 0.6, 0.2, 0.0))]
+    pub tilt: Vec4f,
 }
 
 /// DrawCube + per-instance emission (`glow`) and per-instance fog density.
@@ -413,8 +418,9 @@ pub struct DrawSceneSkinned {
     /// (the classic games' look); minified texels stay filtered. y unused
     /// (keeps the payload a multiple of eight bytes). Set per draw from the
     /// layer's material; 0 everywhere else draws exactly as before.
-    /// y = the PBR lane's race paint (`makepadShading`), packed as
-    /// clearcoat * 255 * 256 + flake * 255 (0 = plain). Packed into this
+    /// y = the PBR lane's shading terms (`makepadShading`), packed as
+    /// rim * 255 * 65536 + clearcoat * 255 * 256 + flake * 255 (0 = plain;
+    /// `MaterialSurface::packed_shading`). Packed into this
     /// spare lane on purpose: the model lanes' instance stream is at the
     /// vertex-attribute limit (31 on Metal, 32 on common Vulkan GPUs; one
     /// more vec4 lost the Vulkan device in race).
@@ -951,6 +957,16 @@ pub struct DrawLmSunDepthCutout {
     pub depth: DrawLmSunDepth,
 }
 
+/// [`DrawLmSunDepth`] for casters wholly inside their cascade's tile: the
+/// same projection with no tile clip, so its pipeline has no `discard` and
+/// keeps the GPU's hidden-surface removal.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawLmSunDepthInside {
+    #[deref]
+    pub depth: DrawLmSunDepth,
+}
+
 /// Lamp-view depth pass: six 90-degree faces tiled 3x2. `face_r*` are the
 /// face view rows; `tile_a` = (sx, sy, ox, oy) clip-space tile mapping;
 /// `lamp_range` = (near, far).
@@ -990,6 +1006,15 @@ pub struct DrawLmLampDepth {
     #[live]
     pub morph_weights7: Vec4f,
 
+}
+
+/// [`DrawLmLampDepth`] with no face clip, for draws scissored to their
+/// face's tile: its pipeline has no `discard`.
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawLmLampDepthInside {
+    #[deref]
+    pub depth: DrawLmLampDepth,
 }
 
 /// Skinned sun-view depth pass (Realtime characters in the bake): the
@@ -1357,6 +1382,7 @@ mod shader_registration_tests {
                 ("sun depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmSunDepth)})),
                 ("sun skin depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmSunDepthSkinned)})),
                 ("lamp depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmLampDepth)})),
+                ("lamp depth inside", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmLampDepthInside)})),
             ] {
                 let errors = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
                 assert!(errors.is_empty(), "{name}: {errors}");

@@ -758,8 +758,8 @@ pub fn write_glb_named_parts(parts: &[GlbNamedPart]) -> Vec<u8> {
                     let times = vec![0.0, 0.25 / hz, 0.75 / hz, 1.0 / hz];
                     let quaternion = |degrees: f32| {
                         let half = degrees.to_radians() * 0.5;
-                        let mut value = [0.0, 0.0, 0.0, half.cos()];
-                        value[animation.axis.min(2)] = half.sin();
+                        let mut value = [0.0, 0.0, 0.0, makepad_math::deterministic::cos(half)];
+                        value[animation.axis.min(2)] = makepad_math::deterministic::sin(half);
                         value
                     };
                     let mut values = Vec::new();
@@ -773,8 +773,8 @@ pub fn write_glb_named_parts(parts: &[GlbNamedPart]) -> Vec<u8> {
                     let mut values = Vec::new();
                     for degrees in [0.0f32, 180.0, 360.0] {
                         let half = degrees.to_radians() * 0.5;
-                        let mut value = [0.0, 0.0, 0.0, half.cos()];
-                        value[animation.axis.min(2)] = half.sin();
+                        let mut value = [0.0, 0.0, 0.0, makepad_math::deterministic::cos(half)];
+                        value[animation.axis.min(2)] = makepad_math::deterministic::sin(half);
                         values.extend_from_slice(&value);
                     }
                     (times, values, "rotation", 4)

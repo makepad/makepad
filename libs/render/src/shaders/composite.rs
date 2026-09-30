@@ -58,7 +58,11 @@ script_mod! {
         mapped: fn(uv: vec2, e: float) -> vec3 {
             var c = self.scene_texture.sample(uv).xyz
             if self.post2.x > 0.0 {
-                c = mix(c, self.bloom_texture.sample(uv).xyz * self.post2.w, self.post2.x)
+                // Tilt-shift: away from the sharp band the frame softens
+                // further toward the same blurred image (a diorama's
+                // shallow focus, free: the bloom chain already made it).
+                let soft = self.tilt.x * smoothstep(self.tilt.z, self.tilt.z + 0.3, abs(uv.y - self.tilt.y))
+                c = mix(c, self.bloom_texture.sample(uv).xyz * self.post2.w, min(self.post2.x + soft, 1.0))
             }
             return self.agx(c * e)
         }

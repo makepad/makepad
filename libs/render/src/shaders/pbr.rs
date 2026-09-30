@@ -92,8 +92,9 @@ script_mod! {
             return mix(env, avg, rough)
         }
 
-        // Race paint (tex_mag.y packs clearcoat * 255 * 256 + flake * 255): a
-        // mirror-smooth lacquer over the base lobe. Its own Fresnel takes
+        // Race paint and toy gloss (tex_mag.y packs rim * 255 * 65536 +
+        // clearcoat * 255 * 256 + flake * 255): a mirror-smooth lacquer over
+        // the base lobe. Its own Fresnel takes
         // light from the base, and it reflects the sky environment sharply
         // with a treeline silhouette along the horizon (dark, broken by
         // azimuth), so the reflection reads as a place and slides over the
@@ -102,15 +103,21 @@ script_mod! {
         clear_coat: fn(base: vec3, n: vec3, v: vec3, l: vec3, albedo: vec3, sun: vec3, amb_occ: float) -> vec3 {
             let ndv = max(dot(n, v), 0.0001)
             let r = n * (2.0 * ndv) - v
-            let packed = floor(self.tex_mag.y + 0.5)
+            let packed_all = floor(self.tex_mag.y + 0.5)
+            let rim = floor(packed_all / 65536.0)
+            let packed = packed_all - rim * 65536.0
             let coat = floor(packed / 256.0) / 255.0
             let flake = (packed - floor(packed / 256.0) * 256.0) / 255.0
             let fc = (0.04 + 0.96 * self.pow5(1.0 - ndv)) * coat
             var env = self.sky_env(normalize(r), 0.03)
-            let az = atan2(r.z, r.x)
-            let ridge = 0.035 + 0.05 * self.tn_noise(vec2(az * 9.0, 0.5)) + 0.03 * self.tn_noise(vec2(az * 37.0, 1.5))
-            let tree = (1.0 - smoothstep(ridge - 0.01, ridge + 0.01, r.y)) * smoothstep(-0.02, 0.0, r.y)
-            env = mix(env, self.sun_ground * 0.28 + self.fog_color * 0.12, tree * 0.85)
+            // The treeline is car paint's; a toy (rim set) reflects a plain
+            // studio sky, and skips the two noise taps.
+            if rim < 0.5 {
+                let az = atan2(r.z, r.x)
+                let ridge = 0.035 + 0.05 * self.tn_noise(vec2(az * 9.0, 0.5)) + 0.03 * self.tn_noise(vec2(az * 37.0, 1.5))
+                let tree = (1.0 - smoothstep(ridge - 0.01, ridge + 0.01, r.y)) * smoothstep(-0.02, 0.0, r.y)
+                env = mix(env, self.sun_ground * 0.28 + self.fog_color * 0.12, tree * 0.85)
+            }
             let h = normalize(l + v)
             let ndh = max(dot(n, h), 0.0)
             let a2 = 0.0016
@@ -125,7 +132,17 @@ script_mod! {
                 let sparkle = pow(max(dot(tilt, h), 0.0), 220.0) * step(0.55, fh2)
                 out = out + sun * albedo * (sparkle * flake * 6.0) + env * albedo * (flake * 0.12 * amb_occ)
             }
+            if rim > 0.0 { out = out + self.toy_rim(n, v, l, amb_occ) * (rim / 255.0) }
             return out
+        }
+
+        // The studio rim a toy diorama is lit with: a soft Fresnel edge of
+        // sky, brightened by the sun when it is behind the object, so a
+        // silhouette separates from the set around it.
+        toy_rim: fn(n: vec3, v: vec3, l: vec3, amb_occ: float) -> vec3 {
+            let e = 1.0 - max(dot(n, v), 0.0)
+            let back = 0.35 + 0.65 * max(0.0 - dot(l, v), 0.0)
+            return (self.sun_color * (back * mix(1.0, 3.14159265, self.lin_ctl.x) * 0.45) + self.sun_sky * 0.8) * (e * e * e * amb_occ)
         }
 
         pixel: fn() {
@@ -229,7 +246,8 @@ script_mod! {
             // Occlusion, sun visibility and lamps: verbatim from
             // DrawSceneSkinned, so a PBR prop sits in the same light as the
             // wall behind it.
-            let baked = self.ao_map.sample(self.v_ao_uv).x
+            var baked = 0.0
+            if self.ao_enabled > 0.5 { baked = self.ao_map.sample(self.v_ao_uv).x }
             let hash = fract(
                 sin(dot(self.world.xy + self.world.zz, vec2(12.9898, 78.233))) * 43758.5453
             )
@@ -250,14 +268,20 @@ script_mod! {
                 let suv = vec2(sp.x * 0.5 + 0.5, 0.5 - sp.y * 0.5)
                 sao = 1.0 - (1.0 - self.ssao_map.sample_nearest(suv).x) * self.ssao_ctl.x
             }
-            let lm = self.light_map.sample_as_bgra(self.v_lm_uv)
+            // Realtime cascades with clustered lamps read none of the baked
+            // atlas (DrawSceneSkinned explains): its three reads are skipped.
+            var lm = vec4(0.0, 0.0, 0.0, 0.0)
+            var sun_vis_g = 1.0
+            if self.csm_p.x < 0.5 || self.cluster_on < 0.5 {
+                lm = self.light_map.sample_as_bgra(self.v_lm_uv)
+                let lmg = self.light_map.sample_as_bgra(self.v_lmg.xy)
+                let top_g = self.lm_top_decode.x
+                    + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
+                let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
+                sun_vis_g = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
+            }
             let has_lm = step(0.000001, self.lm_rect.z)
             let sun_vis = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
-            let lmg = self.light_map.sample_as_bgra(self.v_lmg.xy)
-            let top_g = self.lm_top_decode.x
-                + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
-            let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
-            let sun_vis_g = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
             // Swaying foliage (the wind flag, morph_ctl.w = -1) reads the
             // cascades with one tap: leaf cards overdraw several deep.
             var csm = 1.0
@@ -277,7 +301,9 @@ script_mod! {
 
             // The material. Factor x map, per the glTF spec; orm_on is 0 for
             // a factors-only material so the sample folds out to 1.
-            let orm = self.orm_map.sample_as_bgra_repeat(self.v_uv)
+            // Factors only (orm_on 0): the map would fold out, so it is not read.
+            var orm = vec4(1.0, 1.0, 1.0, 1.0)
+            if self.orm_on > 0.0 { orm = self.orm_map.sample_as_bgra_repeat(self.v_uv) }
             // Roughness floored at 0.045: a2 goes to zero below that and the
             // GGX denominator collapses to a single blown-out pixel that
             // aliases into a crawling white dot as the camera moves.
@@ -354,8 +380,11 @@ script_mod! {
                 + surface_direct * (ao_direct * sun_lit)
                 + local * ao_direct
             let local_pbr = self.cluster_pbr(self.v_csm.xyz, n, self.eye.xyz, albedo, rough, metal)
-            let occlusion=mix(1.0,self.occlusion_map.sample_as_bgra_repeat(self.v_uv).x,self.occlusion_strength*self.surface_on)
-            let emission=self.to_scene(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz)*self.emissive
+            // Per-draw factors of zero fold these maps out: skip the reads.
+            var occlusion=1.0
+            if self.occlusion_strength*self.surface_on>0.0 {occlusion=mix(1.0,self.occlusion_map.sample_as_bgra_repeat(self.v_uv).x,self.occlusion_strength*self.surface_on)}
+            var emission=vec3(0.0,0.0,0.0)
+            if max(self.emissive.x,max(self.emissive.y,self.emissive.z))>0.0 {emission=self.to_scene(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz)*self.emissive}
             var lit = self.fur_shade(albedo * ((1.0 - metal) * (surface_ambient*(ao*sao*occlusion)+surface_direct*(ao_direct*sun_lit)+local*ao_direct)) + sun_spec*f + amb_spec*occlusion + local_pbr*ao_direct, n, self.eye.xyz-self.v_csm.xyz) + emission
             if self.tex_mag.y > 0.5 {
                 lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao)

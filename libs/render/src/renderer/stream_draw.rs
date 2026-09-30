@@ -500,8 +500,7 @@ impl Renderer {
         let Some(st) = self.stream.as_mut() else { return };
         let t = ((0.22 - sun_dir_y) / 0.3).clamp(0.0, 1.0);
         st.night = t * t * (3.0 - 2.0 * t);
-        if st.night < 0.05 { return; }
-        // Headlights: forward spots on the movers that carry one (last
+        // Headlights (and any mover light, at its own level): forward spots on the movers that carry one (last
         // frame's movers; a frame late is invisible). No hard cut by rank,
         // which swapped lights between cars frame to frame: every lit car
         // within a RADIUS draws, fading over the radius' last quarter, and
@@ -517,7 +516,7 @@ impl Renderer {
                 let k = m.kind as usize;
                 if lights.len() <= k { lights.resize(k + 1, None); }
                 if lights[k].is_none() { lights[k] = st.source.mover_light(k); }
-                if lights[k].is_none() { continue; }
+                if lights[k].is_none() || st.source.mover_light_level(k, st.night) < 0.02 { continue; }
                 let d = (vec3f(m.transform.v[12], m.transform.v[13], m.transform.v[14]) - eye).length();
                 if d < RANGE { cars.push((d, i)); }
             }
@@ -538,10 +537,11 @@ impl Renderer {
                 );
                 let axis = vec3f(v[0] * dir.x + v[4] * dir.y + v[8] * dir.z, v[1] * dir.x + v[5] * dir.y + v[9] * dir.z, v[2] * dir.x + v[6] * dir.y + v[10] * dir.z).normalize();
                 self.host_asset_lights.push(crate::lightmap::LmLight {
-                    pos, color: color * (st.night * fade), radius: 26.0, dir: axis, spot: 1.0, cone: Some((10.0, 34.0)), shadows: false,
+                    pos, color: color * (st.source.mover_light_level(m.kind as usize, st.night) * fade), radius: 26.0, dir: axis, spot: 1.0, cone: Some((10.0, 34.0)), shadows: false,
                 });
             }
         }
+        if st.night < 0.05 { return; }
         let kinds: Vec<Option<(Vec3f, Vec3f, f32)>> = (0..st.prop_models.len()).map(|k| st.source.prop_light(k)).collect();
         if kinds.iter().all(Option::is_none) { return; }
         const RANGE: f32 = 220.0;
@@ -575,12 +575,15 @@ impl Renderer {
         }
         let mut city = self.city_draw.take();
         let night = self.stream.as_ref().map_or(0.0, |s| s.night);
+        // The stream clock (seconds, wrapped so f32 keeps sub-frame steps):
+        // the city shader's puddle ripple.
+        let stream_time = self.stream.as_ref().map_or(0.0, |s| (s.time % 3600.0) as f32);
         // Until the city pipeline can draw (Metal compiles it asynchronously
         // after a shader change) or if it failed, the city draws matte
         // rather than not at all.
         let hdr = self.hdr_output;
         let mut draw = match city.as_deref_mut().filter(|c| c.pbr.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr)) && city_shader_on()) {
-            Some(c) => { c.city = vec4(night, 0.0, 0.0, 0.0); ModelDraw::City(c) }
+            Some(c) => { c.city = vec4(night, stream_time, 0.0, 0.0); ModelDraw::City(c) }
             None => ModelDraw::Diffuse(diffuse),
         };
         self.draw_stream_with(cx, &mut draw, eye, fog, sun);

@@ -1720,6 +1720,16 @@ impl SkinnedModel {
         self.nodes.iter().position(|node| node.name == name)
     }
 
+    /// The skeleton joint named `name`, preferring a skin joint over any
+    /// other node of that name: a hand-built character's mesh parts are
+    /// nodes too and are often named after the joint they ride ("head"),
+    /// and posing or following that part node instead of the joint misses
+    /// every rotation the pose puts on the joint. Falls back to any node.
+    pub fn joint_node(&self, name: &str) -> Option<usize> {
+        self.joint_nodes.iter().copied().find(|&n| self.nodes.get(n).is_some_and(|node| node.name == name))
+            .or_else(|| self.node_index(name))
+    }
+
     /// Authored node name, for diagnostics that report a node index.
     pub fn node_name(&self, node: usize) -> Option<&str> {
         self.nodes.get(node).map(|node| node.name.as_str())
@@ -3098,6 +3108,24 @@ impl SkinnedModel {
             let g = global(&self.nodes, pose, &mut globals, *node);
             out.push(Mat4f::mul(&Mat4f::mul(&mesh_inv, &g), &self.inverse_bind[j]));
         }
+    }
+
+    /// The skinning matrix [`Self::palette`] gives the joint at `node` for
+    /// `pose` (mesh space, bind to posed): what every vertex bound to that
+    /// joint goes through. A part that rides the joint takes the same
+    /// matrix, so it moves exactly with the skin. `None` for a non-joint.
+    pub fn joint_skin_matrix(&self, pose: &PoseBuffer, node: usize) -> Option<Mat4f> {
+        let j = self.joint_nodes.iter().position(|&n| n == node)?;
+        let global = |mut i: usize| -> Mat4f {
+            let mut m = Mat4f::identity();
+            loop {
+                let local = trs_to_mat4(pose.get(i).unwrap_or(&self.nodes[i].rest));
+                m = Mat4f::mul(&local, &m);
+                match self.nodes[i].parent { Some(p) => i = p, None => return m }
+            }
+        };
+        let mesh_inv = global(self.mesh_node).invert();
+        Some(Mat4f::mul(&Mat4f::mul(&mesh_inv, &global(node)), &self.inverse_bind[j]))
     }
 
     /// CPU-skin into the packed `geom.GameMeshVertexAo` layout the prop

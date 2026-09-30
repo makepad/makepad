@@ -2,6 +2,50 @@
 
 use super::*;
 
+/// One instance list's draw order for one frame: each copy's model slot and
+/// LOD, and the copies grouped by (model, LOD).
+#[derive(Default)]
+pub(super) struct ModelOrder {
+    key: (usize, usize),
+    slots: Vec<Option<usize>>,
+    lods: Vec<usize>,
+    distances: Vec<f32>,
+    order: Vec<usize>,
+    /// Each model slot's pack occlusion atlas (index into `ao_textures`),
+    /// resolved on first use this frame.
+    ao: Vec<Option<Option<usize>>>,
+}
+
+impl ModelOrder {
+    fn build(&mut self, models: &[(String, LoadedModel)], instances: &[ModelInstance], eye: Vec3f, key: (usize, usize)) {
+        // Model slot per instance, resolved once through a map: a linear
+        // search per instance is O(instances x models), which a streamed or
+        // prop-heavy world turns into milliseconds.
+        let index: std::collections::HashMap<&str, usize> =
+            models.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
+        self.slots.clear();
+        self.slots.extend(instances.iter().map(|inst| index.get(inst.model.as_str()).copied()));
+        self.distances.clear();
+        self.distances.extend(instances.iter().map(|inst| crate::asset_lod::instance_distance(&inst.transform, eye)));
+        self.lods.clear();
+        self.lods.extend(self.slots.iter().zip(&self.distances).map(|(slot, distance)| slot.map_or(0, |at| {
+            models[at].1.lods.partition_point(|(threshold, _)| *threshold <= *distance)
+        })));
+        self.order.clear();
+        self.order.extend(0..instances.len());
+        // Nearest first within each (model, LOD) group: a batch keeps its
+        // geometry, and a cut-out layer (leaves) that cannot use hidden-
+        // surface removal still has its hidden fragments rejected by the
+        // early depth test instead of shaded and then covered. Distances
+        // are non-negative, so their bits order like the floats.
+        let (slots, lods, distances) = (&self.slots, &self.lods, &self.distances);
+        self.order.sort_unstable_by_key(|&i| (slots[i], lods[i], distances[i].to_bits(), i));
+        self.ao.clear();
+        self.ao.resize(models.len(), None);
+        self.key = key;
+    }
+}
+
 impl Renderer {
     /// Draw one world-model lane. Instances are grouped by model, so N
     /// copies of one prop cost ONE draw item with N instances rather than N
@@ -19,6 +63,7 @@ impl Renderer {
         frustum: Option<&Frustum>,
         stats: &mut RenderStats,
     ) {
+        self.apply_model_lod_chains();
         if instances.is_empty() {
             return;
         }
@@ -82,26 +127,21 @@ impl Renderer {
         let mut dynamic_block_active = true;
         // Sort by model so equal geometry+texture land adjacent: consecutive
         // add_instance calls with unchanged geometry and texture accumulate
-        // into a single draw item.
-        // Model slot per instance, resolved once through a map: a linear
-        // search per instance is O(instances x models), which a streamed or
-        // prop-heavy world turns into milliseconds.
-        let slots: Vec<Option<usize>> = {
-            let index: std::collections::HashMap<&str, usize> =
-                self.static_models.iter().enumerate().map(|(i, (k, _))| (k.as_str(), i)).collect();
-            instances.iter().map(|inst| index.get(inst.model.as_str()).copied()).collect()
-        };
-        // And by LOD within a model: copies at different distances draw
-        // different geometry, and interleaved they split into one draw item
-        // per copy (a forest of LOD'd trees: thousands of draws a frame).
-        let lod_of = |i: usize| slots[i].map_or(0, |at| {
-            let root = &self.static_models[at].1;
-            let distance = crate::asset_lod::instance_distance(&instances[i].transform, eye);
-            root.lods.partition_point(|(threshold, _)| *threshold <= distance)
-        });
-        let lods: Vec<usize> = (0..instances.len()).map(lod_of).collect();
-        let mut order: Vec<usize> = (0..instances.len()).collect();
-        order.sort_by(|a, b| instances[*a].model.cmp(&instances[*b].model).then(lods[*a].cmp(&lods[*b])));
+        // into a single draw item; and by LOD within a model: copies at
+        // different distances draw different geometry, and interleaved they
+        // split into one draw item per copy (a forest of LOD'd trees:
+        // thousands of draws a frame). Resolved once per list per frame:
+        // the diffuse lane builds it and the PBR, foliage and custom lanes
+        // that walk the same list after it reuse it.
+        let which = matches!(lane, WorldModelLane::Attachment) as usize;
+        let key = (instances.as_ptr() as usize, instances.len());
+        if matches!(draw, ModelDraw::Diffuse(_)) || self.model_orders[which].key != key {
+            let mut built = std::mem::take(&mut self.model_orders[which]);
+            built.build(&self.static_models, instances, eye, key);
+            self.model_orders[which] = built;
+        }
+        let mut model_order = std::mem::take(&mut self.model_orders[which]);
+        let ModelOrder { slots, lods, distances, order, ao: model_ao, .. } = &mut model_order;
         // Layer-major: every copy's first layer, then every copy's second.
         // A multi-layer model (a tree: trunk, then leaves) drawn copy by
         // copy alternates geometry, and the batcher only appends to the
@@ -115,16 +155,16 @@ impl Renderer {
         // have that many layers (index, layer count).
         let mut layered: Vec<(usize, usize)> = Vec::new();
         for layer_pass in 0..layer_passes {
-            let mut last: Option<(String,usize)> = None;
-            let pass_order: Vec<usize> = if layer_pass == 0 {
-                std::mem::take(&mut order)
+            let mut last: Option<(usize, usize)> = None;
+            let pass_order: std::borrow::Cow<[usize]> = if layer_pass == 0 {
+                std::borrow::Cow::Borrowed(&order[..])
             } else {
-                layered.iter().filter(|(_, n)| *n > layer_pass).map(|(i, _)| *i).collect()
+                std::borrow::Cow::Owned(layered.iter().filter(|(_, n)| *n > layer_pass).map(|(i, _)| *i).collect())
             };
             if pass_order.is_empty() {
                 break;
             }
-            for &i in &pass_order {
+            for &i in pass_order.iter() {
                 let inst = &instances[i];
                 let dynamic = lane.is_dynamic(inst);
                 let Some(at) = slots[i] else {
@@ -134,7 +174,7 @@ impl Renderer {
                 let inv_height = 1.0 / root.max.y.max(0.5);
                 let sways = foliage_ready && std::iter::once(&root.material).chain(root.extra_draws.iter().map(|l| &l.4))
                     .any(|m| m.surface.as_ref().is_some_and(|s| s.definition.wind > 0.0));
-                let distance=crate::asset_lod::instance_distance(&inst.transform,eye);
+                let distance=distances[i];
                 let mut fur_budget = 12_000usize.min(96_000usize.saturating_sub(stats.fur_triangles));
                 let lod_index=lods[i];
                 let loaded=if lod_index==0{root}else{&root.lods[lod_index-1].1};
@@ -219,15 +259,16 @@ impl Renderer {
                 // Rigid parts ride the PARENT's material: a door is cut from the
                 // level tile it sits in, so its metal/roughness is the model's.
                 let has_lightmap_source = loaded.lm_source.is_some();
-                // The pack's baked occlusion, on slot 1. Packs share atlases, so
-                // this changes only when the pack does — the sort above keeps
-                // models of a pack adjacent, so it does not break batching.
-                let ao_tex = self
+                // The pack's baked occlusion, on slot 1. Packs share atlases;
+                // a model's copies are adjacent (the order above), so the
+                // binding changes at most once per model group. Resolved once
+                // per model and frame, not searched per copy.
+                let ao_at = *model_ao[at].get_or_insert_with(|| self
                     .model_pack
                     .iter()
                     .find(|(m, _)| *m == inst.model)
-                    .and_then(|(_, pack)| self.ao_textures.iter().find(|(k, _)| k == pack))
-                    .map(|(_, t)| t);
+                    .and_then(|(_, pack)| self.ao_textures.iter().position(|(k, _)| k == pack)));
+                let ao_tex = ao_at.map(|k| &self.ao_textures[k].1);
                 if let Some(t) = ao_tex.filter(|_|lod_index==0) {
                     draw.base().draw_vars.set_texture(1, t);
                     draw.base().ao_enabled = 1.0;
@@ -241,8 +282,15 @@ impl Renderer {
                 draw.base().color_adjust_ctl = inst.color_adjust;
                 // Screen-door cuts: the streamed-LOD dither, and the occluder
                 // fade wherever its cone can reach this copy.
+                // The level's ground (terrain tiles, road ribbons) never
+                // fades: a dithered hole in the ground shows the void under
+                // it, and a tile's bounding sphere (hundreds of metres) is
+                // always inside the fade cone, which kept every ground tile
+                // on the discarding pipeline: hidden ground under a city
+                // then shaded in full (gpuperf lane, citydrive).
+                let ground = inst.model.starts_with("gen/surface/level-terrain") || inst.model.starts_with("gen/surface/level-road");
                 let screen_clip = inst.color_adjust.w > 0.5
-                    || occluder_focus.is_some_and(|focus| {
+                    || !ground && occluder_focus.is_some_and(|focus| {
                         let (center, radius) = opaque::bounding_sphere(root.min, root.max, &inst.transform);
                         opaque::in_occluder_fade(eye, focus, center, radius)
                     });
@@ -294,12 +342,12 @@ impl Renderer {
                         WorldModelLane::Attachment => self.world_attachment_ground.get(i),
                     }.copied().unwrap_or(0.0);
                 }
-                if layer_pass == 0 && last.as_ref().is_none_or(|(model,level)|model!=&inst.model||*level!=lod_index) {
+                if layer_pass == 0 && last.is_none_or(|(slot, level)| slot != at || level != lod_index) {
                     match lane {
                         WorldModelLane::Placed => stats.model_draws += 1,
                         WorldModelLane::Attachment => stats.world_attachment_draws += 1,
                     }
-                    last = Some((inst.model.clone(),lod_index));
+                    last = Some((at, lod_index));
                 }
                 if layer_pass == 0 { match lane {
                     WorldModelLane::Placed => {
@@ -433,6 +481,7 @@ impl Renderer {
                 }
             }
         }
+        self.model_orders[which] = model_order;
     }
 
     /// Everything a world-model lane binds ONCE before its instances: the
@@ -480,12 +529,9 @@ impl Renderer {
         // The follow-camera occluder fade, once for the whole lane (both
         // model shaders declare it; w = 0 switches it off).
         {
-            let (focus, clear) = match self.occluder.focus() {
-                Some(f) => (f, 0.8),
-                None => (Vec3f::default(), 0.0),
-            };
+            let (push, focus, clear) = self.occluder.uniforms();
             let vars = &mut draw.base().draw_vars;
-            vars.set_uniform(cx.cx, live_id!(occ_eye), &[eye.x, eye.y, eye.z, 0.0]);
+            vars.set_uniform(cx.cx, live_id!(occ_eye), &[eye.x, eye.y, eye.z, push]);
             vars.set_uniform(cx.cx, live_id!(occ_focus), &[focus.x, focus.y, focus.z, clear]);
         }
         // Screen-space AO, once for the whole lane (both lanes pass through
@@ -615,10 +661,13 @@ impl Renderer {
         frustum: Option<&Frustum>,
         stats: &mut RenderStats,
     ) {
-        if !self
-            .placed_models
-            .iter()
-            .any(|inst| self.model_sky(&inst.model).is_some())
+        // Models first: most worlds load no sky model at all, and asking
+        // per placed copy is a search of every model for every copy.
+        if !self.static_models.iter().any(|(_, m)| m.sky.is_some())
+            || !self
+                .placed_models
+                .iter()
+                .any(|inst| self.model_sky(&inst.model).is_some())
         {
             return;
         }

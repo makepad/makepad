@@ -143,7 +143,13 @@ script_mod! {
                 let wet = smoothstep(0.64, 0.72, wn) * orm.w
                 rough = mix(rough, 0.05, wet)
                 albedo = albedo * (1.0 - 0.45 * wet)
-                n = normalize(mix(n, ng, wet))
+                // A slow, faint ripple (city.y is the stream clock): the
+                // mirrored sky wavers the way a puddle's does.
+                let t = self.city.y
+                let rp = pos.xz * 1.7
+                let rx = self.tn_noise(rp + vec2(t * 0.35, 0.0)) - self.tn_noise(rp + vec2(3.1, 1.7 + t * 0.29))
+                let rz = self.tn_noise(rp * 1.3 + vec2(5.3 - t * 0.27, 0.0)) - self.tn_noise(rp * 1.3 + vec2(2.2, -t * 0.33))
+                n = normalize(mix(n, ng, wet) + vec3(rx, 0.0, rz) * (0.07 * wet))
             }
 
             // Light, as DrawScenePbr: AO, SSAO, cascades, local lights.
@@ -192,7 +198,10 @@ script_mod! {
                 // split-sum's scale term falls with roughness).
                 let f_env = (f0 + (fr - f0) * self.pow5(1.0 - ndv)) * (1.0 - 0.9 * rough * (1.0 - fm))
                 var env = self.sky_env(normalize(refl), rough)
-                if rough < 0.6 { env = self.c_reflect(normalize(refl), rough, night, 1.0 - step(2.5, kind)) }
+                // Streets and pavements (plain) mirror the real sky only: a
+                // hashed skyline of lit windows pasted on the road read as a
+                // printed picture. Glass and paint keep the skyline.
+                if rough < 0.6 && kind > 0.5 { env = self.c_reflect(normalize(refl), rough, night, 1.0 - step(2.5, kind)) }
                 let local_pbr = self.cluster_pbr(pos, n, self.eye.xyz, albedo, rough, fm)
                 lit = albedo * ((1.0 - fm) * (ambient + direct + local * ao_direct))
                     + direct * spec * fv + env * f_env * (ao * sao) + local_pbr * ao_direct

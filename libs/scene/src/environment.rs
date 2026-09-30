@@ -57,6 +57,13 @@ pub struct ColorGrade {
     /// Screen-space ambient occlusion strength multiplier (1 = stock): how
     /// dark corners, wall feet and the undersides of things read.
     pub ao: f32,
+    /// Tilt-shift (the diorama look): how far the frame above and below a
+    /// sharp horizontal band softens into the blurred image, 0 = off.
+    pub tilt: f32,
+    /// The sharp band's centre (0 = top of the frame, 1 = bottom) and its
+    /// half-height, in frame heights.
+    pub tilt_center: f32,
+    pub tilt_width: f32,
 }
 
 impl Default for ColorGrade {
@@ -70,6 +77,9 @@ impl Default for ColorGrade {
             auto_min_ev: -0.415,
             auto_max_ev: 0.678,
             ao: 1.0,
+            tilt: 0.0,
+            tilt_center: 0.6,
+            tilt_width: 0.2,
         }
     }
 }

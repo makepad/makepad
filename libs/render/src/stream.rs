@@ -150,6 +150,10 @@ pub trait TileSource: Send + Sync {
     /// A forward light a MOVER kind carries after dark (headlights): offset
     /// and direction in the mover's frame, and colour. None for most kinds.
     fn mover_light(&self, _kind: usize) -> Option<(Vec3f, Vec3f, Vec3f)> { None }
+    /// How strongly a mover kind's light shines given the night factor
+    /// (0 day .. 1 night). Headlights: only after dark (the default). A
+    /// room's lamps and its window light follow the time of day.
+    fn mover_light_level(&self, _kind: usize, night: f32) -> f32 { night }
     /// Build one piece (worker thread).
     fn build(&self, piece: StreamPiece) -> Result<StreamMesh, String>;
 }

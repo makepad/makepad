@@ -131,6 +131,10 @@ script_mod! {
         // ---- follow-camera occluder fade (occluder_fade.rs), OFF by default ----
         // occ_eye = the TRUE world eye; occ_focus = the filmed body's chest,
         // w = the clear length before it (0 = off, every other host).
+        // occ_eye.w > 0: swaying foliage within that many metres of the
+        // followed body (occ_focus.xyz, about 1 m over its feet) bends away
+        // (occluder_fade.rs set_foliage_push); the uniform block is full,
+        // so the push rides these two.
         // Pixels near the eye→focus line, or right at the lens, draw
         // screen-door dithered so nothing hides the player.
         occ_eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
@@ -280,8 +284,16 @@ script_mod! {
             let sway = (sin(t * 0.83 + phase) * 0.7 + sin(t * 2.1 + phase * 1.9) * 0.3 + 0.35) * h * h
             let flutter = sin(t * 6.3 + dot(pos, vec3(3.7, 2.3, 4.1)) + phase) * w.w * h
             let wd = vec3(0.8, 0.0, 0.6) * (sway * w.x)
+            // Stepped-through grass and flowers lean away from the feet.
+            var pd = vec3(0.0, 0.0, 0.0)
+            if self.occ_eye.w > 0.0 {
+                let wp = (self.transform * vec4(pos.x, pos.y, pos.z, 1.0)).xyz - self.occ_focus.xyz
+                let pl = length(vec2(wp.x, wp.z))
+                let pk = clamp(1.0 - pl / self.occ_eye.w, 0.0, 1.0) * (1.0 - smoothstep(1.5, 2.5, abs(wp.y + 1.0)))
+                pd = vec3(wp.x, 0.0, wp.z) * (pk * pk * h * self.occ_eye.w * 0.7 / max(pl, 0.05)) - vec3(0.0, pk * pk * h * 0.25, 0.0)
+            }
             let s2 = max(dot(ax, ax), 0.000001)
-            let bend = vec3(dot(ax, wd), dot(ay, wd), dot(az, wd)) / s2
+            let bend = vec3(dot(ax, wd + pd), dot(ay, wd + pd), dot(az, wd + pd)) / s2
             return pos + bend + vec3(flutter * 0.6, flutter * 0.4, flutter * 0.5) - vec3(0.0, abs(sway * w.x) * 0.12, 0.0)
         }
 
@@ -406,6 +418,25 @@ script_mod! {
         // branch, so the sampler's own derivatives stay well defined.
         base_texel: fn() -> vec4 {
             var suv = self.v_uv
+            if self.tex_mag.x > 1.5 {
+                // A number plate (libs/model stencil_plate): the top half is
+                // a 7-glyph plate (6-dot glyph pitch from dot 2 of 45), the
+                // last three glyphs left blank for the number; the bottom
+                // half is "0123456789" on the same plate (from dot 2 of 63).
+                // Each copy's number rides color_adjust_ctl.w = -(1 + n); a
+                // blank glyph cell reads its digit from the strip.
+                let pu = clamp(self.v_uv.x, 0.0, 0.9999)
+                let pv = clamp(self.v_uv.y, 0.0, 0.9999)
+                suv = vec2(pu, pv * 0.5)
+                let cell = (pu * 45.0 - 1.5) / 6.0
+                let n = max(0.0 - self.color_adjust_ctl.w - 1.0, 0.0)
+                if cell >= 4.0 && cell < 7.0 && self.color_adjust_ctl.w < -0.5 {
+                    let k = floor(cell) - 4.0
+                    let digit = floor(n / pow(10.0, 2.0 - k)) - floor(n / pow(10.0, 3.0 - k)) * 10.0
+                    suv = vec2((1.5 + 6.0 * digit + 6.0 * fract(cell)) / 63.0, 0.5 + pv * 0.5)
+                }
+                return self.tex.sample_as_bgra(suv)
+            }
             if self.tex_mag.x > 0.5 {
                 let tsz = self.tex.size()
                 let tuv = self.v_uv * tsz
@@ -475,7 +506,9 @@ script_mod! {
             // it into both would darken a lit wall twice for the same reason.
             // Occlusion from the ATLAS when the pack has one, else from the
             // vertex lane. Both live in [AO_FLOOR, 1].
-            let baked = self.ao_map.sample(self.v_ao_uv).x
+            // A copy with no pack atlas (ao_enabled 0) never reads it.
+            var baked = 0.0
+            if self.ao_enabled > 0.5 { baked = self.ao_map.sample(self.v_ao_uv).x }
             // Dithered: the atlas is 8-bit and magnified well past a texel per
             // pixel, so a shallow wall gradient otherwise lands as visible
             // bands of piecewise-linear bilinear. Hash noise anchored in WORLD
@@ -512,19 +545,28 @@ script_mod! {
             // the signed-distance field — the penumbra width is the decode
             // WINDOW ([`LM_SUN_SOFT`]), a runtime knob, not a bake product.
             // RGB adds the lamps (x2: half range stored for overbright).
-            let lm = self.light_map.sample_as_bgra(self.v_lm_uv)
+            //
+            // Realtime cascades with clustered lamps use none of it: the
+            // cascades replace both sun gates below (mixed in by csm_p.x = 1)
+            // and the atlas lamps are multiplied out by cluster_on, so the
+            // three reads are skipped (a uniform branch).
+            var lm = vec4(0.0, 0.0, 0.0, 0.0)
+            var sun_vis_g = 1.0
+            if self.csm_p.x < 0.5 || self.cluster_on < 0.5 {
+                lm = self.light_map.sample_as_bgra(self.v_lm_uv)
+                // Dynamics gate their sun through the GROUND region instead
+                // (statics have v_lmg.z = 0, dynamics have lm_rect = 0, so the
+                // two gates never both engage). The shadow-top plane rejects
+                // the ground's shadow for vertices ABOVE the blocker along the
+                // sun ray: a fence rail shades shins, never the head over it.
+                let lmg = self.light_map.sample_as_bgra(self.v_lmg.xy)
+                let top_g = self.lm_top_decode.x
+                    + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
+                let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
+                sun_vis_g = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
+            }
             let has_lm = step(0.000001, self.lm_rect.z)
             let sun_vis = mix(1.0, smoothstep(0.2, 0.8, lm.w), has_lm)
-            // Dynamics gate their sun through the GROUND region instead
-            // (statics have v_lmg.z = 0, dynamics have lm_rect = 0, so the
-            // two gates never both engage). The shadow-top plane rejects
-            // the ground's shadow for vertices ABOVE the blocker along the
-            // sun ray: a fence rail shades shins, never the head over it.
-            let lmg = self.light_map.sample_as_bgra(self.v_lmg.xy)
-            let top_g = self.lm_top_decode.x
-                + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
-            let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
-            let sun_vis_g = mix(1.0, smoothstep(0.2, 0.8, lmg.w), self.v_lmg.z * occ_g)
             // Realtime: the cascades replace BOTH baked gates (own chart
             // and ground projection) — one receive path for every family.
             let sun_all = mix(

@@ -1,5 +1,6 @@
 //! Editable rests, FK poses, constraints, weight tools and shape keys. Controls
 //! evaluate on the worker and bake into ordinary glTF animation channels.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{document::State,mesh,transform::*,schema::*,service::*,json::{self,Value},canon::{Reader,Writer},
     AnimationChannel,AnimationClip,AnimationPath,Keyframe,Skeleton,Error,Limits,Result,OperationResult};
 use std::collections::{BTreeMap,BTreeSet};
@@ -138,7 +139,7 @@ impl RigState {
                 ConstraintKind::Limit{min_translation,max_translation,min_scale,max_scale,max_angle}=>{
                     for d in 0..3{local[j].translation[d]=local[j].translation[d].clamp(min_translation[d],max_translation[d]);local[j].scale[d]=local[j].scale[d].clamp(min_scale[d],max_scale[d]);}
                     let rest=self.local_rest(skeleton,j)?.rotation;let relative=quat_mul(quat_inverse(rest),local[j].rotation);
-                    let angle=2.*relative[3].abs().clamp(0.,1.).acos();if angle>max_angle{local[j].rotation=quat_slerp(rest,local[j].rotation,max_angle/angle);}
+                    let angle=2.*relative[3].abs().clamp(0.,1.).pacos();if angle>max_angle{local[j].rotation=quat_slerp(rest,local[j].rotation,max_angle/angle);}
                 }
                 ConstraintKind::TwoBoneIk{middle,end,target,pole,clamp_reach}=>{
                     let (world,_)=globals(skeleton,&local)?;let target=transform_point(world[target as usize],[0.;3]);
@@ -348,7 +349,7 @@ fn edit_weights(state:&mut State,object:&str,vertices:&[mesh::VertexId],edit:&We
                 if !power.is_finite()||*power<=0.||*power>8.{return Err(Error::Invalid("binding power"));}max=*max_influences;
                 for (j,bone) in skeleton.joints.iter().enumerate(){ctx.checkpoint(1)?;let b=transform_point(global[j],[0.;3]);let a=bone.parent.map(|p|transform_point(global[p as usize],[0.;3])).unwrap_or(b);
                     let ab=sub(b,a);let t=if dot(ab,ab)>1e-20{(dot(sub(vertex.position,a),ab)/dot(ab,ab)).clamp(0.,1.)}else{0.};let distance=length(sub(vertex.position,add(a,mul(ab,t))));
-                    proposed.insert(j as u32,1./distance.max(1e-6).powf(*power));}
+                    proposed.insert(j as u32,1./distance.max(1e-6).ppowf(*power));}
             }
         }
         if proposed.keys().any(|j|*j as usize>=skeleton.joints.len()){return Err(Error::Invalid("weight edit target joint"));}

@@ -1,5 +1,6 @@
 //! Transactional source surfacing. Layers, masks and vertex colors are source
 //! data; flattened PBR textures are derived on the document worker.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{
     canon::{Reader, Writer},
     mesh, Error, ImageEncoding, Limits, Material, Result, RgbaImage,
@@ -385,7 +386,7 @@ impl SurfaceMaterial {
             return Err(Error::Invalid("fur material: length 0.001..0.05m, density 0.05..1, scale 20..1000, seed 0..65535"));
         }
         if self.shading.is_some_and(|s| !s.valid()) {
-            return Err(Error::Invalid("shading: wind, clearcoat and flake are 0..1, impostor a distance in metres"));
+            return Err(Error::Invalid("shading: wind, clearcoat, flake and rim are 0..1, impostor a distance in metres"));
         }
         if !color_valid(&self.base_color)
             || !unit(self.metallic)
@@ -944,7 +945,7 @@ fn falloff(distance: f64, radius: f64, hardness: f64) -> f64 {
     }
 }
 fn distance2(a: [f64; 2], b: [f64; 2]) -> f64 {
-    (a[0] - b[0]).hypot(a[1] - b[1])
+    (a[0] - b[0]).phypot(a[1] - b[1])
 }
 fn segment_distance(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     let d = [b[0] - a[0], b[1] - a[1]];

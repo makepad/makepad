@@ -350,9 +350,13 @@ impl Cx {
         // recorded only on a frame that copied.
         let copied = self.draw_lists.1.stats.bytes.saturating_add(backing_bytes);
         if copied != 0 {
+            let elapsed = copy_started.elapsed();
+            // The per-buffer copies report bytes only; the frame's copy
+            // time is this one clock read.
+            self.draw_lists.1.copied(0, 1, elapsed);
             self.publications.record_observation(crate::shared_instances::UploadObservation {
                 bytes: copied,
-                copy_ns: copy_started.elapsed().as_nanos().min(u64::MAX as u128) as u64,
+                copy_ns: elapsed.as_nanos().min(u64::MAX as u128) as u64,
             });
         }
         let mut drained = Vec::new();
@@ -700,6 +704,7 @@ impl Cx {
                     let () = msg_send![encoder, setFrontFacingWinding: 1u64]; // MTLWindingCounterClockwise
                     let () = msg_send![encoder, setCullMode: cull_mode];
                 }
+                encoders.set_scissor(encoder, draw_call.options.scissor);
 
                 let float16 = float16_target
                     && matches!(shp.color_format, crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm);
@@ -4716,7 +4721,6 @@ impl MetalBuffer {
                 && same_offsets
                 && (inner.last_bound_seq <= completed || append)
         });
-        let started = Instant::now();
         let mut destination = if in_place {
             self.inner.take().unwrap()
         } else if let Some(index) = self.spares.iter().position(|spare| {
@@ -4812,7 +4816,7 @@ impl MetalBuffer {
                         inner: Some(destination),
                         ..Default::default()
                     });
-                budget.copied(uploaded, publication.slots() * 4, started.elapsed());
+                budget.copied(uploaded, publication.slots() * 4, std::time::Duration::ZERO);
                 return (end, 0);
             }
             let source = self
@@ -4862,7 +4866,7 @@ impl MetalBuffer {
                     ..Default::default()
                 });
         }
-        budget.copied(uploaded, publication.slots() * 4, started.elapsed());
+        budget.copied(uploaded, publication.slots() * 4, std::time::Duration::ZERO);
         (0, gpu_copied)
     }
 
@@ -4937,7 +4941,9 @@ impl MetalBuffer {
         }
         // Every copy is whole this frame: a draw item's own data and a
         // retained publication alike (contract §7; pacing is the producer's).
-        let start_time = std::time::Instant::now();
+        // Copies are timed once per frame by the caller (`copy_started`),
+        // not per buffer: two clock reads per draw item were a measurable
+        // share of a busy frame's CPU.
         if self.pending.is_none() {
             let start = range.start.min(range.end) * 4;
             // Append only beyond the resident prefix: earlier command buffers
@@ -5091,7 +5097,7 @@ impl MetalBuffer {
                 let _: () = msg_send![pending.inner.buffer.as_id(),didModifyRange:range];
             }
         }
-        budget.copied(copy.len(), slots * 4, start_time.elapsed());
+        budget.copied(copy.len(), slots * 4, std::time::Duration::ZERO);
         pending.copied = copy.end;
         let remaining = pending.end - pending.copied;
         // Publish only complete immutable records. Later frames append beyond

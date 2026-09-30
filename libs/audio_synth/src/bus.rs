@@ -20,7 +20,6 @@ use crate::engine::{EngineInput, EngineSpec};
 use crate::instrument::Instrument;
 use crate::recipe::{Recipe, RecipeVoice};
 use crate::reverb::{Reverb, RoomParams, RoomPreset};
-use crate::score::{SeqEvent, Sequencer};
 use crate::spatial::{place, Distance, Listener3, Placement3, Spatial, V3};
 use crate::vehicle::{TyreInput, VehicleSound};
 
@@ -154,15 +153,13 @@ struct ToneSlot {
 struct InstrumentSlot {
     key: u64,
     inst: Box<dyn Instrument>,
-    seq: Option<Sequencer>,
     spatial_l: Spatial,
     spatial_r: Spatial,
     emitter: Emitter,
     place: Placement3,
     gain: f32,
     send: f32,
-    /// A retiring slot's gain ramp, 1 -> 0; its sequence is gone and no
-    /// lookup finds it. The control side reaps it at 0
+    /// A retiring slot's gain ramp, 1 -> 0; no lookup finds it. The control side reaps it at 0
     /// ([`SynthBus::reap_instruments`]), so the callback never drops it.
     fade: f32,
     /// Per-sample ramp step; 0 while the slot is live.
@@ -671,7 +668,6 @@ impl SynthBus {
             InstrumentSlot {
                 key,
                 inst,
-                seq: None,
                 spatial_l,
                 spatial_r,
                 emitter,
@@ -696,25 +692,22 @@ impl SynthBus {
         Ok(None)
     }
 
-    /// Remove an instrument, handing it (and its sequence) back to drop.
-    pub fn remove_instrument(&mut self, key: u64) -> Option<(Box<dyn Instrument>, Option<Sequencer>)> {
+    /// Remove an instrument, handing it back to drop (or to keep).
+    pub fn remove_instrument(&mut self, key: u64) -> Option<Box<dyn Instrument>> {
         let i = self.instruments.iter().position(|s| s.live() && s.key == key)?;
-        let slot = self.instruments.swap_remove(i);
-        Some((slot.inst, slot.seq))
+        Some(self.instruments.swap_remove(i).inst)
     }
 
-    /// Retire an instrument without a click: its sequence stops (handed
-    /// back to drop), held notes release, and its output fades to silence
-    /// over `secs`. From now on no lookup finds it, so the same key can be
-    /// installed again at once; [`SynthBus::reap_instruments`] frees it
-    /// once the fade has run out.
-    pub fn fade_instrument(&mut self, key: u64, secs: f32) -> Option<Sequencer> {
-        let old = self.set_sequence(key, None);
+    /// Retire an instrument without a click: held notes release and its
+    /// output fades to silence over `secs`. From now on no lookup finds it,
+    /// so the same key can be installed again at once;
+    /// [`SynthBus::reap_instruments`] frees it once the fade has run out.
+    pub fn fade_instrument(&mut self, key: u64, secs: f32) {
         let rate = self.rate;
-        let s = self.instruments.iter_mut().find(|s| s.live() && s.key == key)?;
-        s.inst.all_notes_off();
-        s.fade_step = 1.0 / (finite(secs, 0.25).max(0.005) * rate);
-        old
+        if let Some(s) = self.instruments.iter_mut().find(|s| s.live() && s.key == key) {
+            s.inst.all_notes_off();
+            s.fade_step = 1.0 / (finite(secs, 0.25).max(0.005) * rate);
+        }
     }
 
     /// Hand back every retired instrument whose fade has finished, to be
@@ -751,22 +744,6 @@ impl SynthBus {
                 s.gain = finite(g, 1.0).clamp(0.0, 4.0);
             }
         }
-    }
-
-    /// Start a sequence on an instrument, handing back the one it replaces.
-    /// Notes the old sequence held are released first.
-    pub fn set_sequence(&mut self, key: u64, seq: Option<Sequencer>) -> Option<Sequencer> {
-        let s = self.instruments.iter_mut().find(|s| s.live() && s.key == key)?;
-        let mut old = std::mem::replace(&mut s.seq, seq);
-        if let Some(old) = old.as_mut() {
-            let inst = &mut s.inst;
-            old.stop(&mut |_, ev| {
-                if let SeqEvent::Off { note } = ev {
-                    inst.note_off(note)
-                }
-            });
-        }
-        old
     }
 
     /// Everything off: voices fade, tones release, instruments go quiet.
@@ -979,32 +956,7 @@ impl SynthBus {
         let il = &mut self.inst_l[..len];
         let ir = &mut self.inst_r[..len];
         for s in self.instruments.iter_mut() {
-            // Sequencer events, then render between them.
-            let mut pending: [(usize, SeqEvent); 32] = [(0, SeqEvent::Off { note: 0 }); 32];
-            let mut count = 0;
-            if let Some(seq) = s.seq.as_mut() {
-                seq.advance(len, rate, &mut |offset, ev| {
-                    if count < pending.len() {
-                        pending[count] = (offset, ev);
-                        count += 1;
-                    }
-                });
-            }
-            let mut from = 0;
-            for &(offset, ev) in &pending[..count] {
-                let offset = offset.min(len);
-                if offset > from {
-                    s.inst.render(&mut il[from..offset], &mut ir[from..offset]);
-                    from = offset;
-                }
-                match ev {
-                    SeqEvent::On { note, vel } => s.inst.note_on(note, vel),
-                    SeqEvent::Off { note } => s.inst.note_off(note),
-                }
-            }
-            if from < len {
-                s.inst.render(&mut il[from..], &mut ir[from..]);
-            }
+            s.inst.render(il, ir);
             s.place = s.emitter.placement(&listener);
             s.spatial_l.set(&s.place, s.emitter.occlusion);
             s.spatial_r.set(&s.place, s.emitter.occlusion);

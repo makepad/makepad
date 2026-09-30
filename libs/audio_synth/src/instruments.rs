@@ -12,7 +12,7 @@
 //!   recipe poly-synth ([`crate::poly::PolySynth`]).
 //!
 //! Drum kits take General MIDI percussion notes (kick 36, snare 38, closed
-//! hat 42, ...; see [`crate::score::drum_note`]); notes the kits lack map to
+//! hat 42, ...; see [`crate::instrument::drum_note`]); notes the kits lack map to
 //! their nearest piece.
 //!
 //! Construction may be slow (the piano builds 88 modal key designs, a
@@ -23,7 +23,7 @@ use crate::instrument::{Control, Instrument};
 use crate::ironfish::{FilterKind, Ironfish, IronfishPatch, OscillatorKind};
 use crate::recipe::Recipe;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use makepad_piano_model::{Piano, PianoEvent, TimedEvent as PianoTimed, PIANO_PRESETS};
 use makepad_soundfont::{
@@ -281,7 +281,7 @@ type ZoneTable = Box<[[Option<VoiceParameters>; SF_ZONES]]>;
 /// key and per velocity eighth at construction, so a note-on is a table
 /// lookup, never the allocating `select`.
 pub struct SoundFontInstrument {
-    font: Option<SoundFont>,
+    font: Option<Arc<SoundFont>>,
     table: ZoneTable,
     sampler: Sampler<SF_VOICES>,
     events: [SfTimed; MAX_PENDING],
@@ -294,7 +294,7 @@ pub struct SoundFontInstrument {
 }
 
 impl SoundFontInstrument {
-    fn with(rate: f32, font: Option<SoundFont>, table: ZoneTable) -> Self {
+    fn with(rate: f32, font: Option<Arc<SoundFont>>, table: ZoneTable) -> Self {
         SoundFontInstrument {
             font,
             table,
@@ -310,7 +310,12 @@ impl SoundFontInstrument {
     }
 
     pub fn from_sf2_bytes(rate: f32, bytes: &[u8], bank: u16, program: u8) -> Result<Self, String> {
-        let font = makepad_soundfont::parse_sf2(bytes).map_err(|e| format!("SoundFont: {e}"))?;
+        Self::from_font(rate, Arc::new(parse_font(bytes)?), bank, program)
+    }
+
+    /// One preset of an already parsed font: the programs of one file share
+    /// its decoded samples.
+    pub fn from_font(rate: f32, font: Arc<SoundFont>, bank: u16, program: u8) -> Result<Self, String> {
         let mut table: Vec<[Option<VoiceParameters>; SF_ZONES]> = vec![[None; SF_ZONES]; 128 * SF_LAYERS];
         let mut any = false;
         for key in 0..128u8 {
@@ -420,7 +425,7 @@ impl Instrument for SoundFontInstrument {
         }
         let events = &self.events[..self.count];
         match &self.font {
-            Some(font) => self.sampler.render(font, events, &mut out_l[..len], &mut out_r[..len]),
+            Some(font) => self.sampler.render(&**font, events, &mut out_l[..len], &mut out_r[..len]),
             None => self.sampler.render(&NoSamples, events, &mut out_l[..len], &mut out_r[..len]),
         };
         self.count = 0;
@@ -429,6 +434,32 @@ impl Instrument for SoundFontInstrument {
     fn is_active(&self) -> bool {
         self.count > 0 || self.sampler.active_voice_count() > 0
     }
+}
+
+/// Parse an SF2. A General MIDI font holds ~74 M sample points, past the
+/// parser's default ceiling for untrusted files, so the ceiling is raised
+/// to what a full GM set needs.
+fn parse_font(bytes: &[u8]) -> Result<SoundFont, String> {
+    let limits = makepad_soundfont::ParseLimits { max_sample_points: 256 << 20, ..Default::default() };
+    makepad_soundfont::parse_sf2_with_limits(bytes, limits).map_err(|e| format!("SoundFont: {e}"))
+}
+
+/// The parsed font of `bytes`, shared by every instrument built from the
+/// same bytes while one of them lives: a General MIDI score plays several
+/// programs of one file, and each would otherwise decode its own ~300 MB of
+/// samples. The `Weak` to the bytes keeps their allocation from being
+/// reused while the entry stands, so pointer equality is identity.
+fn shared_font(bytes: &Arc<[u8]>) -> Result<Arc<SoundFont>, String> {
+    static FONTS: Mutex<Vec<(Weak<[u8]>, Weak<SoundFont>)>> = Mutex::new(Vec::new());
+    let mut fonts = FONTS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    fonts.retain(|(bytes, font)| bytes.strong_count() > 0 && font.strong_count() > 0);
+    let key = Arc::downgrade(bytes);
+    if let Some(font) = fonts.iter().find(|(bytes, _)| Weak::ptr_eq(bytes, &key)).and_then(|(_, font)| font.upgrade()) {
+        return Ok(font);
+    }
+    let font = Arc::new(parse_font(bytes)?);
+    fonts.push((key, Arc::downgrade(&font)));
+    Ok(font)
 }
 
 // ───────────────────────────── ironfish ─────────────────────────────
@@ -531,7 +562,7 @@ pub fn build(kind: &InstrumentKind, rate: f32) -> Result<Box<dyn Instrument>, St
         InstrumentKind::Drums => Box::new(PhysDrums::new(rate)),
         InstrumentKind::SampledDrums { dir } => Box::new(SampledDrums::load(rate, dir)?),
         InstrumentKind::SoundFont { bytes, bank, program } => {
-            Box::new(SoundFontInstrument::from_sf2_bytes(rate, bytes, *bank, *program)?)
+            Box::new(SoundFontInstrument::from_font(rate, shared_font(bytes)?, *bank, *program)?)
         }
         InstrumentKind::Ironfish { preset } => {
             let patch = match preset.as_deref() {

@@ -167,13 +167,19 @@ fn material_write(w: &mut Writer, m: &SurfaceMaterial) -> Result<()> {
     w.f64(m.alpha_cutoff)?;
     // The legacy 0/1 layout stays byte-identical for materials without fur
     // or shading terms.
-    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1) | ((m.shading.is_some() as u8) << 2))?;
+    // Bit 3: the shading block carries a rim term (only when set).
+    let rim = m.shading.is_some_and(|s| s.rim > 0.0);
+    // Bit 4: a number-plate layout (only when set).
+    let plate = m.shading.is_some_and(|s| s.plate > 0.0);
+    w.u8(m.double_sided as u8 | ((m.fur.is_some() as u8) << 1) | ((m.shading.is_some() as u8) << 2) | ((rim as u8) << 3) | ((plate as u8) << 4))?;
     if let Some(fur) = m.fur {
         for value in [fur.length, fur.density, fur.scale] { w.f64(value)?; }
         w.u32(fur.seed)?;
     }
     if let Some(s) = m.shading {
         for value in [s.wind, s.clearcoat, s.flake, s.impostor] { w.f64(value)?; }
+        if rim { w.f64(s.rim)?; }
+        if plate { w.f64(s.plate)?; }
     }
     w.count(m.channels.len())?;
     for (ch, layers) in &m.channels {
@@ -201,7 +207,7 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
     };
     let alpha_cutoff = r.f64()?;
     let flags = r.u8()?;
-    if flags > 7 { return Err(Error::Corrupt("surface material flags")); }
+    if flags > 31 || (flags & 24 != 0 && flags & 4 == 0) { return Err(Error::Corrupt("surface material flags")); }
     let double_sided = flags & 1 != 0;
     let fur = if flags & 2 != 0 {
         Some(makepad_gltf::GlbFurMaterial {
@@ -209,7 +215,10 @@ fn material_read(r: &mut Reader<'_>, l: &Limits) -> Result<SurfaceMaterial> {
         })
     } else { None };
     let shading = if flags & 4 != 0 {
-        Some(makepad_gltf::GlbShading { wind: r.f64()?, clearcoat: r.f64()?, flake: r.f64()?, impostor: r.f64()? })
+        let (wind, clearcoat, flake, impostor) = (r.f64()?, r.f64()?, r.f64()?, r.f64()?);
+        let rim = if flags & 8 != 0 { r.f64()? } else { 0.0 };
+        let plate = if flags & 16 != 0 { r.f64()? } else { 0.0 };
+        Some(makepad_gltf::GlbShading { wind, clearcoat, flake, impostor, rim, plate })
     } else { None };
     let mut channels = BTreeMap::new();
     for _ in 0..r.count(5)? {
@@ -640,5 +649,22 @@ mod compatibility_tests {
         let mut writer = Writer::new(1024);
         layer_write(&mut writer, &layer).unwrap();
         assert_eq!(writer.bytes, bytes);
+    }
+
+    #[test]
+    fn a_rim_term_roundtrips_and_leaves_older_shading_bytes_alone() {
+        let encode = |m: &SurfaceMaterial| { let mut w = Writer::new(4096); material_write(&mut w, m).unwrap(); w.bytes };
+        let coat = makepad_gltf::GlbShading { clearcoat: 1.0, flake: 0.5, ..Default::default() };
+        let plain = SurfaceMaterial { shading: Some(coat), ..Default::default() };
+        let toy = SurfaceMaterial { shading: Some(makepad_gltf::GlbShading { rim: 0.6, ..coat }), ..Default::default() };
+        let (a, b) = (encode(&plain), encode(&toy));
+        // The rim is one f64 more, flagged in bit 3; without it nothing moves.
+        assert_eq!(b.len(), a.len() + 8);
+        for bytes in [a, b] {
+            let back = material_read(&mut Reader::new(&bytes), &Limits::default()).unwrap();
+            assert_eq!(encode(&back), bytes);
+        }
+        let back = material_read(&mut Reader::new(&encode(&toy)), &Limits::default()).unwrap();
+        assert_eq!(back.shading.unwrap().rim, 0.6);
     }
 }

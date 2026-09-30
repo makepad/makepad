@@ -11,6 +11,7 @@
 //! `knocked_down`), `holding-right` / `holding-right-shoot` for held
 //! weapons, `aim_up`/`aim_down` for aim offsets and `reload`, plus hits,
 //! deaths, emotes and fighting moves.
+use makepad_csg_math::portable::PortableFloat;
 use super::body::{side_sign, Body};
 use super::{CHARACTER_JOINTS, j};
 use crate::character_mesh::{mix, norm, smooth01};
@@ -40,10 +41,10 @@ pub const FIGHT_CLIP_NAMES: &[&str] = &["guard", "guard_low", "walk_fwd", "hit_h
 
 type Q = [f64; 4];
 const QI: Q = [0., 0., 0., 1.];
-pub(crate) fn qx(deg: f64) -> Q { let h = deg.to_radians() * 0.5; [h.sin(), 0., 0., h.cos()] }
-pub(crate) fn qy(deg: f64) -> Q { let h = deg.to_radians() * 0.5; [0., h.sin(), 0., h.cos()] }
-pub(crate) fn qz(deg: f64) -> Q { let h = deg.to_radians() * 0.5; [0., 0., h.sin(), h.cos()] }
-fn qaxis(axis: [f64; 3], deg: f64) -> Q { let a = norm(axis); let h = deg.to_radians() * 0.5; let s = h.sin(); [a[0] * s, a[1] * s, a[2] * s, h.cos()] }
+pub(crate) fn qx(deg: f64) -> Q { let h = deg.to_radians() * 0.5; [h.psin(), 0., 0., h.pcos()] }
+pub(crate) fn qy(deg: f64) -> Q { let h = deg.to_radians() * 0.5; [0., h.psin(), 0., h.pcos()] }
+pub(crate) fn qz(deg: f64) -> Q { let h = deg.to_radians() * 0.5; [0., 0., h.psin(), h.pcos()] }
+fn qaxis(axis: [f64; 3], deg: f64) -> Q { let a = norm(axis); let h = deg.to_radians() * 0.5; let s = h.psin(); [a[0] * s, a[1] * s, a[2] * s, h.pcos()] }
 pub(crate) fn qmul(a: Q, b: Q) -> Q { quat_mul(a, b) }
 fn qinv(q: Q) -> Q { quat_inverse(q) }
 fn qrot(q: Q, v: [f64; 3]) -> [f64; 3] { quat_rotate(q, v) }
@@ -63,7 +64,7 @@ fn qframe(a0: [f64; 3], a1: [f64; 3], b0: [f64; 3], b1: [f64; 3]) -> Q {
     let a1r = qrot(q1, a1);
     let b1p = norm(sub(b1, mul(b0, dot(b1, b0))));
     let a1p = norm(sub(a1r, mul(b0, dot(a1r, b0))));
-    let ang = dot(cross(a1p, b1p), b0).atan2(dot(a1p, b1p));
+    let ang = dot(cross(a1p, b1p), b0).patan2(dot(a1p, b1p));
     qmul(qaxis(b0, ang.to_degrees()), q1)
 }
 /// Rest data the clips need: world rest positions, parents and key sizes.
@@ -164,7 +165,7 @@ impl<'a> Pose<'a> {
         // straight and snapping bent again (a short-legged sprint's toe-off).
         let full = l1 + l2;
         let raw = length(to);
-        let soft = if raw > 0.9 * full { 0.9 * full + 0.098 * full * (1. - (-(raw - 0.9 * full) / (0.098 * full)).exp()) } else { raw };
+        let soft = if raw > 0.9 * full { 0.9 * full + 0.098 * full * (1. - (-(raw - 0.9 * full) / (0.098 * full)).pexp()) } else { raw };
         let d = soft.clamp((l1 - l2).abs() + 1e-4, full - 1e-4);
         let dt = norm(to);
         let pn = norm(sub(pole, mul(dt, dot(pole, dt))));
@@ -200,7 +201,7 @@ impl<'a> Pose<'a> {
         let sg = side_sign(side);
         let chest = self.grot("chest");
         let (f, o) = (fwd.to_radians(), out.to_radians());
-        let local_dir = [sg * o.sin(), -o.cos() * f.cos(), -o.cos() * f.sin()];
+        let local_dir = [sg * o.psin(), -o.pcos() * f.pcos(), -o.pcos() * f.psin()];
         self.aim(&format!("upper_arm_{x}"), &format!("lower_arm_{x}"), qrot(chest, local_dir));
         // Elbow bends forward around the arm's own hinge: the rest hinge
         // (perpendicular to the rest arm and to forward) carried by the
@@ -330,14 +331,14 @@ fn gait(t: f64, p: &mut Pose, g: &Gait) {
     let dir: [f64; 3] = if g.side != 0. { [g.side, 0., 0.] } else if g.back { [0., 0., 1.] } else { [0., 0., -1.] };
     // Hips: bob, sway toward the stance foot, twist with the swing leg.
     let d2 = g.duty * 0.5;
-    let bob = -g.bob * u * (0.5 + 0.5 * (4. * PI * (ph - d2)).cos());
-    let sway = -0.012 * u * (TAU * (ph - d2)).cos() * if g.side != 0. { 0.3 } else { 1. };
+    let bob = -g.bob * u * (0.5 + 0.5 * (4. * PI * (ph - d2)).pcos());
+    let sway = -0.012 * u * (TAU * (ph - d2)).pcos() * if g.side != 0. { 0.3 } else { 1. };
     p.shift([sway, bob - g.crouch * r.leg_len, 0.]);
-    let twist = g.twist * (TAU * ph).sin() * if g.back { -1. } else { 1. };
+    let twist = g.twist * (TAU * ph).psin() * if g.back { -1. } else { 1. };
     p.rot("hips", qmul(qy(twist), qz(-sway / u * 60.)));
     p.rot("spine", qx(-g.lean * 0.5));
     p.rot("chest", qmul(qy(-twist * 1.5), qx(-g.lean * 0.5)));
-    p.look(twist * 0.5, g.lean * 0.6 + g.bob * 40. * (4. * PI * (ph - d2)).cos() * 0.5);
+    p.look(twist * 0.5, g.lean * 0.6 + g.bob * 40. * (4. * PI * (ph - d2)).pcos() * 0.5);
     for side in 0..2 {
         let x = super::body::sfx(side);
         let sg = side_sign(side);
@@ -353,11 +354,11 @@ fn gait(t: f64, p: &mut Pose, g: &Gait) {
         } else {
             let s = (fp - g.duty) / (1. - g.duty);
             off = g.stride * (-0.5 + ease(s));
-            lift = g.lift * u * (PI * s.powf(0.75)).sin() + g.knee_up * u * (PI * s).sin().powi(2) * (1. - s);
+            lift = g.lift * u * (PI * s.ppowf(0.75)).psin() + g.knee_up * u * (PI * s).psin().powi(2) * (1. - s);
             pitch = curve(s, &[(0., -34.), (0.35, -20.), (0.8, 6.), (1., 14.)]) * if g.side != 0. { 0.3 } else { 1. };
             toe = curve(s, &[(0., 32.), (0.3, 8.), (1., 0.)]);
         }
-        let heel_rise = if pitch < 0. { r.foot_fwd * 0.8 * (-pitch).to_radians().sin() } else { 0. };
+        let heel_rise = if pitch < 0. { r.foot_fwd * 0.8 * (-pitch).to_radians().psin() } else { 0. };
         // `off` is ahead along the travel: the heel strikes a half stride in
         // front and the planted foot slides back to toe off behind. (It was
         // negated, so every gait moonwalked: feet slid forward while planted
@@ -369,7 +370,7 @@ fn gait(t: f64, p: &mut Pose, g: &Gait) {
     // Arms counter-swing with a little lag.
     for side in 0..2 {
         let arm_ph = (ph + side as f64 * 0.5 - 0.06).rem_euclid(1.);
-        let swing = g.arm * -(TAU * arm_ph).cos() * if g.back { -0.6 } else { 1. } * if g.side != 0. { 0.35 } else { 1. };
+        let swing = g.arm * -(TAU * arm_ph).pcos() * if g.back { -0.6 } else { 1. } * if g.side != 0. { 0.35 } else { 1. };
         let elbow = g.elbow + 0.4 * g.elbow * swing.max(0.) / g.arm.max(1.);
         p.arm(side, swing + g.lean * 0.4, 10., elbow);
         p.fingers(side, if g.elbow > 60. { 0.75 } else { 0.35 }, 0.3, 0.3);
@@ -402,13 +403,13 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
     let run = Gait { cycle: 0.68, stride: 1.25 * rig.leg_len, duty: 0.38, lift: 0.1, bob: 0.03, lean: 10., arm: 34., elbow: 78., twist: 9., crouch: 0.04, side: 0., back: false, knee_up: 0.14 };
     Some(match name {
         "idle" => sample(name, rig, 4.0, 12., true, &[], &|t, p| {
-            let b = (TAU * t / 4.).sin();
-            p.shift([0.008 * u * (TAU * t / 4.).sin(), -0.004 * u * (0.5 + 0.5 * (TAU * t / 2.).cos()), 0.]);
+            let b = (TAU * t / 4.).psin();
+            p.shift([0.008 * u * (TAU * t / 4.).psin(), -0.004 * u * (0.5 + 0.5 * (TAU * t / 2.).pcos()), 0.]);
             p.rot("hips", qz(1.2 * b));
-            p.rot("spine", qx(-1. + 0.6 * (TAU * t / 2.).sin()));
-            p.rot("chest", qmul(qx(0.8 * (TAU * t / 2.).sin()), qz(-1.4 * b)));
-            p.look(8. * (TAU * t / 4. + 0.8).sin() * smooth01(0.8, 1.6, t) * (1. - smooth01(3.0, 3.8, t)), -2.);
-            relaxed(p, 1.5 * (TAU * t / 2.).sin());
+            p.rot("spine", qx(-1. + 0.6 * (TAU * t / 2.).psin()));
+            p.rot("chest", qmul(qx(0.8 * (TAU * t / 2.).psin()), qz(-1.4 * b)));
+            p.look(8. * (TAU * t / 4. + 0.8).psin() * smooth01(0.8, 1.6, t) * (1. - smooth01(3.0, 3.8, t)), -2.);
+            relaxed(p, 1.5 * (TAU * t / 2.).psin());
             // Weight on the right leg: hip drops left, left knee soft.
             p.rot("hips", qmul(qz(-5.), qy(4.)));
             feet_planted(p, 0.018 * u, 0., 0.);
@@ -430,7 +431,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             sample(name, rig, g.cycle, 24., true, &[], &move |t, p| { gait(t, p, &g); p.rot("spine", qz(-s * 3.)); })
         }
         "crouch" => sample(name, rig, 2.4, 10., true, &[], &|t, p| {
-            let br = (TAU * t / 2.4).sin();
+            let br = (TAU * t / 2.4).psin();
             p.shift([0., -0.3 * rig.leg_len - 0.004 * u * br, 0.02 * u]);
             p.rot("hips", qx(-8.));
             p.rot("spine", qx(-10. - 1. * br));
@@ -485,7 +486,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             p.mouth(curve(t, &[(0., 0.), (0.24, 0.35), (0.5, 0.2)]), 0.2);
         }),
         "fall" => sample(name, rig, 1.2, 15., true, &[], &|t, p| {
-            let w = (TAU * t / 1.2).sin(); let w2 = (TAU * 2. * t / 1.2).sin();
+            let w = (TAU * t / 1.2).psin(); let w2 = (TAU * 2. * t / 1.2).psin();
             p.shift([0., 0.05 * u, 0.]);
             p.rot("spine", qx(3. + 2. * w)); p.rot("chest", qz(3. * w2));
             p.look(0., -10.);
@@ -542,7 +543,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
         "wave" => sample(name, rig, 2.0, 20., true, &[], &|t, p| {
             relaxed(p, 0.);
             feet_planted(p, 0.012 * u, 0., 0.);
-            let w = (TAU * t / 0.5).sin();
+            let w = (TAU * t / 0.5).psin();
             let up = smooth01(0., 0.3, t) * (1. - smooth01(1.7, 2., t));
             p.rot("chest", qz(-3. * up));
             p.arm(1, 20. * up + 4., mix(9., 150., up), mix(14., 30. + 25. * w, up));
@@ -551,7 +552,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             p.mouth(0.25 * up, 0.9 * up); p.brows(0.6 * up, 0.);
         }),
         "cheer" => sample(name, rig, 1.6, 20., true, &[], &|t, p| {
-            let h = (TAU * t / 0.8).sin();
+            let h = (TAU * t / 0.8).psin();
             let hop = (h * 0.5 + 0.5).powi(2);
             p.shift([0., 0.05 * u * hop - 0.03 * u, 0.]);
             p.rot("spine", qx(4. * hop)); p.look(0., -12.);
@@ -560,7 +561,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             p.mouth(0.7, 1.); p.brows(1., 0.);
         }),
         "dance" => sample(name, rig, 2.0, 20., true, &[], &|t, p| {
-            let b = (TAU * t / 0.5).sin(); let s = (TAU * t / 1.0).sin();
+            let b = (TAU * t / 0.5).psin(); let s = (TAU * t / 1.0).psin();
             p.shift([0.04 * u * s, -0.03 * u * (b * 0.5 + 0.5), 0.]);
             p.rot("hips", qmul(qz(8. * s), qy(12. * s)));
             p.rot("chest", qmul(qz(-12. * s), qy(-14. * s)));
@@ -573,7 +574,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
         }),
         "taunt" => sample(name, rig, 2.0, 20., false, &[], &|t, p| {
             let k = smooth01(0., 0.35, t) * (1. - smooth01(1.6, 2., t));
-            let pulse = 1. + 0.15 * (TAU * t / 0.4).sin() * k;
+            let pulse = 1. + 0.15 * (TAU * t / 0.4).psin() * k;
             p.shift([0., -0.03 * u * k, 0.]);
             p.rot("spine", qx(4. * k)); p.rot("chest", qx(6. * k * pulse));
             for side in 0..2 { p.arm(side, mix(4., 10., k), mix(9., 85., k), mix(14., 125. * pulse.min(1.05), k)); p.fingers(side, mix(0.3, 1., k), mix(0.2, 1., k), mix(0.2, 0.8, k)); }
@@ -606,7 +607,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             p.look(0., 20. * k); p.mouth(0.2, 0.3); p.brows(0., 0.5);
         }),
         "hang" => sample(name, rig, 1.6, 15., true, &[], &|t, p| {
-            let s = (TAU * t / 1.6).sin();
+            let s = (TAU * t / 1.6).psin();
             p.shift([0., -0.02 * u, 0.02 * u]);
             let top = rig.sh + 0.55 * rig.leg_len * 0.62;
             for side in 0..2 {
@@ -649,7 +650,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             p.brows(-0.2, 1.); p.mouth(0.1, -0.5);
         }),
         "wall_slide" => sample(name, rig, 1.0, 15., true, &[], &|t, p| {
-            let s = (TAU * t).sin();
+            let s = (TAU * t).psin();
             p.rot("spine", qz(8.)); p.look(-25., -5.);
             p.arm(0, 70. + 5. * s, 70., 30.); p.arm(1, 20., 50., 60.);
             for side in 0..2 { p.fingers(side, 0.2, 0.1, 0.2); }
@@ -665,7 +666,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             let spin = curve(t, &[(0., 0.), (0.1, 5.), (0.6, 350.), (0.8, 360.)]);
             let tuck = smooth01(0.08, 0.25, t) * (1. - smooth01(0.55, 0.75, t));
             p.set("hips", qx(spin));
-            p.shift([0., 0.12 * u * (PI * t / 0.8).sin(), 0.]);
+            p.shift([0., 0.12 * u * (PI * t / 0.8).psin(), 0.]);
             p.rot("spine", qx(-25. * tuck));
             for side in 0..2 { p.arm(side, 40. + 60. * tuck, 20., 90. * tuck + 15.); }
             for side in 0..2 {
@@ -681,7 +682,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             // with the toe up, arms flung forward and out, a judder while
             // the sole scrubs, and the head turning toward the new way.
             let k = smooth01(0., 0.06, t);
-            let judder = 0.006 * u * (TAU * t / 0.05).sin() * (1. - smooth01(0.22, 0.4, t));
+            let judder = 0.006 * u * (TAU * t / 0.05).psin() * (1. - smooth01(0.22, 0.4, t));
             p.shift([0., -0.09 * u * k + judder, 0.05 * u * k]);
             p.rot("hips", qmul(qy(-12. * k), qx(10. * k)));
             p.rot("spine", qx(8. * k));
@@ -711,7 +712,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             let roll = curve(t, &[(0., 0.), (0.06, 0.), (0.45, 330.), (0.6, 360.), (0.7, 360.)]);
             let tuck = smooth01(0.05, 0.2, t) * (1. - smooth01(0.45, 0.65, t));
             p.set("hips", qmul(qy(-180. * (1. - twist)), qz(roll)));
-            p.shift([0., 0.1 * u * (PI * (t / 0.7).min(1.)).sin(), 0.]);
+            p.shift([0., 0.1 * u * (PI * (t / 0.7).min(1.)).psin(), 0.]);
             p.rot("spine", qx(-12. * tuck));
             for side in 0..2 { p.arm(side, 10. + 30. * tuck, 80. - 20. * tuck, 15. + 40. * tuck); p.fingers(side, 0.1, 0.1, 0.1); }
             for side in 0..2 {
@@ -725,7 +726,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             // Hanging from one raised hand, legs together swinging ±25°.
             let hand = if name == "swing" { 1 } else { 0 };
             sample(name, rig, 1.2, 20., true, &[], &move |t, p| {
-                let sw = (TAU * t / 1.2).sin();
+                let sw = (TAU * t / 1.2).psin();
                 let sg = side_sign(hand);
                 p.shift([0., 0.02 * u, 0.]);
                 p.rot("hips", qx(8. * sw));
@@ -738,7 +739,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             })
         }
         "zip_pull" => sample(name, rig, 0.5, 10., true, &[], &|t, p| {
-            let b = (TAU * t / 0.5).sin();
+            let b = (TAU * t / 0.5).psin();
             p.rot("hips", qx(-20.)); p.rot("chest", qx(-6.));
             for side in 0..2 {
                 let sg = side_sign(side);
@@ -764,7 +765,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
                     let sg = side_sign(side);
                     let hand_ph = (ph + side as f64 * 0.5).rem_euclid(1.);
                     let foot_ph = (ph + (1 - side) as f64 * 0.5).rem_euclid(1.);
-                    let step = |q: f64| -> (f64, f64) { if q < 0.6 { (stride * (0.5 - q / 0.6), 0.) } else { let s = (q - 0.6) / 0.4; (stride * (-0.5 + ease(s)), 0.06 * u * (PI * s).sin()) } };
+                    let step = |q: f64| -> (f64, f64) { if q < 0.6 { (stride * (0.5 - q / 0.6), 0.) } else { let s = (q - 0.6) / 0.4; (stride * (-0.5 + ease(s)), 0.06 * u * (PI * s).psin()) } };
                     let (hz, hy) = step(hand_ph);
                     p.hand(side, [sg * 0.17 * u, 0.02 * u + hy, -0.62 * u + hz], [sg * 0.6, -0.2, 1.], Some(([0., 0., -1.], [0., -1., 0.])));
                     p.fingers(side, 0.15, 0.1, 0.1);
@@ -782,7 +783,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             sample(name, rig, g.cycle, 32., true, &[], &move |t, p| { gait(t, p, &g); p.rot("hips", qz(s * 15.)); p.look(0., 0.); })
         }
         "perch" => sample(name, rig, 2.0, 10., true, &[], &|t, p| {
-            let br = (TAU * t / 2.).sin();
+            let br = (TAU * t / 2.).psin();
             p.shift([0., -0.5 * rig.leg_len - 0.004 * u * br, 0.06 * u]);
             p.rot("hips", qx(-24.)); p.rot("spine", qx(-14.)); p.rot("chest", qx(-6.));
             p.look(0., 38.);
@@ -799,7 +800,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
         "glide" | "dive" => {
             let glide = name == "glide";
             sample(name, rig, 1.0, 10., true, &[], &move |t, p| {
-                let w = (TAU * t).sin();
+                let w = (TAU * t).psin();
                 p.rot("hips", qx(-85.));
                 p.look(0., if glide { 70. } else { 40. });
                 for side in 0..2 {
@@ -830,7 +831,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
             let k = t / 0.35;
             let sweep = curve(k, &[(0., 0.), (0.4, 1.), (1., 0.2)]);
             // Lean over the planted left hand while the legs swing out to the right.
-            p.shift([0.06 * u * sweep, 0.16 * u * (PI * k).sin(), 0.]);
+            p.shift([0.06 * u * sweep, 0.16 * u * (PI * k).psin(), 0.]);
             p.rot("hips", qmul(qz(24. * sweep), qy(-15. * sweep)));
             p.hand(0, [-0.22 * u, rig.hips_y - 0.12 * u, -0.25 * u], [-1., -0.5, 0.], Some(([0.2, 0., -1.], [0., -1., 0.])));
             p.arm(1, 60., 60., 20.);
@@ -851,7 +852,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
         "drive" | "sit" => {
             let drive = name == "drive";
             sample(name, rig, 2.0, 10., true, &[], &move |t, p| {
-                let s = (TAU * t / 2.).sin();
+                let s = (TAU * t / 2.).psin();
                 let seat = 0.44 * rig.leg_len;
                 p.shift([0., -(rig.hips_y - rig.ankle_y) + seat + 0.05 * u, 0.06 * u]);
                 p.rot("hips", qx(-6.)); p.rot("spine", qx(8.)); p.rot("chest", qx(4.));
@@ -866,7 +867,7 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
                     for side in 0..2 {
                         let sg = side_sign(side);
                         let a = (sg * (70. + 10. * s)).to_radians();
-                        p.hand(side, add(wheel, [a.sin() * 0.17 * u, a.cos() * 0.17 * u, 0.]), [sg, -1., 0.3], Some((norm([-sg * 0.3, 0.2, -1.]), [-sg, 0., 0.])));
+                        p.hand(side, add(wheel, [a.psin() * 0.17 * u, a.pcos() * 0.17 * u, 0.]), [sg, -1., 0.3], Some((norm([-sg * 0.3, 0.2, -1.]), [-sg, 0., 0.])));
                         p.fingers(side, 0.9, 0.85, 0.6);
                     }
                     p.look(4. * s, 4.);
@@ -993,7 +994,7 @@ fn death_pose(p: &mut Pose, t: f64, back: bool) {
 fn fight_stance(p: &mut Pose, t: f64, block: f64) {
     let rig = p.rig;
     let u = rig.u;
-    let bounce = (TAU * t).sin();
+    let bounce = (TAU * t).psin();
     p.shift([0., -0.07 * rig.leg_len - 0.012 * u * (bounce * 0.5 + 0.5), 0.]);
     p.rot("hips", qy(-28.));
     p.rot("spine", qmul(qy(12.), qx(-6.)));

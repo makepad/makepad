@@ -289,6 +289,11 @@ pub struct Renderer {
     /// the host knows a "model" is really a whole imported LEVEL, which must
     /// never shadow its own interior.
     model_casts_shadow: std::collections::BTreeMap<String, bool>,
+    /// LOD chains of separately built models: base id -> (distance, id of
+    /// the model drawn from that distance on). Folded into the base's own
+    /// `lods` whenever the members are resident ([`Self::set_model_lod_chain`]).
+    model_lod_chains: std::collections::BTreeMap<String, Vec<(f32, String)>>,
+    model_lod_chains_dirty: bool,
     /// Where every triggered anim part currently is, keyed by what the host
     /// addressed ([`ModelTarget`]) and the part's node name. Absent = the
     /// part sits in its model's default state, so an untouched scene costs
@@ -341,6 +346,8 @@ pub struct Renderer {
     ao_textures: Vec<(String, Texture)>,
     /// Which pack each loaded model belongs to, for binding its atlas.
     model_pack: Vec<(String, String)>,
+    /// The placed and attached lists' per-frame draw order (draw_models.rs).
+    model_orders: [draw_models::ModelOrder; 2],
     /// One shell per entry — this is the whole per-frame firework upload.
     firework_instances: Vec<crate::firework::FireworkInstance>,
     /// This frame's smoke clouds (see [`Renderer::set_smoke_volumes`]).
@@ -639,6 +646,8 @@ impl Default for Renderer {
             sky_draw_wait_logged: false,
             sky_time: 0.0,
             model_casts_shadow: std::collections::BTreeMap::new(),
+            model_lod_chains: std::collections::BTreeMap::new(),
+            model_lod_chains_dirty: false,
             model_anim_state: ModelStates::default(),
             placed_models: Vec::new(),
             csm_static_casters: Vec::new(),
@@ -654,6 +663,7 @@ impl Default for Renderer {
             vfx: Default::default(),
             ao_textures: Vec::new(),
             model_pack: Vec::new(),
+            model_orders: Default::default(),
             firework_instances: Vec::new(),
             smoke_volumes: Vec::new(),
             smoke_draw: None,

@@ -2,6 +2,7 @@
 //! `body::Wardrobe`); bulky layers are shells built from the body's own
 //! rings pushed outward, so they carry the same weights and bend with the
 //! body; rigid pieces (pouches, plates, pads, visors) are bound to one joint.
+use makepad_csg_math::portable::PortableFloat;
 use super::*;
 use super::body::{densify, sfx, side_sign, Body, Wardrobe};
 use super::head::Face;
@@ -128,7 +129,7 @@ pub(crate) fn beard_mask(face: &Face, d: [f64; 3]) -> f64 {
     let side = 1. - smooth01(0.82, 0.95, fx.abs() + 0.25 * d[2].max(0.));
     (below_cheek * lips * side).clamp(0., 1.)
 }
-fn gauss2(a: f64, b: f64) -> f64 { (-(a * a + b * b)).exp() }
+fn gauss2(a: f64, b: f64) -> f64 { (-(a * a + b * b)).pexp() }
 
 pub(crate) fn facial_hair(g: &mut Gen, face: &Face) {
     let sp = g.spec;
@@ -149,11 +150,11 @@ pub(crate) fn facial_hair(g: &mut Gen, face: &Face) {
             let mut row = Vec::new();
             for k in 0..=nth {
                 let theta = mix(-PI * 0.62, PI * 0.62, k as f64 / nth as f64);
-                let d = [phi.sin() * theta.sin(), -phi.cos(), -phi.sin() * theta.cos()];
+                let d = [phi.psin() * theta.psin(), -phi.pcos(), -phi.psin() * theta.pcos()];
                 let c = mask(d);
                 let p = face.point(d);
                 let out = face.outward(d);
-                let t = a * 0.045 * sp.hair_volume * c.powf(0.7) * (1. + 0.6 * smooth01(-0.6, -0.95, d[1])) + 0.0008 * u;
+                let t = a * 0.045 * sp.hair_volume * c.ppowf(0.7) * (1. + 0.6 * smooth01(-0.6, -0.95, d[1])) + 0.0008 * u;
                 let q = add(p, mul(out, t));
                 let w = wmix(&headw, &jaw, smooth01(mouth_world_y, mouth_world_y - 0.03 * u, q[1]));
                 row.push((part.vertex(q, w), c));
@@ -272,7 +273,7 @@ fn leg_shell_rings(b: &Body, side: usize, t0: f64, t1: f64, grow: f64, flare: f6
     (0..=n).map(|i| {
         let t = mix(t0, t1, i as f64 / n as f64);
         let (c, axis) = if t <= 1. { (add(hip, mul(d1, t * l1)), d1) } else { (add(kn, mul(d2, (t - 1.) * l2)), d2) };
-        let fold = if grow > 0.004 * u { 0.004 * u * (-((t - 1.02) / 0.05).powi(2)).exp() } else { 0. };
+        let fold = if grow > 0.004 * u { 0.004 * u * (-((t - 1.02) / 0.05).powi(2)).pexp() } else { 0. };
         let r = radius(t) * u * l * if t > 1. { 1.1 } else { 1. } + grow + flare * smooth01(1.2, 2., t) + fold;
         let d_kn = if t <= 1. { (t - 1.) * l1 } else { (t - 1.) * l2 };
         let mut w = wmix(&ul, &ll, smooth01(-0.05 * u, 0.05 * u, d_kn));
@@ -353,8 +354,8 @@ pub(crate) fn build(g: &mut Gen) {
                 let rings: Vec<Ring> = (0..7).map(|i| {
                     let t = i as f64 / 6.;
                     let a = mix(-1.1, 1.1, t);
-                    let cc = add(c, [a.sin() * b.neck_r * 1.7, 0.01 * u * (1. - (a * 1.2).cos()), a.cos() * b.neck_r * 1.4]);
-                    let tan = [a.cos(), 0., -a.sin()];
+                    let cc = add(c, [a.psin() * b.neck_r * 1.7, 0.01 * u * (1. - (a * 1.2).pcos()), a.pcos() * b.neck_r * 1.4]);
+                    let tan = [a.pcos(), 0., -a.psin()];
                     let r = 0.035 * u * (1. - 0.6 * (2. * t - 1.).powi(2));
                     Ring::around(cc, tan, [0., 1., 0.], r * 1.3, r, wmix(&w1(j("chest")), &w1(j("neck")), 0.4))
                 }).collect();
@@ -479,7 +480,7 @@ pub(crate) fn build(g: &mut Gen) {
                     let dir = norm(sub(fr[fr.len() - 1].c, fr[0].c));
                     let sole = g.mats.id(MatDef::new(hex("#1d1b1a"), Tex::Rubber));
                     let n = fr.len();
-                    let matf = move |i: usize, theta: f64| { let _ = i; if theta.sin() > 0.55 { sole } else { m } };
+                    let matf = move |i: usize, theta: f64| { let _ = i; if theta.psin() > 0.55 { sole } else { m } };
                     let (s0, e) = (fr[0].c, fr[n - 1].c);
                     tube(&mut part, &fr, 28, Cap::Point(sub(s0, mul(dir, 0.014 * u))), Cap::Point(add(e, mul(dir, 0.012 * u))), &matf, 1., 0., None);
                 }
@@ -683,9 +684,9 @@ pub(crate) fn build(g: &mut Gen) {
                 let n = 20;
                 let wrap: Vec<Ring> = (0..=n).map(|i| {
                     let a = std::f64::consts::TAU * i as f64 / n as f64;
-                    let front = (0.5 - 0.5 * a.cos()).powi(2);
-                    let c = [a.sin() * b.neck_r * 1.45, y - 0.03 * u * front + 0.006 * u, -a.cos() * b.neck_r * 1.4 + 0.006 * u];
-                    let tan = [a.cos(), 0., a.sin()];
+                    let front = (0.5 - 0.5 * a.pcos()).powi(2);
+                    let c = [a.psin() * b.neck_r * 1.45, y - 0.03 * u * front + 0.006 * u, -a.pcos() * b.neck_r * 1.4 + 0.006 * u];
+                    let tan = [a.pcos(), 0., a.psin()];
                     Ring::around(c, tan, [0., 1., 0.], 0.04 * u, 0.016 * u, ww.clone())
                 }).collect();
                 tube(&mut part, &wrap, 10, Cap::Open, Cap::Open, &|_, _| m, 1., 0., None);
@@ -693,7 +694,7 @@ pub(crate) fn build(g: &mut Gen) {
                 rounded_box(&mut part, knot, [0.022 * u, 0.02 * u, 0.014 * u], ID3, 2.4, w1(j("chest")), m, 12);
                 for (k, dx) in [(0usize, -0.03), (1, 0.04)] {
                     let len = if k == 0 { 0.2 } else { 0.14 } * u;
-                    let tail: Vec<Ring> = (0..6).map(|i| { let t = i as f64 / 5.; let c = add(knot, [dx * u * t, -len * t, -0.01 * u * t - 0.012 * u * (PI * t).sin()]); Ring::around(c, [0.05, -1., -0.1], [1., 0., 0.], 0.032 * u * (1. + 0.15 * t), 0.007 * u, w1(j("chest"))) }).collect();
+                    let tail: Vec<Ring> = (0..6).map(|i| { let t = i as f64 / 5.; let c = add(knot, [dx * u * t, -len * t, -0.01 * u * t - 0.012 * u * (PI * t).psin()]); Ring::around(c, [0.05, -1., -0.1], [1., 0., 0.], 0.032 * u * (1. + 0.15 * t), 0.007 * u, w1(j("chest"))) }).collect();
                     let (s0, e) = (tail[0].c, tail[5].c);
                     tube(&mut part, &tail, 8, Cap::Point(s0), Cap::Point(e), &|_, _| m, 1., 0., None);
                 }
@@ -737,12 +738,12 @@ fn plate_carrier(g: &mut Gen, part: &mut Part, hard: &mut Part, b: &Body, l: &La
         let depth = |y: f64| { let r = torso_shell_rings(b, y - 0.001, y + 0.001, 0., 0.); r.first().map_or(b.chest_w[1], |r| if back { r.rz[0] } else { r.rz[1] }) };
         // Rest the plate on the most prominent point (chest front, shoulder blades behind).
         let (dt, db) = (depth(y1 - 0.06 * u).max(depth(yc)), depth(y0 + 0.02 * u));
-        let tilt = ((dt - db) / (y1 - y0 - 0.08 * u)).atan().to_degrees().clamp(-4., 14.);
+        let tilt = ((dt - db) / (y1 - y0 - 0.08 * u)).patan().to_degrees().clamp(-4., 14.);
         let zc = dt.max(db) + shirt + half_t - (dt - db).abs() * 0.35;
         // Local up leans back behind (+z) and forward in front (-z) with the tilt.
         let sg = if back { 1. } else { -1. };
         let rot = rot_x(sg * tilt);
-        let slope = tilt.to_radians().tan();
+        let slope = tilt.to_radians().ptan();
         let at = move |y: f64| sg * (zc + half_t + (y - yc) * slope);
         ([0., yc, sg * zc], rot, at)
     };
@@ -844,8 +845,8 @@ fn belt_ring(part: &mut Part, b: &Body, y: f64, h: f64, grow: f64, m: u32) {
 /// (degrees from the crown at front / side / back).
 fn head_shell(part: &mut Part, face: &Face, edge: [f64; 3], thick: f64, rim: f64, m: u32, rim_m: u32, w: W, skip: Option<&dyn Fn([f64; 3]) -> bool>) {
     let (nth, nph) = (56usize, 16usize);
-    let az = |theta: f64| { let f = theta.cos(); if f >= 0. { mix(edge[1], edge[0], f.powf(1.3)) } else { mix(edge[1], edge[2], (-f).powf(1.1)) } };
-    let dir = |phi: f64, theta: f64| [phi.sin() * theta.sin(), phi.cos(), -phi.sin() * theta.cos()];
+    let az = |theta: f64| { let f = theta.pcos(); if f >= 0. { mix(edge[1], edge[0], f.ppowf(1.3)) } else { mix(edge[1], edge[2], (-f).ppowf(1.1)) } };
+    let dir = |phi: f64, theta: f64| [phi.psin() * theta.psin(), phi.pcos(), -phi.psin() * theta.pcos()];
     let mut outer = Vec::new(); let mut inner = Vec::new(); let mut dirs = Vec::new();
     for i in 0..=nph {
         let t = i as f64 / nph as f64;
@@ -938,7 +939,7 @@ fn headgear(g: &mut Gen, part: &mut Part, hard: &mut Part, face: &Face, l: &Laye
                 }
                 // Chin strap.
                 let strap = g.mats.id(MatDef::new(hex("#222320"), Tex::Nylon));
-                let pts: Vec<[f64; 3]> = (0..9).map(|i| { let t = i as f64 / 8.; let th = mix(-1.05, 1.05, t); let d = norm([th.sin(), -0.25 - 0.62 * th.cos().powi(2), -0.1 * th.cos()]); let s = face.point(d); add(s, mul(norm(sub(s, face.c)), 0.004 * u)) }).collect();
+                let pts: Vec<[f64; 3]> = (0..9).map(|i| { let t = i as f64 / 8.; let th = mix(-1.05, 1.05, t); let d = norm([th.psin(), -0.25 - 0.62 * th.pcos().powi(2), -0.1 * th.pcos()]); let s = face.point(d); add(s, mul(norm(sub(s, face.c)), 0.004 * u)) }).collect();
                 let rings: Vec<Ring> = pts.iter().enumerate().map(|(i, &p)| { let tan = norm(sub(pts[(i + 1).min(8)], pts[i.saturating_sub(1)])); Ring::around(p, tan, norm(sub(p, face.c)), 0.002 * u, 0.008 * u, wmix(&headw, &w1(j("jaw")), 0.5 * (1. - (2. * i as f64 / 8. - 1.).abs()))) }).collect();
                 tube(hard, &rings, 6, Cap::Point(pts[0]), Cap::Point(pts[8]), &|_, _| strap, 1., 0., None);
                 g.sockets.push(("helmet".into(), j("head"), face.point(face.dir(0., 0.62)), [0., 0., 0., 1.]));
@@ -972,7 +973,7 @@ fn headgear(g: &mut Gen, part: &mut Part, hard: &mut Part, face: &Face, l: &Laye
             let pad = g.mats.id(MatDef::new(hex("#1a1a1c"), Tex::Leather));
             let covered = g.spec.has("helmet");
             let lift = if covered { a * 0.16 } else { a * 0.03 };
-            let pts: Vec<[f64; 3]> = (0..11).map(|i| { let t = i as f64 / 10.; let th = mix(-1.45, 1.45, t); let d = norm([th.sin(), th.cos(), 0.08]); let s = face.point_opt(d, false); add(s, mul(norm(sub(s, face.c)), lift)) }).collect();
+            let pts: Vec<[f64; 3]> = (0..11).map(|i| { let t = i as f64 / 10.; let th = mix(-1.45, 1.45, t); let d = norm([th.psin(), th.pcos(), 0.08]); let s = face.point_opt(d, false); add(s, mul(norm(sub(s, face.c)), lift)) }).collect();
             if !covered {
                 let rings: Vec<Ring> = pts.iter().enumerate().map(|(i, &p)| { let tan = norm(sub(pts[(i + 1).min(10)], pts[i.saturating_sub(1)])); Ring::around(p, tan, norm(sub(p, face.c)), 0.006 * u, 0.014 * u, headw.clone()) }).collect();
                 tube(hard, &rings, 8, Cap::Point(pts[0]), Cap::Point(pts[10]), &|_, _| m, 1., 0., None);
@@ -1007,7 +1008,7 @@ fn headgear(g: &mut Gen, part: &mut Part, hard: &mut Part, face: &Face, l: &Laye
                 let t = i as f64 / (n - 1) as f64;
                 let fx = mix(-0.8, 0.8, t);
                 // Deeper at the temples, a nose notch in the middle.
-                let h = half_h * face.r[1] * (1. - 0.3 * (2. * t - 1.).powi(4)) * (1. - 0.2 * (-((2. * t - 1.) / 0.12).powi(2)).exp());
+                let h = half_h * face.r[1] * (1. - 0.3 * (2. * t - 1.).powi(4)) * (1. - 0.2 * (-((2. * t - 1.) / 0.12).powi(2)).pexp());
                 let p = off(fx, fy, 0.75);
                 Ring::around(p, [1., 0., 0.], [0., 1., 0.], h, face.re * 0.06, headw.clone())
             }).collect();

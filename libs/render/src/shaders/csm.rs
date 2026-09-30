@@ -123,18 +123,24 @@ script_mod! {
             let a = 6.2831853 * fract(52.9829189 * fract(dot(cell, vec2(0.06711056, 0.00583715))))
             let cs = vec2(cos(a), sin(a)) * (r * e)
             let sn = vec2(-cs.y, cs.x)
+            // The centre and the four taps on the disk's rim first: where
+            // all five agree fully (open ground in sun, the inside of a
+            // shadow; most pixels) the other eight would agree too and are
+            // skipped. A penumbra pixel takes the whole kernel.
             var s = self.csm_tap(u, v, ci, depth)
-            s = s + self.csm_tap(u - 0.326 * cs.x - 0.406 * sn.x, v - 0.326 * cs.y - 0.406 * sn.y, ci, depth)
             s = s + self.csm_tap(u - 0.840 * cs.x - 0.074 * sn.x, v - 0.840 * cs.y - 0.074 * sn.y, ci, depth)
+            s = s + self.csm_tap(u + 0.962 * cs.x - 0.195 * sn.x, v + 0.962 * cs.y - 0.195 * sn.y, ci, depth)
+            s = s + self.csm_tap(u + 0.519 * cs.x + 0.767 * sn.x, v + 0.519 * cs.y + 0.767 * sn.y, ci, depth)
+            s = s + self.csm_tap(u - 0.322 * cs.x - 0.933 * sn.x, v - 0.322 * cs.y - 0.933 * sn.y, ci, depth)
+            if s > 4.999 { return 1.0 }
+            if s < 0.001 { return 0.0 }
+            s = s + self.csm_tap(u - 0.326 * cs.x - 0.406 * sn.x, v - 0.326 * cs.y - 0.406 * sn.y, ci, depth)
             s = s + self.csm_tap(u - 0.696 * cs.x + 0.457 * sn.x, v - 0.696 * cs.y + 0.457 * sn.y, ci, depth)
             s = s + self.csm_tap(u - 0.203 * cs.x + 0.621 * sn.x, v - 0.203 * cs.y + 0.621 * sn.y, ci, depth)
-            s = s + self.csm_tap(u + 0.962 * cs.x - 0.195 * sn.x, v + 0.962 * cs.y - 0.195 * sn.y, ci, depth)
             s = s + self.csm_tap(u + 0.473 * cs.x - 0.480 * sn.x, v + 0.473 * cs.y - 0.480 * sn.y, ci, depth)
-            s = s + self.csm_tap(u + 0.519 * cs.x + 0.767 * sn.x, v + 0.519 * cs.y + 0.767 * sn.y, ci, depth)
             s = s + self.csm_tap(u + 0.185 * cs.x - 0.893 * sn.x, v + 0.185 * cs.y - 0.893 * sn.y, ci, depth)
             s = s + self.csm_tap(u + 0.507 * cs.x + 0.064 * sn.x, v + 0.507 * cs.y + 0.064 * sn.y, ci, depth)
             s = s + self.csm_tap(u + 0.896 * cs.x + 0.412 * sn.x, v + 0.896 * cs.y + 0.412 * sn.y, ci, depth)
-            s = s + self.csm_tap(u - 0.322 * cs.x - 0.933 * sn.x, v - 0.322 * cs.y - 0.933 * sn.y, ci, depth)
             s = s + self.csm_tap(u - 0.792 * cs.x - 0.598 * sn.x, v - 0.792 * cs.y - 0.598 * sn.y, ci, depth)
             return s * 0.07692308
         }

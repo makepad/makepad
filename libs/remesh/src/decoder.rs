@@ -5,6 +5,7 @@
 //! oriented by the flux sign (flux > 0 reverses the CCW incident order), then
 //! triangulated (default 'auto' = normal_abs consistency).
 
+use makepad_csg_math::portable::PortableFloat;
 use std::sync::Arc;
 
 use crate::grid::Grid;
@@ -325,7 +326,7 @@ fn angle_condition(v0: V3, v1: V3, v2: V3, v3: V3) -> bool {
     fn angle(e1: V3, e2: V3) -> f32 {
         let c = norm3(cross3(e1, e2));
         let d = dot3(e1, e2);
-        c.atan2(d)
+        c.patan2(d)
     }
     let e01 = normalize_eps(sub3(v1, v0));
     let e12 = normalize_eps(sub3(v2, v1));

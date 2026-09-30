@@ -125,6 +125,40 @@ impl Renderer {
     ///
     /// CSM registration updates immediately; the pending atlas bake is also
     /// re-kicked for OnChange.
+    /// Draw `base` as the models of `chain` from their distances on: a
+    /// hand-built mid-detail model and a far proxy, say, where decimating
+    /// the base cannot give the shape wanted. The members are ordinary
+    /// models built and installed on their own; once all are resident they
+    /// become the base's LOD levels (the draw picks by distance like any
+    /// authored LOD) and a chained base casts its shadow from its LAST
+    /// level. An empty chain removes it.
+    pub fn set_model_lod_chain(&mut self, base: &str, chain: Vec<(f32, String)>) {
+        let mut chain = chain;
+        chain.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let changed = if chain.is_empty() { self.model_lod_chains.remove(base).is_some() } else { self.model_lod_chains.insert(base.to_string(), chain.clone()) != Some(chain) };
+        if changed {
+            if let Some((_, m)) = self.static_models.iter_mut().find(|(k, _)| k == base) { m.lods.clear(); }
+            self.model_lod_chains_dirty = true;
+        }
+    }
+
+    /// Whether `id` is the base of a LOD chain (its shadow uses the last level).
+    pub(super) fn is_lod_chain_base(&self, id: &str) -> bool { self.model_lod_chains.contains_key(id) }
+
+    /// Fold resident chain members into their bases' `lods` (after any
+    /// install or chain change; free otherwise).
+    pub(super) fn apply_model_lod_chains(&mut self) {
+        if !self.model_lod_chains_dirty { return; }
+        self.model_lod_chains_dirty = false;
+        for (base, chain) in &self.model_lod_chains {
+            let Some(at) = self.static_models.iter().position(|(k, _)| k == base) else { continue };
+            let levels: Option<Vec<(f32, super::prepared::LoadedModel)>> = chain.iter().map(|(d, id)| {
+                self.static_models.iter().find(|(k, _)| k == id).map(|(_, m)| { let mut m = m.clone(); m.lods.clear(); (*d, m) })
+            }).collect();
+            if let Some(levels) = levels { self.static_models[at].1.lods = levels; }
+        }
+    }
+
     pub fn set_model_casts_shadow(&mut self, id: &str, casts: bool) {
         if self.model_casts_shadow.insert(id.to_string(), casts) != Some(casts) {
             self.placed_scene_signature = None;

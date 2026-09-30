@@ -13,6 +13,7 @@
 //! sit at -X, the same basis as the humanoid template. The rest pose is an
 //! A-pose (arms ~50° from the body) with identity joint rotations, so clip
 //! rotations are expressed in world-aligned parent frames.
+use makepad_csg_math::portable::PortableFloat;
 #[path = "character_body.rs"]
 mod body;
 #[path = "character_head.rs"]
@@ -47,8 +48,10 @@ pub const CHARACTER_JOINTS: [(&str, Option<usize>); 44] = [
     ("hair_1", Some(4)), ("hair_2", Some(42)),
 ];
 /// Bumped whenever generated geometry, materials or clips change, so
-/// content-addressed caches of script characters rebuild.
-pub const CHARACTER_GENERATOR_VERSION: i64 = 41;
+/// content-addressed caches of script characters rebuild. 42: portable
+/// transcendentals (`makepad_csg_math::portable`), the same bits on every
+/// platform.
+pub const CHARACTER_GENERATOR_VERSION: i64 = 42;
 
 pub fn joint_index(name: &str) -> u32 { CHARACTER_JOINTS.iter().position(|j| j.0 == name).unwrap_or_else(|| panic!("joint {name}")) as u32 }
 pub(crate) fn j(name: &str) -> u32 { joint_index(name) }
@@ -114,7 +117,7 @@ pub struct CharacterSpec {
     pub warnings: Vec<String>,
 }
 
-fn srgb_to_linear(c: f64) -> f64 { let c = c.clamp(0., 1.); if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) } }
+fn srgb_to_linear(c: f64) -> f64 { let c = c.clamp(0., 1.); if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).ppowf(2.4) } }
 /// "#rrggbb" (sRGB) or a linear [r,g,b(,a)] array.
 pub(crate) fn color_value(v: &Value) -> Option<[f64; 3]> {
     match v {
@@ -148,7 +151,7 @@ fn merge(base: &Value, over: &Value) -> Value {
 
 pub(crate) fn merge_pub(base: &Value, over: &Value) -> Value { merge(base, over) }
 
-const TOP_KEYS: &[&str] = &["op", "name", "preset", "height", "heads", "stylize", "body", "skin", "face", "hair", "outfit", "colors", "clips", "hands", "facial_hair", "fighter", "material_base", "generator", "hold", "support", "mesh"];
+const TOP_KEYS: &[&str] = &["op", "name", "preset", "height", "heads", "stylize", "body", "skin", "face", "hair", "outfit", "colors", "clips", "hands", "facial_hair", "fighter", "material_base", "generator", "hold", "support", "support_radius", "grip_radius", "grip_front", "mesh"];
 const BODY_KEYS: &[&str] = &["fem", "shoulders", "chest", "waist", "hips", "belly", "muscle", "arms", "legs", "neck", "hands", "feet", "head_width", "jaw", "chin"];
 const FACE_KEYS: &[&str] = &["eye_color", "eye_size", "eye_spacing", "eye_tilt", "lids", "brows", "brow_angle", "brow_color", "nose", "nose_size", "mouth_width", "smile", "lip_color", "ears", "ear_size", "blush", "freckles"];
 const HAIR_KEYS: &[&str] = &["style", "color", "color2", "volume"];
@@ -416,7 +419,7 @@ mod tests {
         let mut b = body::Body::new(&spec);
         head::place_face_joints(&spec, &mut b);
         let rig = clips::RigInfo::new(&b);
-        let ang = |a: [f64; 4], b: [f64; 4]| { let d = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.); 2. * d.acos().to_degrees() };
+        let ang = |a: [f64; 4], b: [f64; 4]| { let d = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.); 2. * d.pacos().to_degrees() };
         let arms: Vec<u32> = ["shoulder_l", "upper_arm_l", "lower_arm_l", "hand_l", "shoulder_r", "upper_arm_r", "lower_arm_r", "hand_r"].iter().map(|n| joint_index(n)).collect();
         let at = |c: &crate::AnimationClip, jn: u32, u: f64| -> Option<[f64; 4]> {
             let ch = c.channels.iter().find(|ch| ch.joint == jn && ch.path == crate::AnimationPath::Rotation)?;
@@ -452,7 +455,7 @@ mod tests {
     /// hand-built Leap hero's rig).
     #[test]
     fn leg_keys_are_continuous() {
-        let ang = |a: [f64; 4], b: [f64; 4]| { let d = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.); 2. * d.acos().to_degrees() };
+        let ang = |a: [f64; 4], b: [f64; 4]| { let d = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3]).abs().min(1.); 2. * d.pacos().to_degrees() };
         let legs: Vec<u32> = ["upper_leg_l", "lower_leg_l", "foot_l", "upper_leg_r", "lower_leg_r", "foot_r", "upper_arm_l", "lower_arm_l", "upper_arm_r", "lower_arm_r"].iter().map(|n| joint_index(n)).collect();
         let specs = [
             json::obj(vec![("preset", json::s("halcyon_warden"))]),

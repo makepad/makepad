@@ -128,12 +128,14 @@ impl SurfaceOperation {
                 value.shading = match v.get("shading") {
                     None | Some(Value::Null) => None,
                     Some(s) => {
-                        fields(s, &["wind", "clearcoat", "flake", "impostor"])?;
+                        fields(s, &["wind", "clearcoat", "flake", "impostor", "rim", "plate"])?;
                         Some(makepad_gltf::GlbShading {
                             wind: number(s, "wind", 0.0)?,
                             clearcoat: number(s, "clearcoat", 0.0)?,
                             flake: number(s, "flake", 0.0)?,
                             impostor: number(s, "impostor", 0.0)?,
+                            rim: number(s, "rim", 0.0)?,
+                            plate: number(s, "plate", 0.0)?,
                         })
                     }
                 };

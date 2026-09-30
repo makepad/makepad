@@ -242,6 +242,15 @@ script_mod! {
     // reads. The Realtime cascades rasterize characters with this, so
     // their shadows land in the maps like every other caster's.
     // skin_a.x = the instance's first palette texel (joint_base).
+    // DrawLmSunDepth without the tile clip, for casters the CPU proved lie
+    // wholly inside their tile: no discard, so hidden-surface removal stays.
+    mod.draw.DrawLmSunDepthInside = mod.std.set_type_default() do #(DrawLmSunDepthInside::script_shader(vm)){
+        ..mod.draw.DrawLmSunDepth
+        pixel: fn() {
+            return vec4(self.v_d, 0.0, 0.0, 1.0)
+        }
+    }
+
     mod.draw.DrawLmSunDepthSkinned = mod.std.set_type_default() do #(DrawLmSunDepthSkinned::script_shader(vm)){
         alpha_blend: false
         backface_culling: false
@@ -766,6 +775,19 @@ script_mod! {
                 delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights7.w
             }
             return delta
+        }
+    }
+
+    // DrawLmLampDepth without the face clip, for backends that scissor each
+    // draw to its face's tile (local_shadows.rs): nothing rasterizes past
+    // the tile, so the pipeline needs no `discard` and keeps the GPU's
+    // hidden-surface removal. A wall beside a lamp spans far past its face.
+    mod.draw.DrawLmLampDepthInside = mod.std.set_type_default() do #(DrawLmLampDepthInside::script_shader(vm)){
+        ..mod.draw.DrawLmLampDepth
+        pixel: fn() {
+            let d01 = (self.v_view.z - self.lamp_range.x)
+                / max(self.lamp_range.y - self.lamp_range.x, 0.0001)
+            return vec4(d01, 0.0, 0.0, 1.0)
         }
     }
 }

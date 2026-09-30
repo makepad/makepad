@@ -459,6 +459,48 @@ pub fn cascade_overlaps(c: &CsmCascade, min: Vec3f, max: Vec3f) -> bool {
     x0 <= 1.0 && x1 >= -1.0 && y0 <= 1.0 && y1 >= -1.0 && z0 <= 1.0 && z1 >= 0.0
 }
 
+/// Does a caster with this world AABB project wholly inside cascade `c`'s
+/// tile (light-space XY within the square)? Then none of its fragments can
+/// land in a neighbour tile, and it needs no per-fragment tile clip.
+pub fn cascade_contains_xy(c: &CsmCascade, min: Vec3f, max: Vec3f) -> bool {
+    let center = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    let inside = |r: Vec4f| {
+        let at = r.x * center.x + r.y * center.y + r.z * center.z + r.w;
+        let ext = r.x.abs() * half.x + r.y.abs() * half.y + r.z.abs() * half.z;
+        at - ext >= -1.0 && at + ext <= 1.0
+    };
+    inside(c.rx) && inside(c.ry)
+}
+
+/// Does cascade `c` alone serve every receiver a caster in `min..max` can
+/// shadow? Receivers read the tightest cascade that holds them and
+/// cross-fade into the next one only in the outer band (|ndc| > 0.9 for
+/// the fast path, 0.93 for the soft one). A shadow lies at the caster's own
+/// light-space XY, farther along the sun, so when the caster's XY is inside
+/// that unblended core and its depth pushed `reach` metres down the light
+/// stays in the z window, no receiver of its shadow reads a coarser
+/// cascade and the coarser tiles need not draw it. The reach is the length
+/// of the shadow the box casts onto ground `drop` metres below its base:
+/// (height + drop) / sin(sun elevation), capped at a 6 degree sun.
+pub fn cascade_holds_shadow(c: &CsmCascade, min: Vec3f, max: Vec3f, drop: f32) -> bool {
+    let center = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    let span = |r: Vec4f| {
+        let at = r.x * center.x + r.y * center.y + r.z * center.z + r.w;
+        let ext = r.x.abs() * half.x + r.y.abs() * half.y + r.z.abs() * half.z;
+        (at - ext, at + ext)
+    };
+    const CORE: f32 = 0.9;
+    let (x0, x1) = span(c.rx);
+    let (y0, y1) = span(c.ry);
+    let (z0, z1) = span(c.rz);
+    let dir = v3(c.rz.x, c.rz.y, c.rz.z);
+    let sin_elev = (dir.y.abs() / dir.length().max(1e-6)).max(0.1);
+    let reach = (max.y - min.y + drop) / sin_elev;
+    x0 >= -CORE && x1 <= CORE && y0 >= -CORE && y1 <= CORE && z0 >= 0.0 && z1 + reach * c.z_per_world <= 1.0
+}
+
 /// Project a world point through a cascade: (ndc_x, ndc_y, z01).
 pub fn cascade_project(c: &CsmCascade, p: Vec3f) -> Vec3f {
     v3(
@@ -856,6 +898,41 @@ mod tests {
         let far = view.cam + v3(0.0, -1.7, 90.0);
         assert!(!cascade_overlaps(c, far - h, far + h), "a caster 90 m out is not in cascade 0");
         assert!(cascade_overlaps(&frame.cascades[3], far - h, far + h));
+    }
+
+    /// Shadow LOD for live casters: a figure near the eye is held by
+    /// cascade 0 (every receiver of its shadow on ground down to 1.5 m
+    /// below its feet reads cascade 0 unblended),
+    /// one 90 m out is not, and whatever cascade 0 holds, each point of the
+    /// shadow's reach projects inside its core and z window.
+    #[test]
+    fn a_near_figure_is_held_by_the_finest_cascade_only() {
+        let view = test_view();
+        let frame = fit_cascades(Some(&view), view.cam, sun(), v3(-60.0, 0.0, -60.0), v3(60.0, 12.0, 60.0), 80.0, 2048.0);
+        let c = &frame.cascades[0];
+        let h = v3(0.4, 0.9, 0.4);
+        let near = view.cam + v3(0.0, -0.8, 5.0);
+        assert!(cascade_holds_shadow(c, near - h, near + h, 1.5));
+        let far = view.cam + v3(0.0, -0.8, 90.0);
+        assert!(!cascade_holds_shadow(c, far - h, far + h, 1.5));
+        let mut held = 0;
+        for i in 0..40 {
+            for j in 0..40 {
+                let at = view.cam + v3(i as f32 * 2.0 - 40.0, -0.8, j as f32 * 2.0 - 10.0);
+                if !cascade_holds_shadow(c, at - h, at + h, 1.5) { continue; }
+                held += 1;
+                // The shadow's far tip: the top of the box traced along the
+                // light down to 1.5 m below its base.
+                let reach = (2.0 * h.y + 1.5) / sun().y;
+                for t in [0.0, reach * 0.5, reach] {
+                    for corner in [at - h, at + h] {
+                        let q = cascade_project(c, corner - sun() * t);
+                        assert!(q.x.abs() <= 0.9 && q.y.abs() <= 0.9 && q.z >= 0.0 && q.z <= 1.0, "{q:?}");
+                    }
+                }
+            }
+        }
+        assert!(held > 0);
     }
 
     /// The generation windows nest strictly downward, so a newer tile

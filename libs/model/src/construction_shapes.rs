@@ -4,6 +4,7 @@
 //! materials read at real size and curved surfaces shade smoothly without a
 //! separate normals pass. Openings, stairs and roofs are built constructively,
 //! never by boolean cuts, so they stay exact and cheap at any size.
+use makepad_csg_math::portable::PortableFloat;
 use super::*;
 use crate::service::float;
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, TAU};
@@ -149,7 +150,7 @@ impl Shape {
                 let from: [f64; 3] = array(need(v, "from")?)?;
                 let to: [f64; 3] = array(need(v, "to")?)?;
                 let rise = to[1] - from[1];
-                if !(rise.is_finite() && rise > 0.05) || (to[0] - from[0]).hypot(to[2] - from[2]) < 0.1 { return Err(Error::Invalid("stair must climb from `from` up to a higher, horizontally distant `to`")); }
+                if !(rise.is_finite() && rise > 0.05) || (to[0] - from[0]).phypot(to[2] - from[2]) < 0.1 { return Err(Error::Invalid("stair must climb from `from` up to a higher, horizontally distant `to`")); }
                 let steps = opt_int(v, "steps", 0)?;
                 let steps = if steps == 0 { ((rise / 0.18).round() as u32).max(2) } else { steps };
                 Shape::Stair { from, to, width: positive(float(need(v, "width")?)?, "stair width")?, steps: in_range(steps, 1, 256, "stair steps 1..256")?, thickness: positive(opt_float(v, "thickness", 0.15)?, "stair thickness")? }
@@ -287,8 +288,8 @@ fn rounded_box(b: &mut Builder, size: [f64; 3], radius: f64, segments: u32, mate
     let coords = |a: usize| -> Vec<f64> {
         if r <= 1e-9 { return vec![-h[a], h[a]]; }
         let inner = h[a] - r;
-        let mut out: Vec<f64> = (0..=m).rev().map(|k| -(inner + r * (FRAC_PI_4 * k as f64 / m as f64).tan())).collect();
-        for k in 0..=m { out.push(inner + r * (FRAC_PI_4 * k as f64 / m as f64).tan()); }
+        let mut out: Vec<f64> = (0..=m).rev().map(|k| -(inner + r * (FRAC_PI_4 * k as f64 / m as f64).ptan())).collect();
+        for k in 0..=m { out.push(inner + r * (FRAC_PI_4 * k as f64 / m as f64).ptan()); }
         if inner <= 1e-9 { out.remove(m + 1); }
         out
     };
@@ -335,12 +336,12 @@ fn rounded_box(b: &mut Builder, size: [f64; 3], radius: f64, segments: u32, mate
 fn revolve(b: &mut Builder, rings: &[[f64; 4]], n: usize, material: u32, smooth: bool) -> Vec<Vec<u32>> {
     let angle = |j: f64| TAU * j / n as f64;
     let ids: Vec<Vec<u32>> = rings.iter().map(|&[r, y, ..]| {
-        if r <= 1e-12 { vec![b.vertex([0., y, 0.])] } else { (0..n).map(|j| { let t = angle(j as f64); b.vertex([r * t.sin(), y, r * t.cos()]) }).collect() }
+        if r <= 1e-12 { vec![b.vertex([0., y, 0.])] } else { (0..n).map(|j| { let t = angle(j as f64); b.vertex([r * t.psin(), y, r * t.pcos()]) }).collect() }
     }).collect();
     let circumference = TAU * rings.iter().map(|r| r[0]).fold(0., f64::max);
     let mut v_along = vec![0.];
-    for i in 1..rings.len() { v_along.push(v_along[i - 1] + (rings[i][0] - rings[i - 1][0]).hypot(rings[i][1] - rings[i - 1][1])); }
-    let normal = |ring: &[f64; 4], t: f64| [ring[2] * t.sin(), ring[3], ring[2] * t.cos()];
+    for i in 1..rings.len() { v_along.push(v_along[i - 1] + (rings[i][0] - rings[i - 1][0]).phypot(rings[i][1] - rings[i - 1][1])); }
+    let normal = |ring: &[f64; 4], t: f64| [ring[2] * t.psin(), ring[3], ring[2] * t.pcos()];
     for i in 0..rings.len() - 1 {
         let (a, c) = (&ids[i], &ids[i + 1]);
         if a.len() == 1 && c.len() == 1 { continue; }
@@ -373,12 +374,12 @@ fn capsule(b: &mut Builder, radius: f64, height: f64, n: usize, rings: usize, ma
     let mut profile = Vec::new();
     for i in 0..=rings {
         let phi = -FRAC_PI_2 + FRAC_PI_2 * i as f64 / rings as f64;
-        profile.push([radius * phi.cos(), -half + radius * phi.sin(), phi.cos(), phi.sin()]);
+        profile.push([radius * phi.pcos(), -half + radius * phi.psin(), phi.pcos(), phi.psin()]);
     }
     for i in 0..=rings {
         if i == 0 && half <= 1e-9 { continue; }
         let phi = FRAC_PI_2 * i as f64 / rings as f64;
-        profile.push([radius * phi.cos(), half + radius * phi.sin(), phi.cos(), phi.sin()]);
+        profile.push([radius * phi.pcos(), half + radius * phi.psin(), phi.pcos(), phi.psin()]);
     }
     revolve(b, &profile, n, material, true);
 }
@@ -389,10 +390,10 @@ fn cone(b: &mut Builder, bottom: f64, top: f64, height: f64, n: usize, smooth: b
     if ids[1].len() > 1 { disc(b, &ids[1], false, material); }
 }
 fn torus(b: &mut Builder, radius: f64, tube: f64, n: usize, m: usize, material: u32) {
-    let dir = |i: usize, j: usize| { let (t, p) = (TAU * i as f64 / n as f64, TAU * j as f64 / m as f64); [t.sin() * p.cos(), p.sin(), t.cos() * p.cos()] };
+    let dir = |i: usize, j: usize| { let (t, p) = (TAU * i as f64 / n as f64, TAU * j as f64 / m as f64); [t.psin() * p.pcos(), p.psin(), t.pcos() * p.pcos()] };
     let ids: Vec<Vec<u32>> = (0..n).map(|i| (0..m).map(|j| {
         let d = dir(i, j); let t = TAU * i as f64 / n as f64;
-        b.vertex(add([radius * t.sin(), 0., radius * t.cos()], mul(d, tube)))
+        b.vertex(add([radius * t.psin(), 0., radius * t.pcos()], mul(d, tube)))
     }).collect()).collect();
     let (lu, lv) = (TAU * radius, TAU * tube);
     for i in 0..n {
@@ -432,9 +433,9 @@ fn clean_profile(profile: &[[f64; 2]]) -> Result<Vec<[f64; 2]>> {
     let mut p: Vec<[f64; 2]> = Vec::with_capacity(profile.len());
     for &q in profile {
         if q.iter().any(|v| !v.is_finite() || v.abs() > 1e5) { return Err(Error::Invalid("profile point out of range")); }
-        if p.last().is_none_or(|l: &[f64; 2]| (l[0] - q[0]).hypot(l[1] - q[1]) > 1e-7) { p.push(q); }
+        if p.last().is_none_or(|l: &[f64; 2]| (l[0] - q[0]).phypot(l[1] - q[1]) > 1e-7) { p.push(q); }
     }
-    while p.len() > 1 && (p[0][0] - p[p.len() - 1][0]).hypot(p[0][1] - p[p.len() - 1][1]) <= 1e-7 { p.pop(); }
+    while p.len() > 1 && (p[0][0] - p[p.len() - 1][0]).phypot(p[0][1] - p[p.len() - 1][1]) <= 1e-7 { p.pop(); }
     if p.len() < 3 { return Err(Error::Invalid("profile needs three distinct points")); }
     let a = area2(&p);
     if a.abs() < 1e-9 { return Err(Error::Invalid("profile encloses no area")); }
@@ -449,25 +450,25 @@ pub(super) fn round_corners(profile: &[[f64; 2]], radius: f64, segments: u32) ->
     let mut out = Vec::with_capacity(n * (segments as usize + 1));
     for i in 0..n {
         let (prev, cur, next) = (p[(i + n - 1) % n], p[i], p[(i + 1) % n]);
-        let (l1, l2) = ((prev[0] - cur[0]).hypot(prev[1] - cur[1]), (next[0] - cur[0]).hypot(next[1] - cur[1]));
+        let (l1, l2) = ((prev[0] - cur[0]).phypot(prev[1] - cur[1]), (next[0] - cur[0]).phypot(next[1] - cur[1]));
         let e1 = [(prev[0] - cur[0]) / l1, (prev[1] - cur[1]) / l1];
         let e2 = [(next[0] - cur[0]) / l2, (next[1] - cur[1]) / l2];
         let cos = (e1[0] * e2[0] + e1[1] * e2[1]).clamp(-1., 1.);
-        let theta = cos.acos();
+        let theta = cos.pacos();
         if theta > std::f64::consts::PI - 1e-3 || theta < 1e-3 { out.push(cur); continue; }
         // Tangent distance, limited so neighbouring fillets never overlap.
-        let t = (radius / (theta * 0.5).tan()).min(0.49 * l1.min(l2));
-        let r = t * (theta * 0.5).tan();
-        let bis = { let s = [e1[0] + e2[0], e1[1] + e2[1]]; let l = s[0].hypot(s[1]); [s[0] / l, s[1] / l] };
-        let d = r / (theta * 0.5).sin();
+        let t = (radius / (theta * 0.5).ptan()).min(0.49 * l1.min(l2));
+        let r = t * (theta * 0.5).ptan();
+        let bis = { let s = [e1[0] + e2[0], e1[1] + e2[1]]; let l = s[0].phypot(s[1]); [s[0] / l, s[1] / l] };
+        let d = r / (theta * 0.5).psin();
         let c = [cur[0] + bis[0] * d, cur[1] + bis[1] * d];
         let (a, bpt) = ([cur[0] + e1[0] * t, cur[1] + e1[1] * t], [cur[0] + e2[0] * t, cur[1] + e2[1] * t]);
-        let (a0, mut a1) = ((a[1] - c[1]).atan2(a[0] - c[0]), (bpt[1] - c[1]).atan2(bpt[0] - c[0]));
+        let (a0, mut a1) = ((a[1] - c[1]).patan2(a[0] - c[0]), (bpt[1] - c[1]).patan2(bpt[0] - c[0]));
         while a1 - a0 > std::f64::consts::PI { a1 -= TAU; }
         while a0 - a1 > std::f64::consts::PI { a1 += TAU; }
         for k in 0..=segments {
             let t = a0 + (a1 - a0) * k as f64 / segments as f64;
-            out.push([c[0] + r * t.cos(), c[1] + r * t.sin()]);
+            out.push([c[0] + r * t.pcos(), c[1] + r * t.psin()]);
         }
     }
     clean_profile(&out)
@@ -478,24 +479,24 @@ pub(super) fn round_corners(profile: &[[f64; 2]], radius: f64, segments: u32) ->
 fn prism(b: &mut Builder, profile: &[[f64; 2]], frame: Frame, w0: f64, w1: f64, bevel: f64, bevel_segments: u32, side_material: &dyn Fn([f64; 2], [f64; 2]) -> u32, cap_material: u32) -> Result<()> {
     let p = clean_profile(profile)?;
     let n = p.len();
-    let edge_normal: Vec<[f64; 2]> = (0..n).map(|i| { let (a, c) = (p[i], p[(i + 1) % n]); let (dx, dy) = (c[0] - a[0], c[1] - a[1]); let l = dx.hypot(dy); [dy / l, -dx / l] }).collect();
+    let edge_normal: Vec<[f64; 2]> = (0..n).map(|i| { let (a, c) = (p[i], p[(i + 1) % n]); let (dx, dy) = (c[0] - a[0], c[1] - a[1]); let l = dx.phypot(dy); [dy / l, -dx / l] }).collect();
     let prev = |i: usize| edge_normal[(i + n - 1) % n];
     let smooth: Vec<bool> = (0..n).map(|i| { let (a, c) = (prev(i), edge_normal[i]); a[0] * c[0] + a[1] * c[1] > 0.766 }).collect();
-    let vertex_normal: Vec<[f64; 2]> = (0..n).map(|i| { let s = [prev(i)[0] + edge_normal[i][0], prev(i)[1] + edge_normal[i][1]]; let l = s[0].hypot(s[1]).max(1e-12); [s[0] / l, s[1] / l] }).collect();
+    let vertex_normal: Vec<[f64; 2]> = (0..n).map(|i| { let s = [prev(i)[0] + edge_normal[i][0], prev(i)[1] + edge_normal[i][1]]; let l = s[0].phypot(s[1]).max(1e-12); [s[0] / l, s[1] / l] }).collect();
     let miter: Vec<[f64; 2]> = (0..n).map(|i| { let (a, c) = (prev(i), edge_normal[i]); let d = (1. + a[0] * c[0] + a[1] * c[1]).max(0.25); [(a[0] + c[0]) / d, (a[1] + c[1]) / d] }).collect();
     let bevel = bevel.min((w1 - w0) * 0.45);
     // Ring layers: (inset, w, theta from cap normal). theta=90deg is the side wall.
     let mut layers: Vec<(f64, f64, f64, f64)> = Vec::new();
     if bevel > 1e-9 {
-        for k in 0..=bevel_segments { let t = FRAC_PI_2 * k as f64 / bevel_segments as f64; layers.push((bevel * (1. - t.sin()), w0 + bevel * (1. - t.cos()), t, -1.)); }
-        for k in (0..=bevel_segments).rev() { let t = FRAC_PI_2 * k as f64 / bevel_segments as f64; layers.push((bevel * (1. - t.sin()), w1 - bevel * (1. - t.cos()), t, 1.)); }
+        for k in 0..=bevel_segments { let t = FRAC_PI_2 * k as f64 / bevel_segments as f64; layers.push((bevel * (1. - t.psin()), w0 + bevel * (1. - t.pcos()), t, -1.)); }
+        for k in (0..=bevel_segments).rev() { let t = FRAC_PI_2 * k as f64 / bevel_segments as f64; layers.push((bevel * (1. - t.psin()), w1 - bevel * (1. - t.pcos()), t, 1.)); }
     } else {
         layers.push((0., w0, FRAC_PI_2, -1.));
         layers.push((0., w1, FRAC_PI_2, 1.));
     }
     let rings: Vec<Vec<u32>> = layers.iter().map(|&(inset, w, ..)| (0..n).map(|i| b.vertex(frame.at(p[i][0] - miter[i][0] * inset, p[i][1] - miter[i][1] * inset, w))).collect()).collect();
     let mut along = vec![0.];
-    for i in 0..n { along.push(along[i] + (p[(i + 1) % n][0] - p[i][0]).hypot(p[(i + 1) % n][1] - p[i][1])); }
+    for i in 0..n { along.push(along[i] + (p[(i + 1) % n][0] - p[i][0]).phypot(p[(i + 1) % n][1] - p[i][1])); }
     let flip = frame.mirrored();
     let push = |b: &mut Builder, mut verts: Vec<u32>, mut uvs: Vec<[f64; 2]>, mut normals: Vec<[f64; 3]>, material: u32| {
         if flip { verts.reverse(); uvs.reverse(); normals.reverse(); }
@@ -505,7 +506,7 @@ fn prism(b: &mut Builder, profile: &[[f64; 2]], frame: Frame, w0: f64, w1: f64, 
         let ((_, wa, ta, sa), (_, wb, tb, sb)) = (layers[k], layers[k + 1]);
         for i in 0..n {
             let j = (i + 1) % n;
-            let side_n = |vi: usize, t: f64, s: f64| { let n2 = if smooth[vi] { vertex_normal[vi] } else { edge_normal[i] }; frame.dir(n2[0] * t.sin(), n2[1] * t.sin(), s * t.cos()) };
+            let side_n = |vi: usize, t: f64, s: f64| { let n2 = if smooth[vi] { vertex_normal[vi] } else { edge_normal[i] }; frame.dir(n2[0] * t.psin(), n2[1] * t.psin(), s * t.pcos()) };
             push(b, vec![rings[k][i], rings[k][j], rings[k + 1][j], rings[k + 1][i]], vec![[along[i], wa], [along[i + 1], wa], [along[i + 1], wb], [along[i], wb]],
                 vec![side_n(i, ta, sa), side_n(j, ta, sa), side_n(j, tb, sb), side_n(i, tb, sb)], side_material(p[i], p[j]));
         }
@@ -533,7 +534,7 @@ fn tube(b: &mut Builder, path: &[[f64; 3]], radius: f64, segments: usize, caps: 
         };
         normal = Some(nrm);
         let binormal = cross(tangent, nrm);
-        let ring_dirs: Vec<[f64; 3]> = (0..segments).map(|j| { let t = TAU * j as f64 / segments as f64; add(mul(nrm, t.cos()), mul(binormal, t.sin())) }).collect();
+        let ring_dirs: Vec<[f64; 3]> = (0..segments).map(|j| { let t = TAU * j as f64 / segments as f64; add(mul(nrm, t.pcos()), mul(binormal, t.psin())) }).collect();
         rings.push(ring_dirs.iter().map(|d| b.vertex(add(path[i], mul(*d, radius)))).collect());
         dirs.push(ring_dirs);
         if i > 0 { along.push(along[i - 1] + length(sub(path[i], path[i - 1]))); }
@@ -566,8 +567,8 @@ fn wall(b: &mut Builder, w: &Wall, material: u32) -> Result<()> {
     // the walker's left (+X walking toward -Z has left at -X... i.e. (dz,-dx)).
     let outer_left = !w.closed || area2(pts) > 0.;
     let (outer, inner, trim) = (material, w.inner_material.unwrap_or(material), w.trim_material.unwrap_or(material));
-    let dir = |s: usize| -> Result<[f64; 2]> { let (a, c) = (pts[s], pts[(s + 1) % pts.len()]); let l = (c[0] - a[0]).hypot(c[1] - a[1]); if l < 1e-6 { return Err(Error::Invalid("wall path has a zero-length segment")); } Ok([(c[0] - a[0]) / l, (c[1] - a[1]) / l]) };
-    let seg_len = |s: usize| { let (a, c) = (pts[s], pts[(s + 1) % pts.len()]); (c[0] - a[0]).hypot(c[1] - a[1]) };
+    let dir = |s: usize| -> Result<[f64; 2]> { let (a, c) = (pts[s], pts[(s + 1) % pts.len()]); let l = (c[0] - a[0]).phypot(c[1] - a[1]); if l < 1e-6 { return Err(Error::Invalid("wall path has a zero-length segment")); } Ok([(c[0] - a[0]) / l, (c[1] - a[1]) / l]) };
+    let seg_len = |s: usize| { let (a, c) = (pts[s], pts[(s + 1) % pts.len()]); (c[0] - a[0]).phypot(c[1] - a[1]) };
     let left = |d: [f64; 2]| [d[1], -d[0]];
     let cross2 = |a: [f64; 2], c: [f64; 2]| a[0] * c[1] - a[1] * c[0];
     // Miter offset along this segment's direction where the offset line meets
@@ -686,7 +687,7 @@ fn wall(b: &mut Builder, w: &Wall, material: u32) -> Result<()> {
     Ok(())
 }
 fn stair(b: &mut Builder, from: [f64; 3], to: [f64; 3], width: f64, steps: usize, thickness: f64, material: u32) -> Result<()> {
-    let run = (to[0] - from[0]).hypot(to[2] - from[2]);
+    let run = (to[0] - from[0]).phypot(to[2] - from[2]);
     let rise = to[1] - from[1];
     let u = [(to[0] - from[0]) / run, 0., (to[2] - from[2]) / run];
     let (g, r) = (run / steps as f64, rise / steps as f64);
@@ -705,7 +706,7 @@ fn stair(b: &mut Builder, from: [f64; 3], to: [f64; 3], width: f64, steps: usize
 }
 fn roof(b: &mut Builder, r: &Roof, material: u32) -> Result<()> {
     let trim = r.trim_material.unwrap_or(material);
-    let slope = r.pitch.to_radians().tan();
+    let slope = r.pitch.to_radians().ptan();
     match r.kind {
         RoofKind::Flat => {
             let (hx, hz) = (r.size[0] * 0.5 + r.overhang, r.size[1] * 0.5 + r.overhang);
@@ -716,7 +717,7 @@ fn roof(b: &mut Builder, r: &Roof, material: u32) -> Result<()> {
             let (across, along) = if r.ridge == 0 { (r.size[1] * 0.5, r.size[0] * 0.5) } else { (r.size[0] * 0.5, r.size[1] * 0.5) };
             let span = across + r.overhang;
             let rise = across * slope; let eave = -r.overhang * slope;
-            let vt = r.thickness / r.pitch.to_radians().cos();
+            let vt = r.thickness / r.pitch.to_radians().pcos();
             let (u, w) = if r.ridge == 0 { ([0., 0., 1.], [1., 0., 0.]) } else { ([1., 0., 0.], [0., 0., 1.]) };
             let frame = Frame { origin: r.center, u, v: [0., 1., 0.], w };
             let profile = [[-span, eave], [0., rise], [span, eave], [span, eave + vt], [0., rise + vt], [-span, eave + vt]];

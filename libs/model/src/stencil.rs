@@ -69,7 +69,12 @@ pub fn stencil_badge(text: &str, cell: u32, ink: [u8; 4], fill: [u8; 4], border:
     let cell = (w as f32 / (tw + margin_x * 2.0)).min(h as f32 / (th + margin_y * 2.0));
     // Stroke segments in pixel space.
     let mut segs: Vec<([f32; 2], [f32; 2])> = Vec::new();
+    // Where each glyph's strokes start in `segs`: a pixel only tests its
+    // own glyph and the two beside it (anything further is more than a
+    // glyph gap away and cannot cover it).
+    let mut starts: Vec<usize> = Vec::with_capacity(chars.len() + 1);
     for (i, c) in chars.iter().enumerate() {
+        starts.push(segs.len());
         let g = glyph(*c);
         let on = |r: i32, c: i32| r >= 0 && r < 7 && c >= 0 && c < 5 && g[r as usize] & (0x10 >> c) != 0;
         let at = |r: i32, c: i32| [(margin_x + i as f32 * 6.0 + c as f32 + 0.5) * cell, (margin_y + r as f32 + 0.5) * cell];
@@ -82,6 +87,7 @@ pub fn stencil_badge(text: &str, cell: u32, ink: [u8; 4], fill: [u8; 4], border:
             }
         }}
     }
+    starts.push(segs.len());
     let radius = cell * 0.58;
     let (cx, cy) = (w as f32 * 0.5, h as f32 * 0.5);
     let mut px = vec![0u8; (w * h * 4) as usize];
@@ -114,7 +120,10 @@ pub fn stencil_badge(text: &str, cell: u32, ink: [u8; 4], fill: [u8; 4], border:
             }
             // Lettering.
             let mut dmin = f32::MAX;
-            for (a, b) in &segs {
+            let gi = ((fx / cell - margin_x) / 6.0).floor() as i64;
+            let lo = starts[(gi - 1).clamp(0, chars.len() as i64) as usize];
+            let hi = starts[(gi + 2).clamp(0, chars.len() as i64) as usize];
+            for (a, b) in &segs[lo..hi] {
                 let (ex, ey) = (b[0] - a[0], b[1] - a[1]);
                 let l2 = ex * ex + ey * ey;
                 let t = if l2 > 0.0 { (((fx - a[0]) * ex + (fy - a[1]) * ey) / l2).clamp(0.0, 1.0) } else { 0.0 };
@@ -126,6 +135,36 @@ pub fn stencil_badge(text: &str, cell: u32, ink: [u8; 4], fill: [u8; 4], border:
         }
     }
     (w, h, px)
+}
+
+/// A number plate whose number each copy of a model shows for itself
+/// (the renderer's `plate` layer, see `shaders/skinned.rs base_texel`):
+/// the top half is `prefix` (4 characters) and three blank glyph cells on a
+/// rounded plate, 45 dots wide; the bottom half is "0123456789" on the same
+/// plate, 63 dots, resampled to the same width. Returns (w, h, rgba).
+pub fn stencil_plate(prefix: &str, cell: u32, ink: [u8; 4], fill: [u8; 4], border: Option<[u8; 4]>) -> (u32, u32, Vec<u8>) {
+    let head: String = prefix.chars().chain(std::iter::repeat(' ')).take(4).chain("   ".chars()).collect();
+    let (w, h, top) = stencil_badge(&head, cell, ink, fill, border, "plate");
+    let (sw, sh, strip) = stencil_badge("0123456789", cell, ink, fill, border, "plate");
+    let mut px = vec![0u8; (w * h * 2 * 4) as usize];
+    px[..top.len()].copy_from_slice(&top);
+    // The strip, resampled (bilinear) into the lower half at the plate's size.
+    for y in 0..h {
+        for x in 0..w {
+            let fx = ((x as f32 + 0.5) / w as f32 * sw as f32 - 0.5).clamp(0.0, sw as f32 - 1.0);
+            let fy = ((y as f32 + 0.5) / h as f32 * sh as f32 - 0.5).clamp(0.0, sh as f32 - 1.0);
+            let (x0, y0) = (fx.floor() as u32, fy.floor() as u32);
+            let (x1, y1) = ((x0 + 1).min(sw - 1), (y0 + 1).min(sh - 1));
+            let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+            let o = (((h + y) * w + x) * 4) as usize;
+            for c in 0..4 {
+                let at = |xx: u32, yy: u32| strip[((yy * sw + xx) * 4) as usize + c] as f32;
+                let v = (at(x0, y0) * (1.0 - tx) + at(x1, y0) * tx) * (1.0 - ty) + (at(x0, y1) * (1.0 - tx) + at(x1, y1) * tx) * ty;
+                px[o + c] = v.round() as u8;
+            }
+        }
+    }
+    (w, h * 2, px)
 }
 
 #[cfg(test)]

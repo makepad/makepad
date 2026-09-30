@@ -156,9 +156,16 @@ impl Renderer {
                 chunks.push((key, c));
             }
         }
-        // Back to front, so alpha smoke composites in order.
-        chunks.sort_by(|a, b| b.0.total_cmp(&a.0));
-        explicit.sort_by(|a, b| b.0.total_cmp(&a.0));
+        // Back to front, so alpha smoke composites in order. The instances
+        // are ~200 bytes each: sort (distance, index) pairs, not the
+        // instances (the tie-break keeps the stable order the draw had).
+        let back_to_front = |batch: &[(f32, ParticleInstance)]| {
+            let mut order: Vec<(f32, u32)> = batch.iter().enumerate().map(|(i, c)| (c.0, i as u32)).collect();
+            order.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
+            order
+        };
+        let chunk_order = back_to_front(&chunks);
+        let explicit_order = back_to_front(&explicit);
 
         let (atlas, atlas_on) = self.vfx.atlas_texture(cx.cx);
         let l = &frame.light;
@@ -174,12 +181,13 @@ impl Renderer {
         dv.set_uniform(cx.cx, live_id!(fog_color), &[l.fog.x, l.fog.y, l.fog.z]);
         dv.set_uniform(cx.cx, live_id!(fog_density), &[l.fog_density]);
         draw.depth_clip = 1.0;
-        for (batch, geometry) in [(&chunks, self.vfx.sheet_geometry(cx.cx, PARTICLE_SHEET)), (&explicit, self.vfx.sheet_geometry(cx.cx, 1))] {
+        for (batch, order, geometry) in [(&chunks, &chunk_order, self.vfx.sheet_geometry(cx.cx, PARTICLE_SHEET)), (&explicit, &explicit_order, self.vfx.sheet_geometry(cx.cx, 1))] {
             if batch.is_empty() {
                 continue;
             }
             draw.draw_vars.geometry_id = Some(geometry);
-            for (_, c) in batch.iter() {
+            for &(_, i) in order.iter() {
+                let c = &batch[i as usize].1;
                 draw.set_record(c);
                 if draw.draw_vars.can_instance() {
                     let new_area = cx.add_instance(&draw.draw_vars);

@@ -444,6 +444,8 @@ impl Renderer {
                     let definition=&part.surface.definition;
                     batch.skinned.fur = crate::material_surface::fur_params(definition.fur);
                     batch.skinned.surface_on=1.0;batch.skinned.metallic=part.metallic;batch.skinned.roughness=part.roughness;
+                    // Toy gloss (clear coat and rim) in the spare lane.
+                    batch.skinned.fur_layer.y=definition.packed_shading();
                     batch.skinned.material_alpha=definition.base_alpha;batch.skinned.alpha_mode=definition.alpha_mode as f32;batch.skinned.alpha_cutoff=definition.alpha_cutoff;
                     batch.skinned.normal_scale=definition.normal_scale;batch.skinned.occlusion_strength=definition.occlusion_strength;
                     batch.skinned.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);batch.skinned.double_sided=if definition.double_sided{1.0}else{0.0};
@@ -469,7 +471,7 @@ impl Renderer {
                 }
             } else {
                 batch.skinned.fur = Default::default(); batch.skinned.fur_layer.x = 0.0;
-                batch.skinned.surface_on=0.0;batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
+                batch.skinned.surface_on=0.0;batch.skinned.fur_layer.y=0.0;batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
             if batch.skinned.draw_vars.can_instance() {
                 let new_area = cx.add_instance(&batch.skinned.draw_vars);
                 batch.skinned.draw_vars.area =

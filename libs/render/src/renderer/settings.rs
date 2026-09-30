@@ -102,6 +102,12 @@ impl Renderer {
             2.0f32.powf(finite(g.auto_max_ev, 0.678).clamp(0.0, 8.0)),
             2.0f32.powf(finite(g.exposure_ev, 0.0).clamp(-8.0, 8.0)),
         );
+        draw.tilt = vec4(
+            finite(g.tilt, 0.0).clamp(0.0, 1.0),
+            finite(g.tilt_center, 0.6).clamp(0.0, 1.0),
+            finite(g.tilt_width, 0.2).clamp(0.0, 1.0),
+            0.0,
+        );
         if let Some(bloom) = bloom {
             draw.draw_vars.set_texture(1, bloom);
         }

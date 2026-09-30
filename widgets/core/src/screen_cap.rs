@@ -801,6 +801,8 @@ fn to_i16(sample: f32) -> i16 {
     (sample.clamp(-1.0, 1.0) * 32767.0) as i16
 }
 
+/// `<makepad>/local/screencap` for any app run inside a Makepad checkout
+/// (nested repos like apps/commercial/* included); elsewhere
 /// `<repo>/local/screencap`, where `<repo>` is the nearest ancestor of the
 /// working directory that has a `.git` entry or a `local/` directory. Apps
 /// are launched from their crate directories as often as from the repo root;
@@ -808,6 +810,17 @@ fn to_i16(sample: f32) -> i16 {
 /// directory itself when no repo is found.
 pub fn repo_screencap_dir() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // Inside a Makepad checkout every app (also the ones in nested repos such
+    // as apps/commercial/*) records into the checkout's one local/screencap.
+    let mut dir = cwd.clone();
+    for _ in 0..8 {
+        if dir.join("platform/Cargo.toml").is_file() && dir.join("widgets/Cargo.toml").is_file() {
+            return dir.join("local").join("screencap");
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
     let mut dir = cwd.clone();
     for _ in 0..8 {
         if dir.join(".git").exists() || dir.join("local").is_dir() {

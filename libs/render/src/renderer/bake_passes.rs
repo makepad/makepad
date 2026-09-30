@@ -131,7 +131,9 @@ impl Renderer {
             if self.model_casts_shadow.get(&inst.model)==Some(&false){continue;}
             let root=&self.static_models[at].1;
             let distance=crate::asset_lod::instance_distance(&inst.transform,eye);
-            let lod=root.lods.partition_point(|(threshold,_)|*threshold<=distance);
+            // A chained base (hand-built LOD models) casts from its last,
+            // cheapest level: a car's shadow is its silhouette on the road.
+            let lod=if self.is_lod_chain_base(&inst.model)&&!root.lods.is_empty(){root.lods.len()}else{root.lods.partition_point(|(threshold,_)|*threshold<=distance)};
             let m=if lod==0{root}else{&root.lods[lod-1].1};
             let morph=m.morph.as_ref().map(|m|m.depth(self.model_anim_state.morph_weights(&target,&inst.model,&m.source)));
             // Anim parts cast as MOVERS even when their level is static: the

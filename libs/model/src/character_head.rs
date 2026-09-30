@@ -4,6 +4,7 @@
 //! brows and mouth corners. Hair is a shell over the scalp following a
 //! hairline, draped below the ears for long styles, plus spikes, tails
 //! and buns on their own geometry.
+use makepad_csg_math::portable::PortableFloat;
 use super::*;
 use super::body::{sfx, side_sign};
 use crate::transform::*;
@@ -23,7 +24,7 @@ pub(crate) struct Face {
     /// Brow ridge height; heavier jaws get heavier brows.
     pub ridge: f64,
 }
-fn gauss(x: f64) -> f64 { (-x * x).exp() }
+fn gauss(x: f64) -> f64 { (-x * x).pexp() }
 
 impl Face {
     pub fn new(sp: &CharacterSpec, b: &body::Body) -> Face {
@@ -42,9 +43,9 @@ impl Face {
             eye_x: 0.37 * sp.eye_spacing * mix(1., 1.05, s), eye_y: mix(0.04, -0.05, s), re,
             nose_y: mix(-0.28, -0.3, s), nose_h: nose_h * sp.nose_size * mix(1., 0.7, s), nose_w: nose_w * sp.nose_size.sqrt(), bridge: bridge * sp.nose_size * mix(1., 0.4, s),
             mouth_y: mix(-0.54, -0.5, s), mouth_w: 0.25 * sp.mouth_width * mix(1., 0.85, s),
-            jaw_narrow: mix(0.3, 0.16, s) / sp.jaw.powf(0.7), chin: sp.chin,
+            jaw_narrow: mix(0.3, 0.16, s) / sp.jaw.ppowf(0.7), chin: sp.chin,
             cheeks: mix(0.03, 0.06, s),
-            ridge: 0.035 * sp.jaw.powf(1.3),
+            ridge: 0.035 * sp.jaw.ppowf(1.3),
         }
     }
     /// Head surface point for a unit direction (Y up, face toward -Z).
@@ -55,7 +56,7 @@ impl Face {
         let mut p = [dx * a, dy * b, dz * c];
         let front = (-dz).max(0.);
         if dy < 0. {
-            let k = (-dy).powf(2.2);
+            let k = (-dy).ppowf(2.2);
             p[0] *= 1. - self.jaw_narrow * k;
             if dz > 0. { p[2] *= 1. - 0.32 * k; }
             p[2] -= self.chin * 0.1 * c * k * front.sqrt() * gauss(dx / 0.6);
@@ -160,7 +161,7 @@ pub(crate) fn build(g: &mut Gen) {
     let mat = |r: usize, theta: f64| {
         if !bal { return skin; }
         let phi = PI * (r as f64 + 0.5) / rings as f64;
-        let d = [phi.sin() * theta.cos(), -phi.cos(), -phi.sin() * theta.sin()];
+        let d = [phi.psin() * theta.pcos(), -phi.pcos(), -phi.psin() * theta.psin()];
         // The eye slot runs from under the eyes to above the brows.
         let eye_band = d[2] < -0.3 && d[1] - f3.eye_y < f3.re / f3.r[1] * 3.4 && f3.eye_y - d[1] < f3.re / f3.r[1] * 1.5 && d[0].abs() < f3.eye_x + 0.34;
         if eye_band { skin } else { cover_mat.unwrap_or(skin) }
@@ -195,7 +196,7 @@ pub(crate) fn build(g: &mut Gen) {
             let under_eye = real * 0.2 * gauss((fx.abs() - face.eye_x) / 0.13) * gauss((fy - face.eye_y + re_y * 1.6) / 0.08);
             let crease = real * 0.3 * gauss((fx.abs() - face.eye_x) / 0.14) * gauss((fy - face.eye_y - re_y * 1.2) / 0.06);
             let fold = real * 0.22 * gauss((fx.abs() - face.nose_w - 0.1 + (fy - face.nose_y) * 0.25) / 0.06) * smooth01(face.nose_y + 0.02, face.nose_y - 0.05, fy) * smooth01(face.mouth_y - 0.06, face.mouth_y + 0.02, fy);
-            let mottle = real * 0.06 * (p[0] * 83. + 1.3).sin() * (p[1] * 71. + 0.7).sin() * (p[2] * 97. + 2.1).sin();
+            let mottle = real * 0.06 * (p[0] * 83. + 1.3).psin() * (p[1] * 71. + 0.7).psin() * (p[2] * 97. + 2.1).psin();
             for i in 0..3 { let target = lip[i] / sp.skin[i].max(0.02); col[i] = mix(col[i], target.min(1.4), lipk * if bal { 0. } else { 1. }); }
             col[1] *= 1. - cheek * 0.35; col[2] *= 1. - cheek * 0.3;
             col[0] *= 1. - under_eye * 0.9; col[1] *= 1. - under_eye; col[2] *= 1. - under_eye * 0.5;
@@ -242,14 +243,14 @@ fn eyes(g: &mut Gen, face: &Face) {
         let mat = |r: usize, _: f64| { let a = PI * (r as f64 + 0.5) / rings as f64; if a < pupil_a { pupil } else if a < iris_a { iris } else { sclera } };
         let f = |d: [f64; 3]| {
             let cosg = -d[2];
-            let bulge = 1. + 0.07 * smooth01(iris_a.cos(), 1., cosg);
+            let bulge = 1. + 0.07 * smooth01(iris_a.pcos(), 1., cosg);
             add(c, mul(d, re * bulge))
         };
         let grid = blob(&mut part, c, [0., 0., 1.], [1., 0., 0.], 24, rings, &f, &wf, &mat, 1.);
         // Iris: a darker limbal ring and a lighter centre.
         for (r, row) in grid.iter().enumerate() {
             let a = PI * r as f64 / rings as f64;
-            let k = if a < iris_a { let t = (a - pupil_a) / (iris_a - pupil_a); if t < 0. { 1. } else { mix(1.25, 0.55, t.powf(1.6)) } } else { 1. - 0.12 * smooth01(PI * 0.5, PI * 0.9, a) };
+            let k = if a < iris_a { let t = (a - pupil_a) / (iris_a - pupil_a); if t < 0. { 1. } else { mix(1.25, 0.55, t.ppowf(1.6)) } } else { 1. - 0.12 * smooth01(PI * 0.5, PI * 0.9, a) };
             for &v in row { part.colors[v as usize] = [k.min(1.), k.min(1.), k.min(1.), 1.]; }
         }
         // Catch-light: a tiny bright speck on the cornea, up and to the left.
@@ -263,11 +264,11 @@ fn eyes(g: &mut Gen, face: &Face) {
         let mut lid = Part::new(&format!("lid_{x}"));
         let tilt = sp.eye_tilt.to_radians() * side_sign(side);
         let open = mix(86., 46., 1. - sp.lid).to_radians();
-        let edge = |beta: f64| open + 0.35 * tilt * beta.sin() + 0.08 * (beta * 1.2).cos().powi(2) - 0.08;
+        let edge = |beta: f64| open + 0.35 * tilt * beta.psin() + 0.08 * (beta * 1.2).pcos().powi(2) - 0.08;
         let lw = w1(j(&format!("lid_{x}")));
         shell_lid(&mut lid, c, re, true, &edge, lw, lid_skin, lash);
         // Lower lid: static, just hides the eyeball's lower seam.
-        let low = |beta: f64| PI - mix(58., 64., s).to_radians() + 0.04 * beta.cos();
+        let low = |beta: f64| PI - mix(58., 64., s).to_radians() + 0.04 * beta.pcos();
         shell_lid(&mut lid, c, re, false, &low, w1(j("head")), skin, skin);
         g.parts.push(lid);
     }
@@ -281,8 +282,8 @@ fn shell_lid(part: &mut Part, c: [f64; 3], re: f64, upper: bool, edge: &dyn Fn(f
     let (r_out, r_in) = (re * 1.1, re * 1.035);
     let dir = |alpha: f64, beta: f64| {
         // alpha from +Y (upper) or -Y (lower); beta around, 0 = front (-Z).
-        let (sa, ca) = alpha.sin_cos();
-        let v = [sa * beta.sin(), ca, -sa * beta.cos()];
+        let (sa, ca) = alpha.psin_cos();
+        let v = [sa * beta.psin(), ca, -sa * beta.pcos()];
         if upper { v } else { [v[0], -v[1], v[2]] }
     };
     let mut rows_out = Vec::new(); let mut rows_in = Vec::new();
@@ -292,7 +293,7 @@ fn shell_lid(part: &mut Part, c: [f64; 3], re: f64, upper: bool, edge: &dyn Fn(f
         for k in 0..=nb {
             let beta = mix(b0, b1, k as f64 / nb as f64);
             let e = if upper { edge(beta) } else { PI - edge(beta) };
-            let a = mix(0.25, e, t.powf(0.8));
+            let a = mix(0.25, e, t.ppowf(0.8));
             let d = dir(a, beta);
             // The margin rolls in: thicker rim at the lash line.
             let bulge = if upper { 1. + 0.03 * smooth01(0.7, 1., t) } else { 1. };
@@ -361,7 +362,7 @@ fn brows(g: &mut Gen, face: &Face) {
             let fy = face.eye_y + face.re / face.r[1] * 1.55 + 0.1 + arch - ang * 0.22 * (1. - t) + ang * 0.05 * t;
             let d = face.dir(sg * fx, fy);
             let p = face.point(d);
-            (add(p, mul(face.outward(d), 0.0025 * u)), mix(1.0, 0.45, t.powf(1.3)) * if t < 0.1 { 0.85 } else { 1. })
+            (add(p, mul(face.outward(d), 0.0025 * u)), mix(1.0, 0.45, t.ppowf(1.3)) * if t < 0.1 { 0.85 } else { 1. })
         }).collect();
         // Realistic faces get slimmer, softer brows.
     let thick = face.re * mix(0.34, 0.36, face.s) * sp.brow;
@@ -403,7 +404,7 @@ fn mouth(g: &mut Gen, face: &Face, lip: [f64; 3]) {
         let (fx, fy) = curve(t);
         let q = 1. - (2. * t - 1.).powi(2);
         // Cupid's bow: the upper lip dips at the centre.
-        let gap = 0.018 * q.powf(0.8) - 0.008 * gauss((2. * t - 1.) / 0.12);
+        let gap = 0.018 * q.ppowf(0.8) - 0.008 * gauss((2. * t - 1.) / 0.12);
         let wu = corner_w(fx);
         let wl = if k == 0 || k == n { wu.clone() } else { wmix(&wmix(&jaw, &wu, 0.3), &jaw, q) };
         upper.push(part.vertex(at(fx, fy + gap * 0.3), wu));
@@ -453,8 +454,8 @@ fn ears(g: &mut Gen, face: &Face, skin: u32) {
             if pointy && q[1] > 0.3 { let k = (q[1] - 0.3) / 0.7; l[1] += k * k * h_ * 0.55; l[2] += k * k * w_ * 0.9; }
             // Concave bowl on the outer face.
             let cup = (1. - (q[1] * q[1] + q[2] * q[2]).min(1.)) * t_ * 1.4;
-            if q[0] > 0. { l[0] -= cup * q[0].powf(0.5); }
-            let (s_, c_) = back.sin_cos();
+            if q[0] > 0. { l[0] -= cup * q[0].ppowf(0.5); }
+            let (s_, c_) = back.psin_cos();
             let y = l[1] * c_ - l[2] * s_; let z = l[1] * s_ + l[2] * c_;
             add(centre, [sg * l[0], y, z])
         };
@@ -521,16 +522,16 @@ fn hair(g: &mut Gen, face: &Face) {
     let mut part = Part::new("hair");
     let (nth, nph) = (56usize, 20usize);
     // Azimuth: 0 = front. Blend front/side/back values around the head.
-    let az = |theta: f64, v: [f64; 3]| { let f = theta.cos(); if f >= 0. { mix(v[1], v[0], f.powf(1.3)) } else { mix(v[1], v[2], (-f).powf(1.1)) } };
-    let dir_of = |phi: f64, theta: f64| [phi.sin() * theta.sin(), phi.cos(), -phi.sin() * theta.cos()];
+    let az = |theta: f64, v: [f64; 3]| { let f = theta.pcos(); if f >= 0. { mix(v[1], v[0], f.ppowf(1.3)) } else { mix(v[1], v[2], (-f).ppowf(1.1)) } };
+    let dir_of = |phi: f64, theta: f64| [phi.psin() * theta.psin(), phi.pcos(), -phi.psin() * theta.pcos()];
     let mohawk_w = 0.24;
     let thickness = |phi: f64, theta: f64, t_edge: f64| {
         let d = dir_of(phi, theta);
         let mut t = shape.thick * vol;
         t += shape.top * vol * d[1].max(0.).powi(2);
-        t += shape.quiff * vol * gauss((phi - 0.35) / 0.35) * theta.cos().max(0.).powi(2);
-        if shape.mohawk { t += a * 0.5 * vol * gauss(d[0] / (mohawk_w * 0.5)) * smooth01(-0.2, 0.3, d[1] + 0.3 * theta.cos().max(0.)); }
-        let groove = 1. - shape.grooves * (0.5 + 0.5 * (theta * 13.).cos()).powi(3) * smooth01(0.2, 0.8, phi);
+        t += shape.quiff * vol * gauss((phi - 0.35) / 0.35) * theta.pcos().max(0.).powi(2);
+        if shape.mohawk { t += a * 0.5 * vol * gauss(d[0] / (mohawk_w * 0.5)) * smooth01(-0.2, 0.3, d[1] + 0.3 * theta.pcos().max(0.)); }
+        let groove = 1. - shape.grooves * (0.5 + 0.5 * (theta * 13.).pcos()).powi(3) * smooth01(0.2, 0.8, phi);
         t *= groove;
         // Hairline taper keeps the edge on the skin.
         t * smooth01(0.0, 0.18, 1. - t_edge).max(if shape.drape.is_some() { 0.35 } else { 0. }) + 0.0012 * u
@@ -578,7 +579,7 @@ fn hair(g: &mut Gen, face: &Face) {
     let centre = face.c;
     let shaved = shape.shaved;
     let mat_at = |theta: f64, _t: f64| {
-        if shaved { let d = theta.sin().abs(); if d < mohawk_w * 0.9 || theta.cos() < -0.95 { hair_m } else { shaved_m } } else { hair_m }
+        if shaved { let d = theta.psin().abs(); if d < mohawk_w * 0.9 || theta.pcos() < -0.95 { hair_m } else { shaved_m } } else { hair_m }
     };
     let orient = |part: &mut Part, v: Vec<u32>, uv: Vec<[f64; 2]>, m: u32, out: bool| {
         let p: Vec<[f64; 3]> = v.iter().map(|&x| part.positions[x as usize]).collect();
@@ -634,7 +635,7 @@ fn hair(g: &mut Gen, face: &Face) {
         tube(part, &rings, 10, Cap::Point(sub(path[0], mul(norm(sub(path[1], path[0])), r0 * 0.3))), Cap::Point(add(e, mul(tan, r0 * 0.15))), &|_, _| hair_m, 1., 0., None);
     };
     let spike_list: Vec<(f64, f64, f64)> = match sp.hair.as_str() {
-        "spiky" => { let mut v = Vec::new(); for i in 0..14 { let f = i as f64; let th = f * 2.39996; v.push((mix(0.2, 1.25, (f * 0.618).fract()), th, mix(0.45, 0.75, (f * 0.37).fract()) * (0.8 + 0.3 * th.cos().max(0.)))); } v }
+        "spiky" => { let mut v = Vec::new(); for i in 0..14 { let f = i as f64; let th = f * 2.39996; v.push((mix(0.2, 1.25, (f * 0.618).fract()), th, mix(0.45, 0.75, (f * 0.37).fract()) * (0.8 + 0.3 * th.pcos().max(0.)))); } v }
         "mohawk" => (0..8).map(|i| { let t = i as f64 / 7.; (mix(0.25, 1.9, t), 0., mix(0.5, 0.36, t)) }).collect(),
         _ => Vec::new(),
     };
@@ -647,7 +648,7 @@ fn hair(g: &mut Gen, face: &Face) {
         let out = norm(sub(s, face.c));
         // Tufts sweep up and back; front ones lean back over the crown.
         let back = [0., 0.75, 0.65];
-        let dirn = norm(add(mul(out, 0.55), mul(back, 0.7 + 0.5 * theta.cos().max(0.))));
+        let dirn = norm(add(mul(out, 0.55), mul(back, 0.7 + 0.5 * theta.pcos().max(0.))));
         let l = a * len * vol;
         let path: Vec<[f64; 3]> = (0..5).map(|i| { let t = i as f64 / 4.; add(add(s, mul(dirn, l * t)), mul([0., -1., 0.], l * 0.12 * t * t)) }).collect();
         lock(&mut part, s, &path, a * if sp.hair == "mohawk" { 0.13 } else { 0.2 }, 0.6, &|_| headw.clone());

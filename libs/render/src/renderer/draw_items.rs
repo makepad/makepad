@@ -430,7 +430,9 @@ impl ModelDraw<'_> {
                 d.material_alpha=definition.base_alpha;d.alpha_mode=definition.alpha_mode as f32;d.alpha_cutoff=definition.alpha_cutoff;
                 d.triplanar=definition.triplanar;
                 // Race paint in the spare tex_mag lane (shaders.rs DrawSceneSkinned).
-                d.skinned.tex_mag.y=((definition.clearcoat*255.0).round()*256.0+(definition.flake*255.0).round()).max(0.0);d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
+                d.skinned.tex_mag.y=definition.packed_shading();
+                // A number plate: tex_mag.x = 2 selects the per-copy digit remap.
+                if definition.plate { d.skinned.tex_mag.x = 2.0; }d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
                 d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;
             }
             if let Some(id)=d.skinned.draw_vars.draw_shader_id {

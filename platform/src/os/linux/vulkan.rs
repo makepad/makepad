@@ -348,6 +348,7 @@ struct VulkanDrawPacket {
     depth_write: bool,
     alpha_blend: bool,
     backface_culling: bool,
+    scissor: Option<[u32; 4]>,
     instances: Vec<f32>,
     retained_instances: Option<RetainedInstances>,
     retained_owner: (DrawListId, usize),
@@ -617,6 +618,10 @@ pub struct CxVulkan {
     requested_width: u32,
     requested_height: u32,
     texture_upload_count_this_frame: u32,
+    /// The open render pass's extent and the draw-call scissor last set in
+    /// it (`None` = the whole target, as the pass begins).
+    scissor_extent: [u32; 2],
+    scissor_set: Option<[u32; 4]>,
     texture_upload_bytes_this_frame: u64,
     xr_packet_buffer_count_this_frame: u32,
     xr_packet_buffer_bytes_this_frame: u64,
@@ -1075,6 +1080,8 @@ impl CxVulkan {
             requested_width: width.max(1),
             requested_height: height.max(1),
             texture_upload_count_this_frame: 0,
+            scissor_extent: [0, 0],
+            scissor_set: None,
             texture_upload_bytes_this_frame: 0,
             xr_packet_buffer_count_this_frame: 0,
             xr_packet_buffer_bytes_this_frame: 0,
@@ -1492,6 +1499,8 @@ impl CxVulkan {
             requested_width: width.max(1),
             requested_height: height.max(1),
             texture_upload_count_this_frame: 0,
+            scissor_extent: [0, 0],
+            scissor_set: None,
             texture_upload_bytes_this_frame: 0,
             xr_packet_buffer_count_this_frame: 0,
             xr_packet_buffer_bytes_this_frame: 0,
@@ -3047,6 +3056,8 @@ impl CxVulkan {
                         },
                     }],
                 );
+                self.scissor_extent = [session.width, session.height];
+                self.scissor_set = None;
             }
 
             let render_pass_key = self.main_render_pass_key();
@@ -3425,6 +3436,8 @@ impl CxVulkan {
                     extent: self.swapchain_extent,
                 }],
             );
+            self.scissor_extent = [self.swapchain_extent.width, self.swapchain_extent.height];
+            self.scissor_set = None;
         }
 
         let xr_depth_view = self.ensure_xr_depth_dummy()?;
@@ -4401,6 +4414,8 @@ impl CxVulkan {
                     },
                 }],
             );
+            self.scissor_extent = [target_width as u32, target_height as u32];
+            self.scissor_set = None;
         }
 
         let xr_depth_view = self.ensure_xr_depth_dummy()?;
@@ -7154,6 +7169,7 @@ impl CxVulkan {
                     depth_write: draw_call.options.depth_write,
                     alpha_blend: draw_call.options.alpha_blend,
                     backface_culling: draw_call.options.backface_culling,
+                    scissor: draw_call.options.scissor,
                     instances,
                     retained_instances,
                     retained_owner: (draw_list_id, draw_item_id),
@@ -7633,6 +7649,18 @@ impl CxVulkan {
                 0,
                 index_type,
             );
+            if packet.scissor != self.scissor_set && self.scissor_extent != [0, 0] {
+                let [tw, th] = self.scissor_extent;
+                let rect = match packet.scissor {
+                    Some([x, y, w, h]) => {
+                        let (x, y) = (x.min(tw), y.min(th));
+                        vk::Rect2D { offset: vk::Offset2D { x: x as i32, y: y as i32 }, extent: vk::Extent2D { width: w.min(tw - x), height: h.min(th - y) } }
+                    }
+                    None => vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: vk::Extent2D { width: tw, height: th } },
+                };
+                self.device.cmd_set_scissor(self.command_buffer, 0, &[rect]);
+                self.scissor_set = packet.scissor;
+            }
             for range in &packet.instance_ranges {
                 let start = range.start.min(instance_count);
                 let end = range.end.min(instance_count);

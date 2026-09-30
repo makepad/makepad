@@ -6,6 +6,7 @@
 //! section in a local frame, and a tube joins successive rings with quads.
 //! Weights are per vertex, so a clothing shell built from the same rings as
 //! the body underneath deforms with it exactly.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{mesh, transform::*, Error, Operation, Result};
 use std::f64::consts::TAU;
 
@@ -96,7 +97,7 @@ impl Part {
         let face_n: Vec<[f64; 3]> = self.polys.iter().map(|p| { let q: Vec<[f64; 3]> = p.vertices.iter().map(|&i| self.positions[i as usize]).collect(); let mut n = [0.; 3]; for i in 1..q.len() - 1 { n = add(n, cross(sub(q[i], q[0]), sub(q[i + 1], q[0]))); } n }).collect();
         let mut adjacent: Vec<Vec<usize>> = vec![Vec::new(); self.positions.len()];
         for (f, p) in self.polys.iter().enumerate() { for &v in &p.vertices { adjacent[v as usize].push(f); } }
-        let cos = self.crease.cos();
+        let cos = self.crease.pcos();
         let smooth = self.crease >= std::f64::consts::PI - 1e-6;
         let mut out = Vec::new();
         for (f, p) in self.polys.iter().enumerate() {
@@ -168,14 +169,14 @@ impl Ring {
         Self::new(c, x, z, rx, rz, w)
     }
     pub fn point(&self, theta: f64) -> [f64; 3] {
-        let (c, s) = (theta.cos(), theta.sin());
+        let (c, s) = (theta.pcos(), theta.psin());
         let e = 2. / self.exp;
-        let px = c.signum() * c.abs().powf(e) * if c >= 0. { self.rx[0] } else { self.rx[1] };
-        let pz = s.signum() * s.abs().powf(e) * if s >= 0. { self.rz[0] } else { self.rz[1] };
+        let px = c.signum() * c.abs().ppowf(e) * if c >= 0. { self.rx[0] } else { self.rx[1] };
+        let pz = s.signum() * s.abs().ppowf(e) * if s >= 0. { self.rz[0] } else { self.rz[1] };
         let mut p = add(self.c, add(mul(self.x, px), mul(self.z, pz)));
         if !self.bumps.is_empty() {
             let mut d = 0.;
-            for &(at, width, h) in &self.bumps { let mut da = (theta - at).rem_euclid(TAU); if da > TAU / 2. { da -= TAU; } d += h * (-(da / width).powi(2)).exp(); }
+            for &(at, width, h) in &self.bumps { let mut da = (theta - at).rem_euclid(TAU); if da > TAU / 2. { da -= TAU; } d += h * (-(da / width).powi(2)).pexp(); }
             p = add(p, mul(norm(sub(p, self.c)), d));
         }
         p
@@ -251,7 +252,7 @@ pub(crate) fn blob(part: &mut Part, centre: [f64; 3], axis: [f64; 3], side: [f64
     let a = norm(axis);
     let x = norm(sub(side, mul(a, dot(side, a))));
     let z = cross(a, x);
-    let dir = |phi: f64, theta: f64| add(add(mul(a, -phi.cos()), mul(x, phi.sin() * theta.cos())), mul(z, phi.sin() * theta.sin()));
+    let dir = |phi: f64, theta: f64| add(add(mul(a, -phi.pcos()), mul(x, phi.psin() * theta.pcos())), mul(z, phi.psin() * theta.psin()));
     let n = segments.max(3);
     let mut grid: Vec<Vec<u32>> = Vec::new();
     let south = f(mul(a, -1.)); let north = f(a);
@@ -291,7 +292,7 @@ pub(crate) fn blob(part: &mut Part, centre: [f64; 3], axis: [f64; 3], side: [f64
 /// larger values square it off.
 pub(crate) fn rounded_box(part: &mut Part, c: [f64; 3], h: [f64; 3], rot: [[f64; 3]; 3], round: f64, w: W, material: u32, segments: usize) {
     let e = 2. / round;
-    let sp = |v: f64| v.signum() * v.abs().powf(e);
+    let sp = |v: f64| v.signum() * v.abs().ppowf(e);
     let f = |d: [f64; 3]| {
         let l = [sp(d[0]) * h[0], sp(d[1]) * h[1], sp(d[2]) * h[2]];
         add(c, add(add(mul(rot[0], l[0]), mul(rot[1], l[1])), mul(rot[2], l[2])))
@@ -301,8 +302,8 @@ pub(crate) fn rounded_box(part: &mut Part, c: [f64; 3], h: [f64; 3], rot: [[f64;
     // The builder's local axis is world Y; rotate via f.
     blob(part, c, [0., 1., 0.], [1., 0., 0.], segments, (segments / 2).max(4), &f, &wf, &mat, 1.);
 }
-pub(crate) fn rot_y(deg: f64) -> [[f64; 3]; 3] { let (s, c) = deg.to_radians().sin_cos(); [[c, 0., -s], [0., 1., 0.], [s, 0., c]] }
-pub(crate) fn rot_x(deg: f64) -> [[f64; 3]; 3] { let (s, c) = deg.to_radians().sin_cos(); [[1., 0., 0.], [0., c, s], [0., -s, c]] }
+pub(crate) fn rot_y(deg: f64) -> [[f64; 3]; 3] { let (s, c) = deg.to_radians().psin_cos(); [[c, 0., -s], [0., 1., 0.], [s, 0., c]] }
+pub(crate) fn rot_x(deg: f64) -> [[f64; 3]; 3] { let (s, c) = deg.to_radians().psin_cos(); [[1., 0., 0.], [0., c, s], [0., -s, c]] }
 pub(crate) fn rot_mul(a: [[f64; 3]; 3], b: [[f64; 3]; 3]) -> [[f64; 3]; 3] {
     // Columns are basis vectors: result basis = a applied to b's basis.
     let ap = |v: [f64; 3]| add(add(mul(a[0], v[0]), mul(a[1], v[1])), mul(a[2], v[2]));

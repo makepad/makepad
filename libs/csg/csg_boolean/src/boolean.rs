@@ -1,3 +1,4 @@
+use makepad_csg_math::portable::PortableFloat;
 // Corefinement-based boolean operations.
 //
 // - Preserves original triangles away from the intersection
@@ -432,7 +433,7 @@ fn fix_t_junctions_pass(mesh: &mut TriMesh, tol: f64, active: &[bool]) -> bool {
     // bbox made far-apart operands collapse every vertex into a handful of
     // cells, degenerating each pass toward O(V*E).
     let extent = (act_max - act_min).length();
-    let cells_per_axis = (n_active as f64).cbrt().max(4.0);
+    let cells_per_axis = (n_active as f64).pcbrt().max(4.0);
     let cell = (extent / cells_per_axis).max(tol * 2.0);
     let inv_cell = 1.0 / cell;
 

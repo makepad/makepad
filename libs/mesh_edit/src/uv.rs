@@ -1,3 +1,4 @@
+use makepad_csg_math::portable::PortableFloat;
 use crate::{context::invalid,geometry::*,mesh::check_uv,modifiers::select_faces,*};
 use std::collections::{BTreeMap,BTreeSet,VecDeque};
 
@@ -40,7 +41,7 @@ impl Mesh {
         if axis>2{return Err(invalid("cylindrical axis must be 0..2"));}check_uv(scale)?;check_uv(offset)?;let selected=select_faces(self,faces,ctx)?;let mut values=BTreeMap::new();
         for &face in &selected{let cs=self.face_corners(face)?;let mut raw=Vec::new();for c in cs{ctx.checkpoint(1)?;let p=self.vertex(c.vertex).unwrap().position;
                 if p[(axis+1)%3]==0.&&p[(axis+2)%3]==0.{return Err(invalid("cylindrical projection is undefined on the axis"));}
-                raw.push([p[(axis+2)%3].atan2(p[(axis+1)%3])/std::f64::consts::TAU+0.5,p[axis]]);
+                raw.push([p[(axis+2)%3].patan2(p[(axis+1)%3])/std::f64::consts::TAU+0.5,p[axis]]);
             }
             let low=raw.iter().map(|p|p[0]).fold(f64::INFINITY,f64::min);let high=raw.iter().map(|p|p[0]).fold(f64::NEG_INFINITY,f64::max);
             for (c,mut uv) in cs.iter().zip(raw){if self.uv_pins.contains(&c.id){continue;}if high-low>0.5&&uv[0]<0.5{uv[0]+=1.;}

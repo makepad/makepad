@@ -3,6 +3,7 @@
 //! into a static model in the weapon's `grip` frame (origin at the grip,
 //! -Z down the barrel, +X the shooter's right, +Y up). Because the arms are
 //! the character's, the view model matches the third-person body exactly.
+use makepad_csg_math::portable::PortableFloat;
 use super::*;
 use super::clips::{qmul, qx, qy, Pose, RigInfo};
 use crate::transform::*;
@@ -61,7 +62,7 @@ const FINGER_R: f64 = 0.12;
 fn qaxis(axis: [f64; 3], deg: f64) -> [f64; 4] {
     let a = norm(axis);
     let h = deg.to_radians() * 0.5;
-    [a[0] * h.sin(), a[1] * h.sin(), a[2] * h.sin(), h.cos()]
+    [a[0] * h.psin(), a[1] * h.psin(), a[2] * h.psin(), h.pcos()]
 }
 
 /// One hand on a handle: placed so its palm lies on the handle (palm
@@ -413,9 +414,9 @@ fn fps_detail(g: &mut Gen, part: &mut Part, frames: &[([f64; 4], [f64; 3])], gri
             // Folds: rings of fabric bunched either side of the elbow and
             // stacked above the cuff, each crease a little tilted, plus a
             // slow spiral of shallow drag lines along the forearm.
-            let elbow = (-(d / (0.07 * u)).powi(2)).exp();
+            let elbow = (-(d / (0.07 * u)).powi(2)).pexp();
             let cuff = smooth01(cuff_d - 0.12 * u, cuff_d - 0.02 * u, d);
-            let fold = (d / (0.018 * u) * TAU).sin().max(0.).powi(3) * (0.0045 * elbow + 0.0035 * cuff) * u;
+            let fold = (d / (0.018 * u) * TAU).psin().max(0.).powi(3) * (0.0045 * elbow + 0.0035 * cuff) * u;
             let mut ring = Ring::around(c, axis, up, r + 0.004 * u + fold, r + 0.004 * u + fold, w0.clone());
             let phase = i as f64 * 0.11 + side as f64 * 1.7;
             ring.bumps = vec![(phase, 0.35, 0.0022 * u), (phase + 2.4, 0.3, -0.0016 * u), (phase + 4.1, 0.45, 0.0018 * u * (1. + elbow))];

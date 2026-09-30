@@ -28,9 +28,11 @@ fn vehicle()->Document {
 #[test]
 fn textured_editable_vehicle_roundtrips_into_four_driven_wheels(){
     let doc=vehicle();let source=doc.to_bytes(None).unwrap();
-    // Recorded before visual-wheel metadata existed: omission must preserve
-    // canonical source identity for every existing library snapshot.
-    assert_eq!(doc.head().content,[247,4,205,15,64,99,16,22,106,30,9,56,249,217,107,238,56,119,176,169,130,193,56,131,201,124,242,203,184,105,138,13]);
+    // Omitting visual-wheel metadata must preserve canonical source identity.
+    // Re-recorded when primitive generation stopped calling the platform
+    // libm (`primitives::turn`): the old value was the Mac's bits, and this
+    // same document hashed differently on Linux.
+    assert_eq!(doc.head().content,[210,237,161,242,12,222,100,145,162,109,242,111,24,84,212,235,232,225,143,156,132,161,139,214,2,207,19,180,9,190,120,112]);
     let restored=Document::from_bytes(&source,Limits::default(),None).unwrap();
     assert_eq!(restored.head(),doc.head());assert_eq!(restored.scene().wheels,doc.scene().wheels);
     let product=restored.compile(None).unwrap();assert_eq!(product.glb,doc.compile(None).unwrap().glb);

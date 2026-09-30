@@ -65,7 +65,7 @@ script_mod! {
             }
             // Hover arrows in the end zones; they retire while the field is
             // a text editor (focus carries the editing state).
-            if self.hover > 0.01 {
+            if self.hover > 0.01 && self.disabled < 0.5 {
                 if self.focus < 0.5 {
                     let cy = h * 0.5
                     let a = vec4(fab.color_num_arrow.xyz, self.hover)
@@ -464,6 +464,9 @@ pub struct FabDragNumber {
     edit_on_double_click: bool,
     #[live]
     time_of_day: bool,
+    /// Shows the value but takes no drag, click or edit (`set_read_only`).
+    #[live]
+    read_only: bool,
 
     #[rust]
     drag: Option<DragState>,
@@ -579,6 +582,26 @@ impl FabDragNumber {
         self.value
     }
 
+    /// A drag or a text entry is in progress: a host that mirrors live
+    /// state into the field holds off until it ends.
+    pub fn is_interacting(&self) -> bool {
+        self.drag.is_some() || self.editing
+    }
+
+    pub fn set_read_only(&mut self, cx: &mut Cx, read_only: bool) {
+        if self.read_only != read_only {
+            self.read_only = read_only;
+            if read_only {
+                self.drag = None;
+                if self.editing {
+                    self.end_edit(cx);
+                }
+            }
+            self.draw_bg.disabled = if read_only { 1.0 } else { 0.0 };
+            self.draw_bg.redraw(cx);
+        }
+    }
+
     /// Publish a live value change (the same path a committed edit takes).
     fn publish(&mut self, cx: &mut Cx, uid: WidgetUid, v: f64, ended: bool) {
         if (v - self.value).abs() > f64::EPSILON {
@@ -607,7 +630,8 @@ impl FabDragNumber {
         self.drag = None;
         self.editing = true;
         let full = self.format_full();
-        self.text_input.set_is_numeric_only(cx, true);
+        // A time of day is typed as HH:MM.
+        self.text_input.set_is_numeric_only(cx, !self.time_of_day);
         self.text_input.set_text(cx, &full);
         self.text_input.set_is_read_only(cx, false);
         self.text_input.set_key_focus(cx);
@@ -678,6 +702,9 @@ impl Widget for FabDragNumber {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        if self.read_only {
+            return;
+        }
 
         // Ctrl+Wheel nudges by one step; a plain wheel keeps scrolling the
         // panel underneath.

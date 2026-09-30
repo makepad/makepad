@@ -522,6 +522,7 @@ struct LmDraws {
     zero: DrawLmZero,
     sun_depth: DrawLmSunDepth,
     sun_depth_cutout: DrawLmSunDepthCutout,
+    sun_depth_inside: DrawLmSunDepthInside,
     sun_depth_skinned: DrawLmSunDepthSkinned,
     lamp_depth: DrawLmLampDepth,
     gather_mesh: DrawLmSunGatherMesh,
@@ -750,6 +751,8 @@ pub struct GpuLightmapBaker {
     /// cascades after per-cascade culling.
     csm_draws: usize,
     csm_mover_bounds: Vec<(Vec3f, Vec3f)>,
+    /// Rigid movers grouped by geometry (scratch, per frame).
+    csm_mover_order: Vec<usize>,
     /// Staggered tile updates (shadow_csm::CsmSchedule): which tiles this
     /// frame re-renders, in which depth generation, and the cascade each
     /// kept tile was rendered with (receivers compare against THAT fit).
@@ -796,6 +799,7 @@ impl Default for GpuLightmapBaker {
             csm_gpu_ms: 0.0,
             csm_draws: 0,
             csm_mover_bounds: Vec::new(),
+            csm_mover_order: Vec::new(),
             csm_schedule: CsmSchedule::default(),
             csm_tiles: CsmFrame::default(),
             csm_frame_no: 0,
@@ -1730,6 +1734,7 @@ impl GpuLightmapBaker {
                 zero: DrawLmZero::script_new_with_default(vm),
                 sun_depth: DrawLmSunDepth::script_new_with_default(vm),
                 sun_depth_cutout: DrawLmSunDepthCutout::script_new_with_default(vm),
+                sun_depth_inside: DrawLmSunDepthInside::script_new_with_default(vm),
                 sun_depth_skinned: DrawLmSunDepthSkinned::script_new_with_default(vm),
                 lamp_depth: DrawLmLampDepth::script_new_with_default(vm),
                 gather_mesh: DrawLmSunGatherMesh::script_new_with_default(vm),
@@ -2778,6 +2783,22 @@ impl GpuLightmapBaker {
                 g
             })
             .geometry_id();
+        // Rigid movers in geometry order: the batcher only appends to the
+        // previous draw of the same geometry, and a town's cars interleave
+        // body, glass and wheels copy by copy: every part of every car was
+        // its own draw in every cascade. Grouped, each car model's part is
+        // one instanced draw. (Morphed movers keep their own draws.)
+        {
+            use std::hash::{Hash, Hasher};
+            let key = |m: &GpuLmMover| {
+                let mut h = std::collections::hash_map::DefaultHasher::new();
+                m.geometry.hash(&mut h);
+                (m.morph.is_some(), h.finish())
+            };
+            self.csm_mover_order.clear();
+            self.csm_mover_order.extend((0..movers.len()).filter(|i| movers[*i].skin.is_none()));
+            self.csm_mover_order.sort_by_cached_key(|i| key(&movers[*i]));
+        }
         // Posed world bounds, once per frame for all cascades (scratch
         // retained across frames: no per-frame allocation once warm).
         self.csm_mover_bounds.clear();
@@ -2785,12 +2806,25 @@ impl GpuLightmapBaker {
             movers.iter().map(|m| crate::lightmap::world_bounds(&m.transform, (m.min, m.max))),
         );
         let mut draws_n = 0usize;
+        let all_due = due.iter().all(|d| *d);
+        // Casters that reach past their cascade's tile (drawn after the rest
+        // through the discarding pipeline), by index.
+        let mut straddle: Vec<usize> = Vec::new();
+        // Where the backend applies the tile scissor, nothing reaches past
+        // the tile at all and every caster takes the discard-free pipeline.
+        let scissored = cx.cx.gpu_backend().honors_scissor();
         for (ci, casc) in frame.cascades.iter().enumerate() {
             if !due[ci] {
                 continue;
             }
             self.csm_tiles.cascades[ci] = *casc;
             let tile = csm_tile_clip(ci);
+            // The tile in target pixels: every draw into this cascade is
+            // scissored to it, so a caster larger than the tile (a city block
+            // in the 13 m near cascade) rasterizes only its tile's texels
+            // instead of up to the whole 2x2 target, every fragment of which
+            // the tile clip then discarded.
+            let scissor = Some([(ci % CSM_GRID) as u32 * res as u32, (ci / CSM_GRID) as u32 * res as u32, res as u32, res as u32]);
             // This tile's depth generation: z_clip = z01 * (1 - y) + z.
             let (gs, go) = depth_generation_window(self.csm_schedule.generation[ci]);
             let gen = vec4(0.0, 1.0 - gs, go, 0.0);
@@ -2798,6 +2832,7 @@ impl GpuLightmapBaker {
             d.set_morph(cx.cx, None);
             d.flip_a = gen;
             d.tile_a = tile;
+            d.draw_vars.options.scissor = scissor;
             if !full_clear {
                 // Clear the tile to its generation's far end: ndc rows are
                 // the identity and z01 = 1 everywhere on the quad.
@@ -2842,12 +2877,50 @@ impl GpuLightmapBaker {
             // near (stand-ins in cascade 1 only: the old cut-in at ~27 m).
             thread_local! { static MODE: u8 = match std::env::var("MAKEPAD_FOLIAGE_SHADOWS").as_deref() { Ok("far") => 1, Ok("none") => 2, Ok("near") => 3, _ => 0 }; }
             let mode = MODE.with(|m| *m);
-            let draws_in = |band: CasterBand| if mode == 3 && band == CasterBand::Far { ci == 1 } else { band.draws_in(ci) };
-            for m in static_casters.iter().filter(|m| m.cutout.is_none() && draws_in(m.band)) {
-                if !cascade_overlaps(casc, m.min, m.max) {
+            let band_in = |band: CasterBand, c: usize| if mode == 3 && band == CasterBand::Far { c == 1 } else { band.draws_in(c) };
+            let draws_in = |band: CasterBand| band_in(band, ci);
+            // Shadow LOD: when every tile re-renders this frame, a caster
+            // whose whole shadow the next finer cascade serves (it draws
+            // there, and no receiver of that shadow reads or cross-fades
+            // into this cascade) is left out of this one. Its shadow is
+            // followed onto ground up to 2 m below its base. Staggered
+            // frames keep every caster: a tile rendered now is read after
+            // the finer one has moved on.
+            let finer = (ci > 0 && all_due).then(|| &frame.cascades[ci - 1]);
+            let held = |band: CasterBand, lo: Vec3f, hi: Vec3f| {
+                finer.is_some_and(|f| band_in(band, ci - 1) && crate::shadow_csm::cascade_holds_shadow(f, lo, hi, 2.0))
+            };
+            // A caster that cannot rasterize past its tile (the scissor stops
+            // it, or it lies wholly inside) draws through the pipeline without
+            // the tile clip's discard: one with discard loses the GPU's
+            // hidden-surface removal. Only casters reaching past the tile's
+            // edge on a backend without the scissor pay for the clip.
+            let di = &mut draws.sun_depth_inside.depth;
+            di.flip_a = gen;
+            di.tile_a = tile;
+            di.draw_vars.options.scissor = scissor;
+            di.sun_rx = casc.rx;
+            di.sun_ry = casc.ry;
+            di.sun_rz = casc.rz;
+            straddle.clear();
+            for (i, m) in static_casters.iter().enumerate().filter(|(_, m)| m.cutout.is_none() && draws_in(m.band)) {
+                if !cascade_overlaps(casc, m.min, m.max) || held(m.band, m.min, m.max) {
                     continue;
                 }
                 draws_n += 1;
+                if !scissored && !crate::shadow_csm::cascade_contains_xy(casc, m.min, m.max) {
+                    straddle.push(i);
+                    continue;
+                }
+                di.transform = m.transform;
+                di.draw_vars.geometry_id = Some(m.geometry);
+                if di.draw_vars.can_instance() {
+                    cx.add_instance(&di.draw_vars);
+                }
+            }
+            let d = &mut draws.sun_depth;
+            for &i in &straddle {
+                let m = &static_casters[i];
                 d.transform = m.transform;
                 d.draw_vars.geometry_id = Some(m.geometry);
                 if d.draw_vars.can_instance() {
@@ -2862,11 +2935,12 @@ impl GpuLightmapBaker {
             let dc = &mut draws.sun_depth_cutout;
             dc.depth.flip_a = gen;
             dc.depth.tile_a = tile;
+            dc.depth.draw_vars.options.scissor = scissor;
             dc.depth.sun_rx = casc.rx;
             dc.depth.sun_ry = casc.ry;
             dc.depth.sun_rz = casc.rz;
             for m in cutouts.iter().filter(|m| m.cutout.is_some() && mode != 2 && draws_in(m.band) && !(mode == 1 && m.band == CasterBand::Near)) {
-                if !cascade_overlaps(casc, m.min, m.max) {
+                if !cascade_overlaps(casc, m.min, m.max) || held(m.band, m.min, m.max) {
                     continue;
                 }
                 draws_n += 1;
@@ -2878,14 +2952,24 @@ impl GpuLightmapBaker {
                 }
             }
             let d = &mut draws.sun_depth;
-            for (mv, (lo, hi)) in movers.iter().zip(&self.csm_mover_bounds) {
-                // Rigid movers cull by their posed AABB. Skinned and morphed
-                // casters are never culled by a rest AABB (a posed limb can
-                // leave it); the GPU clips them.
-                if mv.skin.is_some() || (mv.morph.is_none() && !cascade_overlaps(casc, *lo, *hi)) {
+            let di = &mut draws.sun_depth_inside.depth;
+            for &i in &self.csm_mover_order {
+                let (mv, (lo, hi)) = (&movers[i], &self.csm_mover_bounds[i]);
+                // Rigid movers cull by their posed AABB. Morphed casters are
+                // never culled by a rest AABB (a posed limb can leave it);
+                // the GPU clips them.
+                if mv.morph.is_none() && (!cascade_overlaps(casc, *lo, *hi) || held(CasterBand::All, *lo, *hi)) {
                     continue;
                 }
                 draws_n += 1;
+                if mv.morph.is_none() && (scissored || crate::shadow_csm::cascade_contains_xy(casc, *lo, *hi)) {
+                    di.transform = mv.transform;
+                    di.draw_vars.geometry_id = Some(mv.geometry);
+                    if di.draw_vars.can_instance() {
+                        cx.add_instance(&di.draw_vars);
+                    }
+                    continue;
+                }
                 d.set_morph(cx.cx,mv.morph.as_ref());
                 d.transform = mv.transform;
                 d.draw_vars.geometry_id = Some(mv.geometry);
@@ -2893,8 +2977,21 @@ impl GpuLightmapBaker {
                     cx.add_instance(&d.draw_vars);
                 }
             }
-            for mv in movers {
+            for (mv, (lo, hi)) in movers.iter().zip(&self.csm_mover_bounds) {
                 let Some(skin) = &mv.skin else { continue };
+                // A posed limb can leave the rest bounds, but not by more
+                // than the body's own size: cull by the bounds grown that
+                // much, so a character far outside this cascade (across the
+                // island, off-screen, parked out of sight) costs nothing.
+                let half = (*hi - *lo) * 0.5;
+                let grow = half.x.max(half.y).max(half.z) + 0.25;
+                let grow = vec3f(grow, grow, grow);
+                if !cascade_overlaps(casc, *lo - grow, *hi + grow) {
+                    continue;
+                }
+                if held(CasterBand::All, *lo - grow, *hi + grow) {
+                    continue;
+                }
                 draws_n += 1;
                 let ds = &mut draws.sun_depth_skinned;
                 ds.set_morph(cx.cx,mv.morph.as_ref());
@@ -2903,6 +3000,7 @@ impl GpuLightmapBaker {
                 ds.sun_rz = casc.rz;
                 ds.flip_a = gen;
                 ds.tile_a = tile;
+                ds.draw_vars.options.scissor = scissor;
                 ds.transform = mv.transform;
                 ds.skin_a.x = skin.joint_base;
                 ds.draw_vars.set_texture(0, &skin.joint_tex);
@@ -2913,6 +3011,11 @@ impl GpuLightmapBaker {
             }
         }
         seq.close(cx, idx);
+        // The depth drawers are shared with the atlas passes (whole target).
+        draws.sun_depth.draw_vars.options.scissor = None;
+        draws.sun_depth_cutout.depth.draw_vars.options.scissor = None;
+        draws.sun_depth_inside.depth.draw_vars.options.scissor = None;
+        draws.sun_depth_skinned.draw_vars.options.scissor = None;
         self.csm_draws = draws_n;
         let encoded = seq.cursor;
         let caster_counts = csm_caster_counts(

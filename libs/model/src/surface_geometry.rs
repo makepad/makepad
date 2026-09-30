@@ -1,3 +1,4 @@
+use makepad_csg_math::portable::PortableFloat;
 use super::*;
 type V3 = [f64; 3];
 fn add(a: V3, b: V3) -> V3 {
@@ -590,7 +591,7 @@ pub(super) fn bake(
                         let angle = k as f64 * 2.399963229728653;
                         let r = u.sqrt();
                         let ray = add(
-                            add(mul(t, r * angle.cos()), mul(bt, r * angle.sin())),
+                            add(mul(t, r * angle.pcos()), mul(bt, r * angle.psin())),
                             mul(hn, (1. - u).sqrt()),
                         );
                         if high.ray(origin, ray, *ao_distance, ctx)?.is_some() {

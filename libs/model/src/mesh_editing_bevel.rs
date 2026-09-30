@@ -5,6 +5,7 @@
 //! bevel gets a patch closing the corner. Faces keep flat shading; strips and
 //! patches carry interpolated normals, so big flat faces never pick up a
 //! smoothing gradient. The object is rebuilt: element IDs are new.
+use makepad_csg_math::portable::PortableFloat;
 use crate::{mesh::*, transform::*, Error, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -38,7 +39,7 @@ fn sharp_edges(faces: &[FaceInfo], pos: &BTreeMap<VertexId, [f64; 3]>, angle: f6
     let _ = pos;
     let mut uses: BTreeMap<Key, Vec<(usize, usize)>> = BTreeMap::new();
     for (f, face) in faces.iter().enumerate() { for i in 0..face.verts.len() { uses.entry(key(face.verts[i], face.verts[(i + 1) % face.verts.len()])).or_default().push((f, i)); } }
-    let cos = angle.cos();
+    let cos = angle.pcos();
     let sharp = uses.iter().filter(|(_, u)| u.len() == 2 && dot(faces[u[0].0].normal, faces[u[1].0].normal) < cos).map(|(k, _)| *k).collect();
     (uses, sharp)
 }

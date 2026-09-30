@@ -1,6 +1,7 @@
 //! Fitted collision proxies. Hulls are built from support points in a fixed
 //! direction set once an object is dense, which bounds both the work and the
 //! delivered triangle count while staying inside the true hull.
+use makepad_csg_math::portable::PortableFloat;
 use crate::transform::*;
 
 const DIRECTIONS: usize = 256;
@@ -12,7 +13,7 @@ fn support_points(points: &[[f64; 3]]) -> Vec<[f64; 3]> {
     for i in 0..DIRECTIONS {
         let y = 1. - 2. * (i as f64 + 0.5) / DIRECTIONS as f64;
         let r = (1. - y * y).sqrt();
-        let d = [r * (golden * i as f64).cos(), y, r * (golden * i as f64).sin()];
+        let d = [r * (golden * i as f64).pcos(), y, r * (golden * i as f64).psin()];
         let best = points.iter().copied().max_by(|a, b| dot(*a, d).total_cmp(&dot(*b, d))).unwrap();
         if !out.contains(&best) { out.push(best); }
     }
@@ -64,16 +65,16 @@ pub(crate) fn capsule(bounds: [[f64; 3]; 2]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
     let center: [f64; 3] = std::array::from_fn(|d| (bounds[1][d] + bounds[0][d]) * 0.5);
     let axis = (0..3).max_by(|&a, &b| half[a].total_cmp(&half[b])).unwrap();
     let (u, v) = ((axis + 1) % 3, (axis + 2) % 3);
-    let radius = half[u].hypot(half[v]).min(half[axis]).max(1e-4);
+    let radius = half[u].phypot(half[v]).min(half[axis]).max(1e-4);
     let core = (half[axis] - radius).max(0.);
     let (segments, rings) = (12usize, 3usize);
     let mut positions = Vec::new();
     let mut ring_ids: Vec<Vec<u32>> = Vec::new();
     let ring = |positions: &mut Vec<[f64; 3]>, along: f64, r: f64| -> Vec<u32> {
-        (0..segments).map(|j| { let t = std::f64::consts::TAU * j as f64 / segments as f64; let mut q = center; q[axis] += along; q[u] += r * t.cos(); q[v] += r * t.sin(); positions.push(q); (positions.len() - 1) as u32 }).collect()
+        (0..segments).map(|j| { let t = std::f64::consts::TAU * j as f64 / segments as f64; let mut q = center; q[axis] += along; q[u] += r * t.pcos(); q[v] += r * t.psin(); positions.push(q); (positions.len() - 1) as u32 }).collect()
     };
-    for k in 1..=rings { let phi = -std::f64::consts::FRAC_PI_2 + std::f64::consts::FRAC_PI_2 * k as f64 / rings as f64; ring_ids.push(ring(&mut positions, -core + radius * phi.sin(), radius * phi.cos())); }
-    for k in 0..rings { let phi = std::f64::consts::FRAC_PI_2 * k as f64 / rings as f64; ring_ids.push(ring(&mut positions, core + radius * phi.sin(), radius * phi.cos())); }
+    for k in 1..=rings { let phi = -std::f64::consts::FRAC_PI_2 + std::f64::consts::FRAC_PI_2 * k as f64 / rings as f64; ring_ids.push(ring(&mut positions, -core + radius * phi.psin(), radius * phi.pcos())); }
+    for k in 0..rings { let phi = std::f64::consts::FRAC_PI_2 * k as f64 / rings as f64; ring_ids.push(ring(&mut positions, core + radius * phi.psin(), radius * phi.pcos())); }
     let mut pole = |sign: f64| { let mut q = center; q[axis] += sign * (core + radius); positions.push(q); (positions.len() - 1) as u32 };
     let (south, north) = (pole(-1.), pole(1.));
     let mut triangles = Vec::new();

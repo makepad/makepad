@@ -428,6 +428,12 @@ pub enum GpuBackend {
 }
 
 impl GpuBackend {
+    /// Whether draw calls' scissor rectangles are applied
+    /// (`CxDrawShaderOptions::scissor`); elsewhere they are ignored.
+    pub fn honors_scissor(self) -> bool {
+        matches!(self, GpuBackend::Metal | GpuBackend::Vulkan)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             GpuBackend::Metal => "Metal",

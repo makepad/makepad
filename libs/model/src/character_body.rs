@@ -1,5 +1,6 @@
 //! Body proportions, skeleton and the skinned body surface: torso, neck,
 //! arms, hands, legs and feet as ring tubes with analytic blend weights.
+use makepad_csg_math::portable::PortableFloat;
 use super::*;
 use crate::transform::*;
 use crate::{Joint, Skeleton};
@@ -56,10 +57,10 @@ impl Body {
         let chest_y = hipj + 0.72 * t;
         let armpit = sh - 0.10 * u;
         let sh_half = 0.225 * u * sp.shoulders * wide * mix(1., 0.86, fem) * mix(1., 1.05, sp.muscle - 1.);
-        let hip_w = [0.165 * u * sp.hips * wide * mix(0.88, 1.0, fem) / sp.muscle.powf(0.25), 0.085 * u * wide, 0.095 * u * wide * mix(1., 1.04, fem)];
+        let hip_w = [0.165 * u * sp.hips * wide * mix(0.88, 1.0, fem) / sp.muscle.ppowf(0.25), 0.085 * u * wide, 0.095 * u * wide * mix(1., 1.04, fem)];
         let waist_w = [0.125 * u * mix(1.08, 1., fem) * sp.waist * wide * mix(1., 0.86, fem) * mix(1., 1.1, sp.belly - 1.), 0.085 * u * sp.belly * wide, 0.075 * u * wide];
-        let chest_w = [0.178 * u * sp.chest * wide * mix(1., 0.84, fem) * sp.muscle.powf(0.2), 0.108 * u * sp.chest * wide * mix(1., 1.08, fem), 0.095 * u * wide];
-        let neck_r = mix(0.066 * u, 0.13 * hh, s) * sp.neck.powf(0.4) * mix(1., 0.8, fem) * mix(1., 1.2, s) * (sp.muscle).powf(0.3);
+        let chest_w = [0.178 * u * sp.chest * wide * mix(1., 0.84, fem) * sp.muscle.ppowf(0.2), 0.108 * u * sp.chest * wide * mix(1., 1.08, fem), 0.095 * u * wide];
+        let neck_r = mix(0.066 * u, 0.13 * hh, s) * sp.neck.ppowf(0.4) * mix(1., 0.8, fem) * mix(1., 1.2, s) * (sp.muscle).ppowf(0.3);
         let head_c = [0., chin_y + hh * 0.5, -0.012 * u];
         let head_r = [head_w * 0.5, hh * 0.5, head_d * 0.5];
         let apose = mix(50., 56., s).to_radians();
@@ -75,10 +76,10 @@ impl Body {
         for side in 0..2 {
             let sg = side_sign(side);
             let p0 = [sg * (sh_half - 0.058 * u * limb), sh - 0.045 * u, 0.005 * u];
-            let d1 = norm([sg * apose.sin(), -apose.cos(), -0.06]);
+            let d1 = norm([sg * apose.psin(), -apose.pcos(), -0.06]);
             let p1 = add(p0, mul(d1, 0.30 * u * arms));
             let bend = 12f64.to_radians();
-            let d2 = norm(add(mul(d1, bend.cos()), mul(fwd, bend.sin())));
+            let d2 = norm(add(mul(d1, bend.pcos()), mul(fwd, bend.psin())));
             let p2 = add(p1, mul(d2, 0.26 * u * arms));
             let p3 = add(p2, mul(d2, hand_len * 0.5));
             arm[side] = [p0, p1, p2, p3];
@@ -514,7 +515,7 @@ fn foot(part: &mut Part, b: &Body, wr: &Wardrobe, side: usize) {
     // Ring z axis is world up for the foot; angle PI*1.5 points down.
     let mat = move |i: usize, theta: f64| {
         // The foot rings' z axis points down.
-        let down = theta.sin();
+        let down = theta.psin();
         if down > 0.72 { sole } else if down > 0.45 { trim } else if i >= n - 3 && down < -0.2 { trim } else { shoe }
     };
     let dir = norm(sub(rings[n - 1].c, rings[0].c));

@@ -353,9 +353,10 @@ pub fn preetham_frame(sun_dir: Vec3f, turbidity: f32, exposure: f32) -> SkyFrame
     fog = fog * (1.0 / 8.0);
     let night_fog = vec3f(0.05, 0.06, 0.09);
     fog = fog + (night_fog - fog) * night;
-    // The HDR night horizon: the analytic dome's own night floor.
+    // The HDR night horizon: the analytic dome's own night floor (the
+    // shader's night horizon at its HDR fifth, over HDR_SKY_GAIN).
     fog_linear = fog_linear * (1.0 / 8.0);
-    fog_linear = fog_linear + (vec3f(0.010, 0.012, 0.020) - fog_linear) * night;
+    fog_linear = fog_linear + (vec3f(0.005, 0.006, 0.010) - fog_linear) * night;
 
     SkyFrame {
         pz_y: vec4(y5[0], y5[1], y5[2], y5[3]),

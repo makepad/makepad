@@ -1,3 +1,4 @@
+use makepad_csg_math::portable::PortableFloat;
 use crate::{Error, Limits, Result};
 use makepad_zune_png::{
     makepad_zune_core::{
@@ -140,7 +141,7 @@ impl Texture {
             for x in 0..self.width {
                 let dx = (x as f64 + 0.5) / self.width as f64 - center[0];
                 let dy = (y as f64 + 0.5) / self.height as f64 - center[1];
-                if dx.hypot(dy) <= radius {
+                if dx.phypot(dy) <= radius {
                     let p = (y as usize * self.width as usize + x as usize) * 3;
                     candidate[p..p + 3].copy_from_slice(&color);
                 }
@@ -411,14 +412,14 @@ pub(crate) fn srgb_to_linear(value: f64) -> f64 {
     if value <= 0.04045 {
         value / 12.92
     } else {
-        ((value + 0.055) / 1.055).powf(2.4)
+        ((value + 0.055) / 1.055).ppowf(2.4)
     }
 }
 pub(crate) fn linear_to_srgb(value: f64) -> f64 {
     if value <= 0.0031308 {
         value * 12.92
     } else {
-        1.055 * value.powf(1. / 2.4) - 0.055
+        1.055 * value.ppowf(1. / 2.4) - 0.055
     }
 }
 pub(crate) fn unit_byte(value: f64) -> u8 {

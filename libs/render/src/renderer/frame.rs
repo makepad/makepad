@@ -437,7 +437,7 @@ impl Renderer {
                     let (star_tex, gain) = self.star_binding(cx.cx);
                     sa.cube.draw_vars.set_texture(0, &star_tex);
                     let rows = match world.sun.time_of_day {
-                        Some(hours) => crate::sun::celestial_rows(hours, world.sun.latitude),
+                        Some(hours) => crate::sun::star_rows(hours, world.sun.latitude),
                         None => [
                             vec4(1.0, 0.0, 0.0, 0.0),
                             vec4(0.0, 1.0, 0.0, 0.0),
@@ -455,7 +455,13 @@ impl Renderer {
                     } else {
                         0.0
                     };
-                    sa.cube.draw_vars.set_uniform(cx.cx, live_id!(sky_fog), &[sky_fog, 0.0, 0.0, if fog_on { 1.0 } else { 0.0 }]);
+                    // y: one screen pixel's angle (radians), which sizes the
+                    // point stars to a pixel at any resolution and lens.
+                    let pixel_angle = 2.0
+                        / (scene_state.projection.v[5].abs()
+                            * (scene_state.viewport_rect.size.y * cx.current_dpi_factor()).max(1.0) as f32)
+                            .max(1.0e-3);
+                    sa.cube.draw_vars.set_uniform(cx.cx, live_id!(sky_fog), &[sky_fog, pixel_angle, 0.0, if fog_on { 1.0 } else { 0.0 }]);
                     sa.cube.draw_vars.set_uniform(cx.cx, live_id!(sky_fog_color), &[fog_color.x, fog_color.y, fog_color.z]);
                     sa.cube.draw(cx);
                 }

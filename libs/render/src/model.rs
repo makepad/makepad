@@ -1608,8 +1608,9 @@ pub(crate) fn gltf_material_surface(json:&Val,bin:&[u8],index:usize)->Option<cra
     let shading=material.get("extras").and_then(|e|e.get("makepadShading"));
     let term=|key:&str|value(shading,key,0.0).clamp(0.0,1.0);
     Some(crate::material_surface::MaterialSurface {
-        wind:term("wind"),clearcoat:term("clearcoat"),flake:term("flake"),
+        wind:term("wind"),clearcoat:term("clearcoat"),flake:term("flake"),rim:term("rim"),
         impostor:value(shading,"impostor",0.0).max(0.0),
+        plate:value(shading,"plate",0.0)>0.5,
         fur,
         normal_png:image("normalTexture"),normal_scale:value(material.get("normalTexture"),"scale",1.0),
         occlusion_png:image("occlusionTexture"),occlusion_strength:value(material.get("occlusionTexture"),"strength",1.0),

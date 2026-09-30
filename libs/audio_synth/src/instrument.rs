@@ -95,3 +95,25 @@ impl Instrument for crate::ironfish::Ironfish {
         }
     }
 }
+
+/// General MIDI percussion numbers by name: the drum names `note_on` and
+/// the drum kits answer to (`kick` 36, `snare` 38, `hat` 42, ...).
+pub fn drum_note(name: &str) -> Option<u8> {
+    Some(match name {
+        "kick" | "bd" => 36,
+        "snare" | "sd" => 38,
+        "rim" | "side" | "sidestick" => 37,
+        "clap" => 39,
+        "hat" | "hihat" | "hh" => 42,
+        "openhat" | "ohat" | "oh" => 46,
+        "pedalhat" => 44,
+        "tom1" | "hitom" => 50,
+        "tom2" | "midtom" => 47,
+        "tom3" | "lowtom" => 45,
+        "floortom" => 43,
+        "crash" => 49,
+        "ride" => 51,
+        "bell" | "ridebell" => 53,
+        _ => return None,
+    })
+}

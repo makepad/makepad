@@ -700,7 +700,11 @@ script_mod! {
             return self.cluster_data.sample_nearest(vec2((col+0.5)*self.cluster_tex.x,(row+0.5)*self.cluster_tex.y))
         }
         // One light's contribution at `wp` (index into the light texels).
-        cluster_light: fn(index: float, wp: vec3, n: vec3, eye: vec3, albedo: vec3, roughness: float, metallic: float, pbr: float) -> vec3 {
+        // `view`, `f0` and `dalb` (the diffuse albedo over pi) and `pa`
+        // (ndv, the geometry term's k, the view half of that term, the HDR
+        // lobe scale) depend on the pixel only: cluster_lights computes them
+        // once, not once per light.
+        cluster_light: fn(index: float, wp: vec3, n: vec3, view: vec3, f0: vec3, dalb: vec3, a2: float, pa: vec4, pbr: float) -> vec3 {
             let pos=self.cluster_fetch(self.cluster_z.w+index*3.0)
             let delta=pos.xyz-wp
             let distance=length(delta)
@@ -735,25 +739,19 @@ script_mod! {
                 if ndl>0.0 && attenuation*cone>0.0 {
                 var response=vec3(ndl,ndl,ndl)
                 if pbr>0.5 {
-                    let view=normalize(eye-wp)
                     let halfdir=normalize(light+view)
-                    let ndv=max(dot(n,view),0.0001)
                     let ndh=max(dot(n,halfdir),0.0)
                     let vdh=max(dot(view,halfdir),0.0)
-                    let rough=clamp(roughness,0.045,1.0)
-                    let metal=clamp(metallic,0.0,1.0)
-                    let f0=mix(vec3(0.04,0.04,0.04),albedo,metal)
                     let f=f0+(vec3(1.0,1.0,1.0)-f0)*pow(1.0-vdh,5.0)
-                    let a2=rough*rough*rough*rough
                     let den=ndh*ndh*(a2-1.0)+1.0
                     let distribution=a2/max(3.14159265*den*den,0.000001)
-                    let k=(rough+1.0)*(rough+1.0)*0.125
-                    let geometry=(ndv/max(ndv*(1.0-k)+k,0.0001))*(ndl/max(ndl*(1.0-k)+k,0.0001))
-                    let spec=f*(distribution*geometry/max(4.0*ndv*ndl,0.0001))
-                    let diffuse=(vec3(1.0,1.0,1.0)-f)*albedo*((1.0-metal)/3.14159265)
+                    let k=pa.y
+                    let geometry=pa.z*(ndl/max(ndl*(1.0-k)+k,0.0001))
+                    let spec=f*(distribution*geometry/max(4.0*pa.x*ndl,0.0001))
+                    let diffuse=(vec3(1.0,1.0,1.0)-f)*dalb
                     // Light colours are irradiance/pi units; the HDR
                     // lane restores the pi the 1/pi BRDF divides out.
-                    response=(diffuse+spec)*(ndl*mix(1.0,3.14159265,self.lin_ctl.x))
+                    response=(diffuse+spec)*(ndl*pa.w)
                 }
                 return color.xyz*(attenuation*cone*self.local_shadow_visibility(index,wp,n,pos.xyz,pos.w))*response
                 }
@@ -780,10 +778,22 @@ script_mod! {
             let x=min(floor(u*self.cluster_grid.x),self.cluster_grid.x-1.0)
             let y=min(floor(v*self.cluster_grid.y),self.cluster_grid.y-1.0)
             z=clamp(z,0.0,self.cluster_grid.z-1.0)
+            let header=self.cluster_fetch(x+self.cluster_grid.x*(y+self.cluster_grid.y*z))
+            // Most pixels sit in clusters no light reaches.
+            if header.y < 0.5 { return vec3(0.0,0.0,0.0) }
             let n=normalize(normal)
+            // The BRDF's per-pixel half, hoisted out of the light loop.
+            let view=normalize(eye-wp)
+            let ndv=max(dot(n,view),0.0001)
+            let rough=clamp(roughness,0.045,1.0)
+            let metal=clamp(metallic,0.0,1.0)
+            let f0=mix(vec3(0.04,0.04,0.04),albedo,metal)
+            let a2=rough*rough*rough*rough
+            let k=(rough+1.0)*(rough+1.0)*0.125
+            let pa=vec4(ndv,k,ndv/max(ndv*(1.0-k)+k,0.0001),mix(1.0,3.14159265,self.lin_ctl.x))
+            let dalb=albedo*((1.0-metal)/3.14159265)
             var total=vec3(0.0,0.0,0.0)
             var i=0.0
-            let header=self.cluster_fetch(x+self.cluster_grid.x*(y+self.cluster_grid.y*z))
             // Four light indices per texel: fetched once per four lights.
             var packed=vec4(0.0,0.0,0.0,0.0)
             while i<min(header.y,64.0) {
@@ -796,7 +806,7 @@ script_mod! {
                 if lane>0.5 { index=packed.y }
                 if lane>1.5 { index=packed.z }
                 if lane>2.5 { index=packed.w }
-                total=total+self.cluster_light(index,wp,n,eye,albedo,roughness,metallic,pbr)
+                total=total+self.cluster_light(index,wp,n,view,f0,dalb,a2,pa,pbr)
                 i=i+1.0
             }
             return total
