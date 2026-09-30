@@ -112,6 +112,10 @@ mod v {
     }
     pub const UMAXV: u32 = 0x6EB0_A800;
     pub const UMINV: u32 = 0x6EB1_A800;
+    /// eor3 vd.16b, vn, vm, va (SHA3: every M-series core).
+    pub fn eor3(d: u8, n: u8, m: u8, a: u8) -> u32 {
+        0xCE00_0000 | (m as u32) << 16 | (a as u32) << 10 | (n as u32) << 5 | d as u32
+    }
     /// By-element multiplies: vd = vn * vm.s[lane] (and accumulating).
     pub const FMUL_E: u32 = 0x4F80_9000;
     pub const FMLA_E: u32 = 0x4F80_1000;
@@ -443,6 +447,37 @@ fn small_table(body: &Block, info: &Info, bounds: &[Option<u32>]) -> Option<(u32
     n.into_iter().filter(|(_, c)| *c >= 2).max_by_key(|((b, e), c)| (*c, std::cmp::Reverse(*b), *e)).map(|(k, _)| k)
 }
 
+/// How many times each value is read.
+fn use_counts(p: &Program) -> Vec<u32> {
+    let mut n = vec![0u32; p.vals.len()];
+    fn walk(b: &Block, n: &mut Vec<u32>) {
+        for s in b {
+            let us: Vec<Val> = match s {
+                Stmt::Def(_, op) => crate::ir::op_uses(op),
+                Stmt::Set(_, x) => vec![*x],
+                Stmt::Store { off, val, .. } => off.iter().copied().chain([*val]).collect(),
+                Stmt::Out { idx, val, .. } => vec![*idx, *val],
+                Stmt::If(c, t, e) => {
+                    walk(t, n);
+                    walk(e, n);
+                    vec![*c]
+                }
+                Stmt::Loop { body, .. } => {
+                    walk(body, n);
+                    vec![]
+                }
+                Stmt::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
+                _ => vec![],
+            };
+            for u in us {
+                n[u.0 as usize] += 1;
+            }
+        }
+    }
+    walk(&p.body, &mut n);
+    n
+}
+
 /// Picks constants read only as multiplicands (either side of MulF/MulI,
 /// a or b of a fused multiply-add), most used first, up to four packed
 /// registers taken from the end of `pool`: value -> (register, lane), and
@@ -632,6 +667,8 @@ struct Em {
     table: Option<(u32, u32)>,
     /// Elements per iteration (4, or 8 for a widened program).
     lanes: u32,
+    /// Uses of every value (for fusing a definition into its one user).
+    uses: Vec<u32>,
     /// Constants used only as multiplicands, packed four to a register:
     /// value -> (register, lane), read with by-element FMUL/FMLA/MUL/MLA.
     packed: HashMap<u32, (u8, u32, u32)>,
@@ -1088,7 +1125,10 @@ impl Em {
         let mut k = 0;
         while k < b.len() {
             let n = match self.gather_group(&b[k..]) {
-                0 => self.store_group(&b[k..]),
+                0 => match self.store_group(&b[k..]) {
+                    0 => self.pair(&b[k..]),
+                    n => n,
+                },
                 n => n,
             };
             if n > 0 {
@@ -1101,6 +1141,44 @@ impl Em {
                 self.full = false;
             }
             k += 1;
+        }
+    }
+
+    /// Two adjacent definitions whose first has no other use, fused into
+    /// fewer instructions: `(a ^ b) ^ c` is one EOR3; a right shift by
+    /// `x + c` (proven below 32) shifts by `-c - x` computed with one SUB
+    /// (a right shift is a left shift by the negated amount). Returns 2
+    /// when it emitted both, else 0.
+    fn pair(&mut self, b: &[Stmt]) -> usize {
+        let (Some(Stmt::Def(t, op1)), Some(Stmt::Def(v, op2))) = (b.first(), b.get(1)) else { return 0 };
+        if self.uses[t.0 as usize] != 1 || self.packed.contains_key(&t.0) {
+            return 0;
+        }
+        match (*op1, *op2) {
+            (Op::Bin(Bin::XorI, a, a2), Op::Bin(Bin::XorI, x, y)) if (x == *t) != (y == *t) => {
+                let c = if x == *t { y } else { x };
+                let ra = self.vsrc(a, VS0);
+                let rb = self.vsrc(a2, VS1);
+                let rc = self.vsrc(c, VS2);
+                let d = self.dst(Ent::Val(v.0));
+                self.e(v::eor3(d, ra, rb, rc));
+                self.done(Ent::Val(v.0), d);
+                2
+            }
+            (Op::Bin(Bin::AddI, x0, k), Op::Bin(sh @ (Bin::ShrUI | Bin::ShrI), s0, amt))
+                if amt == *t && s0 != *t && self.consts[k.0 as usize].is_some() && self.bounds[t.0 as usize].is_some_and(|m| m < 32) =>
+            {
+                let c = self.consts[k.0 as usize].unwrap();
+                let rx = self.vsrc(x0, VS0);
+                self.splat(VS2, c.wrapping_neg() as u32);
+                self.e(v::r3(v::SUB, VS2, VS2, rx));
+                let rs = self.vsrc(s0, VS1);
+                let d = self.dst(Ent::Val(v.0));
+                self.e(v::r3(if sh == Bin::ShrUI { v::USHL } else { v::SSHL }, d, rs, VS2));
+                self.done(Ent::Val(v.0), d);
+                2
+            }
+            _ => 0,
         }
     }
 
@@ -2015,6 +2093,7 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
         table,
         lanes,
         packed,
+        uses: use_counts(p),
         full: true,
         i,
         bounds,
