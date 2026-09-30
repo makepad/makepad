@@ -15,3 +15,5 @@ pub mod shapes;
 pub mod view;
 pub use view::{script_mod, FrameStats, KineticFrame, KineticView};
 pub use records::Karaoke;
+/// Where a kit's letters' font comes from ([`KineticView::set_font`]).
+pub use makepad_text_mesh::letters::FontSource;

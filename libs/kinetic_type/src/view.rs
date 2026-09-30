@@ -321,6 +321,8 @@ pub struct KineticView {
     pub values: KitValues,
     /// The kit's own palette (a host override replaces `values.colors`).
     kit_colors: [Vec4f; 4],
+    /// The kit's own font, for [`Self::set_font`]`(None)`.
+    kit_font: crate::FontSource,
     /// Letters alone over a clear frame ([`KineticView::set_overlay`]).
     overlay: bool,
     draw: DrawKineticGlyph,
@@ -385,6 +387,7 @@ impl KineticView {
         graph.set_passes(&values.passes);
         Ok(Self {
             kit_colors: values.colors,
+            kit_font: values.shape.font.clone(),
             overlay: false,
             split,
             values,
@@ -492,6 +495,17 @@ impl KineticView {
     /// banner over play, a title over footage); off, the kit's whole frame.
     pub fn set_overlay(&mut self, overlay: bool) {
         self.overlay = overlay;
+    }
+
+    /// A host's font in place of the kit's own (`None`: the kit's): a
+    /// document's font for a kinetic title. The text is rebuilt on the next
+    /// `set_text` when it changes.
+    pub fn set_font(&mut self, font: Option<crate::FontSource>) {
+        let font = font.unwrap_or_else(|| self.kit_font.clone());
+        if font != self.values.shape.font {
+            self.values.shape.font = font;
+            self.text = None;
+        }
     }
 
     pub fn set_axes(&mut self, weight: Option<f32>, axes: &[(u32, f32)]) {
