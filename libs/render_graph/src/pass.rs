@@ -9,6 +9,7 @@
 //!     name: "soft"                  // optional: later passes read it by name
 //!     reads: [@color @glow]         // texture slots, self.color / self.glow
 //!     scale: 0.5                    // output size relative to the frame
+//!     preview_scale: 0.5            // and times this in a realtime preview
 //!     uniforms: {amount: 0.4 tint: #ff8844}
 //!     pixel: "fn() -> vec4 { return self.color.sample(self.uv()) * self.amount }"
 //! }
@@ -76,6 +77,10 @@ pub struct PassDecl {
     /// own name.
     pub slots: Vec<String>,
     pub scale: f32,
+    /// `preview_scale`: in a realtime preview the pass runs at `scale`
+    /// times this (0.5: a quarter of the pixels), in renders and exports at
+    /// `scale` (the same shader, so exports are untouched). 1 by default.
+    pub preview_scale: f32,
     /// A fixed output size in pixels (simulation state, a lookup) instead
     /// of `scale`.
     pub size: Option<(u32, u32)>,
@@ -257,7 +262,7 @@ pub fn namespace(decls: &mut [PassDecl], prefix: &str) {
 /// Whether `d` can run inside a fused pass: a `map` pass writing the frame
 /// colour at the frame's size, nothing else.
 fn fusable(d: &PassDecl) -> bool {
-    d.map && d.name.is_none() && d.scale == 1.0 && d.size.is_none() && d.format.is_none() && d.outputs.is_empty() && !d.history
+    d.map && d.name.is_none() && d.scale == 1.0 && d.preview_scale == 1.0 && d.size.is_none() && d.format.is_none() && d.outputs.is_empty() && !d.history
         && d.reads.first().is_some_and(|r| r == "color") && d.slot(0) == "color"
 }
 
@@ -385,6 +390,7 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
             reads,
             slots,
             scale: 1.0,
+            preview_scale: 1.0,
             size: None,
             format: None,
             uniforms,
@@ -413,6 +419,7 @@ mod tests {
             reads: reads.iter().map(|r| r.to_string()).collect(),
             slots: Vec::new(),
             scale: 1.0,
+            preview_scale: 1.0,
             size: None,
             format: None,
             uniforms: uniforms.iter().map(|u| UniformDecl { name: u.to_string(), width: 1 }).collect(),
@@ -450,6 +457,7 @@ mod tests {
             reads: vec!["color".into(), "glow".into()],
             slots: Vec::new(),
             scale: 0.5,
+            preview_scale: 1.0,
             size: None,
             format: None,
             uniforms: vec![UniformDecl { name: "amount".into(), width: 1 }, UniformDecl { name: "tint".into(), width: 4 }],

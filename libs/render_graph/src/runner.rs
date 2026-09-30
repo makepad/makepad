@@ -161,7 +161,7 @@ impl GraphRunner {
                     name: d.name.as_deref().map(LiveId::from_str),
                     stage: d.stage,
                     reads: d.resources(),
-                    scale: d.scale,
+                    scale: d.scale * if self.realtime { d.preview_scale } else { 1.0 },
                     size: d.size,
                     format: d.format(),
                     program: d.program_id(),
@@ -194,7 +194,18 @@ impl GraphRunner {
     /// export's): passes read it as `self.realtime()` and may take fewer
     /// samples then. Off by default.
     pub fn set_realtime(&mut self, realtime: bool) {
+        if realtime == self.realtime {
+            return;
+        }
         self.realtime = realtime;
+        // Passes with a `preview_scale` run at another size: plan again.
+        if self.decls.iter().any(|d| d.preview_scale != 1.0) {
+            for (node, d) in self.graph.nodes.iter_mut().zip(&self.decls) {
+                node.scale = d.scale * if realtime { d.preview_scale } else { 1.0 };
+            }
+            self.plan = None;
+            self.plan_key = None;
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -545,4 +556,45 @@ fn record(cx: &mut Cx2d, slot: &mut PassSlot, size: DVec2, target: &Texture, ext
     cx.end_pass_sized_turtle();
     slot.list.end(cx);
     cx.end_pass(&slot.pass);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plan::Stage;
+
+    fn pass(preview_scale: f32) -> PassDecl {
+        PassDecl {
+            name: Some("march".into()),
+            stage: Stage::Hdr,
+            reads: vec!["color".into()],
+            slots: Vec::new(),
+            scale: 0.5,
+            preview_scale,
+            size: None,
+            format: None,
+            uniforms: Vec::new(),
+            pixel: "fn() -> vec4 { return self.color.sample(self.uv()) }".into(),
+            helpers: String::new(),
+            history: false,
+            outputs: Vec::new(),
+            label: "Pass".into(),
+            map: false,
+        }
+    }
+
+    #[test]
+    fn a_preview_scale_applies_only_in_realtime() {
+        let mut runner = GraphRunner::default();
+        runner.set_passes(&[pass(0.5), pass(1.0)]);
+        assert_eq!(runner.graph.nodes.iter().map(|n| n.scale).collect::<Vec<_>>(), vec![0.5, 0.5], "a render runs every pass at its scale");
+        runner.set_realtime(true);
+        assert_eq!(runner.graph.nodes.iter().map(|n| n.scale).collect::<Vec<_>>(), vec![0.25, 0.5], "a preview runs it at scale x preview_scale");
+        runner.set_realtime(false);
+        assert_eq!(runner.graph.nodes.iter().map(|n| n.scale).collect::<Vec<_>>(), vec![0.5, 0.5]);
+        // Passes set while realtime get the preview scale too.
+        runner.set_realtime(true);
+        runner.set_passes(&[pass(0.25)]);
+        assert_eq!(runner.graph.nodes[0].scale, 0.125);
+    }
 }

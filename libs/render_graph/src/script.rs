@@ -20,7 +20,7 @@ pub struct PassRead {
 }
 
 /// The fields a pass object may have (for a host's unknown-field check).
-pub const PASS_FIELDS: &[&str] = &["outputs", "at", "name", "reads", "slots", "scale", "size", "format", "uniforms", "pixel", "helpers", "history", "map"];
+pub const PASS_FIELDS: &[&str] = &["outputs", "at", "name", "reads", "slots", "scale", "preview_scale", "size", "format", "uniforms", "pixel", "helpers", "history", "map"];
 
 fn get(vm: &ScriptVm, o: ScriptObject, name: &str) -> ScriptValue {
     let v = vm.bx.heap.value(o, LiveId::from_str(name).into(), NoTrap);
@@ -99,6 +99,8 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
     }
     let scale_v = get(vm, o, "scale");
     let scale = if scale_v.is_nil() { 1.0 } else { scale_v.as_number().ok_or_else(|| format!("{label}: `scale` is a number (0.5 = half resolution)"))? as f32 };
+    let preview_v = get(vm, o, "preview_scale");
+    let preview_scale = if preview_v.is_nil() { 1.0 } else { preview_v.as_number().filter(|s| *s > 0.0 && *s <= 1.0).ok_or_else(|| format!("{label}: `preview_scale` is a number in (0, 1]: the pass's resolution in a realtime preview (0.5 = half)"))? as f32 };
     let size_v = get(vm, o, "size");
     let size = if size_v.is_nil() {
         None
@@ -147,7 +149,7 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
         };
         outputs.push(crate::pass::OutputDecl { slot: name.clone(), name, format });
     }
-    let decl = PassDecl { name, stage, reads, slots, scale, size, format, uniforms: Vec::new(), pixel, helpers, history, outputs, label: label.to_string(), map };
+    let decl = PassDecl { name, stage, reads, slots, scale, preview_scale, size, format, uniforms: Vec::new(), pixel, helpers, history, outputs, label: label.to_string(), map };
     Ok(PassRead { decl, uniforms })
 }
 
