@@ -416,3 +416,40 @@ fn mirror_weld_and_delete_keep_stable_ids() {
         .is_err());
     assert_eq!(before, m.to_bytes(&mut ctx).unwrap());
 }
+
+#[test]
+fn inward_closed_shells_turn_outward_and_cavities_open_sheets_stay() {
+    // Two boxes: an outer 0..4 and a cavity 1..2 inside it, plus an open quad.
+    let boxed = |o: f64, s: f64, inward: bool, positions: &mut Vec<[f64; 3]>, polygons: &mut Vec<Polygon>| {
+        let base = positions.len() as u32;
+        for z in [0., 1.] { for y in [0., 1.] { for x in [0., 1.] { positions.push([o + x * s, o + y * s, o + z * s]); } } }
+        // Counter-clockwise seen from outside.
+        for f in [[0u32, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5], [0, 2, 3, 1], [4, 5, 7, 6]] {
+            let mut f = f.map(|i| base + i).to_vec(); if inward { f.reverse(); }
+            polygons.push(Polygon::new(f));
+        }
+    };
+    let volume = |m: &Mesh| { let t = m.triangulate(&mut Context::default()).unwrap();
+        t.triangles.iter().map(|tri| { let [a, b, c] = tri.indices.map(|i| t.vertices[i as usize].position); crate::geometry::dot(a, crate::geometry::cross(b, c)) / 6. }).sum::<f64>() };
+    let mut ctx = Context::default();
+    // Outward shells (the primitives too) are left exactly as they are.
+    for mut m in [Mesh::cube([1., 2., 3.], &mut ctx).unwrap(), { let (mut p, mut f) = (Vec::new(), Vec::new()); boxed(0., 1., false, &mut p, &mut f); Mesh::from_polygons(&p, &f, &mut ctx).unwrap() }] {
+        let before = m.clone(); assert_eq!(m.orient_closed_outward(&mut ctx).unwrap(), 0); assert_eq!(m, before);
+    }
+    // An inward box turns outward, keeping every face identity.
+    let (mut p, mut f) = (Vec::new(), Vec::new()); boxed(0., 1., true, &mut p, &mut f);
+    let mut m = Mesh::from_polygons(&p, &f, &mut ctx).unwrap();
+    assert!((volume(&m) + 1.).abs() < 1e-9);
+    assert_eq!(m.orient_closed_outward(&mut ctx).unwrap(), 6);
+    assert!((volume(&m) - 1.).abs() < 1e-9);
+    assert!(m.validate(&mut ctx).unwrap().is_closed_manifold);
+    // An outer shell written inward with an inward cavity: the shell turns, the cavity stays.
+    let (mut p, mut f) = (Vec::new(), Vec::new());
+    boxed(0., 4., true, &mut p, &mut f); boxed(1., 1., true, &mut p, &mut f);
+    let base = p.len() as u32; p.extend([[10., 0., 0.], [11., 0., 0.], [11., 0., 1.], [10., 0., 1.]]);
+    f.push(Polygon::new(vec![base + 3, base + 2, base + 1, base]));
+    let mut m = Mesh::from_polygons(&p, &f, &mut ctx).unwrap();
+    assert_eq!(m.orient_closed_outward(&mut ctx).unwrap(), 6);
+    assert!((volume(&m) - (64. - 1.)).abs() < 1e-9);
+    assert_eq!(m.orient_closed_outward(&mut ctx).unwrap(), 0);
+}

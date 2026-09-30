@@ -108,6 +108,13 @@ impl Document {
                     "weighted mesh requires a skeleton; static compile cannot discard skin weights",
                 ));
             }
+            // A closed shell wound inward would draw its inside under back-face
+            // culling; the product faces every closed shell out (drafts too).
+            let inward = mesh.inward_closed_faces(&mut ctx)?;
+            let oriented;
+            let mesh = if inward.is_empty() { mesh } else {
+                let mut copy = mesh.clone(); copy.flip_faces(&inward, &mut ctx)?; oriented = copy; &oriented
+            };
             let triangulated = mesh.triangulate(&mut ctx)?;
             triangles = triangles
                 .checked_add(triangulated.triangles.len())

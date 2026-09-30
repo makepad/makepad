@@ -207,3 +207,46 @@ fn actual_saloon_winding_repair_keeps_source_identity_and_exports_outward_normal
     let original = Document::from_bytes(&before, Limits::default(), None).unwrap();
     for (name,mesh) in original.objects() {assert_eq!(doc.object(name).unwrap(), mesh);}
 }
+
+/// Signed volume of what the renderer draws: positive when the faces point out.
+fn drawn_volume(glb: &[u8]) -> f64 {
+    let model = StaticModel::parse_glb(glb).unwrap();
+    let p = |i: u32| { let o = i as usize * makepad_render::MODEL_VERTEX_FLOATS; [model.vertices[o] as f64, model.vertices[o + 1] as f64, model.vertices[o + 2] as f64] };
+    model.indices.chunks_exact(3).map(|t| { let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
+        a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]) }).sum::<f64>() / 6.
+}
+
+#[test]
+fn inward_polygon_shells_draw_outward_in_draft_and_product() {
+    for inward in [false, true] {
+        let faces = [[0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5], [0, 2, 3, 1], [4, 5, 7, 6]]
+            .map(|f| { let mut f = f.to_vec(); if inward { f.reverse(); } format!("{{\"vertices\":{f:?}}}") });
+        let text = format!(r#"[{{"op":"polygon_mesh","object":"body","positions":[[0,0,0],[2,0,0],[0,1,0],[2,1,0],[0,0,3],[2,0,3],[0,1,3],[2,1,3]],"polygons":[{}]}}]"#, faces.join(","));
+        let mut doc = Document::new(Limits::default()).unwrap();
+        let operations = parse_operations(&json::parse(text.as_bytes()).unwrap(), doc.limits()).unwrap();
+        apply(&mut doc, "box", operations);
+        // The source keeps what was written; only the drawn product faces out.
+        assert_eq!(doc.object("body").unwrap().inward_closed_faces(&mut mesh::Context::default()).unwrap().len(), if inward { 6 } else { 0 });
+        for glb in [doc.compile_preview(None).unwrap().glb, doc.compile(None).unwrap().glb] {
+            assert!((drawn_volume(&glb) - 6.).abs() < 1e-4, "inward={inward}");
+        }
+    }
+}
+
+#[test]
+fn captured_inward_saloon_draws_outward() {
+    // The recorded conversation wound its body, cab and fender polygons inward.
+    let fixture = json::parse(include_bytes!("fixtures/astra_saloon.json")).unwrap();
+    let mut doc = Document::new(Limits::default()).unwrap();
+    for batch in fixture.as_arr().unwrap() {
+        let operations = parse_operations(batch.get("operations").unwrap(), doc.limits()).unwrap();
+        apply(&mut doc, batch.get("request_id").unwrap().as_str().unwrap(), operations);
+        let authored_inward = doc.objects().map(|(_, m)| m.inward_closed_faces(&mut mesh::Context::default()).unwrap().len()).sum::<usize>();
+        assert!(authored_inward > 0);
+        let draft = doc.compile_preview(None).unwrap();
+        assert!(drawn_volume(&draft.glb) > 4., "draft volume {}", drawn_volume(&draft.glb));
+        let model = StaticModel::parse_glb(&draft.glb).unwrap();
+        assert_eq!(model.indices.len(), draft.triangles * 3);
+    }
+    assert!(drawn_volume(&doc.compile(None).unwrap().glb) > 4.);
+}
