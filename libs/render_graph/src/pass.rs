@@ -14,6 +14,13 @@
 //! }
 //! ```
 //!
+//! A pass with `history: true` may read `@history`: its own output of the
+//! previous frame (trails, a latched frame). History is realtime state: the
+//! first frame after the passes change, or after the host resets it, has no
+//! history, and the slot reads the pass's first input instead while
+//! `self.history_ready()` is 0 (a pass never samples a texture it has not
+//! written itself). Locked time refuses history (see [`crate::locked`]).
+//!
 //! and the host turns it into a [`PassDecl`]. [`PassDecl::source`] makes
 //! the Splash shader text: a subclass of `DrawGraphPass` (the standard
 //! block below) with one `texture_2d` per read, one `uniform` per value and
@@ -28,7 +35,8 @@
 //!   `self.frame_hash(i)` (a per-frame random in 0..1, constant over the
 //!   shutter), `self.ss_tap()` (the supersampling tap of this sub-frame, or
 //!   -1), `self.exposure()`, `self.view_depth(d)` (the view distance of a
-//!   depth sample);
+//!   depth sample), `self.history_ready()` (1 when `@history` holds the
+//!   pass's previous output, 0 on a cold start);
 //! * `self.luma(c)`, `self.to_srgb(c)`, `self.from_srgb(c)`,
 //!   `self.hash(p)`.
 
@@ -63,6 +71,8 @@ pub struct PassDecl {
     pub pixel: String,
     /// Extra shader functions the pixel calls (`name: fn(..) {..}` lines).
     pub helpers: String,
+    /// The pass keeps its output across frames and may read `@history`.
+    pub history: bool,
     /// For diagnostics.
     pub label: String,
 }
@@ -70,7 +80,7 @@ pub struct PassDecl {
 /// A slot name must be a plain identifier; the standard block's names are
 /// taken.
 pub fn check_ident(name: &str) -> Result<(), String> {
-    const TAKEN: &[&str] = &["uv", "texel", "size", "aspect", "time", "frame", "ss_tap", "exposure", "luma", "hash", "frame_hash", "to_srgb", "from_srgb", "view_depth", "g_cam", "pixel", "vertex", "pos", "world", "geom", "draw_call", "draw_pass", "draw_list", "g_frame", "g_size", "g_misc", "color_format", "depth_clip"];
+    const TAKEN: &[&str] = &["uv", "texel", "size", "aspect", "time", "frame", "ss_tap", "exposure", "luma", "hash", "frame_hash", "to_srgb", "from_srgb", "view_depth", "history_ready", "g_cam", "pixel", "vertex", "pos", "world", "geom", "draw_call", "draw_pass", "draw_list", "g_frame", "g_size", "g_misc", "color_format", "depth_clip"];
     let ok = !name.is_empty()
         && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
@@ -126,6 +136,12 @@ impl PassDecl {
         }
         if let Some(n) = &self.name {
             check_ident(n)?;
+        }
+        if !self.history && self.reads.iter().any(|r| r == "history") {
+            return Err("reads @history but is not a history pass (add `history: true`)".into());
+        }
+        if self.history && self.reads.first().is_none_or(|r| r == "history") {
+            return Err("a history pass reads something before @history (its cold start reads that instead)".into());
         }
         if !self.pixel.trim_start().starts_with("fn") {
             return Err("`pixel` must be a shader function: \"fn() -> vec4 { ... }\"".into());
@@ -204,6 +220,7 @@ mod tests {
             uniforms: vec![UniformDecl { name: "amount".into(), width: 1 }, UniformDecl { name: "tint".into(), width: 4 }],
             pixel: "fn() -> vec4 { return self.color.sample(self.uv()) * self.amount }".into(),
             helpers: String::new(),
+            history: false,
             label: "Pass".into(),
         }
     }
@@ -247,6 +264,13 @@ mod tests {
         assert!(d.validate().is_err());
         let mut d = decl();
         d.pixel = "return 1".into();
+        assert!(d.validate().is_err());
+        let mut d = decl();
+        d.reads.push("history".into());
+        assert!(d.validate().unwrap_err().contains("history: true"));
+        d.history = true;
+        assert!(d.validate().is_ok());
+        d.reads = vec!["history".into()];
         assert!(d.validate().is_err());
         assert!(decl().validate().is_ok());
     }

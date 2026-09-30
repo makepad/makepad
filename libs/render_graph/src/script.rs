@@ -20,7 +20,7 @@ pub struct PassRead {
 }
 
 /// The fields a pass object may have (for a host's unknown-field check).
-pub const PASS_FIELDS: &[&str] = &["at", "name", "reads", "slots", "scale", "format", "uniforms", "pixel", "helpers"];
+pub const PASS_FIELDS: &[&str] = &["at", "name", "reads", "slots", "scale", "format", "uniforms", "pixel", "helpers", "history"];
 
 fn get(vm: &ScriptVm, o: ScriptObject, name: &str) -> ScriptValue {
     let v = vm.bx.heap.value(o, LiveId::from_str(name).into(), NoTrap);
@@ -116,7 +116,8 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
             uniforms.push((n, val));
         }
     }
-    let decl = PassDecl { name, stage, reads, slots, scale, format, uniforms: Vec::new(), pixel, helpers, label: label.to_string() };
+    let history = get(vm, o, "history").as_bool().unwrap_or(false);
+    let decl = PassDecl { name, stage, reads, slots, scale, format, uniforms: Vec::new(), pixel, helpers, history, label: label.to_string() };
     Ok(PassRead { decl, uniforms })
 }
 

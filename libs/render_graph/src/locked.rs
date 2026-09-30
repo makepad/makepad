@@ -22,6 +22,7 @@
 //! | stepper | seeked to the canonical time |
 //! | resource readiness | every pipeline, asset, kernel and sim output ready; a fallback pipeline is not ready |
 //! | VJ feedback, hold, GPU sims, frame scripts | refused |
+//! | history passes (`history: true`: trails, latches) | refused |
 
 /// The stateful subsystems a frame can depend on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -40,6 +41,7 @@ pub enum Subsystem {
     Stepper,
     Readiness,
     VjHistory,
+    PassHistory,
 }
 
 impl Subsystem {
@@ -59,6 +61,7 @@ impl Subsystem {
             Self::Stepper => "effect stepper",
             Self::Readiness => "resource readiness",
             Self::VjHistory => "VJ history (feedback, hold, GPU sims, frame scripts)",
+            Self::PassHistory => "a history pass (trails, a latched frame)",
         }
     }
 }
@@ -127,6 +130,7 @@ fn rule(s: Subsystem, u: Usage) -> Result<(), &'static str> {
         (Readiness, Analytic | Synchronous | Stateless) => Ok(()),
         (Readiness, History) => Err("is showing a result from an earlier frame"),
         (VjHistory, _) => Err("keeps arbitrary history and cannot be seeked"),
+        (PassHistory, _) => Err("reads its own earlier frames and cannot be seeked: export it through the live recording path"),
     }
 }
 
@@ -152,6 +156,7 @@ mod tests {
         assert!(err.message.contains("fixed or metered"), "{}", err.message);
         assert!(check(&[(Subsystem::Taa, Usage::History)]).is_err());
         assert!(check(&[(Subsystem::Ssao, Usage::History)]).unwrap_err().message.contains("pre-pass"));
+        assert!(check(&[(Subsystem::PassHistory, Usage::History)]).unwrap_err().message.contains("live recording"));
     }
 
     #[test]
@@ -186,6 +191,7 @@ mod tests {
             (Subsystem::Stepper, Usage::Off),
             (Subsystem::Readiness, Usage::Synchronous),
             (Subsystem::VjHistory, Usage::Off),
+            (Subsystem::PassHistory, Usage::Off),
         ];
         assert_eq!(check(&frame), Ok(()));
     }

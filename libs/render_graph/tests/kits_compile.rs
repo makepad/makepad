@@ -95,6 +95,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             uniforms: Vec::new(),
             pixel: "fn() -> vec4 { return self.nope.sample(self.uv()) }".into(),
             helpers: String::new(),
+            history: false,
             label: "bad".into(),
         };
         let code = bad.source().replacen("mod.draw.DrawGraphPass{", "let sh = mod.draw.DrawGraphPass{", 1) + "mod.shader.test_compile_draw_source(sh, \"metal\", false)\n";

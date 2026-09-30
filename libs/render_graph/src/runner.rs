@@ -7,10 +7,17 @@
 //! (the chain order is producer -> stage passes -> `parent`). An empty stage
 //! returns the input unchanged and records nothing: with no nodes the host's
 //! chain is exactly what it was.
+//!
+//! History passes (`history: true`) own a second target: each frame they
+//! write one and read the other as `@history`, and the two swap. After the
+//! passes change or [`GraphRunner::reset_history`] the history is cold: the
+//! slot reads the pass's first input and `history_ready()` is 0, so a pass
+//! never samples a texture it has not written in this run (a texture from
+//! the pool may still hold another document's frame).
 
 use crate::pass::PassDecl;
 use crate::program::{DrawGraphPass, Programs};
-use crate::plan::{Attachments, FramePlan, PlanError, PostGraph, PassNode, Resource, Source, Stage};
+use crate::plan::{Attachments, ColorPipeline, FramePlan, PlanError, PostGraph, PassNode, Resource, Source, Stage, Version};
 use makepad_draw::*;
 
 pub use crate::PassValues;
@@ -37,6 +44,7 @@ impl StageInputs<'_> {
             Resource::Glow => self.glow,
             Resource::Id => self.id,
             Resource::Named(n) => self.named.iter().find(|(k, _)| *k == n).map(|(_, t)| t),
+            Resource::History => None,
         }
     }
 }
@@ -64,6 +72,16 @@ struct PassSlot {
     list: DrawList,
 }
 
+/// A history pass's second target and which of the two it writes next.
+struct HistorySlot {
+    /// The plan node it belongs to.
+    node: usize,
+    twin: Texture,
+    /// True: this frame writes `twin` and reads the plan's target.
+    flip: bool,
+    cold: bool,
+}
+
 /// The graph's GPU side for one host view.
 #[derive(Default)]
 pub struct GraphRunner {
@@ -74,20 +92,36 @@ pub struct GraphRunner {
     programs: Programs,
     slots: Vec<PassSlot>,
     targets: Vec<(crate::plan::Format, Texture)>,
+    history: Vec<HistorySlot>,
+    color: Option<ColorPipeline>,
+    /// Per stage: the passes the last run recorded, in order.
+    last: [Vec<DrawPassId>; 3],
     /// Errors to show the author (compile errors, refused plans), taken by
     /// the host.
     pub errors: Vec<String>,
 }
 
 impl GraphRunner {
-    /// Set the document's passes (cheap when unchanged).
+    /// The colour pipeline the plan checks against (default HDR).
+    pub fn set_color_pipeline(&mut self, color: ColorPipeline) {
+        if self.color != Some(color) {
+            self.color = Some(color);
+            self.graph.color = color;
+            self.plan = None;
+            self.plan_key = None;
+        }
+    }
+
+    /// Set the document's passes (cheap when unchanged). New passes start
+    /// with a cold history.
     pub fn set_passes(&mut self, decls: &[PassDecl]) {
         if self.decls.as_slice() == decls {
             return;
         }
         self.decls = decls.to_vec();
+        self.history.clear();
         self.graph = PostGraph {
-            color: crate::plan::ColorPipeline::Hdr,
+            color: self.color.unwrap_or(ColorPipeline::Hdr),
             nodes: decls
                 .iter()
                 .map(|d| PassNode {
@@ -97,6 +131,7 @@ impl GraphRunner {
                     scale: d.scale,
                     format: d.format(),
                     program: d.program_id(),
+                    history: d.history,
                     label: d.label.clone(),
                 })
                 .collect(),
@@ -168,7 +203,97 @@ impl GraphRunner {
             let pass = DrawPass::new_with_name(cx, "graph pass");
             self.slots.push(PassSlot { pass, list: DrawList::new(cx) });
         }
+        // History twins, kept across plan rebuilds of the same passes (a
+        // resize keeps the texture objects; their content is resized).
+        let wanted: Vec<(usize, crate::plan::Format)> = plan
+            .passes
+            .iter()
+            .filter(|p| self.graph.nodes[p.node].history)
+            .map(|p| (p.node, plan.targets[p.output.0 as usize].format))
+            .collect();
+        self.history.retain(|h| wanted.iter().any(|(n, _)| *n == h.node));
+        for (node, format) in wanted {
+            if !self.history.iter().any(|h| h.node == node) {
+                let twin = Texture::new_with_format(cx, format.texture_format());
+                self.history.push(HistorySlot { node, twin, flip: false, cold: true });
+            }
+        }
         ok
+    }
+
+    /// The texture a planned version lives in this frame (a history pass
+    /// alternates between its plan target and its twin).
+    fn version_texture(&self, v: Version) -> Texture {
+        let plan = self.plan.as_ref().unwrap();
+        let writer = plan.targets[v.0 as usize].writer;
+        let node = plan.passes[writer.0 as usize].node;
+        match self.history.iter().find(|h| h.node == node) {
+            Some(h) if h.flip => h.twin.clone(),
+            _ => self.targets[v.0 as usize].1.clone(),
+        }
+    }
+
+    /// The other texture of a history pass: what it wrote last frame.
+    fn history_texture(&self, node: usize, v: Version) -> Option<Texture> {
+        let h = self.history.iter().find(|h| h.node == node)?;
+        if h.cold {
+            return None;
+        }
+        Some(if h.flip { self.targets[v.0 as usize].1.clone() } else { h.twin.clone() })
+    }
+
+    /// Start every history cold again (a live unit suspended, a document
+    /// reloaded), and drop what the passes recorded, so nothing keeps the
+    /// producers they sampled. Targets stay allocated.
+    pub fn reset_history(&mut self, cx: &mut Cx) {
+        for h in &mut self.history {
+            h.flip = false;
+            h.cold = true;
+        }
+        for slot in &self.slots {
+            let pass = &mut cx.passes[slot.pass.draw_pass_id()];
+            pass.main_draw_list_id = None;
+            pass.parent = CxDrawPassParent::None;
+            pass.attached_by = None;
+            pass.paint_dirty = false;
+            let items = &mut cx.draw_lists[slot.list.id()].draw_items;
+            items.clear();
+            items.finish_recording();
+        }
+        self.last = Default::default();
+    }
+
+    /// Whether any pass keeps history.
+    pub fn has_history(&self) -> bool {
+        self.decls.iter().any(|d| d.history)
+    }
+
+    /// What these passes need of locked time: a history pass is refused
+    /// there (`locked::check`).
+    pub fn locked_usage(&self) -> (crate::locked::Subsystem, crate::locked::Usage) {
+        use crate::locked::{Subsystem, Usage};
+        (Subsystem::PassHistory, if self.has_history() { Usage::History } else { Usage::Off })
+    }
+
+    /// The passes the last run of `stage` recorded, first to last.
+    pub fn last_run(&self, stage: Stage) -> &[DrawPassId] {
+        let si = Stage::ALL.iter().position(|s| *s == stage).unwrap();
+        &self.last[si]
+    }
+
+    /// Attach the passes of the last run of `stage` again, unchanged (a
+    /// host retrying a submission that has not painted yet): nothing is
+    /// recorded and no history advances.
+    pub fn reattach(&self, cx: &mut Cx2d, stage: Stage, parent: Option<DrawPassId>) {
+        let ids = self.last_run(stage);
+        for w in ids.windows(2) {
+            cx.cx.attach_child_pass(w[0], w[1], None);
+        }
+        if let Some(last) = ids.last() {
+            if let Some(slot) = self.slots.iter().find(|s| s.pass.draw_pass_id() == *last) {
+                crate::accum::attach(cx, &slot.pass, parent);
+            }
+        }
     }
 
     fn note(&mut self, e: String) {
@@ -189,8 +314,9 @@ impl GraphRunner {
             return None;
         }
         let si = Stage::ALL.iter().position(|s| *s == stage).unwrap();
-        let out = plan.stage_color[si].map(|v| self.targets[v.0 as usize].1.clone()).unwrap_or_else(|| inputs.color.clone());
+        let out = plan.stage_color[si].map(|v| self.version_texture(v)).unwrap_or_else(|| inputs.color.clone());
         let ids: Vec<DrawPassId> = passes.iter().map(|p| self.slots[p.id.0 as usize].pass.draw_pass_id()).collect();
+        self.last[si] = ids.clone();
         for w in ids.windows(2) {
             cx.cx.attach_child_pass(w[0], w[1], None);
         }
@@ -200,15 +326,25 @@ impl GraphRunner {
         for p in &passes {
             let decl = &self.decls[p.node];
             let program = decl.program_id();
-            let target = self.targets[p.output.0 as usize].1.clone();
-            let textures: Vec<Option<Texture>> = p
+            let target = self.version_texture(p.output);
+            let mut textures: Vec<Option<Texture>> = p
                 .inputs
                 .iter()
                 .map(|s| match *s {
                     Source::Host(r) => inputs.get(r).cloned(),
-                    Source::Target(v) => Some(self.targets[v.0 as usize].1.clone()),
+                    Source::Target(v) => Some(self.version_texture(v)),
+                    Source::History => self.history_texture(p.node, p.output),
                 })
                 .collect();
+            // A cold history reads the pass's first input instead.
+            let mut history_ready = 1.0;
+            if let Some(i) = p.inputs.iter().position(|s| *s == Source::History) {
+                if textures[i].is_none() {
+                    textures[i] = textures[0].clone();
+                    history_ready = 0.0;
+                }
+            }
+            let decl = &self.decls[p.node];
             let Some(draw) = self.programs.get_mut(program) else { continue };
             let dv = &mut draw.draw_super.draw_vars;
             for (i, t) in textures.iter().enumerate() {
@@ -219,7 +355,7 @@ impl GraphRunner {
             let (w, h) = (p.size.0 as f32, p.size.1 as f32);
             dv.set_uniform(cx.cx, live_id!(g_frame), &[frame.time, frame.frame, frame.ss_tap, frame.seed]);
             dv.set_uniform(cx.cx, live_id!(g_size), &[w, h, 1.0 / w, 1.0 / h]);
-            dv.set_uniform(cx.cx, live_id!(g_misc), &[frame.exposure, aspect, 0.0, 0.0]);
+            dv.set_uniform(cx.cx, live_id!(g_misc), &[frame.exposure, aspect, history_ready, 0.0]);
             dv.set_uniform(cx.cx, live_id!(g_cam), &frame.camera);
             if let Some(vals) = values.get(p.node) {
                 for (u, v) in decl.uniforms.iter().zip(vals.iter()) {
@@ -228,6 +364,13 @@ impl GraphRunner {
             }
             let slot = &mut self.slots[p.id.0 as usize];
             record(cx, slot, dvec2(w as f64, h as f64), &target, draw);
+        }
+        // Each history pass wrote this frame's target: next frame reads it.
+        for p in &passes {
+            if let Some(h) = self.history.iter_mut().find(|h| h.node == p.node) {
+                h.flip = !h.flip;
+                h.cold = false;
+            }
         }
         Some((out, ids[0]))
     }

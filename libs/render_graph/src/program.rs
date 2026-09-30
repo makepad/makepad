@@ -24,7 +24,8 @@ script_mod! {
         g_frame: uniform(vec4(0.0, 0.0, -1.0, 0.0))
         // xy = output size in pixels, zw = one output texel in uv
         g_size: uniform(vec4(1.0, 1.0, 1.0, 1.0))
-        // x = exposure, y = aspect (w / h)
+        // x = exposure, y = aspect (w / h), z = 1 when @history holds the
+        // pass's previous output
         g_misc: uniform(vec4(1.0, 1.0, 0.0, 0.0))
         // The camera for depth reads: proj[10], proj[14], orthographic,
         // depth stores clip z / w directly (else z * 0.5 + 0.5).
@@ -44,6 +45,7 @@ script_mod! {
         frame: fn() -> float { return self.g_frame.y }
         ss_tap: fn() -> float { return self.g_frame.z }
         exposure: fn() -> float { return self.g_misc.x }
+        history_ready: fn() -> float { return self.g_misc.z }
         // The view distance of a depth-buffer value (a sample of a depth
         // read), for depth of field, outlines and fog passes.
         view_depth: fn(d: float) -> float {
@@ -95,6 +97,14 @@ pub struct Programs {
     compiled: HashMap<ProgramId, Result<Box<DrawGraphPass>, String>>,
 }
 
+thread_local! {
+    /// Each distinct pass source is evaluated once per process: every
+    /// runner (a view, its bake steps, other views) draws with the same
+    /// shader object, so a program compiles on the GPU once, however many
+    /// runners use it.
+    static EVALUATED: std::cell::RefCell<HashMap<ProgramId, Result<ScriptObjectRef, String>>> = Default::default();
+}
+
 impl Programs {
     /// Compile `decl`'s program (once). `Ok(None)` while the script VM is
     /// busy elsewhere (try again next frame).
@@ -107,11 +117,24 @@ impl Programs {
         let code = decl.source();
         let label = decl.label.clone();
         let made = cx.try_with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
-            let v = vm.eval(ScriptMod { file: format!("graph://pass/{:016x}", id.0), code, ..Default::default() });
-            let errors = vm.take_errors();
-            if !errors.is_empty() || v.is_err() {
-                return Err(format!("{label} did not compile: {}", errors.join("; ")));
+            let evaluated = EVALUATED.with(|e| e.borrow().get(&id).cloned());
+            let v: ScriptValue = match evaluated {
+                Some(Ok(obj)) => obj.as_object().into(),
+                Some(Err(e)) => return Err(e),
+                None => {
+                    vm.bx.captured_errors = Some(Vec::new());
+                    let v = vm.eval(ScriptMod { file: format!("graph://pass/{:016x}", id.0), code, ..Default::default() });
+                    let errors = vm.take_errors();
+                    let made = match v.as_object() {
+                        Some(obj) if errors.is_empty() && !v.is_err() => Ok(vm.bx.heap.new_object_ref(obj)),
+                        _ => Err(format!("{label} did not compile: {}", errors.join("; "))),
+                    };
+                    EVALUATED.with(|e| e.borrow_mut().insert(id, made.clone()));
+                    v
+                }
+            };
+            if v.is_err() || v.as_object().is_none() {
+                return Err(format!("{label} did not compile"));
             }
             let mut scope = Scope::default();
             let mut d = Box::new(DrawGraphPass::script_new_with_default(vm));

@@ -138,6 +138,9 @@ pub enum Resource {
     /// The output of an earlier named pass, or a texture the host provides
     /// by name (a LUT, a document image).
     Named(LiveId),
+    /// The reading pass's own output of the previous frame (a history
+    /// pass only).
+    History,
 }
 
 impl Resource {
@@ -150,12 +153,13 @@ impl Resource {
             "velocity" => Resource::Velocity,
             "glow" | "emission" => Resource::Glow,
             "id" => Resource::Id,
+            "history" => Resource::History,
             other => Resource::Named(LiveId::from_str(other)),
         }
     }
 
     fn is_attachment(self) -> bool {
-        !matches!(self, Resource::Color | Resource::Named(_))
+        !matches!(self, Resource::Color | Resource::Named(_) | Resource::History)
     }
 }
 
@@ -176,6 +180,8 @@ pub struct PassNode {
     pub scale: f32,
     pub format: Format,
     pub program: ProgramId,
+    /// It keeps its output across frames (it may read `@history`).
+    pub history: bool,
     /// For diagnostics: the pass's label (its kit and index, or `Pass`).
     pub label: String,
 }
@@ -233,6 +239,8 @@ pub enum Source {
     Host(Resource),
     /// An earlier pass's output.
     Target(Version),
+    /// This pass's own output of the previous frame.
+    History,
 }
 
 /// A planned target: one per written version.
@@ -276,7 +284,7 @@ impl Attachments {
             Resource::Velocity => self.velocity,
             Resource::Glow => self.glow,
             Resource::Id => self.id,
-            Resource::Color | Resource::Named(_) => true,
+            Resource::Color | Resource::Named(_) | Resource::History => true,
         }
     }
 }
@@ -294,6 +302,8 @@ pub enum PlanError {
     NoHdrStage { pass: String },
     /// A scale outside (0, 4].
     BadScale { pass: String, scale: f32 },
+    /// A read of `@history` in a pass that keeps none.
+    NoHistory { pass: String },
     /// The targets do not fit the budget the host gave.
     OverBudget { bytes: u64, budget: u64 },
 }
@@ -306,6 +316,7 @@ impl std::fmt::Display for PlanError {
             PlanError::DuplicateName { pass, name } => write!(f, "{pass}: a pass named `{name}` already exists"),
             PlanError::NoHdrStage { pass } => write!(f, "{pass} is placed at @hdr, but this pipeline is display-space 8-bit (no @hdr stage)"),
             PlanError::BadScale { pass, scale } => write!(f, "{pass}: scale {scale} is outside 0..4"),
+            PlanError::NoHistory { pass } => write!(f, "{pass} reads @history but keeps none (add `history: true`)"),
             PlanError::OverBudget { bytes, budget } => write!(f, "the post graph needs {} MiB of targets, over the {} MiB budget", bytes >> 20, budget >> 20),
         }
     }
@@ -365,6 +376,12 @@ impl FramePlan {
                             None if host_named.contains(&n) => Source::Host(r),
                             None => return Err(PlanError::UnproducedRead { pass: node.label.clone(), resource: n.to_string() }),
                         },
+                        Resource::History => {
+                            if !node.history {
+                                return Err(PlanError::NoHistory { pass: node.label.clone() });
+                            }
+                            Source::History
+                        }
                         a if a.is_attachment() => {
                             if !attachments.has(a) {
                                 return Err(PlanError::MissingAttachment { pass: node.label.clone(), resource: format!("{a:?}").to_lowercase() });
@@ -388,14 +405,21 @@ impl FramePlan {
                     }
                     None => color = Some(v),
                 }
-                (stage, &node.reads, node.name, node.format, node.program).hash(&mut hasher);
+                (stage, &node.reads, node.name, node.format, node.program, node.history).hash(&mut hasher);
                 node.scale.to_bits().hash(&mut hasher);
                 passes.push(PlannedPass { id, node: ni, stage, inputs, output: v, size: px });
             }
             stage_color[si] = color;
         }
         let _ = color;
-        let bytes = targets.iter().map(|t| t.size.0 as u64 * t.size.1 as u64 * t.format.bytes_per_texel()).sum();
+        // A history pass keeps a second target (last frame's output).
+        let bytes = targets
+            .iter()
+            .map(|t| {
+                let twin = if graph.nodes[passes[t.writer.0 as usize].node].history { 2 } else { 1 };
+                twin * t.size.0 as u64 * t.size.1 as u64 * t.format.bytes_per_texel()
+            })
+            .sum();
         if bytes > budget {
             return Err(PlanError::OverBudget { bytes, budget });
         }
@@ -434,6 +458,7 @@ mod tests {
             scale,
             format: Format::default_for(stage),
             program: ProgramId(reads.len() as u64),
+            history: false,
             label: name.unwrap_or("Pass").to_string(),
         }
     }
@@ -492,6 +517,18 @@ mod tests {
         assert!(matches!(FramePlan::compile(&d8, (64, 64), at, &[], false, BIG), Err(PlanError::NoHdrStage { .. })));
         let scale = PostGraph { color: ColorPipeline::Hdr, nodes: vec![pass(None, Stage::Hdr, &["color"], 0.0)] };
         assert!(matches!(FramePlan::compile(&scale, (64, 64), at, &[], false, BIG), Err(PlanError::BadScale { .. })));
+    }
+
+    #[test]
+    fn history_reads_its_own_last_frame_and_is_charged_twice() {
+        let mut fb = pass(None, Stage::Display, &["color", "history"], 1.0);
+        let g = PostGraph { color: ColorPipeline::Display8, nodes: vec![fb.clone()] };
+        assert!(matches!(FramePlan::compile(&g, (64, 64), Attachments::default(), &[], false, BIG), Err(PlanError::NoHistory { .. })));
+        fb.history = true;
+        let g = PostGraph { color: ColorPipeline::Display8, nodes: vec![fb] };
+        let plan = FramePlan::compile(&g, (64, 64), Attachments::default(), &[], false, BIG).unwrap();
+        assert_eq!(plan.passes[0].inputs, vec![Source::Host(Resource::Color), Source::History]);
+        assert_eq!(plan.bytes(), 2 * 64 * 64 * 4);
     }
 
     #[test]
