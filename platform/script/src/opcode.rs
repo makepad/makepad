@@ -14,8 +14,9 @@ impl OpcodeArgs {
 
     pub const NONE: Self = Self(0);
     pub const NIL: Self = Self(Self::TYPE_NIL);
-    /// FIELD's argument in the left operand of `??`: a missing field, or
-    /// a field of nil, reads as nil without an error.
+    /// FIELD's and ARRAY_INDEX's argument in the left operand of `??`: a
+    /// missing field or element, or one of nil, reads as nil without an
+    /// error.
     pub const OPTIONAL_FIELD: Self = Self(Self::TYPE_NUMBER | 1);
 
     pub fn raw(&self) -> u32 {

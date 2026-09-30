@@ -187,7 +187,7 @@ impl<'a> ScriptVm<'a> {
             Opcode::ME_SPLAT => self.handle_me_splat(),
 
             // Array index
-            Opcode::ARRAY_INDEX => self.handle_array_index(),
+            Opcode::ARRAY_INDEX => self.handle_array_index(opargs),
 
             // Let
             Opcode::LET_DYN => self.handle_let_dyn(opargs),

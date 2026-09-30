@@ -580,9 +580,29 @@ impl<'a> ScriptVm<'a> {
 
     // Array index handler
 
-    pub(crate) fn handle_array_index(&mut self) {
+    pub(crate) fn handle_array_index(&mut self, opargs: OpcodeArgs) {
         let index = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        if opargs.without_flags() == OpcodeArgs::OPTIONAL_FIELD {
+            // `a[i] ?? d`: out of range, not an index, or nothing to index
+            // reads as nil, quietly.
+            let at = index.checked_index().or_else(|| {
+                self.bx.heap.pod_scalar_number(index).and_then(|n| ScriptValue::from_f64(n).checked_index())
+            });
+            let value = if let Some(obj) = object.as_object() {
+                self.bx.heap.value(obj, index, NoTrap)
+            } else if let (Some(arr), Some(at)) = (object.as_array(), at) {
+                self.bx.heap.array_index(arr, at, NoTrap)
+            } else if let (Some(pod), Some(at)) = (object.as_pod(), at) {
+                self.bx.heap.pod_array_index(pod, at, &self.bx.code.builtins.pod, NoTrap)
+            } else {
+                NIL
+            };
+            let value = if value.is_err() { NIL } else { value };
+            self.bx.threads.cur().push_stack_unchecked(value);
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
 
         if let Some(obj) = object.as_object() {
             let value = self

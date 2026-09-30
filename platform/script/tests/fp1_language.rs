@@ -112,7 +112,7 @@ fn mod_call_is_modulo_and_mod_stays_the_modules() {
     assert_eq!(number("mod_shadow", "let mod = fn(a, b) { a + b }\nmod(1, 2)"), 3.0);
 }
 
-/// `a.b ?? d`: an optional field read. `??` was a parse error before
+/// `a.b ?? d`: an optional field read (and `a[i] ?? d`, `a[i].b ?? d`). `??` was a parse error before
 /// ("Parser stuck on character Operator(?)") in every spelling, so no
 /// program that parsed changes meaning. It is `|?` (nil-or) whose left
 /// operand's trailing field reads are quiet: a missing field, or a field of
@@ -133,6 +133,13 @@ fn optional_field_read() {
         ("plain", "let a = 3\na ?? 4", 3.0),
         ("pod", "use mod.pod.*\nlet v = vec2(3, 4)\nv.y ?? 0", 4.0),
         ("nospace", "o.b??6", 6.0),
+        // The index read before the trailing fields is optional too.
+        ("index_out", "let a = [1, 2]\na[5] ?? 7", 7.0),
+        ("index_in", "let a = [1, 2]\na[1] ?? 7", 2.0),
+        ("index_field", "let w = [{s: [{start: 1.5}]}]\nw[0].s[1].start ?? 9", 9.0),
+        ("index_field_in", "let w = [{s: [{start: 1.5}]}]\nw[0].s[0].start ?? 9", 1.5),
+        ("index_nil", "let a = nil\na[0] ?? 4", 4.0),
+        ("index_map", "let m = {k: 3}\nm[@x] ?? 5", 5.0),
     ] {
         assert_eq!(number(name, &format!("{o}{expr}")), want, "{name}");
     }
@@ -142,4 +149,5 @@ fn optional_field_read() {
     // Without `??` a missing field is still an error.
     fails("plain_missing", &format!("{o}o.b"));
     fails("nil_or_missing", &format!("{o}o.b |? 7"));
+    fails("plain_index", "let a = [1]\na[3]");
 }

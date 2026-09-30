@@ -1335,8 +1335,9 @@ impl ScriptParser {
         self.opcodes.last()
     }
 
-    /// Mark the field reads ending the code emitted so far (`a.b.c` is
-    /// `a b FIELD c FIELD`) as optional reads: FIELD with the argument
+    /// Mark the reads ending the code emitted so far as optional: the
+    /// trailing field reads (`a.b.c` is `a b FIELD c FIELD`) and the index
+    /// read before them (`a[1].c`), FIELD and ARRAY_INDEX with the argument
     /// [`OpcodeArgs::OPTIONAL_FIELD`].
     fn quiet_trailing_field_reads(&mut self) {
         let mut i = self.opcodes.len();
@@ -1346,6 +1347,9 @@ impl ScriptParser {
         {
             self.opcodes[i - 1].set_opcode_args(OpcodeArgs::OPTIONAL_FIELD);
             i -= 2;
+        }
+        if i >= 1 && self.opcodes[i - 1] == Opcode::ARRAY_INDEX.into() {
+            self.opcodes[i - 1].set_opcode_args(OpcodeArgs::OPTIONAL_FIELD);
         }
     }
 
