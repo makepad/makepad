@@ -905,6 +905,12 @@ mod tests {
         }
     }
     #[test]
+    fn every_shader_a_sheet_writes_compiles() {
+        for entry in catalogue() {
+            sheet_checks::replaced_shaders_compile(crate::script_mod, entry);
+        }
+    }
+    #[test]
     fn every_sheet_evaluates_and_ends_both_halves_in_true() {
         for entry in catalogue() {
             sheet_checks::evaluates(crate::script_mod, entry);

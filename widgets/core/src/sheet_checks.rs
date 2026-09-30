@@ -288,3 +288,94 @@ pub fn button_faces_take_the_host_colour(entry: &SheetEntry) {
         );
     }
 }
+
+/// Every shader the sheet writes compiles, and still compiles when an app
+/// sets the numbers it reads: each `mod.widgets.<Template>.<draw>.pixel` or
+/// `.vertex` the sheet replaces is built into a draw the way a widget builds
+/// its own, first with every number the sheet set on that draw set again by
+/// an instance (as Stage's `LevelMeter{draw_bg +: {lamp_size: 7}}` does), then as
+/// the template stands. A face that fails to compile is not drawn at all --
+/// the widget is simply missing under that sheet -- and nothing else would
+/// say so short of looking. The instance half catches a sheet that sets a
+/// uniform by path with a bare number (`draw_bg.lamp_size = 6.0`): that
+/// turns the uniform into a plain value, which compiles as the template has
+/// it and fails as soon as an instance sets it; `uniform(6.0)` keeps it one.
+/// Templates of a family the registration left out are skipped. Returns how
+/// many draws were compiled.
+pub fn replaced_shaders_compile(register: fn(&mut ScriptVm), entry: &SheetEntry) -> usize {
+    let mut draws: Vec<(&str, &str, Vec<&str>)> = Vec::new();
+    for line in entry.widgets.lines() {
+        let Some(path) = line.strip_prefix("mod.widgets.") else { continue };
+        let Some((path, value)) = path.split_once(" = ") else { continue };
+        let parts: Vec<&str> = path.split('.').collect();
+        if let [template, draw, "pixel" | "vertex"] = parts[..] {
+            if value.starts_with("fn") && !draws.iter().any(|(t, d, _)| (*t, *d) == (template, draw)) {
+                draws.push((template, draw, Vec::new()));
+            }
+        }
+    }
+    for line in entry.widgets.lines() {
+        let Some(path) = line.strip_prefix("mod.widgets.") else { continue };
+        let Some((path, value)) = path.split_once(" = ") else { continue };
+        let parts: Vec<&str> = path.split('.').collect();
+        if let [template, draw, field] = parts[..] {
+            let value = value.trim();
+            let bare = value.strip_prefix("uniform(").and_then(|v| v.strip_suffix(')')).unwrap_or(value);
+            if bare.parse::<f64>().is_ok() {
+                if let Some((_, _, numbers)) = draws.iter_mut().find(|(t, d, _)| (*t, *d) == (template, draw)) {
+                    numbers.push(field);
+                }
+            }
+        }
+    }
+    // Only the numbers the library declares as uniforms: a field it keeps a
+    // plain value (a Rust draw's own field) is the library's as it stands.
+    {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            register(vm);
+            let widgets = vm.module(id!(widgets));
+            for (template, draw, numbers) in draws.iter_mut() {
+                let proto = vm.bx.heap.value(widgets, LiveId::from_str(template).into(), NoTrap);
+                let stock = proto.as_object().map(|proto| vm.bx.heap.value(proto, LiveId::from_str(draw).into(), NoTrap));
+                let Some(stock) = stock.and_then(|value| value.as_object()) else { continue };
+                numbers.retain(|field| vm.bx.heap.value(stock, LiveId::from_str(field).into(), NoTrap).as_f64().is_none());
+            }
+        });
+    }
+    let mut compiled = 0;
+    under(register, entry, |vm, _| {
+        let widgets = vm.module(id!(widgets));
+        for (template, draw, numbers) in &draws {
+            let proto = vm.bx.heap.value(widgets, LiveId::from_str(template).into(), NoTrap);
+            let Some(proto) = proto.as_object() else { continue };
+            let value = vm.bx.heap.value(proto, LiveId::from_str(draw).into(), NoTrap);
+            let Some(draw_obj) = value.as_object() else { continue };
+            let mut builds = Vec::new();
+            if !numbers.is_empty() {
+                let derived = vm.bx.heap.new_with_proto(value);
+                for field in numbers {
+                    let key: ScriptValue = LiveId::from_str(field).into();
+                    let at = vm.bx.heap.value(draw_obj, key, NoTrap).as_f64().unwrap_or(0.0);
+                    // A whole number, as `lamp_size: 7` writes it: a uniform takes it
+                    // as its float, a bare value keeps it an integer.
+                    vm.bx.heap.set_value_def(derived, key, ScriptValue::from_i32(at.round() as i32 + 1));
+                }
+                builds.push(("an instance setting its numbers", ScriptValue::from(derived)));
+            }
+            builds.push(("the template", value));
+            for (how, build) in builds {
+                vm.bx.captured_errors = Some(Vec::new());
+                let quad = DrawQuad::script_from_value(vm, build);
+                let errors = vm.take_errors();
+                assert!(
+                    quad.draw_vars.draw_shader_id.is_some(),
+                    "{}: {template}.{draw}, built as {how}, does not compile, so it is not drawn: {errors:?}",
+                    entry.id
+                );
+            }
+            compiled += 1;
+        }
+    });
+    compiled
+}
