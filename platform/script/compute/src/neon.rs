@@ -784,6 +784,8 @@ struct Em {
     table: Option<(u32, u32)>,
     /// Elements per iteration (4, or 8 for a widened program).
     lanes: u32,
+    /// Where the last label was bound (a join: registers may differ).
+    last_bind: Option<usize>,
     /// Uses of every value (for fusing a definition into its one user).
     uses: Vec<u32>,
     /// The element counter's IR step value (not emitted).
@@ -826,6 +828,7 @@ impl Em {
 
     fn bind(&mut self, l: usize) {
         self.labels[l] = Some(self.code.len());
+        self.last_bind = Some(self.code.len());
     }
 
     fn jump(&mut self, kind: Fix, word: u32, l: usize) {
@@ -869,6 +872,16 @@ impl Em {
         match self.loc(e) {
             Loc::Reg(r) => r,
             Loc::Stack(off) => {
+                // The instruction just emitted stored (or loaded) this slot
+                // from (into) the same register, and nothing branches in
+                // between: the register already holds it.
+                if off < 65536 && self.last_bind != Some(self.code.len()) {
+                    if let Some(&last) = self.code.last() {
+                        if last == v::ldst_q(false, scratch, 31, off) || last == v::ldst_q(true, scratch, 31, off) {
+                            return scratch;
+                        }
+                    }
+                }
                 self.ldst_sp_q(true, scratch, off);
                 scratch
             }
@@ -2103,7 +2116,7 @@ impl Em {
                 // accumulator when the result register is free for it.
                 let direct = d != ra && (pk.is_some() || d != rb) && d != VS0 && (self.packed.contains_key(&c.0) || matches!(self.loc(Ent::Val(c.0)), Loc::Stack(_)));
                 let rc = self.vsrc(c, if direct { d } else { VS2 });
-                let acc = if d != ra && (pk.is_some() || d != rb) && d != VS0 { d } else { VS2 };
+                let acc = if d != ra && (pk.is_some() || d != rb) { d } else { VS2 };
                 if k == crate::ir::Fma::Sub {
                     self.e(v::r2(v::FNEG, acc, rc));
                 } else if acc != rc {
@@ -2372,6 +2385,7 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
         lanes,
         packed,
         uses: use_counts(p),
+        last_bind: None,
         step_def,
         mask: bmask,
         var_mask: bvar,
