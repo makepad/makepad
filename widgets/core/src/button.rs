@@ -281,7 +281,12 @@ script_mod! {
                 let on = 1.0 - self.disabled
                 if own.a > 0.5 {
                     let d = (host.rgb - own.rgb) * inside * on
-                    let rgb = clamp(res.rgb + d * res.a, vec3(0.0, 0.0, 0.0), vec3(res.a, res.a, res.a))
+                    // Not capped at res.a: a sheet's face is not held to
+                    // premultiplied colour (the light it throws past its
+                    // edge, and a glass face, carry colour above their
+                    // alpha), and capping cut every glow at the rect and
+                    // emptied the outline face.
+                    let rgb = clamp(res.rgb + d * res.a, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
                     // Where the sheet's face lets the ground through (glass,
                     // a face that is only its frame), the host's colour is
                     // the body under it, as far as the host moved it: a lit
