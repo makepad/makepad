@@ -122,45 +122,146 @@ pub struct Estimate {
     pub threads: usize,
 }
 
+/// One element's worst case, split so host calls can be bounded per call.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ElementCost {
+    /// Everything but host calls whose input size is only known at run
+    /// time, picoseconds (host calls on constant-size slices included).
+    pub fixed_ps: u64,
+    /// Host calls per element whose slice lengths are run-time values
+    /// (loop caps included): each is bounded by the per-call limit.
+    pub open_calls: u64,
+    /// Those calls charged at their declared cost for their largest input.
+    pub open_max_ps: u64,
+}
+
+impl ElementCost {
+    /// The element's worst case when each open call may use `call_ps`.
+    pub fn with_call_limit(&self, call_ps: u64) -> u64 {
+        self.fixed_ps.saturating_add(self.open_calls.saturating_mul(call_ps))
+    }
+}
+
+/// Declared op-equivalents of one call of `h` with slice lengths `lens`
+/// (a length the compiler knows, else the signature's maximum).
+fn host_ops(h: &crate::host::HostFn, lens: &[Option<u32>]) -> u64 {
+    let lens: Vec<u32> = lens.iter().zip(h.slices).map(|(l, s)| l.unwrap_or(s.max_words)).collect();
+    h.cost_of(&lens).saturating_add(8)
+}
+
 /// Worst-case time of one element of `kernel` on `backend`, following
 /// `Program::cost` (the outermost loop is the element loop: counted once;
 /// branches take their dearer side), with host-memory accesses charged as
-/// misses.
-pub fn element_ps(kernel: &Kernel, backend: Backend) -> u64 {
+/// misses and host calls at their declared cost for their input size. Host
+/// components are Rust: their ops are charged at the native rate whatever
+/// runs the kernel.
+pub fn element_cost(kernel: &Kernel, backend: Backend) -> ElementCost {
     let r = rates(backend);
+    let native = rates(Backend::Native);
     let shared_misses = kernel.shared_words() > SHARED_CACHED_WORDS;
-    let miss = |region: Region| match region {
-        // Buffer 0 is the one-word control buffer.
-        Region::Buf(k) => k > 0,
-        Region::Shared => shared_misses,
-        _ => false,
-    };
-    fn walk(b: &Block, depth: u32, r: Rates, miss: &dyn Fn(Region) -> bool) -> u64 {
-        let mut sum = 0u64;
+    let program = kernel.program();
+    // Integer constants, for slice lengths the compiler fixed.
+    let mut consts = std::collections::HashMap::new();
+    fn scan(b: &Block, consts: &mut std::collections::HashMap<u32, i32>) {
         for s in b {
-            let ps = match s {
-                Stmt::If(_, t, e) => r.op_ps.saturating_add(walk(t, depth, r, miss).max(walk(e, depth, r, miss))),
-                Stmt::Loop { cap, body } => {
-                    let reps = if depth == 0 { 1 } else { *cap as u64 };
-                    reps.saturating_mul(walk(body, depth + 1, r, miss).saturating_add(2 * r.op_ps))
+            match s {
+                Stmt::Def(v, Op::ConstI(c)) => {
+                    consts.insert(v.0, *c);
                 }
-                Stmt::Def(_, Op::Load { region, .. }) | Stmt::Store { region, .. } if miss(*region) => r.op_ps + r.miss_ps,
-                _ => r.op_ps,
-            };
-            sum = sum.saturating_add(ps);
+                Stmt::If(_, t, e) => {
+                    scan(t, consts);
+                    scan(e, consts);
+                }
+                Stmt::Loop { body, .. } => scan(body, consts),
+                _ => {}
+            }
         }
-        sum
     }
-    walk(&kernel.program().body, 0, r, &miss)
+    scan(&program.body, &mut consts);
+    struct W<'a> {
+        r: Rates,
+        native: Rates,
+        shared_misses: bool,
+        consts: &'a std::collections::HashMap<u32, i32>,
+    }
+    impl W<'_> {
+        fn miss(&self, region: Region) -> bool {
+            match region {
+                // Buffer 0 is the one-word control buffer.
+                Region::Buf(k) => k > 0,
+                Region::Shared => self.shared_misses,
+                _ => false,
+            }
+        }
+        fn walk(&self, b: &Block, depth: u32) -> ElementCost {
+            let mut sum = ElementCost::default();
+            let add = |a: ElementCost, b: ElementCost| ElementCost {
+                fixed_ps: a.fixed_ps.saturating_add(b.fixed_ps),
+                open_calls: a.open_calls.saturating_add(b.open_calls),
+                open_max_ps: a.open_max_ps.saturating_add(b.open_max_ps),
+            };
+            let fixed = |ps: u64| ElementCost { fixed_ps: ps, ..Default::default() };
+            for s in b {
+                let c = match s {
+                    Stmt::If(_, t, e) => {
+                        // Each part at its dearer side: an upper bound.
+                        let (t, e) = (self.walk(t, depth), self.walk(e, depth));
+                        ElementCost {
+                            fixed_ps: self.r.op_ps.saturating_add(t.fixed_ps.max(e.fixed_ps)),
+                            open_calls: t.open_calls.max(e.open_calls),
+                            open_max_ps: t.open_max_ps.max(e.open_max_ps),
+                        }
+                    }
+                    Stmt::Loop { cap, body } => {
+                        let reps = if depth == 0 { 1 } else { *cap as u64 };
+                        let c = add(self.walk(body, depth + 1), fixed(2 * self.r.op_ps));
+                        ElementCost { fixed_ps: c.fixed_ps.saturating_mul(reps), open_calls: c.open_calls.saturating_mul(reps), open_max_ps: c.open_max_ps.saturating_mul(reps) }
+                    }
+                    Stmt::Def(_, Op::Load { region, .. }) | Stmt::Store { region, .. } if self.miss(*region) => fixed(self.r.op_ps + self.r.miss_ps),
+                    Stmt::CallHost { f, slices, .. } => match crate::host::get(*f) {
+                        Some(h) => {
+                            let lens: Vec<Option<u32>> = slices.iter().map(|x| self.consts.get(&x.len.0).map(|c| *c as u32)).collect();
+                            let misses = (h.misses as u64).saturating_mul(self.r.miss_ps);
+                            let ps = |lens: &[Option<u32>]| host_ops(&h, lens).saturating_mul(self.native.op_ps).saturating_add(misses);
+                            if lens.iter().all(|l| l.is_some()) {
+                                fixed(ps(&lens))
+                            } else {
+                                ElementCost { fixed_ps: misses, open_calls: 1, open_max_ps: ps(&vec![None; lens.len()]) }
+                            }
+                        }
+                        // An unknown index costs everything.
+                        None => fixed(u64::MAX / 4),
+                    },
+                    _ => fixed(self.r.op_ps),
+                };
+                sum = add(sum, c);
+            }
+            sum
+        }
+    }
+    W { r, native, shared_misses, consts: &consts }.walk(&program.body, 0)
 }
 
-/// Worst-case time of `count` elements on up to `threads` threads.
-pub fn estimate(kernel: &Kernel, count: usize, threads: usize) -> Estimate {
-    let element = element_ps(kernel, kernel.backend());
+/// Worst-case time of one element with every host call at its largest
+/// input (the trusted bound).
+pub fn element_ps(kernel: &Kernel, backend: Backend) -> u64 {
+    let c = element_cost(kernel, backend);
+    c.fixed_ps.saturating_add(c.open_max_ps)
+}
+
+/// Worst-case time of `count` elements on up to `threads` threads, each
+/// element at `element` picoseconds.
+fn estimate_at(kernel: &Kernel, element: u64, count: usize, threads: usize) -> Estimate {
     let worker_ns = element.saturating_mul(count as u64) / 1000;
     // Element-local kernels split into fixed chunks; others run on one thread.
     let threads = if kernel.parallel_safe { threads.max(1).min(count.div_ceil(CHUNK).max(1)) } else { 1 };
     Estimate { element_ps: element, worker_ns, wall_ns: worker_ns / threads as u64, threads }
+}
+
+/// Worst-case time of `count` elements on up to `threads` threads (every
+/// host call at its largest input).
+pub fn estimate(kernel: &Kernel, count: usize, threads: usize) -> Estimate {
+    estimate_at(kernel, element_ps(kernel, kernel.backend()), count, threads)
 }
 
 /// Why a job was not admitted.
@@ -255,16 +356,36 @@ impl Ledger {
         }
         let limits = self.limits();
         let untrusted = origin.untrusted();
-        let est = estimate(kernel, count, threads);
+        // Computed once per kernel: admission allocates nothing per job.
+        let cost = *kernel.admission.get_or_init(|| element_cost(kernel, kernel.backend()));
+        let native_op = rates(Backend::Native).op_ps.max(1);
         let mut wall = budget.wall;
-        if untrusted {
-            let limit_ns = limits.element_latency.as_nanos() as u64;
-            let worst_ns = est.element_ps / 1000;
-            if worst_ns > limit_ns {
-                return Err(Refused::ElementTooSlow { worst_ns, limit_ns });
+        // Host calls on run-time input sizes: each is held to a per-call op
+        // limit, enforced at the call (an input over it is refused there,
+        // not run). Trusted code: each function's largest input.
+        let (element, host_call_limit) = if untrusted {
+            let limit_ps = limits.element_latency.as_nanos() as u64 * 1000;
+            if cost.fixed_ps > limit_ps {
+                return Err(Refused::ElementTooSlow { worst_ns: cost.fixed_ps / 1000, limit_ns: limit_ps / 1000 });
             }
             wall = wall.min(limits.untrusted_job_wall);
-        }
+            if cost.open_calls == 0 {
+                (cost.fixed_ps, 0)
+            } else {
+                // What the element bound leaves, shared by the open calls
+                // (no more than their largest input needs).
+                let call_ps = ((limit_ps - cost.fixed_ps) / cost.open_calls).min(cost.open_max_ps.max(1));
+                if call_ps < native_op {
+                    return Err(Refused::ElementTooSlow { worst_ns: cost.with_call_limit(native_op) / 1000, limit_ns: limit_ps / 1000 });
+                }
+                // The limit is one ctx word (K_HOST_LIMIT).
+                let ops = (call_ps / native_op).clamp(1, u32::MAX as u64);
+                (cost.with_call_limit(ops * native_op), ops)
+            }
+        } else {
+            (cost.fixed_ps.saturating_add(cost.open_max_ps), 0)
+        };
+        let est = estimate_at(kernel, element, count, threads);
         let budget_ns = wall.as_nanos().min(u64::MAX as u128) as u64;
         if est.wall_ns > budget_ns {
             return Err(Refused::OverBudget { worst_ns: est.wall_ns, budget_ns });
@@ -296,6 +417,7 @@ impl Ledger {
             untrusted,
             estimate: est,
             work_limit: kernel.cost.saturating_mul(count as u64),
+            host_call_limit,
             deadline: Instant::now() + wall,
         })
     }
@@ -314,6 +436,7 @@ pub struct Ticket {
     untrusted: bool,
     estimate: Estimate,
     work_limit: u64,
+    host_call_limit: u64,
     deadline: Instant,
 }
 
@@ -327,6 +450,12 @@ impl Ticket {
     /// For `Call::set_work_limit`: the admitted worst-case ops.
     pub fn work_limit(&self) -> u64 {
         self.work_limit
+    }
+
+    /// The op-equivalents one host call on a run-time input size may use
+    /// (0: no limit, trusted code); an input over it is refused at the call.
+    pub fn host_call_limit(&self) -> u64 {
+        self.host_call_limit
     }
 
     /// When the watchdog cancels the job.

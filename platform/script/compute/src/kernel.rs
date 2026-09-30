@@ -52,6 +52,9 @@ pub struct Kernel {
     /// Four elements per iteration (element-local kernels only).
     #[cfg(target_arch = "aarch64")]
     neon: Option<crate::arm64::Code>,
+    /// Admission's worst-case element estimate, computed on first admit
+    /// (the job path stays allocation-free).
+    pub(crate) admission: std::sync::OnceLock<crate::admission::ElementCost>,
 }
 
 impl std::fmt::Debug for Kernel {
@@ -149,6 +152,7 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
         native,
         #[cfg(target_arch = "aarch64")]
         neon,
+        admission: std::sync::OnceLock::new(),
     }))
 }
 
