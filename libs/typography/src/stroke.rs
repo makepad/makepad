@@ -61,7 +61,7 @@ pub struct StrokeFont {
 }
 
 /// Our bundled single-stroke fonts (drawn for Makepad).
-pub const BUNDLED: &[(&str, &str)] = &[("technical", include_str!("../../resources/stroke/technical.strokefont"))];
+pub const BUNDLED: &[(&str, &str)] = &[("technical", include_str!("../resources/stroke/technical.strokefont"))];
 
 fn arc_points(cx: f32, cy: f32, rx: f32, ry: f32, a0: f32, a1: f32) -> Vec<[f32; 2]> {
     let sweep = (a1 - a0).abs();

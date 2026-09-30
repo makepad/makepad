@@ -3,7 +3,7 @@ name = "makepad-text-mesh"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2021"
-description = "Shaped text as geometry: extruded glyph solids with counters and bevels on the fx vertex stream, per-letter 3D type, glyph outlines and layout metrics, single-stroke fonts, fitting, karaoke states and text on paths, and the kernel host components that read fonts"
+description = "Shaped text as geometry: extruded glyph solids with counters and bevels on the fx vertex stream, and per-letter 3D type"
 license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
@@ -13,8 +13,3 @@ makepad-draw = { path = "../../draw", version = "2.0.0" }
 makepad-geom3d = { path = "../geom3d" }
 # Constrained triangulation of glyph caps.
 makepad-csg-boolean = { path = "../csg/csg_boolean" }
-# Shaping and font tables for layout metrics, outlines and the kernel host
-# components (thread-safe, parsed on use).
-rustybuzz = { version = "0.18.0", path = "../rustybuzz" }
-# Kernel host components (`text.outline`, `text.layout`).
-makepad-script-compute = { path = "../../platform/script/compute" }

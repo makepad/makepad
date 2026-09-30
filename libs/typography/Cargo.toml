@@ -1,0 +1,15 @@
+[package]
+name = "makepad-typography"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Typography as engine primitives: fonts at any variable-axis values, shaped layout metrics, glyph outlines as paths, fitting, single-stroke fonts with optical kerning and write-on, karaoke states, text on 3D paths, and the kernel host components that read fonts"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+# Shaping and font tables (thread-safe, parsed on use).
+rustybuzz = { version = "0.18.0", path = "../rustybuzz" }
+# Kernel host components (`text.outline`, `text.layout`).
+makepad-script-compute = { path = "../../platform/script/compute" }

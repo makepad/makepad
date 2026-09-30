@@ -27,9 +27,9 @@
 //! tracking)` writes one [`GLYPH_RECORD`]-word `TextGlyph` record per
 //! glyph and returns the glyph count.
 
-use crate::typo::font::OutlineFont;
-use crate::typo::layout::{layout, TextStyle};
-use crate::typo::outline::outlines;
+use crate::font::OutlineFont;
+use crate::layout::{layout, TextStyle};
+use crate::outline::outlines;
 use makepad_script_compute::host::{self, HostError, HostFn, HostSlice, SliceSig, Tier};
 use makepad_script_compute::ir::Ty;
 use makepad_script_compute::kernel::{FieldTy, Layout, LayoutField};
@@ -184,7 +184,7 @@ pub fn layouts() -> Vec<Layout> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typo::font::test_font;
+    use crate::font::test_font;
     use makepad_script_compute::kernel::compile_with;
     use makepad_script_compute::sched::{InlineExecutor, Job};
     use makepad_script_compute::Backend;

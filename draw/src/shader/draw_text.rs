@@ -3427,6 +3427,10 @@ pub struct FontMember {
     /// Positive values map to the OpenType `wght` axis. `0.0` keeps the font default.
     #[live(0.0)]
     pub weight: f32,
+    /// Any other variable-font axes, as `"wdth 125 slnt -8 GRAD 50"`
+    /// (four-letter tag, value; axes the font lacks are ignored).
+    #[live]
+    pub axes: String,
     /// `1` = CJK and `2` = emoji. These members are requested only after a
     /// real glyph miss; zero keeps the ordinary eager behavior.
     #[live(0.0)]
@@ -3453,12 +3457,64 @@ pub struct FontMemberDef {
     asc: f32,
     desc: f32,
     weight: f32,
+    /// Variable-axis values as (tag, value); `wght` rides in `weight`.
+    variations: Vec<(u32, f32)>,
     lazy: Option<LazyFontFamily>,
+}
+
+/// Axis values from `"wdth 125 slnt -8"`: pairs of a tag of up to four
+/// characters (padded with spaces) and a number; malformed pairs are
+/// skipped.
+pub fn parse_font_axes(text: &str) -> Vec<(u32, f32)> {
+    let words: Vec<&str> = text.split_whitespace().collect();
+    words
+        .chunks(2)
+        .filter_map(|pair| {
+            let [tag, value] = pair else { return None };
+            let b = tag.as_bytes();
+            if b.is_empty() || b.len() > 4 {
+                return None;
+            }
+            let mut t = [b' '; 4];
+            t[..b.len()].copy_from_slice(b);
+            let v: f32 = value.parse().ok()?;
+            v.is_finite().then_some((u32::from_be_bytes(t), v))
+        })
+        .collect()
 }
 
 impl FontFamily {
     fn to_font_family_id(&self) -> FontFamilyId {
         (self.id.0).into()
+    }
+
+    /// This family read at other variable-axis values: every member takes
+    /// `axes` (`(tag, value)`, e.g. `wdth` 125.0; a `wght` value is the
+    /// member's weight), on top of its own. A font without an axis ignores
+    /// it. The result is its own family (its own id and font cache), so a
+    /// caller animating an axis should step its values (whole units) and
+    /// keep the families it made.
+    pub fn with_axes(&self, axes: &[(u32, f32)]) -> FontFamily {
+        const WGHT: u32 = u32::from_be_bytes(*b"wght");
+        let mut out = self.clone();
+        for member in &mut out.members {
+            for &(tag, value) in axes {
+                if !value.is_finite() {
+                    continue;
+                }
+                if tag == WGHT {
+                    member.weight = value;
+                    continue;
+                }
+                match member.variations.iter_mut().find(|(t, _)| *t == tag) {
+                    Some(slot) => slot.1 = value,
+                    None => member.variations.push((tag, value)),
+                }
+            }
+            member.variations.sort_by_key(|(t, _)| *t);
+        }
+        out.id = family_id_of(&out.members);
+        out
     }
 
     /// Stable logical member names in fallback order.
@@ -3514,7 +3570,7 @@ impl FontFamily {
                             ascender_fudge_in_ems: member.asc,
                             descender_fudge_in_ems: member.desc,
                             weight: font_member_weight(member),
-                            variations: Vec::new(),
+                            variations: member.variations.clone(),
                         },
                     );
                 // Two different absences, and only one is a mistake. A build that
@@ -3680,12 +3736,28 @@ fn font_member_weight(member: &FontMemberDef) -> Option<f32> {
     }
 }
 
+/// A family's id from its complete ordered members (resources, metrics and
+/// axis values), so identical families share a cache and different ones
+/// never alias.
+fn family_id_of(members: &[FontMemberDef]) -> LiveId {
+    let mut hasher = DefaultHasher::new();
+    for member in members {
+        font_member_font_id(member).hash(&mut hasher);
+        (member.lazy.map(|v| v as u32)).hash(&mut hasher);
+    }
+    LiveId(hasher.finish())
+}
+
 fn font_member_font_id(member: &FontMemberDef) -> FontId {
     let mut hasher = DefaultHasher::new();
     member.resource_path.hash(&mut hasher);
     member.asc.to_bits().hash(&mut hasher);
     member.desc.to_bits().hash(&mut hasher);
     member.weight.to_bits().hash(&mut hasher);
+    for (tag, value) in &member.variations {
+        tag.hash(&mut hasher);
+        value.to_bits().hash(&mut hasher);
+    }
     FontId::from(hasher.finish())
 }
 
@@ -3764,6 +3836,11 @@ impl ScriptHook for FontFamily {
                     asc: member.asc,
                     desc: member.desc,
                     weight: member.weight,
+                    variations: {
+                        let mut v: Vec<(u32, f32)> = parse_font_axes(&member.axes).into_iter().filter(|(t, _)| *t != u32::from_be_bytes(*b"wght")).collect();
+                        v.sort_by_key(|(t, _)| *t);
+                        v
+                    },
                     lazy: match member.lazy as u32 {
                         1 => Some(LazyFontFamily::Cjk),
                         2 => Some(LazyFontFamily::Emoji),
@@ -3779,12 +3856,7 @@ impl ScriptHook for FontFamily {
         // belong to Cx, so identify the complete ordered family by its actual
         // resources and metrics. Identical families can safely share a cache
         // across isolates, while different ones can never alias by index.
-        let mut hasher = DefaultHasher::new();
-        for member in &self.members {
-            font_member_font_id(member).hash(&mut hasher);
-            (member.lazy.map(|v| v as u32)).hash(&mut hasher);
-        }
-        self.id = LiveId(hasher.finish());
+        self.id = family_id_of(&self.members);
 
         // Don't eagerly register fonts here. Font registration is deferred
         // to ensure_fonts_loaded() which is called at draw time.
@@ -3792,6 +3864,26 @@ impl ScriptHook for FontFamily {
         // to hundreds of widgets.
 
         true
+    }
+}
+
+#[cfg(test)]
+mod axes_tests {
+    use super::*;
+
+    #[test]
+    fn axes_parse_and_make_their_own_family() {
+        let wdth = u32::from_be_bytes(*b"wdth");
+        let grad = u32::from_be_bytes(*b"GRAD");
+        assert_eq!(parse_font_axes("wdth 125 GRAD -50 bad x toolong 3"), vec![(wdth, 125.0), (grad, -50.0)]);
+        let member = FontMemberDef { resource_path: "a.ttf".into(), weight: 400.0, ..Default::default() };
+        let family = FontFamily { id: family_id_of(&[member.clone()]), members: vec![member], diagnostic_role: String::new(), diagnostic_set: String::new() };
+        let wide = family.with_axes(&[(wdth, 125.0), (u32::from_be_bytes(*b"wght"), 900.0)]);
+        assert_ne!(wide.id, family.id);
+        assert_eq!(wide.members[0].weight, 900.0);
+        assert_eq!(wide.members[0].variations, vec![(wdth, 125.0)]);
+        assert_eq!(family.with_axes(&[(wdth, 125.0), (u32::from_be_bytes(*b"wght"), 900.0)]).id, wide.id, "the same values give the same family");
+        assert_ne!(font_member_font_id(&wide.members[0]), font_member_font_id(&family.members[0]));
     }
 }
 

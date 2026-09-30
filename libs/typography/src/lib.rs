@@ -1,4 +1,4 @@
-//! Typography as engine primitives (PDOOM-PARITY §4, P4): fonts read at any
+//! `makepad-typography`: typography as engine primitives (PDOOM-PARITY §4, P4): fonts read at any
 //! variable-axis values ([`font`], F1), shaped layout metrics ([`layout`],
 //! F2), glyph outlines as paths ([`outline`], F3), fitting ([`fit`], F4),
 //! single-stroke fonts with optical kerning and write-on ([`stroke`], F5),
@@ -7,6 +7,7 @@
 //! [`crate::host`]) and renderers share it.
 
 pub mod fit;
+pub mod host;
 pub mod font;
 pub mod karaoke;
 pub mod layout;
