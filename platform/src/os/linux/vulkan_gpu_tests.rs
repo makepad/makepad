@@ -625,3 +625,32 @@ fn runaway_nested_loops_finish_within_the_budget_on_the_gpu() {
     eprintln!("spinning callee: {} passes in {time:?}", px[0]);
     gpu.finish();
 }
+
+// ---------------------------------------------------------------------------
+// Max blend (`blend_op: @Max`).
+
+#[test]
+fn max_blend_takes_the_per_channel_maximum_on_rgba16f() {
+    let Some(gpu) = Gpu::new() else { return };
+    let format = vk::Format::R16G16B16A16_SFLOAT;
+    let target = gpu.target(format, 2);
+    let refs = [&target];
+    let layout = unsafe { gpu.device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None).unwrap() };
+    let clear_pass = gpu.render_pass(&refs, false);
+    let load_pass = gpu.render_pass(&refs, true);
+    let fragment = |color: &str| {
+        let wgsl = format!("@fragment fn fragment_main() -> @location(0) vec4<f32> {{ return vec4<f32>({color}); }}");
+        compile_wgsl_to_spirv(&wgsl).unwrap().1.unwrap()
+    };
+    let blend = mrt_blend_attachments(&[format], 1, true, true);
+    assert_eq!(blend[0].color_blend_op, vk::BlendOp::MAX);
+    let a = gpu.pipeline(clear_pass, layout, &fragment("0.8, 0.2, 0.0, 1.0"), &blend, 2);
+    let b = gpu.pipeline(load_pass, layout, &fragment("0.3, 0.6, 0.0, 1.0"), &blend, 2);
+    gpu.draw(&refs, &[clear_f([0.0; 4])], a, clear_pass, layout, None);
+    assert_eq!(halves(&gpu.read(&target, 8))[..4], [f16_to_f32(0x3A66), f16_to_f32(0x3266), 0.0, 1.0], "first draw over the clear");
+    gpu.draw(&refs, &[], b, load_pass, layout, None);
+    let px = halves(&gpu.read(&target, 8));
+    eprintln!("max blend pixel: {:?}", &px[..4]);
+    assert!((px[0] - 0.8).abs() < 1e-3 && (px[1] - 0.6).abs() < 1e-3 && px[2] == 0.0 && px[3] == 1.0, "{px:?}");
+    gpu.finish();
+}
