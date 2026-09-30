@@ -238,6 +238,15 @@ impl GraphRunner {
             let pass = DrawPass::new_with_name(cx, "graph pass");
             self.slots.push(PassSlot { pass, list: DrawList::new(cx) });
         }
+        // Each pass named for what it runs, so a GPU profile says which.
+        for p in &plan.passes {
+            let label = &self.decls[p.node].label;
+            let id = self.slots[p.id.0 as usize].pass.draw_pass_id();
+            let named = &cx.passes[id].debug_name;
+            if !(named.len() == label.len() + 6 && named.starts_with("graph ") && named.ends_with(label.as_str())) {
+                cx.passes[id].debug_name = format!("graph {label}");
+            }
+        }
         // History twins, kept across plan rebuilds of the same passes (a
         // resize keeps the texture objects; their content is resized).
         let wanted: Vec<(usize, crate::plan::Format)> = plan
