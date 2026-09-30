@@ -574,3 +574,52 @@ fn item_names(it: &Item, out: &mut HashSet<String>) {
         Item::Use { .. } => {}
     }
 }
+
+/// Register [`SHARED_STD`] in a Splash VM as `mod.shared` (what effect
+/// documents, Motion documents and runtime-compiled shaders `use`): one
+/// object of its top-level functions, which keep their module scope and so
+/// call each other unqualified. Once per VM: a VM that has `mod.shared`
+/// already keeps it. The `vm` feature (this crate is otherwise
+/// dependency-free).
+#[cfg(feature = "vm")]
+pub fn register_shared_std(vm: &mut makepad_script::ScriptVm) {
+    use makepad_script::*;
+    let modules = vm.bx.heap.modules;
+    if vm.bx.heap.value(modules, id!(shared).into(), NoTrap).as_object().is_some() {
+        return;
+    }
+    let exports: String = SHARED_STD
+        .lines()
+        .filter_map(|l| l.strip_prefix("fn ").and_then(|r| r.split('(').next()))
+        .map(|name| format!("{0}: {0} ", name.trim()))
+        .collect();
+    let value = vm.eval(ScriptMod {
+        file: "std.shared".into(),
+        code: format!("use mod.math.*\nuse mod.pod.*\n{SHARED_STD}\n{{{exports}}}\n"),
+        ..Default::default()
+    });
+    if value.as_object().is_some() {
+        vm.bx.heap.set_value(modules, id!(shared).into(), value, NoTrap);
+    }
+}
+
+#[cfg(all(test, feature = "vm"))]
+mod vm_tests {
+    use makepad_script::*;
+
+    #[test]
+    fn shared_std_registers_once_with_every_function() {
+        let mut host = Box::new(ScriptVmHost::new((), ()));
+        let bx = Box::new(ScriptVmBase::new());
+        let mut vm = ScriptVm { host: &mut *host, bx };
+        super::register_shared_std(&mut vm);
+        let modules = vm.bx.heap.modules;
+        let shared = vm.bx.heap.value(modules, id!(shared).into(), NoTrap).as_object().expect("mod.shared");
+        for name in super::SHARED_STD.lines().filter_map(|l| l.strip_prefix("fn ").and_then(|r| r.split('(').next())) {
+            let f = vm.bx.heap.value(shared, LiveId::from_str(name.trim()).into(), NoTrap);
+            assert!(!f.is_nil(), "mod.shared.{name}");
+        }
+        super::register_shared_std(&mut vm);
+        assert_eq!(vm.bx.heap.value(modules, id!(shared).into(), NoTrap).as_object(), Some(shared), "registered once");
+    }
+}
