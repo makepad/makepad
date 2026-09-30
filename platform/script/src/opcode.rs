@@ -14,6 +14,9 @@ impl OpcodeArgs {
 
     pub const NONE: Self = Self(0);
     pub const NIL: Self = Self(Self::TYPE_NIL);
+    /// FIELD's argument in the left operand of `??`: a missing field, or
+    /// a field of nil, reads as nil without an error.
+    pub const OPTIONAL_FIELD: Self = Self(Self::TYPE_NUMBER | 1);
 
     pub fn raw(&self) -> u32 {
         self.0
@@ -21,6 +24,11 @@ impl OpcodeArgs {
 
     pub fn from_u32(jump_to_next: u32) -> Self {
         Self(Self::TYPE_NUMBER | (jump_to_next & 0x0fff_ffff))
+    }
+
+    /// The arguments without the NEED_NIL and POP_TO_ME flags.
+    pub fn without_flags(self) -> Self {
+        Self(self.0 & !(Self::NEED_NIL_FLAG | Self::POP_TO_ME_FLAG))
     }
 
     pub fn set_need_nil(self) -> Self {

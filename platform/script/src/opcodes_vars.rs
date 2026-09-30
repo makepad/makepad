@@ -312,9 +312,32 @@ impl<'a> ScriptVm<'a> {
 
     // Field handlers
 
-    pub(crate) fn handle_field(&mut self) {
+    pub(crate) fn handle_field(&mut self, opargs: OpcodeArgs) {
         let field = self.bx.threads.cur().pop_stack_value();
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        if opargs.without_flags() == OpcodeArgs::OPTIONAL_FIELD {
+            // `a.b ?? d`: absent reads as nil, quietly.
+            let value = if let Some(obj) = object.as_object() {
+                self.bx.heap.value(obj, field, NoTrap)
+            } else if let Some(pod) = object.as_pod() {
+                self.bx.heap.pod_read_field(pod, field, &self.bx.code.builtins.pod, NoTrap)
+            } else if object.is_nil() || object.is_err() {
+                NIL
+            } else {
+                let field = field.as_id().unwrap_or(id!());
+                let type_index = object.value_type().to_redux();
+                let getter_ptr: *const dyn Fn(&mut ScriptVm, ScriptValue, LiveId) -> ScriptValue = {
+                    let native = self.bx.code.native.borrow();
+                    &*native.getters[type_index.to_index()] as *const _
+                };
+                // SAFETY: as in the plain read below
+                unsafe { (*getter_ptr)(self, object, field) }
+            };
+            let value = if value.is_err() { NIL } else { value };
+            self.bx.threads.cur().push_stack_unchecked(value);
+            self.bx.threads.cur().trap.goto_next();
+            return;
+        }
         if let Some(obj) = object.as_object() {
             let value = self
                 .bx

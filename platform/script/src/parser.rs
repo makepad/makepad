@@ -537,14 +537,14 @@ impl State {
     }
 
     fn is_short_circuit_op(op: LiveId) -> bool {
-        op == id!(&&) || op == id!(||) || op == id!(|?)
+        op == id!(&&) || op == id!(||) || op == id!(|?) || op == id!(??)
     }
 
     fn short_circuit_opcode(op: LiveId) -> Opcode {
         match op {
             id!(&&) => Opcode::LOGIC_AND_TEST,
             id!(||) => Opcode::LOGIC_OR_TEST,
-            id!(|?) => Opcode::NIL_OR_TEST,
+            id!(|?) | id!(??) => Opcode::NIL_OR_TEST,
             _ => Opcode::NOP,
         }
     }
@@ -592,7 +592,7 @@ impl State {
             id!(===) | id!(!==) | id!(==) | id!(!=) => 15,
             id!(is) => 15,
             id!(&&) => 16,
-            id!(||) | id!(|?) => 17,
+            id!(||) | id!(|?) | id!(??) => 17,
             id!(..) => 18,
             id!(:)
             | id!(:=)
@@ -729,7 +729,7 @@ impl State {
             // &&, ||, |? are handled specially for short-circuit evaluation
             id!(&&) => Opcode::LOGIC_AND_TEST,
             id!(||) => Opcode::LOGIC_OR_TEST,
-            id!(|?) => Opcode::NIL_OR_TEST,
+            id!(|?) | id!(??) => Opcode::NIL_OR_TEST,
             id!(:) => Opcode::ASSIGN_ME,
             id!(:=) => Opcode::ASSIGN_ME_VEC,
             id!(<:) => Opcode::ASSIGN_ME_BEFORE,
@@ -1323,6 +1323,20 @@ impl ScriptParser {
 
     fn code_last(&self) -> Option<&ScriptValue> {
         self.opcodes.last()
+    }
+
+    /// Mark the field reads ending the code emitted so far (`a.b.c` is
+    /// `a b FIELD c FIELD`) as optional reads: FIELD with the argument
+    /// [`OpcodeArgs::OPTIONAL_FIELD`].
+    fn quiet_trailing_field_reads(&mut self) {
+        let mut i = self.opcodes.len();
+        while i >= 2
+            && self.opcodes[i - 1] == Opcode::FIELD.into()
+            && self.opcodes[i - 2].is_id()
+        {
+            self.opcodes[i - 1].set_opcode_args(OpcodeArgs::OPTIONAL_FIELD);
+            i -= 2;
+        }
     }
 
     fn pop_code(&mut self) {
@@ -4509,6 +4523,13 @@ impl ScriptParser {
                         } else {
                             break;
                         }
+                    }
+
+                    // `a.b.c ?? d`: the field reads ending the left operand
+                    // are optional, a missing field (or a nil object) reads
+                    // as nil without an error, so `??` gives `d`.
+                    if op == id!(??) {
+                        self.quiet_trailing_field_reads();
                     }
 
                     // Emit the TEST opcode with placeholder jump

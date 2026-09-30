@@ -111,3 +111,35 @@ fn mod_call_is_modulo_and_mod_stays_the_modules() {
     // A local named mod is that local.
     assert_eq!(number("mod_shadow", "let mod = fn(a, b) { a + b }\nmod(1, 2)"), 3.0);
 }
+
+/// `a.b ?? d`: an optional field read. `??` was a parse error before
+/// ("Parser stuck on character Operator(?)") in every spelling, so no
+/// program that parsed changes meaning. It is `|?` (nil-or) whose left
+/// operand's trailing field reads are quiet: a missing field, or a field of
+/// nil, is nil without an error.
+#[test]
+fn optional_field_read() {
+    let o = "let o = {a: 1 n: nil f: false s: {c: 2}}\n";
+    for (name, expr, want) in [
+        ("missing", "o.b ?? 7", 7.0),
+        ("present", "o.a ?? 7", 1.0),
+        ("nil_field", "o.n ?? 5", 5.0),
+        ("chain_missing", "o.x.c ?? 9", 9.0),
+        ("chain_present", "o.s.c ?? 9", 2.0),
+        ("chain_tail_missing", "o.s.d ?? 9", 9.0),
+        ("then", "o.b ?? o.x ?? 8", 8.0),
+        ("precedence", "o.b ?? 3 + 4", 7.0),
+        ("in_fn", "let f = fn(x) { x.b ?? x.a }\nf(o)", 1.0),
+        ("plain", "let a = 3\na ?? 4", 3.0),
+        ("pod", "use mod.pod.*\nlet v = vec2(3, 4)\nv.y ?? 0", 4.0),
+        ("nospace", "o.b??6", 6.0),
+    ] {
+        assert_eq!(number(name, &format!("{o}{expr}")), want, "{name}");
+    }
+    // false is a value, not absent.
+    let (value, errs, _vm) = run("false", &format!("{o}o.f ?? 5"));
+    assert!(errs.is_empty() && value.as_bool() == Some(false), "{value:?} {errs:?}");
+    // Without `??` a missing field is still an error.
+    fails("plain_missing", &format!("{o}o.b"));
+    fails("nil_or_missing", &format!("{o}o.b |? 7"));
+}

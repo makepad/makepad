@@ -179,7 +179,7 @@ impl<'a> ScriptVm<'a> {
             }
 
             // Field
-            Opcode::FIELD => self.handle_field(),
+            Opcode::FIELD => self.handle_field(opargs),
             Opcode::FIELD_NIL => self.handle_field_nil(),
             Opcode::ME_FIELD => self.handle_me_field(),
             Opcode::PROTO_FIELD => self.handle_proto_field(),

@@ -154,6 +154,13 @@ colors such as `#x2ecc71` and `#x1e1e2e` where a digit followed by `e` or
 For Rust action enums, use `#[derive(Default)]` and `#[default]` on the
 default variant, not the old `DefaultNone` derive.
 
+In script functions, `a.b ?? d` reads an optional field: a missing field
+(or a field of nil) is `d`, where `a.b |? d` only replaces a nil value.
+`mod(a, b)` is the floored modulo of shading languages (the result takes
+b's sign); `mod` alone is still the module root, and `modf(a, b)` is the
+truncating remainder. `int(x)`, `i32`, `u32` and `f32` values index arrays
+and do arithmetic as the number they hold.
+
 ## Templates and lists
 
 Script objects distinguish ordinary `key: value` properties in their map
