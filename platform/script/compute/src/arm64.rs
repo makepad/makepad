@@ -118,6 +118,13 @@ impl Code {
         self.len == 0
     }
 
+    /// The machine code as instruction words (for disassembly and tests).
+    pub fn words(&self) -> &[u32] {
+        // SAFETY: the mapping holds `len` bytes of code, readable for the
+        // life of `self`.
+        unsafe { std::slice::from_raw_parts(self.ptr as *const u32, self.len / 4) }
+    }
+
     /// Runs the program. The caller guarantees the slice sizes the program
     /// was compiled for (checked by `AudioShader::run`) and n >= 1.
     ///
@@ -288,7 +295,10 @@ impl Liveness {
             if !repeats {
                 continue;
             }
-            let encloses_ref = r.at.iter().any(|p| *p > ls && *p < le);
+            // `at` is in walk order (ascending): the first reference past
+            // the loop's start decides whether one lies inside it.
+            let next = r.at.partition_point(|p| *p <= ls);
+            let encloses_ref = r.at.get(next).is_some_and(|p| *p < le);
             if !encloses_ref {
                 continue;
             }
@@ -329,7 +339,9 @@ pub(crate) fn allocate_with(p: &Program, class: impl Fn(Ent) -> usize, pools: &[
         let (s, t) = lv.interval(r);
         (s, t, *e)
     }).collect();
-    ivs.sort_by_key(|(s, e, ent)| (*s, *e, format!("{:?}", ent)));
+    // The entity's name breaks ties: formatted once per entity, not per
+    // comparison (a large kernel has thousands).
+    ivs.sort_by_cached_key(|(s, e, ent)| (*s, *e, format!("{:?}", ent)));
     let mut locs = std::collections::HashMap::new();
     let mut spill_bytes = 0u32;
     let new_slot = |spill: &mut u32, size: u32| {
