@@ -105,6 +105,11 @@ mod v {
         0x4F00_5400 | (32 + sh) << 16 | (n as u32) << 5 | d as u32
     }
     pub const UMAXV: u32 = 0x6EB0_A800;
+    /// smull vd.2d, vn.2s, vm.2s / smull2 (upper halves).
+    pub const SMULL: u32 = 0x0EA0_C000;
+    pub const SMULL2: u32 = 0x4EA0_C000;
+    pub const UZP2: u32 = 0x4E80_5800;
+    pub const CMLT0: u32 = 0x4EA0_A800;
     pub const DUP_W: u32 = 0x4E04_0C00;
     pub fn ins_w(d: u8, lane: u32, n: u8) -> u32 {
         0x4E00_1C00 | ((lane << 3) | 4) << 16 | (n as u32) << 5 | d as u32
@@ -121,6 +126,14 @@ mod v {
     /// ldr/str q, [xn, #imm] (imm a multiple of 16 below 65536).
     pub fn ldst_q(load: bool, t: u8, n: u8, off: u32) -> u32 {
         (if load { 0x3DC0_0000 } else { 0x3D80_0000 }) | (off / 16) << 10 | (n as u32) << 5 | t as u32
+    }
+    /// ld1 {vt.s}[lane], [xn], xm (post-index by xm).
+    pub fn ld1_lane_post(t: u8, lane: u32, n: u8, m: u8) -> u32 {
+        0x0DC0_8000 | (lane >> 1) << 30 | (m as u32) << 16 | (lane & 1) << 12 | (n as u32) << 5 | t as u32
+    }
+    /// st1 {vt.s}[lane], [xn], xm (post-index by xm).
+    pub fn st1_lane_post(t: u8, lane: u32, n: u8, m: u8) -> u32 {
+        0x0D80_8000 | (lane >> 1) << 30 | (m as u32) << 16 | (lane & 1) << 12 | (n as u32) << 5 | t as u32
     }
     /// ld1r {vt.4s}, [xn]
     pub fn ld1r(t: u8, n: u8) -> u32 {
@@ -686,6 +699,46 @@ impl Em {
         }
     }
 
+    /// For an offset whose lanes are `o + l * step` (step > 1): branches to
+    /// `slow` unless every lane's word lies inside the buffer; else x9 = the
+    /// address of lane 0's word and x13 = step * 4 (the four lanes are then
+    /// one lane load or store each, post-indexed). Needs buf_regs.
+    fn strided_or(&mut self, base: u32, ro: u8, step: u32, slow: usize) {
+        self.e(v::umov_w(12, ro, 0));
+        // The last lane's word, in 64 bits: lanes increase, so the last one
+        // inside means all are (a lane that wrapped 32 bits is past any
+        // buffer and takes the slow path).
+        let span = base as u64 + 3 * step as u64;
+        if span > i32::MAX as u64 {
+            self.jump(Fix::B, 0x1400_0000, slow);
+            return;
+        }
+        if span < 4096 {
+            self.e(add_xi(13, 12, span as u32));
+        } else {
+            self.mov_imm(13, span as u32);
+            self.e(add_x(13, 12, 13));
+        }
+        self.e(cmp_x(13, 11));
+        self.jump(Fix::BCond, 0x5400_0000 | 8, slow);
+        if base > 0 {
+            if base < 4096 {
+                self.e(add_xi(12, 12, base));
+            } else {
+                self.mov_imm(13, base);
+                self.e(add_x(12, 12, 13));
+            }
+        }
+        self.e(add_x_lsl(9, 10, 12, 2));
+        self.mov_imm(13, step * 4);
+    }
+
+    /// A proven step (lanes `o + l * step`) of a varying offset, step > 1.
+    fn stride_of(&self, off: Option<Val>) -> Option<u32> {
+        let s = self.step[off?.0 as usize]?;
+        (s > 1 && s <= 1 << 16).then_some(s as u32)
+    }
+
     fn load(&mut self, dst: Ent, region: Region, base: u32, extent: u32, off: Option<Val>) {
         let d = self.dst(dst);
         let uniform = off.is_none_or(|o| self.uniform(o));
@@ -706,6 +759,13 @@ impl Em {
                         self.contiguous_or(base, ro, 1, slow);
                         self.e(add_x_lsl(9, 10, 12, 2));
                         self.e(v::ldst_q(true, VS2, 9, 0));
+                        self.jump(Fix::B, 0x1400_0000, end);
+                    } else if let Some(st) = self.stride_of(off) {
+                        // Records `st` words apart, all inside: a lane load each.
+                        self.strided_or(base, ro, st, slow);
+                        for l in 0..4 {
+                            self.e(v::ld1_lane_post(VS2, l, 9, 13));
+                        }
                         self.jump(Fix::B, 0x1400_0000, end);
                     }
                     self.bind(slow);
@@ -817,6 +877,16 @@ impl Em {
                         self.contiguous_or(base, ro.unwrap(), 1, slow);
                         self.e(add_x_lsl(9, 10, 12, 2));
                         self.store_q(rv, 9);
+                        self.jump(Fix::B, 0x1400_0000, end);
+                        self.bind(slow);
+                    } else if let (false, true, Some(st)) = (uniform, self.full, self.stride_of(off)) {
+                        // Records `st` words apart, all inside, every lane
+                        // running: a lane store each, in lane order.
+                        let slow = self.label();
+                        self.strided_or(base, ro.unwrap(), st, slow);
+                        for l in 0..4 {
+                            self.e(v::st1_lane_post(rv, l, 9, 13));
+                        }
                         self.jump(Fix::B, 0x1400_0000, end);
                         self.bind(slow);
                     }
@@ -1140,6 +1210,20 @@ impl Em {
                         self.done(dst, d);
                         return;
                     }
+                    Bin::DivI | Bin::RemI if self.consts[y.0 as usize].is_some_and(|c| c > 1) => {
+                        // By a constant: the magic multiplier (as SDIV rounds).
+                        let c = self.consts[y.0 as usize].unwrap() as u32;
+                        self.magic_div(rx, c);
+                        if b == Bin::RemI {
+                            self.splat(VS1, c);
+                            self.e(v::r3(v::MUL, VS2, VS2, VS1));
+                            self.e(v::r3(v::SUB, VS2, rx, VS2));
+                        }
+                        let d = self.dst(dst);
+                        self.e(v::mov(d, VS2));
+                        self.done(dst, d);
+                        return;
+                    }
                     Bin::DivI | Bin::RemI => {
                         for l in 0..4 {
                             self.e(v::umov_w(10, rx, l));
@@ -1255,6 +1339,18 @@ impl Em {
                     let d = self.dst(dst);
                     self.e(v::r3(v::AND, d, rx, VS2));
                     self.done(dst, d);
+                } else if len < 1 << 31 {
+                    // q = x / len by the magic multiplier (as SDIV rounds),
+                    // r = x - q * len, then r < 0 ? r + len : r.
+                    self.magic_div(rx, len);
+                    self.splat(VS1, len);
+                    self.e(v::r3(v::MUL, VS2, VS2, VS1));
+                    self.e(v::r3(v::SUB, VS2, rx, VS2));
+                    let d = self.dst(dst);
+                    self.e(v::r2(v::CMLT0, d, VS2));
+                    self.e(v::r3(v::AND, d, d, VS1));
+                    self.e(v::r3(v::ADD, d, VS2, d));
+                    self.done(dst, d);
                 } else {
                     // r = x - (x / len) * len; r < 0 ? r + len : r
                     self.mov_imm(11, len);
@@ -1286,6 +1382,24 @@ impl Em {
             }
             Op::ConstD(_) | Op::CmpD(..) | Op::In { .. } => unreachable!("declined"),
         }
+    }
+
+    /// VS2 = x / d per lane (truncating, as SDIV) for a constant d in
+    /// 2..2^31, by the magic multiplier; `rx` is kept (clobbers VS1).
+    fn magic_div(&mut self, rx: u8, d: u32) {
+        let (m, sh) = crate::ir::magic_s32(d);
+        self.splat(VS1, m as u32);
+        self.e(v::r3(v::SMULL, VS2, rx, VS1));
+        self.e(v::r3(v::SMULL2, VS1, rx, VS1));
+        self.e(v::r3(v::UZP2, VS2, VS2, VS1));
+        if m < 0 {
+            self.e(v::r3(v::ADD, VS2, VS2, rx));
+        }
+        if sh > 0 {
+            self.e(v::sshr(VS2, VS2, sh));
+        }
+        self.e(v::ushr(VS1, rx, 31));
+        self.e(v::r3(v::ADD, VS2, VS2, VS1));
     }
 
     fn konst(&mut self, dst: Ent, bits: u32) {

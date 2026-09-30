@@ -1171,6 +1171,21 @@ impl<'a> Emit<'a> {
                 if len.is_power_of_two() {
                     self.mov_imm(XS1, len - 1);
                     self.e(AND | (XS1 as u32) << 16 | (rx as u32) << 5 | d as u32);
+                } else if len < 1 << 31 {
+                    // q = x / len by the magic multiplier (as SDIV rounds),
+                    // r = x - q * len, then r < 0 ? r + len : r.
+                    let rx = if rx == XS0 || rx == XS1 {
+                        self.e(mov(XS2, rx));
+                        XS2
+                    } else {
+                        rx
+                    };
+                    self.magic_div(rx, len);
+                    self.mov_imm(XS1, len);
+                    self.e(0x1B00_8000 | (XS1 as u32) << 16 | (rx as u32) << 10 | (XS0 as u32) << 5 | XS0 as u32);
+                    self.e(ADD | (XS0 as u32) << 16 | (XS1 as u32) << 5 | XS1 as u32);
+                    self.e(cmp_imm(XS0, 0));
+                    self.e(csel(d, XS1, XS0, LT));
                 } else {
                     // r = x - (x / len) * len (x parked in s29).
                     self.e(fp2(FMOV_SW, FS2, rx));
@@ -1231,6 +1246,24 @@ impl<'a> Emit<'a> {
     }
 
     /// x(d) = a 64-bit immediate.
+    /// w16 = x / d (truncating, as SDIV) for a constant d in 2..2^31, by
+    /// the magic multiplier; `rx` is not x16 or x17 (clobbers x17).
+    fn magic_div(&mut self, rx: u8, d: u32) {
+        let (m, sh) = crate::ir::magic_s32(d);
+        self.mov_imm(XS1, m as u32);
+        // smull x16, w(rx), w17; asr x16, x16, #32
+        self.e(0x9B20_7C00 | (XS1 as u32) << 16 | (rx as u32) << 5 | XS0 as u32);
+        self.e(0x9360_FC00 | (XS0 as u32) << 5 | XS0 as u32);
+        if m < 0 {
+            self.e(ADD | (rx as u32) << 16 | (XS0 as u32) << 5 | XS0 as u32);
+        }
+        if sh > 0 {
+            self.e(0x1300_7C00 | sh << 16 | (XS0 as u32) << 5 | XS0 as u32);
+        }
+        // add w16, w16, w(rx), lsr #31
+        self.e(0x0B40_7C00 | (rx as u32) << 16 | (XS0 as u32) << 5 | XS0 as u32);
+    }
+
     fn mov_imm64(&mut self, d: u8, v: u64) {
         self.e(0xD280_0000 | ((v & 0xFFFF) as u32) << 5 | d as u32);
         for hw in 1..4u32 {

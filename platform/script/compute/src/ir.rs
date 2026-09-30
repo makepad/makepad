@@ -497,6 +497,50 @@ pub fn eval_wrap(x: u32, len: u32) -> u32 {
     }
 }
 
+/// The signed magic multiplier and shift for division by a constant
+/// `d` in 2..2^31 (Hacker's Delight 10-1): `x / d` (truncating) is
+/// `q = mulhi(m, x) (+ x when m < 0); q >>= s (arithmetic); q + (x >>> 31)`.
+/// The backends use it for `Wrap` and integer division by constants.
+pub fn magic_s32(d: u32) -> (i32, u32) {
+    debug_assert!((2..1 << 31).contains(&d));
+    let two31: u32 = 1 << 31;
+    let anc = two31 - 1 - two31 % d;
+    let mut p = 31u32;
+    let (mut q1, mut r1) = (two31 / anc, two31 - (two31 / anc) * anc);
+    let (mut q2, mut r2) = (two31 / d, two31 - (two31 / d) * d);
+    loop {
+        p += 1;
+        q1 = q1.wrapping_mul(2);
+        r1 = r1.wrapping_mul(2);
+        if r1 >= anc {
+            q1 = q1.wrapping_add(1);
+            r1 = r1.wrapping_sub(anc);
+        }
+        q2 = q2.wrapping_mul(2);
+        r2 = r2.wrapping_mul(2);
+        if r2 >= d {
+            q2 = q2.wrapping_add(1);
+            r2 = r2.wrapping_sub(d);
+        }
+        let delta = d - r2;
+        if !(q1 < delta || (q1 == delta && r1 == 0)) {
+            break;
+        }
+    }
+    (q2.wrapping_add(1) as i32, p - 32)
+}
+
+/// `x / d` by [`magic_s32`] (the backends' sequence, for tests).
+pub fn div_by_magic(x: i32, d: u32) -> i32 {
+    let (m, s) = magic_s32(d);
+    let mut q = ((x as i64 * m as i64) >> 32) as i32;
+    if m < 0 {
+        q = q.wrapping_add(x);
+    }
+    q >>= s;
+    q + ((x as u32) >> 31) as i32
+}
+
 #[inline(always)]
 pub fn clamp_off(off: u32, extent: u32) -> u32 {
     off.min(extent.saturating_sub(1))
@@ -1121,4 +1165,32 @@ pub fn op_ty(p: &Program, op: &Op) -> Option<Ty> {
         Op::In { .. } => Ty::F32,
         Op::Load { .. } => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn magic_division_is_exact() {
+        let mut r = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = || {
+            r ^= r << 13;
+            r ^= r >> 7;
+            r ^= r << 17;
+            r
+        };
+        let mut ds: Vec<u32> = (2..2000).collect();
+        ds.extend([1505, 140049, 28476, 1582, 0x7FFF_FFFF, 0x4000_0001, 3, 7, 641, 65537]);
+        for _ in 0..2000 {
+            ds.push(2 + (next() as u32 % 0x7FFF_FFFE));
+        }
+        let edge = [0, 1, -1, i32::MAX, i32::MIN, i32::MIN + 1, i32::MAX - 1];
+        for d in ds {
+            for k in 0..300 {
+                let x = if k < edge.len() { edge[k] } else { next() as u32 as i32 };
+                for x in [x, x / 1000, x % 5000] {
+                    assert_eq!(super::div_by_magic(x, d), x.wrapping_div(d as i32), "{} / {}", x, d);
+                }
+            }
+        }
+    }
 }

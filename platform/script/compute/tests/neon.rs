@@ -126,7 +126,7 @@ impl Gen<'_> {
                     }
                     2 => {
                         let a = self.pick(b, Ty::I32);
-                        let len = [1u32, 2, 3, 5, 8, 7, 1000, 1 << 20][self.r.below(8) as usize];
+                        let len = [1u32, 2, 3, 5, 8, 7, 1000, 1 << 20, 1505, 0x7FFF_FFFF, 0x8000_0001, 641][self.r.below(12) as usize];
                         Op::Wrap(a, len)
                     }
                     3 => {
