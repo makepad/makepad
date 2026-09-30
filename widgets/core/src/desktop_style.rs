@@ -157,6 +157,10 @@ pub struct SheetEntry {
     /// The cargo manifest directory the sheet's `crate_resource("self:...")`
     /// resolves against: the crate that owns the fonts and images it names.
     pub resources: fn() -> &'static str,
+    /// A script module the sheet brings with it, registered before its widget
+    /// half evaluates: a shader library its rules call that the widget
+    /// library does not carry. None for a sheet that needs only the library's.
+    pub script_mod: Option<fn(&mut ScriptVm)>,
 }
 
 impl SheetEntry {
@@ -194,6 +198,20 @@ macro_rules! sheet_entry {
             widgets: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir, "/", $id, "/widgets.splash")),
             source_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir),
             resources: $resources,
+            script_mod: None,
+        }
+    };
+    (dir: $dir:literal, id: $id:literal, label: $label:literal, family: $family:expr, dark: $dark:expr, resources: $resources:expr, script_mod: $script_mod:expr $(,)?) => {
+        $crate::desktop_style::SheetEntry {
+            id: $id,
+            label: $label,
+            family: $family,
+            dark: $dark,
+            theme: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir, "/", $id, "/theme.splash")),
+            widgets: include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir, "/", $id, "/widgets.splash")),
+            source_dir: concat!(env!("CARGO_MANIFEST_DIR"), "/", $dir),
+            resources: $resources,
+            script_mod: Some($script_mod),
         }
     };
 }
@@ -464,6 +482,13 @@ pub fn apply_theme(vm: &mut ScriptVm) {
 }
 pub fn apply_widgets(vm: &mut ScriptVm) {
     if let Some(sheet) = current(vm) {
+        // The module a sheet brings with it comes from its catalogue entry: a
+        // sheet that travels as a value (a hosted app's) has no function in
+        // it, so a sheet with its own module needs its crate registered in
+        // every process that runs it.
+        if let Some(script_mod) = find(&sheet.name).and_then(|entry| entry.script_mod) {
+            script_mod(vm);
+        }
         let code = without_unregistered_widgets(vm, &sheet.widgets);
         evaluate(vm, &sheet, "widgets", code);
     }
