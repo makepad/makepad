@@ -658,11 +658,14 @@ impl Renderer {
         }
         let mut triangles = 0usize;
         let mut fur_budget = 0usize;
-        let mut submit = |draw: &mut ModelDraw<'_>, cx: &mut Cx3d, m: &LoadedModel, scene: usize, transform: Mat4f, tint: Vec4f, dither: f32| {
+        // Draws layers `layers` of `m` at one placement.
+        let mut submit = |draw: &mut ModelDraw<'_>, cx: &mut Cx3d, m: &LoadedModel, layers: std::ops::Range<usize>, transform: Mat4f, tint: Vec4f, dither: f32| {
             draw.base().transform = transform;
             draw.base().tint = tint;
             draw.base().color_adjust_ctl = vec4(0.0, 1.0, 1.0, dither);
-            let mut layers = |g: &std::rc::Rc<Geometry>, t: &Texture, d: &Texture, s: [f32; 2], mat: &LayerMaterial, draw: &mut ModelDraw<'_>, cx: &mut Cx3d| {
+            let all = std::iter::once((&m.geometry, &m.texture, &m.detail, m.detail_scale, &m.material))
+                .chain(m.extra_draws.iter().map(|(g, t, d, s, mat)| (g, t, d, *s, mat)));
+            for (g, t, d, s, mat) in all.skip(layers.start).take(layers.len()) {
                 draw.base().draw_vars.geometry_id = Some(g.geometry_id());
                 draw.base().draw_vars.set_texture(0, t);
                 draw.base().draw_vars.set_texture(5, d);
@@ -670,10 +673,7 @@ impl Renderer {
                 draw.set_material(cx.cx, mat);
                 let cut = dither > 0.5 || mat.cutout;
                 draw.submit_as(cx, 0.0, &mut fur_budget, opaque.filter(|_| !cut));
-            };
-            layers(&m.geometry, &m.texture, &m.detail, m.detail_scale, &m.material, draw, cx);
-            for (g, t, d, s, mat) in m.extra_draws.iter().take(scene.saturating_sub(1)) { layers(g, t, d, *s, mat, draw, cx); }
-            triangles += m.triangles;
+            }
         };
         for &(piece, dither, _) in &st.draw_list {
             let slot = match piece {
@@ -682,10 +682,28 @@ impl Renderer {
                 StreamPiece::Cell(i) => &st.cell[i as usize],
                 StreamPiece::Prop(_) => continue,
             };
-            if let Some((m, scene)) = slot.scene() { submit(draw, cx, m, scene, Mat4f::identity(), vec4(1.0, 1.0, 1.0, glow), dither); }
+            if let Some((m, scene)) = slot.scene() {
+                submit(draw, cx, m, 0..scene, Mat4f::identity(), vec4(1.0, 1.0, 1.0, glow), dither);
+                triangles += m.triangles;
+            }
         }
-        for (kind, transform, tint, dither) in &st.prop_list {
-            if let Some((m, scene)) = st.prop_models.get(*kind as usize).and_then(Slot::scene) { submit(draw, cx, m, scene, *transform, *tint, *dither); }
+        // Props, a kind at a time and layer-major within it: every copy's
+        // first layer, then every copy's second. Copy by copy, a
+        // multi-layer prop alternated geometries and each layer of each
+        // copy was its own draw call.
+        let mut group = 0;
+        while group < st.prop_list.len() {
+            let kind = st.prop_list[group].0;
+            let end = group + st.prop_list[group..].iter().take_while(|p| p.0 == kind).count();
+            if let Some((m, scene)) = st.prop_models.get(kind as usize).and_then(Slot::scene) {
+                for layer in 0..scene {
+                    for (_, transform, tint, dither) in &st.prop_list[group..end] {
+                        submit(draw, cx, m, layer..layer + 1, *transform, *tint, *dither);
+                    }
+                }
+                triangles += m.triangles * (end - group);
+            }
+            group = end;
         }
         drop(submit);
         draw.base().color_adjust_ctl = vec4(0.0, 1.0, 1.0, 0.0);
