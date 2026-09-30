@@ -52,7 +52,9 @@ pub fn plan(desc: &MaterialDesc, hooks: &HookSet) -> Result<VariantPlan, Materia
     }
     let mut builtins = Vec::new();
     if unlit {
-        builtins.push(Builtin::Unlit);
+        // The Unlit kind's params carry its stops; a lit base drawn unlit
+        // keeps its params for the hooks.
+        builtins.push(if desc.kind == BaseKind::Unlit { Builtin::Unlit } else { Builtin::Flat });
     } else {
         if lit_hooks {
             builtins.push(Builtin::HookedCompose);
@@ -113,5 +115,7 @@ mod tests {
         let unlit = MaterialDesc { kind: BaseKind::Unlit, ibl: true, ..Default::default() };
         assert_eq!(plan(&unlit, &HookSet::new()).unwrap().builtins, vec![Builtin::Unlit], "unlit takes no IBL");
         assert!(plan(&unlit, &hooks(&[Hook::Lighting])).is_err());
+        let flat = MaterialDesc { lighting: LightingModel::Unlit, ..Default::default() };
+        assert_eq!(plan(&flat, &hooks(&[Hook::Surface])).unwrap().builtins, vec![Builtin::Flat], "a lit base drawn unlit keeps its params");
     }
 }

@@ -542,9 +542,13 @@ impl Renderer {
         lane: WorldModelLane, fog: (Vec3f, f32), sun: &SunLight,
         frustum: Option<&Frustum>, stats: &mut RenderStats,
     ) {
-        let names: Vec<String> = self.custom_draws.keys().filter(|name| {
+        // Blended programs after every opaque one (they neither write depth
+        // nor hide what is behind them), each group in name order.
+        let mut names: Vec<(bool, String)> = self.custom_draws.iter().filter(|(name, _)| {
             instances.iter().any(|i| i.custom_material.as_ref().is_some_and(|m| &m.name == *name))
-        }).cloned().collect();
+        }).map(|(name, m)| (m.draw.draw_vars.options.alpha_blend, name.clone())).collect();
+        names.sort();
+        let names = names.into_iter().map(|(_, name)| name);
         for name in names {
             let Some(mut draw) = self.custom_draws.remove(&name) else { continue; };
             self.draw_models_inner(cx, ModelDraw::Custom(&name, &mut draw), eye,

@@ -115,8 +115,12 @@ script_mod! {
 pub enum Builtin {
     /// Route the sun and the sums through `light` / `lighting`.
     HookedCompose,
-    /// The Unlit kind.
+    /// The Unlit kind: the base colour lifted by the host's stops
+    /// (`params.w`).
     Unlit,
+    /// Unlit lighting on a program whose `params` are the author's: the
+    /// surface colour as it is.
+    Flat,
     /// The error material (surface and composition).
     Error,
     /// Image-based lighting from the atlas in `detail_map`.
@@ -143,6 +147,7 @@ pub fn overrides(vm: &mut ScriptVm, builtin: Builtin) -> Vec<(LiveId, ScriptObje
     let pairs: Vec<(LiveId, Option<ScriptObject>)> = match builtin {
         Builtin::HookedCompose => vec![(id!(mat_compose), f(script_eval!(vm, { mod.draw.mat_compose_hooked })))],
         Builtin::Unlit => vec![(id!(mat_compose), f(script_eval!(vm, { mod.draw.mat_compose_unlit })))],
+        Builtin::Flat => vec![(id!(mat_compose), f(script_eval!(vm, { mod.draw.mat_compose_flat })))],
         Builtin::Error => vec![
             (id!(surface), f(script_eval!(vm, { mod.draw.mat_error_surface }))),
             (id!(mat_compose), f(script_eval!(vm, { mod.draw.mat_compose_flat }))),

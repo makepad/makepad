@@ -180,7 +180,9 @@ impl Renderer {
     /// pipeline: until then those items draw through the stock lane, so a
     /// locked-time host waits for this before it takes the frame.
     pub fn items_ready(&self, cx: &Cx) -> bool {
-        self.items.used_custom.iter().all(|name| self.custom_material_shader(name).is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output)))
+        // A material that is not installed (it did not build) draws through
+        // the stock lane for good: nothing to wait for.
+        self.items.used_custom.iter().all(|name| self.custom_material_shader(name).is_none_or(|id| cx.draw_shader_ready(id, self.hdr_output)))
     }
 
     /// Items the model lanes skipped last frame (lines, points, cards,
