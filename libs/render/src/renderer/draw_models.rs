@@ -471,7 +471,7 @@ impl Renderer {
                     draw.base().draw_vars.set_texture(5, detail);
                     draw.base().detail_st = vec2f(dscale[0], dscale[1]);
                     // An IBL material reads its environment on the detail slot.
-                    if let (ModelDraw::Custom(_, m), Some(t)) = (&mut draw, self.ibl_texture()) { if m.ibl { m.draw.draw_vars.set_texture(5, t); } }
+                    if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
                     draw.base().prelit = if prelit { 1.0 } else { 0.0 };
                     draw.set_material(cx.cx, material);
                     // A far stand-in's cards in the foliage lane skip the
@@ -564,7 +564,7 @@ impl Renderer {
                         draw.base().draw_vars.set_texture(5, detail);
                         draw.base().detail_st = vec2f(dscale[0], dscale[1]);
                         // An IBL material reads its environment on the detail slot.
-                        if let (ModelDraw::Custom(_, m), Some(t)) = (&mut draw, self.ibl_texture()) { if m.ibl { m.draw.draw_vars.set_texture(5, t); } }
+                        if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
                         draw.base().prelit = if prelit { 1.0 } else { 0.0 };
                         draw.set_material(cx.cx, material);
                         stats.fur_triangles += draw.submit(cx, distance, &mut fur_budget);

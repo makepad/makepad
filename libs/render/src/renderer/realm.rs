@@ -522,6 +522,15 @@ impl Renderer {
         true
     }
 
+    /// Bind `texture` on the `detail_map` of the custom material `name`
+    /// (the program samples it as `self.detail_map`: a planar reflection, a
+    /// screen) until changed; `None` unbinds it. It replaces the IBL there.
+    pub fn set_custom_material_texture(&mut self, name: &str, texture: Option<Texture>) {
+        if let Some(m) = self.custom_draws.get_mut(name) {
+            m.texture = texture;
+        }
+    }
+
     /// Install the error material (hatched magenta) under `name`: what a
     /// preview shows for a material that did not compile. A host that
     /// keeps the last good material instead (Sandbox) never calls this.

@@ -154,6 +154,9 @@ pub struct CustomMaterial {
     pub bounds_pad: f32,
     /// The program samples the IBL texture (bind it on `detail_map`).
     pub ibl: bool,
+    /// A texture the host binds on `detail_map` for this program (a
+    /// planar reflection, a screen): wins over the IBL.
+    pub texture: Option<Texture>,
     /// Problems that did not stop the colour program (a caster that did not
     /// compile casts the stock shadow instead).
     pub warnings: Vec<material::Diagnostic>,
@@ -171,6 +174,7 @@ impl From<DrawSceneCustom> for CustomMaterial {
             cutoff: 0.0,
             bounds_pad: 0.0,
             ibl: false,
+            texture: None,
             warnings: Vec::new(),
         }
     }
@@ -282,6 +286,7 @@ impl DrawSceneCustom {
         Ok(CustomMaterial {
             draw,
             ibl: plan.builtins.contains(&Builtin::Ibl),
+            texture: None,
             plan,
             opaque_variant,
             shadow,
