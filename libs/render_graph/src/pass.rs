@@ -105,7 +105,7 @@ pub struct OutputDecl {
 /// A slot name must be a plain identifier; the standard block's names are
 /// taken.
 pub fn check_ident(name: &str) -> Result<(), String> {
-    const TAKEN: &[&str] = &["uv", "texel", "size", "aspect", "time", "frame", "ss_tap", "exposure", "luma", "hash", "frame_hash", "to_srgb", "from_srgb", "view_depth", "history_ready", "g_cam", "eye", "ray_dir", "view_distance", "g_ivp0", "g_ivp1", "g_ivp2", "g_ivp3", "g_eye", "g_fwd", "pixel", "vertex", "pos", "world", "geom", "draw_call", "draw_pass", "draw_list", "g_frame", "g_size", "g_misc", "color_format", "depth_clip"];
+    const TAKEN: &[&str] = &["uv", "texel", "size", "aspect", "time", "frame", "ss_tap", "exposure", "luma", "hash", "frame_hash", "to_srgb", "from_srgb", "view_depth", "history_ready", "g_cam", "eye", "ray_dir", "view_distance", "g_ivp0", "g_ivp1", "g_ivp2", "g_ivp3", "g_eye", "g_fwd", "g_pvp0", "g_pvp1", "g_pvp2", "g_pvp3", "world_at", "prev_uv", "pixel", "vertex", "pos", "world", "geom", "draw_call", "draw_pass", "draw_list", "g_frame", "g_size", "g_misc", "color_format", "depth_clip"];
     let ok = !name.is_empty()
         && name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')

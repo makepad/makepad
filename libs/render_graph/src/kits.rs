@@ -32,6 +32,7 @@ pub const KITS: &[KitDef] = &[
     KitDef { name: "DepthOfField", kind: "dof", params: &["focus", "aperture", "max_blur"] },
     KitDef { name: "Outline", kind: "outline", params: &["color", "thickness", "threshold"] },
     KitDef { name: "Upsample", kind: "upsample", params: &["src", "depth", "guide", "guide_view", "sigma"] },
+    KitDef { name: "VelocityBlur", kind: "velocity_blur", params: &["amount", "samples"] },
 ];
 
 pub fn kit(kind: &str) -> Option<&'static KitDef> {
@@ -365,6 +366,53 @@ $M.kit_upsample = fn(p) {
                     return c
                 }
                 return up + c * (1.0 - clamp(up.w, 0.0, 1.0))
+            }"}
+    ]
+}
+"##),
+    ("velocity_blur", r##"
+// ---------------------------------------------------------------- VelocityBlur
+// Realtime motion blur from the camera's motion: each pixel's world point
+// (from @depth) projected with last frame's camera gives its screen motion,
+// and the colour is averaged along it over the open shutter (`amount`: the
+// shutter's fraction of a frame, 0.5 for 180 degrees). The camera's motion
+// only (an object moving on its own is not smeared); locked time sums
+// sub-frames instead. Needs the host's camera and @depth.
+$M.VelocityBlur = $M.VelocityBlur{amount: 0.5 samples: 12}
+$M.kit_velocity_blur = fn(p) {
+    return [
+        {at: @hdr reads: [@color, @depth] uniforms: {amount: p.amount taps: p.samples}
+            pixel: "fn() -> vec4 {
+                let uv = self.uv()
+                // The pixel's motion, or a neighbour's when that is longer
+                // (a moving edge smears over what is behind it: the motion
+                // is dilated over 8 px).
+                let r = self.texel() * 8.0
+                var v = vec2(0.0, 0.0)
+                for k in 0..9 {
+                    let o = vec2(float(k % 3) - 1.0, float(k / 3) - 1.0) * r
+                    let q = uv + o
+                    let w = self.world_at(q, self.depth.sample_nearest(q).x)
+                    let vk = (q - self.prev_uv(w)) * self.amount
+                    if dot(vk, vk) > dot(v, v) {
+                        v = vk
+                    }
+                }
+                // At most a tenth of the frame per shutter (a cut is not a
+                // smear).
+                let l = length(v)
+                if l > 0.1 {
+                    v = v * (0.1 / l)
+                }
+                let n = clamp(self.taps, 2.0, 32.0)
+                var sum = vec4(0.0, 0.0, 0.0, 0.0)
+                for k in 0..32 {
+                    if float(k) < n {
+                        let f = (float(k) + 0.5) / n - 0.5
+                        sum = sum + self.color.sample(uv - v * f)
+                    }
+                }
+                return sum / n
             }"}
     ]
 }

@@ -57,6 +57,9 @@ pub struct PassView {
     pub inv_view_proj: [f32; 16],
     pub eye: [f32; 3],
     pub forward: [f32; 3],
+    /// Last frame's projection x view (realtime velocity: where a point was
+    /// on screen a frame ago); the current one when there is none.
+    pub prev_view_proj: [f32; 16],
 }
 /// The frame's standard-block values.
 #[derive(Clone, Copy, Debug, Default)]
@@ -426,6 +429,11 @@ impl GraphRunner {
                 dv.set_uniform(cx.cx, live_id!(g_ivp3), &[m[3], m[7], m[11], m[15]]);
                 dv.set_uniform(cx.cx, live_id!(g_eye), &[v.eye[0], v.eye[1], v.eye[2], 1.0]);
                 dv.set_uniform(cx.cx, live_id!(g_fwd), &[v.forward[0], v.forward[1], v.forward[2], 0.0]);
+                let p = &v.prev_view_proj;
+                dv.set_uniform(cx.cx, live_id!(g_pvp0), &[p[0], p[4], p[8], p[12]]);
+                dv.set_uniform(cx.cx, live_id!(g_pvp1), &[p[1], p[5], p[9], p[13]]);
+                dv.set_uniform(cx.cx, live_id!(g_pvp2), &[p[2], p[6], p[10], p[14]]);
+                dv.set_uniform(cx.cx, live_id!(g_pvp3), &[p[3], p[7], p[11], p[15]]);
             }
             if let Some(vals) = values.get(p.node) {
                 for (u, v) in decl.uniforms.iter().zip(vals.iter()) {
