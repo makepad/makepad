@@ -1,12 +1,11 @@
-//! The five game draw shaders, moved verbatim from gamemaker's game_view.rs.
-//! DrawSceneTexture composites the offscreen 3D pass into the host pane; the
+//! The game draw shaders, moved verbatim from gamemaker's game_view.rs.
+//! The composite into the host pane (DrawSceneTexture) is makepad-render-graph's; the
 //! cube/alpha/sky/terrain family renders the world itself.
 
 use makepad_draw::*;
 
 mod mixins;
 mod csm;
-mod composite;
 mod cube;
 mod effects;
 mod sky_dome;
@@ -26,7 +25,6 @@ mod lm_encode;
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     mixins::script_mod(vm);
     csm::script_mod(vm);
-    composite::script_mod(vm);
     cube::script_mod(vm);
     effects::script_mod(vm);
     sky_dome::script_mod(vm);
@@ -47,7 +45,6 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
 pub(crate) const SHADER_SOURCE: &str = concat!(
     include_str!("shaders/mixins.rs"),
     include_str!("shaders/csm.rs"),
-    include_str!("shaders/composite.rs"),
     include_str!("shaders/cube.rs"),
     include_str!("shaders/effects.rs"),
     include_str!("shaders/sky_dome.rs"),
@@ -59,37 +56,6 @@ pub(crate) const SHADER_SOURCE: &str = concat!(
     include_str!("shaders/lm_gather.rs"),
     include_str!("shaders/lm_encode.rs"),
 );
-
-#[derive(Script, ScriptHook, Debug)]
-#[repr(C)]
-pub struct DrawSceneTexture {
-    #[deref]
-    pub draw_super: DrawQuad,
-    /// The composite's post chain, set by the host from
-    /// [`crate::Renderer::composite_post`]: x = 1 when the scene texture is
-    /// linear HDR (exposure + tone map + sRGB encode here), y = exposure,
-    /// z = 1 for FXAA, w unused. All zero (the default) is the plain blit.
-    #[live(vec4(0.0, 1.0, 0.0, 0.0))]
-    pub post: Vec4f,
-    /// One scene-texture texel in uv (1/width, 1/height), for FXAA.
-    #[live(vec2(0.001, 0.001))]
-    pub texel: Vec2f,
-    /// HDR post, set from [`crate::Renderer::composite_post2`]: x = bloom
-    /// share, y = auto-exposure key, z = auto-exposure floor as a factor of
-    /// the metered exposure, w = bloom level normalisation.
-    #[live(vec4(0.0, 0.18, 0.5, 1.0))]
-    pub post2: Vec4f,
-    /// The game's grade, from [`crate::Renderer::set_grade`]: x = contrast,
-    /// y = saturation, z = auto-exposure ceiling as a factor of the metered
-    /// exposure, w = exposure bias factor. The default is the stock look.
-    #[live(vec4(1.0, 1.0, 1.6, 1.0))]
-    pub grade: Vec4f,
-    /// Tilt-shift: x = strength (0 = off), y = the sharp band's centre in
-    /// uv (0 = top), z = its half-height. Needs the bloom texture (the
-    /// blurred image it softens toward).
-    #[live(vec4(0.0, 0.6, 0.2, 0.0))]
-    pub tilt: Vec4f,
-}
 
 /// DrawCube + per-instance emission (`glow`) and per-instance fog density.
 ///

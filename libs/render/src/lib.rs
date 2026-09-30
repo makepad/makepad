@@ -40,7 +40,6 @@ pub mod model;
 pub mod material_surface;
 pub mod texture_pack;
 pub use makepad_texcomp;
-pub mod post;
 pub mod renderer;
 pub mod scene;
 pub mod shaders;
@@ -82,7 +81,6 @@ pub use preview::*;
 pub use shadow::*;
 pub use shadow_mesh::*;
 pub use ssao::*;
-pub use post::BloomPass;
 pub use smoke::SmokeVolume;
 pub use sun::*;
 // `sun::solar_dir` (axis-mapped game-space wrapper) and
@@ -105,7 +103,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     clustered::script_mod(vm);
     fast_gi::script_mod(vm);
     ssao::script_mod(vm);
-    post::script_mod(vm);
+    makepad_render_graph::script_mod(vm);
     smoke::script_mod(vm);
     vfx::shader::script_mod(vm);
     shaders::script_mod(vm);

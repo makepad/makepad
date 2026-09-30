@@ -84,7 +84,7 @@ impl Renderer {
 
     /// Everything the composite needs: post controls, texel, and the bloom
     /// and exposure textures. `texels` is the scene target in pixels.
-    pub fn bind_composite(&self, draw: &mut crate::shaders::DrawSceneTexture, texels: Vec2f) {
+    pub fn bind_composite(&self, draw: &mut makepad_render_graph::DrawSceneTexture, texels: Vec2f) {
         draw.post = self.composite_post();
         draw.texel = vec2(1.0 / texels.x.max(1.0), 1.0 / texels.y.max(1.0));
         let bloom = self.post.bloom().filter(|_| self.hdr_output && self.bloom > 0.0);

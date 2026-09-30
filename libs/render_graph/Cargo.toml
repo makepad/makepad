@@ -1,0 +1,9 @@
+[package]
+name = "makepad-render-graph"
+version = "0.1.0"
+edition = "2021"
+description = "The render graph: post passes, HDR composite, locked-time accumulation"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+makepad-draw = { path = "../../draw", version = "2.0.0" }

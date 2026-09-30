@@ -461,7 +461,7 @@ pub struct Renderer {
     /// See [`Renderer::set_fxaa`].
     fxaa: bool,
     /// The HDR post chain (bloom + auto-exposure), see [`Renderer::run_post`].
-    post: crate::post::BloomPass,
+    post: makepad_render_graph::BloomPass,
     /// See [`Renderer::set_bloom`] / [`Renderer::set_auto_exposure`].
     bloom: f32,
     auto_exposure: bool,

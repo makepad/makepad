@@ -1,8 +1,8 @@
 //! The HDR lane's post chain between the scene pass and its composite:
-//! bloom and auto-exposure (see `Renderer::set_hdr_output`).
+//! bloom and auto-exposure (see `makepad_render::Renderer::set_hdr_output`).
 //!
 //! [`BloomPass`] is a self-contained chain of offscreen passes, wired the way
-//! [`crate::SsaoPass`] is: the host parents its scene pass under
+//! `makepad_render::SsaoPass` is: the host parents its scene pass under
 //! [`BloomPass::first_pass_id`] and hands [`BloomPass::run`] the pass that
 //! composites (the window), so the pass sort runs scene -> bloom -> composite.
 //!

@@ -67,6 +67,7 @@ workspace.members = [
     "libs/csg/csg_primitives",
     "libs/csg/csg_sdf",
     "libs/render",
+    "libs/render_graph",
     "libs/raytrace",
     "libs/fab",
     "libs/fab_tour",
