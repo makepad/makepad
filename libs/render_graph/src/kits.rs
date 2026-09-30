@@ -29,10 +29,10 @@ pub const KITS: &[KitDef] = &[
     KitDef { name: "Aberration", kind: "aberration", params: &["amount", "falloff"] },
     KitDef { name: "Grain", kind: "grain", params: &["amount", "size"] },
     KitDef { name: "Vignette", kind: "vignette", params: &["amount", "softness", "color", "mode"] },
-    KitDef { name: "FramePost", kind: "frame_post", params: &["shake", "zoom", "flash", "flash_color", "fade", "invert"] },
+    KitDef { name: "FramePost", kind: "frame_post", params: &["shake", "zoom", "flash", "flash_color", "fade", "invert", "mode"] },
     KitDef { name: "Lut", kind: "lut", params: &["image", "amount", "size"] },
     KitDef { name: "DepthOfField", kind: "dof", params: &["focus", "aperture", "max_blur"] },
-    KitDef { name: "Outline", kind: "outline", params: &["color", "thickness", "threshold"] },
+    KitDef { name: "Outline", kind: "outline", params: &["color", "thickness", "threshold", "mode"] },
     KitDef { name: "Upsample", kind: "upsample", params: &["src", "depth", "guide", "guide_view", "sigma"] },
     KitDef { name: "VelocityBlur", kind: "velocity_blur", params: &["amount", "samples"] },
 ];
@@ -351,11 +351,14 @@ $M.kit_vignette = fn(p) {
 // the frame time, however many sub-frames the frame has, like every post
 // parameter): shake (fraction
 // of the frame height), zoom (1 = none), a flash toward `flash_color`, a
-// fade to black and an invert, each 0..1.
-$M.FramePost = $M.FramePost{shake: 0 zoom: 1 flash: 0 flash_color: #ffffff fade: 0 invert: 0}
+// fade to black and an invert, each 0..1. `mode` 0: on the display
+// picture, at the end; 1: in linear light at @hdr, where it stands in the
+// post list (shake and zoom first, flash and fade after a Shoulder and a
+// linear Vignette: two FramePosts).
+$M.FramePost = $M.FramePost{shake: 0 zoom: 1 flash: 0 flash_color: #ffffff fade: 0 invert: 0 mode: 0}
 $M.kit_frame_post = fn(p) {
     return [
-        {at: @final reads: [@color]
+        {at: if p.mode == 1 { @hdr } else { @final } reads: [@color]
             uniforms: {shake: p.shake zoom: p.zoom flash: p.flash flash_color: p.flash_color fade: p.fade invert: p.invert}
             pixel: "fn() -> vec4 {
                 let j = vec2(self.frame_hash(3.0) - 0.5, self.frame_hash(4.0) - 0.5) * 2.0 * self.shake * vec2(1.0 / self.aspect(), 1.0)
@@ -435,8 +438,35 @@ $M.kit_dof = fn(p) {
 // Ink edges where depth jumps (the re-draw-free fallback; items flagged
 // for the id attachment get exact outlines where the renderer has it):
 // `thickness` pixels at 1080p, `threshold` the relative depth step.
-$M.Outline = $M.Outline{color: #000000 thickness: 1.5 threshold: 0.08}
+// `mode` 1: from the renderer's @id map (surface ids, x the low byte and
+// y the high byte, 0 none): where the id changes within the thickness,
+// around each outlined surface and between two of them (on the lower
+// id's side, once).
+$M.Outline = $M.Outline{color: #000000 thickness: 1.5 threshold: 0.08 mode: 0}
 $M.kit_outline = fn(p) {
+    if p.mode == 1 {
+        return [
+            {at: @display reads: [@color, @id] slots: ["color", "ids"] uniforms: {ink: p.color thickness: p.thickness}
+                helpers: "surface: fn(uv: vec2) -> float {
+                    let c = self.ids.sample_nearest(uv)
+                    return floor(c.y * 255.0 + 0.5) * 256.0 + floor(c.x * 255.0 + 0.5)
+                }"
+                pixel: "fn() -> vec4 {
+                    let c = self.color.sample(self.uv())
+                    let r = max(self.thickness * self.size().y / 1080.0, self.px_scale())
+                    let own = self.surface(self.uv())
+                    var hit = 0.0
+                    for k in 0..16 {
+                        let a = float(k) * 0.3926991
+                        let q = self.surface(self.uv() + vec2(cos(a), sin(a)) * r * self.texel())
+                        if q > 0.5 && q > own + 0.5 {
+                            hit = 1.0
+                        }
+                    }
+                    return vec4(mix(c.xyz, self.ink.xyz, hit * self.ink.w), c.w)
+                }"}
+        ]
+    }
     return [
         {at: @display reads: [@color, @depth] uniforms: {ink: p.color thickness: p.thickness threshold: p.threshold}
             pixel: "fn() -> vec4 {

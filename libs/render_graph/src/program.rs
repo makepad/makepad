@@ -25,8 +25,8 @@ script_mod! {
         // xy = output size in pixels, zw = one output texel in uv
         g_size: uniform(vec4(1.0, 1.0, 1.0, 1.0))
         // x = exposure, y = aspect (w / h), z = 1 when @history holds the
-        // pass's previous output
-        g_misc: uniform(vec4(1.0, 1.0, 0.0, 0.0))
+        // pass's previous output, w = this pass's pixels per output pixel
+        g_misc: uniform(vec4(1.0, 1.0, 0.0, 1.0))
         // The camera for depth reads: proj[10], proj[14], orthographic,
         // depth stores clip z / w directly (else z * 0.5 + 0.5).
         g_cam: uniform(vec4(-1.0, -0.2, 0.0, 1.0))
@@ -59,6 +59,10 @@ script_mod! {
         ss_tap: fn() -> float { return self.g_frame.z }
         exposure: fn() -> float { return self.g_misc.x }
         history_ready: fn() -> float { return self.g_misc.z }
+        // This pass's pixels per output pixel (supersampling times the
+        // pass's scale): a line N output pixels wide is N * px_scale()
+        // pass pixels, and fwidth()/dFdx() are in pass pixels.
+        px_scale: fn() -> float { return self.g_misc.w }
         // The view distance of a depth-buffer value (a sample of a depth
         // read), for depth of field, outlines and fog passes.
         view_depth: fn(d: float) -> float {

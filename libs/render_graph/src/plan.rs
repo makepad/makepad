@@ -336,6 +336,9 @@ pub enum PlanError {
     PreColor { pass: String },
     /// The targets do not fit the budget the host gave.
     OverBudget { bytes: u64, budget: u64 },
+    /// A named pass nothing reads: its picture goes nowhere (a named pass
+    /// is not the frame colour).
+    UnreadPass { pass: String, name: String },
 }
 
 impl std::fmt::Display for PlanError {
@@ -348,6 +351,7 @@ impl std::fmt::Display for PlanError {
             PlanError::BadScale { pass, scale } => write!(f, "{pass}: scale {scale} is outside 0..4"),
             PlanError::NoHistory { pass } => write!(f, "{pass} reads @history but keeps none (add `history: true`)"),
             PlanError::PreColor { pass } => write!(f, "{pass} runs @pre, before the scene: it has no @color to read, and it needs a `name` later passes and the scene read it by"),
+            PlanError::UnreadPass { pass, name } => write!(f, "{pass} is named `{name}` but no later pass reads it, so its picture goes nowhere; a pass that writes the frame has no `name` (or read `{name}` in a later pass)"),
             PlanError::OverBudget { bytes, budget } => write!(f, "the post graph needs {} MiB of targets, over the {} MiB budget", bytes >> 20, budget >> 20),
         }
     }
@@ -465,6 +469,17 @@ impl FramePlan {
             stage_color[si] = color;
         }
         let _ = color;
+        // A named pass (outside @pre, which the scene reads) must be read.
+        for p in &passes {
+            let node = &graph.nodes[p.node];
+            if node.name.is_none() || node.history || p.stage == Stage::Pre {
+                continue;
+            }
+            let read = passes.iter().any(|q| q.inputs.iter().any(|i| matches!(i, Source::Target(v) if *v == p.output)));
+            if !read {
+                return Err(PlanError::UnreadPass { pass: node.label.clone(), name: node.name.and_then(|n| n.as_string(|s| s.map(str::to_string))).unwrap_or_else(|| node.label.clone()) });
+            }
+        }
         // A history pass keeps a second target (last frame's output).
         let bytes = targets
             .iter()
@@ -556,6 +571,17 @@ mod tests {
         assert_eq!(plan.stage_color, [None, Some(Version(2)), Some(Version(3)), Some(Version(4))]);
         assert_eq!(plan.targets.len(), 5);
         assert_eq!(plan.bytes(), 640 * 360 * 8 + 2 * 1280 * 720 * 8 + 2 * 1280 * 720 * 4);
+    }
+
+    #[test]
+    fn a_named_pass_nothing_reads_is_refused() {
+        // A named last pass is not the frame colour: refused, not dropped.
+        let g = PostGraph { color: ColorPipeline::Hdr, nodes: vec![pass(None, Stage::Hdr, &["color"], 1.0), pass(Some("comp"), Stage::Hdr, &["color"], 1.0)] };
+        let e = FramePlan::compile(&g, (64, 64), Attachments::default(), &[], false, BIG).unwrap_err();
+        assert!(matches!(&e, PlanError::UnreadPass { pass, .. } if pass == "comp"), "{e}");
+        // Read by a later pass, it is fine.
+        let g = PostGraph { color: ColorPipeline::Hdr, nodes: vec![pass(Some("comp"), Stage::Hdr, &["color"], 1.0), pass(None, Stage::Hdr, &["comp"], 1.0)] };
+        assert!(FramePlan::compile(&g, (64, 64), Attachments::default(), &[], false, BIG).is_ok());
     }
 
     #[test]

@@ -50,7 +50,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
         assert!(errors.is_empty(), "kits did not evaluate: {errors:?}");
         let mut total = 0;
         // Every kit with its defaults, and the variants a parameter selects.
-        let variants: Vec<(&kits::KitDef, Option<(&str, f64)>)> = kits::KITS.iter().map(|k| (k, None)).chain([("vignette", "mode", 1.0)].into_iter().map(|(kind, f, v)| (kits::kit(kind).unwrap(), Some((f, v))))).collect();
+        let variants: Vec<(&kits::KitDef, Option<(&str, f64)>)> = kits::KITS.iter().map(|k| (k, None)).chain([("vignette", "mode", 1.0), ("frame_post", "mode", 1.0), ("outline", "mode", 1.0)].into_iter().map(|(kind, f, v)| (kits::kit(kind).unwrap(), Some((f, v))))).collect();
         for (k, over) in variants {
             let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("gtest").into(), NoTrap).as_object().unwrap();
             let template = vm.bx.heap.value(module, LiveId::from_str(&format!("kit_{}", k.kind)).into(), NoTrap);
@@ -139,6 +139,25 @@ fn every_kit_builds_passes_that_compile_everywhere() {
         };
         let code = bad.source().replacen("mod.draw.DrawGraphPass{", "let sh = mod.draw.DrawGraphPass{", 1) + "mod.shader.test_compile_draw_source(sh, \"metal\", false)\n";
         assert!(compile_value(vm, "bad", code).is_err());
+        // Short slot and uniform names (a pass named `g`, a uniform `r`)
+        // compile: they do not collide with the shader's own members.
+        let short = pass::PassDecl {
+            name: None,
+            stage: makepad_render_graph::Stage::Hdr,
+            reads: vec!["color".into(), "g".into()],
+            slots: Vec::new(),
+            scale: 1.0,
+            size: None,
+            format: None,
+            uniforms: vec![UniformDecl { name: "r".into(), width: 1 }, UniformDecl { name: "b".into(), width: 4 }],
+            pixel: "fn() -> vec4 { return self.color.sample(self.uv()) + self.g.sample(self.uv()) * self.r + self.b }".into(),
+            helpers: String::new(),
+            history: false,
+            outputs: Vec::new(),
+            label: "short".into(),
+        };
+        short.validate().unwrap();
+        compile_pass(vm, &short);
         // The accumulator's own shaders.
         for name in ["DrawGraphAccum", "DrawGraphMerge", "DrawGraphAverage", "DrawGraphError", "DrawGraphErrorMax", "DrawGraphPass"] {
             for backend in BACKENDS {

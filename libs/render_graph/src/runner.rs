@@ -101,6 +101,8 @@ struct HistorySlot {
 pub struct GraphRunner {
     /// The camera passes see (`self.ray_dir()`, `self.eye()`).
     view: Option<PassView>,
+    /// Frame pixels per output pixel (the host's supersampling; 0 = 1).
+    px_scale: f32,
     decls: Vec<PassDecl>,
     graph: PostGraph,
     plan: Option<FramePlan>,
@@ -165,6 +167,14 @@ impl GraphRunner {
     /// The camera the passes see this frame (raymarch passes), or none.
     pub fn set_view(&mut self, view: Option<PassView>) {
         self.view = view;
+    }
+
+    /// How many frame pixels one output pixel is (the host's supersampling
+    /// factor; 1 by default). Passes read it, times their own scale, as
+    /// `self.px_scale()`, so a line N output pixels wide stays N wide at
+    /// any supersampling.
+    pub fn set_px_scale(&mut self, px_scale: f32) {
+        self.px_scale = if px_scale.is_finite() && px_scale > 0.0 { px_scale } else { 1.0 };
     }
 
     pub fn is_empty(&self) -> bool {
@@ -359,6 +369,7 @@ impl GraphRunner {
         let last = passes.last().unwrap().id.0 as usize;
         crate::accum::attach(cx, &self.slots[last].pass, parent);
         let aspect = plan.size.0 as f32 / plan.size.1.max(1) as f32;
+        let plan_w = plan.size.0 as f32;
         for p in &passes {
             let program = self.decls[p.node].program_id();
             // A history pass reads its latest output and writes the other
@@ -410,6 +421,19 @@ impl GraphRunner {
             let decl = &self.decls[p.node];
             let Some(draw) = self.programs.get_mut(program) else { continue };
             let dv = &mut draw.draw_super.draw_vars;
+            // A pass whose uniforms do not fit a draw call is refused by
+            // name instead of writing past the call's uniforms.
+            if let Some(sid) = dv.draw_shader_id {
+                let total = cx.cx.draw_shaders[sid.index].mapping.dyn_uniforms.total_slots;
+                let room = dv.dyn_uniforms.len();
+                if total > room {
+                    let e = format!("{}: its uniforms (with the standard block's) take {total} floats, over the {room} a pass can have; pack parameters into fewer vectors, or read tables from a named texture", decl.label);
+                    if !self.errors.contains(&e) {
+                        self.errors.push(e);
+                    }
+                    continue;
+                }
+            }
             for (i, t) in textures.iter().enumerate() {
                 if let Some(t) = t {
                     dv.set_texture(i, t);
@@ -418,7 +442,9 @@ impl GraphRunner {
             let (w, h) = (p.size.0 as f32, p.size.1 as f32);
             dv.set_uniform(cx.cx, live_id!(g_frame), &[frame.time, frame.frame, frame.ss_tap, frame.seed]);
             dv.set_uniform(cx.cx, live_id!(g_size), &[w, h, 1.0 / w, 1.0 / h]);
-            dv.set_uniform(cx.cx, live_id!(g_misc), &[frame.exposure, aspect, history_ready, 0.0]);
+            let base = if self.px_scale > 0.0 { self.px_scale } else { 1.0 };
+            let pass_px = base * w / plan_w.max(1.0);
+            dv.set_uniform(cx.cx, live_id!(g_misc), &[frame.exposure, aspect, history_ready, pass_px]);
             dv.set_uniform(cx.cx, live_id!(g_cam), &frame.camera);
             if let Some(v) = &self.view {
                 // Rows of the column-major matrix.
