@@ -75,16 +75,19 @@ pub struct ScriptBody {
 pub struct ScriptBuiltins {
     pub range: ScriptObject,
     pub pod: ScriptPodBuiltins,
+    /// The function a call of `mod` runs (`crate::mod_math::define_mod_call`).
+    pub mod_call: ScriptObject,
 }
 
 impl ScriptBuiltins {
-    pub fn new(heap: &mut ScriptHeap, pod: ScriptPodBuiltins) -> Self {
+    pub fn new(heap: &mut ScriptHeap, pod: ScriptPodBuiltins, mod_call: ScriptObject) -> Self {
         Self {
             range: heap
                 .value_path(heap.modules, ids!(std.Range), NoTrap)
                 .as_object()
                 .unwrap(),
             pod,
+            mod_call,
         }
     }
 }
@@ -1842,8 +1845,9 @@ impl ScriptVmBase {
         define_shader_module(&mut heap, &mut native);
         define_gc_module(&mut heap, &mut native);
         let pod_builtins = define_pod_module(&mut heap, &mut native);
+        let mod_call = define_mod_call(&mut heap, &mut native);
 
-        let builtins = ScriptBuiltins::new(&mut heap, pod_builtins);
+        let builtins = ScriptBuiltins::new(&mut heap, pod_builtins, mod_call);
 
         Self {
             void: 0,

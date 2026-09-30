@@ -92,3 +92,22 @@ fn int_values_index_arrays() {
     let (value, errs, _vm) = run("pod", &format!("{PRELUDE}float(1.0)"));
     assert!(errs.is_empty() && value.as_pod().is_some(), "{value:?} {errs:?}");
 }
+
+/// A call of `mod` is the modulo of shading languages; `mod` itself stays
+/// the module root.
+#[test]
+fn mod_call_is_modulo_and_mod_stays_the_modules() {
+    assert_eq!(number("mod", "mod(7, 3)"), 1.0);
+    assert_eq!(number("mod_neg", "mod(-1, 3)"), 2.0);
+    assert_eq!(number("mod_frac", "mod(5.5, 2)"), 1.5);
+    assert_eq!(number("mod_math", &format!("{PRELUDE}mod(7.5, 2.0) + floor(0.5)")), 1.5);
+    assert_eq!(number("mod_in_fn", &format!("{PRELUDE}let f = fn(t) {{ mod(t, 2.0) }}\nf(5.5)")), 1.5);
+    assert_eq!(number("mod_vec", &format!("{PRELUDE}let v = mod(vec2(5, -1), vec2(3, 3))\nv.x * 10 + v.y")), 22.0);
+    // mod.x and use mod.x.* mean what they did.
+    assert_eq!(number("mod_field", "let m = mod.math\nm.floor(2.5)"), 2.0);
+    assert_eq!(number("mod_path", "mod.math.floor(3.5)"), 3.0);
+    assert_eq!(number("mod_use", "use mod.math.*\nfloor(4.5)"), 4.0);
+    assert_eq!(number("modf", &format!("{PRELUDE}modf(-1, 3)")), -1.0);
+    // A local named mod is that local.
+    assert_eq!(number("mod_shadow", "let mod = fn(a, b) { a + b }\nmod(1, 2)"), 3.0);
+}

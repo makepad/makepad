@@ -17,7 +17,12 @@ impl<'a> ScriptVm<'a> {
     // Calling handlers
 
     pub(crate) fn handle_call_args(&mut self) {
-        let fnobj = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        let mut fnobj = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
+        // `mod(x, y)` is the modulo function; `mod` itself stays the module
+        // root (see `define_mod_call`).
+        if fnobj == self.bx.heap.modules.into() {
+            fnobj = self.bx.code.builtins.mod_call.into();
+        }
         if let Some(ty) = self.bx.heap.pod_type(fnobj) {
             let pod = self.bx.heap.new_pod(ty);
             self.bx.threads.cur().mes.push(ScriptMe::Pod {
