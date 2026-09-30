@@ -5,6 +5,10 @@
 //!
 //! ```text
 //! Splash source --[parse]--> AST --[lower: types, inlining, math]--> AIR
+//!     AIR --> opt              (kernels: forwarding, loop-invariant code
+//!                               motion, if-conversion, CSE, dead code,
+//!                               strength reduction, multiply-add fusion;
+//!                               the same bits, FMA only in math: fast)
 //!     AIR --> ir::run          (the reference; also the no-JIT path)
 //!     AIR --> arm64            (native scalar code: audio shaders, kernels)
 //!     AIR --> neon             (kernels: 4 elements per iteration)
@@ -15,7 +19,8 @@
 //! the audio thread) and geometry kernels ([`geometry`]: per-element
 //! kernels over many vertices or instances). Every backend is
 //! bit-identical to the interpreter: AIR's ops are total and exactly
-//! specified and math functions are polynomials of those ops (no libm).
+//! specified (a fused multiply-add is one rounding everywhere) and math
+//! functions are polynomials of those ops (no libm).
 
 pub mod admission;
 pub mod host;
