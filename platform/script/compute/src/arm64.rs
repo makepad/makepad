@@ -1236,6 +1236,15 @@ impl<'a> Emit<'a> {
                 self.e(mov(d, 4));
                 self.gdone(dst, d);
             }
+            Op::Fma(crate::ir::Fma::MulAddI, a, b, c) => {
+                // madd wd = wc + wa * wb
+                let ra = self.gsrc(ev(a), XS0);
+                let rb = self.gsrc(ev(b), XS1);
+                let rc = self.gsrc(ev(c), XS2);
+                let d = self.gdst(dst);
+                self.e(0x1B00_0000 | (rb as u32) << 16 | (rc as u32) << 10 | (ra as u32) << 5 | d as u32);
+                self.gdone(dst, d);
+            }
             Op::Fma(k, a, b, c) => {
                 // fmadd d = c + a*b; fmsub d = c - a*b; fnmsub d = a*b - c.
                 let ra = self.fsrc(ev(a), FS0);
@@ -1245,7 +1254,7 @@ impl<'a> Emit<'a> {
                 let base = match k {
                     crate::ir::Fma::Add => 0x1F00_0000,
                     crate::ir::Fma::SubFrom => 0x1F00_8000,
-                    crate::ir::Fma::Sub => 0x1F20_8000,
+                    _ => 0x1F20_8000,
                 };
                 self.e(base | (rb as u32) << 16 | (rc as u32) << 10 | (ra as u32) << 5 | d as u32);
                 self.fdone(dst, d);

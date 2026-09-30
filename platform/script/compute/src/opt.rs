@@ -38,6 +38,7 @@ pub fn optimize(p: &mut Program) {
     cse(p);
     dce(p);
     cluster_stores(p);
+    fuse_mla(p);
 }
 
 /// `Wrap(x, n)` of an x proven in `0..n` ([`ir::bounds`]) is x.
@@ -1038,14 +1039,27 @@ pub fn if_convert(p: &mut Program) {
 /// fast` kernels run it; every backend and the interpreter give the same
 /// fused bits.
 pub fn fuse_fma(p: &mut Program) {
+    fuse(p, true);
+}
+
+/// i32 `a * b + c` whose product has no other use becomes one multiply-add
+/// (`Fma::MulAddI`): exact, so every kernel gets it.
+pub fn fuse_mla(p: &mut Program) {
+    fuse(p, false);
+}
+
+fn fuse(p: &mut Program, float: bool) {
+    let mul = if float { ir::Bin::MulF } else { ir::Bin::MulI };
     let mut uses = vec![0u32; p.vals.len()];
     let mut muls: HashMap<u32, (Val, Val)> = HashMap::new();
-    fn count(b: &Block, uses: &mut [u32], muls: &mut HashMap<u32, (Val, Val)>) {
+    fn count(b: &Block, uses: &mut [u32], muls: &mut HashMap<u32, (Val, Val)>, mul: ir::Bin) {
         for s in b {
             let us: Vec<Val> = match s {
                 Stmt::Def(v, op) => {
-                    if let Op::Bin(ir::Bin::MulF, a, b) = op {
-                        muls.insert(v.0, (*a, *b));
+                    if let Op::Bin(m, a, b) = op {
+                        if *m == mul {
+                            muls.insert(v.0, (*a, *b));
+                        }
                     }
                     ir::op_uses(op)
                 }
@@ -1053,12 +1067,12 @@ pub fn fuse_fma(p: &mut Program) {
                 Stmt::Store { off, val, .. } => off.iter().copied().chain([*val]).collect(),
                 Stmt::Out { idx, val, .. } => vec![*idx, *val],
                 Stmt::If(c, t, e) => {
-                    count(t, uses, muls);
-                    count(e, uses, muls);
+                    count(t, uses, muls, mul);
+                    count(e, uses, muls, mul);
                     vec![*c]
                 }
                 Stmt::Loop { body, .. } => {
-                    count(body, uses, muls);
+                    count(body, uses, muls, mul);
                     vec![]
                 }
                 Stmt::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
@@ -1069,13 +1083,15 @@ pub fn fuse_fma(p: &mut Program) {
             }
         }
     }
-    count(&p.body, &mut uses, &mut muls);
+    count(&p.body, &mut uses, &mut muls, mul);
     let single = |v: Val| if uses[v.0 as usize] == 1 { muls.get(&v.0).copied() } else { None };
-    fn walk(b: &mut Block, f: &dyn Fn(Val) -> Option<(Val, Val)>) {
+    fn walk(b: &mut Block, f: &dyn Fn(Val) -> Option<(Val, Val)>, float: bool) {
         for s in b {
             match s {
                 Stmt::Def(_, op) => {
                     let fused = match *op {
+                        Op::Bin(ir::Bin::AddI, x, y) if !float => f(x).map(|(a, b)| Op::Fma(ir::Fma::MulAddI, a, b, y)).or_else(|| f(y).map(|(a, b)| Op::Fma(ir::Fma::MulAddI, a, b, x))),
+                        _ if !float => None,
                         Op::Bin(ir::Bin::AddF, x, y) => f(x).map(|(a, b)| Op::Fma(ir::Fma::Add, a, b, y)).or_else(|| f(y).map(|(a, b)| Op::Fma(ir::Fma::Add, a, b, x))),
                         Op::Bin(ir::Bin::SubF, x, y) => f(x).map(|(a, b)| Op::Fma(ir::Fma::Sub, a, b, y)).or_else(|| f(y).map(|(a, b)| Op::Fma(ir::Fma::SubFrom, a, b, x))),
                         _ => None,
@@ -1085,15 +1101,15 @@ pub fn fuse_fma(p: &mut Program) {
                     }
                 }
                 Stmt::If(_, t, e) => {
-                    walk(t, f);
-                    walk(e, f);
+                    walk(t, f, float);
+                    walk(e, f, float);
                 }
-                Stmt::Loop { body, .. } => walk(body, f),
+                Stmt::Loop { body, .. } => walk(body, f, float),
                 _ => {}
             }
         }
     }
-    walk(&mut p.body, &single);
+    walk(&mut p.body, &single, float);
     dce(p);
 }
 

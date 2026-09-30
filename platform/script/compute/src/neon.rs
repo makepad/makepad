@@ -65,6 +65,8 @@ mod v {
     /// vd += vn * vm / vd -= vn * vm (fused).
     pub const FMLA: u32 = 0x4E20_CC00;
     pub const FMLS: u32 = 0x4EA0_CC00;
+    /// vd += vn * vm (i32 lanes).
+    pub const MLA: u32 = 0x4EA0_9400;
     pub const FCMEQ: u32 = 0x4E20_E400;
     pub const FCMGE: u32 = 0x6E20_E400;
     pub const FCMGT: u32 = 0x6EA0_E400;
@@ -840,10 +842,8 @@ impl Em {
             Region::Shared if !uniform && self.table == Some((base, extent)) && self.proven(off.unwrap(), extent) => {
                 // Word o of the table in v24..: byte indices 4o + 0..3.
                 let ro = ro.unwrap();
-                self.splat(VS2, 0x0404_0404);
-                self.e(v::r3(v::MUL, VS2, ro, VS2));
-                self.splat(VS0, 0x0302_0100);
-                self.e(v::r3(v::ADD, VS2, VS2, VS0));
+                self.e(v::r3(v::MUL, VS2, ro, 22));
+                self.e(v::r3(v::ADD, VS2, VS2, 23));
                 let tbl = if extent == 16 { v::TBL4 } else { v::TBL2 };
                 self.e(v::r3(tbl, d, 24, VS2));
             }
@@ -1607,7 +1607,11 @@ impl Em {
                 } else if acc != rc {
                     self.e(v::mov(acc, rc));
                 }
-                let op = if k == crate::ir::Fma::SubFrom { v::FMLS } else { v::FMLA };
+                let op = match k {
+                    crate::ir::Fma::SubFrom => v::FMLS,
+                    crate::ir::Fma::MulAddI => v::MLA,
+                    _ => v::FMLA,
+                };
                 self.e(v::r3(op, acc, ra, rb));
                 if acc != d {
                     self.e(v::mov(d, acc));
@@ -1725,6 +1729,10 @@ fn steps(p: &Program, info: &Info, i: Var) -> (Vec<Option<i64>>, Vec<Option<i32>
                                 (Some(x), Some(c), _, _) | (_, _, Some(c), Some(x)) => Some(x * c as i64),
                                 _ => None,
                             },
+                            Op::Fma(crate::ir::Fma::MulAddI, a, b, c) => match (st(&a), consts[b.0 as usize], consts[a.0 as usize], st(&b), st(&c)) {
+                                (Some(x), Some(k), _, _, Some(z)) | (_, _, Some(k), Some(x), Some(z)) => Some(x * k as i64 + z),
+                                _ => None,
+                            },
                             Op::Bin(Bin::ShlI, a, b) => match (st(&a), consts[b.0 as usize]) {
                                 (Some(x), Some(k)) if (0..31).contains(&k) => Some(x << k),
                                 _ => None,
@@ -1787,7 +1795,9 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
     let info = analyse(p, &sh)?;
     let bounds = crate::arm64::bounds(p);
     let table = small_table(body, &info, &bounds);
-    let pool: Vec<u8> = V_POOL.iter().copied().filter(|r| table.is_none_or(|(_, w)| !(24..24 + w / 4).contains(&(*r as u32)))).collect();
+    // A resident table takes v24.. and keeps its byte-index constants in
+    // v22 (0x04040404) and v23 (0x03020100).
+    let pool: Vec<u8> = V_POOL.iter().copied().filter(|r| table.is_none_or(|(_, w)| !(22..24 + w / 4).contains(&(*r as u32)))).collect();
     let alloc = allocate_with(
         p,
         |e| match e {
@@ -1863,6 +1873,8 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
         for k in 0..words / 4 {
             em.e(v::ldst_q(true, 24 + k as u8, 9, 16 * k));
         }
+        em.splat(22, 0x0404_0404);
+        em.splat(23, 0x0302_0100);
     }
     // The execution mask: every lane.
     em.e(v::movi0(VM));

@@ -140,6 +140,8 @@ pub enum Fma {
     SubFrom,
     /// `a * b - c`
     Sub,
+    /// i32 `a * b + c`, wrapping (exact: fused in every math mode).
+    MulAddI,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -476,11 +478,15 @@ pub fn eval_bin(op: Bin, a: u64, b: u64) -> u64 {
 
 #[inline(always)]
 pub fn eval_fma(k: Fma, a: u64, b: u64, c: u64) -> u64 {
+    if k == Fma::MulAddI {
+        return iw(i(a).wrapping_mul(i(b)).wrapping_add(i(c)));
+    }
     let (a, b, c) = (f(a), f(b), f(c));
     fw(match k {
         Fma::Add => a.mul_add(b, c),
         Fma::SubFrom => (-a).mul_add(b, c),
         Fma::Sub => a.mul_add(b, -c),
+        Fma::MulAddI => unreachable!(),
     })
 }
 
@@ -601,6 +607,13 @@ pub fn bounds(p: &Program) -> Vec<Option<u32>> {
                             (Some(x), Some(k)) if (0..31).contains(&k) => x.checked_shl(k as u32).filter(|y| y >> k == x && *y <= i32::MAX as u32),
                             _ => None,
                         },
+                        Op::Fma(Fma::MulAddI, a, b, c) => {
+                            let m = match (out[a.0 as usize], pos(consts[b.0 as usize]), pos(consts[a.0 as usize]), out[b.0 as usize]) {
+                                (Some(x), Some(k), _, _) | (_, _, Some(k), Some(x)) => x.checked_mul(k),
+                                _ => None,
+                            };
+                            m.zip(out[c.0 as usize].or(pos(consts[c.0 as usize]))).and_then(|(m, c)| m.checked_add(c))
+                        }
                         Op::Sel(_, a, b) => match (out[a.0 as usize], out[b.0 as usize]) {
                             (Some(x), Some(y)) => Some(x.max(y)),
                             _ => None,
@@ -1062,11 +1075,12 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
                     self.used(y, Some(tx))?;
                     tx
                 }
-                Op::Fma(_, a, b, c) => {
-                    self.used(a, Some(F32))?;
-                    self.used(b, Some(F32))?;
-                    self.used(c, Some(F32))?;
-                    F32
+                Op::Fma(k, a, b, c) => {
+                    let t = if k == Fma::MulAddI { I32 } else { F32 };
+                    self.used(a, Some(t))?;
+                    self.used(b, Some(t))?;
+                    self.used(c, Some(t))?;
+                    t
                 }
                 Op::Wrap(x, len) => {
                     self.used(x, Some(I32))?;
@@ -1245,6 +1259,7 @@ pub fn op_ty(p: &Program, op: &Op) -> Option<Ty> {
         Op::Un(u, _) => un_types(u).1,
         Op::Bin(b, _, _) => bin_types(b).1,
         Op::Sel(_, a, _) => p.vals[a.0 as usize],
+        Op::Fma(Fma::MulAddI, ..) => Ty::I32,
         Op::In { .. } | Op::Fma(..) => Ty::F32,
         Op::Load { .. } => return None,
     })
