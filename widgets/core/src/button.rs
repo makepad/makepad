@@ -160,6 +160,8 @@ script_mod! {
             color_focus: uniform(theme.color_outset_focus)
             /** face fill when disabled */
             color_disabled: uniform(theme.color_outset_disabled)
+            /** this variant's own resting fill, which a style sheet that draws a face of its own draws for; `color` set away from it is a host's colour (see host_over) */
+            color_default: uniform(theme.color_outset)
 
             /** fill gradient end stop; negative alpha means flat fill */
             color_2: uniform(vec4(-1.0, -1.0, -1.0, -1.0))
@@ -233,6 +235,65 @@ script_mod! {
             material_shadow_ink: uniform(theme.color_material_shadow)
             /** the emissive ink a held face and its halo take */
             material_glow_ink: uniform(theme.color_material_glow)
+
+            /** THE HOST'S COLOUR UNDER A STYLE SHEET. A sheet that replaces
+             * `pixel` with a face of its own still owes the host the colour
+             * it paints: an app lights a latch -- the page it is on, a mute
+             * that is down -- by setting `color`, and that has to show
+             * under every sheet. `color_default` is what the variant rests
+             * in; where `color` has been set away from it, `host_face`
+             * moves a face colour by the difference (the sheet's bevels,
+             * gloss and grain stay, its colour becomes the host's) and a
+             * host colour let through lets the face through as far. At the
+             * default both helpers return what they are given, so the sheet
+             * draws exactly what it always drew. */
+            host_face: fn(face: vec3) -> vec3 {
+                let d = (self.color.rgb - self.color_default.rgb) * (1.0 - self.disabled) * step(0.5, self.color_default.a)
+                return clamp(face + d, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            }
+
+            /** how much of an opaque sheet face the host's colour lets
+             * through: 1 at the default, 0 for a face the host keeps
+             * transparent (a readout that takes a click) */
+            host_alpha: fn() -> float {
+                return mix(1.0, clamp(self.color.a / max(self.color_default.a, 0.001), 0.0, 1.0), step(0.5, self.color_default.a))
+            }
+
+            /** `host_face` for a finished, premultiplied face: moved inside
+             * the button's rect only, so the shadows and glows a sheet
+             * throws outside it keep their own colour. `m` is how far the
+             * sheet grew its quad round the rect. A variant that has no
+             * face at rest (a borderless button) gets the host's colour laid
+             * under what the sheet drew, in the rect's rounded shape. */
+            host_over: fn(res: vec4, m: float) -> vec4 {
+                let host = self.color
+                let own = self.color_default
+                let apart = abs(host - own)
+                if max(max(apart.x, apart.y), max(apart.z, apart.w)) < 0.002 {
+                    return res
+                }
+                let p = self.pos * (self.rect_size + vec2(2.0 * m, 2.0 * m)) - vec2(m, m)
+                let h = self.rect_size * 0.5
+                let r = clamp(self.border_radius, 0.0, min(h.x, h.y))
+                let q = abs(p - h) - h + vec2(r, r)
+                let sd = min(max(q.x, q.y), 0.0) + length(max(q, vec2(0.0, 0.0))) - r
+                let inside = clamp(0.5 - sd, 0.0, 1.0)
+                let on = 1.0 - self.disabled
+                if own.a > 0.5 {
+                    let d = (host.rgb - own.rgb) * inside * on
+                    let rgb = clamp(res.rgb + d * res.a, vec3(0.0, 0.0, 0.0), vec3(res.a, res.a, res.a))
+                    // Where the sheet's face lets the ground through (glass,
+                    // a face that is only its frame), the host's colour is
+                    // the body under it, as far as the host moved it: a lit
+                    // latch reads on glass too, and a face the host only
+                    // nudged stays nearly the sheet's.
+                    let moved = max(max(apart.x, apart.y), apart.z)
+                    let ba = host.a * smoothstep(0.0, 0.25, moved) * inside * on * (1.0 - res.a)
+                    return (vec4(rgb, res.a) + vec4(host.rgb * ba, ba)) * self.host_alpha()
+                }
+                let fa = host.a * inside * on
+                return res + vec4(host.rgb * fa, fa) * (1.0 - res.a)
+            }
 
             /** THE STATE CONTRACT, as one elevation. Raised at rest; the
              * pointer lifts it a quarter more (hover adds subtle elevation);
@@ -636,6 +697,7 @@ script_mod! {
     mod.widgets.ButtonFlatter = mod.widgets.ButtonFlat{
         draw_bg +: {
             color: theme.color_u_hidden
+            color_default: theme.color_u_hidden
             color_hover: theme.color_u_hidden
             color_down: theme.color_u_hidden
             /** the one state that paints a face: disabled */
@@ -674,6 +736,7 @@ script_mod! {
         draw_bg +: {
             /** gradient start stop at rest */
             color: theme.color_outset_1
+            color_default: theme.color_outset_1
             /** gradient start stop under the pointer */
             color_hover: theme.color_outset_1_hover
             /** gradient start stop while held */
@@ -740,6 +803,7 @@ script_mod! {
     mod.widgets.ButtonPrimary = mod.widgets.ButtonFlat{
         draw_bg +: {
             color: theme.color_primary
+            color_default: theme.color_primary
             color_hover: theme.color_primary
             color_down: theme.color_primary
             color_focus: theme.color_primary
@@ -767,6 +831,7 @@ script_mod! {
     mod.widgets.ButtonSecondary = mod.widgets.ButtonPrimary{
         draw_bg +: {
             color: theme.color_secondary
+            color_default: theme.color_secondary
             color_hover: theme.color_secondary
             color_down: theme.color_secondary
             color_focus: theme.color_secondary
@@ -792,6 +857,7 @@ script_mod! {
     mod.widgets.ButtonTertiary = mod.widgets.ButtonPrimary{
         draw_bg +: {
             color: theme.color_tertiary_container
+            color_default: theme.color_tertiary_container
             color_hover: theme.color_tertiary_container
             color_down: theme.color_tertiary_container
             color_focus: theme.color_tertiary_container
@@ -819,6 +885,7 @@ script_mod! {
             /** outline thickness in pixels 0..4 step 0.5 */
             border_size: 1.0
             color: theme.color_u_hidden
+            color_default: theme.color_u_hidden
             color_hover: theme.color_u_hidden
             color_down: theme.color_u_hidden
             color_focus: theme.color_u_hidden
@@ -853,6 +920,7 @@ script_mod! {
     mod.widgets.ButtonDanger = mod.widgets.ButtonPrimary{
         draw_bg +: {
             color: theme.color_error
+            color_default: theme.color_error
             color_hover: theme.color_error
             color_down: theme.color_error
             color_focus: theme.color_error

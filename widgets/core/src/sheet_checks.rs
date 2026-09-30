@@ -259,3 +259,32 @@ pub fn contrast(register: fn(&mut ScriptVm), entry: &SheetEntry) {
         assert!(bad.is_empty(), "{}: ink that does not read on its ground:\n{}", entry.id, bad.join("\n"));
     });
 }
+
+/// A button face the sheet draws itself still shows the colour the app
+/// paints on it: an app lights a latch (the page it is on, a mute that is
+/// down) by setting the face's `color`, and a face that fills with a colour
+/// of its own hides which latches are on. Every `Button*` face the sheet
+/// replaces reads the host's colour, through `host_over` or `host_face`
+/// (the sheet's own look, moved to the host's colour where it asks for one)
+/// or through `face_fill` (the library's state mix).
+pub fn button_faces_take_the_host_colour(entry: &SheetEntry) {
+    let text = entry.widgets;
+    let mut rest = text;
+    while let Some(at) = rest.find("mod.widgets.Button") {
+        let line_end = rest[at..].find('\n').map_or(rest.len(), |end| at + end);
+        let line = &rest[at..line_end];
+        rest = &rest[line_end..];
+        if !line.contains(".draw_bg.pixel = fn") {
+            continue;
+        }
+        // The body runs to the first line that closes it at column 0.
+        let body_end = rest.find("\n}").unwrap_or(rest.len());
+        let body = &rest[..body_end];
+        let name = line.split(".draw_bg").next().unwrap_or(line);
+        assert!(
+            ["host_over(", "host_face(", "face_fill("].iter().any(|reads| body.contains(reads)),
+            "{}: {name}'s face does not take the colour the app paints on it (route it through self.host_over)",
+            entry.id
+        );
+    }
+}

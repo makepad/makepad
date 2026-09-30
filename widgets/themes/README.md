@@ -40,6 +40,14 @@ Each style has two phases:
   It can replace a widget's shader as well as its properties. Windows 2000's
   raised buttons and sunken edit fields are examples.
 
+A replaced button face still shows the colour an app paints on it: apps light
+a latch (the page they are on, a mute that is down) by setting `draw_bg.color`.
+Each `Button*` face a sheet draws goes through `self.host_over(face, m)` (`m`
+the room the sheet grew its quad by) or fills with `self.host_face(...)` or
+`self.face_fill()`. At the variant's own `color_default` these return the
+sheet's face unchanged; `sheet_checks::button_faces_take_the_host_colour`
+holds every sheet to it.
+
 ## The surface material
 
 The rounded view, the panel, the button, the check box, the toggle, the

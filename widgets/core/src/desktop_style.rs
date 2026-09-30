@@ -899,6 +899,12 @@ mod tests {
         assert!(checked > 50, "only {checked} faces were read");
     }
     #[test]
+    fn every_sheet_button_face_takes_the_colour_the_app_paints() {
+        for entry in catalogue() {
+            sheet_checks::button_faces_take_the_host_colour(entry);
+        }
+    }
+    #[test]
     fn every_sheet_evaluates_and_ends_both_halves_in_true() {
         for entry in catalogue() {
             sheet_checks::evaluates(crate::script_mod, entry);

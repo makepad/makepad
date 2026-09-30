@@ -78,13 +78,15 @@ mod.widgets.Button.draw_bg.pixel = fn() {
     let p=self.pos*self.rect_size
     let size=self.rect_size
     let sunken=self.down>0.5
-    let fill=#d4d0c8
+    // The host's colour (a lit latch) fills the face inside the bevel.
+    let own=#d4d0c8
+    let fill=vec4(self.host_face(own.xyz),1.0)
 
     let tl=min(p.x,p.y)
     let br=min(size.x-p.x,size.y-p.y)
     let d=min(tl,br)
     let upper=tl<br
-    let raised_light=if d<1.0 {#ffffff}else{#d4d0c8}
+    let raised_light=if d<1.0 {#ffffff}else{fill}
     let raised_dark=if d<1.0 {#404040}else{#808080}
     let light=if sunken {#ffffff}else{raised_light}
     let dark=if sunken {if d<1.0 {#808080}else{#404040}}else{raised_dark}
@@ -110,7 +112,7 @@ mod.widgets.Button.draw_bg.pixel = fn() {
         sdf.fill(vec4(self.loading_color.rgb,self.loading_color.a*self.loading))
         return sdf.result
     }
-    return face
+    return face*self.host_alpha()
 }
 // Sunken white edit fields, independent of the light theme's gradient material.
 mod.widgets.TextInput.draw_bg.pixel = fn() {
