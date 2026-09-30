@@ -79,14 +79,15 @@ fn out_bounce(u) { ends(u, 1.0 - in_bounce_d(1.0 - unit(u))) }
 fn in_out_bounce(u) { let d = unit(u)
     ends(u, if d < 0.5 { 0.5 * in_bounce_d(2.0 * d) } else { 1.0 - 0.5 * in_bounce_d(2.0 - 2.0 * d) }) }
 
-// A damped spring's step response at time t (stiffness k, damping d).
-fn spring(k, d, t) {
+// A damped spring's step response at time t (stiffness k, damping d),
+// in f64 (`spring` rounds it to f32).
+fn spring_d(k, d, t) {
     let kk = max(f64(k), f64(0.000001))
     let dd = max(f64(d), f64(0.0))
     let tt = f64(t)
     let w0 = sqrt(kk)
     let zeta = dd / (2.0 * w0)
-    let v = if zeta < 1.0 - 0.000000001 {
+    if zeta < 1.0 - 0.000000001 {
         let wd = w0 * sqrt(1.0 - zeta * zeta)
         1.0 - exp(-zeta * w0 * tt) * (cos(wd * tt) + zeta * w0 / wd * sin(wd * tt))
     } elif zeta <= 1.0 + 0.000000001 {
@@ -97,5 +98,87 @@ fn spring(k, d, t) {
         let r2 = -w0 * (zeta + s)
         1.0 + r2 / (r1 - r2) * exp(r1 * tt) + (-r1 / (r1 - r2)) * exp(r2 * tt)
     }
-    float(v)
+}
+fn spring(k, d, t) { float(spring_d(k, d, t)) }
+
+// CSS cubic-bezier(x1, y1, x2, y2) at u, as Motion solves it: Newton from
+// u (8 steps, to 1e-12 in x), falling back to bisection (64 steps).
+fn bezier_d(x1, y1, x2, y2, u) {
+    let cx = 3.0 * clamp(f64(x1), f64(0.0), f64(1.0))
+    let bx = 3.0 * (clamp(f64(x2), f64(0.0), f64(1.0)) - clamp(f64(x1), f64(0.0), f64(1.0))) - cx
+    let ax = 1.0 - cx - bx
+    let cy = 3.0 * f64(y1)
+    let by = 3.0 * (f64(y2) - f64(y1)) - cy
+    let ay = 1.0 - cy - by
+    let uu = f64(u)
+    let s = uu
+    let solved = false
+    let stop = false
+    for it in 0..8 {
+        if !stop {
+            let err = ((ax * s + bx) * s + cx) * s - uu
+            if abs(err) < 0.000000000001 {
+                solved = true
+                stop = true
+            } else {
+                let dx = (3.0 * ax * s + 2.0 * bx) * s + cx
+                if abs(dx) < 0.000000001 {
+                    stop = true
+                } else {
+                    s = s - err / dx
+                    if !(s >= 0.0 && s <= 1.0) { stop = true }
+                }
+            }
+        }
+    }
+    if !solved || !(s >= 0.0 && s <= 1.0) {
+        let lo = f64(0.0)
+        let hi = f64(1.0)
+        s = uu
+        stop = false
+        for it in 0..64 {
+            if !stop {
+                let x = ((ax * s + bx) * s + cx) * s
+                if abs(x - uu) < 0.000000000001 {
+                    stop = true
+                } else {
+                    if x < uu { lo = s } else { hi = s }
+                    s = 0.5 * (lo + hi)
+                }
+            }
+        }
+    }
+    ((ay * s + by) * s + cy) * s
+}
+
+// The ease-in curve `c` (0 quad, 1 cubic, 2 quart, 3 quint, 4 sine, 5 expo,
+// 6 circ, 7 back, 8 elastic, 9 bounce) at u, in f64.
+fn in_curve_d(c, u) {
+    if c == 0 { in_quad_d(u) } elif c == 1 { in_cubic_d(u) } elif c == 2 { in_quart_d(u) } elif c == 3 { in_quint_d(u) }
+    elif c == 4 { in_sine_d(u) } elif c == 5 { in_expo_d(u) } elif c == 6 { in_circ_d(u) } elif c == 7 { in_back_d(u) }
+    elif c == 8 { in_elastic_d(u) } else { in_bounce_d(u) }
+}
+
+// Motion's Ease::apply by id, in f64: the eased fraction at u of a segment
+// `seconds` long (0 at or below u = 0, 1 at or above 1). Ids: 0 linear,
+// 1 hold, 2 + 3 * curve + dir (curve as in_curve_d, dir 0 in, 1 out,
+// 2 in_out; Motion's plain ease_in/out/in_out are the quad ones), 32 a
+// spring (p0 = k, p1 = d) over the segment's seconds, 33 bezier(p0, p1, p2, p3).
+fn apply_d(id, u, seconds, p0, p1, p2, p3) {
+    let k = int(id)
+    let uu = f64(u)
+    if !(uu > 0.0) { f64(0.0) }
+    elif uu >= 1.0 { f64(1.0) }
+    elif k == 0 { uu }
+    elif k == 1 { f64(0.0) }
+    elif k == 32 { spring_d(p0, p1, uu * max(f64(seconds), f64(0.0))) }
+    elif k == 33 { bezier_d(p0, p1, p2, p3, uu) }
+    else {
+        let c = (k - 2) / 3
+        let dir = (k - 2) % 3
+        if dir == 0 { in_curve_d(c, uu) }
+        elif dir == 1 { 1.0 - in_curve_d(c, 1.0 - uu) }
+        elif uu < 0.5 { 0.5 * in_curve_d(c, 2.0 * uu) }
+        else { 1.0 - 0.5 * in_curve_d(c, 2.0 - 2.0 * uu) }
+    }
 }

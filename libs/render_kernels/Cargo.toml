@@ -10,3 +10,6 @@ makepad-platform = { path = "../../platform", version = "2.0.0" }
 makepad-script-compute = { path = "../../platform/script/compute" }
 makepad-kernel-tools = { path = "tools" }
 makepad-strict-json = { path = "../strict_json" }
+
+[dev-dependencies]
+makepad-csg-math = { path = "../csg/csg_math" }

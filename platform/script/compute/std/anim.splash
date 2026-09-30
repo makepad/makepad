@@ -2,6 +2,7 @@
 // pulses and event steps over time `t`. Tracks live in buffers: `times`
 // (ascending), `values`, n keys.
 use std.search.*
+use std.ease as ease
 
 // Progress of t through [t0, t1], 0..1 (0 before, 1 after).
 fn tween(t, t0, t1) { if t1 > t0 { clamp((t - t0) / (t1 - t0), 0.0, 1.0) } else { if t >= t1 { 1.0 } else { 0.0 } } }
@@ -17,6 +18,40 @@ fn keys(times, values, n, t) {
     if k < 0 { values[0] }
     elif k >= n - 1 { values[n - 1] }
     else { mix(values[k], values[k + 1], tween(t, times[k], times[k + 1])) }
+}
+
+// A Motion key track (motion eval.rs sample_track) in f64: `times` (f64,
+// ascending), `values` (f64, `width` per key; this reads component
+// `comp`), per key an ease id (`eases`, i32: ease.apply_d's ids) and four
+// ease params (`eparams`, f64); key k's ease shapes the segment ending at
+// key k. The first key's value before it, the last one's after.
+fn track_d(times, values, width, comp, eases, eparams, n, t) {
+    let tt = f64(t)
+    if !(tt > times[0]) { values[comp] }
+    else {
+        let next = last_le(times, n, tt) + 1
+        if next >= n { values[(n - 1) * width + comp] }
+        else {
+            let a = next - 1
+            let span = times[next] - times[a]
+            let u = ease.apply_d(eases[next], (tt - times[a]) / max(span, f64(0.000000000001)), span, eparams[next * 4], eparams[next * 4 + 1], eparams[next * 4 + 2], eparams[next * 4 + 3])
+            values[a * width + comp] + (values[next * width + comp] - values[a * width + comp]) * u
+        }
+    }
+}
+
+// A precomputed history (render-kernels' `precompute`, AK5): record i of
+// step s at words (s * count + i) * stride; word `word` of element i at time
+// t, linear between steps and held at the ends.
+fn history_at(table, count, stride, word, i, t0, dt, steps, t) {
+    let last = steps - 1
+    let x = clamp((t - t0) / dt, 0.0, float(last))
+    let k = min(int(floor(x)), max(last - 1, 0))
+    let a = table[(k * count + i) * stride + word]
+    if last == 0 { a } else {
+        let b = table[((k + 1) * count + i) * stride + word]
+        a + (b - a) * (x - float(k))
+    }
 }
 
 // The index of the last event at or before t (-1: none yet), and how long
