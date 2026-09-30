@@ -462,6 +462,72 @@ fn without_step(p: &Program, sh: &Shape) -> (Program, Option<u32>) {
     (q, Some(next.0))
 }
 
+/// Which bool values the vector code holds as lane masks: compares,
+/// constants and negations always; and/or/select of masks; gets of
+/// variables every set of which is a mask. Loaded bools (any bits) stay
+/// raw words, as do and/or/select touching one, so every op keeps the
+/// scalar code's exact bits where they can differ (and/or of raw words);
+/// a mask becomes the 0/1 word where it meets raw bits or memory.
+fn bool_masks(p: &Program) -> (Vec<bool>, Vec<bool>) {
+    use crate::ir::Ty;
+    let mut mask = vec![false; p.vals.len()];
+    let mut var_mask: Vec<bool> = p.vars.iter().map(|t| *t == Ty::Bool).collect();
+    loop {
+        fn vals(b: &Block, p: &Program, mask: &mut Vec<bool>, var_mask: &[bool]) {
+            for s in b {
+                match s {
+                    Stmt::Def(v, op) if p.vals[v.0 as usize] == Ty::Bool => {
+                        mask[v.0 as usize] = match *op {
+                            Op::CmpF(..) | Op::CmpI(..) | Op::CmpD(..) | Op::ConstB(_) | Op::Un(Un::NotB, _) => true,
+                            Op::Bin(Bin::AndB | Bin::OrB, a, b) => mask[a.0 as usize] && mask[b.0 as usize],
+                            Op::Sel(_, a, b) => mask[a.0 as usize] && mask[b.0 as usize],
+                            Op::Get(var) => var_mask[var.0 as usize],
+                            _ => false,
+                        };
+                    }
+                    Stmt::If(_, t, e) => {
+                        vals(t, p, mask, var_mask);
+                        vals(e, p, mask, var_mask);
+                    }
+                    Stmt::Loop { body, .. } => vals(body, p, mask, var_mask),
+                    _ => {}
+                }
+            }
+        }
+        // Values in program order twice (gets in a loop see later sets).
+        vals(&p.body, p, &mut mask, &var_mask);
+        vals(&p.body, p, &mut mask, &var_mask);
+        let mut next = var_mask.clone();
+        fn sets(b: &Block, mask: &[bool], next: &mut Vec<bool>) {
+            for s in b {
+                match s {
+                    Stmt::Set(var, v) => {
+                        if !mask[v.0 as usize] {
+                            next[var.0 as usize] = false;
+                        }
+                    }
+                    Stmt::If(_, t, e) => {
+                        sets(t, mask, next);
+                        sets(e, mask, next);
+                    }
+                    Stmt::Loop { body, .. } => sets(body, mask, next),
+                    _ => {}
+                }
+            }
+        }
+        sets(&p.body, &mask, &mut next);
+        for (k, t) in p.vars.iter().enumerate() {
+            if *t != Ty::Bool {
+                next[k] = false;
+            }
+        }
+        if next == var_mask {
+            return (mask, var_mask);
+        }
+        var_mask = next;
+    }
+}
+
 /// How many times each value is read.
 fn use_counts(p: &Program) -> Vec<u32> {
     let mut n = vec![0u32; p.vals.len()];
@@ -686,6 +752,13 @@ struct Em {
     uses: Vec<u32>,
     /// The element counter's IR step value (not emitted).
     step_def: Option<u32>,
+    /// Bool values held as lane masks (all ones / zero) rather than the
+    /// 0/1 words the scalar code holds (see `bool_masks`).
+    mask: Vec<bool>,
+    /// Bool variables that hold masks.
+    var_mask: Vec<bool>,
+    /// Every value's type.
+    p_vals: Vec<crate::ir::Ty>,
     /// Constants used only as multiplicands, packed four to a register:
     /// value -> (register, lane), read with by-element FMUL/FMLA/MUL/MLA.
     packed: HashMap<u32, (u8, u32, u32)>,
@@ -761,6 +834,21 @@ impl Em {
                 scratch
             }
         }
+    }
+
+    fn is_bool(&self, v: Val) -> bool {
+        self.p_vals[v.0 as usize] == crate::ir::Ty::Bool
+    }
+
+    /// `v` in a register as the scalar code's word when `word` is set (a
+    /// mask becomes 0/1 in `scratch`), else as held.
+    fn vsrc_word(&mut self, v: Val, scratch: u8, word: bool) -> u8 {
+        let r = self.vsrc(v, scratch);
+        if word && self.mask[v.0 as usize] {
+            self.e(v::r2(v::USHR31, scratch, r));
+            return scratch;
+        }
+        r
     }
 
     fn vsrc(&mut self, v: Val, scratch: u8) -> u8 {
@@ -1069,7 +1157,8 @@ impl Em {
 
     fn store(&mut self, region: Region, base: u32, extent: u32, off: Option<Val>, val: Val) {
         let uniform = off.is_none_or(|o| self.uniform(o));
-        let rv = self.vsrc(val, VS0);
+        // Memory holds the scalar code's words (a mask stores as 0/1).
+        let rv = self.vsrc_word(val, VS0, true);
         let ro = off.map(|o| self.vsrc(o, VS1));
         match region {
             Region::Frame if uniform => {
@@ -1260,7 +1349,7 @@ impl Em {
             self.e(add_x_lsl(9, 10, 12, 2));
             for s in &b[..n] {
                 let Stmt::Store { val, .. } = s else { unreachable!() };
-                let rv = self.vsrc(*val, VS0);
+                let rv = self.vsrc_word(*val, VS0, true);
                 self.e(v::st1_lane_post(rv, l, 9, 31));
             }
             self.bind(skip);
@@ -1447,7 +1536,9 @@ impl Em {
                     self.done(dst, d);
                     return;
                 }
-                let r = self.vsrc(*v, VS1);
+                // A raw bool variable takes a mask as its 0/1 word.
+                let word = self.is_bool(*v) && !self.var_mask[var.0 as usize];
+                let r = self.vsrc_word(*v, VS1, word);
                 if self.full {
                     let d = self.dst(dst);
                     if d != r {
@@ -1485,7 +1576,11 @@ impl Em {
                 let (else_slot, then_slot) = (self.slot(0), self.slot(1));
                 self.depth += 1;
                 let rc = self.vsrc(*c, VS1);
-                self.e(v::r3(v::CMTST, VS2, rc, rc));
+                if self.mask[c.0 as usize] {
+                    self.e(v::mov(VS2, rc));
+                } else {
+                    self.e(v::r3(v::CMTST, VS2, rc, rc));
+                }
                 self.e(v::r3(v::BIC, VS1, VM, VS2));
                 self.ldst_sp_q(false, VS1, else_slot);
                 self.e(v::r3(v::AND, VM, VM, VS2));
@@ -1645,7 +1740,7 @@ impl Em {
         match *op {
             Op::ConstF(x) => self.konst(dst, x.to_bits()),
             Op::ConstI(x) => self.konst(dst, x as u32),
-            Op::ConstB(x) => self.konst(dst, x as u32),
+            Op::ConstB(x) => self.konst(dst, if self.mask[v.0 as usize] { if x { u32::MAX } else { 0 } } else { x as u32 }),
             Op::Get(var) => {
                 let r = self.src(Ent::Var(var.0), VS1);
                 let d = self.dst(dst);
@@ -1664,8 +1759,16 @@ impl Em {
                         }
                     }
                     Un::NotB => {
-                        self.e(v::r2(v::CMEQ0, d, ra));
-                        self.e(v::r2(v::USHR31, d, d));
+                        // A mask: NOT of a mask, or raw bits == 0 (as the
+                        // scalar code tests them).
+                        if self.mask[a.0 as usize] {
+                            self.e(v::r2(v::NOT, d, ra));
+                        } else {
+                            self.e(v::r2(v::CMEQ0, d, ra));
+                        }
+                        if !self.mask[v.0 as usize] {
+                            self.e(v::r2(v::USHR31, d, d));
+                        }
                     }
                     _ => {
                         let base = match u {
@@ -1696,8 +1799,10 @@ impl Em {
                 self.done(dst, d);
             }
             Op::Bin(b, x, y) => {
-                let rx = self.vsrc(x, VS0);
-                let ry = if y == x { rx } else { self.vsrc(y, VS1) };
+                // And/or of bools: masks when both are, else 0/1 words.
+                let raw = matches!(b, Bin::AndB | Bin::OrB) && !self.mask[v.0 as usize];
+                let rx = self.vsrc_word(x, VS0, raw);
+                let ry = if y == x { rx } else { self.vsrc_word(y, VS1, raw) };
                 match b {
                     Bin::DivI | Bin::RemI if self.consts[y.0 as usize].is_some_and(|c| c > 1 && (c as u32).is_power_of_two()) => {
                         // By 2^k: q = (x + ((x >> 31) >>> (32 - k))) >> k
@@ -1817,8 +1922,10 @@ impl Em {
             }
             Op::CmpF(cc, x, y) | Op::CmpI(cc, x, y) => {
                 let float = matches!(op, Op::CmpF(..));
-                let rx = self.vsrc(x, VS0);
-                let ry = self.vsrc(y, VS1);
+                // Bools compare as masks when both are, else as 0/1 words.
+                let raw = !float && self.is_bool(x) && !(self.mask[x.0 as usize] && self.mask[y.0 as usize]);
+                let rx = self.vsrc_word(x, VS0, raw);
+                let ry = self.vsrc_word(y, VS1, raw);
                 let (gt, ge, eq) = if float { (v::FCMGT, v::FCMGE, v::FCMEQ) } else { (v::CMGT, v::CMGE, v::CMEQ) };
                 match cc {
                     Cmp::Lt => self.e(v::r3(gt, VS2, ry, rx)),
@@ -1833,14 +1940,27 @@ impl Em {
                     }
                 }
                 let d = self.dst(dst);
-                self.e(v::r2(v::USHR31, d, VS2));
+                if self.mask[v.0 as usize] {
+                    self.e(v::mov(d, VS2));
+                } else {
+                    self.e(v::r2(v::USHR31, d, VS2));
+                }
                 self.done(dst, d);
             }
             Op::Sel(c, x, y) => {
+                // The selector: a mask as it is, raw bits made one.
                 let rc = self.vsrc(c, VS2);
-                self.e(v::r3(v::CMTST, VS2, rc, rc));
-                let rx = self.vsrc(x, VS0);
-                let ry = self.vsrc(y, VS1);
+                if self.mask[c.0 as usize] {
+                    if rc != VS2 {
+                        self.e(v::mov(VS2, rc));
+                    }
+                } else {
+                    self.e(v::r3(v::CMTST, VS2, rc, rc));
+                }
+                // A bool select of raw words takes masks as their 0/1 word.
+                let raw = self.is_bool(v) && !self.mask[v.0 as usize];
+                let rx = self.vsrc_word(x, VS0, raw);
+                let ry = self.vsrc_word(y, VS1, raw);
                 self.e(v::r3(v::BSL, VS2, rx, ry));
                 let d = self.dst(dst);
                 self.e(v::mov(d, VS2));
@@ -2131,6 +2251,7 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
     // (iv + 1) is never computed, so the allocator must not keep iv live to
     // the end of the element for it.
     let (alloc_view, step_def) = without_step(p, &sh);
+    let (bmask, bvar) = bool_masks(p);
     let alloc = allocate_with(
         &alloc_view,
         |e| match e {
@@ -2175,6 +2296,9 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
         packed,
         uses: use_counts(p),
         step_def,
+        mask: bmask,
+        var_mask: bvar,
+        p_vals: p.vals.clone(),
         full: true,
         i,
         bounds,
