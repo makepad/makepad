@@ -20,7 +20,7 @@ pub struct PassRead {
 }
 
 /// The fields a pass object may have (for a host's unknown-field check).
-pub const PASS_FIELDS: &[&str] = &["at", "name", "reads", "slots", "scale", "format", "uniforms", "pixel", "helpers", "history"];
+pub const PASS_FIELDS: &[&str] = &["at", "name", "reads", "slots", "scale", "size", "format", "uniforms", "pixel", "helpers", "history"];
 
 fn get(vm: &ScriptVm, o: ScriptObject, name: &str) -> ScriptValue {
     let v = vm.bx.heap.value(o, LiveId::from_str(name).into(), NoTrap);
@@ -76,7 +76,7 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
     let at = get(vm, o, "at");
     let stage = match text(vm, at) {
         None => Stage::Hdr,
-        Some(s) => Stage::by_name(&s).ok_or_else(|| format!("{label}: `at: @{s}` is not a stage; one of @hdr @display @final"))?,
+        Some(s) => Stage::by_name(&s).ok_or_else(|| format!("{label}: `at: @{s}` is not a stage; one of @pre @hdr @display @final"))?,
     };
     let name_v = get(vm, o, "name");
     let name = text(vm, name_v);
@@ -99,6 +99,15 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
     }
     let scale_v = get(vm, o, "scale");
     let scale = if scale_v.is_nil() { 1.0 } else { scale_v.as_number().ok_or_else(|| format!("{label}: `scale` is a number (0.5 = half resolution)"))? as f32 };
+    let size_v = get(vm, o, "size");
+    let size = if size_v.is_nil() {
+        None
+    } else {
+        match makepad_script::numeric::NumericValue::from_script_value_heap(&vm.bx.heap, size_v, Default::default()) {
+            makepad_script::numeric::NumericValue::Vec2(v) if v.x >= 1.0 && v.y >= 1.0 => Some((v.x as u32, v.y as u32)),
+            _ => return Err(format!("{label}: `size` is the output in pixels: vec2(512, 256)")),
+        }
+    };
     let format_v = get(vm, o, "format");
     let format = match text(vm, format_v) {
         None => None,
@@ -117,7 +126,7 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
         }
     }
     let history = get(vm, o, "history").as_bool().unwrap_or(false);
-    let decl = PassDecl { name, stage, reads, slots, scale, format, uniforms: Vec::new(), pixel, helpers, history, label: label.to_string() };
+    let decl = PassDecl { name, stage, reads, slots, scale, size, format, uniforms: Vec::new(), pixel, helpers, history, label: label.to_string() };
     Ok(PassRead { decl, uniforms })
 }
 

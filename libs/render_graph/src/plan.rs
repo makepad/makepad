@@ -33,6 +33,9 @@ use std::hash::{Hash, Hasher};
 /// Where a pass sits in the chain.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Stage {
+    /// Before the scene: simulation state and generated textures the scene
+    /// and later passes read by name (no frame colour yet).
+    Pre,
     /// Linear scene-referred light, before exposure and the tone map.
     Hdr,
     /// Display-encoded, after the tone map (grades, LUTs, outlines).
@@ -42,10 +45,11 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 3] = [Stage::Hdr, Stage::Display, Stage::Final];
+    pub const ALL: [Stage; 4] = [Stage::Pre, Stage::Hdr, Stage::Display, Stage::Final];
 
     pub fn by_name(name: &str) -> Option<Self> {
         match name {
+            "pre" => Some(Stage::Pre),
             "hdr" => Some(Stage::Hdr),
             "display" => Some(Stage::Display),
             "final" => Some(Stage::Final),
@@ -55,6 +59,7 @@ impl Stage {
 
     pub fn name(self) -> &'static str {
         match self {
+            Stage::Pre => "pre",
             Stage::Hdr => "hdr",
             Stage::Display => "display",
             Stage::Final => "final",
@@ -94,7 +99,7 @@ impl Format {
     /// The format a stage's passes write unless they say otherwise.
     pub fn default_for(stage: Stage) -> Self {
         match stage {
-            Stage::Hdr => Format::Rgba16f,
+            Stage::Pre | Stage::Hdr => Format::Rgba16f,
             Stage::Display | Stage::Final => Format::Rgba8,
         }
     }
@@ -178,6 +183,8 @@ pub struct PassNode {
     pub reads: Vec<Resource>,
     /// Output size relative to the frame (0.5 = half resolution).
     pub scale: f32,
+    /// A fixed size in pixels instead (simulation state, a lookup).
+    pub size: Option<(u32, u32)>,
     pub format: Format,
     pub program: ProgramId,
     /// It keeps its output across frames (it may read `@history`).
@@ -304,6 +311,8 @@ pub enum PlanError {
     BadScale { pass: String, scale: f32 },
     /// A read of `@history` in a pass that keeps none.
     NoHistory { pass: String },
+    /// A `@pre` pass reads the frame colour or writes it.
+    PreColor { pass: String },
     /// The targets do not fit the budget the host gave.
     OverBudget { bytes: u64, budget: u64 },
 }
@@ -317,6 +326,7 @@ impl std::fmt::Display for PlanError {
             PlanError::NoHdrStage { pass } => write!(f, "{pass} is placed at @hdr, but this pipeline is display-space 8-bit (no @hdr stage)"),
             PlanError::BadScale { pass, scale } => write!(f, "{pass}: scale {scale} is outside 0..4"),
             PlanError::NoHistory { pass } => write!(f, "{pass} reads @history but keeps none (add `history: true`)"),
+            PlanError::PreColor { pass } => write!(f, "{pass} runs @pre, before the scene: it has no @color to read, and it needs a `name` later passes and the scene read it by"),
             PlanError::OverBudget { bytes, budget } => write!(f, "the post graph needs {} MiB of targets, over the {} MiB budget", bytes >> 20, budget >> 20),
         }
     }
@@ -329,7 +339,9 @@ pub struct FramePlan {
     pub targets: Vec<TargetDesc>,
     /// Per stage: the colour at the stage's end (None = unchanged: what the
     /// host handed in).
-    pub stage_color: [Option<Version>; 3],
+    pub stage_color: [Option<Version>; 4],
+    /// The last version of each named resource.
+    pub named: Vec<(LiveId, Version)>,
     pub size: (u32, u32),
     structure: u64,
     bytes: u64,
@@ -347,7 +359,7 @@ impl FramePlan {
         let mut passes = Vec::new();
         let mut targets: Vec<TargetDesc> = Vec::new();
         let mut named: Vec<(LiveId, Version)> = Vec::new();
-        let mut stage_color = [None; 3];
+        let mut stage_color = [None; 4];
         let mut color: Option<Version> = None;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         size.hash(&mut hasher);
@@ -364,8 +376,11 @@ impl FramePlan {
                 if stage == Stage::Hdr && graph.color == ColorPipeline::Display8 {
                     return Err(PlanError::NoHdrStage { pass: node.label.clone() });
                 }
-                if !(node.scale > 0.0 && node.scale <= 4.0) {
+                if node.size.is_none() && !(node.scale > 0.0 && node.scale <= 4.0) {
                     return Err(PlanError::BadScale { pass: node.label.clone(), scale: node.scale });
+                }
+                if stage == Stage::Pre && (node.name.is_none() || node.reads.contains(&Resource::Color)) {
+                    return Err(PlanError::PreColor { pass: node.label.clone() });
                 }
                 let mut inputs = Vec::with_capacity(node.reads.len());
                 for &r in &node.reads {
@@ -394,7 +409,10 @@ impl FramePlan {
                 }
                 let id = PassId(passes.len() as u32);
                 let v = Version(targets.len() as u32);
-                let px = scaled(size, node.scale);
+                let px = match node.size {
+                    Some((w, h)) => (w.clamp(1, 16384), h.clamp(1, 16384)),
+                    None => scaled(size, node.scale),
+                };
                 targets.push(TargetDesc { format: node.format, scale: node.scale, size: px, writer: id });
                 match node.name {
                     Some(n) => {
@@ -405,7 +423,7 @@ impl FramePlan {
                     }
                     None => color = Some(v),
                 }
-                (stage, &node.reads, node.name, node.format, node.program, node.history).hash(&mut hasher);
+                (stage, &node.reads, node.name, node.format, node.program, node.history, node.size).hash(&mut hasher);
                 node.scale.to_bits().hash(&mut hasher);
                 passes.push(PlannedPass { id, node: ni, stage, inputs, output: v, size: px });
             }
@@ -423,7 +441,7 @@ impl FramePlan {
         if bytes > budget {
             return Err(PlanError::OverBudget { bytes, budget });
         }
-        Ok(FramePlan { passes, targets, stage_color, size, structure: hasher.finish(), bytes })
+        Ok(FramePlan { passes, targets, stage_color, named, size, structure: hasher.finish(), bytes })
     }
 
     /// What changes the plan; equal hashes run the same passes.
@@ -459,6 +477,7 @@ mod tests {
             format: Format::default_for(stage),
             program: ProgramId(reads.len() as u64),
             history: false,
+            size: None,
             label: name.unwrap_or("Pass").to_string(),
         }
     }
@@ -470,7 +489,7 @@ mod tests {
         let plan = FramePlan::compile(&PostGraph::default(), (1920, 1080), Attachments::default(), &[], false, BIG).unwrap();
         assert!(plan.is_empty());
         assert_eq!(plan.bytes(), 0);
-        assert_eq!(plan.stage_color, [None; 3]);
+        assert_eq!(plan.stage_color, [None; 4]);
     }
 
     #[test]
@@ -498,7 +517,7 @@ mod tests {
         // @display starts from the host's tone-mapped colour again, and
         // can still read @hdr's named output.
         assert_eq!(plan.passes[3].inputs, vec![Source::Host(Resource::Color), Source::Target(Version(0))]);
-        assert_eq!(plan.stage_color, [Some(Version(2)), Some(Version(3)), Some(Version(4))]);
+        assert_eq!(plan.stage_color, [None, Some(Version(2)), Some(Version(3)), Some(Version(4))]);
         assert_eq!(plan.targets.len(), 5);
         assert_eq!(plan.bytes(), 640 * 360 * 8 + 2 * 1280 * 720 * 8 + 2 * 1280 * 720 * 4);
     }
@@ -529,6 +548,22 @@ mod tests {
         let plan = FramePlan::compile(&g, (64, 64), Attachments::default(), &[], false, BIG).unwrap();
         assert_eq!(plan.passes[0].inputs, vec![Source::Host(Resource::Color), Source::History]);
         assert_eq!(plan.bytes(), 2 * 64 * 64 * 4);
+    }
+
+    #[test]
+    fn pre_passes_run_first_at_their_own_size_and_are_read_by_name() {
+        let mut state = pass(Some("state"), Stage::Pre, &["history"], 1.0);
+        state.history = true;
+        state.size = Some((256, 128));
+        state.format = Format::Rgba32f;
+        let g = PostGraph { color: ColorPipeline::Hdr, nodes: vec![pass(None, Stage::Hdr, &["color", "state"], 1.0), state] };
+        let plan = FramePlan::compile(&g, (1920, 1080), Attachments::default(), &[], false, BIG).unwrap();
+        assert_eq!(plan.passes[0].node, 1);
+        assert_eq!(plan.passes[0].size, (256, 128));
+        assert_eq!(plan.passes[1].inputs, vec![Source::Host(Resource::Color), Source::Target(Version(0))]);
+        assert_eq!(plan.named, vec![(LiveId::from_str("state"), Version(0))]);
+        let bad = PostGraph { color: ColorPipeline::Hdr, nodes: vec![pass(Some("s"), Stage::Pre, &["color"], 1.0)] };
+        assert!(matches!(FramePlan::compile(&bad, (64, 64), Attachments::default(), &[], false, BIG), Err(PlanError::PreColor { .. })));
     }
 
     #[test]

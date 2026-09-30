@@ -91,6 +91,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             reads: vec!["color".into()],
             slots: Vec::new(),
             scale: 1.0,
+            size: None,
             format: None,
             uniforms: Vec::new(),
             pixel: "fn() -> vec4 { return self.nope.sample(self.uv()) }".into(),

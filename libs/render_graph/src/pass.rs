@@ -14,6 +14,11 @@
 //! }
 //! ```
 //!
+//! A pass placed `at: @pre` runs before the scene (simulation state, a
+//! generated texture): it reads no frame colour, is named, and later passes
+//! read it by name, as the host's scene may; `size: vec2(w, h)` fixes its
+//! output in pixels.
+//!
 //! A pass with `history: true` may read `@history`: its own output of the
 //! previous frame (trails, a latched frame). History is realtime state: the
 //! first frame after the passes change, or after the host resets it, has no
@@ -65,6 +70,9 @@ pub struct PassDecl {
     /// own name.
     pub slots: Vec<String>,
     pub scale: f32,
+    /// A fixed output size in pixels (simulation state, a lookup) instead
+    /// of `scale`.
+    pub size: Option<(u32, u32)>,
     pub format: Option<Format>,
     pub uniforms: Vec<UniformDecl>,
     /// The body of `pixel`: `fn() -> vec4 { ... }`.
@@ -216,6 +224,7 @@ mod tests {
             reads: vec!["color".into(), "glow".into()],
             slots: Vec::new(),
             scale: 0.5,
+            size: None,
             format: None,
             uniforms: vec![UniformDecl { name: "amount".into(), width: 1 }, UniformDecl { name: "tint".into(), width: 4 }],
             pixel: "fn() -> vec4 { return self.color.sample(self.uv()) * self.amount }".into(),
