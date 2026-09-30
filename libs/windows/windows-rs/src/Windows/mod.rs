@@ -107646,6 +107646,7 @@ pub const D3D11_BLEND_ONE: D3D11_BLEND = D3D11_BLEND(2i32);
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct D3D11_BLEND_OP(pub i32);
 pub const D3D11_BLEND_OP_ADD: D3D11_BLEND_OP = D3D11_BLEND_OP(1i32);
+pub const D3D11_BLEND_OP_MAX: D3D11_BLEND_OP = D3D11_BLEND_OP(5i32);
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct D3D11_BOX {

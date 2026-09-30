@@ -58,6 +58,7 @@ impl DrawVars {
             }
 
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            let pipe = DrawVars::pipeline_state_hash(&vm.bx.heap, io_self);
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
@@ -206,7 +207,7 @@ impl DrawVars {
 
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
@@ -297,7 +298,7 @@ impl DrawVars {
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
-            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
             if os_shader_id.is_none() {
                 cx.draw_shaders.compile_set.insert(index);
             }
@@ -1003,6 +1004,9 @@ impl Cx {
                     // no extra GL calls.
                     if !draw_call.options.alpha_blend {
                         (gl.glDisable)(gl_sys::BLEND);
+                    } else if sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max {
+                        // `blend_op: @Max`: per-channel max (factors unused).
+                        (gl.glBlendEquationSeparate)(gl_sys::MAX, gl_sys::MAX);
                     }
                     if draw_call.options.backface_culling {
                         (gl.glEnable)(gl_sys::CULL_FACE);
@@ -1195,6 +1199,8 @@ impl Cx {
                     (gl.glDepthMask)(gl_sys::TRUE);
                     if !draw_call.options.alpha_blend {
                         (gl.glEnable)(gl_sys::BLEND);
+                    } else if sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max {
+                        (gl.glBlendEquationSeparate)(gl_sys::FUNC_ADD, gl_sys::FUNC_ADD);
                     }
                 }
             }

@@ -70,6 +70,7 @@ pub const INT: GLenum = 0x1404;
 pub const DEPTH_TEST: GLenum = 0x0B71;
 pub const LEQUAL: GLenum = 0x0203;
 pub const FUNC_ADD: GLenum = 0x8006;
+pub const MAX: GLenum = 0x8008;
 pub const ONE: GLenum = 1;
 pub const ONE_MINUS_SRC_ALPHA: GLenum = 0x0303;
 pub const BLEND: GLenum = 0x0BE2;

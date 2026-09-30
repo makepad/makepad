@@ -2343,10 +2343,13 @@ impl Cx {
             // Get the uniform buffer bindings from the mapping
             let bindings = cx_shader.mapping.uniform_buffer_bindings.clone();
 
-            // Check if we already have an os_shader with the same source
+            // Check if we already have an os_shader with the same source and
+            // the same pipeline state (the colour format and blend op are
+            // baked into its pipelines).
             let mut found_os_shader_id = None;
+            let (color_format, blend_max) = (cx_shader.mapping.color_format, cx_shader.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max);
             for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
-                if ds.mtlsl == mtlsl {
+                if ds.mtlsl == mtlsl && ds.color_format == color_format && ds.pipelines.blend_max == blend_max {
                     found_os_shader_id = Some(index);
                     break;
                 }
@@ -3586,6 +3589,7 @@ impl DrawVars {
 
             // Cache 2: Compute function hash and check if we've seen these functions before
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            let pipe = DrawVars::pipeline_state_hash(&vm.bx.heap, io_self);
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
@@ -3690,7 +3694,7 @@ impl DrawVars {
             // Cache 3: Check if this exact code has been compiled before
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
                     // Add to both object_id and function hash caches
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
@@ -3759,7 +3763,7 @@ impl DrawVars {
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
-            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
 
             // Add to compile set for later Metal compilation
             cx.draw_shaders.compile_set.insert(index);
@@ -3791,6 +3795,8 @@ struct MetalPipelines {
     /// Bit `i` set when the shader writes color output `i`
     /// (`CxDrawShaderMapping::fragment_outputs`).
     written_outputs: u8,
+    /// `blend_op: @Max`: blending pipelines take the per-channel max.
+    blend_max: bool,
     /// Pipelines for passes with several color attachments (MRT), one per
     /// attachment-format list and blend mode, built from `functions` on the
     /// first draw into such a pass.
@@ -3825,7 +3831,7 @@ fn mtl_format_blendable(format: MTLPixelFormat) -> bool {
 /// so drawing ordinary one-output items into an MRT pass leaves the other
 /// attachments intact; a written, blendable one gets the premultiplied-over
 /// blend when `blend`; everything else writes raw.
-pub(crate) unsafe fn describe_mrt_attachments(descriptor: ObjcId, formats: &[MTLPixelFormat], written: u8, blend: bool) {
+pub(crate) unsafe fn describe_mrt_attachments(descriptor: ObjcId, formats: &[MTLPixelFormat], written: u8, blend: bool, max: bool) {
     let color_attachments: ObjcId = msg_send![descriptor, colorAttachments];
     for (index, format) in formats.iter().enumerate() {
         let attachment: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: index as u64];
@@ -3834,7 +3840,7 @@ pub(crate) unsafe fn describe_mrt_attachments(descriptor: ObjcId, formats: &[MTL
             let () = msg_send![attachment, setBlendingEnabled: NO];
             let () = msg_send![attachment, setWriteMask: 0u64];
         } else if blend && mtl_format_blendable(*format) {
-            MetalPipelines::set_over_blend(attachment);
+            MetalPipelines::set_over_blend(attachment, max);
         } else {
             let () = msg_send![attachment, setBlendingEnabled: NO];
         }
@@ -3869,11 +3875,14 @@ impl MetalPipelines {
         crate::thread::wake_ui_loop();
     }
 
-    /// The premultiplied-over blend every blendable colour target uses.
-    unsafe fn set_over_blend(color_attachment: ObjcId) {
+    /// The blend every blendable colour target uses: premultiplied over,
+    /// or per-channel max for a `blend_op: @Max` shader (factors are
+    /// ignored by the max operation).
+    unsafe fn set_over_blend(color_attachment: ObjcId, max: bool) {
+        let op = if max { MTLBlendOperation::Max } else { MTLBlendOperation::Add };
         let () = msg_send![color_attachment, setBlendingEnabled: YES];
-        let () = msg_send![color_attachment, setRgbBlendOperation: MTLBlendOperation::Add];
-        let () = msg_send![color_attachment, setAlphaBlendOperation: MTLBlendOperation::Add];
+        let () = msg_send![color_attachment, setRgbBlendOperation: op];
+        let () = msg_send![color_attachment, setAlphaBlendOperation: op];
         let () = msg_send![color_attachment, setSourceRGBBlendFactor: MTLBlendFactor::One];
         let () = msg_send![color_attachment, setSourceAlphaBlendFactor: MTLBlendFactor::One];
         let () = msg_send![color_attachment, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
@@ -3949,7 +3958,7 @@ impl MetalPipelines {
         unsafe {
             let _: () = msg_send![descriptor.as_id(), setVertexFunction: vertex_function.as_id()];
             let _: () = msg_send![descriptor.as_id(), setFragmentFunction: fragment_function.as_id()];
-            describe_mrt_attachments(descriptor.as_id(), &variant.formats, ready.written_outputs, variant.blend);
+            describe_mrt_attachments(descriptor.as_id(), &variant.formats, ready.written_outputs, variant.blend, ready.blend_max);
             let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
         }
         let completion = objc_block!(move |pipeline: ObjcId, error: ObjcId| {
@@ -3993,7 +4002,7 @@ impl MetalPipelines {
                     msg_send![color_attachments, objectAtIndexedSubscript: 0];
                 let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::RGBA16Float];
                 if blend {
-                    Self::set_over_blend(color_attachment);
+                    Self::set_over_blend(color_attachment, ready.blend_max);
                 } else {
                     let () = msg_send![color_attachment, setBlendingEnabled: NO];
                 }
@@ -4099,7 +4108,7 @@ impl MetalPipelines {
                         match color_format {
                             crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm => {
                                 let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
-                                Self::set_over_blend(color_attachment);
+                                Self::set_over_blend(color_attachment, ready.blend_max);
                             }
                             crate::draw_shader::DrawShaderColorFormat::Bgra8NoBlend => {
                                 // Raw-write data pass: alpha is payload, and the over
@@ -4207,6 +4216,7 @@ impl CxOsDrawShader {
     ) -> Option<Self> {
         let pipelines = Arc::new(MetalPipelines {
             written_outputs: mapping.fragment_outputs,
+            blend_max: mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max,
             ..Default::default()
         });
         let compile_queued = MetalPipelines::enqueue(

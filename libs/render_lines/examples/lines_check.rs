@@ -213,6 +213,25 @@ fn hdr_check(p: &[Picture]) -> Result<String, String> {
     Ok(format!("HDR kept: one line red {r1:.3} (3.0 x 0.25), crossing green {g2:.3} (adds)"))
 }
 
+/// Two crossing lines with max blending: the crossing keeps each
+/// channel's larger value.
+fn max_job() -> Job {
+    let style = LineStyle { space: Space::Screen, blend: Blend::Max, ..LineStyle::default() };
+    let mut b = LineBatch::new(style);
+    b.push_path(&[[32.0, 4.0, 0.0], [32.0, 28.0, 0.0]], 6.0, [0.8, 0.2, 0.0, 1.0], false);
+    b.push_path(&[[4.0, 16.0, 0.0], [60.0, 16.0, 0.0]], 6.0, [0.3, 0.6, 0.0, 1.0], false);
+    Job { name: "max".into(), size: (64, 32), view: LineView::screen((64.0, 32.0), 1.0), lines: vec![b], points: vec![], scale: 1.0, frames: 0 }
+}
+
+fn max_check(p: &[Picture]) -> Result<String, String> {
+    let c = p[0].px(32, 16);
+    let (r, g) = (c[0] as f32 / 255.0, c[1] as f32 / 255.0);
+    if (r - 0.8).abs() > 0.02 || (g - 0.6).abs() > 0.02 {
+        return Err(format!("the crossing is {c:?}, not max(0.8, 0.3), max(0.2, 0.6)"));
+    }
+    Ok(format!("crossing keeps the per-channel max ({r:.2}, {g:.2})"))
+}
+
 /// Dashes, trim and a tail on screen lines.
 fn style_job() -> Job {
     let solid = LineStyle { space: Space::Screen, ..LineStyle::default() };
@@ -318,6 +337,8 @@ impl LinesHost {
                 self.checks.push(("ink".into(), 2, Box::new(ink_check)));
                 self.jobs.push_back(hdr_job());
                 self.checks.push(("hdr".into(), 1, Box::new(hdr_check)));
+                self.jobs.push_back(max_job());
+                self.checks.push(("max".into(), 1, Box::new(max_check)));
                 self.jobs.push_back(style_job());
                 self.checks.push(("styles".into(), 1, Box::new(style_check)));
                 self.jobs.push_back(world_job());

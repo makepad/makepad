@@ -1139,6 +1139,7 @@ impl DrawVars {
             }
 
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            let pipe = DrawVars::pipeline_state_hash(&vm.bx.heap, io_self);
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
@@ -1212,7 +1213,7 @@ impl DrawVars {
 
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
@@ -1273,7 +1274,7 @@ impl DrawVars {
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
-            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
             cx.draw_shaders.compile_set.insert(index);
 
             self.draw_shader_id = Some(shader_id);
@@ -1281,10 +1282,25 @@ impl DrawVars {
         }
     }
 
-    /// Compute a hash of all function IDs on an object by iterating through
-    /// the prototype chain and hashing each function's ScriptIp.
-    pub fn compute_shader_functions_hash(heap: &ScriptHeap, obj: ScriptObject) -> LiveId {
+    /// The shader's pipeline state as a hash: its `color_format` and
+    /// `blend_op` declarations, which the backends bake into its pipelines,
+    /// so two shaders of one code but another state never share an entry.
+    pub fn pipeline_state_hash(heap: &ScriptHeap, obj: ScriptObject) -> LiveId {
         let mut hash = LiveId(LiveId::SEED);
+        for key in [id!(color_format), id!(blend_op)] {
+            hash = hash.id_append(key);
+            if let Some(v) = heap.value(obj, key.into(), NoTrap).as_id() {
+                hash = hash.id_append(v);
+            }
+        }
+        hash
+    }
+
+    /// Compute a hash of all function IDs on an object by iterating through
+    /// the prototype chain and hashing each function's ScriptIp, and its
+    /// pipeline state ([`DrawVars::pipeline_state_hash`]).
+    pub fn compute_shader_functions_hash(heap: &ScriptHeap, obj: ScriptObject) -> LiveId {
+        let mut hash = Self::pipeline_state_hash(heap, obj);
 
         // Walk the prototype chain to collect all functions
         let mut current = Some(obj);

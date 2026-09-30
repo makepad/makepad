@@ -279,7 +279,7 @@ fn mrt_attachments_get_their_own_formats_blend_and_write_masks() {
         unsafe {
             let () = msg_send![descriptor, setVertexFunction: Gpu::function(library, "vs")];
             let () = msg_send![descriptor, setFragmentFunction: Gpu::function(library, fragment)];
-            describe_mrt_attachments(descriptor, &formats, written, blend);
+            describe_mrt_attachments(descriptor, &formats, written, blend, false);
         }
         gpu.pipeline(descriptor)
     };

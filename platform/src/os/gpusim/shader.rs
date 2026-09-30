@@ -41,6 +41,7 @@ impl DrawVars {
             }
 
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            let pipe = DrawVars::pipeline_state_hash(&vm.bx.heap, io_self);
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
@@ -126,7 +127,7 @@ impl DrawVars {
 
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
@@ -186,7 +187,7 @@ impl DrawVars {
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
-            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
             cx.draw_shaders.compile_set.insert(index);
 
             self.draw_shader_id = Some(shader_id);

@@ -302,6 +302,18 @@ script_mod! {
             self.fb0 = self.pixel()
         }
     }
+
+    // Max-blended variants: overlapping lines and sprites keep the
+    // brightest value per channel instead of summing (the platform's
+    // `blend_op: @Max` pipelines).
+    mod.draw.DrawLineSegmentMax = mod.std.set_type_default() do #(DrawLineSegmentMax::script_shader(vm)){
+        ..mod.draw.DrawLineSegment
+        blend_op: @Max
+    }
+    mod.draw.DrawLinePointMax = mod.std.set_type_default() do #(DrawLinePointMax::script_shader(vm)){
+        ..mod.draw.DrawLinePoint
+        blend_op: @Max
+    }
 }
 
 /// One segment instance (see [`SEGMENT_FLOATS`]).
@@ -339,6 +351,20 @@ pub struct DrawLinePoint {
     /// rotation, birth, 0, 0
     #[live]
     pub p_misc: Vec4f,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawLineSegmentMax {
+    #[deref]
+    pub draw_super: DrawLineSegment,
+}
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawLinePointMax {
+    #[deref]
+    pub draw_super: DrawLinePoint,
 }
 
 /// What batches are drawn through: the camera and the target's pixels.
@@ -402,6 +428,8 @@ fn flag(b: bool) -> f32 {
 pub struct LineRenderer {
     seg: Box<DrawLineSegment>,
     pts: Box<DrawLinePoint>,
+    seg_max: Box<DrawLineSegmentMax>,
+    pts_max: Box<DrawLinePointMax>,
     /// Draw calls issued since the last [`LineRenderer::take_calls`].
     calls: usize,
 }
@@ -409,14 +437,20 @@ pub struct LineRenderer {
 impl LineRenderer {
     /// None until the VM is free (try again next frame).
     pub fn new(cx: &mut Cx) -> Option<Self> {
-        cx.try_with_vm(|vm| Self { seg: Box::new(DrawLineSegment::script_new_with_default(vm)), pts: Box::new(DrawLinePoint::script_new_with_default(vm)), calls: 0 })
+        cx.try_with_vm(|vm| Self {
+            seg: Box::new(DrawLineSegment::script_new_with_default(vm)),
+            pts: Box::new(DrawLinePoint::script_new_with_default(vm)),
+            seg_max: Box::new(DrawLineSegmentMax::script_new_with_default(vm)),
+            pts_max: Box::new(DrawLinePointMax::script_new_with_default(vm)),
+            calls: 0,
+        })
     }
 
     /// Whether both shaders can draw now (`float16`: into an RGBA16F
     /// target; asking starts that pipeline's build). A frame drawn before
     /// they are ready is not whole.
     pub fn ready(&self, cx: &Cx, float16: bool) -> bool {
-        [self.seg.draw_vars.draw_shader_id, self.pts.draw_vars.draw_shader_id].into_iter().all(|id| id.is_some_and(|id| cx.draw_shader_ready(id, float16)))
+        [self.seg.draw_vars.draw_shader_id, self.pts.draw_vars.draw_shader_id, self.seg_max.draw_vars.draw_shader_id, self.pts_max.draw_vars.draw_shader_id].into_iter().all(|id| id.is_some_and(|id| cx.draw_shader_ready(id, float16)))
     }
 
     pub fn take_calls(&mut self) -> usize {
@@ -429,7 +463,7 @@ impl LineRenderer {
             return;
         }
         let s = &batch.style;
-        let dv = &mut self.seg.draw_vars;
+        let dv = if s.blend == Blend::Max { &mut self.seg_max.draw_vars } else { &mut self.seg.draw_vars };
         set_camera(dv, cx.cx, &view.matrix(s.space), view);
         let world = s.width_unit == WidthUnit::World && s.space == Space::World;
         dv.set_uniform(cx.cx, live_id!(u_mode), &[flag(world), flag(s.blend == Blend::Add), flag(s.round_caps), s.min_px]);
@@ -453,7 +487,7 @@ impl LineRenderer {
             return;
         }
         let s = &batch.style;
-        let dv = &mut self.pts.draw_vars;
+        let dv = if s.blend == Blend::Max { &mut self.pts_max.draw_vars } else { &mut self.pts.draw_vars };
         set_camera(dv, cx.cx, &view.matrix(s.space), view);
         let world = s.size_unit == WidthUnit::World && s.space == Space::World;
         dv.set_uniform(cx.cx, live_id!(u_mode), &[flag(world), flag(s.blend == Blend::Add), s.shape.code(), s.min_px]);

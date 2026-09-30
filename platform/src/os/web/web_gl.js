@@ -2344,6 +2344,8 @@ export class WasmWebGL extends WasmWebBrowser {
       // finally block, so the default path issues no extra GL calls.
       if (!args.alpha_blend) {
         gl.disable(gl.BLEND);
+      } else if (args.blend_max) {
+        gl.blendEquationSeparate(gl.MAX, gl.MAX);
       }
       if (args.backface_culling) {
         gl.enable(gl.CULL_FACE);
@@ -2494,6 +2496,11 @@ export class WasmWebGL extends WasmWebBrowser {
       if (!args.alpha_blend) {
         try {
           gl.enable(gl.BLEND);
+        } catch (_error) {
+        }
+      } else if (args.blend_max) {
+        try {
+          gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
         } catch (_error) {
         }
       }

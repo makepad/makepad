@@ -1784,6 +1784,7 @@ impl Cx {
             // shaders must not touch the depth buffer.
             let state = RasterState {
                 blend: matches!(color_format, DrawShaderColorFormat::Bgra8Unorm) && alpha_blend,
+                blend_max: sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max,
                 depth_write,
                 unorm8: pass_raster.unorm8,
                 has_depth: pass_raster.has_depth,

@@ -47,6 +47,9 @@ pub enum Blend {
     Over,
     /// Additive light (the target's alpha is left as it is).
     Add,
+    /// Per-channel max with the target: overlapping strokes and glows keep
+    /// the brightest value instead of summing (dense line work, isolines).
+    Max,
 }
 
 /// The per-batch style of a [`LineBatch`]. Distances (`dash`, `gap`,

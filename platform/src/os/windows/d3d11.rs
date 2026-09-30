@@ -45,7 +45,7 @@ use crate::{
                     D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_DEPTH_STENCIL, D3D11_BIND_FLAG,
                     D3D11_BIND_INDEX_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
                     D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
-                    D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BOX, D3D11_BUFFER_DESC,
+                    D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_OP_MAX, D3D11_BOX, D3D11_BUFFER_DESC,
                     D3D11_CLEAR_DEPTH, D3D11_CLEAR_STENCIL, D3D11_COLOR_WRITE_ENABLE_ALL,
                     D3D11_COMPARISON_ALWAYS, D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE,
                     D3D11_CREATE_DEVICE_FLAG, D3D11_CULL_BACK, D3D11_CULL_NONE,
@@ -468,7 +468,10 @@ impl Cx {
                             .context
                             .OMSetDepthStencilState(depth_stencil_state, 0);
                     }
-                    let blend_state = if draw_call.options.alpha_blend {
+                    let blend_max = sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max;
+                    let blend_state = if draw_call.options.alpha_blend && blend_max {
+                        self.passes[pass_id].os.blend_state_max.as_ref()
+                    } else if draw_call.options.alpha_blend {
                         self.passes[pass_id].os.blend_state.as_ref()
                     } else {
                         self.passes[pass_id].os.blend_state_no_blend.as_ref()
@@ -2498,6 +2501,7 @@ impl CxOsPass {
     fn forget_gpu_objects(&mut self) {
         self.pass_uniforms = D3d11Buffer::default();
         self.blend_state = None;
+        self.blend_state_max = None;
         self.blend_state_no_blend = None;
         self.raster_state_no_cull = None;
         self.raster_state_backface_cull = None;
@@ -3840,6 +3844,29 @@ impl CxOsPass {
             }
             self.blend_state = blend_state;
         }
+        if self.blend_state_max.is_none() {
+            // `blend_op: @Max` shaders: per-channel max (factors unused).
+            let mut blend_desc: D3D11_BLEND_DESC = Default::default();
+            blend_desc.AlphaToCoverageEnable = FALSE;
+            blend_desc.RenderTarget[0] = D3D11_RENDER_TARGET_BLEND_DESC {
+                BlendEnable: TRUE,
+                SrcBlend: D3D11_BLEND_ONE,
+                SrcBlendAlpha: D3D11_BLEND_ONE,
+                DestBlend: D3D11_BLEND_ONE,
+                DestBlendAlpha: D3D11_BLEND_ONE,
+                BlendOp: D3D11_BLEND_OP_MAX,
+                BlendOpAlpha: D3D11_BLEND_OP_MAX,
+                RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
+            };
+            let mut blend_state = None;
+            unsafe {
+                d3d11_cx
+                    .device
+                    .CreateBlendState(&blend_desc, Some(&mut blend_state))
+                    .unwrap()
+            }
+            self.blend_state_max = blend_state;
+        }
         if self.blend_state_no_blend.is_none() {
             // The `alpha_blend: false` variant: a fragment replaces the
             // destination, alpha included.
@@ -3953,6 +3980,7 @@ impl CxOsPass {
 pub struct CxOsPass {
     pass_uniforms: D3d11Buffer,
     blend_state: Option<ID3D11BlendState>,
+    blend_state_max: Option<ID3D11BlendState>,
     blend_state_no_blend: Option<ID3D11BlendState>,
     raster_state_no_cull: Option<ID3D11RasterizerState>,
     raster_state_backface_cull: Option<ID3D11RasterizerState>,
@@ -3990,6 +4018,7 @@ impl DrawVars {
 
             // Cache 2: Compute function hash and check if we've seen these functions before
             let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            let pipe = DrawVars::pipeline_state_hash(&vm.bx.heap, io_self);
             {
                 let cx = vm.host.cx();
                 if let Some(&shader_id) = cx.draw_shaders.cache_functions_to_shader.get(&fnhash) {
@@ -4085,7 +4114,7 @@ impl DrawVars {
             // Cache 3: Check if this exact code has been compiled before
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&code) {
+                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader
@@ -4153,7 +4182,7 @@ impl DrawVars {
             cx.draw_shaders
                 .cache_functions_to_shader
                 .insert(fnhash, shader_id);
-            cx.draw_shaders.cache_code_to_shader.insert(code, shader_id);
+            cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
 
             // Add to compile set for later HLSL compilation
             cx.draw_shaders.compile_set.insert(index);

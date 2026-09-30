@@ -143,6 +143,8 @@ pub struct RasterState {
     /// formats (`Bgra8NoBlend`, `Rf32`), where the fragment REPLACES the
     /// destination because alpha is payload, not opacity.
     pub blend: bool,
+    /// `blend_op: @Max`: a blending draw keeps the per-channel max.
+    pub blend_max: bool,
     /// Whether the attachment has a depth buffer at all. A pass without a depth
     /// attachment does no depth testing on a GPU — and here it also carries no
     /// depth allocation, which is a fifth of a large data target's memory.
@@ -163,6 +165,7 @@ impl Default for RasterState {
     fn default() -> Self {
         Self {
             blend: true,
+            blend_max: false,
             has_depth: true,
             depth_write: true,
             unorm8: true,
@@ -606,7 +609,10 @@ pub fn rasterize_setup_rows<F>(
                 frag_color
             };
             let src_a = frag_color[3];
-            if state.blend {
+            if state.blend && state.blend_max {
+                let dst = color[index];
+                color[index] = [frag_color[0].max(dst[0]), frag_color[1].max(dst[1]), frag_color[2].max(dst[2]), frag_color[3].max(dst[3])];
+            } else if state.blend {
                 let dst = color[index];
                 color[index] = blend_premul_src_over(frag_color, dst);
             } else {

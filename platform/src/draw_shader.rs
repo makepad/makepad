@@ -113,7 +113,10 @@ pub struct CxDrawShaders {
     /// with the app heap's and must never hit its entries.
     pub cache_object_id_to_shader: HashMap<(usize, ScriptObject), DrawShaderId>,
     pub cache_functions_to_shader: LiveIdMap<LiveId, DrawShaderId>,
-    pub cache_code_to_shader: HashMap<CxDrawShaderCode, DrawShaderId>,
+    /// Keyed by the generated code and the pipeline state
+    /// (`DrawVars::pipeline_state_hash`): one code with another colour
+    /// format or blend op is another shader.
+    pub cache_code_to_shader: HashMap<(CxDrawShaderCode, LiveId), DrawShaderId>,
     //pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
     //pub fingerprints: Vec<DrawShaderFingerprint>,
     //pub error_set: HashSet<DrawShaderPtr>,
@@ -776,6 +779,22 @@ pub enum DrawShaderColorFormat {
     Rgba32F,
 }
 
+/// How a blending pipeline combines a fragment with the target. Declared in
+/// the shader DSL as `blend_op: @Max`; the default is premultiplied over.
+/// Baked into the shader's pipelines on every backend (a per-shader
+/// property, like `color_format`); `alpha_blend: false` draw calls still
+/// write raw.
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+pub enum DrawShaderBlendOp {
+    /// `src + dst * (1 - src.a)` (premultiplied source-over; additive when
+    /// the shader outputs alpha 0).
+    #[default]
+    Over,
+    /// Per-channel `max(src, dst)`: overlapping glows and lines keep the
+    /// brightest value instead of summing.
+    Max,
+}
+
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DrawShaderFlags {
     pub debug_draw: bool,
@@ -863,6 +882,8 @@ pub struct CxDrawShaderMapping {
     pub varying_total_slots: usize,
     /// The color-attachment format this shader's pipeline targets.
     pub color_format: DrawShaderColorFormat,
+    /// The blend operation of this shader's blending pipelines.
+    pub blend_op: DrawShaderBlendOp,
     /// Bit `i` set when the shader declares `fragment_output(i, …)`. In a
     /// pass with several color attachments (MRT) an attachment the shader
     /// does not write keeps its contents: its write mask is off.
@@ -1043,6 +1064,10 @@ impl CxDrawShaderMapping {
             Some(id) if id == id!(Rgba32F) => DrawShaderColorFormat::Rgba32F,
             Some(id) if id == id!(Bgra8NoBlend) => DrawShaderColorFormat::Bgra8NoBlend,
             _ => DrawShaderColorFormat::Bgra8Unorm,
+        };
+        let blend_op = match heap.value(source.as_object(), id!(blend_op).into(), NoTrap).as_id() {
+            Some(id) if id == id!(Max) => DrawShaderBlendOp::Max,
+            _ => DrawShaderBlendOp::Over,
         };
         let fragment_outputs = output.io.iter().fold(0u8, |mask, io| match io.kind {
             ShaderIoKind::FragmentOutput(index) if index < 8 => mask | (1 << index),
@@ -1404,6 +1429,7 @@ impl CxDrawShaderMapping {
             geometry_id,
             varying_total_slots: 0,
             color_format,
+            blend_op,
             fragment_outputs,
             reflection: crate::draw_shader_layout::DrawShaderReflection::from_output(output, heap),
         }

@@ -703,6 +703,7 @@ impl Cx {
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
                     alpha_blend: draw_call.options.alpha_blend,
+                    blend_max: sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max,
                     backface_culling: draw_call.options.backface_culling,
                     pass_uniforms: WasmPtrF32::new(pass_uniforms),
                     pass_uniforms_gen_lo: pass_uniforms_gen as u32,

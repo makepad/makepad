@@ -480,6 +480,8 @@ pub struct FromWasmDrawCall {
     pub index_width: u32,
     pub depth_write: bool,
     pub alpha_blend: bool,
+    /// The shader's `blend_op: @Max`: blend by per-channel max.
+    pub blend_max: bool,
     pub backface_culling: bool,
     pub pass_uniforms: WasmPtrF32,
     pub pass_uniforms_gen_lo: u32,
