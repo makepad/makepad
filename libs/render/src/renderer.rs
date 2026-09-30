@@ -317,6 +317,8 @@ pub struct Renderer {
     /// CSM directly, rather than waiting for an atlas layout that may never
     /// exist (an imported editor scene commonly has none).
     csm_static_casters: Vec<crate::gpu_lightmap::GpuBakeMesh>,
+    /// Runs of `csm_static_casters` with their bounds (rebuilt with it).
+    csm_static_blocks: Vec<crate::gpu_lightmap::CasterBlock>,
     /// The streamed world (stream.rs / renderer/stream_draw.rs), its build
     /// workers (kept across sources) and this frame's streamed shadow
     /// casters, appended to `csm_static_casters` for the cascades.
@@ -669,6 +671,7 @@ impl Default for Renderer {
             model_anim_state: ModelStates::default(),
             placed_models: Vec::new(),
             csm_static_casters: Vec::new(),
+            csm_static_blocks: Vec::new(),
             stream: None,
             stream_workers: None,
             stream_casters: Vec::new(),

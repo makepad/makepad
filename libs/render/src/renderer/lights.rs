@@ -252,13 +252,18 @@ impl Renderer {
         // their glTF intensity is not part of the legacy AO bake.
         let authored_start=self.frame_lights.len();
         if self.clustered_enabled{
+        // Only models that carry emitters are looked up (most carry none,
+        // and a scattered forest is thousands of copies a frame).
+        let emitting: Vec<&(String, LoadedModel)> = self.static_models.iter().filter(|(_, m)| !m.emitters.is_empty()).collect();
+        if !emitting.is_empty() {
         for(target,instance)in self.placed_models.iter().enumerate().map(|(i,m)|(ModelTarget::Instance(i),m)).chain(self.world_attachments.iter().enumerate().map(|(i,m)|(ModelTarget::Attachment(i),m))){
-            if let Some((_, model)) = self.static_models.iter().find(|(id,_)|id == &instance.model) {
+            if let Some((_, model)) = emitting.iter().copied().find(|(id,_)|id == &instance.model) {
                 for emitter in model.emitters.iter() {
                     let node=emitter.animation.as_ref().and_then(|hierarchy|self.model_anim_state.clip(&target,&instance.model).map(|playback|hierarchy.transform_named_weighted(playback.name.as_deref(),playback.name.as_ref().map(|_|playback.time),playback.looping,playback.weight)));
                     self.frame_lights.push(emitter.placed_at(&instance.transform,node,self.model_anim_state.idle_time));
                 }
             }
+        }
         }
         self.frame_lights.append(&mut self.host_asset_lights);
         }else{self.host_asset_lights.clear();}

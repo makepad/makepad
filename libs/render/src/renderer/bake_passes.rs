@@ -123,8 +123,19 @@ impl Renderer {
         skinned_items: Option<&[SkinnedDraw]>,
     ) -> Vec<crate::gpu_lightmap::GpuLmMover> {
         let mut out = Vec::new();
+        // A static placed copy casts here only through its parts or a
+        // morph; the models that have either at some level (usually none).
+        // The rest (a scattered forest: thousands of copies) are skipped
+        // before any lookup.
+        let static_movers: std::collections::HashSet<&str> = self.static_models.iter()
+            .filter(|(_, root)| std::iter::once(root).chain(root.lods.iter().map(|(_, m)| m))
+                .any(|m| !m.anim_parts.is_empty() || !m.driven_parts.is_empty() || m.morph.is_some()))
+            .map(|(k, _)| k.as_str()).collect();
         for (target,inst) in self.placed_models.iter().enumerate().map(|(i,m)|(ModelTarget::Instance(i),m))
             .chain(self.world_attachments.iter().enumerate().map(|(i,m)|(ModelTarget::Attachment(i),m))) {
+            if !inst.dynamic && matches!(target, ModelTarget::Instance(_)) && (static_movers.is_empty() || !static_movers.contains(inst.model.as_str())) {
+                continue;
+            }
             let Some(at) = self.static_models.iter().position(|(k, _)| *k == inst.model)
             else {
                 continue;
@@ -441,7 +452,7 @@ impl Renderer {
             // disappear from the cascades' light-space depth window.
             let mut min = eye;
             let mut max = eye;
-            for (lo, hi) in self.csm_static_casters.iter().chain(&self.stream_casters).map(|m| (m.min, m.max))
+            for (lo, hi) in self.csm_static_blocks.iter().map(|b| (b.min, b.max)).chain(self.stream_casters.iter().map(|m| (m.min, m.max)))
                 .chain(movers.iter().map(|m| crate::lightmap::world_bounds(&m.transform, (m.min, m.max))))
             {
                 min = vec3f(min.x.min(lo.x), min.y.min(lo.y), min.z.min(lo.z));
@@ -455,7 +466,10 @@ impl Renderer {
         if let Some(d) = self.gpu_baker.run_frame(
             cx,
             sun.dir,
-            &[self.csm_static_casters.as_slice(), self.stream_casters.as_slice()],
+            &[
+                crate::gpu_lightmap::CasterSlice { casters: &self.csm_static_casters, blocks: &self.csm_static_blocks },
+                crate::gpu_lightmap::CasterSlice { casters: &self.stream_casters, blocks: &[] },
+            ],
             movers,
             csm_view,
             eye,

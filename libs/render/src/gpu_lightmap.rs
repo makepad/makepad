@@ -310,6 +310,49 @@ pub struct GpuBakeMesh {
     pub band: CasterBand,
 }
 
+/// A run of consecutive static casters (`start..end` of their list) and
+/// the union of their world bounds: a cascade that misses the run skips
+/// all of it. Built with the list, which keeps each layer's copies in
+/// spatial order, so a run is a small patch of the world.
+#[derive(Clone, Copy, Debug)]
+pub struct CasterBlock {
+    pub start: u32,
+    pub end: u32,
+    pub min: Vec3f,
+    pub max: Vec3f,
+}
+
+/// Static casters for the cascades: a list and its blocks (none: every
+/// caster is tested on its own).
+#[derive(Clone, Copy)]
+pub struct CasterSlice<'a> {
+    pub casters: &'a [GpuBakeMesh],
+    pub blocks: &'a [CasterBlock],
+}
+
+/// Runs of up to 32 consecutive casters.
+pub fn caster_blocks(casters: &[GpuBakeMesh]) -> Vec<CasterBlock> {
+    casters.chunks(32).enumerate().map(|(k, run)| {
+        let (mut min, mut max) = (run[0].min, run[0].max);
+        for m in &run[1..] {
+            min = v3(min.x.min(m.min.x), min.y.min(m.min.y), min.z.min(m.min.z));
+            max = v3(max.x.max(m.max.x), max.y.max(m.max.y), max.z.max(m.max.z));
+        }
+        CasterBlock { start: (k * 32) as u32, end: (k * 32 + run.len()) as u32, min, max }
+    }).collect()
+}
+
+/// The casters of `slices` in blocks that reach cascade `casc`, in list order.
+fn casters_reaching<'a>(slices: &'a [CasterSlice<'a>], casc: &'a crate::shadow_csm::CsmCascade) -> impl Iterator<Item = &'a GpuBakeMesh> + 'a {
+    slices.iter().flat_map(move |s| {
+        let whole = std::iter::once((0, s.casters.len())).filter(move |_| s.blocks.is_empty());
+        let blocks = s.blocks.iter()
+            .filter(move |b| cascade_overlaps(casc, b.min, b.max))
+            .map(|b| (b.start as usize, b.end as usize));
+        whole.chain(blocks).flat_map(move |(a, e)| s.casters[a..e].iter())
+    })
+}
+
 /// A model with a far stand-in (impostor.rs) casts its own layers into the
 /// near cascade and only its stand-in's cards into the others: a hillside
 /// of trees there is a few thousand alpha-cut quads, not millions of
@@ -1805,7 +1848,7 @@ impl GpuLightmapBaker {
         &mut self,
         cx: &mut CxDraw,
         sun_dir: Vec3f,
-        static_casters: &[&[GpuBakeMesh]],
+        static_casters: &[CasterSlice],
         movers: &[GpuLmMover],
         csm_view: Option<&CsmView>,
         eye: Vec3f,
@@ -1939,12 +1982,12 @@ impl GpuLightmapBaker {
                 self.csm_tex.as_ref().map(|t| t.texture_id()),
                 c.rx.w, c.ry.w, c.rz.w, c.bias01,
                 sun_dir.x, sun_dir.y, sun_dir.z,
-                static_casters.iter().map(|s| s.len()).sum::<usize>(), movers.len(),
+                static_casters.iter().map(|s| s.casters.len()).sum::<usize>(), movers.len(),
                 self.state.is_some()
             );
         }
         self.csm_frame_stats = if csm.is_some() {
-            (static_casters.iter().map(|s| s.len()).sum::<usize>(), movers.len(), us)
+            (static_casters.iter().map(|s| s.casters.len()).sum::<usize>(), movers.len(), us)
         } else {
             (0, 0, 0)
         };
@@ -2757,7 +2800,7 @@ impl GpuLightmapBaker {
     fn encode_cascades(
         &mut self,
         cx: &mut CxDraw,
-        static_casters: &[&[GpuBakeMesh]],
+        static_casters: &[CasterSlice],
         movers: &[GpuLmMover],
         frame: &CsmFrame,
         full_clear: bool,
@@ -2944,7 +2987,7 @@ impl GpuLightmapBaker {
             di.sun_ry = casc.ry;
             di.sun_rz = casc.rz;
             straddle.clear();
-            for m in static_casters.iter().flat_map(|s| s.iter()).filter(|m| m.cutout.is_none() && draws_in(m.band)) {
+            for m in casters_reaching(static_casters, casc).filter(|m| m.cutout.is_none() && draws_in(m.band)) {
                 if !cascade_overlaps(casc, m.min, m.max) || held(m.band, m.min, m.max) {
                     continue;
                 }
@@ -2980,7 +3023,7 @@ impl GpuLightmapBaker {
             dc.depth.sun_rx = casc.rx;
             dc.depth.sun_ry = casc.ry;
             dc.depth.sun_rz = casc.rz;
-            for m in cutouts.iter().flat_map(|s| s.iter()).filter(|m| m.cutout.is_some() && mode != 2 && draws_in(m.band) && !(mode == 1 && m.band == CasterBand::Near)) {
+            for m in casters_reaching(cutouts, casc).filter(|m| m.cutout.is_some() && mode != 2 && draws_in(m.band) && !(mode == 1 && m.band == CasterBand::Near)) {
                 if !cascade_overlaps(casc, m.min, m.max) || held(m.band, m.min, m.max) {
                     continue;
                 }
@@ -3088,7 +3131,7 @@ impl GpuLightmapBaker {
         let encoded = seq.cursor;
         let caster_counts = csm_caster_counts(
             state.as_ref(),
-            static_casters.iter().map(|s| s.len()).sum::<usize>(),
+            static_casters.iter().map(|s| s.casters.len()).sum::<usize>(),
             movers.len(),
         );
         let statics = caster_counts.0;

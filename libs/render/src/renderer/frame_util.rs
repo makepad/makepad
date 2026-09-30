@@ -306,6 +306,30 @@ impl Frustum {
     /// reject test.
     pub fn intersects_obb(&self, min: Vec3f, max: Vec3f, transform: &Mat4f) -> bool {
         let t = &transform.v;
+        // The bounding sphere of the transformed box decides first: beyond
+        // a plane by more than its radius puts every corner beyond it (the
+        // corner test's reject), and inside every plane by its radius keeps
+        // a corner inside each (its accept). Only a straddler takes the
+        // eight corners. A forest's thousands of copies a frame.
+        let (mid, half) = ((min + max) * 0.5, (max - min) * 0.5);
+        let center = vec3f(
+            t[0] * mid.x + t[4] * mid.y + t[8] * mid.z + t[12],
+            t[1] * mid.x + t[5] * mid.y + t[9] * mid.z + t[13],
+            t[2] * mid.x + t[6] * mid.y + t[10] * mid.z + t[14],
+        );
+        let column = |k: usize| (t[k] * t[k] + t[k + 1] * t[k + 1] + t[k + 2] * t[k + 2]).sqrt();
+        let radius = half.x.abs() * column(0) + half.y.abs() * column(4) + half.z.abs() * column(8);
+        let mut straddles = false;
+        for p in &self.planes {
+            let d = Self::distance(*p, center);
+            if d < -(radius + CULL_MARGIN) {
+                return false;
+            }
+            straddles |= d < radius;
+        }
+        if !straddles {
+            return true;
+        }
         let mut corners = [Vec3f::default(); 8];
         for (i, c) in corners.iter_mut().enumerate() {
             let l = vec3f(

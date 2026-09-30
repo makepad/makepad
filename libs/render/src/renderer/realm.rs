@@ -31,6 +31,7 @@ impl Renderer {
         self.skin_joint_bases.clear();
         self.placed_models.clear();
         self.csm_static_casters.clear();
+        self.csm_static_blocks.clear();
         self.grass = None;
         self.world_attachments.clear();
         self.view_models.clear();
@@ -378,10 +379,25 @@ impl Renderer {
         }
         // Equal geometry adjacent, opaque first: a cascade then appends a
         // forest's copies of one layer into ONE instanced draw instead of
-        // alternating trunk, crown, trunk, crown (a draw each).
+        // alternating trunk, crown, trunk, crown (a draw each). Within a
+        // layer the copies go in spatial order (a Z-order of 32 m cells),
+        // so the blocks of consecutive casters that the cascades cull
+        // first are small patches of ground (depth is order-free).
         let mut first: std::collections::HashMap<GeometryId, usize> = std::collections::HashMap::new();
         for (i, m) in self.csm_static_casters.iter().enumerate() { first.entry(m.geometry).or_insert(i); }
-        self.csm_static_casters.sort_by_key(|m| (m.cutout.is_some(), first[&m.geometry]));
+        let cell = |m: &crate::gpu_lightmap::GpuBakeMesh| {
+            let c = (m.min + m.max) * 0.5;
+            let spread = |v: f32| {
+                let mut x = ((v / 32.0).floor() as i64 + (1 << 15)).clamp(0, (1 << 16) - 1) as u64;
+                x = (x | (x << 8)) & 0x00ff_00ff;
+                x = (x | (x << 4)) & 0x0f0f_0f0f;
+                x = (x | (x << 2)) & 0x3333_3333;
+                (x | (x << 1)) & 0x5555_5555
+            };
+            spread(c.x) | spread(c.z) << 1
+        };
+        self.csm_static_casters.sort_by_key(|m| (m.cutout.is_some(), first[&m.geometry], cell(m)));
+        self.csm_static_blocks = crate::gpu_lightmap::caster_blocks(&self.csm_static_casters);
     }
 
     /// Hand this frame's stock props to the renderer. Draw submission is
