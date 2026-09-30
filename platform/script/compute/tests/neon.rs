@@ -676,6 +676,13 @@ fn kernels_from_source_agree_with_neon() {
         "o",
         4,
     );
+    // Small tables read at hashed indices (8 and 16 words: held in vector
+    // registers, read by TBL), next to a 12-word one (per-lane loads).
+    same_everywhere(
+        "let A8 = [0.5, -1.0, 2.0, 3.5, -4.25, 5.0, 6.125, -7.0]\nlet B16 = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, -16.0]\nlet C12 = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5, 8.5, 9.5, 10.5, 11.5, 12.5]\nlet o = output(vec4)\nfn element(i) {\n let h = hash(i)\n let a = A8[h & 7] + A8[(h >> 3) & 7]\n let b = B16[(h >> 6) & 15] * B16[i]\n var c = 0.0\n if (h & 1) == 1 { c = A8[i] - B16[h >> 28] }\n o[i] = vec4(a, b, c, C12[h % 12]) }",
+        "o",
+        4,
+    );
     // Early return from a helper under divergence; integer division and shifts.
     same_everywhere(
         "let o = output(vec2)\nfn f(i) { if i % 5 == 2 { return float(i / 3) }\n let x = i * 7919\n return float((x >> 3) ^ (x << 5) % 11) }\nfn element(i) { o[i] = vec2(f(i), f(i + 1)) }",

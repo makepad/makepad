@@ -110,6 +110,9 @@ mod v {
     }
     pub const UMAXV: u32 = 0x6EB0_A800;
     pub const UMINV: u32 = 0x6EB1_A800;
+    /// tbl vd.16b, {vn.16b .. vn+3.16b} / {vn, vn+1}, vm.16b
+    pub const TBL4: u32 = 0x4E00_6000;
+    pub const TBL2: u32 = 0x4E00_2000;
     /// ld2/ld3/ld4 {vt.4s ..}, [xn] (de-interleaving).
     pub const LD2: u32 = 0x4C40_8800;
     pub const LD3: u32 = 0x4C40_4800;
@@ -399,6 +402,31 @@ fn shape(p: &Program) -> Option<Shape<'_>> {
     Some(Shape { prelude, element: last, i: *i })
 }
 
+/// The small table (base word, 8 or 16 words) whose varying reads in the
+/// element body are the most (at least two), with offsets proven inside it.
+fn small_table(body: &Block, info: &Info, bounds: &[Option<u32>]) -> Option<(u32, u32)> {
+    fn walk(b: &Block, info: &Info, bounds: &[Option<u32>], n: &mut HashMap<(u32, u32), u32>) {
+        for s in b {
+            match s {
+                Stmt::Def(_, Op::Load { region: Region::Shared, base, extent, off: Some(o) })
+                    if (*extent == 8 || *extent == 16) && info.vval[o.0 as usize] && bounds[o.0 as usize].is_some_and(|x| x < *extent) =>
+                {
+                    *n.entry((*base, *extent)).or_default() += 1;
+                }
+                Stmt::If(_, t, e) => {
+                    walk(t, info, bounds, n);
+                    walk(e, info, bounds, n);
+                }
+                Stmt::Loop { body, .. } => walk(body, info, bounds, n),
+                _ => {}
+            }
+        }
+    }
+    let mut n = HashMap::new();
+    walk(body, info, bounds, &mut n);
+    n.into_iter().filter(|(_, c)| *c >= 2).max_by_key(|((b, e), c)| (*c, std::cmp::Reverse(*b), *e)).map(|(k, _)| k)
+}
+
 /// What the vector code cannot express (the scalar code runs instead).
 fn supported(p: &Program, body: &Block) -> bool {
     if p.uses_f64() || p.frame_words > MAX_FRAME_WORDS {
@@ -513,6 +541,9 @@ struct Em {
     depth: u32,
     /// A 16-byte slot saving the mask around a four-register load.
     group_slot: u32,
+    /// A small table (base word, words: 8 or 16) held in v24.. for the
+    /// whole call: lane reads from it are one TBL.
+    table: Option<(u32, u32)>,
     /// The execution mask is statically all lanes.
     full: bool,
     i: Var,
@@ -805,6 +836,16 @@ impl Em {
                     }
                     self.e(v::mov(d, VS2));
                 }
+            }
+            Region::Shared if !uniform && self.table == Some((base, extent)) && self.proven(off.unwrap(), extent) => {
+                // Word o of the table in v24..: byte indices 4o + 0..3.
+                let ro = ro.unwrap();
+                self.splat(VS2, 0x0404_0404);
+                self.e(v::r3(v::MUL, VS2, ro, VS2));
+                self.splat(VS0, 0x0302_0100);
+                self.e(v::r3(v::ADD, VS2, VS2, VS0));
+                let tbl = if extent == 16 { v::TBL4 } else { v::TBL2 };
+                self.e(v::r3(tbl, d, 24, VS2));
             }
             Region::Ctx | Region::Shared => {
                 let rb = if region == Region::Ctx { 0 } else { 2 };
@@ -1732,13 +1773,16 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
         return None;
     }
     let info = analyse(p, &sh)?;
+    let bounds = crate::arm64::bounds(p);
+    let table = small_table(body, &info, &bounds);
+    let pool: Vec<u8> = V_POOL.iter().copied().filter(|r| table.is_none_or(|(_, w)| !(24..24 + w / 4).contains(&(*r as u32)))).collect();
     let alloc = allocate_with(
         p,
         |e| match e {
             Ent::Counter(_) => 0,
             _ => 1,
         },
-        &[G_POOL, V_POOL],
+        &[G_POOL, &pool],
         |e| match e {
             Ent::Counter(_) => 4,
             _ => 16,
@@ -1755,7 +1799,6 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
     }
     let i = sh.i;
     let prelude_len = sh.prelude.len();
-    let bounds = crate::arm64::bounds(p);
     let (step, consts) = steps(p, &info, i);
     let mut em = Em {
         info,
@@ -1769,6 +1812,7 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
         frame_base: spill + masks,
         depth: 0,
         group_slot: spill + masks - 16,
+        table,
         full: true,
         i,
         bounds,
@@ -1798,6 +1842,15 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
         }
     };
     sub_sp(&mut em, false);
+    // A small table into v24.. (it lies inside the shared tables: its
+    // loads' extent is its size).
+    if let Some((base, words)) = table {
+        em.mov_imm(9, base * 4);
+        em.e(add_x(9, 2, 9));
+        for k in 0..words / 4 {
+            em.e(v::ldst_q(true, 24 + k as u8, 9, 16 * k));
+        }
+    }
     // The execution mask: every lane.
     em.e(v::movi0(VM));
     em.e(v::r2(v::NOT, VM, VM));
