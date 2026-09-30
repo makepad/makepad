@@ -389,6 +389,34 @@ pub fn stroke_layout(font: &StrokeFont, text: &str, style: &StrokeStyle) -> Stro
     StrokeLayout { strokes, length: total, width, size: style.size, missing }
 }
 
+/// Words per [`stroke_segments`] record: a (x, y), b (x, y), the written
+/// length at a, the segment's length, and pen (0 drawn, 1 travel).
+pub const STROKE_SEGMENT_WORDS: usize = 7;
+
+/// A layout as kernel input (PDOOM-PARITY AK9): one record per drawn
+/// segment of every stroke, in writing order, with the written length where
+/// it starts (so a kernel's `birth = s / speed` writes it on in the order
+/// and pace of [`write_on`]); with `travel`, a pen-up record from each
+/// stroke's end to the next one's start (a plotter's travel moves), at the
+/// written length between them and length 0 of ink.
+pub fn stroke_segments(layout: &StrokeLayout, travel: bool) -> Vec<f32> {
+    let mut out = Vec::new();
+    let mut last: Option<[f32; 2]> = None;
+    for s in &layout.strokes {
+        if let (true, Some(a), Some(b)) = (travel, last, s.points.first()) {
+            out.extend_from_slice(&[a[0], a[1], b[0], b[1], s.start, 0.0, 1.0]);
+        }
+        let mut at = s.start;
+        for w in s.points.windows(2) {
+            let d = ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt();
+            out.extend_from_slice(&[w[0][0], w[0][1], w[1][0], w[1][1], at, d, 0.0]);
+            at += d;
+        }
+        last = s.points.last().copied();
+    }
+    out
+}
+
 /// The pen at a moment of writing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PenHead {
@@ -464,6 +492,52 @@ pub fn voice_length(layout: &StrokeLayout, words: &[SungWord], t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// AK9: a kernel writes the strokes as line segments with a birth, in
+    /// the order and at the pace `write_on` writes them.
+    #[test]
+    fn a_kernel_writes_strokes_on_with_births() {
+        use makepad_script_compute::kernel::{compile_with, FieldTy, Layout, LayoutField};
+        use makepad_script_compute::Backend;
+        let font = StrokeFont::bundled("technical").unwrap();
+        let lay = stroke_layout(&font, "Write it on, word by word", &StrokeStyle { size: 40.0, ..Default::default() });
+        let segs = stroke_segments(&lay, true);
+        let n = segs.len() / STROKE_SEGMENT_WORDS;
+        assert!(n > 100);
+        let f = |name: &str, ty, offset| LayoutField { name: name.into(), ty, offset };
+        let seg = Layout { name: "LineSegment".into(), stride: 12, fields: vec![f("a", FieldTy::Vec3, 0), f("b", FieldTy::Vec3, 3), f("width", FieldTy::F32, 6), f("color", FieldTy::Vec4, 7), f("birth", FieldTy::F32, 11)] };
+        let src = "let s = input(f32)\nlet out = output(LineSegment)\nlet speed = param(200)\nfn element(i) { let r = i * 7\n out[i].a = vec3(s[r], s[r + 1], 0.0)\n out[i].b = vec3(s[r + 2], s[r + 3], 0.0)\n out[i].width = if s[r + 6] > 0.5 { 0.5 } else { 2.0 }\n out[i].color = if s[r + 6] > 0.5 { vec4(1.0, 1.0, 1.0, 0.2) } else { vec4(1.0, 0.9, 0.8, 1.0) }\n out[i].birth = s[r + 4] / speed }";
+        let k = compile_with(src, &[seg], Backend::Native).unwrap_or_else(|e| panic!("{:?}", e));
+        let mut out = vec![0.0f32; n * 12];
+        let mut c = k.call();
+        c.input("s", &segs).unwrap();
+        c.output("out", &mut out).unwrap();
+        c.run(n).unwrap();
+        // Births rise in writing order, and a segment is born exactly when
+        // write_on reaches its start.
+        let births: Vec<f32> = out.chunks_exact(12).map(|r| r[11]).collect();
+        assert!(births.windows(2).all(|w| w[0] <= w[1]));
+        let drawn: f32 = segs.chunks_exact(STROKE_SEGMENT_WORDS).filter(|r| r[6] == 0.0).map(|r| r[5]).sum();
+        assert!((drawn - lay.length).abs() < 1e-2, "{drawn} vs {}", lay.length);
+        let t = 0.4;
+        let (written, _) = write_on(&lay, t * 200.0);
+        let born = segs.chunks_exact(STROKE_SEGMENT_WORDS).zip(&births).filter(|(r, b)| r[6] == 0.0 && **b < t).count();
+        let started: usize = written.iter().map(|p| p.len().saturating_sub(1)).sum();
+        assert!(born.abs_diff(started) <= 1, "{born} born, {started} started");
+        // The AK9 target: 50k points <= 0.5 ms on 8 threads.
+        let big: Vec<f32> = segs.iter().copied().cycle().take(50_000 * STROKE_SEGMENT_WORDS).collect();
+        let mut out = vec![0.0f32; 50_000 * 12];
+        let mut best = f64::MAX;
+        for _ in 0..10 {
+            let mut c = k.call();
+            c.input("s", &big).unwrap();
+            c.output("out", &mut out).unwrap();
+            let t = std::time::Instant::now();
+            c.run_parallel(50_000, 8).unwrap();
+            best = best.min(t.elapsed().as_secs_f64() * 1e3);
+        }
+        println!("50k stroke segments written on: {best:.3} ms on 8 threads");
+    }
 
     #[test]
     fn the_bundled_technical_font_covers_ascii() {
