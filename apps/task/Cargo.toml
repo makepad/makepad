@@ -15,7 +15,7 @@ default = ["tweaker"]
 tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["data", "charts"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
 makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-civil-time = { path = "../../libs/civil_time" }
