@@ -68,3 +68,38 @@ mod tests {
         assert!((rebuilt - a.tangent).length() < 1e-5);
     }
 }
+
+/// The rig with a world's own Sun (key light) and Sky (hemisphere fill)
+/// in place of the host's, when the world has them.
+pub fn apply_world_sun(world: &World, mut sun: crate::sun::SunLight) -> crate::sun::SunLight {
+    for light in world.lights.iter().filter(|l| l.validate().is_ok()) {
+        match *light {
+            Light::Sun { dir, color, lux, .. } => {
+                sun.dir = dir.normalize();
+                sun.color = color * lux;
+            }
+            Light::Sky { top, ground, intensity } => {
+                sun.sky = top * intensity;
+                sun.ground = ground * intensity;
+            }
+            _ => {}
+        }
+    }
+    sun
+}
+
+/// The world environment's fog as the lanes' (colour, density): the lanes
+/// fog exponentially with distance, so a linear fog maps to the density
+/// that reaches 1 - 1/e halfway between its start and end, and a height
+/// fog to its density at the base. `None` = the host's fog.
+pub fn world_fog(world: &World) -> Option<(makepad_draw::Vec3f, f32)> {
+    use makepad_scene::Fog;
+    world.environment.validate().ok()?;
+    match world.environment.fog {
+        Fog::Host => None,
+        Fog::None => Some((makepad_draw::Vec3f::default(), 0.0)),
+        Fog::Exp2 { color, density } => Some((color, density)),
+        Fog::Linear { color, start, end } => Some((color, 2.0 / (start + end).max(1.0e-3))),
+        Fog::Height { color, density, .. } => Some((color, density)),
+    }
+}

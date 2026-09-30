@@ -1,7 +1,7 @@
 //! Material pixel tests: grab the lab's hidden window once every material's
 //! pipeline is ready and check each cube's column by what it must show.
 
-use makepad_test::{makepad_test, TestApp};
+use makepad_test::{makepad_test, run_with_config, TestApp, TestConfig, TestError};
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 use makepad_zune_png::PngDecoder;
 
@@ -106,4 +106,68 @@ fn each_material_hook_shows_in_its_column(app: TestApp) {
     let per_metre = img.per_metre();
     let lift = centroid_y(&cols[0]) - centroid_y(&cols[4]);
     assert!(lift > 0.6 * per_metre, "vertex: lifted {lift:.1} px, want about {:.1}", 0.9 * per_metre);
+}
+
+/// Grab the lab drawing a `World` scene (`--scene=<name>`) once ready.
+fn world_scene(name: &str, test_name: &str) -> Image {
+    let mut config = TestConfig::current_package(env!("CARGO_MANIFEST_DIR"), env!("CARGO_PKG_NAME"), test_name).unwrap();
+    config.app_args.push(format!("--scene={name}"));
+    let mut out = None;
+    run_with_config(config, |app: TestApp| -> Result<(), TestError> {
+        app.wait_for_log_contains("material lab: ready, world scene");
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let path = app.screenshot();
+        println!("[material_lab] {name} grab: {}", path.display());
+        out = Some(Image::read(&path));
+        Ok(())
+    })
+    .unwrap();
+    out.unwrap()
+}
+
+fn luma(p: [i32; 3]) -> f32 {
+    0.2126 * p[0] as f32 + 0.7152 * p[1] as f32 + 0.0722 * p[2] as f32
+}
+
+/// The mean luma of a column's non-background pixels.
+fn mean_luma(col: &[(usize, [i32; 3])]) -> f32 {
+    let lit: Vec<f32> = col.iter().filter(|(_, p)| !is_background(*p)).map(|(_, p)| luma(*p)).collect();
+    lit.iter().sum::<f32>() / lit.len().max(1) as f32
+}
+
+fn brightest(col: &[(usize, [i32; 3])]) -> f32 {
+    col.iter().map(|(_, p)| luma(*p)).fold(0.0, f32::max)
+}
+
+#[test]
+fn world_items_and_a_rect_area_light_draw_in_the_dark() {
+    let img = world_scene("rect", "pixels::world_items_and_a_rect_area_light_draw_in_the_dark");
+    let cols: Vec<_> = (0..4).map(|c| img.column(c)).collect();
+    for c in 0..4 {
+        println!("[material_lab] rect column {c}: brightest {:.1}, mean {:.1}", brightest(&cols[c]), mean_luma(&cols[c]));
+    }
+    let cyan = |p: [i32; 3]| p[1] > 150 && p[2] > 150 && p[0] < 60;
+    let red = |p: [i32; 3]| p[0] > 150 && p[1] < 60 && p[2] < 60;
+    // Means over the cube pixels: a band's edges can catch a neighbour's
+    // highlight.
+    assert!(mean_luma(&cols[0]) > 60.0, "the rect light lights its cube");
+    assert!(mean_luma(&cols[1]) < 15.0, "no light, no world sun: a dark cube");
+    assert!(fraction(&cols[2], cyan) > 0.02, "an Unlit item draws its colour in the dark");
+    assert!(fraction(&cols[3], red) > 0.02, "a packed Instances item draws its tinted copies");
+}
+
+#[test]
+fn image_based_lighting_reflects_its_environment() {
+    let img = world_scene("ibl", "pixels::image_based_lighting_reflects_its_environment");
+    let cols: Vec<_> = (0..3).map(|c| img.column(c)).collect();
+    for c in 0..3 {
+        println!("[material_lab] ibl column {c}: brightest {:.1}, mean {:.1}", brightest(&cols[c]), mean_luma(&cols[c]));
+    }
+    // Both metal cubes reflect the sunset (no other light is on), so both
+    // are lit; the environment is warm at the horizon.
+    for c in 0..2 {
+        assert!(mean_luma(&cols[c]) > 25.0, "column {c}: an IBL metal cube reflects its environment");
+    }
+    let warm = cols[0].iter().filter(|(_, p)| !is_background(*p)).filter(|(_, p)| p[0] > p[2] + 10).count();
+    assert!(warm > 50, "the sunset's warm horizon shows in the reflection");
 }

@@ -400,6 +400,8 @@ pub struct Renderer {
     custom_draws: std::collections::BTreeMap<String, Box<CustomMaterial>>,
     /// Image-based lighting for Splash materials (renderer/ibl.rs).
     ibl: ibl::IblState,
+    /// The world's generic items on the model lanes (renderer/items.rs).
+    items: items::ItemState,
     /// The streamed world's surface shader, created on first streamed draw.
     city_draw: Option<Box<crate::shaders::DrawSceneCity>>,
     /// The level's grass field (grass.rs), its shader and this frame's
@@ -623,6 +625,8 @@ mod stream_draw;
 mod grass_draw;
 mod vfx_draw;
 mod ibl;
+mod items;
+pub use items::{splash_material_name, GeometryData, LAYOUT_TRANSFORM_TINT, TRANSFORM_TINT_FLOATS};
 
 pub use draw_items::*;
 pub use prepared::*;
@@ -695,6 +699,7 @@ impl Default for Renderer {
             pbr_draw: None,
             custom_draws: Default::default(),
             ibl: Default::default(),
+            items: Default::default(),
             city_draw: None,
             grass: None,
             grass_draw: None,

@@ -62,6 +62,24 @@ impl Renderer {
         world: &World,
         scene_state: SceneState3D,
         skinned: Option<SkinnedBatch>,
+        models_draw: Option<&mut DrawSceneSkinned>,
+    ) -> RenderStats {
+        // The world's generic items ride the placed models for this frame.
+        self.push_item_instances(cx.cx, world);
+        let stats = self.draw_scene_inner(cx, draw_list, draws, world, scene_state, skinned, models_draw);
+        self.pop_item_instances();
+        stats
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn draw_scene_inner(
+        &mut self,
+        cx: &mut Cx3d,
+        draw_list: &mut DrawList,
+        draws: &mut SceneDraws,
+        world: &World,
+        scene_state: SceneState3D,
+        skinned: Option<SkinnedBatch>,
         mut models_draw: Option<&mut DrawSceneSkinned>,
     ) -> RenderStats {
         let mut stats = RenderStats::default();
@@ -99,7 +117,7 @@ impl Renderer {
             self.sky_clock = true;
         }
         self.sky_hour = hour;
-        let sun = crate::sun::resolve_sun(&world.sun);
+        let sun = crate::world_lights::apply_world_sun(world, crate::sun::resolve_sun(&world.sun));
         self.light_eye = camera_pos;
         self.stream_lights(camera_pos, sun.dir.y);
         self.build_frame_lights(&sun);
@@ -256,7 +274,7 @@ impl Renderer {
         // batch begins, because instance fields are snapshotted per draw and
         // uniforms are captured when the draw item opens.
         let sun = {
-            let sun = crate::sun::resolve_sun(&world.sun);
+            let sun = crate::world_lights::apply_world_sun(world, crate::sun::resolve_sun(&world.sun));
             if self.hdr_output {
                 let mut hdr = sun.to_hdr();
                 self.hdr_fill_from_sky(world, &mut hdr);
@@ -308,6 +326,8 @@ impl Renderer {
             }
             _ => (vec3(0.75, 0.87, 0.96), 0.0),
         };
+        // The world environment's fog, when it names one.
+        let (fog_color, fog_density) = crate::world_lights::world_fog(world).unwrap_or((fog_color, fog_density));
         // HDR lane: per-pixel exponential height fog (clustered.rs
         // scene_fog) with the game's density at the base height.
         let fog_on = self.hdr_output && fog_density > 0.0;
