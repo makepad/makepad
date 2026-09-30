@@ -75,15 +75,16 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
     let ctx_words = CTX_PARAMS as usize + lowered.params.len();
     let state_words = lowered.state_init.len();
     let shared_words = lowered.shared_init.len().max(1);
-    let sizes = move |r: ir::Region| -> u32 {
-        match r {
-            ir::Region::Ctx => ctx_words as u32,
-            ir::Region::State => state_words as u32,
-            ir::Region::Shared => shared_words as u32,
-            ir::Region::Frame | ir::Region::Buf(_) => u32::MAX,
-        }
+    let regions = |p: &ir::Program, init: bool| ir::Regions {
+        ctx: ctx_words as u32,
+        state: state_words as u32,
+        shared: shared_words as u32,
+        frame: p.frame_words,
+        shared_writable: init,
+        bufs: Vec::new(),
+        io: true,
     };
-    if let Err(e) = ir::validate(&lowered.render, &sizes) {
+    if let Err(e) = ir::validate(&lowered.render, &regions(&lowered.render, false)) {
         return Err(vec![ShaderError::new(0, 1, format!("internal compiler error: {}", e))]);
     }
     let mut shared = lowered.shared_init.clone();
@@ -94,7 +95,7 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
     let native_ok = backend == Backend::Native;
     // Tables: run init() once (natively when possible: it can be big).
     if let Some(init) = &lowered.init {
-        if let Err(e) = ir::validate(init, &sizes) {
+        if let Err(e) = ir::validate(init, &regions(init, true)) {
             return Err(vec![ShaderError::new(0, 1, format!("internal compiler error in init: {}", e))]);
         }
         let mut ctx = vec![0u32; ctx_words];
@@ -105,7 +106,8 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
         {
             if native_ok {
                 if let Some(code) = arm64::compile(init) {
-                    code.run(&mut ctx, &mut state, &mut shared, [&zeros, &zeros], [&mut o0, &mut o1], 1);
+                    // SAFETY: `shared` is this init's own table vector.
+                    unsafe { code.run(&mut ctx, &mut state, shared.as_mut_ptr(), [&zeros, &zeros], [&mut o0, &mut o1], 1) };
                 } else {
                     run_init_interp(init, &mut ctx, &mut state, &mut shared);
                 }
@@ -137,7 +139,7 @@ fn run_init_interp(init: &ir::Program, ctx: &mut [u32], state: &mut [u32], share
     let mut scratch = vec![0u32; init.scratch_words()];
     let zeros = [0f32; 1];
     let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
-    let mut mem = ir::Mem { ctx, state, shared, bufs: &mut [] };
+    let mut mem = ir::Mem { ctx, state, shared: ir::Shared::Write(shared), bufs: &[] };
     let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
     ir::run(init, &mut scratch, &mut mem, &mut io, 1);
 }
@@ -303,9 +305,10 @@ impl AudioShader {
         if let Some(code) = &self.native {
             // SAFETY-relevant contract: `run` only touches the slices
             // passed here, with every access clamped into them.
-            let shared = self.shared.as_ptr() as *mut u32;
-            let shared = unsafe { std::slice::from_raw_parts_mut(shared, self.shared.len()) };
-            code.run(ctx, state, shared, ins, outs, n as u32);
+            // SAFETY: the render program never stores to shared tables
+            // (validated), so handing native code a pointer derived from
+            // the immutable table only ever reads it.
+            unsafe { code.run(ctx, state, self.shared.as_ptr() as *mut u32, ins, outs, n as u32) };
             return;
         }
         self.run_interp(ctx, state, scratch, ins, outs, n);
@@ -314,11 +317,7 @@ impl AudioShader {
     /// The reference interpreter, whatever the backend.
     pub fn run_interp(&self, ctx: &mut [u32], state: &mut [u32], scratch: &mut [u32], ins: [&[f32]; 2], outs: [&mut [f32]; 2], n: usize) {
         let n = n.min(MAX_FRAMES as usize);
-        // The render program never writes shared tables (checked by the
-        // front end), so a shared view is sound.
-        let shared = self.shared.as_ptr() as *mut u32;
-        let shared = unsafe { std::slice::from_raw_parts_mut(shared, self.shared.len()) };
-        let mut mem = ir::Mem { ctx, state, shared, bufs: &mut [] };
+        let mut mem = ir::Mem { ctx, state, shared: ir::Shared::Read(&self.shared), bufs: &[] };
         let [o0, o1] = outs;
         let mut io = ir::Io { ins, outs: [o0, o1] };
         ir::run(&self.render, scratch, &mut mem, &mut io, n as u32);

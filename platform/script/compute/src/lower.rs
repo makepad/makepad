@@ -61,6 +61,12 @@ pub const UNROLL_MAX: u32 = 16;
 pub const MAX_STATE_WORDS: u32 = 1 << 20;
 pub const MAX_SHARED_WORDS: u32 = 1 << 22;
 pub const MAX_FRAME_WORDS: u32 = 1 << 14;
+/// Largest constant initializer (state, shared tables, struct defaults).
+pub const MAX_INIT_WORDS: u32 = 1 << 22;
+/// Largest program after inlining and unrolling (AIR values).
+pub const MAX_IR_VALS: usize = 1 << 20;
+/// Worst-case AIR ops of one `init()` run.
+pub const MAX_INIT_COST: u64 = 200_000_000;
 /// Worst-case AIR ops per frame.
 pub const MAX_COST_PER_FRAME: u64 = 4_000_000;
 
@@ -1173,13 +1179,38 @@ impl Lowerer {
         }
     }
 
-    fn flatten(c: &CInit, out: &mut Vec<u32>) {
+    /// Words a constant initializer flattens to.
+    fn cinit_words(&self, c: &CInit) -> u32 {
+        match c {
+            CInit::W(..) => 1,
+            CInit::Vec(n, _) => *n as u32,
+            CInit::Struct(sid, _) => self.structs[*sid].words,
+            CInit::Array(_, f) => f.iter().map(|c| self.cinit_words(c)).fold(0u32, |a, b| a.saturating_add(b)),
+        }
+    }
+
+    /// A constant initializer's words in memory order: struct fields at
+    /// their offsets, padding zero (no word of a record is left unset).
+    fn flatten(&self, c: &CInit, out: &mut Vec<u32>) {
         match c {
             CInit::W(w, _) => out.push(*w),
             CInit::Vec(n, l) => out.extend_from_slice(&l[..*n as usize]),
-            CInit::Struct(_, f) | CInit::Array(_, f) => {
+            CInit::Struct(sid, f) => {
+                let d = &self.structs[*sid];
+                let start = out.len();
+                out.resize(start + d.words as usize, 0);
+                let mut tmp = Vec::new();
+                for (c, (_, _, off, _)) in f.iter().zip(d.fields.iter()) {
+                    tmp.clear();
+                    self.flatten(c, &mut tmp);
+                    let at = start + *off as usize;
+                    let end = (at + tmp.len()).min(out.len());
+                    out[at..end].copy_from_slice(&tmp[..end - at]);
+                }
+            }
+            CInit::Array(_, f) => {
                 for c in f {
-                    Self::flatten(c, out);
+                    self.flatten(c, out);
                 }
             }
         }
@@ -1207,6 +1238,11 @@ impl Lowerer {
             ExprKind::ArrayRepeat(el, count) => {
                 let n = self.const_count(count)?;
                 let el = self.cinit(el, ann)?;
+                // Check the size before expanding anything.
+                let words = (self.cinit_words(&el) as u64).saturating_mul(n as u64);
+                if words > MAX_INIT_WORDS as u64 {
+                    return err(e.span, format!("this array holds {} words; the limit is {}", words, MAX_INIT_WORDS));
+                }
                 let t = self.cinit_ty(&el);
                 Ok(CInit::Array(t, vec![el; n as usize]))
             }
@@ -1303,7 +1339,7 @@ impl Lowerer {
     /// Writes a constant initializer into a place (frame locals).
     fn store_cinit(&mut self, p: &Place, c: &CInit) {
         let mut words = Vec::new();
-        Self::flatten(c, &mut words);
+        self.flatten(c, &mut words);
         let t = self.cinit_ty(c);
         let n = words.len() as u32;
         let uniform = words.iter().all(|w| *w == words[0]);
@@ -1394,7 +1430,9 @@ impl Lowerer {
                         let c = self.cinit(value, ann.as_ref())?;
                         let t = self.cinit_ty(&c);
                         let root = self.shared_init.len() as u32;
-                        Self::flatten(&c, &mut self.shared_init);
+                        let mut w = std::mem::take(&mut self.shared_init);
+                        self.flatten(&c, &mut w);
+                        self.shared_init = w;
                         if self.shared_init.len() as u32 > MAX_SHARED_WORDS {
                             return err(*span, "tables exceed 4 Mi words");
                         }
@@ -1433,7 +1471,9 @@ impl Lowerer {
                     let c = self.cinit(value, ann.as_ref())?;
                     let t = self.cinit_ty(&c);
                     let offset = self.state_init.len() as u32;
-                    Self::flatten(&c, &mut self.state_init);
+                    let mut w = std::mem::take(&mut self.state_init);
+                    self.flatten(&c, &mut w);
+                    self.state_init = w;
                     if self.state_init.len() as u32 > MAX_STATE_WORDS {
                         return err(*span, format!("state exceeds {} words (4 MiB) per instance", MAX_STATE_WORDS));
                     }
@@ -1644,7 +1684,12 @@ impl Lowerer {
         let saved_entry = self.entry.take();
         // State `var`s are per instance: init sees only tables and constants.
         let saved_globals = self.globals.clone();
-        self.globals.retain(|_, b| !matches!(b, Bind::Local(..)) && !matches!(b, Bind::Place(p) if p.region == Region::State));
+        // Nor host buffers, emit buffers or params: init() runs once at
+        // compile time with none of them bound.
+        self.globals.retain(|_, b| {
+            !matches!(b, Bind::Local(..) | Bind::Emit(..) | Bind::Uniform(_) | Bind::Param(_))
+                && !matches!(b, Bind::Place(p) if matches!(p.region, Region::State | Region::Buf(_)))
+        });
         self.in_init = true;
         if !f.params.is_empty() {
             return err(f.span, "`fn init()` takes no parameters");
@@ -1660,12 +1705,18 @@ impl Lowerer {
         prog.body = b.blocks.into_iter().next().unwrap();
         prog.frame_words = frame_words;
         dce(&mut prog);
+        if prog.total_cost() > MAX_INIT_COST {
+            return err(f.span, format!("init() may run {} operations; the limit is {}", prog.total_cost(), MAX_INIT_COST));
+        }
         Ok(prog)
     }
 
     // -- calls (inlining) ------------------------------------------------------
 
     fn call(&mut self, f: &FnDecl, args: Vec<V>, span: Span) -> LResult<V> {
+        if self.b.prog.vals.len() > MAX_IR_VALS {
+            return err(span, "the program is too large after inlining (fewer or smaller helper calls, or smaller unrolled loops)");
+        }
         if self.call_stack.iter().any(|n| *n == f.name) {
             return err(span, format!("`{}` calls itself; audio shaders have no recursion", f.name));
         }
@@ -2101,6 +2152,9 @@ impl Lowerer {
                         l.bind(var, Bind::Const(V::Lit(k as f64)));
                         l.stmts(body)
                     })?;
+                    if self.b.prog.vals.len() > MAX_IR_VALS {
+                        return err(span, "the program is too large after unrolling");
+                    }
                 }
                 return Ok(());
             }

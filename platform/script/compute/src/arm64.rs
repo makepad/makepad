@@ -120,12 +120,17 @@ impl Code {
 
     /// Runs the program. The caller guarantees the slice sizes the program
     /// was compiled for (checked by `AudioShader::run`) and n >= 1.
-    pub fn run(&self, ctx: &mut [u32], state: &mut [u32], shared: &mut [u32], ins: [&[f32]; 2], outs: [&mut [f32]; 2], n: u32) {
+    ///
+    /// # Safety
+    /// `shared` points at the program's shared tables, alive for the call;
+    /// it is written only by an `init()` program (validated: no other
+    /// program stores to shared memory).
+    pub unsafe fn run(&self, ctx: &mut [u32], state: &mut [u32], shared: *mut u32, ins: [&[f32]; 2], outs: [&mut [f32]; 2], n: u32) {
         let [o0, o1] = outs;
         let io = [ins[0].as_ptr() as *mut f32, ins[1].as_ptr() as *mut f32, o0.as_mut_ptr(), o1.as_mut_ptr()];
         unsafe {
             let f: Entry = std::mem::transmute(self.ptr);
-            f(ctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_mut_ptr(), io.as_ptr(), n);
+            f(ctx.as_mut_ptr(), state.as_mut_ptr(), shared, io.as_ptr(), n);
         }
     }
 }
@@ -618,27 +623,30 @@ impl<'a> Emit<'a> {
     fn addr(&mut self, region: Region, base: u32, extent: u32, off: Option<Val>) -> (u8, Option<u32>) {
         if let Region::Buf(k) = region {
             // Host buffer k: the table at x3 holds (pointer, length) pairs.
-            // index = min(base + off, len - 1), wrapping like the interpreter.
+            // index = min(base + off, len - 1), in 64 bits (no wrap), like
+            // the interpreter; the result is below 2^32, so the load uses
+            // its low word zero-extended.
             match off {
                 Some(o) => {
                     let ro = self.gsrc(Ent::Val(o.0), XS0);
-                    if base == 0 {
-                        if ro != XS0 {
-                            self.e(mov(XS0, ro));
-                        }
-                    } else if base < 4096 {
-                        self.e(add_imm(XS0, ro, base));
-                    } else {
-                        self.mov_imm(XS1, base);
-                        self.e(ADD | (XS1 as u32) << 16 | (ro as u32) << 5 | XS0 as u32);
-                    }
+                    // mov w16, w(ro): zero-extends into x16.
+                    self.e(mov(XS0, ro));
                 }
-                None => self.mov_imm(XS0, base),
+                None => self.e(mov(XS0, 31)),
+            }
+            if base > 0 {
+                if base < 4096 {
+                    self.e(0x9100_0000 | base << 10 | (XS0 as u32) << 5 | XS0 as u32);
+                } else {
+                    self.mov_imm(XS1, base);
+                    self.e(0x8B00_0000 | (XS1 as u32) << 16 | (XS0 as u32) << 5 | XS0 as u32);
+                }
             }
             self.e(ldst_imm(false, true, XS1, 3, k as u32 * 16 + 8));
-            self.e(0x5100_0000 | 1 << 10 | (XS1 as u32) << 5 | XS1 as u32);
-            self.e(cmp(XS0, XS1));
-            self.e(csel(XS0, XS0, XS1, LS));
+            // sub x17, x17, #1; cmp x16, x17; csel x16, x16, x17, ls
+            self.e(0xD100_0000 | 1 << 10 | (XS1 as u32) << 5 | XS1 as u32);
+            self.e(0xEB00_001F | (XS1 as u32) << 16 | (XS0 as u32) << 5);
+            self.e(0x9A80_0000 | (XS1 as u32) << 16 | (LS as u32) << 12 | (XS0 as u32) << 5 | XS0 as u32);
             self.e(ldr_x(XS2, 3, k as u32 * 16));
             return (XS2, None);
         }

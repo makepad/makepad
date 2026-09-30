@@ -14,10 +14,10 @@
 //! chunk partials in chunk order, so every result is bit-identical whatever
 //! the backend, thread count or scheduling.
 
-use crate::ir::{self, Program, Region};
+use crate::ir::{self, Program};
 use crate::lower::kernel as kl;
 pub use crate::lower::kernel::{
-    Access, BufferDecl, FieldTy, KernelKind, Layout, LayoutField, ReduceOp, K_ACC, K_BASE, K_CANCEL, K_COUNT, K_OVERFLOW, K_PARAMS, K_SEED,
+    Access, BufferDecl, FieldTy, KernelKind, Layout, LayoutField, ReduceOp, K_ACC, K_BASE, K_COUNT, K_OVERFLOW, K_PARAMS, K_SEED,
     K_TIME,
 };
 pub use crate::lower::ParamInfo;
@@ -69,15 +69,16 @@ pub fn compile_with(src: &str, layouts: &[Layout], backend: Backend) -> Result<A
     let lowered = kl::lower_kernel(&all, src.len() + 1, layouts).map_err(|e| vec![e])?;
     let ctx_words = K_PARAMS as usize + lowered.params.len();
     let shared_words = lowered.shared_init.len().max(1);
-    let sizes = move |r: Region| -> u32 {
-        match r {
-            Region::Ctx => ctx_words as u32,
-            Region::State => 1,
-            Region::Shared => shared_words as u32,
-            Region::Frame | Region::Buf(_) => u32::MAX,
-        }
+    let regions = ir::Regions {
+        ctx: ctx_words as u32,
+        state: 1,
+        shared: shared_words as u32,
+        frame: lowered.program.frame_words,
+        shared_writable: false,
+        bufs: lowered.buffers.iter().map(|b| b.access != Access::Read).collect(),
+        io: false,
     };
-    if let Err(e) = ir::validate(&lowered.program, &sizes) {
+    if let Err(e) = ir::validate(&lowered.program, &regions) {
         return Err(vec![ShaderError::new(0, 1, format!("internal compiler error: {}", e))]);
     }
     let mut shared = lowered.shared_init.clone();
@@ -85,12 +86,24 @@ pub fn compile_with(src: &str, layouts: &[Layout], backend: Backend) -> Result<A
         shared.push(0);
     }
     if let Some(init) = &lowered.init {
+        let init_regions = ir::Regions {
+            ctx: ctx_words as u32,
+            state: 1,
+            shared: shared_words as u32,
+            frame: init.frame_words,
+            shared_writable: true,
+            bufs: Vec::new(),
+            io: false,
+        };
+        if let Err(e) = ir::validate(init, &init_regions) {
+            return Err(vec![ShaderError::new(0, 1, format!("internal compiler error in init: {}", e))]);
+        }
         let mut ctx = vec![0u32; ctx_words];
         let mut state = [0u32; 1];
         let mut scratch = vec![0u32; init.scratch_words()];
         let zeros = [0f32; 1];
         let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
-        let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: &mut shared, bufs: &mut [] };
+        let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: ir::Shared::Write(&mut shared), bufs: &[] };
         let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
         ir::run(init, &mut scratch, &mut mem, &mut io, 1);
     }
@@ -125,6 +138,12 @@ pub enum KernelError {
     ReadOnly(String),
     /// Cancelled (by the watchdog or the owner) before it finished.
     Cancelled,
+    /// An output buffer is smaller than the call needs (words).
+    TooSmall { name: String, need: u64, have: usize },
+    /// More elements than one call may run.
+    TooMany(usize),
+    /// Worst-case work (ops per element x elements) exceeds the call's limit.
+    OverBudget { work: u64, limit: u64 },
 }
 
 impl std::fmt::Display for KernelError {
@@ -135,6 +154,9 @@ impl std::fmt::Display for KernelError {
             KernelError::NoSuchBuffer(n) => write!(f, "the kernel has no buffer `{}`", n),
             KernelError::ReadOnly(n) => write!(f, "buffer `{}` is written by the kernel but was bound read-only", n),
             KernelError::Cancelled => write!(f, "cancelled"),
+            KernelError::TooSmall { name, need, have } => write!(f, "buffer `{}` has {} words; this call needs {}", name, have, need),
+            KernelError::TooMany(n) => write!(f, "{} elements is more than one call may run", n),
+            KernelError::OverBudget { work, limit } => write!(f, "worst-case work {} ops exceeds the limit of {}", work, limit),
         }
     }
 }
@@ -191,7 +213,14 @@ impl Kernel {
         for (k, p) in self.params.iter().enumerate() {
             ctx[K_PARAMS as usize + k] = p.default.to_bits();
         }
-        Call { kernel: self, ctx, bufs: vec![None; self.buffers.len()], cancel: Arc::new(AtomicU32::new(0)), _borrow: std::marker::PhantomData }
+        let cancel = Arc::new(AtomicU32::new(0));
+        let mut bufs = vec![None; self.buffers.len()];
+        // Buffer 0 is the control word: the cancel token itself, which the
+        // kernel reads every element.
+        if !bufs.is_empty() {
+            bufs[0] = Some((cancel.as_ptr(), 1));
+        }
+        Call { kernel: self, ctx, bufs, cancel, work_limit: DEFAULT_WORK_LIMIT, _borrow: std::marker::PhantomData }
     }
 
     fn reduce_init(&self) -> (ReduceOp, usize, f32) {
@@ -210,7 +239,8 @@ impl Kernel {
     }
 
     /// Runs elements [start, start + n) on this thread with `ctx` (the
-    /// caller's copy) and the buffer table.
+    /// caller's copy) and the buffer table. The kernel itself polls the
+    /// cancel token (the control buffer) every element.
     fn run_range(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], start: usize, n: usize, interp: bool, cancel: &AtomicU32) -> Result<(), KernelError> {
         let step = if interp { 256 } else { CHUNK };
         let mut at = 0;
@@ -221,10 +251,10 @@ impl Kernel {
             let k = (n - at).min(step);
             ctx[K_BASE as usize] = (start + at) as u32;
             self.run_raw(ctx, table, lens, k, interp);
-            if ctx[K_CANCEL as usize] != 0 {
-                return Err(KernelError::Cancelled);
-            }
             at += k;
+        }
+        if cancel.load(Ordering::Relaxed) != 0 {
+            return Err(KernelError::Cancelled);
         }
         Ok(())
     }
@@ -244,10 +274,13 @@ impl Kernel {
         let _ = interp;
         let mut scratch = vec![0u32; self.program.scratch_words()];
         let mut state = [0u32; 1];
-        let shared = unsafe { std::slice::from_raw_parts_mut(self.shared.as_ptr() as *mut u32, self.shared.len()) };
-        let mut bufs: Vec<&mut [u32]> =
-            lens.iter().enumerate().map(|(k, len)| unsafe { std::slice::from_raw_parts_mut(table[2 * k] as *mut u32, *len) }).collect();
-        let mut mem = ir::Mem { ctx, state: &mut state, shared, bufs: &mut bufs };
+        // No references over host memory: word access through atomics.
+        let bufs: Vec<ir::RawBuf> = lens
+            .iter()
+            .enumerate()
+            .map(|(k, len)| ir::RawBuf { ptr: table[2 * k] as *mut u32, len: *len, writable: self.buffers[k].access != Access::Read })
+            .collect();
+        let mut mem = ir::Mem { ctx, state: &mut state, shared: ir::Shared::Read(&self.shared), bufs: &bufs };
         let zeros = [0f32; 1];
         let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
         let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
@@ -262,8 +295,12 @@ pub struct Call<'a> {
     /// (pointer, length in words) per kernel buffer.
     bufs: Vec<Option<(*mut u32, usize)>>,
     cancel: Arc<AtomicU32>,
+    work_limit: u64,
     _borrow: std::marker::PhantomData<&'a mut [u32]>,
 }
+
+/// Default admission limit: worst-case ops per element x elements.
+pub const DEFAULT_WORK_LIMIT: u64 = 1 << 40;
 
 // SAFETY: the raw pointers are borrows held for 'a; a call is moved, not
 // shared, and parallel runs only split element-local work.
@@ -300,12 +337,18 @@ impl<'a> Call<'a> {
         self.ctx[K_SEED as usize] = seed;
     }
 
+    /// Admission: refuse calls whose worst-case work (ops per element x
+    /// elements) exceeds `ops` (untrusted kernels get a host-chosen limit).
+    pub fn set_work_limit(&mut self, ops: u64) {
+        self.work_limit = ops;
+    }
+
     pub fn cancel_token(&self) -> CancelToken {
         CancelToken(self.cancel.clone())
     }
 
     fn bind(&mut self, name: &str, ptr: *mut u32, len: usize, writable: bool) -> Result<(), KernelError> {
-        let k = self.kernel.buffer_index(name).ok_or_else(|| KernelError::NoSuchBuffer(name.into()))?;
+        let k = self.kernel.buffer_index(name).filter(|k| *k > 0).ok_or_else(|| KernelError::NoSuchBuffer(name.into()))?;
         if len == 0 {
             return Err(KernelError::Empty(name.into()));
         }
@@ -361,12 +404,42 @@ impl<'a> Call<'a> {
         self.run_with(count, true)
     }
 
+    /// Admission and capacity: the element count fits, the worst-case work
+    /// fits the limit, and every buffer the kernel writes per element holds
+    /// `count` records (always for emit buffers; for plain outputs when the
+    /// run is split across threads, so no two workers ever share a word).
+    fn admit(&self, count: usize, parallel: bool) -> Result<(), KernelError> {
+        if count > kl::ELEMENT_CAP as usize {
+            return Err(KernelError::TooMany(count));
+        }
+        let work = self.kernel.cost.saturating_mul(count as u64);
+        if work > self.work_limit {
+            return Err(KernelError::OverBudget { work, limit: self.work_limit });
+        }
+        for (k, b) in self.kernel.buffers.iter().enumerate().skip(1) {
+            let per = match b.access {
+                Access::Read => continue,
+                Access::Write if !parallel => continue,
+                Access::Write => b.stride as u64,
+                Access::Emit { width, capacity } => width as u64 * capacity as u64,
+                Access::EmitCount => 1,
+            };
+            let need = per.saturating_mul(count as u64);
+            let have = self.bufs[k].map_or(0, |(_, len)| len);
+            // Offsets are 32-bit element arithmetic: keep them below 2^31.
+            if need > have as u64 || need > i32::MAX as u64 {
+                return Err(KernelError::TooSmall { name: b.name.clone(), need, have });
+            }
+        }
+        Ok(())
+    }
+
     fn run_with(&mut self, count: usize, interp: bool) -> Result<RunStats, KernelError> {
         let t0 = std::time::Instant::now();
         let (table, lens) = self.table()?;
+        self.admit(count, false)?;
         self.ctx[K_COUNT as usize] = count as u32;
         self.ctx[K_OVERFLOW as usize] = 0;
-        self.ctx[K_CANCEL as usize] = 0;
         let (op, lanes, init) = self.kernel.reduce_init();
         let mut reduced = vec![init; lanes];
         let mut at = 0;
@@ -395,6 +468,7 @@ impl<'a> Call<'a> {
         }
         let t0 = std::time::Instant::now();
         let (table, lens) = self.table()?;
+        self.admit(count, true)?;
         self.ctx[K_COUNT as usize] = count as u32;
         let chunks = count.div_ceil(CHUNK);
         let (op, lanes, init) = self.kernel.reduce_init();
@@ -405,7 +479,6 @@ impl<'a> Call<'a> {
             for _ in 0..threads.min(chunks) {
                 s.spawn(|| {
                     let mut ctx = self.ctx.clone();
-                    ctx[K_CANCEL as usize] = 0;
                     loop {
                         let c = next.fetch_add(1, Ordering::Relaxed) as usize;
                         if c >= chunks {

@@ -174,6 +174,22 @@ impl Program {
         self.vals.len() + self.vars.len() + self.frame_words as usize
     }
 
+    /// Worst-case ops of one whole run: every loop at its cap (`init()`).
+    pub fn total_cost(&self) -> u64 {
+        fn walk(b: &Block) -> u64 {
+            let mut sum = 0u64;
+            for s in b {
+                sum = sum.saturating_add(match s {
+                    Stmt::If(_, t, e) => 1 + walk(t).max(walk(e)),
+                    Stmt::Loop { cap, body } => (*cap as u64).saturating_mul(walk(body) + 2),
+                    _ => 1,
+                });
+            }
+            sum
+        }
+        walk(&self.body)
+    }
+
     /// Static instruction count weighted by loop caps: a bound on the work
     /// of one call per frame of the outer sample loop.
     pub fn cost(&self) -> u64 {
@@ -313,7 +329,7 @@ pub fn eval_wrap(x: u32, len: u32) -> u32 {
 
 #[inline(always)]
 pub fn clamp_off(off: u32, extent: u32) -> u32 {
-    off.min(extent - 1)
+    off.min(extent.saturating_sub(1))
 }
 
 // =========================================================================
@@ -327,18 +343,72 @@ pub struct Io<'a> {
     pub outs: [&'a mut [f32]; 2],
 }
 
-pub struct Mem<'a> {
-    pub ctx: &'a mut [u32],
-    pub state: &'a mut [u32],
-    pub shared: &'a mut [u32],
-    /// Host buffers (each at least one word long).
-    pub bufs: &'a mut [&'a mut [u32]],
+/// A host buffer as a run sees it. Several workers may use one buffer at
+/// once (each writing only its own elements), so the interpreter never makes
+/// a Rust reference over this memory: it reads and writes single words
+/// through relaxed atomics.
+#[derive(Clone, Copy, Debug)]
+pub struct RawBuf {
+    pub ptr: *mut u32,
+    /// Length in words.
+    pub len: usize,
+    pub writable: bool,
 }
 
-/// A buffer access: `base + off` (wrapping), clamped to the last word.
+// SAFETY: a RawBuf is only dereferenced word by word through atomics, at
+// clamped indices below `len`, by the runs its owner hands it to.
+unsafe impl Send for RawBuf {}
+unsafe impl Sync for RawBuf {}
+
+impl RawBuf {
+    #[inline(always)]
+    fn load(&self, at: usize) -> u32 {
+        if at >= self.len {
+            return 0;
+        }
+        // SAFETY: at < len, and the owner keeps ptr..ptr+len alive for the run.
+        unsafe { (*(self.ptr.add(at) as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Relaxed) }
+    }
+
+    #[inline(always)]
+    fn store(&self, at: usize, x: u32) {
+        if at >= self.len || !self.writable {
+            return;
+        }
+        // SAFETY: as in `load`; the buffer was bound writable.
+        unsafe { (*(self.ptr.add(at) as *const std::sync::atomic::AtomicU32)).store(x, std::sync::atomic::Ordering::Relaxed) }
+    }
+}
+
+/// Shared tables: written only by `init()`; every other program reads them.
+pub enum Shared<'a> {
+    Read(&'a [u32]),
+    Write(&'a mut [u32]),
+}
+
+impl Shared<'_> {
+    fn get(&self, at: usize) -> u32 {
+        match self {
+            Shared::Read(s) => s.get(at).copied().unwrap_or(0),
+            Shared::Write(s) => s.get(at).copied().unwrap_or(0),
+        }
+    }
+}
+
+pub struct Mem<'a> {
+    /// The run's own ctx (params in, reduce/overflow words out).
+    pub ctx: &'a mut [u32],
+    pub state: &'a mut [u32],
+    pub shared: Shared<'a>,
+    /// Host buffers (each at least one word long).
+    pub bufs: &'a [RawBuf],
+}
+
+/// A buffer access: `base + off` computed without wrapping (64-bit), then
+/// clamped to the last word. The same in every backend.
 #[inline(always)]
 pub fn buf_index(base: u32, off: Option<u32>, len: usize) -> usize {
-    (base.wrapping_add(off.unwrap_or(0)) as usize).min(len - 1)
+    ((base as u64 + off.unwrap_or(0) as u64) as usize).min(len.saturating_sub(1))
 }
 
 enum Flow {
@@ -362,13 +432,36 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
         self.regs[v.0 as usize]
     }
 
-    fn region(&mut self, region: Region) -> &mut [u32] {
+    /// Reads word `at` of an owned region (clamped callers; out of range
+    /// reads 0 so a malformed program cannot panic here).
+    fn read_word(&self, region: Region, at: usize) -> u32 {
         match region {
-            Region::Ctx => self.mem.ctx,
-            Region::State => self.mem.state,
-            Region::Shared => self.mem.shared,
-            Region::Frame => self.frame,
-            Region::Buf(k) => self.mem.bufs[k as usize],
+            Region::Ctx => self.mem.ctx.get(at).copied().unwrap_or(0),
+            Region::State => self.mem.state.get(at).copied().unwrap_or(0),
+            Region::Shared => self.mem.shared.get(at),
+            Region::Frame => self.frame.get(at).copied().unwrap_or(0),
+            Region::Buf(k) => self.mem.bufs.get(k as usize).map_or(0, |b| b.load(at)),
+        }
+    }
+
+    fn write_word(&mut self, region: Region, at: usize, x: u32) {
+        let slot = match region {
+            Region::Ctx => self.mem.ctx.get_mut(at),
+            Region::State => self.mem.state.get_mut(at),
+            Region::Shared => match &mut self.mem.shared {
+                Shared::Write(s) => s.get_mut(at),
+                Shared::Read(_) => None,
+            },
+            Region::Frame => self.frame.get_mut(at),
+            Region::Buf(k) => {
+                if let Some(b) = self.mem.bufs.get(k as usize) {
+                    b.store(at, x);
+                }
+                None
+            }
+        };
+        if let Some(w) = slot {
+            *w = x;
         }
     }
 
@@ -391,16 +484,19 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
             }
             Op::Wrap(x, len) => eval_wrap(self.r(x), len),
             Op::Load { region: Region::Buf(k), base, off, .. } => {
-                let buf = &self.mem.bufs[k as usize];
-                buf[buf_index(base, off.map(|o| self.r(o)), buf.len())]
+                let Some(b) = self.mem.bufs.get(k as usize) else { return 0 };
+                if b.len == 0 {
+                    return 0;
+                }
+                b.load(buf_index(base, off.map(|o| self.r(o)), b.len))
             }
-            Op::BufLen(k) => self.mem.bufs[k as usize].len() as u32,
+            Op::BufLen(k) => self.mem.bufs.get(k as usize).map_or(0, |b| b.len as u32),
             Op::Load { region, base, extent, off } => {
                 let off = match off {
                     Some(o) => clamp_off(self.r(o), extent),
                     None => 0,
                 };
-                self.region(region)[(base + off) as usize]
+                self.read_word(region, base as usize + off as usize)
             }
             Op::In { ch, idx } => {
                 let at = clamp_off(self.r(idx), self.n) as usize;
@@ -424,9 +520,11 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                 Stmt::Store { region: Region::Buf(k), base, off, val, .. } => {
                     let x = self.r(*val);
                     let o = off.map(|o| self.r(o));
-                    let buf = &mut self.mem.bufs[*k as usize];
-                    let at = buf_index(*base, o, buf.len());
-                    buf[at] = x;
+                    if let Some(b) = self.mem.bufs.get(*k as usize) {
+                        if b.len > 0 {
+                            b.store(buf_index(*base, o, b.len), x);
+                        }
+                    }
                 }
                 Stmt::Store { region, base, extent, off, val } => {
                     let off = match off {
@@ -434,7 +532,7 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                         None => 0,
                     };
                     let x = self.r(*val);
-                    self.region(*region)[(base + off) as usize] = x;
+                    self.write_word(*region, *base as usize + off as usize, x);
                 }
                 Stmt::Out { ch, idx, val } => {
                     let at = clamp_off(self.r(*idx), self.n) as usize;
@@ -485,80 +583,224 @@ pub fn run(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n: u32)
 // Validation (types, loop depths, memory extents)
 // =========================================================================
 
-/// Checks the structural invariants every backend relies on. The front end
-/// always produces valid programs; this guards hand-built ones and
-/// front-end bugs (tests call it on every compiled program).
-pub fn validate(p: &Program, sizes: &dyn Fn(Region) -> u32) -> Result<(), String> {
-    let mut defined = vec![false; p.vals.len()];
-    fn walk(
-        p: &Program,
-        b: &Block,
-        depth: u32,
-        defined: &mut Vec<bool>,
-        sizes: &dyn Fn(Region) -> u32,
-    ) -> Result<(), String> {
-        let ty = |v: Val| p.vals[v.0 as usize];
-        for s in b {
-            let used: Vec<Val> = match s {
-                Stmt::Def(_, op) => op_uses(op),
-                Stmt::Set(_, v) => vec![*v],
-                Stmt::Store { off, val, .. } => off.iter().copied().chain([*val]).collect(),
-                Stmt::Out { idx, val, .. } => vec![*idx, *val],
-                Stmt::If(c, _, _) => vec![*c],
-                _ => vec![],
-            };
-            for u in &used {
-                if !defined.get(u.0 as usize).copied().unwrap_or(false) {
-                    return Err(format!("{:?} used before definition", u));
-                }
-            }
-            match s {
-                Stmt::Def(v, op) => {
-                    if defined[v.0 as usize] {
-                        return Err(format!("{:?} defined twice", v));
-                    }
-                    let want = op_ty(p, op);
-                    if let Some(want) = want {
-                        if want != ty(*v) {
-                            return Err(format!("{:?} typed {:?}, op gives {:?}", v, ty(*v), want));
-                        }
-                    }
-                    if let Op::Load { region, base, extent, .. } = op {
-                        if !matches!(region, Region::Buf(_)) && (*extent == 0 || base + extent > sizes(*region)) {
-                            return Err(format!("load outside {:?}", region));
-                        }
-                    }
-                    defined[v.0 as usize] = true;
-                }
-                Stmt::Set(var, v) => {
-                    if p.vars[var.0 as usize] != ty(*v) {
-                        return Err(format!("{:?} set with a {:?}", var, ty(*v)));
-                    }
-                }
-                Stmt::Store { region, base, extent, .. } => {
-                    if !matches!(region, Region::Buf(_)) && (*extent == 0 || base + extent > sizes(*region)) {
-                        return Err(format!("store outside {:?}", region));
-                    }
-                }
-                Stmt::If(c, t, e) => {
-                    if ty(*c) != Ty::Bool {
-                        return Err("if on a non-bool".into());
-                    }
-                    walk(p, t, depth, defined, sizes)?;
-                    walk(p, e, depth, defined, sizes)?;
-                }
-                Stmt::Loop { body, .. } => walk(p, body, depth + 1, defined, sizes)?,
-                Stmt::Break(d) | Stmt::Continue(d) => {
-                    if *d >= depth {
-                        return Err("break/continue outside its loop".into());
-                    }
-                }
-                Stmt::Out { .. } => {}
-            }
+/// What a program may touch: region sizes in words, which host buffers
+/// exist and which are writable, whether shared tables are writable (only
+/// `init()`), whether audio I/O ops are allowed.
+#[derive(Clone, Debug, Default)]
+pub struct Regions {
+    pub ctx: u32,
+    pub state: u32,
+    pub shared: u32,
+    pub frame: u32,
+    pub shared_writable: bool,
+    /// Writable flag per host buffer index.
+    pub bufs: Vec<bool>,
+    pub io: bool,
+}
+
+impl Regions {
+    fn size(&self, r: Region) -> Option<u32> {
+        match r {
+            Region::Ctx => Some(self.ctx),
+            Region::State => Some(self.state),
+            Region::Shared => Some(self.shared),
+            Region::Frame => Some(self.frame),
+            Region::Buf(_) => None,
         }
-        Ok(())
     }
-    walk(p, &p.body, 0, &mut defined, sizes)
+}
+
+/// Checks every invariant the backends rely on, without ever panicking on
+/// a malformed program: identifiers in range, types of every operand,
+/// values used only where defined (per branch and loop scope), accesses
+/// inside real region sizes (checked arithmetic), existing host buffers,
+/// writes only to writable memory, break/continue depths. The front end
+/// always produces valid programs; this is the independent barrier in
+/// front of native code generation.
+pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
+    struct V<'a> {
+        p: &'a Program,
+        r: &'a Regions,
+        visible: Vec<bool>,
+        ever: Vec<bool>,
+        scope: Vec<u32>,
+    }
+    impl<'a> V<'a> {
+        fn ty(&self, v: Val) -> Result<Ty, String> {
+            self.p.vals.get(v.0 as usize).copied().ok_or_else(|| format!("{:?} out of range", v))
+        }
+        fn var_ty(&self, v: Var) -> Result<Ty, String> {
+            self.p.vars.get(v.0 as usize).copied().ok_or_else(|| format!("{:?} out of range", v))
+        }
+        fn used(&self, v: Val, want: Option<Ty>) -> Result<Ty, String> {
+            let t = self.ty(v)?;
+            if !self.visible[v.0 as usize] {
+                return Err(format!("{:?} used where it is not defined", v));
+            }
+            if let Some(w) = want {
+                if t != w {
+                    return Err(format!("{:?} is {:?}, expected {:?}", v, t, w));
+                }
+            }
+            Ok(t)
+        }
+        fn access(&self, region: Region, base: u32, extent: u32, off: Option<Val>, write: bool) -> Result<(), String> {
+            if let Some(o) = off {
+                self.used(o, Some(Ty::I32))?;
+            }
+            match region {
+                Region::Buf(k) => {
+                    let Some(w) = self.r.bufs.get(k as usize) else {
+                        return Err(format!("no host buffer {}", k));
+                    };
+                    if write && !*w {
+                        return Err(format!("write to read-only buffer {}", k));
+                    }
+                }
+                r => {
+                    let size = self.r.size(r).unwrap_or(0);
+                    let end = base.checked_add(extent).ok_or("access extent overflows")?;
+                    if extent == 0 || end > size {
+                        return Err(format!("access outside {:?} ({}..{} of {})", r, base, end, size));
+                    }
+                    if write && r == Region::Shared && !self.r.shared_writable {
+                        return Err("write to read-only shared tables".into());
+                    }
+                }
+            }
+            Ok(())
+        }
+        fn op(&self, v: Val, op: &Op) -> Result<(), String> {
+            use Ty::*;
+            let t = self.ty(v)?;
+            let want = match *op {
+                Op::ConstF(_) => F32,
+                Op::ConstI(_) => I32,
+                Op::ConstB(_) => Bool,
+                Op::Get(var) => self.var_ty(var)?,
+                Op::Un(u, a) => {
+                    let (inp, out) = match u {
+                        Un::NegF | Un::AbsF | Un::SqrtF | Un::FloorF | Un::CeilF | Un::TruncF | Un::RoundF => (F32, F32),
+                        Un::F2I | Un::BitsFI => (F32, I32),
+                        Un::I2F | Un::BitsIF => (I32, F32),
+                        Un::NegI => (I32, I32),
+                        Un::NotB => (Bool, Bool),
+                    };
+                    self.used(a, Some(inp))?;
+                    out
+                }
+                Op::Bin(b, x, y) => {
+                    let (inp, out) = match b {
+                        Bin::AddF | Bin::SubF | Bin::MulF | Bin::DivF | Bin::MinF | Bin::MaxF => (F32, F32),
+                        Bin::AndB | Bin::OrB => (Bool, Bool),
+                        _ => (I32, I32),
+                    };
+                    self.used(x, Some(inp))?;
+                    self.used(y, Some(inp))?;
+                    out
+                }
+                Op::CmpF(_, x, y) => {
+                    self.used(x, Some(F32))?;
+                    self.used(y, Some(F32))?;
+                    Bool
+                }
+                Op::CmpI(_, x, y) => {
+                    let tx = self.used(x, None)?;
+                    self.used(y, Some(tx))?;
+                    if tx == F32 {
+                        return Err("integer compare of floats".into());
+                    }
+                    Bool
+                }
+                Op::Sel(c, x, y) => {
+                    self.used(c, Some(Bool))?;
+                    let tx = self.used(x, None)?;
+                    self.used(y, Some(tx))?;
+                    tx
+                }
+                Op::Wrap(x, len) => {
+                    self.used(x, Some(I32))?;
+                    if len == 0 {
+                        return Err("wrap by 0".into());
+                    }
+                    I32
+                }
+                Op::Load { region, base, extent, off } => {
+                    self.access(region, base, extent, off, false)?;
+                    t
+                }
+                Op::In { idx, .. } => {
+                    if !self.r.io {
+                        return Err("audio input in a program without audio I/O".into());
+                    }
+                    self.used(idx, Some(I32))?;
+                    F32
+                }
+                Op::FrameCount => I32,
+                Op::BufLen(k) => {
+                    if k as usize >= self.r.bufs.len() {
+                        return Err(format!("no host buffer {}", k));
+                    }
+                    I32
+                }
+            };
+            if want != t {
+                return Err(format!("{:?} typed {:?}, its op gives {:?}", v, t, want));
+            }
+            Ok(())
+        }
+        fn block(&mut self, b: &Block, depth: u32) -> Result<(), String> {
+            let mark = self.scope.len();
+            for s in b {
+                match s {
+                    Stmt::Def(v, op) => {
+                        self.ty(*v)?;
+                        if self.ever[v.0 as usize] {
+                            return Err(format!("{:?} defined twice", v));
+                        }
+                        self.op(*v, op)?;
+                        self.ever[v.0 as usize] = true;
+                        self.visible[v.0 as usize] = true;
+                        self.scope.push(v.0);
+                    }
+                    Stmt::Set(var, v) => {
+                        let want = self.var_ty(*var)?;
+                        self.used(*v, Some(want))?;
+                    }
+                    Stmt::Store { region, base, extent, off, val } => {
+                        self.used(*val, None)?;
+                        self.access(*region, *base, *extent, *off, true)?;
+                    }
+                    Stmt::Out { idx, val, .. } => {
+                        if !self.r.io {
+                            return Err("audio output in a program without audio I/O".into());
+                        }
+                        self.used(*idx, Some(Ty::I32))?;
+                        self.used(*val, Some(Ty::F32))?;
+                    }
+                    Stmt::If(c, t, e) => {
+                        self.used(*c, Some(Ty::Bool))?;
+                        self.block(t, depth)?;
+                        self.block(e, depth)?;
+                    }
+                    Stmt::Loop { body, .. } => self.block(body, depth + 1)?,
+                    Stmt::Break(d) | Stmt::Continue(d) => {
+                        if *d >= depth {
+                            return Err("break/continue outside its loop".into());
+                        }
+                    }
+                }
+            }
+            // Values defined in this block are not visible after it.
+            for v in self.scope.drain(mark..) {
+                self.visible[v as usize] = false;
+            }
+            Ok(())
+        }
+    }
+    let mut v = V { p, r: regions, visible: vec![false; p.vals.len()], ever: vec![false; p.vals.len()], scope: Vec::new() };
+    // The top block's values stay visible to the end; nothing follows it.
+    v.block(&p.body, 0)
 }
 
 /// The operands an op reads.

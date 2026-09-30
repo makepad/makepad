@@ -26,8 +26,9 @@ pub const K_BASE: u32 = 0;
 pub const K_COUNT: u32 = 1;
 pub const K_TIME: u32 = 2;
 pub const K_SEED: u32 = 3;
-/// Set non-zero (by a watchdog) to stop the call at the next element.
-pub const K_CANCEL: u32 = 4;
+/// Host buffer 0: the control word (non-zero = stop at the next element),
+/// bound by the runtime to the call's cancel token.
+pub const CONTROL_BUFFER: &str = "#control";
 /// Set to 1 when an emit found its element's slots full.
 pub const K_OVERFLOW: u32 = 5;
 /// A reduce kernel's running value (up to 16 lanes).
@@ -84,12 +85,15 @@ pub struct KernelCtx {
     /// Some access to a writable buffer is not to the element's own record:
     /// the kernel cannot be split across threads.
     pub nonlocal: bool,
+    /// Buffers viewed with different strides (records of different
+    /// elements may overlap).
+    mixed: std::collections::HashSet<u8>,
 }
 
 impl KernelCtx {
     /// Notes an access to buffer k at `off`.
     pub(super) fn access(&mut self, k: u8, off: Option<Val>) {
-        if self.writable(k) && !off.is_some_and(|o| self.local_offsets.contains(&o)) {
+        if self.writable(k) && (self.mixed.contains(&k) || !off.is_some_and(|o| self.local_offsets.contains(&o))) {
             self.nonlocal = true;
         }
     }
@@ -106,8 +110,14 @@ impl KernelCtx {
                 (a, b2) if a == b2 => {}
                 _ => return err(span, format!("buffer `{}` is declared two incompatible ways", name)),
             }
-            b.stride = b.stride.max(stride);
+            if b.stride != stride {
+                self.mixed.insert(k as u8);
+                b.stride = b.stride.max(stride);
+            }
             return Ok(k as u8);
+        }
+        if self.buffers.is_empty() {
+            self.buffers.push(BufferDecl { name: CONTROL_BUFFER.into(), access: Access::Read, stride: 1 });
         }
         if self.buffers.len() >= MAX_BUFFERS {
             return err(span, format!("at most {} buffers", MAX_BUFFERS));
@@ -278,7 +288,12 @@ impl Lowerer {
                     Some(e) => self.const_arg(e, "the offset")?,
                     None => 0,
                 };
-                if offset + words > stride.max(words) && args.get(1).is_some() {
+                // A record must fit inside its stride, or neighbouring
+                // elements' records would overlap.
+                if stride < words {
+                    return err(span, format!("a stride of {} is smaller than the {} words of one record", stride, words));
+                }
+                if offset.checked_add(words).is_none_or(|end| end > stride) {
                     return err(span, format!("offset {} + {} words does not fit a stride of {}", offset, words, stride));
                 }
                 let host = match args.get(3) {
@@ -305,9 +320,12 @@ impl Lowerer {
                 if args.len() < 2 {
                     return err(span, "emit_buffer(width, slots_per_element [, buffer])");
                 }
-                let width = match ident(&args[0]).as_deref().and_then(type_words) {
-                    Some((_, w)) => w,
-                    None => self.const_arg(&args[0], "the record width")?,
+                let tn = ident(&args[0]);
+                let layout = tn.as_ref().and_then(|n| self.structs.iter().position(|s| s.name == *n));
+                let width = match (tn.as_deref().and_then(type_words), layout) {
+                    (Some((_, w)), _) => w,
+                    (None, Some(sid)) => self.structs[sid].words,
+                    _ => self.const_arg(&args[0], "the record width")?,
                 };
                 let capacity = self.const_arg(&args[1], "the slots per element")?;
                 if width == 0 || capacity == 0 {
@@ -317,7 +335,10 @@ impl Lowerer {
                     Some(e) => ident(e).ok_or_else(|| ShaderError::new(e.span.start, e.span.end, "the buffer name (an identifier)".into()))?,
                     None => name.to_string(),
                 };
-                let kd = self.kernel.buffer(&host, Access::Emit { width, capacity }, width * capacity, span)?;
+                let Some(slots) = width.checked_mul(capacity).filter(|w| *w <= 1 << 24) else {
+                    return err(span, "records x slots per element is too large");
+                };
+                let kd = self.kernel.buffer(&host, Access::Emit { width, capacity }, slots, span)?;
                 let kc = self.kernel.buffer(&format!("{}_count", host), Access::EmitCount, 1, span)?;
                 Ok(Bind::Emit(kd, kc, width, capacity))
             }
@@ -357,6 +378,15 @@ impl Lowerer {
             match v {
                 V::Vec(n, l) => words.extend_from_slice(&l[..n as usize]),
                 V::I(x) => words.push(x),
+                // A struct or layout record: all of its words, as stored.
+                V::Place(p) if matches!(p.ty, T::Struct(_)) => {
+                    let n = self.words(&p.ty);
+                    for k in 0..n {
+                        let leaf = self.leaf_ty(&p.ty, k);
+                        let (base, extent, off) = self.offset_plus(&p, k);
+                        words.push(self.b.load(leaf, p.region, base, extent, off));
+                    }
+                }
                 V::B(x) => {
                     let one = self.b.ci(1);
                     let zero = self.b.ci(0);
@@ -431,7 +461,11 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> 
     let iv = l.b.get(i);
     let done = l.b.cmpi(Cmp::Ge, iv, n);
     l.b.push(IS::If(done, vec![IS::Break(0)], vec![]));
-    let cancel = l.b.load(Ty::I32, Region::Ctx, K_CANCEL, 1, None);
+    // The control word: the cancel token, polled every element.
+    if l.kernel.buffers.is_empty() {
+        l.kernel.buffers.push(BufferDecl { name: CONTROL_BUFFER.into(), access: Access::Read, stride: 1 });
+    }
+    let cancel = l.b.load(Ty::I32, Region::Buf(0), 0, 1, None);
     let zero = l.b.ci(0);
     let stop = l.b.cmpi(Cmp::Ne, cancel, zero);
     l.b.push(IS::If(stop, vec![IS::Break(0)], vec![]));
