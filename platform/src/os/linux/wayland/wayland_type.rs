@@ -37,12 +37,20 @@ impl Into<wp_cursor_shape_device_v1::Shape> for MouseCursor {
 
 pub fn from_mouse(button: u32) -> Option<MouseButton> {
     // ref: linux/input-event-codes.h
+    const BTN_LEFT: u32 = 0x110;
+    const BTN_RIGHT: u32 = 0x111;
+    const BTN_MIDDLE: u32 = 0x112;
+    const BTN_SIDE: u32 = 0x113;
+    const BTN_EXTRA: u32 = 0x114;
+    const BTN_FORWARD: u32 = 0x115;
+    const BTN_BACK: u32 = 0x116;
     match button {
-        0x110 => Some(MouseButton::PRIMARY),
-        0x111 => Some(MouseButton::SECONDARY),
-        0x112 => Some(MouseButton::MIDDLE),
-        0x116 => Some(MouseButton::BACK),
-        0x117 => Some(MouseButton::FORWARD),
+        BTN_LEFT => Some(MouseButton::PRIMARY),
+        BTN_RIGHT => Some(MouseButton::SECONDARY),
+        BTN_MIDDLE => Some(MouseButton::MIDDLE),
+        // most mice send their back/forward thumb buttons as BTN_SIDE/BTN_EXTRA (X11 buttons 8/9)
+        BTN_SIDE | BTN_BACK => Some(MouseButton::BACK),
+        BTN_EXTRA | BTN_FORWARD => Some(MouseButton::FORWARD),
         _ => None,
     }
 }

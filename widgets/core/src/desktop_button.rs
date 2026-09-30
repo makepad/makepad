@@ -199,7 +199,9 @@ impl Widget for DesktopButton {
         }
 
         match event.hits(cx, self.draw_bg.area()) {
-            Hit::FingerDown(fe) => {
+            // only a primary click/touch counts, so e.g. a right-click or the mouse's
+            // back button over the close button doesn't close the window
+            Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 cx.widget_action(uid, ButtonAction::Pressed(fe.modifiers));
                 self.animator_play(cx, ids!(hover.down));
             }
@@ -213,7 +215,7 @@ impl Widget for DesktopButton {
             Hit::FingerLongPress(_) => {
                 cx.widget_action(uid, ButtonAction::LongPressed);
             }
-            Hit::FingerUp(fe) => {
+            Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 if fe.is_over {
                     cx.widget_action(uid, ButtonAction::Clicked(fe.modifiers));
                     if fe.device.has_hovers() {
