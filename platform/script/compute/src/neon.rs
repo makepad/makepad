@@ -546,6 +546,8 @@ struct Em {
     /// A small table (base word, words: 8 or 16) held in v24.. for the
     /// whole call: lane reads from it are one TBL.
     table: Option<(u32, u32)>,
+    /// Elements per iteration (4, or 8 for a widened program).
+    lanes: u32,
     /// The execution mask is statically all lanes.
     full: bool,
     i: Var,
@@ -1156,9 +1158,10 @@ impl Em {
             Stmt::Set(var, v) => {
                 let dst = Ent::Var(var.0);
                 if *var == self.i {
-                    // The element counter steps by four elements.
+                    // The element counter steps by the elements of one
+                    // iteration (4, or 8 for two groups).
                     let r = self.src(dst, VS0);
-                    self.splat(VS2, 4);
+                    self.splat(VS2, self.lanes);
                     let d = self.dst(dst);
                     self.e(v::r3(v::ADD, d, r, VS2));
                     self.done(dst, d);
@@ -1777,16 +1780,16 @@ fn mask_depth(info: &Info, b: &Block) -> u32 {
 /// code, and uses this only for element-local, non-overlapping kernels
 /// whose written buffers hold every element's records.
 pub fn compile(p: &Program) -> Option<Code> {
-    compile_words(p).and_then(|(w, _)| Code::new(&w))
+    compile_words(p, 4).and_then(|(w, _)| Code::new(&w))
 }
 
 /// Size of the vector code: (instructions, spill bytes), or None when
 /// declined (for diagnostics and `check()`).
 pub fn stats(p: &Program) -> Option<(usize, u32)> {
-    compile_words(p).map(|(w, s)| (w.len(), s))
+    compile_words(p, 4).map(|(w, s)| (w.len(), s))
 }
 
-fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
+fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
     let sh = shape(p)?;
     let Stmt::Loop { body, .. } = sh.element else { return None };
     if !supported(p, body) {
@@ -1797,7 +1800,13 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
     let table = small_table(body, &info, &bounds);
     // A resident table takes v24.. and keeps its byte-index constants in
     // v22 (0x04040404) and v23 (0x03020100).
-    let pool: Vec<u8> = V_POOL.iter().copied().filter(|r| table.is_none_or(|(_, w)| !(22..24 + w / 4).contains(&(*r as u32)))).collect();
+    let mut pool: Vec<u8> = V_POOL.iter().copied().filter(|r| table.is_none_or(|(_, w)| !(22..24 + w / 4).contains(&(*r as u32)))).collect();
+    // No divergent branch or masked loop: the mask register is never read
+    // (every lane always runs), so it holds values too. (A four-register
+    // row load saves and restores v28 whatever it holds.)
+    if mask_depth(&info, &p.body) == 0 && info.masked.is_empty() && info.escapes.is_empty() {
+        pool.push(VM);
+    }
     let alloc = allocate_with(
         p,
         |e| match e {
@@ -1836,6 +1845,7 @@ fn compile_words(p: &Program) -> Option<(Vec<u32>, u32)> {
         depth: 0,
         group_slot: spill + masks - 16,
         table,
+        lanes,
         full: true,
         i,
         bounds,
