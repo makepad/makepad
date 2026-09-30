@@ -1505,6 +1505,7 @@ impl Cx {
         if let Err(payload) = drawn {
             std::panic::resume_unwind(payload);
         }
+        self.validate_scoped_sweep_locks_after_draw();
         if let Some(mut hook) = self.post_draw_hook.take() {
             hook(self);
             if self.post_draw_hook.is_none() {

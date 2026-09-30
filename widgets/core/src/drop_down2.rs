@@ -2,7 +2,7 @@ use {
     crate::{
         animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
         makepad_derive_widget::*,
-        makepad_draw::*,
+        makepad_draw::{event::{DigitId, SweepLock, TouchState}, *},
         overlay_place::{place_overlay, span_inboard, PlaceRequest, Placement},
         widget::*,
     },
@@ -39,11 +39,15 @@ script_mod! {
         item_height: 22.0
         arrow_height: 16.0
         popup_margin: 8.0
+        popup_padding: 3.0
+        popup_min_width: 0.0
+        item_padding: Inset{left: 10.0 right: 8.0}
 
         draw_text +: {
             disabled: instance(0.0)
             down: instance(0.0)
             ink_centered: true
+            text_overflow: Ellipsis
             color: theme.color_label_inner
             color_hover: uniform(theme.color_label_inner_hover)
             color_focus: uniform(theme.color_label_inner_focus)
@@ -159,6 +163,7 @@ script_mod! {
             color_hover: uniform(theme.color_label_inner_hover)
             color_active: uniform(theme.color_label_inner_active)
             text_style: theme.font_regular{ font_size: theme.font_size_p }
+            text_overflow: Ellipsis
             get_color: fn() {
                 self.color.mix(self.color_active, self.active).mix(self.color_hover, self.hover)
             }
@@ -276,13 +281,13 @@ impl CoveringPopupGeom {
 
     pub fn list_rect(&self) -> Rect {
         Rect {
-            pos: dvec2(self.x, self.list_y),
-            size: dvec2(self.width, self.list_h),
+            pos: dvec2(self.x + self.pad, self.list_y),
+            size: dvec2((self.width - self.pad * 2.0).max(0.0), self.list_h),
         }
     }
 
     pub fn up_rect(&self) -> Option<Rect> {
-        if !self.show_up {
+        if self.list_y <= self.y {
             return None;
         }
         Some(Rect {
@@ -292,7 +297,7 @@ impl CoveringPopupGeom {
     }
 
     pub fn down_rect(&self) -> Option<Rect> {
-        if !self.show_down {
+        if self.list_y + self.list_h >= self.y + self.height {
             return None;
         }
         let y = self.list_y + self.list_h;
@@ -335,41 +340,46 @@ pub fn layout_covering_popup(
     let n = item_count.max(1);
     let selected = selected.min(n.saturating_sub(1));
     let item_h = item_h.max(1.0);
-    let pad = pad.max(0.0);
-    let margin = margin.max(0.0);
-    let arrow_h = arrow_h.max(0.0);
+    let margin_x = margin.max(0.0).min(pass.x.max(0.0) * 0.5);
+    let margin_y = margin.max(0.0).min(pass.y.max(0.0) * 0.5);
+    let available_w = (pass.x - margin_x * 2.0).max(0.0);
+    let available_h = (pass.y - margin_y * 2.0).max(0.0);
+    let pad = pad.max(0.0).min(available_h * 0.25).min(available_w * 0.5);
     let content_h = pad * 2.0 + n as f64 * item_h;
     let trigger_center = trigger.pos.y + trigger.size.y * 0.5;
     let selected_center = pad + (selected as f64 + 0.5) * item_h;
     let ideal_y = trigger_center - selected_center;
-    let max_h = (pass.y - margin * 2.0).max(item_h + arrow_h * 2.0);
-    let overflow = content_h > max_h + 0.5;
-    let height = if overflow { max_h } else { content_h };
-    // This popup does not hang off a side of the trigger: it COVERS it so
-    // the selected row sits under it, and its height is its own rule (the
-    // content, or the pass). Only the cross axis is shared with the other
-    // popups — never narrower than the trigger, never wider than the pass,
-    // pulled inboard with the left edge winning — so the request is bounded
-    // in x only and the vertical answer is not read.
+    let height = content_h.min(available_h);
+    // The selected row covers the trigger. Share horizontal placement with
+    // other overlays while keeping the popup's own vertical alignment.
     let placed = place_overlay(&PlaceRequest {
         anchor: trigger,
-        size: dvec2(content_w.max(40.0), height),
+        size: dvec2(content_w.max(0.0), height),
         bounds: Rect {
-            pos: dvec2(margin, 0.0),
-            size: dvec2((pass.x - margin * 2.0).max(40.0), 0.0),
+            pos: dvec2(margin_x, 0.0),
+            size: dvec2(available_w, 0.0),
         },
         gap: 0.0,
         placement: Placement::BOTTOM_START,
         match_anchor_width: true,
     });
-    let x = placed.rect.pos.x;
-    let width = placed.rect.size.x;
-    let y = span_inboard(ideal_y, height, margin, pass.y - margin * 2.0);
-
-    let up_h = if overflow { arrow_h } else { 0.0 };
-    let down_h = if overflow { arrow_h } else { 0.0 };
-    let list_h = (height - up_h - down_h).max(item_h);
-    let list_y = y + up_h;
+    // The shared helper treats a zero extent as unbounded; this popup has
+    // measured its pass, so zero room really means there is no space.
+    let x = if available_w > 0.0 { placed.rect.pos.x } else { margin_x };
+    let width = placed.rect.size.x.max(0.0).min(available_w);
+    let y = if available_h > 0.0 {
+        span_inboard(ideal_y, height, margin_y, available_h)
+    } else {
+        margin_y
+    };
+    let overflow = content_h > height;
+    let arrow_h = if overflow {
+        arrow_h.max(0.0).min((height - item_h).max(0.0) * 0.5)
+    } else {
+        0.0
+    };
+    let list_h = (height - arrow_h * 2.0).max(0.0);
+    let list_y = y + arrow_h;
     let max_scroll = (content_h - list_h).max(0.0);
     let aligned = (list_y + selected_center - trigger_center).clamp(0.0, max_scroll);
     let scroll = scroll.unwrap_or(aligned).clamp(0.0, max_scroll);
@@ -443,7 +453,7 @@ struct DrawDropDown2Arrow {
     enabled: f32,
 }
 
-#[derive(Script, ScriptHook, Widget, Animator)]
+#[derive(Script, WidgetRegister, WidgetRef, WidgetSet, Animator)]
 pub struct DropDown2 {
     #[uid]
     uid: WidgetUid,
@@ -452,7 +462,6 @@ pub struct DropDown2 {
     #[apply_default]
     animator: Animator,
 
-    #[redraw]
     #[live]
     draw_bg: DrawQuad,
     #[live]
@@ -473,6 +482,8 @@ pub struct DropDown2 {
     #[layout]
     layout: Layout,
 
+    #[live(true)]
+    visible: bool,
     #[live]
     labels: Vec<String>,
     #[live]
@@ -483,6 +494,12 @@ pub struct DropDown2 {
     arrow_height: f64,
     #[live(8.0)]
     popup_margin: f64,
+    #[live(3.0)]
+    popup_padding: f64,
+    #[live]
+    popup_min_width: f64,
+    #[live]
+    item_padding: Inset,
 
     #[rust]
     is_active: bool,
@@ -491,7 +508,17 @@ pub struct DropDown2 {
     #[rust]
     cancel_scope: Option<CancelScope>,
     #[rust]
-    opening_click: bool,
+    sweep_lock: Option<SweepLock>,
+    #[rust]
+    items_before_apply: Option<(Vec<String>, usize)>,
+    #[rust]
+    pointer: Option<PopupGesture>,
+    #[rust]
+    search: String,
+    #[rust]
+    search_timer: Timer,
+    #[rust]
+    ensure_selected_visible: bool,
     #[rust]
     hover_item: Option<usize>,
     #[rust]
@@ -510,9 +537,60 @@ pub struct DropDown2 {
     #[rust]
     last_frame_time: f64,
 
-    #[action_data]
     #[rust]
     action_data: WidgetActionData,
+}
+
+impl ScriptHook for DropDown2 {
+    fn on_before_apply(
+        &mut self,
+        _vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if !apply.is_animate() {
+            self.items_before_apply = Some((self.labels.clone(), self.selected_item));
+        }
+    }
+
+    fn on_after_apply(
+        &mut self,
+        vm: &mut ScriptVm,
+        apply: &Apply,
+        _scope: &mut Scope,
+        _value: ScriptValue,
+    ) {
+        if apply.is_animate() {
+            return;
+        }
+        if self.items_before_apply.take().is_some_and(|(labels, selected)| {
+            labels != self.labels || selected != self.selected_item
+        }) {
+            self.reset_items(vm.cx_mut());
+        }
+        if !self.visible {
+            self.set_closed(vm.cx_mut());
+            self.clear_focus(vm.cx_mut());
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum PopupPointer {
+    Mouse,
+    Touch(u64),
+}
+
+#[derive(Clone, Copy)]
+struct PopupGesture {
+    pointer: PopupPointer,
+    start: Vec2d,
+    last: Vec2d,
+    scroll: f64,
+    opening: bool,
+    moved: bool,
+    scrolling: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -532,36 +610,99 @@ impl DropDown2 {
     }
 
     pub fn set_active(&mut self, cx: &mut Cx) {
+        if self.sweep_lock_expired() {
+            self.set_closed(cx);
+        }
+        if self.is_active || !self.visible || self.labels.is_empty() || self.disabled(cx) {
+            return;
+        }
+        let Some(lock) = cx.acquire_sweep_lock(self.draw_bg.area()) else {
+            return;
+        };
+        self.sweep_lock = Some(lock);
         self.clamp_selected();
         self.is_active = true;
         self.cancel_scope = Some(self.begin_cancel_scope(cx));
-        self.opening_click = true;
         self.hover_item = Some(self.selected_item);
         self.scroll = None;
+        self.pointer = None;
         self.arrow_dir = None;
-        self.draw_bg.redraw(cx);
-        self.draw_list.redraw(cx);
-        cx.sweep_lock(self.draw_bg.area());
+        self.geom = None;
+        self.clear_search(cx);
+        cx.set_key_focus(self.draw_bg.area());
+        self.redraw_popup(cx);
     }
 
     pub fn set_closed(&mut self, cx: &mut Cx) {
+        let was_active = self.is_active;
         self.is_active = false;
         if let Some(scope) = self.cancel_scope.take() {
             cx.end_cancel_scope(scope);
         }
-        self.opening_click = false;
+        self.pointer = None;
         self.arrow_dir = None;
         self.geom = None;
+        self.hover_item = None;
+        self.clear_search(cx);
+        self.sweep_lock = None;
+        if was_active {
+            self.redraw_popup(cx);
+            self.animator_play(cx, ids!(hover.off));
+        }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.is_active && !self.sweep_lock_expired()
+    }
+
+    fn sweep_lock_expired(&self) -> bool {
+        self.is_active && !self.sweep_lock.as_ref().is_some_and(SweepLock::is_active)
+    }
+
+    fn redraw_popup(&mut self, cx: &mut Cx) {
         self.draw_bg.redraw(cx);
         self.draw_list.redraw(cx);
-        cx.sweep_unlock(self.draw_bg.area());
+    }
+
+    fn clear_focus(&mut self, cx: &mut Cx) {
+        if cx.has_key_focus(self.draw_bg.area()) {
+            cx.set_key_focus(Area::Empty);
+            self.animator_play(cx, ids!(focus.off));
+        }
+    }
+
+    fn clear_search(&mut self, cx: &mut Cx) {
+        self.search.clear();
+        cx.stop_timer(self.search_timer);
+        self.search_timer = Timer::empty();
+    }
+
+    fn reset_items(&mut self, cx: &mut Cx) {
+        self.clamp_selected();
+        if self.labels.is_empty() {
+            self.set_closed(cx);
+            self.clear_focus(cx);
+        } else if self.is_active {
+            self.hover_item = Some(self.selected_item);
+            self.pointer = None;
+            self.arrow_dir = None;
+            self.scroll = None;
+            self.geom = None;
+            self.ensure_selected_visible = true;
+        }
+        self.clear_search(cx);
+        self.redraw_popup(cx);
     }
 
     fn emit_select(&mut self, cx: &mut Cx, index: usize) {
-        if self.labels.is_empty() {
+        if self.labels.is_empty() || self.disabled(cx) {
             return;
         }
-        self.selected_item = index.min(self.labels.len() - 1);
+        let index = index.min(self.labels.len() - 1);
+        if self.selected_item == index {
+            return;
+        }
+        self.selected_item = index;
         cx.widget_action_with_data(
             &self.action_data,
             self.uid,
@@ -575,6 +716,11 @@ impl DropDown2 {
         let next = scroll.clamp(0.0, max);
         if self.scroll != Some(next) {
             self.scroll = Some(next);
+            if let Some(geom) = self.geom.as_mut() {
+                geom.scroll = next;
+                geom.show_up = next > 0.5;
+                geom.show_down = next < geom.max_scroll - 0.5;
+            }
             self.draw_list.redraw(cx);
             self.draw_bg.redraw(cx);
         }
@@ -614,6 +760,164 @@ impl DropDown2 {
         PopupHit::Outside
     }
 
+    fn set_hover_item(&mut self, cx: &mut Cx, item: Option<usize>) {
+        if self.hover_item != item {
+            self.hover_item = item;
+            self.draw_list.redraw(cx);
+        }
+    }
+
+    fn set_arrow_dir(&mut self, cx: &mut Cx, direction: Option<f64>) {
+        let direction = direction.filter(|dir| self.geom.is_some_and(|g| {
+            if *dir < 0.0 { g.scroll > 0.0 } else { g.scroll < g.max_scroll }
+        }));
+        if self.arrow_dir != direction {
+            self.arrow_dir = direction;
+            self.last_frame_time = 0.0;
+            if direction.is_some() {
+                self.next_frame = cx.new_next_frame();
+            }
+        }
+    }
+
+    fn pointer_down(&mut self, cx: &mut Cx, pointer: PopupPointer, abs: Vec2d, opening: bool) {
+        if self.pointer.is_some() {
+            return;
+        }
+        let zone = self.hit_zone(abs);
+        if !opening && matches!(zone, PopupHit::Outside) {
+            self.set_closed(cx);
+            return;
+        }
+        self.clear_search(cx);
+        self.pointer = Some(PopupGesture {
+            pointer,
+            start: abs,
+            last: abs,
+            scroll: self.scroll.unwrap_or(0.0),
+            opening,
+            moved: false,
+            scrolling: matches!(zone, PopupHit::UpArrow | PopupHit::DownArrow),
+        });
+        match zone {
+            PopupHit::Item(i) => self.set_hover_item(cx, Some(i)),
+            PopupHit::UpArrow => self.set_arrow_dir(cx, Some(-1.0)),
+            PopupHit::DownArrow => self.set_arrow_dir(cx, Some(1.0)),
+            _ => (),
+        }
+    }
+
+    fn pointer_move(&mut self, cx: &mut Cx, pointer: PopupPointer, abs: Vec2d) {
+        if let Some(mut gesture) = self.pointer {
+            if gesture.pointer != pointer {
+                return;
+            }
+            let delta = abs - gesture.start;
+            gesture.last = abs;
+            gesture.moved |= delta.x.abs() > 5.0 || delta.y.abs() > 5.0;
+            if matches!(pointer, PopupPointer::Touch(_)) && gesture.moved
+                && self.geom.is_some_and(|g| g.max_scroll > 0.0)
+            {
+                gesture.scrolling = true;
+                self.set_arrow_dir(cx, None);
+                self.set_hover_item(cx, None);
+                self.apply_scroll(cx, gesture.scroll - delta.y);
+                self.pointer = Some(gesture);
+                return;
+            }
+            self.pointer = Some(gesture);
+        } else if matches!(pointer, PopupPointer::Touch(_)) {
+            return;
+        }
+        if self.geom.is_none() {
+            return;
+        }
+        match self.hit_zone(abs) {
+            PopupHit::Item(i) => {
+                self.set_arrow_dir(cx, None);
+                self.set_hover_item(cx, Some(i));
+            }
+            PopupHit::UpArrow => {
+                self.set_hover_item(cx, None);
+                self.set_arrow_dir(cx, Some(-1.0));
+            }
+            PopupHit::DownArrow => {
+                self.set_hover_item(cx, None);
+                self.set_arrow_dir(cx, Some(1.0));
+            }
+            _ => {
+                self.set_arrow_dir(cx, None);
+                self.set_hover_item(cx, None);
+            }
+        }
+    }
+
+    fn pointer_up(&mut self, cx: &mut Cx, pointer: PopupPointer, abs: Vec2d) {
+        let Some(gesture) = self.pointer.filter(|g| g.pointer == pointer) else {
+            return;
+        };
+        self.pointer = None;
+        self.set_arrow_dir(cx, None);
+        if gesture.scrolling || (gesture.opening && self.geom.is_none())
+            || (gesture.opening && !gesture.moved
+                && self.aligned_rect.is_some_and(|rect| rect.contains(abs)))
+        {
+            return;
+        }
+        match self.hit_zone(abs) {
+            PopupHit::Item(i) => {
+                self.emit_select(cx, i);
+                self.set_closed(cx);
+            }
+            PopupHit::Outside => self.set_closed(cx),
+            _ => (),
+        }
+    }
+
+    fn navigate_to(&mut self, cx: &mut Cx, index: usize) {
+        if self.labels.is_empty() {
+            return;
+        }
+        let index = index.min(self.labels.len() - 1);
+        self.pointer = None;
+        self.set_arrow_dir(cx, None);
+        if self.is_active {
+            self.set_hover_item(cx, Some(index));
+            self.ensure_selected_visible = true;
+            self.scroll_item_into_view(cx, index);
+            self.redraw_popup(cx);
+        } else {
+            self.emit_select(cx, index);
+        }
+    }
+
+    fn type_ahead(&mut self, cx: &mut Cx, input: &str) {
+        if input.is_empty() || input.chars().any(char::is_control)
+            || (input.trim().is_empty() && self.search.is_empty())
+        {
+            return;
+        }
+        let input = input.to_lowercase();
+        let repeated = self.search == input && input.chars().count() == 1;
+        let continuing = !self.search.is_empty() && !repeated;
+        if !repeated {
+            self.search.push_str(&input);
+        }
+        cx.stop_timer(self.search_timer);
+        self.search_timer = cx.start_timeout(1.0);
+        let count = self.labels.len();
+        if count == 0 {
+            return;
+        }
+        let current = self.hover_item.unwrap_or(self.selected_item);
+        let start = if continuing { current } else { (current + 1) % count };
+        let found = (0..count).map(|offset| (start + offset) % count)
+            .find(|&index| self.labels[index].to_lowercase().starts_with(&self.search));
+        if let Some(index) = found {
+            self.navigate_to(cx, index);
+        }
+    }
+
     fn draw_field(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_bg.begin(cx, walk, self.layout);
         let label = self
@@ -624,29 +928,61 @@ impl DropDown2 {
         self.draw_text
             .draw_walk(cx, Walk::fit(), Align::default(), label);
         self.draw_bg.end(cx);
-        cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Inset::default());
+        if !self.disabled(cx) && !self.labels.is_empty() {
+            cx.add_nav_stop(self.draw_bg.area(), NavRole::DropDown, Inset::default());
+        }
     }
 
     fn draw_popup(&mut self, cx: &mut Cx2d, trigger: Rect) {
         let pass = cx.current_pass_size();
-        // The size the items are ABOUT to be drawn at, not a number typed
-        // once. It was hardcoded to 9 while the theme drew them larger, so
-        // the popup came up too narrow for its own contents and sliced the
-        // tail off the longest option with nothing to say it had.
-        let font_px = self.draw_item_text.text_style.font_size as f64;
-        let content_w = estimate_label_width(&self.labels, font_px);
+        let first_draw = self.geom.is_none();
+        let mut content_w = 0.0_f64;
+        let mut item_h = self.item_height;
+        for label in &self.labels {
+            let text = self.draw_item_text.layout(cx, 0.0, 0.0, None, false, Align::default(), label);
+            let scale = self.draw_item_text.font_scale as f64;
+            content_w = content_w.max(text.size_in_lpxs.width as f64 * scale
+                + self.item_padding.left + self.item_padding.right);
+            item_h = item_h.max(text.size_in_lpxs.height as f64 * scale
+                + self.item_padding.top + self.item_padding.bottom);
+        }
+        content_w = (content_w + self.popup_padding.max(0.0) * 2.0).max(self.popup_min_width);
         let mut geom = layout_covering_popup(
             pass,
             trigger,
             self.labels.len(),
             self.selected_item,
-            self.item_height,
+            item_h,
             content_w,
-            3.0,
+            self.popup_padding,
             self.popup_margin,
             self.arrow_height,
             self.scroll,
         );
+        if self.ensure_selected_visible {
+            let index = self.hover_item.unwrap_or(self.selected_item);
+            let top = geom.pad + index as f64 * geom.item_h;
+            let bottom = top + geom.item_h;
+            geom.scroll = geom.scroll.min(top).max(bottom - geom.list_h).clamp(0.0, geom.max_scroll);
+            geom.show_up = geom.scroll > 0.5;
+            geom.show_down = geom.scroll < geom.max_scroll - 0.5;
+            self.ensure_selected_visible = false;
+        }
+        if let Some(gesture) = self.pointer.as_mut() {
+            if gesture.opening && first_draw {
+                gesture.scroll = geom.scroll;
+                if gesture.moved && matches!(gesture.pointer, PopupPointer::Touch(_))
+                    && geom.max_scroll > 0.0
+                {
+                    gesture.scrolling = true;
+                    geom.scroll = (gesture.scroll - (gesture.last.y - gesture.start.y))
+                        .clamp(0.0, geom.max_scroll);
+                    self.hover_item = None;
+                }
+            }
+        }
+        geom.show_up = geom.scroll > 0.5;
+        geom.show_down = geom.scroll < geom.max_scroll - 0.5;
         self.scroll = Some(geom.scroll);
         self.geom = Some(geom);
 
@@ -655,20 +991,26 @@ impl DropDown2 {
 
         let popup_walk = Walk::fixed(geom.width, geom.height).with_abs_pos(dvec2(geom.x, geom.y));
         self.draw_popup_bg
-            .begin(cx, popup_walk, Layout::flow_down());
+            .begin(cx, popup_walk, Layout::flow_down().with_padding(Inset {
+                left: geom.pad,
+                right: geom.pad,
+                ..Inset::default()
+            }));
 
-        if geom.show_up || geom.max_scroll > 0.5 {
+        if let Some(arrow) = geom.up_rect() {
             self.draw_scroll_arrow.up = 1.0;
             self.draw_scroll_arrow.enabled = if geom.show_up { 1.0 } else { 0.35 };
             self.draw_scroll_arrow.draw_walk(
                 cx,
-                Walk::new(Size::fill(), Size::Fixed(self.arrow_height)),
+                Walk::new(Size::fill(), Size::Fixed(arrow.size.y)),
             );
         }
 
         cx.begin_turtle(
             Walk::new(Size::fill(), Size::Fixed(geom.list_h)),
-            Layout::flow_down().with_scroll(dvec2(0.0, geom.scroll)),
+            Layout::flow_down()
+                .with_padding(Inset { top: geom.pad, bottom: geom.pad, ..Inset::default() })
+                .with_scroll(dvec2(0.0, geom.scroll)),
         );
         let hover = self.hover_item;
         for (i, label) in self.labels.iter().enumerate() {
@@ -680,12 +1022,7 @@ impl DropDown2 {
                 cx,
                 Walk::new(Size::fill(), Size::Fixed(geom.item_h)),
                 Layout {
-                    padding: Inset {
-                        left: 10.0,
-                        right: 8.0,
-                        top: 0.0,
-                        bottom: 0.0,
-                    },
+                    padding: self.item_padding,
                     align: Align { x: 0.0, y: 0.5 },
                     ..Layout::flow_right()
                 },
@@ -698,28 +1035,18 @@ impl DropDown2 {
         }
         cx.end_turtle();
 
-        if geom.show_down || geom.max_scroll > 0.5 {
+        if let Some(arrow) = geom.down_rect() {
             self.draw_scroll_arrow.up = 0.0;
             self.draw_scroll_arrow.enabled = if geom.show_down { 1.0 } else { 0.35 };
             self.draw_scroll_arrow.draw_walk(
                 cx,
-                Walk::new(Size::fill(), Size::Fixed(self.arrow_height)),
+                Walk::new(Size::fill(), Size::Fixed(arrow.size.y)),
             );
         }
 
         self.draw_popup_bg.end(cx);
         cx.end_pass_sized_turtle();
         self.draw_list.end(cx);
-
-        // Re-read geom after reserved-arrow draw so hit tests match what we
-        // actually reserved (both arrow bands whenever the list overflows).
-        if geom.max_scroll > 0.5 {
-            geom.show_up = true;
-            geom.show_down = true;
-            geom.list_y = geom.y + self.arrow_height;
-            geom.list_h = (geom.height - self.arrow_height * 2.0).max(geom.item_h);
-            self.geom = Some(geom);
-        }
     }
 }
 
@@ -732,8 +1059,72 @@ enum PopupHit {
     Outside,
 }
 
+impl WidgetNode for DropDown2 {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+
+    fn area(&self) -> Area {
+        self.draw_bg.area()
+    }
+
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.redraw_popup(cx);
+    }
+
+    fn set_action_data(&mut self, data: std::sync::Arc<dyn ActionTrait>) {
+        self.action_data.set_box(data);
+    }
+
+    fn action_data(&self) -> Option<std::sync::Arc<dyn ActionTrait>> {
+        self.action_data.clone_data()
+    }
+
+    fn visible(&self) -> bool {
+        self.visible
+    }
+
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.visible != visible {
+            self.visible = visible;
+            if !visible {
+                self.set_closed(cx);
+                self.clear_focus(cx);
+            }
+            if visible && !self.draw_bg.area().is_valid(cx) {
+                cx.redraw_all();
+            } else {
+                self.redraw_popup(cx);
+            }
+        }
+    }
+
+    fn layer_areas(&self) -> Vec<(&'static str, Area)> {
+        vec![
+            ("draw_bg", self.draw_bg.area()),
+            ("draw_text", self.draw_text.area()),
+            ("draw_popup_bg", self.draw_popup_bg.area()),
+            ("draw_item", self.draw_item.area()),
+            ("draw_item_text", self.draw_item_text.area()),
+            ("draw_scroll_arrow", self.draw_scroll_arrow.area()),
+        ]
+    }
+}
+
 impl Widget for DropDown2 {
+    fn text(&self) -> String {
+        self.labels.get(self.selected_item).cloned().unwrap_or_default()
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
+        if disabled {
+            self.set_closed(cx);
+            self.clear_focus(cx);
+        }
         self.animator_toggle(
             cx,
             disabled,
@@ -741,6 +1132,7 @@ impl Widget for DropDown2 {
             ids!(disabled.on),
             ids!(disabled.off),
         );
+        self.draw_bg.redraw(cx);
     }
 
     fn disabled(&self, cx: &Cx) -> bool {
@@ -748,8 +1140,29 @@ impl Widget for DropDown2 {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if self.sweep_lock_expired() {
+            self.set_closed(cx);
+            self.clear_focus(cx);
+            return;
+        }
+        if self.is_active && cx.sweep_lock_area().is_some_and(|area| area != self.draw_bg.area()) {
+            self.set_closed(cx);
+            self.clear_focus(cx);
+            return;
+        }
         self.animator_handle_event(cx, event);
-        if self.is_active && crate::modal::ModalAction::is_dismissal(event) {
+        if self.search_timer.is_event(event).is_some() {
+            self.clear_search(cx);
+        }
+        if !self.visible || self.disabled(cx) || self.labels.is_empty() {
+            self.set_closed(cx);
+            self.clear_focus(cx);
+            return;
+        }
+        if self.is_active && (crate::modal::ModalAction::is_dismissal(event)
+            || matches!(event, Event::Pause | Event::Background | Event::Shutdown
+                | Event::WindowLostFocus(_) | Event::WindowClosed(_) | Event::WindowGeomChange(_)))
+        {
             self.set_closed(cx);
             return;
         }
@@ -760,187 +1173,191 @@ impl Widget for DropDown2 {
             self.set_closed(cx);
             return;
         }
-        // Between draws every deferred alignment has been applied, so this
-        // is the field's true on-screen rect (see `aligned_rect`).
-        let rect = self.draw_bg.area().rect(cx);
-        if rect.size.x > 0.0 && rect.size.y > 0.0 {
+        // Alignment finishes after drawing the field, so use its final event-time rect.
+        let area = self.draw_bg.area();
+        let rect = area.rect(cx);
+        let clipped = area.clipped_rect(cx);
+        if area.is_valid(cx) && clipped.size.x > 0.0 && clipped.size.y > 0.0 {
+            if self.is_active && self.aligned_rect.is_some_and(|old| old != rect) {
+                self.set_closed(cx);
+            }
             self.aligned_rect = Some(rect);
+        } else {
+            self.set_closed(cx);
+            self.clear_focus(cx);
+            return;
         }
 
         if let Some(ne) = self.next_frame.is_event(event) {
-            if self.is_active {
-                if let Some(dir) = self.arrow_dir {
-                    let dt = if self.last_frame_time > 0.0 {
-                        (ne.time - self.last_frame_time).clamp(1.0 / 240.0, 0.05)
-                    } else {
-                        1.0 / 60.0
-                    };
-                    self.last_frame_time = ne.time;
-                    let cur = self.scroll.or_else(|| self.geom.map(|g| g.scroll)).unwrap_or(0.0);
-                    self.apply_scroll(cx, cur + dir * ARROW_SCROLL_PX_PER_SEC * dt);
+            if let Some(dir) = self.arrow_dir.filter(|_| self.is_active) {
+                let dt = if self.last_frame_time > 0.0 {
+                    (ne.time - self.last_frame_time).clamp(1.0 / 240.0, 0.05)
+                } else {
+                    1.0 / 60.0
+                };
+                self.last_frame_time = ne.time;
+                let cur = self.scroll.unwrap_or(0.0);
+                self.apply_scroll(cx, cur + dir * ARROW_SCROLL_PX_PER_SEC * dt);
+                if self.scroll != Some(cur) {
                     self.next_frame = cx.new_next_frame();
+                } else {
+                    self.arrow_dir = None;
                 }
             }
         }
 
         if self.is_active {
-            if let Event::Scroll(e) = event {
-                if self
-                    .geom
-                    .is_some_and(|g| g.popup_rect().contains(e.abs))
-                    && !e.handled_y.get()
-                {
-                    let cur = self.scroll.or_else(|| self.geom.map(|g| g.scroll)).unwrap_or(0.0);
-                    self.apply_scroll(cx, cur + e.scroll.y);
-                    e.handled_y.set(true);
+            if let Event::FingerCancel(cancel) = event {
+                let pointer_matches = self.pointer.is_some_and(|gesture| {
+                    let digit_id: DigitId = match gesture.pointer {
+                        PopupPointer::Mouse => live_id!(mouse).into(),
+                        PopupPointer::Touch(uid) => live_id_num!(touch, uid).into(),
+                    };
+                    digit_id == cancel.digit_id
+                });
+                let cancelled_capture = matches!(event.hits(cx, area), Hit::FingerUp(fe) if fe.cancelled);
+                if pointer_matches && (cx.fingers.press_taken_away(cancel.digit_id) || cancelled_capture) {
+                    self.set_closed(cx);
+                    return;
                 }
             }
-
-            if let Event::MouseMove(e) = event {
-                match self.hit_zone(e.abs) {
-                    PopupHit::Item(i) => {
-                        self.arrow_dir = None;
-                        if self.hover_item != Some(i) {
-                            self.hover_item = Some(i);
-                            self.draw_list.redraw(cx);
+            match event {
+                Event::Scroll(e) => {
+                    if !e.handled_y.get() {
+                        if self.geom.is_some_and(|g| g.popup_rect().contains(e.abs)) {
+                            self.set_arrow_dir(cx, None);
+                            self.apply_scroll(cx, self.scroll.unwrap_or(0.0) + e.scroll.y);
+                            self.set_hover_item(cx, None);
                         }
+                        e.handled_y.set(true);
+                        e.handled_x.set(true);
                     }
-                    PopupHit::UpArrow => {
-                        if self.arrow_dir != Some(-1.0) {
-                            self.arrow_dir = Some(-1.0);
-                            self.last_frame_time = 0.0;
-                            self.next_frame = cx.new_next_frame();
-                        }
-                    }
-                    PopupHit::DownArrow => {
-                        if self.arrow_dir != Some(1.0) {
-                            self.arrow_dir = Some(1.0);
-                            self.last_frame_time = 0.0;
-                            self.next_frame = cx.new_next_frame();
-                        }
-                    }
-                    _ => {
-                        self.arrow_dir = None;
-                    }
+                    return;
                 }
-            }
-
-            if let Event::MouseDown(e) = event {
-                match self.hit_zone(e.abs) {
-                    PopupHit::Outside => {
+                Event::MouseMove(e) => {
+                    if !e.handled.get().is_empty() && e.handled.get() != area {
                         self.set_closed(cx);
-                        self.animator_play(cx, ids!(hover.off));
                         return;
                     }
-                    PopupHit::UpArrow | PopupHit::DownArrow | PopupHit::Chrome => return,
-                    PopupHit::Item(i) => {
-                        self.hover_item = Some(i);
-                    }
+                    e.handled.set(area);
+                    self.pointer_move(cx, PopupPointer::Mouse, e.abs);
+                    return;
                 }
-            }
-
-            // The press taken away selects nothing.
-            if matches!(event, Event::FingerCancel(c) if c.device.is_mouse() && cx.fingers.press_taken_away(c.digit_id)) {
-                self.opening_click = false;
-            }
-            if let Event::MouseUp(e) = event {
-                match self.hit_zone(e.abs) {
-                    PopupHit::Item(i) => {
-                        if self.opening_click {
-                            self.opening_click = false;
-                            if i != self.selected_item {
-                                self.emit_select(cx, i);
-                                self.set_closed(cx);
-                            }
-                        } else {
-                            self.emit_select(cx, i);
-                            self.set_closed(cx);
+                Event::MouseDown(e) => {
+                    if !e.handled.get().is_empty() && e.handled.get() != area {
+                        self.set_closed(cx);
+                        return;
+                    }
+                    e.handled.set(area);
+                    if e.button.is_primary() {
+                        self.pointer_down(cx, PopupPointer::Mouse, e.abs, false);
+                    }
+                    return;
+                }
+                Event::MouseUp(e) => {
+                    if e.button.is_primary() {
+                        self.pointer_up(cx, PopupPointer::Mouse, e.abs);
+                    }
+                    return;
+                }
+                Event::MouseLeave(_) => {
+                    self.set_arrow_dir(cx, None);
+                    self.set_hover_item(cx, None);
+                }
+                Event::TouchUpdate(e) => {
+                    if e.touches.iter().any(|touch| !touch.handled.get().is_empty()
+                        && touch.handled.get() != area)
+                    {
+                        self.set_closed(cx);
+                        return;
+                    }
+                    for touch in &e.touches {
+                        touch.handled.set(self.draw_bg.area());
+                    }
+                    for touch in &e.touches {
+                        let pointer = PopupPointer::Touch(touch.uid);
+                        match touch.state {
+                            TouchState::Start => self.pointer_down(cx, pointer, touch.abs, false),
+                            TouchState::Move => self.pointer_move(cx, pointer, touch.abs),
+                            TouchState::Stop => self.pointer_up(cx, pointer, touch.abs),
+                            TouchState::Stable => (),
+                        }
+                        if !self.is_active {
+                            break;
                         }
                     }
-                    PopupHit::Outside => {
-                        self.opening_click = false;
-                        self.set_closed(cx);
-                    }
-                    _ => {
-                        self.opening_click = false;
-                    }
+                    return;
                 }
+                _ => (),
             }
         }
 
-        match event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area()) {
+        let hit = event.hits_with_sweep_area(cx, self.draw_bg.area(), self.draw_bg.area());
+        if self.sweep_lock_expired() {
+            self.set_closed(cx);
+            self.clear_focus(cx);
+            return;
+        }
+        match hit {
             Hit::KeyFocusLost(_) => {
                 self.animator_play(cx, ids!(focus.off));
                 self.set_closed(cx);
-                self.animator_play(cx, ids!(hover.off));
+                self.clear_search(cx);
             }
-            Hit::KeyFocus(_) => {
-                self.animator_play(cx, ids!(focus.on));
+            Hit::KeyFocus(_) => self.animator_play(cx, ids!(focus.on)),
+            Hit::TextInput(input) if !input.was_paste && input.composition.is_none() => {
+                self.type_ahead(cx, &input.input);
             }
-            Hit::KeyDown(ke) => match ke.key_code {
-                KeyCode::Escape
-                    if self.cancel_scope.as_ref().is_some_and(|s| cx.owns_cancel(s)) =>
+            Hit::KeyDown(ke) => {
+                if matches!(ke.key_code, KeyCode::ArrowUp | KeyCode::ArrowDown
+                    | KeyCode::Home | KeyCode::End | KeyCode::PageUp | KeyCode::PageDown)
                 {
-                    self.set_closed(cx);
+                    self.clear_search(cx);
                 }
-                KeyCode::ReturnKey => {
-                    if self.is_active {
-                        if let Some(i) = self.hover_item {
-                            self.emit_select(cx, i);
-                        }
-                        self.set_closed(cx);
-                    }
-                }
-                KeyCode::ArrowUp => {
-                    if self.is_active {
-                        let cur = self.hover_item.unwrap_or(self.selected_item);
-                        let next = cur.saturating_sub(1);
-                        self.hover_item = Some(next);
-                        self.scroll_item_into_view(cx, next);
-                        self.draw_list.redraw(cx);
-                    } else if self.selected_item > 0 {
-                        self.emit_select(cx, self.selected_item - 1);
-                    }
-                }
-                KeyCode::ArrowDown => {
-                    if self.is_active {
-                        let cur = self.hover_item.unwrap_or(self.selected_item);
-                        let last = self.labels.len().saturating_sub(1);
-                        let next = (cur + 1).min(last);
-                        self.hover_item = Some(next);
-                        self.scroll_item_into_view(cx, next);
-                        self.draw_list.redraw(cx);
-                    } else if !self.labels.is_empty()
-                        && self.selected_item < self.labels.len() - 1
+                let current = self.hover_item.unwrap_or(self.selected_item);
+                let last = self.labels.len().saturating_sub(1);
+                let page = self.geom.map(|g| (g.list_h / g.item_h).floor() as usize).unwrap_or(10).max(1);
+                match ke.key_code {
+                    KeyCode::ReturnKey | KeyCode::Space
+                        if !ke.is_repeat && (ke.key_code != KeyCode::Space || self.search.is_empty()) =>
                     {
-                        self.emit_select(cx, self.selected_item + 1);
+                        if self.is_active {
+                            if let Some(index) = self.hover_item {
+                                self.emit_select(cx, index);
+                            }
+                            self.set_closed(cx);
+                        } else {
+                            self.set_active(cx);
+                        }
                     }
+                    KeyCode::ArrowDown if ke.modifiers.alt && !ke.is_repeat => self.set_active(cx),
+                    KeyCode::ArrowUp if ke.modifiers.alt => self.set_closed(cx),
+                    KeyCode::ArrowUp => self.navigate_to(cx, current.saturating_sub(1)),
+                    KeyCode::ArrowDown => self.navigate_to(cx, current.saturating_add(1)),
+                    KeyCode::Home => self.navigate_to(cx, 0),
+                    KeyCode::End => self.navigate_to(cx, last),
+                    KeyCode::PageUp => self.navigate_to(cx, current.saturating_sub(page)),
+                    KeyCode::PageDown => self.navigate_to(cx, current.saturating_add(page)),
+                    KeyCode::Tab => self.set_closed(cx),
+                    _ => (),
                 }
-                _ => (),
-            },
+            }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
-                if self.animator_in_state(cx, ids!(disabled.off)) {
-                    cx.set_key_focus(self.draw_bg.area());
-                    self.animator_play(cx, ids!(hover.down));
-                    // Never toggle-close here. The selected row is drawn
-                    // under the trigger, so a held drag that leaves the
-                    // field and comes back is a sweep re-entry FingerDown
-                    // (capture.area was cleared). Treating that as "click
-                    // the field again" closes the popup and the next
-                    // crossing opens it — flicker. Open on press; dismiss
-                    // on mouse-up-on-item, mouse-down-outside, or Escape.
-                    if !self.is_active {
-                        self.set_active(cx);
-                    }
+                self.animator_play(cx, ids!(hover.down));
+                self.set_active(cx);
+                if self.is_active {
+                    let pointer = match fe.device {
+                        DigitDevice::Touch { uid } => PopupPointer::Touch(uid),
+                        _ => PopupPointer::Mouse,
+                    };
+                    self.pointer_down(cx, pointer, fe.abs, true);
                 }
             }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animator_play(cx, ids!(hover.on));
             }
-            Hit::FingerHoverOut(_) => {
-                self.animator_play(cx, ids!(hover.off));
-            }
+            Hit::FingerHoverOut(_) => self.animator_play(cx, ids!(hover.off)),
             Hit::FingerUp(fe) if fe.is_primary_hit() => {
                 if fe.is_over && fe.device.has_hovers() {
                     self.animator_play(cx, ids!(hover.on));
@@ -953,6 +1370,14 @@ impl Widget for DropDown2 {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if self.sweep_lock_expired() {
+            self.set_closed(cx);
+            self.clear_focus(cx);
+        }
+        if !self.visible {
+            self.set_closed(cx);
+            return DrawStep::done();
+        }
         self.clamp_selected();
         self.draw_field(cx, walk);
         if self.is_active {
@@ -972,11 +1397,16 @@ impl Widget for DropDown2 {
 }
 
 impl DropDown2Ref {
+    pub fn is_open(&self) -> bool {
+        self.borrow().is_some_and(|inner| inner.is_open())
+    }
+
     pub fn set_labels(&self, cx: &mut Cx, labels: Vec<String>) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.labels = labels;
-            inner.clamp_selected();
-            inner.draw_bg.redraw(cx);
+            if inner.labels != labels {
+                inner.labels = labels;
+                inner.reset_items(cx);
+            }
         }
     }
 
@@ -1002,7 +1432,7 @@ impl DropDown2Ref {
             };
             if new_selected != inner.selected_item {
                 inner.selected_item = new_selected;
-                inner.draw_bg.redraw(cx);
+                inner.reset_items(cx);
             }
         }
     }

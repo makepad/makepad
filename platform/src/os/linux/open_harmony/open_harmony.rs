@@ -10,6 +10,7 @@ use {
         egl_sys::{self, LibEgl, EGL_NONE},
         event::{Event, KeyCode, KeyEvent, TouchUpdateEvent, VirtualKeyboardEvent, WindowGeom},
         gpu_info::GpuPerformance,
+        makepad_live_id::LiveId,
         makepad_math::*,
         os::cx_native::EventFlow,
         shared_framebuf::{PollTimer, PollTimers},
@@ -210,6 +211,24 @@ impl Cx {
                 self.redraw_all();
                 self.os.first_after_resize = true;
                 self.call_event_handler(&Event::ClearAtlasses);
+            }
+            FromOhosMessage::TouchCancel(mut touches) => {
+                let window_id = CxWindowPool::id_zero();
+                let dpi_factor = self.windows[window_id].dpi_override.unwrap_or(self.os.dpi_factor);
+                for touch in &mut touches {
+                    touch.abs /= dpi_factor;
+                    let digit_id = crate::makepad_live_id::live_id_num!(touch, touch.uid).into();
+                    self.fingers.cancel_digit(digit_id);
+                    self.call_event_handler(&Event::FingerCancel(crate::event::FingerCancelEvent {
+                        window_id,
+                        digit_id,
+                        device: crate::event::DigitDevice::Touch { uid: touch.uid },
+                        abs: touch.abs,
+                        time: touch.time,
+                        modifiers: Default::default(),
+                    }));
+                }
+                self.fingers.process_touch_update_end(&touches);
             }
             FromOhosMessage::Touch(mut touches) => {
                 let time = touches[0].time;

@@ -720,12 +720,13 @@ impl IosApp {
             touches,
         };
         IosApp::do_callback(if cancel { IosEvent::TouchCancel(event) } else { IosEvent::TouchUpdate(event) });
-        // remove the stopped touches
+        // Keep unchanged fingers in later updates without replaying their previous phase.
         with_ios_app(|app| {
-            app.touches.retain(|v| {
-                if let TouchState::Stop = v.state {
+            app.touches.retain_mut(|touch| {
+                if touch.state == TouchState::Stop {
                     false
                 } else {
+                    touch.state = TouchState::Stable;
                     true
                 }
             })

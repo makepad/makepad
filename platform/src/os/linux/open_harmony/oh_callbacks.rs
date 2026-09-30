@@ -119,13 +119,14 @@ extern "C" fn on_dispatch_touch_event_cb(component: *mut OH_NativeXComponent, wi
     let touch_event = unsafe { touch_event.assume_init() };
 
     let mut touches = Vec::with_capacity(touch_event.numPoints as usize);
+    let mut cancelled = Vec::new();
     for idx in 0..touch_event.numPoints {
         let point = &(touch_event.touchPoints[idx as usize]);
         let touch_state = match point.type_ {
             OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_DOWN => TouchState::Start,
             OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_UP => TouchState::Stop,
             OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_MOVE => TouchState::Move,
-            OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_CANCEL => TouchState::Move,
+            OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_CANCEL => TouchState::Stop,
             _ => {
                 crate::error!(
                     "Failed to dispatch call for touch Event {:?}",
@@ -134,7 +135,7 @@ extern "C" fn on_dispatch_touch_event_cb(component: *mut OH_NativeXComponent, wi
                 TouchState::Move
             }
         };
-        touches.push(TouchPoint {
+        let touch = TouchPoint {
             state: touch_state,
             abs: dvec2(point.x as f64, point.y as f64),
             time: point.timeStamp as f64 / 1000000000.0,
@@ -144,9 +145,19 @@ extern "C" fn on_dispatch_touch_event_cb(component: *mut OH_NativeXComponent, wi
             radius: dvec2(1.0, 1.0),
             handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
-        })
+        };
+        if matches!(point.type_, OH_NativeXComponent_TouchEventType::OH_NATIVEXCOMPONENT_CANCEL) {
+            cancelled.push(touch);
+        } else {
+            touches.push(touch);
+        }
     }
-    send_from_ohos_message(FromOhosMessage::Touch(touches));
+    if !cancelled.is_empty() {
+        send_from_ohos_message(FromOhosMessage::TouchCancel(cancelled));
+    }
+    if !touches.is_empty() {
+        send_from_ohos_message(FromOhosMessage::Touch(touches));
+    }
     //crate::log!("OnDispatchTouchEventCallBack");
 }
 
@@ -267,6 +278,7 @@ pub enum FromOhosMessage {
     SurfaceDestroyed,
     VSync,
     Touch(Vec<TouchPoint>),
+    TouchCancel(Vec<TouchPoint>),
     TextInput(TextInputEvent),
     DeleteLeft(i32),
     ResizeTextIME(bool, i32),

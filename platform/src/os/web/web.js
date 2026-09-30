@@ -3419,7 +3419,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmTouchUpdate({
                 time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e),
-                touches: touches_to_wasm_wtouches(e, 3)
+                touches: touches_to_wasm_wtouches(e, e.type === "touchend" ? 3 : 4)
             });
             this.do_wasm_pump();
             return false
