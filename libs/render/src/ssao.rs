@@ -344,19 +344,26 @@ struct SsaoStage {
     list: DrawList,
 }
 
-/// The chain. Owns its passes, draw lists and both RGBA16F ping-pong
-/// targets (x = occlusion, y = view distance);
+/// The chain. Owns its passes, draw lists and three RGBA16F targets (x =
+/// occlusion, y = view distance): no pass writes a texture an earlier pass
+/// of the chain sampled, and each blur has its own draw, so a painted
+/// chain stays painted (a write-back made the blurs dirty each other on
+/// every paint, and a locked-time host waiting for a clean frame never
+/// got one);
 /// the host parents it between its depth-producing pass and the pass that
 /// consumes [`SsaoPass::output`].
 #[derive(Default)]
 pub struct SsaoPass {
     stages: Vec<SsaoStage>,
-    /// raw target, and the final blurred output (the v blur writes back).
+    /// raw target.
     tex_a: Option<Texture>,
     /// h-blur intermediate.
     tex_b: Option<Texture>,
+    /// The blurred output (v blur).
+    tex_c: Option<Texture>,
     draw_raw: Option<Box<DrawSsaoRaw>>,
     draw_blur: Option<Box<DrawSsaoBlur>>,
+    draw_blur_v: Option<Box<DrawSsaoBlur>>,
     /// Latest GPU duration per stage (raw, blur h, blur v), milliseconds.
     /// Metal command-buffer times, arriving a frame or two behind.
     pub stage_gpu_ms: [f64; 3],
@@ -401,6 +408,9 @@ impl SsaoPass {
         if self.tex_b.is_none() {
             self.tex_b = Some(rgba16f(cx));
         }
+        if self.tex_c.is_none() {
+            self.tex_c = Some(rgba16f(cx));
+        }
         if self.draw_raw.is_none() {
             self.draw_raw = cx.try_with_vm(|vm| Box::new(DrawSsaoRaw::script_new_with_default(vm)));
         }
@@ -408,7 +418,11 @@ impl SsaoPass {
             self.draw_blur =
                 cx.try_with_vm(|vm| Box::new(DrawSsaoBlur::script_new_with_default(vm)));
         }
-        self.draw_raw.is_some() && self.draw_blur.is_some()
+        if self.draw_blur_v.is_none() {
+            self.draw_blur_v =
+                cx.try_with_vm(|vm| Box::new(DrawSsaoBlur::script_new_with_default(vm)));
+        }
+        self.draw_raw.is_some() && self.draw_blur.is_some() && self.draw_blur_v.is_some()
     }
 
     /// The deepest pass of the chain — the host parents its depth-producing
@@ -421,7 +435,7 @@ impl SsaoPass {
     /// unoccluded, y = view distance). Valid after [`SsaoPass::run`] in the
     /// same frame.
     pub fn output(&self) -> Option<&Texture> {
-        self.tex_a.as_ref()
+        self.tex_c.as_ref()
     }
 
     /// Sum of the latest per-stage GPU times, ms.
@@ -452,6 +466,7 @@ impl SsaoPass {
         }
         let tex_a = self.tex_a.clone().unwrap();
         let tex_b = self.tex_b.clone().unwrap();
+        let tex_c = self.tex_c.clone().unwrap();
         let dpi = cx.current_dpi_factor() as f32;
         let px = vec2(
             (size.x as f32 * dpi).max(1.0),
@@ -533,12 +548,12 @@ impl SsaoPass {
         // ---- blur h / v ---------------------------------------------------
         for (i, (src, dst, dir)) in [
             (&tex_a, &tex_b, [1.0 / px.x, 0.0]),
-            (&tex_b, &tex_a, [0.0, 1.0 / px.y]),
+            (&tex_b, &tex_c, [0.0, 1.0 / px.y]),
         ]
         .into_iter()
         .enumerate()
         {
-            let draw_blur = self.draw_blur.as_mut().unwrap();
+            let draw_blur = if i == 0 { self.draw_blur.as_mut().unwrap() } else { self.draw_blur_v.as_mut().unwrap() };
             let dv = &mut draw_blur.draw_super.draw_vars;
             dv.set_texture(0, src);
             dv.set_uniform(cx.cx, live_id!(u_dir), &[dir[0], dir[1], 0.0, 0.0]);
