@@ -7,7 +7,7 @@
 
 use crate::draw::{DrawKineticBackdrop, DrawKineticGlyph};
 use crate::kernel::{self, SIGNALS};
-use crate::kit::{self, KitValues, Split};
+use crate::kit::{self, Kit, KitValues};
 use crate::records::{Karaoke, Records, GLYPH_WORDS};
 use crate::shapes::{self, GlyphSet, VERT_FLOATS};
 use makepad_draw::makepad_platform::draw_shader_layout::{LayoutKind, LayoutPacking, PodType};
@@ -62,37 +62,31 @@ pub struct FrameStats {
     pub record_us: f32,
 }
 
-/// The shader members a kit adds, as Splash text for its draw subclass.
-fn members(split: &Split, values: &KitValues) -> String {
-    let mut s = String::new();
-    for (name, f) in &split.shader {
-        s.push_str(&format!("    {name}: {}\n", f.text));
-    }
-    for (k, (name, _)) in values.dials.iter().enumerate().take(4) {
-        let c = ["x", "y", "z", "w"][k];
-        if !split.shader.iter().any(|(n, _)| n == name) {
-            s.push_str(&format!("    {name}: fn() -> float {{ return self.p.{c} }}\n"));
+/// The draw members of a kit: its shader fns (`backdrop`'s draw takes
+/// only the helpers, not the glyph stage's own `look`, `floor`, `deform`)
+/// and an accessor `self.<dial>()` per dial of the first four it does not
+/// write itself.
+fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, ScriptValue)> {
+    let own = kit.shader_fns(vm);
+    let mut out: Vec<(LiveId, ScriptValue)> = own
+        .iter()
+        .filter(|(k, _)| {
+            let name = k.to_string();
+            if backdrop { !matches!(name.as_str(), "look" | "floor" | "deform") } else { name != "backdrop" }
+        })
+        .cloned()
+        .collect();
+    let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(kit::KIT_MODULE).into(), NoTrap).as_object();
+    for (k, (name, _)) in kit.values.dials.iter().enumerate().take(4) {
+        let id = LiveId::from_str(name);
+        if own.iter().any(|(n, _)| *n == id) {
+            continue;
+        }
+        if let Some(m) = module {
+            out.push((id, vm.bx.heap.value(m, LiveId::from_str(["dial_x", "dial_y", "dial_z", "dial_w"][k]).into(), NoTrap)));
         }
     }
-    s
-}
-
-/// The kit's helper fns and dial accessors for the backdrop (every shader
-/// fn but the glyph stage's own).
-fn helpers(split: &Split, values: &KitValues) -> String {
-    let mut s = String::new();
-    for (name, f) in &split.shader {
-        if !matches!(name.as_str(), "look" | "floor" | "deform") {
-            s.push_str(&format!("    {name}: {}\n", f.text));
-        }
-    }
-    for (k, (name, _)) in values.dials.iter().enumerate().take(4) {
-        let c = ["x", "y", "z", "w"][k];
-        if !split.shader.iter().any(|(n, _)| n == name) {
-            s.push_str(&format!("    {name}: fn() -> float {{ return self.p.{c} }}\n"));
-        }
-    }
-    s
+    out
 }
 
 /// Register the draw shaders and the kit module (after `makepad_draw::script_mod`
@@ -107,34 +101,25 @@ pub fn script_mod(vm: &mut ScriptVm) {
     });
     if !have {
         makepad_render_graph::script_mod_passes(vm);
+        makepad_audio_reactive::script_mod(vm);
         crate::draw::script_mod(vm);
     }
     kit::script_mod(vm);
 }
 
-fn compile_shader<T: ScriptNew + ScriptApply>(cx: &mut Cx, base: &str, members: &str, file: &str) -> Result<T, String> {
-    let _ = makepad_draw::makepad_platform::shader_error::take();
-    let r = cx.with_vm(|vm| {
-        let mut draw = T::script_new_with_default(vm);
-        if members.trim().is_empty() {
-            return Ok(draw);
-        }
-        let code = format!("use mod.std.*\nuse mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nuse mod.shared.*\nmod.draw.{base}{{\n{}{members}}}\n", makepad_audio_reactive::SPLASH);
-        vm.bx.captured_errors = Some(Vec::new());
-        // A body of its own the VM reclaims once the shader is built (the
-        // shader cache keys a compile by its body and text).
-        let value = vm.eval_transient(ScriptMod { file: file.to_string(), code, ..Default::default() });
-        let errors = vm.take_errors();
-        if value.is_err() || !errors.is_empty() {
-            return Err(if errors.is_empty() { format!("{file}: the look did not evaluate") } else { errors.join("; ") });
-        }
-        draw.script_apply(vm, &Apply::Eval, &mut Scope::default(), value);
-        Ok(draw)
-    })?;
-    match makepad_draw::makepad_platform::shader_error::take() {
-        Some(e) => Err(format!("{file}: {e}")),
-        None => Ok(r),
+/// The kit's draw: `mod.draw.<base>` with the kit's members.
+fn kit_draw<T: ScriptNew + ScriptApply>(vm: &mut ScriptVm, base: &str, members: &[(LiveId, ScriptValue)]) -> T {
+    let mut draw = T::script_new_with_default(vm);
+    if members.is_empty() {
+        return draw;
     }
+    let proto = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("draw").into(), NoTrap).as_object().map_or(NIL, |d| vm.bx.heap.value(d, LiveId::from_str(base).into(), NoTrap));
+    let o = vm.bx.heap.new_with_proto(proto);
+    for (k, v) in members {
+        vm.bx.heap.set_value_def(o, (*k).into(), *v);
+    }
+    draw.script_apply(vm, &Apply::Eval, &mut Scope::default(), o.into());
+    draw
 }
 
 /// The glyph draw's instance record as the kernel's `KineticGlyph` layout.
@@ -297,7 +282,6 @@ impl Glyphs<'_> {
 }
 
 pub struct KineticView {
-    pub split: Split,
     pub values: KitValues,
     /// The kit's own palette (a host override replaces `values.colors`).
     kit_colors: [Vec4f; 4],
@@ -338,26 +322,36 @@ pub struct KineticView {
 impl KineticView {
     /// Load a kit (its Splash text). `file` names it in diagnostics.
     pub fn new(cx: &mut Cx, source: &str, file: &str) -> Result<Self, String> {
-        let split = kit::split(source)?;
-        let values = cx.with_vm(|vm| kit::read_values(vm, &split, file))?;
-        let draw: DrawKineticGlyph = compile_shader(cx, "DrawKineticGlyph", &members(&split, &values), file)?;
-        let backdrop = match &split.backdrop {
-            Some(f) => Some(compile_shader::<DrawKineticBackdrop>(cx, "DrawKineticBackdrop", &format!("    backdrop: {}\n{}", f.text, helpers(&split, &values)), file)?),
-            None => None,
-        };
+        let _ = makepad_draw::makepad_platform::shader_error::take();
+        let (kit, draw, backdrop) = cx.with_vm(|vm| -> Result<_, String> {
+            let kit = kit::load(vm, source, file)?;
+            let glyph = members(vm, &kit, false);
+            let draw: DrawKineticGlyph = kit_draw(vm, "DrawKineticGlyph", &glyph);
+            let backdrop = match kit.fn_field(vm, "backdrop") {
+                Some(_) => Some(kit_draw::<DrawKineticBackdrop>(vm, "DrawKineticBackdrop", &members(vm, &kit, true))),
+                None => None,
+            };
+            Ok((kit, draw, backdrop))
+        })?;
+        if let Some(e) = makepad_draw::makepad_platform::shader_error::take() {
+            return Err(format!("{file}: {e}"));
+        }
         let layout = instance_layout(cx, &draw)?;
         let shape_word = layout.fields.iter().find(|f| f.name == "shape").map(|f| f.offset as usize).ok_or("the glyph record has no `shape`")?;
-        let composed = kernel::compose(&split, &values.dials, "KineticGlyph");
-        let glyph_kernel = kernel::compile(&composed, &layout)?;
-        let camera_kernel = match &split.camera {
-            Some(f) => Some(kernel::compile(&kernel::compose_camera(&split, &values.dials, f), &layout)?),
-            None => None,
-        };
-        let curve_kernel = match (&split.curve, values.curve_points) {
-            (Some(f), Some(_)) => Some(kernel::compile(&kernel::compose_curve(&split, &values.dials, f), &layout)?),
-            (Some(_), None) => return Err("a kit with `curve_fn` also declares `curve: {points: 256}`".into()),
-            _ => None,
-        };
+        let (glyph_kernel, camera_kernel, curve_kernel) = cx.with_vm(|vm| -> Result<_, String> {
+            let glyph = kernel::compile(vm, &kit, kernel::Which::Glyph, &layout)?;
+            let camera = match kit.fn_field(vm, "camera_fn") {
+                Some(_) => Some(kernel::compile(vm, &kit, kernel::Which::Camera, &layout)?),
+                None => None,
+            };
+            let curve = match (kit.fn_field(vm, "curve_fn"), kit.values.curve_points) {
+                (Some(_), Some(_)) => Some(kernel::compile(vm, &kit, kernel::Which::Curve, &layout)?),
+                (Some(_), None) => return Err("a kit with `curve_fn` also declares `curve: {points: 256}`".to_string()),
+                _ => None,
+            };
+            Ok((glyph, camera, curve))
+        })?;
+        let values = kit.values;
         let pass = DrawPass::new_with_name(cx, "kinetic");
         // The pass keeps the camera this view sets (not the 2D ortho).
         pass.set_keep_camera_matrix(cx, true);
@@ -369,7 +363,6 @@ impl KineticView {
             kit_colors: values.colors,
             kit_font: values.shape.font.clone(),
             overlay: false,
-            split,
             values,
             draw,
             backdrop,

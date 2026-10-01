@@ -1,7 +1,8 @@
-//! Reading a kit: one `Kinetic{...}` Splash document.
+//! Reading a kit: one `Kinetic{...}` Splash document, evaluated whole in
+//! the VM ([`load`]).
 //!
 //! ```text
-//! fn lift(g, h) { ... }                 // top-level fns: kernel helpers (CPU)
+//! fn lift(g) { ... }                 // top-level fns: kernel helpers (CPU)
 //! Kinetic{
 //!     name: "Wave Line"  text: "KINETIC TEXT"  case: @upper  font: @bold
 //!     size: 1.0  depth: 0.35  bevel: 0.03  bevel_type: @round  material: @metal
@@ -10,9 +11,9 @@
 //!     colors: {bg: #05060d a: #ffc84a b: #2a1450 c: #49e6ff}
 //!     dials: {swing: 0.0 drive: 0.0 split: 0.5}  // p1.. in order, 0..1
 //!     camera: {fov: 50 dist: 9 height: 0}   // dist, height in cap heights
-//!     floor: {y: -0.7 size: 14}
+//!     ground: {y: -0.7 size: 14}         // a floor plane (its look: `floor: fn() -> vec4`)
 //!     picture: {width: 1024 height: 256 view: 2}   // glyphs into a picture; backdrop = the screen
-//!     surface: {u: 96 v: 32 copies: 1}   // a grid shaped by the look's `surface(uv)` hook
+//!     grid: {u: 96 v: 32 copies: 1}      // a grid shaped by the look's `surface: fn(uv)` hook
 //!     post: [Glow{threshold: 0.62 strength: 0.9}]
 //!     glyph: fn(g, o) { ... }            // the animator: a kernel (CPU)
 //!     camera_fn: fn(c) { ... }           // optional camera kernel (CPU); c.share -> self.k_share
@@ -27,239 +28,78 @@
 //! `self.plane_hit(n, d)` (this pixel's ray on the plane dot(n, p) = d) and
 //! `self.text_plane()` (the z = 0 point under the pixel).
 //!
-//! `glyph` and `camera_fn` (and the top-level fns) are kernel source: they
-//! are cut out of the text before the document VM sees it (their lines kept
-//! blank, so every diagnostic keeps its line) and compiled by
-//! makepad-script-compute. Every other `name: fn` field is a member of the
-//! kit's subclass of `DrawKineticGlyph` (`look`, `deform`, `floor`,
-//! helpers) or, for `backdrop`, of `DrawKineticBackdrop`. The rest is read
-//! as values.
+//! `glyph`, `camera_fn` and `curve_fn` are kernels: crate::kernel compiles
+//! them from their fn objects (makepad-script-compute's vm_kernel), with
+//! whatever top-level fns they reach. Every other `name: fn` field is a
+//! member of the kit's draw, derived from `DrawKineticGlyph` (`look`,
+//! `deform`, `floor`, helpers) or, for `backdrop`, `DrawKineticBackdrop`
+//! (view.rs). The rest is read as values ([`KitValues`]).
 
-/// A function cut out of the kit: its parameter names, its body text and
-/// the line its body starts on (1-based).
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct FnSrc {
-    pub params: Vec<String>,
-    /// The whole `fn(...) -> T { ... }` text.
-    pub text: String,
-    /// The text between the outer braces.
-    pub body: String,
-    pub line: usize,
+/// What every kit is evaluated with, on its first line (so its own lines
+/// keep their numbers).
+const KIT_USES: &str = "use mod.std.* use mod.pod.* use mod.math.* use mod.shader.* use mod.draw use mod.shared.* use mod.kin.* ";
+
+/// The host's side of every kit: the kernel entries, `band`, the dial
+/// accessors (kit.splash).
+const KIT_GLUE: &str = include_str!("kit.splash");
+
+/// The fields of a kit that are kernels, not draw members.
+pub const KERNEL_FIELDS: &[&str] = &["glyph", "camera_fn", "curve_fn"];
+
+/// A kit evaluated: its object (kept alive while the host builds from it)
+/// and its values.
+pub struct Kit {
+    pub object: ScriptObjectRef,
+    pub values: KitValues,
 }
 
-/// The kit text taken apart.
-#[derive(Clone, Debug, PartialEq, Default)]
-pub struct Split {
-    /// Kernel items before `Kinetic{` (fns, consts, `use` lines).
-    pub kernel_items: String,
-    pub glyph: Option<FnSrc>,
-    pub camera: Option<FnSrc>,
-    /// `curve_fn: fn(c) { c.pos = ... }`: a point on a path at `c.u` 0..1.
-    pub curve: Option<FnSrc>,
-    /// Shader members of the glyph draw (`name: fn ...`), in order.
-    pub shader: Vec<(String, FnSrc)>,
-    /// `backdrop: fn() -> vec4 {...}`.
-    pub backdrop: Option<FnSrc>,
-    /// The document with every fn cut out, for the VM.
-    pub values: String,
-}
-
-fn skip_trivia(b: &[u8], i: usize) -> usize {
-    if b[i] == b'"' {
-        let mut j = i + 1;
-        while j < b.len() && b[j] != b'"' {
-            j += if b[j] == b'\\' { 2 } else { 1 };
-        }
-        return (j + 1).min(b.len());
+impl Kit {
+    /// The kit's fn field `name` (a script fn), if it has one.
+    pub fn fn_field(&self, vm: &ScriptVm, name: &str) -> Option<ScriptObject> {
+        field(vm, self.object.as_object(), name).as_object().filter(|f| vm.bx.heap.as_fn(*f).is_some())
     }
-    if b[i] == b'/' && b.get(i + 1) == Some(&b'/') {
-        let mut j = i;
-        while j < b.len() && b[j] != b'\n' {
-            j += 1;
-        }
-        return j;
-    }
-    if b[i] == b'/' && b.get(i + 1) == Some(&b'*') {
-        let mut j = i + 2;
-        while j + 1 < b.len() && !(b[j] == b'*' && b[j + 1] == b'/') {
-            j += 1;
-        }
-        return (j + 2).min(b.len());
-    }
-    i
-}
 
-/// The index after the bracket that closes the opener at `i`.
-fn skip_balanced(b: &[u8], i: usize) -> usize {
-    let mut depth = 0i32;
-    let mut j = i;
-    while j < b.len() {
-        let k = skip_trivia(b, j);
-        if k != j {
-            j = k;
-            continue;
-        }
-        match b[j] {
-            b'(' | b'[' | b'{' => depth += 1,
-            b')' | b']' | b'}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return j + 1;
-                }
-            }
-            _ => {}
-        }
-        j += 1;
-    }
-    b.len()
-}
-
-fn is_ident(c: u8) -> bool {
-    c.is_ascii_alphanumeric() || c == b'_'
-}
-
-fn line_of(b: &[u8], at: usize) -> usize {
-    1 + b[..at.min(b.len())].iter().filter(|c| **c == b'\n').count()
-}
-
-/// Blank `range` keeping its newlines.
-fn blank(out: &mut [u8], from: usize, to: usize) {
-    for c in &mut out[from..to] {
-        if *c != b'\n' {
-            *c = b' ';
-        }
+    /// The draw members the kit writes (`name: fn` fields other than the
+    /// kernels), in the order written.
+    pub fn shader_fns(&self, vm: &ScriptVm) -> Vec<(LiveId, ScriptValue)> {
+        fields(vm, self.object.as_object())
+            .into_iter()
+            .filter(|(k, v)| {
+                let name = k.to_string();
+                !KERNEL_FIELDS.contains(&name.as_str()) && v.as_object().is_some_and(|f| vm.bx.heap.as_fn(f).is_some())
+            })
+            .collect()
     }
 }
 
-/// Reads `fn(a, b) -> T { body }` starting at `i` (at the `fn`); returns
-/// the function and the index after it.
-fn read_fn(src: &str, i: usize) -> Result<(FnSrc, usize), String> {
-    let b = src.as_bytes();
-    let mut j = i + 2;
-    while j < b.len() && b[j].is_ascii_whitespace() {
-        j += 1;
+/// Evaluate a kit's Splash text (`file` names it in diagnostics) and read
+/// its values.
+pub fn load(vm: &mut ScriptVm, source: &str, file: &str) -> Result<Kit, String> {
+    script_mod(vm);
+    vm.bx.captured_errors = Some(Vec::new());
+    // A body of its own the VM reclaims once nothing holds the kit.
+    let v = vm.eval_transient(ScriptMod { file: file.to_string(), code: format!("{KIT_USES}{source}"), ..Default::default() });
+    let errors = vm.take_errors();
+    if !errors.is_empty() {
+        return Err(errors.join("; "));
     }
-    if b.get(j) != Some(&b'(') {
-        return Err(format!("line {}: `fn` needs its parameters: `fn(g, o) {{ ... }}`", line_of(b, i)));
-    }
-    let close = skip_balanced(b, j);
-    let params = src[j + 1..close - 1].split(',').map(|p| p.split(':').next().unwrap_or("").trim().to_string()).filter(|p| !p.is_empty()).collect();
-    let mut k = close;
-    while k < b.len() && b[k] != b'{' {
-        if b[k] == b'}' || b[k] == b']' {
-            return Err(format!("line {}: a `fn` without a body", line_of(b, i)));
-        }
-        k += 1;
-    }
-    let end = skip_balanced(b, k);
-    let body = src[k + 1..end.saturating_sub(1)].to_string();
-    Ok((FnSrc { params, text: src[i..end].to_string(), body, line: line_of(b, k) }, end))
+    let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(KIT_MODULE).into(), NoTrap).as_object();
+    let kinetic = module.map(|m| vm.bx.heap.value(m, LiveId::from_str("Kinetic").into(), NoTrap));
+    let o = v.as_object().filter(|o| Some(vm.bx.heap.proto(*o)) == kinetic).ok_or_else(|| format!("{file}: a kit is one `Kinetic{{ ... }}` object"))?;
+    let object = vm.bx.heap.new_object_ref(o);
+    let values = read_values(vm, o)?;
+    Ok(Kit { object, values })
 }
 
-/// Takes the kit text apart (§ module docs).
-pub fn split(src: &str) -> Result<Split, String> {
-    let b = src.as_bytes();
-    let mut out = src.as_bytes().to_vec();
-    let mut split = Split::default();
-    // Find `Kinetic{` at the top level.
-    let mut i = 0;
-    let mut open = None;
-    while i < b.len() {
-        let k = skip_trivia(b, i);
-        if k != i {
-            i = k;
-            continue;
+/// An object's own fields, in the order written.
+fn fields(vm: &ScriptVm, o: ScriptObject) -> Vec<(LiveId, ScriptValue)> {
+    let mut out = Vec::new();
+    vm.bx.heap.object_data(o).map_iter_ordered(|k, v| {
+        if let Some(k) = k.as_id() {
+            out.push((k, v));
         }
-        if b[i..].starts_with(b"Kinetic") && (i == 0 || !is_ident(b[i - 1])) {
-            let mut j = i + 7;
-            while j < b.len() && b[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if b.get(j) == Some(&b'{') {
-                open = Some((i, j));
-                break;
-            }
-        }
-        if b[i] == b'{' || b[i] == b'(' || b[i] == b'[' {
-            i = skip_balanced(b, i);
-            continue;
-        }
-        i += 1;
-    }
-    let Some((start, brace)) = open else { return Err("a kit is one `Kinetic{ ... }` object".into()) };
-    split.kernel_items = src[..start].to_string();
-    blank(&mut out, 0, start);
-    let end = skip_balanced(b, brace);
-    // The object's own fields: `name: fn`.
-    let mut i = brace + 1;
-    while i < end - 1 {
-        let k = skip_trivia(b, i);
-        if k != i {
-            i = k;
-            continue;
-        }
-        let c = b[i];
-        if c == b'{' || c == b'[' || c == b'(' {
-            i = skip_balanced(b, i);
-            continue;
-        }
-        if (c.is_ascii_alphabetic() || c == b'_') && !is_ident(b[i - 1]) {
-            let s = i;
-            while i < b.len() && is_ident(b[i]) {
-                i += 1;
-            }
-            let name = &src[s..i];
-            let mut j = i;
-            while j < b.len() && b[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if b.get(j) == Some(&b':') {
-                let mut v = j + 1;
-                while v < b.len() && b[v].is_ascii_whitespace() {
-                    v += 1;
-                }
-                if b[v..].starts_with(b"fn") && !b.get(v + 2).is_some_and(|c| is_ident(*c)) {
-                    let (f, after) = read_fn(src, v)?;
-                    blank(&mut out, s, after);
-                    match name {
-                        "glyph" => split.glyph = Some(f),
-                        "camera_fn" => split.camera = Some(f),
-                        "curve_fn" => split.curve = Some(f),
-                        "backdrop" => split.backdrop = Some(f),
-                        _ => split.shader.push((name.to_string(), f)),
-                    }
-                    i = after;
-                }
-            }
-            continue;
-        }
-        i += 1;
-    }
-    split.values = String::from_utf8(out).map_err(|_| "the kit is not UTF-8".to_string())?;
-    Ok(split)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn fns_are_cut_out_and_lines_kept() {
-        let src = "// a kit\nfn lift(g) { g.t * 2.0 }\nKinetic{\n    name: \"x // not a comment\"\n    dials: {a: 0.5}\n    glyph: fn(g, o) {\n        o.pos.y = lift(g)\n    }\n    look: fn() -> vec4 { return vec4(1.0, 0.0, 0.0, 1.0) }\n    backdrop: fn() -> vec4 { return self.col_bg }\n    size: 2.0\n}\n";
-        let s = split(src).unwrap();
-        assert!(s.kernel_items.contains("fn lift"));
-        let g = s.glyph.unwrap();
-        assert_eq!(g.params, vec!["g", "o"]);
-        assert!(g.body.contains("o.pos.y = lift(g)"));
-        assert_eq!(g.line, 6);
-        assert_eq!(s.shader.len(), 1);
-        assert_eq!(s.shader[0].0, "look");
-        assert!(s.shader[0].1.text.starts_with("fn() -> vec4 {"));
-        assert!(s.backdrop.is_some());
-        assert_eq!(s.values.lines().count(), src.lines().count());
-        assert!(s.values.contains("size: 2.0") && !s.values.contains("glyph") && !s.values.contains("fn lift"));
-        assert!(split("Nope{}").is_err());
-    }
+    });
+    out
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +135,7 @@ pub struct KitValues {
     /// of width x height pixels showing `view` cap heights vertically (an
     /// orthographic view), and the backdrop is the frame (a screen).
     pub picture: Option<(u32, u32, f32)>,
-    /// `surface: {u v copies}`: a u x v grid the look's `surface(uv)` hook
+    /// `grid: {u v copies}`: a u x v grid the look's `surface(uv)` hook
     /// shapes (a globe, a knot, a ribbon printed with the picture), drawn
     /// `copies` times (`self.attr.x` = the copy).
     pub surface: Option<(u32, u32, u32)>,
@@ -346,59 +186,6 @@ fn color(v: ScriptValue) -> Option<Vec4f> {
     v.as_color().map(Vec4f::from_u32)
 }
 
-/// The names of `{a: .. b: ..}` under `key:` in the (fn-free) kit text, in
-/// the order written.
-fn ordered_keys(values: &str, key: &str) -> Vec<String> {
-    let b = values.as_bytes();
-    let pat = format!("{key}:");
-    let mut at = 0;
-    while let Some(k) = values[at..].find(&pat) {
-        let s = at + k;
-        at = s + pat.len();
-        if s > 0 && is_ident(b[s - 1]) {
-            continue;
-        }
-        let mut j = at;
-        while j < b.len() && b[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        if b.get(j) != Some(&b'{') {
-            continue;
-        }
-        let end = skip_balanced(b, j);
-        let mut out = Vec::new();
-        let mut i = j + 1;
-        while i < end - 1 {
-            let k = skip_trivia(b, i);
-            if k != i {
-                i = k;
-                continue;
-            }
-            if b[i] == b'{' || b[i] == b'[' || b[i] == b'(' {
-                i = skip_balanced(b, i);
-                continue;
-            }
-            if (b[i].is_ascii_alphabetic() || b[i] == b'_') && !is_ident(b[i - 1]) {
-                let s = i;
-                while is_ident(b[i]) {
-                    i += 1;
-                }
-                let mut j = i;
-                while b[j].is_ascii_whitespace() {
-                    j += 1;
-                }
-                if b[j] == b':' {
-                    out.push(values[s..i].to_string());
-                }
-                continue;
-            }
-            i += 1;
-        }
-        return out;
-    }
-    Vec::new()
-}
-
 /// The module kits are read in: `Kinetic` plus the graph's post kits.
 pub const KIT_MODULE: &str = "kin";
 
@@ -421,19 +208,15 @@ pub fn script_mod(vm: &mut ScriptVm) {
     for e in makepad_render_graph::script::install_kits(vm, &format!("mod.{KIT_MODULE}"), None) {
         log!("kinetic: graph kits: {e}");
     }
+    vm.bx.captured_errors = Some(Vec::new());
+    vm.eval(ScriptMod { file: "kinetic_type/kit.splash".into(), code: KIT_GLUE.into(), ..Default::default() });
+    for e in vm.take_errors() {
+        log!("kinetic: kit.splash: {e}");
+    }
 }
 
-/// Reads the kit's values (`split.values`) through the VM.
-pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitValues, String> {
-    script_mod(vm);
-    vm.bx.captured_errors = Some(Vec::new());
-    let code = format!("use mod.{KIT_MODULE}.*\nuse mod.math.*\nuse mod.pod.*\n{}", split.values);
-    let v = vm.eval(ScriptMod { file: file.to_string(), code, ..Default::default() });
-    let errors = vm.take_errors();
-    if !errors.is_empty() {
-        return Err(errors.join("; "));
-    }
-    let o = v.as_object().ok_or_else(|| "the kit did not evaluate to a Kinetic{} object".to_string())?;
+/// Reads the values of the evaluated kit `o`.
+fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> {
     let mut shape = ShapeSpec::default();
     let s = |vm: &mut ScriptVm, n: &str| {
         let v = field(vm, o, n);
@@ -456,8 +239,9 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
     // (`wght` is `weight`).
     let axes = field(vm, o, "axes");
     if let Some(a) = axes.as_object() {
-        for tag in ordered_keys(&split.values, "axes") {
-            let Some(v) = num(field(vm, a, &tag)) else { continue };
+        for (tag, v) in fields(vm, a) {
+            let Some(v) = num(v) else { continue };
+            let tag = tag.to_string();
             let b = tag.as_bytes();
             if b.len() != 4 {
                 return Err(format!("axes: `{tag}` is not a four-letter axis tag (wdth, wght, slnt, opsz, GRAD, ...)"));
@@ -549,8 +333,8 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
     let mut dials = Vec::new();
     let dv = field(vm, o, "dials");
     if let Some(d) = dv.as_object() {
-        for name in ordered_keys(&split.values, "dials") {
-            dials.push((name.clone(), num(field(vm, d, &name)).unwrap_or(0.5)));
+        for (name, v) in fields(vm, d) {
+            dials.push((name.to_string(), num(v).unwrap_or(0.5)));
         }
     }
     // A dial is a kernel param and a shader function by its name: it may
@@ -573,7 +357,7 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
         dist = num(field(vm, c, "dist"));
         height = num(field(vm, c, "height"));
     }
-    let fl = field(vm, o, "floor");
+    let fl = field(vm, o, "ground");
     let floor = fl.as_object().map(|c| (num(field(vm, c, "y")), num(field(vm, c, "size"))));
     let pic = field(vm, o, "picture");
     let picture = pic.as_object().map(|c| {
@@ -581,7 +365,7 @@ pub fn read_values(vm: &mut ScriptVm, split: &Split, file: &str) -> Result<KitVa
         let h = num(field(vm, c, "height")).unwrap_or(256.0).clamp(16.0, 4096.0) as u32;
         (w, h, num(field(vm, c, "view")).unwrap_or(2.0).max(0.01))
     });
-    let sf = field(vm, o, "surface");
+    let sf = field(vm, o, "grid");
     let surface = sf.as_object().map(|c| {
         let u = num(field(vm, c, "u")).unwrap_or(96.0).clamp(2.0, 1024.0) as u32;
         let v = num(field(vm, c, "v")).unwrap_or(32.0).clamp(2.0, 1024.0) as u32;

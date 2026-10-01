@@ -11,15 +11,17 @@
 //!   analyser per app: every consumer gets the same [`AudioFrame`].
 //! * [`bind_audio`] puts a frame onto any draw call whose shader declares
 //!   the uniforms (by name: a shader that declares none is untouched).
-//! * [`SPLASH`] is those declarations and the reading helpers as Splash
-//!   shader fields (`audio_fft(f, age)`, `audio_wave(t)`,
-//!   `audio_wave2(t)`), for a runtime shader (a kit, a material, a game's
-//!   look) to include.
+//! * `mod.draw.AudioInput` ([`script_mod`]) is those declarations and the
+//!   reading helpers as Splash shader fields (`audio_fft(f, age)`,
+//!   `audio_wave(t)`, `audio_wave2(t)`), for a runtime shader (a kit, a
+//!   material, a game's look) to spread.
 //! * [`bed`] is a deterministic music bed for hosts that have no music (a
 //!   thumbnail baker, a gallery, tests, an attract mode).
 //!
 //! Silence is a valid picture: with nothing played every value is 0, the
 //! same as an unbound texture, so a look carries its own idle floor.
+
+use makepad_draw::*;
 
 pub mod analysis;
 pub mod bed;
@@ -28,20 +30,25 @@ pub mod track;
 pub use analysis::{bind_audio, fold_bands, AudioFrame, AudioReactive, Levels, AUDIO_BINS, AUDIO_SIDE_ROWS, AUDIO_SPEC_ROWS, AUDIO_TEX_H, AUDIO_TEX_W, AUDIO_WAVE_ROWS, SPECTRUM_BANDS};
 pub use track::{AudioTrack, TrackPicture};
 
-/// The audio input as Splash shader fields: the texture, its uniforms, and
-/// the three reading helpers. Paste it into a runtime draw shader or
-/// material (`mod.draw.MyLook = mod.draw.DrawQuad{ <SPLASH> ... }`) and bind
-/// frames with [`bind_audio`].
-///
-/// * `self.audio_fft(f, age)` — spectrum magnitude 0..1; `f` log frequency
-///   0..1 (30 Hz .. 16 kHz), `age` 0..1 back in time (0 = now, 1 ≈ 5.5 s).
-/// * `self.audio_wave(t)` — the waveform -1..1; `t` 0..1 across the kept
-///   window (1 = newest).
-/// * `self.audio_wave2(t)` — the stereo pair (L, R) at `t`.
-/// * `self.audio_env` (bass, mid, high, rms), `self.audio_hit` (kick,
-///   snare, hat, loud), `self.audio_norm` (auto-gained levels),
-///   `self.audio_form` (drop, section, 0, 0).
-pub const SPLASH: &str = r#"
+script_mod! {
+    use mod.pod.*
+    use mod.math.*
+    use mod.shader.*
+
+    // The audio input as Splash shader fields: the texture, its uniforms
+    // and the reading helpers. A runtime draw shader or material spreads
+    // it (`mod.draw.MyLook = mod.draw.DrawQuad{ ..mod.draw.AudioInput ... }`)
+    // and the host binds frames with `bind_audio`.
+    //
+    // * `self.audio_fft(f, age)`: spectrum magnitude 0..1; `f` log frequency
+    //   0..1 (30 Hz .. 16 kHz), `age` 0..1 back in time (0 = now, 1 ~ 5.5 s).
+    // * `self.audio_wave(t)`: the waveform -1..1; `t` 0..1 across the kept
+    //   window (1 = newest).
+    // * `self.audio_wave2(t)`: the stereo pair (L, R) at `t`.
+    // * `self.audio_env` (bass, mid, high, rms), `self.audio_hit` (kick,
+    //   snare, hat, loud), `self.audio_norm` (auto-gained levels),
+    //   `self.audio_form` (drop, section, 0, 0).
+    mod.draw.AudioInput = {
         audio_tex: texture_2d(float)
         audio_dim: uniform(vec4(256.0, 256.0, 0.0, 0.0))
         audio_meta: uniform(vec4(256.0, 384.0, 64.0, 0.0213))
@@ -80,4 +87,5 @@ pub const SPLASH: &str = r#"
             let sd = self.audio_tex.sample_nearest(vec2((col + 0.5) / self.audio_meta.x, y), 0.0).x
             return vec2(m + sd, m - sd)
         }
-"#;
+    }
+}

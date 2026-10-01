@@ -25,6 +25,8 @@ script_mod! {
     use mod.geom
 
     mod.draw.DrawKineticGlyph = mod.std.set_type_default() do #(DrawKineticGlyph::script_shader(vm)){
+        // The sound: self.audio_fft(f, age), self.audio_wave(t), ...
+        ..mod.draw.AudioInput
         vertex_pos: vertex_position(vec4f)
         fb0: fragment_output(0, vec4f)
         draw_call: uniform_buffer(draw.DrawCallUniforms)
@@ -117,7 +119,7 @@ script_mod! {
             return normalize(self.curve_row(s, 3.0).xyz)
         }
 
-        // A surface's point at (u, v) in 0..1 (`surface: {u v copies}`;
+        // A surface's point at (u, v) in 0..1 (`grid: {u v copies}`;
         // `self.attr.x` is the copy). A flat sheet by default.
         surface: fn(uv: vec2) -> vec3 {
             return vec3(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, 0.0)
@@ -342,7 +344,8 @@ script_mod! {
     // the backdrop is the whole frame (a screen): `self.picture(uv)`,
     // `self.ink(uv)`.
     mod.draw.DrawKineticBackdrop = mod.std.set_type_default() do #(DrawKineticBackdrop::script_shader(vm)){
-        ..mod.draw.DrawQuad
+        ..mod.draw.DrawQuad,
+        ..mod.draw.AudioInput,
         content_tex: texture_2d(float)
         // The kit's picture (`picture: {...}`): its glyphs drawn flat.
         pic_tex: texture_2d(float)

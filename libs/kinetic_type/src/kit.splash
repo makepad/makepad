@@ -1,0 +1,58 @@
+// The host's side of every kit (kit.rs evaluates this into mod.kin). The
+// kernel entries below are compiled with the kit's own fns bound by name
+// (vm_kernel): `kit_glyph` is the kit's `glyph: fn(g, o)`, `kit_camera`
+// its `camera_fn: fn(c)`, `kit_curve` its `curve_fn: fn(c)`. Records are
+// passed by reference: the kit's fn changes the record it is given.
+use mod.pod.*
+use mod.math.*
+use mod.shader.*
+
+// The newest spectrum in 32 log bands: band(f), f 0..1 low to high.
+mod.kin.band = fn(f) { spectrum[clamp(int(f * 32.0), 0, 31)] }
+
+// A kit without `glyph`: the letters at rest.
+mod.kin.still = fn(g, o) {}
+
+// The animator: each element's draw record starts at rest, then the kit's
+// glyph fn moves it.
+mod.kin.glyph_entry = fn(i) {
+    let g = glyphs[i]
+    let o = KineticGlyph{}
+    o.pos = g.rest
+    o.rot = vec4(0.0, 0.0, 0.0, 1.0)
+    o.scale = vec3(g.k, g.k, g.k)
+    o.color = vec4(1.0, 1.0, 1.0, 1.0)
+    o.info = vec4(g.t, g.word, g.line, g.index)
+    o.shape = g.shape
+    kit_glyph(g, o)
+    out[i] = o
+}
+
+// The camera: `c` starts as the default framing.
+mod.kin.camera_entry = fn(i) {
+    let b = base[0]
+    let c = Camera{}
+    c.eye = b.eye
+    c.target = b.target
+    c.up = b.up
+    c.fov = b.fov
+    c.roll = b.roll
+    c.share = b.share
+    kit_camera(c)
+    out[i] = c
+}
+
+// The curve: element i is the point at u = i / (count - 1).
+mod.kin.curve_entry = fn(i) {
+    let c = CurvePoint{}
+    c.u = float(i) / float(max(count - 1, 1))
+    kit_curve(c)
+    out[i] = c
+}
+
+// A dial's shader accessor, `self.<dial>()`, for the first four dials
+// (p1..p4 are self.p.x..w).
+mod.kin.dial_x = fn() -> float { return self.p.x }
+mod.kin.dial_y = fn() -> float { return self.p.y }
+mod.kin.dial_z = fn() -> float { return self.p.z }
+mod.kin.dial_w = fn() -> float { return self.p.w }

@@ -1,4 +1,4 @@
-//! The Splash fields a runtime shader includes compile on every backend
+//! The Splash fields a runtime shader spreads (`mod.draw.AudioInput`) compile on every backend
 //! the shader compiler writes, in a draw that reads every helper.
 
 use makepad_draw::*;
@@ -8,10 +8,10 @@ fn the_splash_fields_compile_everywhere() {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     cx.with_vm(|vm| {
         makepad_draw::script_mod(vm);
+        makepad_audio_reactive::script_mod(vm);
         for backend in ["metal", "hlsl", "glsl", "wgsl"] {
             let code = format!(
-                "use mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nlet sh = mod.draw.DrawQuad{{\n{}\n        pixel: fn() {{\n            let s = self.audio_fft(self.pos.x, self.pos.y) + self.audio_wave(self.pos.x) + self.audio_wave2(self.pos.y).x\n            return vec4(s, self.audio_hit.x + self.audio_norm.y, self.audio_env.z + self.audio_form.x, 1.0)\n        }}\n}}\nmod.shader.test_compile_draw_source(sh, \"{backend}\", false)\n",
-                makepad_audio_reactive::SPLASH
+                "use mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nlet sh = mod.draw.DrawQuad{{\n        ..mod.draw.AudioInput\n        pixel: fn() {{\n            let s = self.audio_fft(self.pos.x, self.pos.y) + self.audio_wave(self.pos.x) + self.audio_wave2(self.pos.y).x\n            return vec4(s, self.audio_hit.x + self.audio_norm.y, self.audio_env.z + self.audio_form.x, 1.0)\n        }}\n}}\nmod.shader.test_compile_draw_source(sh, \"{backend}\", false)\n"
             );
             vm.bx.captured_errors = Some(Vec::new());
             let v = vm.eval(ScriptMod { file: format!("audio/{backend}"), code, ..Default::default() });

@@ -48,7 +48,7 @@
 //!
 //! `spec_cursor` / `wave_cursor` are the row indices of the NEWEST row in
 //! each ring — the unwrap key: row `(cursor - n) mod rows` is `n` hops ago.
-//! [`crate::SPLASH`] wraps all of that in helpers (`audio_fft(f, age)`,
+//! `mod.draw.AudioInput` ([`crate::script_mod`]) wraps all of that in helpers (`audio_fft(f, age)`,
 //! `audio_wave(t)`, `audio_wave2(t)`), so a shader never does ring math.
 //!
 //! ## SILENCE IS A VALID PICTURE
