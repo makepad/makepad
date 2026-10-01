@@ -141,8 +141,8 @@ export function makepad_gpu_degraded_budget(pixel_budget, css_pixels) {
 // Ledger: live GPU bytes by object (textures, buffers, renderbuffers), kept
 // by wrapping the context's allocation calls. Accounting only, it never
 // refuses. It reports, once each, with what dominates:
-// - at least one texture allocated per animation frame, on average over a
-//   whole second: a steady frame allocates nothing, so this is a target
+// - at least one texture allocated per animation frame, on average over two
+//   whole seconds in a row: a steady frame allocates nothing, so this is a target
 //   re-created per frame (a size that changes each frame) instead of reused;
 // - GL_OUT_OF_MEMORY, the driver's own allocation failure, with the live
 //   bytes at that moment.
@@ -224,7 +224,11 @@ export function makepad_gpu_ledger_frame(ledger, now, gl_error, out_of_memory, r
     }
     ledger.window_frames += 1;
     if (now - ledger.window_start >= 1000) {
-        if (!ledger.warned_churn && ledger.window_textures >= ledger.window_frames) {
+        // Two whole seconds in a row: a plate loading its targets in one
+        // burst (a few slow frames) is not a frame that allocates.
+        const churning = ledger.window_textures >= ledger.window_frames;
+        ledger.churn_seconds = churning ? (ledger.churn_seconds || 0) + 1 : 0;
+        if (!ledger.warned_churn && ledger.churn_seconds >= 2) {
             ledger.warned_churn = true;
             const common = [...ledger.window_sizes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
                 .map(([size, count]) => `${count}x ${size}`).join(", ");
@@ -1552,9 +1556,12 @@ export class WasmWebBrowser extends WasmBridge {
         const now = performance.now();
         if (this.gpu_ledger) {
             // The driver's own allocation failure, read at most once a
-            // second (getError waits for the GPU process).
+            // second and only while no earlier frame is still on the GPU:
+            // getError waits for the GPU process, which behind a busy GPU
+            // is a 25-40 ms stall of this thread (a hitch every second in
+            // a GPU-bound scene).
             let error = 0;
-            if (!(now - (this.gpu_ledger_error_checked || 0) < 1000)) {
+            if (watchdog.in_flight.length === 0 && !(now - (this.gpu_ledger_error_checked || 0) < 1000)) {
                 this.gpu_ledger_error_checked = now;
                 error = gl.getError();
             }

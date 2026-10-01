@@ -120,6 +120,12 @@ test("a texture per frame on average over a second is reported once; steady fram
     web.makepad_gpu_ledger_frame(half, frame * 16.7, 0, 1285, report);
   }
   assert.equal(reports.length, before);
+  // A load burst: 30 textures across a few slow frames, once, is not churn.
+  const burst = web.makepad_create_gpu_ledger();
+  for (let k = 0; k < 30; k++) web.makepad_gpu_ledger_set(burst, "texture", {}, "0", 1024);
+  for (const at of [0, 300, 600, 900, 1200]) web.makepad_gpu_ledger_frame(burst, at, 0, 1285, report);
+  for (let frame = 0; frame < 300; frame++) web.makepad_gpu_ledger_frame(burst, 1300 + frame * 16.7, 0, 1285, report);
+  assert.equal(reports.length, before);
 });
 
 test("GL_OUT_OF_MEMORY is reported once with the live bytes", () => {
