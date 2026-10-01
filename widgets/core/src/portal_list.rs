@@ -3770,8 +3770,11 @@ impl Widget for PortalList {
                                 samples.last().unwrap().abs
                             };
                             push_sample(samples, new_abs, e.time);
-                            self.delta_top_scroll(cx, new_abs - from, false, false, 0.0, true, true);
-                            self.area.redraw(cx);
+                            // A still finger keeps sending moves (Android does), and those have nothing to scroll.
+                            if new_abs != from {
+                                self.delta_top_scroll(cx, new_abs - from, false, false, 0.0, true, true);
+                                self.area.redraw(cx);
+                            }
                         }
                     }
                 }
