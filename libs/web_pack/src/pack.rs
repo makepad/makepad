@@ -2,7 +2,7 @@
 //! `cargo makepad wasm --pack`: a preset ([`PackPreset`]) gives the
 //! defaults ([`PackPreset::options`]) and every knob can be set on its own.
 
-use crate::js::FILM_JS_STRIPPED;
+use crate::js::PLAYBACK_JS_STRIPPED;
 use std::collections::BTreeSet;
 
 /// How hard the pack crunches, as a preset of knobs.
@@ -68,7 +68,7 @@ pub const APP_JS_KEPT: [&str; 5] = ["text-input", "clipboard", "history", "stora
 
 impl PackPreset {
     pub fn options(self) -> PackOptions {
-        let all: Vec<String> = FILM_JS_STRIPPED.iter().map(|s| s.to_string()).collect();
+        let all: Vec<String> = PLAYBACK_JS_STRIPPED.iter().map(|s| s.to_string()).collect();
         match self {
             PackPreset::Film => PackOptions { preset: self, fonts: FontsKnob::Analysed, shaders: ShadersKnob::PrebuiltOnly, kernels: KernelsKnob::AotOnly, js_stripped: all, assets: AssetsKnob::BySize },
             PackPreset::App => PackOptions {

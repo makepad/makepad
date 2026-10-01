@@ -19,12 +19,12 @@ pub const AUDIO_WORKLET_JS: &str = "platform/src/os/web/audio_worklet.js";
 /// list).
 pub const SECTIONS: [&str; 14] = makepad_web_manifest::JS_SECTIONS;
 
-/// The sections a film strips: text input and IME, the clipboard, file
-/// dialogs and drops, MIDI, XR, websockets, live reload, storage, crash
-/// uploads (a static host has no endpoint), browser history, geolocation,
-/// the legacy XHR path and permission prompts. Video playback stays: a
-/// film's music plays through the media element.
-pub const FILM_JS_STRIPPED: [&str; 13] = [
+/// The sections a playback-only app (a Stage film) strips: text input and
+/// IME, the clipboard, file dialogs and drops, MIDI, XR, websockets, live
+/// reload, storage, crash uploads (a static host has no endpoint), browser
+/// history, geolocation, the legacy XHR path and permission prompts. Video
+/// playback stays, for documents with video layers.
+pub const PLAYBACK_JS_STRIPPED: [&str; 13] = [
     "text-input", "clipboard", "file-dialog", "midi", "xr", "websocket", "live-reload", "storage", "crash-upload", "history", "geolocation", "legacy-http", "permissions",
 ];
 
