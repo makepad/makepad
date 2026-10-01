@@ -1,8 +1,5 @@
 use crate::heap::*;
 use crate::native::*;
-use crate::shader::*;
-use crate::shader_backend::*;
-use crate::trap::NoTrap;
 use crate::value::*;
 #[allow(unused)]
 use crate::*;
@@ -10,6 +7,13 @@ use makepad_live_id::*;
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 pub struct ShaderIoType(pub(crate) u32);
+
+impl ShaderIoType {
+    /// The io type's number, as the `SHADER_IO_*` constants define it.
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
 
 pub const SHADER_IO_RUST_INSTANCE: ShaderIoType = ShaderIoType(0);
 pub const SHADER_IO_DYN_INSTANCE: ShaderIoType = ShaderIoType(1);
@@ -292,6 +296,18 @@ pub fn define_shader_module(heap: &mut ScriptHeap, native: &mut ScriptNative) {
             obj.into()
         },
     );
+
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
+    define_shader_compile_natives(heap, native, shader);
+}
+
+/// The compile test seams (`mod.shader.test_compile_*`). They run the
+/// shader compiler, which a build on shader packs leaves out.
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
+fn define_shader_compile_natives(heap: &mut ScriptHeap, native: &mut ScriptNative, shader: ScriptObject) {
+    use crate::shader::*;
+    use crate::shader_backend::*;
+    use crate::trap::NoTrap;
 
     native.add_method(
         heap,

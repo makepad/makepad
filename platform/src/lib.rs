@@ -58,6 +58,7 @@ mod draw_pass;
 mod draw_shader;
 pub mod draw_shader_layout;
 mod draw_vars;
+pub mod shader_pack;
 
 // Native Linux display inventory (direct DRM/KMS outputs). Lives at the crate
 // root so headless logic builds of the WM see the same types and API; only the
@@ -300,7 +301,10 @@ pub use {
         },
         game_input::*,
         geometry::{CxGeometry, Geometry, GeometryId, IndexData, VertexData},
-        draw_shader::{DrawShaderAttrFormat, DrawShaderInputPacking, DrawShaderInputs},
+        draw_shader::{
+            CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderDesc,
+            DrawShaderInputPacking, DrawShaderInputs,
+        },
         gpu_info::GpuPerformance,
         ime::{
             AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,

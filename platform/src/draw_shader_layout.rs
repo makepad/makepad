@@ -21,9 +21,8 @@
 use {
     crate::{
         cx::Cx,
-        draw_shader::{CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderId, DrawShaderInputs},
+        draw_shader::{CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderDesc, DrawShaderId, DrawShaderInputs},
         makepad_live_id::*,
-        makepad_script::heap::ScriptHeap,
         makepad_script::pod::{ScriptPodMat, ScriptPodTy, ScriptPodVec},
         makepad_script::shader::*,
     },
@@ -174,9 +173,9 @@ pub struct DrawShaderReflection {
 }
 
 impl DrawShaderReflection {
-    pub fn from_output(output: &ShaderOutput, heap: &ScriptHeap) -> Self {
+    pub fn from_desc(desc: &DrawShaderDesc) -> Self {
         let pick = |kind: fn(&ShaderIoKind) -> bool| -> Vec<ReflectedIo> {
-            output.io.iter().filter(|io| kind(&io.kind)).map(|io| ReflectedIo { name: io.name, ty: heap.pod_type_ref(io.ty).ty.clone() }).collect()
+            desc.io.iter().filter(|io| kind(&io.kind)).map(|io| ReflectedIo { name: io.name, ty: io.ty.clone() }).collect()
         };
         let mut instance = pick(|k| matches!(k, ShaderIoKind::DynInstance));
         instance.extend(pick(|k| matches!(k, ShaderIoKind::RustInstance)));

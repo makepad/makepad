@@ -262,6 +262,72 @@ impl ScriptCode {
         Some((loc, text))
     }
 
+    /// Visit the tokens of the fn whose body starts at `ip`, from its `fn`
+    /// keyword through the body's closing `}`: each token with the `/** */`
+    /// annotation in front of it and, for a `#(…)` token, the value it
+    /// interpolates. What a host hashes to know a function by its text in
+    /// any process (heap indices and ips differ between processes, the
+    /// tokens do not). False when `ip` maps to no fn.
+    pub fn fn_tokens(
+        &self,
+        ip: ScriptIp,
+        mut f: impl FnMut(&ScriptTokenPos, Option<&str>, Option<ScriptValue>),
+    ) -> bool {
+        let bodies = self.bodies.borrow();
+        let Some(body) = bodies.get(ip.body as usize) else {
+            return false;
+        };
+        let source_map = &body.parser.source_map;
+        let ip_index = (ip.index as usize).min(source_map.len().saturating_sub(1));
+        let Some(token_index) = (0..=ip_index)
+            .rev()
+            .find_map(|i| source_map.get(i).and_then(|slot| *slot))
+            .or_else(|| ((ip_index + 1)..source_map.len()).find_map(|i| source_map.get(i).and_then(|slot| *slot)))
+        else {
+            return false;
+        };
+        let tokens = &body.tokenizer.tokens;
+        let Some(last) = tokens.len().checked_sub(1) else {
+            return false;
+        };
+        let mut k = (token_index as usize).min(last);
+        while !matches!(tokens[k].token, ScriptToken::Identifier(id) if id == id!(fn)) {
+            let Some(prev) = k.checked_sub(1) else {
+                return false;
+            };
+            k = prev;
+        }
+        let values = match &body.source {
+            ScriptSource::Mod(script_mod) => &script_mod.values[..],
+            _ => &[],
+        };
+        let docs = &body.tokenizer.docs;
+        let mut doc = docs.partition_point(|d| (d.next_token as usize) < k);
+        let mut depth = 0i32;
+        for (i, tok) in tokens.iter().enumerate().skip(k) {
+            let mut text = None;
+            while doc < docs.len() && docs[doc].next_token as usize <= i {
+                if docs[doc].next_token as usize == i {
+                    text = Some(docs[doc].text.as_str());
+                }
+                doc += 1;
+            }
+            let value = tok.token.as_rust_value().and_then(|v| values.get(v as usize).copied());
+            f(tok, text, value);
+            match tok.token {
+                ScriptToken::OpenCurly => depth += 1,
+                ScriptToken::CloseCurly => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        true
+    }
+
     pub fn ip_to_loc(&self, ip: ScriptIp) -> Option<ScriptLoc> {
         if let Some(body) = self.bodies.borrow().get(ip.body as usize) {
             let source_map = &body.parser.source_map;

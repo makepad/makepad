@@ -1,6 +1,7 @@
 //! Building a material program: a base lane's shader object with the
 //! material's hooks installed, checked by the shader front end before any
 //! pipeline exists, with every error mapped back to the author's source.
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 use makepad_draw::makepad_platform::makepad_script::shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType};
 use makepad_draw::makepad_platform::makepad_script::shader_backend::ShaderBackend;
 use makepad_draw::*;
@@ -256,7 +257,16 @@ pub fn frontend_errors(vm: &mut ScriptVm, io_self: ScriptObject) -> Vec<String> 
     frontend_errors_for(vm, io_self, ShaderBackend::Metal)
 }
 
+/// [`frontend_errors`] lowering for one backend. A build on shader packs
+/// (`--cfg makepad_precompiled_shaders` on the web) has no shader compiler
+/// and reports none.
+#[cfg(all(target_arch = "wasm32", makepad_precompiled_shaders))]
+pub fn frontend_errors_for(_vm: &mut ScriptVm, _io_self: ScriptObject, _backend: ShaderBackend) -> Vec<String> {
+    Vec::new()
+}
+
 /// [`frontend_errors`] lowering for one backend.
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 pub fn frontend_errors_for(vm: &mut ScriptVm, io_self: ScriptObject, backend: ShaderBackend) -> Vec<String> {
     let mut output = ShaderOutput::default();
     output.backend = backend;

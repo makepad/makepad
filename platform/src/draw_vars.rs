@@ -16,11 +16,12 @@ use crate::{
     uniform_buffer::UniformBuffer,
 };
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 use crate::makepad_script::{
     shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType},
     shader_backend::ShaderBackend,
 };
+use crate::makepad_script::mod_shader::SHADER_IO_VERTEX_BUFFER;
 
 pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
 // Combined bindings, not the fragment-stage limit. Full rigid PBR uses
@@ -91,6 +92,12 @@ impl ScriptHook for DrawVars {
         DrawVars::prune_stale_object_shader_cache(vm);
 
         if !apply.is_default() && !apply.is_animate() {
+            #[cfg(not(target_arch = "wasm32"))]
+            if vm.host.cx().draw_shaders.packs.recorder.is_some() {
+                if let Some(io_self) = value.as_object() {
+                    DrawVars::record_shader_pack_entry(vm, io_self);
+                }
+            }
             self.compile_shader(vm, apply, value);
         }
 
@@ -1152,134 +1159,240 @@ impl DrawVars {
                 }
             }
 
-            let mut output = ShaderOutput::default();
-            output.backend = ShaderBackend::Glsl;
-            output.use_vulkan = false;
-            output.const_table = vm.host.cx().shader_const_table_mode();
-            output.pre_collect_rust_instance_io(vm, io_self);
-            output.pre_collect_shader_io(vm, io_self);
-
-            if let Some(fnobj) = vm
-                .bx
-                .heap
-                .object_method(io_self, id!(vertex).into(), vm.thread().trap.pass())
-                .as_object()
-            {
-                output.mode = ShaderMode::Vertex;
-                ShaderFnCompiler::compile_shader_def(
-                    vm,
-                    &mut output,
-                    NoTrap,
-                    id!(vertex),
-                    fnobj,
-                    ShaderType::IoSelf(io_self),
-                    vec![],
-                );
-            }
-            if let Some(fnobj) = vm
-                .bx
-                .heap
-                .object_method(io_self, id!(fragment).into(), vm.thread().trap.pass())
-                .as_object()
-            {
-                output.mode = ShaderMode::Fragment;
-                ShaderFnCompiler::compile_shader_def(
-                    vm,
-                    &mut output,
-                    NoTrap,
-                    id!(fragment),
-                    fnobj,
-                    ShaderType::IoSelf(io_self),
-                    vec![],
-                );
-            }
-
-            if output.has_errors {
-                Self::log_shader_compile_failure(vm, io_self, &output);
+            let const_table = vm.host.cx().shader_const_table_mode();
+            // A shader pack entry binds the shader without a compile.
+            if !vm.host.cx().draw_shaders.packs.is_empty() || cfg!(makepad_precompiled_shaders) {
+                let key = crate::shader_pack::shader_pack_key(vm, io_self, const_table);
+                if let Some(entry) = vm.host.cx().draw_shaders.packs.entry(key) {
+                    let desc = entry.to_desc(&vm.bx.heap, io_self);
+                    let code = CxDrawShaderCode::Separate { vertex: entry.vertex, fragment: entry.fragment };
+                    self.register_compiled_shader(vm, io_self, code, &desc, heap_key, fnhash, pipe);
+                    return;
+                }
+                Self::log_shader_pack_miss(vm, io_self, key);
+                #[cfg(makepad_precompiled_shaders)]
                 return;
             }
 
-            output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
-
-            let mut shared_defs = String::new();
-            output.create_struct_defs(vm, &mut shared_defs);
-
-            let mut vertex = String::new();
-            let mut fragment = String::new();
-            output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
-            output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
-
-            let code = CxDrawShaderCode::Separate { vertex, fragment };
-
+            #[cfg(not(makepad_precompiled_shaders))]
             {
-                let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
-                    let cx = vm.host.cx_mut();
-                    cx.draw_shaders
-                        .cache_object_id_to_shader
-                        .insert((heap_key, io_self), shader_id);
-                    cx.draw_shaders
-                        .cache_functions_to_shader
-                        .insert(fnhash, shader_id);
-                    self.finalize_cached_shader(vm, shader_id);
+                let Some((output, code)) = Self::compile_glsl(vm, io_self, const_table) else {
                     return;
-                }
+                };
+                let desc = DrawShaderDesc::from_output(&vm.bx.heap, &output);
+                self.register_compiled_shader(vm, io_self, code, &desc, heap_key, fnhash, pipe);
             }
+        }
+    }
 
-            let geometry_id = if let Some(vb_obj) = output.find_vertex_buffer_object(vm, io_self) {
-                let buffer_value =
-                    vm.bx
-                        .heap
-                        .value(vb_obj, id!(buffer).into(), vm.thread().trap.pass());
-                if let Some(handle) = buffer_value.as_handle() {
-                    vm.bx
-                        .heap
-                        .handle_ref::<crate::geometry::Geometry>(handle)
-                        .map(|g: &crate::geometry::Geometry| g.geometry_id())
-                } else {
-                    None
-                }
+    /// A shader the shader pack does not hold: say which, and where it is
+    /// written (the collect run never applied it: a widget that creates it
+    /// from data needs a `scan:` entry). Without a compiler it is not
+    /// drawn; with one it is compiled now. Once per shader object.
+    #[cfg(target_arch = "wasm32")]
+    fn log_shader_pack_miss(vm: &ScriptVm, io_self: ScriptObject, key: u64) {
+        let name = vm
+            .bx
+            .heap
+            .object_type_name_in_chain(io_self)
+            .map(|id| format!("{}", id))
+            .unwrap_or_else(|| format!("<script object {}>", io_self.index()));
+        let at = [id!(fragment), id!(pixel), id!(vertex)]
+            .iter()
+            .find_map(|m| match vm.bx.heap.object_method(io_self, (*m).into(), NoTrap).as_object() {
+                Some(f) => match vm.bx.heap.as_fn(f) {
+                    Some(ScriptFnPtr::Script(ip)) => vm.bx.code.ip_to_loc(ip).map(|loc| loc.to_string()),
+                    _ => None,
+                },
+                None => None,
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        #[cfg(makepad_precompiled_shaders)]
+        {
+            crate::shader_error::note(format!("{name}: not in the shader pack"));
+            crate::error!(
+                "not in pack: draw shader '{}' ({}, key {:016x}); this build has no shader compiler: it will NOT be drawn. Add the widget that creates it to a `scan:` list",
+                name,
+                at,
+                key
+            );
+        }
+        #[cfg(not(makepad_precompiled_shaders))]
+        crate::log!(
+            "not in pack: draw shader '{}' ({}, key {:016x}), compiled at run time. Add the widget that creates it to a `scan:` list",
+            name,
+            at,
+            key
+        );
+    }
+
+    /// The GLSL ES 3.0 compile of a draw shader: the web backend's code, as
+    /// the web build runs it and a shader pack recording repeats it. `None`
+    /// (logged) when the shader does not compile.
+    #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
+    pub(crate) fn compile_glsl(
+        vm: &mut ScriptVm,
+        io_self: ScriptObject,
+        const_table: bool,
+    ) -> Option<(ShaderOutput, CxDrawShaderCode)> {
+        let mut output = ShaderOutput::default();
+        output.backend = ShaderBackend::Glsl;
+        output.use_vulkan = false;
+        output.const_table = const_table;
+        output.pre_collect_rust_instance_io(vm, io_self);
+        output.pre_collect_shader_io(vm, io_self);
+
+        if let Some(fnobj) = vm
+            .bx
+            .heap
+            .object_method(io_self, id!(vertex).into(), vm.thread().trap.pass())
+            .as_object()
+        {
+            output.mode = ShaderMode::Vertex;
+            ShaderFnCompiler::compile_shader_def(
+                vm,
+                &mut output,
+                NoTrap,
+                id!(vertex),
+                fnobj,
+                ShaderType::IoSelf(io_self),
+                vec![],
+            );
+        }
+        if let Some(fnobj) = vm
+            .bx
+            .heap
+            .object_method(io_self, id!(fragment).into(), vm.thread().trap.pass())
+            .as_object()
+        {
+            output.mode = ShaderMode::Fragment;
+            ShaderFnCompiler::compile_shader_def(
+                vm,
+                &mut output,
+                NoTrap,
+                id!(fragment),
+                fnobj,
+                ShaderType::IoSelf(io_self),
+                vec![],
+            );
+        }
+
+        if output.has_errors {
+            Self::log_shader_compile_failure(vm, io_self, &output);
+            return None;
+        }
+
+        output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
+
+        let mut shared_defs = String::new();
+        output.create_struct_defs(vm, &mut shared_defs);
+
+        let mut vertex = String::new();
+        let mut fragment = String::new();
+        output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
+        output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
+
+        Some((output, CxDrawShaderCode::Separate { vertex, fragment }))
+    }
+
+    /// Bind a compiled (or shader pack) draw shader: reuse the shader of the
+    /// same code and pipeline state, or build its mapping and register it.
+    #[cfg(target_arch = "wasm32")]
+    #[allow(clippy::too_many_arguments)]
+    fn register_compiled_shader(
+        &mut self,
+        vm: &mut ScriptVm,
+        io_self: ScriptObject,
+        code: CxDrawShaderCode,
+        desc: &DrawShaderDesc,
+        heap_key: usize,
+        fnhash: LiveId,
+        pipe: LiveId,
+    ) {
+        {
+            let cx = vm.host.cx();
+            if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
+                let cx = vm.host.cx_mut();
+                cx.draw_shaders
+                    .cache_object_id_to_shader
+                    .insert((heap_key, io_self), shader_id);
+                cx.draw_shaders
+                    .cache_functions_to_shader
+                    .insert(fnhash, shader_id);
+                self.finalize_cached_shader(vm, shader_id);
+                return;
+            }
+        }
+
+        let geometry_id = if let Some(vb_obj) = Self::find_vertex_buffer_object(&vm.bx.heap, io_self) {
+            let buffer_value =
+                vm.bx
+                    .heap
+                    .value(vb_obj, id!(buffer).into(), vm.thread().trap.pass());
+            if let Some(handle) = buffer_value.as_handle() {
+                vm.bx
+                    .heap
+                    .handle_ref::<crate::geometry::Geometry>(handle)
+                    .map(|g: &crate::geometry::Geometry| g.geometry_id())
             } else {
                 None
-            };
+            }
+        } else {
+            None
+        };
 
-            let source = vm.bx.heap.new_object_ref(io_self);
-            let mut mapping = CxDrawShaderMapping::from_shader_output(
-                source,
-                code.clone(),
-                &vm.bx.heap,
-                &output,
-                geometry_id,
-            );
-            mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
+        let source = vm.bx.heap.new_object_ref(io_self);
+        let mut mapping = CxDrawShaderMapping::from_desc(
+            source,
+            code.clone(),
+            &vm.bx.heap,
+            desc,
+            geometry_id,
+        );
+        mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
 
-            self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
-            self.dyn_instance_slots = mapping.instances.total_slots;
+        self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
+        self.dyn_instance_slots = mapping.instances.total_slots;
 
-            // The shader's type name, for GPU diagnostics (`gpu.shaders`).
-            let debug_id = vm.bx.heap.object_type_name_in_chain(io_self).unwrap_or(LiveId(0));
-            let cx = vm.host.cx_mut();
-            mapping.scope_uniforms_gen = cx.next_uniform_gen();
-            let index = cx.draw_shaders.shaders.len();
-            cx.draw_shaders.shaders.push(CxDrawShader {
-                debug_id,
-                os_shader_id: None,
-                mapping,
-            });
+        // The shader's type name, for GPU diagnostics (`gpu.shaders`).
+        let debug_id = vm.bx.heap.object_type_name_in_chain(io_self).unwrap_or(LiveId(0));
+        let cx = vm.host.cx_mut();
+        mapping.scope_uniforms_gen = cx.next_uniform_gen();
+        let index = cx.draw_shaders.shaders.len();
+        cx.draw_shaders.shaders.push(CxDrawShader {
+            debug_id,
+            os_shader_id: None,
+            mapping,
+        });
 
-            let shader_id = DrawShaderId { index };
-            cx.draw_shaders
-                .cache_object_id_to_shader
-                .insert((heap_key, io_self), shader_id);
-            cx.draw_shaders
-                .cache_functions_to_shader
-                .insert(fnhash, shader_id);
-            cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
-            cx.draw_shaders.compile_set.insert(index);
+        let shader_id = DrawShaderId { index };
+        cx.draw_shaders
+            .cache_object_id_to_shader
+            .insert((heap_key, io_self), shader_id);
+        cx.draw_shaders
+            .cache_functions_to_shader
+            .insert(fnhash, shader_id);
+        cx.draw_shaders.cache_code_to_shader.insert((code, pipe), shader_id);
+        cx.draw_shaders.compile_set.insert(index);
 
-            self.draw_shader_id = Some(shader_id);
-            self.geometry_id = geometry_id;
+        self.draw_shader_id = Some(shader_id);
+        self.geometry_id = geometry_id;
+    }
+
+    /// The vertex-buffer marker object on the shader object's prototype
+    /// chain, if it has one (a heap walk, no compile).
+    pub fn find_vertex_buffer_object(heap: &ScriptHeap, io_self: ScriptObject) -> Option<ScriptObject> {
+        let mut current = Some(io_self);
+        while let Some(obj) = current {
+            if let Some(found) = heap.object_data(obj).map_iter_ret(|_key, value| {
+                let value_obj = value.as_object()?;
+                (heap.as_shader_io(value_obj) == Some(SHADER_IO_VERTEX_BUFFER)).then_some(value_obj)
+            }) {
+                return Some(found);
+            }
+            current = heap.proto(obj).as_object();
         }
+        None
     }
 
     /// The shader's pipeline state as a hash: its `color_format` and

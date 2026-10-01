@@ -681,6 +681,10 @@ pub struct ValueError {
 pub struct ScriptValueType(u8);
 
 impl ScriptValueType {
+    /// The type's number, as the constants below define it.
+    pub const fn index(self) -> u8 {
+        self.0
+    }
     pub const F64: Self = Self(0);
     pub const NAN: Self = Self(1);
     pub const F32: Self = Self(2);
