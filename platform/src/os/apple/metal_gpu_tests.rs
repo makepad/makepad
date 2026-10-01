@@ -263,6 +263,27 @@ fn runaway_nested_loops_finish_within_the_budget_on_the_gpu() {
 }
 
 #[test]
+fn while_with_a_called_condition_reruns_it_each_pass_on_the_gpu() {
+    let Some(gpu) = Gpu::new() else { return };
+    // The cascade search shape: the condition calls a fn on a var the body
+    // reassigns. proj(ci).x = 2 - ci, inside below 0.99: stops at ci = 2.
+    let extra = "inside: fn(q: vec3, m: float) -> float {\nif q.x > m { return 0.0 }\nreturn 1.0\n}\n\
+                 proj: fn(ci: float) -> vec3 {\nreturn vec3(2.0 - ci + self.u_n, 0.0, 0.0)\n}";
+    let body = "var ci = 0.0\nvar q = self.proj(0.0)\n\
+                while ci < 3.5 && self.inside(q, 0.99) < 0.5 {\nci = ci + 1.0\nq = self.proj(min(ci, 3.0))\n}\n\
+                self.pixel = vec4(ci, q.x, 0.0, 1.0)";
+    let (px, _) = run_splash(&gpu, body, extra);
+    assert_eq!(px, [2.0, 0.0, 0.0, 1.0]);
+    // Nested whiles stepping float vars (the exposure meter's 8x8 grid),
+    // and a condition that calls with the var the body steps.
+    let body = "var n = 0.0\nvar y = 0.0\nwhile y < 8.0 {\nvar x = 0.0\nwhile x < 8.0 {\nn = n + 1.0\nx = x + 1.0\n}\ny = y + 1.0\n}\n\
+                var j = 0.0\nwhile self.inside(self.proj(j), 0.99) < 0.5 && j < 10.0 { j = j + 1.0 }\n\
+                self.pixel = vec4(n, j, 0.0, 1.0)";
+    let (px, _) = run_splash(&gpu, body, extra);
+    assert_eq!(px, [64.0, 2.0, 0.0, 1.0]);
+}
+
+#[test]
 fn scalar_varyings_after_vector_varyings_interpolate_correctly() {
     let Some(gpu) = Gpu::new() else { return };
     // VJ5's case: a float varying declared after a vec2 one.
