@@ -67,9 +67,9 @@ script_mod! {
         // x = radius (m), y = bias floor (m), z = bias slope per metre of
         // view distance, w unused
         u_ao: uniform(vec4(0.3, 0.015, 0.002, 0.0))
-        // x = 1: `depth_tex` is a HARDWARE depth buffer of a GL-style
-        // projection (stored z = ndc * 0.5 + 0.5); y, z = the projection's
-        // m[2][2] and m[3][2], which turn it back into view distance.
+        // x = 1: `depth_tex` is a HARDWARE depth buffer (it holds ndc z on
+        // every backend); y, z = the projection's m[2][2] and m[3][2],
+        // which turn it back into view distance.
         u_depth: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
         // View distance at uv (0 = background), from either input kind.
@@ -81,7 +81,7 @@ script_mod! {
             if d >= 0.99999 {
                 return 0.0
             }
-            let z = self.u_depth.z / (d * 2.0 - 1.0 + self.u_depth.y)
+            let z = self.u_depth.z / (d + self.u_depth.y)
             let nx = uv.x * 2.0 - 1.0
             let ny = 1.0 - uv.y * 2.0
             return z * length(vec3(nx * self.u_proj.x, ny * self.u_proj.y, 1.0))

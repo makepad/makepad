@@ -32,19 +32,13 @@ script_mod! {
         g_misc: uniform(vec4(1.0, 1.0, 0.0, 1.0))
         // The camera for depth reads: proj[10], proj[14], orthographic.
         g_cam: uniform(vec4(-1.0, -0.2, 0.0, 1.0))
-        // The view (when the host gives one): the inverse view-projection
-        // by rows, the eye (w = 1 when set) and the view's forward axis.
-        g_ivp0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
-        g_ivp1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
-        g_ivp2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
-        g_ivp3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        // The view (when the host gives one): the inverse view-projection,
+        // the eye (w = 1 when set) and the view's forward axis.
+        g_ivp: uniform(mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
         g_eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         g_fwd: uniform(vec4(0.0, 0.0, -1.0, 0.0))
-        // Last frame's projection x view by rows (realtime velocity).
-        g_pvp0: uniform(vec4(1.0, 0.0, 0.0, 0.0))
-        g_pvp1: uniform(vec4(0.0, 1.0, 0.0, 0.0))
-        g_pvp2: uniform(vec4(0.0, 0.0, 1.0, 0.0))
-        g_pvp3: uniform(vec4(0.0, 0.0, 0.0, 1.0))
+        // Last frame's projection x view (realtime velocity).
+        g_pvp: uniform(mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0))
 
         vertex: fn() {
             self.pos = self.geom.pos
@@ -87,21 +81,21 @@ script_mod! {
         eye: fn() -> vec3 { return self.g_eye.xyz }
         ray_dir: fn(uv: vec2) -> vec3 {
             let n = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, 1.0, 1.0)
-            let w = vec4(dot(self.g_ivp0, n), dot(self.g_ivp1, n), dot(self.g_ivp2, n), dot(self.g_ivp3, n))
+            let w = self.g_ivp * n
             return normalize(w.xyz / w.w - self.g_eye.xyz)
         }
         view_distance: fn(p: vec3) -> float { return dot(p - self.g_eye.xyz, self.g_fwd.xyz) }
         // The world point a depth-buffer sample shows at `uv`.
         world_at: fn(uv: vec2, z: float) -> vec3 {
             let n = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0)
-            let w = vec4(dot(self.g_ivp0, n), dot(self.g_ivp1, n), dot(self.g_ivp2, n), dot(self.g_ivp3, n))
+            let w = self.g_ivp * n
             return w.xyz / w.w
         }
         // Where world point `p` was on screen last frame (uv): with `uv`,
         // the camera's screen motion there.
         prev_uv: fn(p: vec3) -> vec2 {
             let q = vec4(p, 1.0)
-            let c = vec4(dot(self.g_pvp0, q), dot(self.g_pvp1, q), dot(self.g_pvp2, q), dot(self.g_pvp3, q))
+            let c = self.g_pvp * q
             return vec2(c.x / c.w * 0.5 + 0.5, 0.5 - c.y / c.w * 0.5)
         }
         luma: fn(c: vec3) -> float { return dot(c, vec3(0.2126, 0.7152, 0.0722)) }

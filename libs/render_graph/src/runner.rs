@@ -485,19 +485,10 @@ impl GraphRunner {
             dv.set_uniform(cx.cx, live_id!(g_misc), &[frame.exposure, aspect, mode, pass_px]);
             dv.set_uniform(cx.cx, live_id!(g_cam), &frame.camera);
             if let Some(v) = &self.view {
-                // Rows of the column-major matrix.
-                let m = &v.inv_view_proj;
-                dv.set_uniform(cx.cx, live_id!(g_ivp0), &[m[0], m[4], m[8], m[12]]);
-                dv.set_uniform(cx.cx, live_id!(g_ivp1), &[m[1], m[5], m[9], m[13]]);
-                dv.set_uniform(cx.cx, live_id!(g_ivp2), &[m[2], m[6], m[10], m[14]]);
-                dv.set_uniform(cx.cx, live_id!(g_ivp3), &[m[3], m[7], m[11], m[15]]);
+                dv.set_uniform(cx.cx, live_id!(g_ivp), &v.inv_view_proj);
                 dv.set_uniform(cx.cx, live_id!(g_eye), &[v.eye[0], v.eye[1], v.eye[2], 1.0]);
                 dv.set_uniform(cx.cx, live_id!(g_fwd), &[v.forward[0], v.forward[1], v.forward[2], 0.0]);
-                let p = &v.prev_view_proj;
-                dv.set_uniform(cx.cx, live_id!(g_pvp0), &[p[0], p[4], p[8], p[12]]);
-                dv.set_uniform(cx.cx, live_id!(g_pvp1), &[p[1], p[5], p[9], p[13]]);
-                dv.set_uniform(cx.cx, live_id!(g_pvp2), &[p[2], p[6], p[10], p[14]]);
-                dv.set_uniform(cx.cx, live_id!(g_pvp3), &[p[3], p[7], p[11], p[15]]);
+                dv.set_uniform(cx.cx, live_id!(g_pvp), &v.prev_view_proj);
             }
             // The values of the given passes this one holds, in order.
             let vals = self.members.get(p.node).into_iter().flatten().filter_map(|&m| values.get(m)).flatten();
