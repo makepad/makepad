@@ -22,7 +22,8 @@
 //! `filter` (lp hp bp notch ladder), `cutoff`, `cutoff_to`, `q`, shorthands
 //! `lp=`/`hp=`/`bp=`/`ladder=` (mode + cutoff, `a>b` sweeps), `drive`,
 //! `a` `d` `s` `r` (ADSR seconds / sustain level), `hold` (gate seconds),
-//! `gain`, `delay`, `pan`, `width` (pulse width), `density` (velvet),
+//! `gain`, `delay`, `pan`, `width` (pulse width), `pwm` and `pwm_depth`
+//! (pulse-width modulation), `density` (velvet),
 //! `repeat` (count), `every` (seconds between repeats), `decay` (gain per
 //! repeat), `detune` (cents). Recipe keys: `volume`, `jitter` (random pitch
 //! ± fraction per play), `reverb` (send 0..1), `pitch`.
@@ -74,6 +75,10 @@ pub struct Layer {
     pub delay: f32,
     pub pan: f32,
     pub width: f32,
+    /// Pulse-width modulation: a triangle of `pwm_depth` (0..0.45 of the
+    /// period either side of `width`) at `pwm_hz` (`pwm`).
+    pub pwm_hz: f32,
+    pub pwm_depth: f32,
     pub density: f32,
     pub repeat: u16,
     pub every: f32,
@@ -106,6 +111,8 @@ impl Default for Layer {
             delay: 0.0,
             pan: 0.0,
             width: 0.5,
+            pwm_hz: 0.0,
+            pwm_depth: 0.0,
             density: 0.02,
             repeat: 0,
             every: 0.1,
@@ -194,6 +201,8 @@ impl Layer {
             "delay" => self.delay = v.clamp(0.0, 10.0),
             "pan" => self.pan = v.clamp(-1.0, 1.0),
             "width" | "pw" => self.width = v.clamp(0.05, 0.95),
+            "pwm" | "pwm_hz" => self.pwm_hz = v.clamp(0.0, 50.0),
+            "pwm_depth" => self.pwm_depth = v.clamp(0.0, 0.45),
             "density" => self.density = v.clamp(0.0, 1.0),
             "repeat" => self.repeat = v.clamp(0.0, 64.0) as u16,
             "every" => self.every = v.clamp(0.005, 5.0),
@@ -588,6 +597,11 @@ impl RecipeVoice {
                         y
                     }
                 };
+                if layer.pwm_depth > 0.0 && st.ctl == 0 {
+                    let ph = st.t * layer.pwm_hz;
+                    let tri = 4.0 * (ph - (ph + 0.5).floor()).abs() - 1.0;
+                    st.osc.width = (layer.width + layer.pwm_depth * tri).clamp(0.02, 0.98);
+                }
                 if layer.filter != FilterMode::Off && st.ctl == 0 {
                     let c = if layer.cutoff_to.is_finite() {
                         layer.cutoff * (layer.cutoff_to / layer.cutoff).powf(u)
