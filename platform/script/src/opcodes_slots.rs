@@ -65,7 +65,10 @@ impl<'a> ScriptVm<'a> {
 
     pub(crate) fn handle_let_slot(&mut self, opargs: OpcodeArgs) {
         let value = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
-        let _id = self.bx.threads.cur().pop_stack_value();
+        let id = self.bx.threads.cur().pop_stack_value();
+        if let Some(hook) = self.bx.let_hook {
+            hook(&self.bx.heap, self.bx.threads.cur_ref().trap.ip, id.as_id().unwrap_or_default(), value);
+        }
         // parity with def_scope_value: stored values pass the escape barrier
         self.bx.heap.escape_value(value);
         self.bx.threads.cur().set_slot(opargs.to_u32(), value);

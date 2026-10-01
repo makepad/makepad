@@ -2141,6 +2141,11 @@ pub enum ScriptBinOp {
 /// result's `made_at`).
 pub type ScriptObjectOpHook = fn(&mut ScriptHeap, ScriptBinOp, ScriptValue, ScriptValue, ScriptIp) -> Option<ScriptValue>;
 
+/// Called as a `let` or `var` binds a value: `(heap, ip, name, value)`,
+/// `ip` the binding's place. A host that shows what code computed (an
+/// editor's live values) installs it for one evaluation.
+pub type ScriptLetHook = fn(&ScriptHeap, ScriptIp, LiveId, ScriptValue);
+
 pub struct ScriptVmBase {
     pub void: usize,
     pub code: ScriptCode,
@@ -2178,6 +2183,8 @@ pub struct ScriptVmBase {
     /// a derived value. Only reached where an operand is an object, so no
     /// program on numbers, vectors, colours or strings changes meaning.
     pub object_op_hook: Option<ScriptObjectOpHook>,
+    /// What `let`s bind, told to the host (none by default).
+    pub let_hook: Option<ScriptLetHook>,
 }
 
 impl ScriptVmBase {
@@ -2198,6 +2205,7 @@ impl ScriptVmBase {
             last_limit_consumed: 0,
             last_limit_exit_remaining: 0,
             object_op_hook: None,
+            let_hook: None,
         }
     }
 
@@ -2238,6 +2246,7 @@ impl ScriptVmBase {
             last_limit_consumed: 0,
             last_limit_exit_remaining: 0,
             object_op_hook: None,
+            let_hook: None,
         }
     }
 }

@@ -663,6 +663,9 @@ impl<'a> ScriptVm<'a> {
         };
         let id = self.bx.threads.cur().pop_stack_value();
         let id = id.as_id().unwrap_or(id!());
+        if let Some(hook) = self.bx.let_hook {
+            hook(&self.bx.heap, self.bx.threads.cur_ref().trap.ip, id, value);
+        }
         self.bx
             .threads
             .cur()
@@ -684,6 +687,9 @@ impl<'a> ScriptVm<'a> {
             .pop_stack_value()
             .as_id()
             .unwrap_or(id!());
+        if let Some(hook) = self.bx.let_hook {
+            hook(&self.bx.heap, self.bx.threads.cur_ref().trap.ip, id, value);
+        }
         self.bx
             .threads
             .cur()
@@ -699,6 +705,9 @@ impl<'a> ScriptVm<'a> {
         };
         let id = self.bx.threads.cur().pop_stack_value();
         let id = id.as_id().unwrap_or(id!());
+        if let Some(hook) = self.bx.let_hook {
+            hook(&self.bx.heap, self.bx.threads.cur_ref().trap.ip, id, value);
+        }
         self.bx
             .threads
             .cur()
@@ -720,6 +729,9 @@ impl<'a> ScriptVm<'a> {
             .pop_stack_value()
             .as_id()
             .unwrap_or(id!());
+        if let Some(hook) = self.bx.let_hook {
+            hook(&self.bx.heap, self.bx.threads.cur_ref().trap.ip, id, value);
+        }
         self.bx
             .threads
             .cur()
