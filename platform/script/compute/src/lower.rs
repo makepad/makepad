@@ -60,6 +60,9 @@ pub const LOOP_CAP: u32 = 1024;
 /// break/continue of their own) are unrolled, when the unrolled code fits
 /// [`UNROLL_BYTES`].
 pub const UNROLL_MAX: u32 = 8;
+/// Audio programs' `for` loops over constant ranges up to this many
+/// iterations unroll (see `for_loop`).
+pub const AUDIO_UNROLL_MAX: u32 = 16;
 /// Most code a fully unrolled loop may emit (estimated, every backend):
 /// beyond a few hundred instructions unrolling stops paying (the loop's
 /// own overhead is a few instructions an iteration) and costs instruction
@@ -2763,8 +2766,17 @@ impl Lowerer {
         if let (V::Lit(a), V::Lit(z)) = (&a, &z) {
             let (a, z) = (a.floor() as i64, z.floor() as i64);
             let count = (z - a).max(0) as u64;
-            // Small loops unroll while the unrolled code stays small.
-            let unroll = count <= UNROLL_MAX as u64 && count.saturating_mul(self.ast_cost(body)).saturating_mul(BYTES_PER_OP) <= UNROLL_BYTES;
+            // Small loops unroll while the unrolled code stays small. Audio
+            // programs keep their own rule (up to 16 iterations, or 64 of a
+            // one-line body): an unrolled loop's counter is a literal, and
+            // expressions of literals fold at lowering (in f64, rounded to
+            // f32 once) where the loop computes them in f32 step by step, so
+            // the rule decides the rendered bits, which audio renders keep
+            // (their golden hashes).
+            let unroll = match self.domain {
+                Domain::Audio => count <= AUDIO_UNROLL_MAX as u64 || (count <= 64 && body.len() == 1),
+                Domain::Kernel => count <= UNROLL_MAX as u64 && count.saturating_mul(self.ast_cost(body)).saturating_mul(BYTES_PER_OP) <= UNROLL_BYTES,
+            };
             if unroll && !has_own_break(body) {
                 for k in a..z {
                     self.scoped(|l| {

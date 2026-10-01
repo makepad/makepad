@@ -745,3 +745,30 @@ fn renders_match_the_golden_hashes() {
         assert_eq!(want, Some(*h), "{} changed", n);
     }
 }
+
+/// A constant `for` in an audio program renders the same bits as the same
+/// loop written out by hand: the lowering unrolls it, so expressions of its
+/// counter fold exactly as the hand-written literals do. (An unroll rule
+/// that kept wavetable_pad's 16-harmonic loop a loop computed `mix(saw, sq,
+/// t * 2.0)` in f32 step by step instead of folding it, and its golden
+/// render changed.)
+#[test]
+fn constant_loops_render_as_written_out() {
+    let src = shader_src("wavetable_pad");
+    let head = "            for h in 1..17 {\n";
+    let start = src.find(head).expect("wavetable_pad's harmonic loop");
+    let body_start = start + head.len();
+    let end = body_start + src[body_start..].find("\n            }\n").expect("loop end");
+    let body = &src[body_start..end];
+    let mut written = String::new();
+    for h in 1..17 {
+        written.push_str(&format!("            {{\n                let h = {h}\n{body}\n            }}\n"));
+    }
+    let unrolled = format!("{}{}{}", &src[..start], written, &src[end + "\n            }\n".len()..]);
+    let total = 48000;
+    for backend in [Backend::Native, Backend::Interp] {
+        let a = perform(&build(&src, backend), backend == Backend::Interp, &[128], total);
+        let b = perform(&build(&unrolled, backend), backend == Backend::Interp, &[128], total);
+        assert!(bits(&a.0) == bits(&b.0) && bits(&a.1) == bits(&b.1), "{backend:?}: the loop and its written-out form differ at {:?}", first_diff(&a.0, &b.0));
+    }
+}
