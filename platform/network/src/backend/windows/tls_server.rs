@@ -825,10 +825,9 @@ struct CertContext {
     store: *mut c_void,
 }
 
-/// Client handshake on Schannel without chain validation; the server's
-/// certificate must hash to `pin` before the stream is returned (nothing
-/// has been sent but the handshake at that point).
-pub fn connect_pinned(mut tcp: TcpStream, host: &str, pin: &[u8; 32]) -> io::Result<ServerStream> {
+/// Client handshake on Schannel without chain validation (self-signed
+/// servers); returns the server certificate's SHA-256 with the stream.
+pub fn connect_capture(mut tcp: TcpStream, host: &str) -> io::Result<(ServerStream, [u8; 32])> {
     let cred = client_credentials()?;
     let target = wide(host);
     // The stream owns cred and ctx from here; its Drop frees them.
@@ -913,7 +912,7 @@ pub fn connect_pinned(mut tcp: TcpStream, host: &str, pin: &[u8; 32]) -> io::Res
             }
         }
     }
-    // The pin, before any application data.
+    // The certificate, before any application data.
     let mut cert: *const c_void = null();
     let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &mut cert as *mut _ as *mut c_void) };
     if st != SEC_E_OK || cert.is_null() {
@@ -925,18 +924,11 @@ pub fn connect_pinned(mut tcp: TcpStream, host: &str, pin: &[u8; 32]) -> io::Res
     };
     unsafe { CertFreeCertificateContext(cert) };
     let got = crate::digest::sha256_hash(&der);
-    if !crate::tls::constant_time_eq(&got, pin) {
-        let _ = tcp.shutdown(Shutdown::Both);
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("server certificate fingerprint {} does not match the pin", crate::tls::to_hex(&got)),
-        ));
-    }
     let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_STREAM_SIZES, &mut stream.sizes as *mut _ as *mut c_void) };
     if st != SEC_E_OK {
         return Err(status_error("QueryContextAttributes(STREAM_SIZES)", st));
     }
-    Ok(stream)
+    Ok((stream, got))
 }
 
 impl Read for ServerStream {

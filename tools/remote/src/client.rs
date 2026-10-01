@@ -232,7 +232,11 @@ pub fn rotate(addr: &str) -> io::Result<()> {
     // 2. Client tries next first, keeps current as the fallback.
     set_entries(&psk_path, &host, &[next.to_hex(), current.to_hex()], true)?;
     // 3. Prove next works, and drop current on the server (over next).
-    let creds = ClientCredentials { keys: vec![next.clone()], pin: client_credentials(&tunnel_dir(), &addr)?.pin };
+    let creds = ClientCredentials {
+        keys: vec![next.clone()],
+        known_hosts: Some(makepad_network::tls::KnownHosts::new(tunnel_dir().join("pins"))),
+        expect: None,
+    };
     {
         let mut conn = connect_with_credentials(&addr, &creds)?;
         write_msg(&mut conn, TAG_SET_KEYS, key_file_text(&[next.clone()]).as_bytes())?;
@@ -253,7 +257,7 @@ pub fn probe(addr: &str, keys_file: &Path, identity_dir: &Path) -> io::Result<()
     let keys = load_server_keys(keys_file)?;
     let fp_text = fs::read_to_string(identity_dir.join(makepad_network::tls::FINGERPRINT_FILE))?;
     let pin = from_hex::<32>(fp_text.trim()).ok_or_else(|| io::Error::other("bad fingerprint file"))?;
-    let creds = ClientCredentials { keys, pin };
+    let creds = ClientCredentials { keys, known_hosts: None, expect: Some(pin) };
     let mut conn = connect_with_credentials(&with_port(addr), &creds)?;
     write_msg(&mut conn, TAG_ADMIN, b"probe")?;
     // Any answer (an allowlist refusal) proves TLS, the pin and the key.

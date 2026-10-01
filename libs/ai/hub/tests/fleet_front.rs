@@ -1,10 +1,10 @@
-//! The TLS front end to end on this OS's TLS stack: pinned TLS, fleet
-//! credentials, route policy per role, identity stamping, the credential
-//! guard in the HTTP client, and the auth-failure ban.
+//! The TLS front end to end on this OS's TLS stack: known-node recording,
+//! fleet credential proofs, route policy per role, identity stamping, and
+//! the auth-failure ban.
 
-use makepad_ai_hub::fleet_auth::{pin_endpoint, Authority, Role, Trust};
+use makepad_ai_hub::fleet_auth::{install_fleet_client, mark_fleet_endpoint, FleetKey, Role, Verifier};
 use makepad_ai_hub::front::{start_front, FrontConfig};
-use makepad_ai_hub::http_client::{http_fetch, BearerAuth, HttpClientRequest};
+use makepad_ai_hub::http_client::{http_fetch, HttpClientRequest};
 use makepad_network::tls::{TlsIdentity, TlsServer};
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -55,11 +55,17 @@ fn start_inner() -> SocketAddr {
 fn front_end_to_end() {
     let _env = ENV.lock().unwrap_or_else(|p| p.into_inner());
     let dir = temp("e2e");
-    let authority = Authority::create(&dir.join("authority")).unwrap();
-    let point = makepad_network::tls::from_hex::<65>(&authority.public_hex()).unwrap();
-    let trust = Arc::new(Trust::new(point, ["revoked-one".to_string()].into_iter().collect()));
+    install_fleet_client(&dir);
+    let key = FleetKey::generate().unwrap();
     let identity = TlsIdentity::load_or_create(&dir.join("tls"), "test node").unwrap();
     let pin = identity.fingerprint;
+    let key_path = dir.join("fleet.key");
+    key.save(&key_path).unwrap();
+    let verifier = Arc::new(Verifier::new(
+        FleetKey::load(&key_path).unwrap(),
+        pin,
+        ["revoked-one".to_string()].into_iter().collect(),
+    ));
     let inner = start_inner();
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let listen = probe.local_addr().unwrap();
@@ -68,7 +74,7 @@ fn front_end_to_end() {
         listen,
         inner,
         tls: TlsServer::new(identity).unwrap(),
-        trust,
+        verifier,
         front_secret: "the-front-secret".into(),
         edge: false,
     })
@@ -76,20 +82,18 @@ fn front_end_to_end() {
     std::thread::sleep(Duration::from_millis(100));
 
     let expiry = makepad_ai_hub::fleet_auth::now_secs() + 3600;
-    let lan = authority.issue("tester", Role::Lan, expiry).unwrap();
-    let device = authority.issue("phone", Role::Device, expiry).unwrap();
-    let revoked = authority.issue("revoked-one", Role::Lan, expiry).unwrap();
+    let lan = key.issue("tester", Role::Lan, expiry).unwrap();
+    let device = key.issue("phone", Role::Device, expiry).unwrap();
+    let revoked = key.issue("revoked-one", Role::Lan, expiry).unwrap();
+    let other_fleet = FleetKey::generate().unwrap().issue("tester", Role::Lan, expiry).unwrap();
 
-    // Before the endpoint is pinned, a fleet credential is never sent.
+    // Not yet a fleet endpoint: the client does not speak fleet TLS to it.
     let url = format!("https://{listen}/jobs");
-    let mut request = HttpClientRequest::get(&url);
-    request.bearer = Some(BearerAuth { token: &lan, host_suffix: "127.0.0.1" });
-    let err = http_fetch(&request).err().expect("unpinned endpoint must be refused");
-    assert!(err.to_string().contains("not a verified fleet node"), "{err}");
+    assert!(http_fetch(&HttpClientRequest::get(&url)).is_err());
 
-    pin_endpoint(&listen.to_string(), pin);
+    mark_fleet_endpoint(&listen.to_string());
     let get = |path: &str, token: &str| {
-        std::env::set_var("MAKEPAD_AI_HUB_TOKEN", token);
+        std::env::set_var("MAKEPAD_AI_HUB_CREDENTIAL", token);
         let url = format!("https://{listen}{path}");
         let response = http_fetch(&HttpClientRequest::get(&url)).unwrap();
         let status = response.status;
@@ -109,25 +113,23 @@ fn front_end_to_end() {
     assert_eq!(get("/jobs", &device).0, 403);
     assert_eq!(get("/job/job-1", &device).0, 200);
 
-    // Revoked and forged credentials.
+    // The node's certificate is now a known node.
+    let known = std::fs::read_to_string(dir.join("known_nodes")).unwrap();
+    assert!(known.contains(&makepad_network::tls::to_hex(&pin)), "{known}");
+
+    // Revoked, tampered and other-fleet credentials.
     assert_eq!(get("/jobs", &revoked).0, 401);
     assert_eq!(get("/jobs", &lan.replace(".lan.", ".node.")).0, 401);
-
-    // A wrong pin: the client refuses before sending anything.
-    pin_endpoint(&listen.to_string(), [0u8; 32]);
-    std::env::set_var("MAKEPAD_AI_HUB_TOKEN", &lan);
-    let url = format!("https://{listen}/jobs");
-    assert!(http_fetch(&HttpClientRequest::get(&url)).is_err());
-    pin_endpoint(&listen.to_string(), pin);
+    assert_eq!(get("/jobs", &other_fleet).0, 401);
 
     // Repeated failures from one address end in a ban: then even a good
     // credential gets no answer from that address for a while.
     for _ in 0..4 {
-        std::env::set_var("MAKEPAD_AI_HUB_TOKEN", "mkc1.nobody.lan.1.00");
+        std::env::set_var("MAKEPAD_AI_HUB_CREDENTIAL", &other_fleet);
         let url = format!("https://{listen}/jobs");
         let _ = http_fetch(&HttpClientRequest::get(&url));
     }
-    std::env::set_var("MAKEPAD_AI_HUB_TOKEN", &lan);
+    std::env::set_var("MAKEPAD_AI_HUB_CREDENTIAL", &lan);
     let url = format!("https://{listen}/jobs");
     assert!(http_fetch(&HttpClientRequest::get(&url)).is_err(), "banned address still served");
 
@@ -150,11 +152,12 @@ fn websocket_through_the_front() {
     use std::sync::mpsc;
 
     let dir = temp("ws");
-    let authority = Authority::create(&dir.join("authority")).unwrap();
-    let point = makepad_network::tls::from_hex::<65>(&authority.public_hex()).unwrap();
-    let trust = Arc::new(Trust::new(point, Default::default()));
+    install_fleet_client(&dir);
+    let key = FleetKey::generate().unwrap();
     let identity = TlsIdentity::load_or_create(&dir.join("tls"), "ws node").unwrap();
-    let pin = identity.fingerprint;
+    let key_path = dir.join("fleet.key");
+    key.save(&key_path).unwrap();
+    let verifier = Arc::new(Verifier::new(FleetKey::load(&key_path).unwrap(), identity.fingerprint, Default::default()));
 
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let inner = probe.local_addr().unwrap();
@@ -186,15 +189,15 @@ fn websocket_through_the_front() {
         listen,
         inner,
         tls: TlsServer::new(identity).unwrap(),
-        trust,
+        verifier,
         front_secret: "s".into(),
         edge: false,
     })
     .unwrap();
     std::thread::sleep(Duration::from_millis(100));
-    pin_endpoint(&listen.to_string(), pin);
-    let token = authority.issue("ws-tester", Role::Lan, makepad_ai_hub::fleet_auth::now_secs() + 600).unwrap();
-    std::env::set_var("MAKEPAD_AI_HUB_TOKEN", &token);
+    mark_fleet_endpoint(&listen.to_string());
+    let token = key.issue("ws-tester", Role::Lan, makepad_ai_hub::fleet_auth::now_secs() + 600).unwrap();
+    std::env::set_var("MAKEPAD_AI_HUB_CREDENTIAL", &token);
 
     let (wtx, wrx) = mpsc::channel();
     let request = makepad_network::HttpRequest::new(format!("wss://{listen}/realtime/job-x"), makepad_network::HttpMethod::GET);

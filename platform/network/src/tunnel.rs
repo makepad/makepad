@@ -2,8 +2,11 @@
 //! wire protocol, TLS transport and client authentication.
 //!
 //! Transport: TLS from [`crate::tls`] (each OS's own stack). The server has
-//! a self-signed P-256 certificate; clients pin its SHA-256 fingerprint per
-//! host, so there is no CA and no trust-on-first-use.
+//! a self-signed P-256 certificate; clients record its SHA-256 per host on
+//! first contact (`<tunnel dir>/pins`, ssh known-hosts style) and warn
+//! loudly if it later changes. The key proof below is bound to the
+//! certificate actually presented, so an impersonator learns nothing it can
+//! use against the real box.
 //!
 //! Client authentication, inside the TLS session, with a pre-shared key
 //! (32 random bytes) per box:
@@ -20,8 +23,8 @@
 //! any other server. TLS supplies confidentiality and integrity for
 //! everything after. Key files never leave their owner: the client keeps
 //! `<tunnel dir>/psk` (`<host> <hex key>` lines) and `<tunnel dir>/pins`
-//! (`<host> <hex sha256>` lines); a server keeps its accepted keys (one hex
-//! key per line, two during a rotation) in a file only it can read.
+//! (known hosts, `<host> <hex sha256>`); a server keeps its accepted keys
+//! (one hex key per line, two during a rotation) in a file only it can read.
 //!
 //! Messages after authentication: `tag(1) | len(u32 BE) | payload`.
 
@@ -277,10 +280,13 @@ fn lookup(text: &str, addr: &str) -> Vec<String> {
     exact
 }
 
-/// The keys (first = current) and pin a client uses for `addr`.
+/// The keys (first = current) a client uses for `addr`, and its
+/// known-hosts file. `expect`: a fingerprint that must match exactly
+/// (installer self-test), else the known-hosts rule applies.
 pub struct ClientCredentials {
     pub keys: Vec<Psk>,
-    pub pin: [u8; 32],
+    pub known_hosts: Option<crate::tls::KnownHosts>,
+    pub expect: Option<[u8; 32]>,
 }
 
 pub fn client_credentials(dir: &Path, addr: &str) -> io::Result<ClientCredentials> {
@@ -298,12 +304,7 @@ pub fn client_credentials(dir: &Path, addr: &str) -> io::Result<ClientCredential
     if keys.is_empty() {
         return Err(missing("key", &psk_path));
     }
-    let pins_text = fs::read_to_string(&pins_path).map_err(|_| missing("certificate pin", &pins_path))?;
-    let pin = lookup(&pins_text, addr)
-        .iter()
-        .find_map(|p| from_hex::<32>(p))
-        .ok_or_else(|| missing("certificate pin", &pins_path))?;
-    Ok(ClientCredentials { keys, pin })
+    Ok(ClientCredentials { keys, known_hosts: Some(crate::tls::KnownHosts::new(pins_path)), expect: None })
 }
 
 /// Sets `<name> <value>` in a `<host> <hex>` file: replaces the name's
@@ -472,9 +473,18 @@ pub fn connect_with_credentials(addr: &str, creds: &ClientCredentials) -> io::Re
     let tls_host = host.trim_start_matches('[').trim_end_matches(']');
     let mut last = None;
     for key in &creds.keys {
-        let mut stream = SocketStream::connect_pinned(tls_host, port, &creds.pin)?;
+        let (mut stream, seen) = SocketStream::connect_capture(tls_host, port)?;
+        if let Some(expect) = creds.expect {
+            if !constant_time_eq(&expect, &seen) {
+                stream.shutdown();
+                return Err(io::Error::new(io::ErrorKind::PermissionDenied, "server certificate is not the expected one"));
+            }
+        }
+        if let Some(known) = &creds.known_hosts {
+            known.observe(host, &seen);
+        }
         stream.set_read_timeout(Some(std::time::Duration::from_secs(30)))?;
-        match client_authenticate(&mut stream, key, &creds.pin) {
+        match client_authenticate(&mut stream, key, &seen) {
             Ok(()) => {
                 stream.set_read_timeout(None)?;
                 return Ok(TunnelConn { stream });

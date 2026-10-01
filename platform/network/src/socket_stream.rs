@@ -24,12 +24,11 @@ impl SocketStream {
         })
     }
 
-    /// TLS without CA validation, requiring the server certificate's
-    /// SHA-256 to equal `pin` (self-signed, pinned servers).
-    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
-        Ok(Self {
-            inner: crate::backend::linux::socket_stream::SocketStream::connect_pinned(host, port, pin)?,
-        })
+    /// TLS without CA validation (self-signed servers); returns the server
+    /// certificate's SHA-256 for a known-hosts check ([`crate::tls::KnownHosts`]).
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
+        let (inner, fp) = crate::backend::linux::socket_stream::SocketStream::connect_capture(host, port)?;
+        Ok((Self { inner }, fp))
     }
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
@@ -91,12 +90,11 @@ impl SocketStream {
         })
     }
 
-    /// TLS without CA validation, requiring the server certificate's
-    /// SHA-256 to equal `pin` (self-signed, pinned servers).
-    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
-        Ok(Self {
-            inner: apple_impl::SocketStream::connect_pinned(host, port, pin)?,
-        })
+    /// TLS without CA validation (self-signed servers); returns the server
+    /// certificate's SHA-256 for a known-hosts check ([`crate::tls::KnownHosts`]).
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
+        let (inner, fp) = apple_impl::SocketStream::connect_capture(host, port)?;
+        Ok((Self { inner }, fp))
     }
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
@@ -158,12 +156,11 @@ impl SocketStream {
         })
     }
 
-    /// TLS without CA validation, requiring the server certificate's
-    /// SHA-256 to equal `pin` (self-signed, pinned servers).
-    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
-        Ok(Self {
-            inner: windows_impl::SocketStream::connect_pinned(host, port, pin)?,
-        })
+    /// TLS without CA validation (self-signed servers); returns the server
+    /// certificate's SHA-256 for a known-hosts check ([`crate::tls::KnownHosts`]).
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
+        let (inner, fp) = windows_impl::SocketStream::connect_capture(host, port)?;
+        Ok((Self { inner }, fp))
     }
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
@@ -226,10 +223,10 @@ impl SocketStream {
         })
     }
 
-    pub fn connect_pinned(_host: &str, _port: &str, _pin: &[u8; 32]) -> io::Result<Self> {
+    pub fn connect_capture(_host: &str, _port: &str) -> io::Result<(Self, [u8; 32])> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "pinned TLS is not available on this target",
+            "self-signed TLS is not available on this target",
         ))
     }
 
@@ -288,10 +285,10 @@ impl SocketStream {
         ))
     }
 
-    pub fn connect_pinned(_host: &str, _port: &str, _pin: &[u8; 32]) -> io::Result<Self> {
+    pub fn connect_capture(_host: &str, _port: &str) -> io::Result<(Self, [u8; 32])> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "pinned TLS is not available on this target",
+            "self-signed TLS is not available on this target",
         ))
     }
 

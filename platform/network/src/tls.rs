@@ -14,9 +14,12 @@
 //! The OS generates the key and signs the certificate; this crate only
 //! writes the DER around them.
 //!
-//! Clients connect with [`crate::SocketStream::connect_pinned`], which runs
-//! the OS client stack without CA validation and then requires the server
-//! certificate's SHA-256 to equal the pin. TLS 1.2 is the floor everywhere;
+//! Clients connect with [`crate::SocketStream::connect_capture`], which runs
+//! the OS client stack without CA validation and returns the server
+//! certificate's SHA-256; [`KnownHosts`] records it ssh-style (first
+//! contact), warns loudly when it changes, and continues. What protects use
+//! of a server is the client credential, which is bound to the fingerprint
+//! actually seen. TLS 1.2 is the floor everywhere;
 //! TLS 1.3 is used where both stacks have it (OpenSSL, Schannel on recent
 //! Windows). SecureTransport stops at TLS 1.2, with ECDHE-ECDSA AEAD suites
 //! only.
@@ -100,34 +103,140 @@ pub fn os_random(buf: &mut [u8]) -> io::Result<()> {
     }
 }
 
-/// Verified endpoints (`host:port` → certificate SHA-256) that clients in
-/// this process may reach over pinned TLS, e.g. fleet nodes learned from
-/// endorsed discovery beacons. Websocket and HTTP clients consult it for
-/// `wss://` / `https://` URLs.
-fn pins() -> &'static std::sync::RwLock<std::collections::HashMap<String, [u8; 32]>> {
-    static PINS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashMap<String, [u8; 32]>>> =
+/// Known hosts, ssh-style: the certificate fingerprint seen for each
+/// `host:port` is recorded on first contact. A later different fingerprint
+/// is not refused (servers regenerate certificates; the client credential,
+/// bound to the fingerprint actually seen, is what protects use): it is
+/// reported loudly, appended to `<file>.log`, kept in
+/// [`fingerprint_changes`] for status displays, and replaces the record.
+pub struct KnownHosts {
+    path: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FingerprintChange {
+    pub host_port: String,
+    pub old: [u8; 32],
+    pub new: [u8; 32],
+    pub unix_time: u64,
+}
+
+fn changes() -> &'static std::sync::Mutex<Vec<FingerprintChange>> {
+    static CHANGES: std::sync::OnceLock<std::sync::Mutex<Vec<FingerprintChange>>> = std::sync::OnceLock::new();
+    CHANGES.get_or_init(Default::default)
+}
+
+/// Every certificate change this process has seen (newest last).
+pub fn fingerprint_changes() -> Vec<FingerprintChange> {
+    changes().lock().unwrap().clone()
+}
+
+impl KnownHosts {
+    pub fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn get(&self, host_port: &str) -> Option<[u8; 32]> {
+        let key = host_port.to_ascii_lowercase();
+        let text = fs::read_to_string(&self.path).ok()?;
+        text.lines().find_map(|line| {
+            let mut parts = line.split_whitespace();
+            (parts.next()? == key).then(|| parts.next().and_then(from_hex::<32>)).flatten()
+        })
+    }
+
+    /// Records `fingerprint` for `host_port`; returns the previous one when
+    /// it changed (after warning about it).
+    pub fn observe(&self, host_port: &str, fingerprint: &[u8; 32]) -> Option<[u8; 32]> {
+        let key = host_port.to_ascii_lowercase();
+        let old = self.get(&key);
+        if old.as_ref() == Some(fingerprint) {
+            return None;
+        }
+        let text = fs::read_to_string(&self.path).unwrap_or_default();
+        let mut out: String = text
+            .lines()
+            .filter(|l| l.split_whitespace().next() != Some(key.as_str()))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        out.push_str(&format!("{key} {}\n", to_hex(fingerprint)));
+        if let Some(parent) = self.path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let _ = write_atomic(&self.path, out.as_bytes());
+        let old = old?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        eprintln!(
+            "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n\
+             @  WARNING: THE TLS CERTIFICATE OF {key} HAS CHANGED\n\
+             @  was {}\n\
+             @  now {}\n\
+             @  Expected after a reinstall; otherwise something on the network\n\
+             @  may be impersonating it. Recorded in {}.log; continuing.\n\
+             @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+            to_hex(&old),
+            to_hex(fingerprint),
+            self.path.display()
+        );
+        let log = self.path.with_extension("log");
+        let line = format!("{now} {key} changed {} -> {}\n", to_hex(&old), to_hex(fingerprint));
+        let _ = fs::OpenOptions::new().create(true).append(true).open(log).and_then(|mut f| f.write_all(line.as_bytes()));
+        changes().lock().unwrap().push(FingerprintChange { host_port: key, old, new: *fingerprint, unix_time: now });
+        Some(old)
+    }
+}
+
+/// Endpoints of a self-signed TLS service this process talks to (AI fleet
+/// nodes learned from discovery): their known-hosts file and the
+/// `Authorization` value for a given server fingerprint (a proof bound to
+/// that certificate, so it is useless to anyone but that server).
+pub struct FleetClient {
+    pub known_hosts: KnownHosts,
+    pub authorization: fn(&[u8; 32]) -> Option<String>,
+}
+
+fn fleet_endpoints() -> &'static std::sync::RwLock<std::collections::HashSet<String>> {
+    static ENDPOINTS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
         std::sync::OnceLock::new();
-    PINS.get_or_init(Default::default)
+    ENDPOINTS.get_or_init(Default::default)
 }
 
-pub fn pin_endpoint(host_port: &str, fingerprint: [u8; 32]) {
-    pins().write().unwrap().insert(host_port.to_ascii_lowercase(), fingerprint);
+static FLEET_CLIENT: std::sync::OnceLock<FleetClient> = std::sync::OnceLock::new();
+
+/// Installs this process's fleet client (once).
+pub fn set_fleet_client(client: FleetClient) {
+    let _ = FLEET_CLIENT.set(client);
 }
 
-pub fn pin_for(host_port: &str) -> Option<[u8; 32]> {
-    pins().read().unwrap().get(&host_port.to_ascii_lowercase()).copied()
+pub fn fleet_client() -> Option<&'static FleetClient> {
+    FLEET_CLIENT.get()
 }
 
-static CREDENTIAL: std::sync::OnceLock<fn() -> Option<String>> = std::sync::OnceLock::new();
-
-/// The credential (bearer token) this process presents to pinned endpoints,
-/// supplied by whoever owns it (the AI hub's fleet credential).
-pub fn set_pinned_credential_provider(provider: fn() -> Option<String>) {
-    let _ = CREDENTIAL.set(provider);
+/// Marks `host:port` as a fleet endpoint: HTTP and websocket clients reach
+/// it over self-signed TLS with the fleet authorization.
+pub fn mark_fleet_endpoint(host_port: &str) {
+    fleet_endpoints().write().unwrap().insert(host_port.to_ascii_lowercase());
 }
 
-pub fn pinned_credential() -> Option<String> {
-    CREDENTIAL.get().and_then(|f| f())
+pub fn is_fleet_endpoint(host_port: &str) -> bool {
+    fleet_endpoints().read().unwrap().contains(&host_port.to_ascii_lowercase())
+}
+
+/// Connects to a fleet endpoint: TLS, the certificate checked against (and
+/// recorded in) the fleet known-hosts file, and the `Authorization` value
+/// bound to the certificate actually presented.
+pub fn connect_fleet(host: &str, port: &str) -> io::Result<(crate::SocketStream, Option<String>)> {
+    let client = fleet_client().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no fleet client configured"))?;
+    let (stream, fp) = crate::SocketStream::connect_capture(host.trim_start_matches('[').trim_end_matches(']'), port)?;
+    client.known_hosts.observe(&format!("{host}:{port}"), &fp);
+    Ok((stream, (client.authorization)(&fp)))
 }
 
 /// A fresh P-256 key (X9.63) from the OS.
@@ -623,6 +732,23 @@ mod server_tests {
     }
 
     #[test]
+    fn known_hosts_record_then_warn_and_replace() {
+        let dir = temp_dir("known");
+        let known = KnownHosts::new(dir.join("known_nodes"));
+        assert_eq!(known.observe("10.0.0.5:8123", &[1; 32]), None);
+        assert_eq!(known.get("10.0.0.5:8123"), Some([1; 32]));
+        assert_eq!(known.observe("10.0.0.5:8123", &[1; 32]), None);
+        assert_eq!(known.observe("10.0.0.6:8123", &[2; 32]), None);
+        // A change is reported, logged and replaces the record.
+        assert_eq!(known.observe("10.0.0.5:8123", &[3; 32]), Some([1; 32]));
+        assert_eq!(known.get("10.0.0.5:8123"), Some([3; 32]));
+        assert_eq!(known.get("10.0.0.6:8123"), Some([2; 32]));
+        assert!(fs::read_to_string(dir.join("known_nodes.log")).unwrap().contains("changed"));
+        assert!(fingerprint_changes().iter().any(|c| c.host_port == "10.0.0.5:8123" && c.new == [3; 32]));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn sign_and_verify_round_trip() {
         let key = generate_p256().unwrap();
         let sig = sign_p256_sha256(&key, b"statement").unwrap();
@@ -669,7 +795,8 @@ mod server_tests {
             }
             outcomes
         });
-        let mut client = crate::SocketStream::connect_pinned("127.0.0.1", &port, &pin).unwrap();
+        let (mut client, seen) = crate::SocketStream::connect_capture("127.0.0.1", &port).unwrap();
+        assert_eq!(seen, pin, "the captured fingerprint is the server certificate's");
         client.write_all(b"hello").unwrap();
         let mut echo = [0u8; 5];
         client.read_exact(&mut echo).unwrap();
@@ -678,13 +805,11 @@ mod server_tests {
         client.read_exact(&mut big).unwrap();
         assert!(big.iter().all(|b| *b == 0x42));
 
-        let mut wrong = pin;
-        wrong[0] ^= 1;
-        let err = crate::SocketStream::connect_pinned("127.0.0.1", &port, &wrong).err().expect("wrong pin must fail");
-        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        let (mut second, again) = crate::SocketStream::connect_capture("127.0.0.1", &port).unwrap();
+        assert_eq!(again, pin);
+        second.shutdown();
         let outcomes = handle.join().unwrap();
         assert!(outcomes[0]);
-        assert!(!outcomes[1], "nothing may be served to a client that rejected the pin");
         let _ = fs::remove_dir_all(&dir);
     }
 }

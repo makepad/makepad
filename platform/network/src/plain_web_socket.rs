@@ -265,29 +265,21 @@ impl PlainWebSocket {
         }
     }
 
-    /// `wss://` to an endpoint registered with [`crate::tls::pin_endpoint`]:
-    /// TLS pinned to its certificate, with this process's pinned-endpoint
-    /// credential. Unpinned TLS endpoints are refused (no CA validation here).
-    #[cfg(target_arch = "wasm32")]
-    fn open_pinned(_request: HttpRequest, rx_sender: Sender<WebSocketMessage>) -> PlainWebSocket {
-        // Pinned TLS uses the OS's TLS stack: native hosts only.
-        let _ = rx_sender.send(WebSocketMessage::Error("pinned TLS websockets need a native host".into()));
-        PlainWebSocket { sender: None, stream: None }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
+    /// `wss://` to a fleet endpoint ([`crate::tls::mark_fleet_endpoint`]):
+    /// self-signed TLS checked against the fleet known-hosts record, with
+    /// the fleet authorization bound to the certificate presented. Other
+    /// TLS endpoints are refused (no CA validation here).
     fn open_pinned(request: HttpRequest, rx_sender: Sender<WebSocketMessage>) -> PlainWebSocket {
         let failed = |rx: &Sender<WebSocketMessage>, msg: String| {
             let _ = rx.send(WebSocketMessage::Error(msg));
             PlainWebSocket { sender: None, stream: None }
         };
         let split = request.split_url();
-        let host = split.host.trim_start_matches('[').trim_end_matches(']').to_string();
         let host_port = format!("{}:{}", split.host, split.port);
-        let Some(pin) = crate::tls::pin_for(&host_port) else {
-            return failed(&rx_sender, format!("{host_port} is not a verified TLS endpoint"));
-        };
-        let mut stream = match crate::SocketStream::connect_pinned(&host, split.port, &pin) {
+        if !crate::tls::is_fleet_endpoint(&host_port) {
+            return failed(&rx_sender, format!("{host_port} is not a known fleet TLS endpoint"));
+        }
+        let (mut stream, authorization) = match crate::tls::connect_fleet(split.host, split.port) {
             Ok(s) => s,
             Err(err) => return failed(&rx_sender, format!("Error connecting websocket stream: {err}")),
         };
@@ -297,8 +289,8 @@ impl PlainWebSocket {
         );
         let headers = request.get_headers_string();
         if !headers.to_ascii_lowercase().contains("authorization:") {
-            if let Some(token) = crate::tls::pinned_credential() {
-                head.push_str(&format!("Authorization: Bearer {token}\r\n"));
+            if let Some(value) = authorization {
+                head.push_str(&format!("Authorization: {value}\r\n"));
             }
         }
         head.push_str(&headers);

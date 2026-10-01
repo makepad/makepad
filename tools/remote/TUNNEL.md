@@ -13,12 +13,17 @@ or GPU box. Clients: `makepad-remote <host> …`, `cargo makepad tunnel <host>:8
   cipher only. TLS 1.3 is used where both ends support it.
 - **Server identity.** Each box has a self-signed P-256 certificate in its
   identity directory (`tls-key.x963`, `tls-cert.der`,
-  `tls-fingerprint.txt`). Clients pin the certificate's SHA-256 per host;
-  there is no CA and no trust on first use.
+  `tls-fingerprint.txt`). Clients record its SHA-256 per host on first
+  contact (`~/.makepad/tunnel/pins`, like ssh known_hosts). If it later
+  changes, the client:
+  - prints a loud warning;
+  - appends it to `pins.log`;
+  - updates the record and continues.
 - **Client authentication.** One random 32-byte key per box. Inside TLS the
   client proves it holds the key with HMAC-SHA256 over a fresh server nonce
-  and the server's certificate fingerprint, so a captured proof cannot be
-  replayed or used against another server (`platform/network/src/tunnel.rs`).
+  and the fingerprint of the certificate it was actually shown. A captured
+  proof can't be replayed, and an impersonator with another certificate
+  can't use it against the real box (`platform/network/src/tunnel.rs`).
 - **Fail closed.** The server refuses to start without a readable key file,
   and on unix it refuses key files that other users can read.
 - **Scope.** The server binds the LAN address of its default route (`--bind
@@ -51,7 +56,8 @@ administrator, and why each key is per box and rotatable.
 Client (this Mac), in `~/.makepad/tunnel/` (or `$MAKEPAD_TUNNEL_DIR`):
 - `psk`: `<host> <64-hex key>` lines, mode 600. Two lines for one host mean
   a rotation is in progress; they are tried in order.
-- `pins`: `<host> <64-hex certificate sha256>` lines.
+- `pins`: known hosts, `<host> <64-hex certificate sha256>`. Recorded on
+  first contact; `pins.log` lists changes.
 - `outbox/<host>.keys`: the server key file `keygen` writes for a new box.
   Delete it once installed.
 
@@ -84,17 +90,17 @@ that does not contain the key of the session sending it.
 2. Pull `<dir>.next/tls-fingerprint.txt`.
 3. Move `<dir>.next` into place.
 4. Run `admin tunnel-restart`.
-5. Pin the new fingerprint with `makepad-remote pin <host> <hex>`.
+5. The client records the new fingerprint on its next connect and warns
+   once. `makepad-remote pin <host> <hex>` records it ahead of time
+   instead.
 
 ## Adding a box
 
 1. On the client, run `makepad-remote keygen <host>`. It stores the client
    key and writes `outbox/<host>.keys`.
 2. On the box, install that file as the server's `server-keys`, readable by
-   the server's account only, then run `makepad-remote --init`. It prints
-   the fingerprint.
-3. On the client, run `makepad-remote pin <host> <fingerprint>`.
-4. Start `makepad-remote --server --all`, or on Windows run
+   the server's account only.
+3. Start `makepad-remote --server --all`, or on Windows run
    `tools/aihub-node-install-services.ps1` (see `tools/aihub-farm.md`).
 
 If the key file had to cross the network in the clear (a first install with

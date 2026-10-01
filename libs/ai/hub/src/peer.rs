@@ -625,12 +625,7 @@ impl PeerPlan {
 
 fn is_fleet_endpoint(base: &str) -> bool {
     let Ok(url) = crate::http_client::parse_url(base) else { return false };
-    if url.https {
-        return crate::fleet_auth::pin_for(&format!("{}:{}", url.host, url.port)).is_some();
-    }
-    // Open-fleet transition: a legacy node this node has itself discovered.
-    crate::fleet_auth::legacy_fleet_allowed()
-        && crate::discovery::start_listener().nodes().iter().any(|n| n.base_url == base)
+    url.https && crate::fleet_auth::is_fleet_endpoint(&format!("{}:{}", url.host, url.port))
 }
 
 /// The operator's peer list (`MAKEPAD_AI_PEER_SOURCES`, any scheme and
@@ -833,7 +828,7 @@ mod tests {
 
     #[test]
     fn plan_bounds_and_ticket_selection() {
-        crate::fleet_auth::pin_endpoint("10.0.0.1:8765", [2u8; 32]);
+        crate::fleet_auth::mark_fleet_endpoint("10.0.0.1:8765");
         let receiver = "b".repeat(32);
         let source = "a".repeat(32);
         let digest = "c".repeat(64);
@@ -908,7 +903,7 @@ mod tests {
 
     #[test]
     fn plan_accepts_origins_only() {
-        crate::fleet_auth::pin_endpoint("example.com:8765", [1u8; 32]);
+        crate::fleet_auth::mark_fleet_endpoint("example.com:8765");
         let receiver = "b".repeat(32);
         let plan = PeerPlan::for_job(
             &[

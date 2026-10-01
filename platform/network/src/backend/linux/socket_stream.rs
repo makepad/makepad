@@ -399,9 +399,9 @@ impl SocketStream {
         }
     }
 
-    /// TLS 1.2+ without CA validation; the server certificate's SHA-256
-    /// must equal `pin` before the stream is handed out.
-    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
+    /// TLS 1.2+ without CA validation (self-signed servers); returns the
+    /// server certificate's SHA-256 for the caller's known-hosts record.
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
         let tcp_stream = TcpStream::connect(format!("{host}:{port}"))?;
         let _ = tcp_stream.set_nodelay(true);
         let _ = tcp_stream.set_read_timeout(Some(Duration::from_secs(5)));
@@ -412,24 +412,15 @@ impl SocketStream {
             if unsafe { SSL_version(stream.ssl) } < 0x0303 {
                 return Err(io_other("server negotiated a TLS version below 1.2"));
             }
-            let leaf = stream.peer_leaf_der()?;
-            let got = crate::digest::sha256_hash(&leaf);
-            if !crate::tls::constant_time_eq(&got, pin) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!(
-                        "server certificate fingerprint {} does not match the pin",
-                        crate::tls::to_hex(&got)
-                    ),
-                ));
-            }
-            Ok(())
+            Ok(crate::digest::sha256_hash(&stream.peer_leaf_der()?))
         })();
-        if let Err(err) = result {
-            stream.shutdown();
-            return Err(err);
+        match result {
+            Ok(fp) => Ok((SocketStream::Tls(stream), fp)),
+            Err(err) => {
+                stream.shutdown();
+                Err(err)
+            }
         }
-        Ok(SocketStream::Tls(stream))
     }
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {

@@ -113,8 +113,8 @@ const MAX_ARTIFACT_BODY: usize = 1024 * 1024 * 1024;
 impl LocalService {
     pub fn new(base_url: &str) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
-        // Fleet nodes (https, pinned from a signed beacon) get this
-        // process's fleet credential from the HTTP client itself.
+        // Fleet nodes (https endpoints from discovery) get this process's
+        // credential proof from the HTTP client itself.
         Self {
             base_url,
             auth_headers: Vec::new(),

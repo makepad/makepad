@@ -725,45 +725,32 @@ fn same_origin(a: &ParsedUrl, b: &ParsedUrl) -> bool {
     a.https == b.https && a.port == b.port && a.host.eq_ignore_ascii_case(&b.host)
 }
 
-/// A fleet credential (`mkc1.` bearer) only ever goes to a pinned fleet
-/// endpoint, inside its pinned TLS session.
-fn carries_fleet_credential(req: &HttpClientRequest) -> bool {
-    req.bearer.is_some_and(|b| b.token.starts_with("mkc1."))
-        || req.extra_headers.iter().any(|(_, v)| v.contains("mkc1."))
-}
-
-fn fleet_pin(url: &ParsedUrl) -> Option<[u8; 32]> {
-    if !url.https {
-        return None;
-    }
-    crate::fleet_auth::pin_for(&format!("{}:{}", url.host, url.port))
-}
-
-/// A verified fleet node: TLS pinned to its endorsed certificate, then the
-/// request with this process's fleet credential attached.
-fn fetch_pinned(
+/// A fleet node: TLS checked against the known-nodes record, then the
+/// request with this process's credential proof for the certificate seen.
+fn fetch_fleet(
     url: &ParsedUrl,
-    pin: &[u8; 32],
     method: &str,
     req: &HttpClientRequest,
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
-    let host = url.host.trim_start_matches('[').trim_end_matches(']');
-    let stream = SocketStream::connect_pinned(host, &url.port.to_string(), pin)
+    let (stream, authorization) = makepad_network::tls::connect_fleet(&url.host, &url.port.to_string())
         .map_err(|e| AssetAiError::Http(format!("fleet tls {}:{}: {e}", url.host, url.port)))?;
     let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
     let mut transport = Transport::Tls(stream);
-    let token = crate::fleet_auth::own_token();
     let has_auth = req.extra_headers.iter().any(|(n, _)| n.eq_ignore_ascii_case("authorization"));
     let mut headers: Vec<(String, String)> = req.extra_headers.to_vec();
-    if let (Some(token), false) = (token, has_auth) {
-        headers.push(("Authorization".into(), format!("Bearer {token}")));
+    if let (Some(value), false) = (authorization, has_auth) {
+        headers.push(("Authorization".into(), value));
     }
-    let pinned_req = HttpClientRequest { bearer: None, extra_headers: &headers, ..*req };
-    write_request(&mut transport, url, method, &pinned_req, body, send_extra_headers)?;
+    let fleet_req = HttpClientRequest { bearer: None, extra_headers: &headers, ..*req };
+    write_request(&mut transport, url, method, &fleet_req, body, send_extra_headers)?;
     read_response_head(transport)
+}
+
+fn is_fleet(url: &ParsedUrl) -> bool {
+    url.https && makepad_network::tls::is_fleet_endpoint(&format!("{}:{}", url.host, url.port))
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -774,14 +761,8 @@ fn fetch_once(
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
-    if let Some(pin) = fleet_pin(url) {
-        return fetch_pinned(url, &pin, method, req, body, send_extra_headers);
-    }
-    if carries_fleet_credential(req) {
-        return Err(AssetAiError::Http(format!(
-            "refusing to send a fleet credential to {}:{}, which is not a verified fleet node",
-            url.host, url.port
-        )));
+    if is_fleet(url) {
+        return fetch_fleet(url, method, req, body, send_extra_headers);
     }
     let mut transport = connect(url)?;
     write_request(
@@ -803,14 +784,8 @@ fn fetch_once(
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
-    if let Some(pin) = fleet_pin(url) {
-        return fetch_pinned(url, &pin, method, req, body, send_extra_headers);
-    }
-    if carries_fleet_credential(req) {
-        return Err(AssetAiError::Http(format!(
-            "refusing to send a fleet credential to {}:{}, which is not a verified fleet node",
-            url.host, url.port
-        )));
+    if is_fleet(url) {
+        return fetch_fleet(url, method, req, body, send_extra_headers);
     }
     winhttp_fetch_once(url, method, req, body, send_extra_headers)
 }

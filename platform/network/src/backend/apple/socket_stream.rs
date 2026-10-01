@@ -242,11 +242,11 @@ impl SecureTransportStream {
         })
     }
 
-    /// Client handshake that skips CA validation and instead requires the
-    /// server's leaf certificate to hash (SHA-256) to `pin`, checked at the
-    /// server-auth break before any application data is sent. TLS 1.2+,
+    /// Client handshake without CA validation (self-signed servers): the
+    /// server's leaf certificate SHA-256 is taken at the server-auth break
+    /// and returned, for the caller's known-hosts record. TLS 1.2+,
     /// ECDHE-ECDSA AEAD suites only.
-    pub(crate) fn connect_pinned(tcp_stream: TcpStream, pin: &[u8; 32]) -> io::Result<Self> {
+    pub(crate) fn connect_capture(tcp_stream: TcpStream) -> io::Result<(Self, [u8; 32])> {
         // A peer that never answers (not a TLS server) must not hang us.
         tcp_stream.set_read_timeout(Some(Duration::from_secs(20)))?;
         let mut tcp_stream = Box::new(tcp_stream);
@@ -254,30 +254,21 @@ impl SecureTransportStream {
         if ssl_context.is_null() {
             return Err(io_other("SSLCreateContext returned null"));
         }
-        let result = (|| -> io::Result<()> {
+        let result = (|| -> io::Result<[u8; 32]> {
             Self::configure(ssl_context, &mut tcp_stream)?;
             check_ssl_status("SSLSetSessionOption(BreakOnServerAuth)", unsafe {
                 SSLSetSessionOption(ssl_context, kSSLSessionOptionBreakOnServerAuth, true)
             })?;
-            let mut pinned = false;
+            let mut seen = None;
             loop {
                 let status = unsafe { SSLHandshake(ssl_context) };
                 match status {
-                    SSL_OK if pinned => return Ok(()),
-                    SSL_OK => return Err(io_other("TLS handshake finished without server authentication")),
+                    SSL_OK => {
+                        return seen.ok_or_else(|| io_other("TLS handshake finished without a server certificate"))
+                    }
                     s if s == errSSLServerAuthCompleted => {
                         let leaf = peer_leaf_der(ssl_context)?;
-                        let got = crate::digest::sha256_hash(&leaf);
-                        if !crate::tls::constant_time_eq(&got, pin) {
-                            return Err(io::Error::new(
-                                io::ErrorKind::PermissionDenied,
-                                format!(
-                                    "server certificate fingerprint {} does not match the pin",
-                                    crate::tls::to_hex(&got)
-                                ),
-                            ));
-                        }
-                        pinned = true;
+                        seen = Some(crate::digest::sha256_hash(&leaf));
                     }
                     ERR_SSL_WOULD_BLOCK => {
                         return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))
@@ -286,15 +277,18 @@ impl SecureTransportStream {
                 }
             }
         })();
-        if let Err(err) = result {
-            unsafe {
-                let _ = SSLClose(ssl_context);
-                CFRelease(ssl_context);
+        let fingerprint = match result {
+            Ok(fp) => fp,
+            Err(err) => {
+                unsafe {
+                    let _ = SSLClose(ssl_context);
+                    CFRelease(ssl_context);
+                }
+                return Err(err);
             }
-            return Err(err);
-        }
+        };
         tcp_stream.set_read_timeout(None)?;
-        Ok(Self { tcp_stream, ssl_context, is_closed: false })
+        Ok((Self { tcp_stream, ssl_context, is_closed: false }, fingerprint))
     }
 
     /// Server handshake with an in-memory identity.
@@ -478,10 +472,11 @@ impl SocketStream {
         }
     }
 
-    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
         let tcp_stream = TcpStream::connect(format!("{host}:{port}"))?;
         let _ = tcp_stream.set_nodelay(true);
-        Ok(SocketStream::Tls(SecureTransportStream::connect_pinned(tcp_stream, pin)?))
+        let (stream, fp) = SecureTransportStream::connect_capture(tcp_stream)?;
+        Ok((SocketStream::Tls(stream), fp))
     }
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {

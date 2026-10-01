@@ -13,7 +13,7 @@
 //! failures throttled per address (5 in 10 min → 15 min ban), an audit line
 //! per refusal, and idle connections closed after 10 min.
 
-use crate::fleet_auth::{now_secs, Role, Trust};
+use crate::fleet_auth::{now_secs, Role, Verifier};
 use makepad_network::tls::{TlsServer, TlsStream};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -40,7 +40,7 @@ pub struct FrontConfig {
     pub listen: SocketAddr,
     pub inner: SocketAddr,
     pub tls: TlsServer,
-    pub trust: Arc<Trust>,
+    pub verifier: Arc<Verifier>,
     /// Per-process secret proving a request came through a front.
     pub front_secret: String,
     /// Internet edge: device routes only, tighter limits.
@@ -242,12 +242,13 @@ fn read_head(tls: &mut TlsStream) -> Result<(Vec<u8>, Vec<u8>), Refusal> {
     }
 }
 
-/// The parsed head: method, path, the bearer token, and the head rewritten
-/// for the inner server (no Authorization, no X-Makepad-*, plus identity).
+/// The parsed head: method, path, the Authorization value, and the head
+/// rewritten for the inner server (no Authorization, no X-Makepad-*, plus
+/// identity).
 pub struct ParsedHead {
     pub method: String,
     pub path: String,
-    pub bearer: Option<String>,
+    pub authorization: Option<String>,
     lines: Vec<String>,
 }
 
@@ -261,13 +262,13 @@ pub fn parse_head(head: &[u8]) -> Option<ParsedHead> {
     if !path.starts_with('/') {
         return None;
     }
-    let mut bearer = None;
+    let mut authorization = None;
     let mut kept = vec![request_line.to_string()];
     for line in lines {
         let (name, value) = line.split_once(':')?;
         let name_l = name.trim().to_ascii_lowercase();
         if name_l == "authorization" {
-            bearer = value.trim().strip_prefix("Bearer ").map(|t| t.trim().to_string());
+            authorization = Some(value.trim().to_string());
             continue;
         }
         if name_l.starts_with("x-makepad-") {
@@ -275,7 +276,7 @@ pub fn parse_head(head: &[u8]) -> Option<ParsedHead> {
         }
         kept.push(line.to_string());
     }
-    Some(ParsedHead { method, path, bearer, lines: kept })
+    Some(ParsedHead { method, path, authorization, lines: kept })
 }
 
 impl ParsedHead {
@@ -306,11 +307,11 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
         respond(&mut tls, 400, "bad request");
         return Err(Refusal::Other("malformed request head".into()));
     };
-    let Some(token) = parsed.bearer.as_deref() else {
+    let Some(authorization) = parsed.authorization.as_deref() else {
         respond(&mut tls, 401, "a fleet credential is required");
         return Err(Refusal::Auth("no credential".into()));
     };
-    let cred = match config.trust.verify_token(token, now_secs()) {
+    let cred = match config.verifier.verify(authorization, now_secs()) {
         Ok(c) => c,
         Err(e) => {
             respond(&mut tls, 401, "credential refused");
@@ -433,11 +434,11 @@ mod tests {
 
     #[test]
     fn head_rewrite_strips_credentials_and_spoofed_identity() {
-        let head = b"POST /generate HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer mkc1.a.lan.9.ff\r\nX-Makepad-Client: admin\r\nx-makepad-front: guess\r\nContent-Length: 2\r\n\r\n";
+        let head = b"POST /generate HTTP/1.1\r\nHost: x\r\nAuthorization: MKC2 a.lan.9.ff\r\nX-Makepad-Client: admin\r\nx-makepad-front: guess\r\nContent-Length: 2\r\n\r\n";
         let p = parse_head(head).unwrap();
         assert_eq!(p.method, "POST");
         assert_eq!(p.path, "/generate");
-        assert_eq!(p.bearer.as_deref(), Some("mkc1.a.lan.9.ff"));
+        assert_eq!(p.authorization.as_deref(), Some("MKC2 a.lan.9.ff"));
         let out = String::from_utf8(p.rewrite("s3cret", "rik-mac", Role::Lan, "10.0.0.5".parse().unwrap())).unwrap();
         assert!(!out.to_ascii_lowercase().contains("authorization"));
         assert!(!out.contains("guess") && !out.contains("admin"));

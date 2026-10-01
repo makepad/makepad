@@ -1,52 +1,55 @@
-//! Fleet trust: who may serve, who may ask.
+//! Fleet credentials: who may ask a node for work.
 //!
-//! One **fleet authority** key (P-256, held on the admin's machine) signs two
-//! kinds of statement; everyone else holds only its public half:
+//! Nodes are trusted ssh-style: each makes its own self-signed TLS
+//! certificate on first start, and a client records the certificate's
+//! fingerprint per node on first contact (`~/.makepad/ai-hub/known_nodes`),
+//! warning loudly if it ever changes (makepad_network::tls::KnownHosts).
+//! Nothing about nodes is provisioned.
 //!
-//! - **Node endorsements**: "this node key, serving with this TLS
-//!   certificate, belongs to this fleet until then". Nodes broadcast theirs
-//!   in the discovery beacon, so a client can tell a real fleet node from
-//!   anything else on the LAN and pins the certificate it names. A
-//!   credential is only ever sent over a TLS session pinned this way.
-//! - **Client credentials**: "client `id` has role `role` until then",
-//!   presented as `Authorization: Bearer mkc1.…` over that pinned TLS. Each
-//!   person, app install, device or node has its own, so jobs have owners
-//!   and a credential can be revoked alone (the `revoked` list, by id).
+//! Clients are what is checked. A **fleet key** (32 random bytes) lives on
+//! the admin machine and on every node (`<cache>/fleet/fleet.key`, 0600).
+//! A client credential is
 //!
-//! Signatures are the OS's own ECDSA (makepad_network::tls); nothing here
-//! can mint a credential except the authority key.
+//! ```text
+//!   mkc2.<client id>.<role>.<expiry>.<secret>
+//!   secret = HMAC-SHA256(fleet key, "mkfleet2 client|<id>|<role>|<expiry>")
+//! ```
 //!
-//! Files:
-//! - admin: `~/.makepad/ai-hub/authority/authority.x963` (0600).
-//! - every node and client: `authority.pub` (hex public point) and
-//!   `revoked` (ids, one per line) in its fleet dir: `<cache>/fleet` on a
-//!   node, `~/.makepad/ai-hub` for a client.
-//! - node: `<cache>/fleet/node.endorsement`, `<cache>/fleet/node.token`
-//!   (its own client credential, role `node`), `<cache>/fleet/tls/` (its TLS
-//!   identity).
-//! - client: `~/.makepad/ai-hub/client.token` (or `MAKEPAD_AI_HUB_TOKEN`).
+//! and a client never sends it. On each request it sends a proof bound to
+//! the certificate the node actually presented:
+//!
+//! ```text
+//!   Authorization: MKC2 <id>.<role>.<expiry>.<HMAC-SHA256(secret, "mkfleet2 proof|" + certificate sha256 hex)>
+//! ```
+//!
+//! The node recomputes the secret from its fleet key and checks the proof
+//! against its own certificate, the expiry and the `revoked` list. Whoever
+//! sits in the middle with another certificate (TLS is not CA-checked) only
+//! gets a proof for that certificate: useless against any real node.
+//! Credentials are per person, app install, device or node (role `lan`,
+//! `node` or `device`) and revocable one by one.
 
 use makepad_network::tls::{self, from_hex, to_hex};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub const AUTHORITY_PUB: &str = "authority.pub";
+pub const FLEET_KEY: &str = "fleet.key";
 pub const REVOKED: &str = "revoked";
-pub const NODE_ENDORSEMENT: &str = "node.endorsement";
-pub const NODE_TOKEN: &str = "node.token";
-pub const CLIENT_TOKEN: &str = "client.token";
+pub const NODE_CREDENTIAL: &str = "node.credential";
+pub const CLIENT_CREDENTIAL: &str = "client.credential";
+pub const KNOWN_NODES: &str = "known_nodes";
 
 /// What a credential may do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Role {
     /// A person's app on the LAN: the full job API, fleet views included.
     Lan,
-    /// A fleet node calling another (peer model transfer).
+    /// A fleet node calling another (peer model transfer, health).
     Node,
-    /// An enrolled remote device: its own jobs only, through the edge.
+    /// An enrolled remote device: its own job routes only.
     Device,
 }
 
@@ -69,18 +72,6 @@ impl Role {
     }
 }
 
-/// End of the open-fleet transition (2026-10-15 00:00 UTC). Until then a
-/// network node without fleet credentials still serves plaintext as before,
-/// and clients also accept unsigned (legacy) beacons; both are logged. From
-/// then on both refuse. The legacy paths are deleted once every box is
-/// enrolled and every client has switched (tools/aihub-fleet.md).
-pub const LEGACY_FLEET_UNTIL: u64 = 1_792_022_400;
-pub const LEGACY_FLEET_UNTIL_TEXT: &str = "2026-10-15";
-
-pub fn legacy_fleet_allowed() -> bool {
-    now_secs() < LEGACY_FLEET_UNTIL
-}
-
 pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
@@ -91,131 +82,110 @@ fn valid_id(id: &str) -> bool {
         && id.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
-fn valid_hex(text: &str, len: usize) -> bool {
-    text.len() == len && text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+fn hmac(key: &[u8], msg: &str) -> [u8; 32] {
+    makepad_network::tunnel::hmac_sha256(key, msg.as_bytes())
 }
 
-// --- statements -----------------------------------------------------------------
-
-/// A verified client credential.
+/// A credential's public part.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ClientCredential {
+pub struct Identity {
     pub client_id: String,
     pub role: Role,
     pub expiry: u64,
 }
 
-impl ClientCredential {
-    fn statement(&self) -> String {
-        format!("mkfleet1 client {} {} {}", self.client_id, self.role.as_str(), self.expiry)
-    }
-}
-
-/// A verified node endorsement.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NodeEndorsement {
-    pub fleet: String,
-    pub node_key: String,
-    pub tls_fingerprint: [u8; 32],
-    pub expiry: u64,
-}
-
-impl NodeEndorsement {
-    fn statement(&self) -> String {
-        format!(
-            "mkfleet1 node {} {} {} {}",
-            self.fleet,
-            self.node_key,
-            to_hex(&self.tls_fingerprint),
-            self.expiry
-        )
-    }
-}
-
-/// The authority: signs endorsements and credentials (admin machine only).
-pub struct Authority {
-    key: [u8; tls::X963_KEY_LEN],
-}
-
-impl Authority {
-    pub fn dir() -> PathBuf {
-        crate::home::makepad_home().join("ai-hub").join("authority")
+impl Identity {
+    fn text(&self) -> String {
+        format!("{}.{}.{}", self.client_id, self.role.as_str(), self.expiry)
     }
 
-    pub fn create(dir: &Path) -> std::io::Result<Self> {
-        let path = dir.join("authority.x963");
-        if path.exists() {
-            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, format!("{} exists", path.display())));
+    fn parse(id: &str, role: &str, expiry: &str) -> Option<Identity> {
+        if !valid_id(id) {
+            return None;
         }
-        fs::create_dir_all(dir)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        Some(Identity { client_id: id.to_string(), role: Role::parse(role)?, expiry: expiry.parse().ok()? })
+    }
+}
+
+/// The fleet key: issues credentials (admin) and checks proofs (nodes).
+pub struct FleetKey([u8; 32]);
+
+impl std::fmt::Debug for FleetKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FleetKey(…)")
+    }
+}
+
+impl FleetKey {
+    pub fn generate() -> std::io::Result<Self> {
+        let mut k = [0u8; 32];
+        tls::os_random(&mut k)?;
+        Ok(Self(k))
+    }
+
+    pub fn load(path: &Path) -> std::io::Result<Self> {
+        tls::check_private_file(path)?;
+        let text = fs::read_to_string(path)?;
+        from_hex::<32>(text.trim())
+            .map(Self)
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, format!("{}: not a fleet key", path.display())))
+    }
+
+    pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
         }
-        let key = tls::generate_p256()?;
-        tls::write_private(&path, &key)?;
-        Ok(Self { key })
+        tls::write_private(path, format!("{}\n", to_hex(&self.0)).as_bytes())
     }
 
-    pub fn load(dir: &Path) -> std::io::Result<Self> {
-        let path = dir.join("authority.x963");
-        tls::check_private_file(&path)?;
-        let bytes = fs::read(&path)?;
-        let key: [u8; tls::X963_KEY_LEN] = bytes
-            .try_into()
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "bad authority key"))?;
-        Ok(Self { key })
+    fn secret(&self, identity: &Identity) -> [u8; 32] {
+        hmac(&self.0, &format!("mkfleet2 client|{}|{}|{}", identity.client_id, identity.role.as_str(), identity.expiry))
     }
 
-    pub fn public_hex(&self) -> String {
-        to_hex(&self.key[..65])
-    }
-
-    fn sign(&self, statement: &str) -> std::io::Result<String> {
-        Ok(to_hex(&tls::sign_p256_sha256(&self.key, statement.as_bytes())?))
-    }
-
-    /// `mkc1.<id>.<role>.<expiry>.<sig>`: a bearer credential.
+    /// `mkc2.<id>.<role>.<expiry>.<secret>`: keep it like a password.
     pub fn issue(&self, client_id: &str, role: Role, expiry: u64) -> std::io::Result<String> {
         if !valid_id(client_id) {
             return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "client id: a-z 0-9 - _ (max 64)"));
         }
-        let cred = ClientCredential { client_id: client_id.into(), role, expiry };
-        Ok(format!("mkc1.{}.{}.{}.{}", client_id, role.as_str(), expiry, self.sign(&cred.statement())?))
-    }
-
-    /// `mkn1.<fleet>.<node_key>.<tls fp>.<expiry>.<sig>`.
-    pub fn endorse(&self, fleet: &str, node_key: &str, tls_fingerprint: &[u8; 32], expiry: u64) -> std::io::Result<String> {
-        if !valid_id(fleet) || !valid_hex(node_key, 32) {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "bad fleet name or node key"));
-        }
-        let e = NodeEndorsement { fleet: fleet.into(), node_key: node_key.into(), tls_fingerprint: *tls_fingerprint, expiry };
-        Ok(format!(
-            "mkn1.{}.{}.{}.{}.{}",
-            fleet,
-            node_key,
-            to_hex(tls_fingerprint),
-            expiry,
-            self.sign(&e.statement())?
-        ))
+        let identity = Identity { client_id: client_id.into(), role, expiry };
+        Ok(format!("mkc2.{}.{}", identity.text(), to_hex(&self.secret(&identity))))
     }
 }
 
-// --- verification -----------------------------------------------------------------
+/// A client's credential, ready to make proofs.
+#[derive(Clone)]
+pub struct Credential {
+    pub identity: Identity,
+    secret: [u8; 32],
+}
 
-/// The public side: the authority's point and the revocation list.
-pub struct Trust {
-    authority: [u8; 65],
-    revoked: HashSet<String>,
-    // Verified-token cache (ECDSA verify per request is wasteful).
-    cache: Mutex<HashMap<String, ClientCredential>>,
+impl std::fmt::Debug for Credential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Credential({})", self.identity.text())
+    }
+}
+
+impl Credential {
+    pub fn parse(text: &str) -> Option<Credential> {
+        let parts: Vec<&str> = text.trim().split('.').collect();
+        let [tag, id, role, expiry, secret] = parts.as_slice() else { return None };
+        if *tag != "mkc2" {
+            return None;
+        }
+        Some(Credential { identity: Identity::parse(id, role, expiry)?, secret: from_hex::<32>(secret)? })
+    }
+
+    /// The `Authorization` value for a server presenting `fingerprint`.
+    pub fn authorization(&self, fingerprint: &[u8; 32]) -> String {
+        let proof = hmac(&self.secret, &format!("mkfleet2 proof|{}", to_hex(fingerprint)));
+        format!("MKC2 {}.{}", self.identity.text(), to_hex(&proof))
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Rejection {
     Malformed,
-    BadSignature,
+    BadProof,
     Expired,
     Revoked,
 }
@@ -224,223 +194,138 @@ impl std::fmt::Display for Rejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
             Rejection::Malformed => "malformed credential",
-            Rejection::BadSignature => "bad signature",
+            Rejection::BadProof => "bad proof",
             Rejection::Expired => "expired",
             Rejection::Revoked => "revoked",
         })
     }
 }
 
-impl Trust {
-    pub fn new(authority: [u8; 65], revoked: HashSet<String>) -> Self {
-        Self { authority, revoked, cache: Mutex::new(HashMap::new()) }
+/// A node's check: its fleet key, its own certificate, the revocations.
+pub struct Verifier {
+    key: FleetKey,
+    fingerprint: [u8; 32],
+    revoked: HashSet<String>,
+}
+
+impl Verifier {
+    pub fn new(key: FleetKey, fingerprint: [u8; 32], revoked: HashSet<String>) -> Self {
+        Self { key, fingerprint, revoked }
     }
 
-    /// Loads `authority.pub` (required) and `revoked` (optional) from `dir`.
-    pub fn load(dir: &Path) -> Result<Self, String> {
-        let path = dir.join(AUTHORITY_PUB);
-        let text = fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-        let authority = from_hex::<65>(text.trim())
-            .filter(|p| p[0] == 0x04)
-            .ok_or_else(|| format!("{}: not a P-256 public key", path.display()))?;
+    /// Loads `fleet.key` (required) and `revoked` (optional) from `dir`.
+    pub fn load(dir: &Path, fingerprint: [u8; 32]) -> Result<Self, String> {
+        let path = dir.join(FLEET_KEY);
+        let key = FleetKey::load(&path).map_err(|e| format!("{}: {e}", path.display()))?;
         let revoked = fs::read_to_string(dir.join(REVOKED))
             .unwrap_or_default()
             .lines()
             .map(|l| l.trim().to_string())
             .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .collect();
-        Ok(Self::new(authority, revoked))
+        Ok(Self::new(key, fingerprint, revoked))
     }
 
-    pub fn authority_hex(&self) -> String {
-        to_hex(&self.authority)
-    }
-
-    pub fn verify_token(&self, token: &str, now: u64) -> Result<ClientCredential, Rejection> {
-        if let Some(cred) = self.cache.lock().unwrap().get(token).cloned() {
-            return self.still_valid(cred, now);
+    /// Checks an `Authorization` header value (`MKC2 <id>.<role>.<expiry>.<proof>`).
+    pub fn verify(&self, authorization: &str, now: u64) -> Result<Identity, Rejection> {
+        let value = authorization.trim().strip_prefix("MKC2 ").ok_or(Rejection::Malformed)?;
+        let parts: Vec<&str> = value.trim().split('.').collect();
+        let [id, role, expiry, proof] = parts.as_slice() else { return Err(Rejection::Malformed) };
+        let identity = Identity::parse(id, role, expiry).ok_or(Rejection::Malformed)?;
+        let proof = from_hex::<32>(proof).ok_or(Rejection::Malformed)?;
+        let secret = self.key.secret(&identity);
+        let expected = hmac(&secret, &format!("mkfleet2 proof|{}", to_hex(&self.fingerprint)));
+        if !tls::constant_time_eq(&expected, &proof) {
+            return Err(Rejection::BadProof);
         }
-        let parts: Vec<&str> = token.split('.').collect();
-        let [tag, id, role, expiry, sig] = parts.as_slice() else { return Err(Rejection::Malformed) };
-        if *tag != "mkc1" || !valid_id(id) || sig.len() > 300 {
-            return Err(Rejection::Malformed);
-        }
-        let role = Role::parse(role).ok_or(Rejection::Malformed)?;
-        let expiry: u64 = expiry.parse().map_err(|_| Rejection::Malformed)?;
-        let sig = hex_bytes(sig).ok_or(Rejection::Malformed)?;
-        let cred = ClientCredential { client_id: id.to_string(), role, expiry };
-        if !tls::verify_p256_sha256(&self.authority, cred.statement().as_bytes(), &sig) {
-            return Err(Rejection::BadSignature);
-        }
-        let mut cache = self.cache.lock().unwrap();
-        if cache.len() > 4096 {
-            cache.clear();
-        }
-        cache.insert(token.to_string(), cred.clone());
-        drop(cache);
-        self.still_valid(cred, now)
-    }
-
-    fn still_valid(&self, cred: ClientCredential, now: u64) -> Result<ClientCredential, Rejection> {
-        if self.revoked.contains(&cred.client_id) {
+        if self.revoked.contains(&identity.client_id) {
             return Err(Rejection::Revoked);
         }
-        if cred.expiry <= now {
+        if identity.expiry <= now {
             return Err(Rejection::Expired);
         }
-        Ok(cred)
-    }
-
-    pub fn verify_endorsement(&self, text: &str, now: u64) -> Result<NodeEndorsement, Rejection> {
-        let parts: Vec<&str> = text.trim().split('.').collect();
-        let [tag, fleet, node_key, fp, expiry, sig] = parts.as_slice() else { return Err(Rejection::Malformed) };
-        if *tag != "mkn1" || !valid_id(fleet) || !valid_hex(node_key, 32) || sig.len() > 300 {
-            return Err(Rejection::Malformed);
-        }
-        let tls_fingerprint = from_hex::<32>(fp).ok_or(Rejection::Malformed)?;
-        let expiry: u64 = expiry.parse().map_err(|_| Rejection::Malformed)?;
-        let sig = hex_bytes(sig).ok_or(Rejection::Malformed)?;
-        let e = NodeEndorsement { fleet: fleet.to_string(), node_key: node_key.to_string(), tls_fingerprint, expiry };
-        if !tls::verify_p256_sha256(&self.authority, e.statement().as_bytes(), &sig) {
-            return Err(Rejection::BadSignature);
-        }
-        if self.revoked.contains(&e.node_key) {
-            return Err(Rejection::Revoked);
-        }
-        if e.expiry <= now {
-            return Err(Rejection::Expired);
-        }
-        Ok(e)
+        Ok(identity)
     }
 }
 
-fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    if text.len() % 2 != 0 {
-        return None;
-    }
-    (0..text.len())
-        .step_by(2)
-        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
-        .collect()
-}
-
-// --- client side ----------------------------------------------------------------
+// --- this process as a fleet client ---------------------------------------------
 
 /// `~/.makepad/ai-hub`.
 pub fn client_dir() -> PathBuf {
     crate::home::makepad_home().join("ai-hub")
 }
 
-/// This client's trust (authority public key), loaded once.
-pub fn client_trust() -> Option<&'static Trust> {
-    static TRUST: OnceLock<Option<Trust>> = OnceLock::new();
-    TRUST
-        .get_or_init(|| match Trust::load(&client_dir()) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                eprintln!("ai-hub: no fleet trust ({e}); LAN fleet nodes cannot be verified");
-                None
-            }
-        })
-        .as_ref()
+static NODE_CREDENTIAL_TEXT: OnceLock<Option<String>> = OnceLock::new();
+
+/// A fleet node's own credential (role `node`), set when it starts.
+pub fn set_node_credential(text: Option<String>) {
+    let _ = NODE_CREDENTIAL_TEXT.set(text);
 }
 
-static NODE_TRUST: OnceLock<std::sync::Arc<Trust>> = OnceLock::new();
-
-/// A fleet node's own trust (its `<cache>/fleet`), set when its front starts.
-pub fn set_node_trust(trust: std::sync::Arc<Trust>) {
-    let _ = NODE_TRUST.set(trust);
+/// This process's credential: a node's own, else `MAKEPAD_AI_HUB_CREDENTIAL`,
+/// else `~/.makepad/ai-hub/client.credential`.
+pub fn own_credential() -> Option<Credential> {
+    let text = NODE_CREDENTIAL_TEXT
+        .get()
+        .cloned()
+        .flatten()
+        .or_else(|| std::env::var("MAKEPAD_AI_HUB_CREDENTIAL").ok())
+        .or_else(|| fs::read_to_string(client_dir().join(CLIENT_CREDENTIAL)).ok())?;
+    Credential::parse(&text)
 }
 
-/// The trust this process verifies beacons with: the node's own when it
-/// is a fleet node, else the user's.
-pub fn verifier() -> Option<&'static Trust> {
-    NODE_TRUST.get().map(|t| &**t).or_else(client_trust)
+fn authorization_for(fingerprint: &[u8; 32]) -> Option<String> {
+    own_credential().map(|c| c.authorization(fingerprint))
 }
 
-/// This process's own fleet credential: a node's `node.token`, else the
-/// user's client token.
-pub fn own_token() -> Option<String> {
-    NODE_TOKEN_TEXT.get().cloned().flatten().or_else(client_token)
+/// Installs the fleet client of this process (known nodes in
+/// `known_nodes_dir`, proofs from [`own_credential`]). First call wins.
+pub fn install_fleet_client(known_nodes_dir: &Path) {
+    tls::set_fleet_client(tls::FleetClient {
+        known_hosts: tls::KnownHosts::new(known_nodes_dir.join(KNOWN_NODES)),
+        authorization: authorization_for,
+    });
 }
 
-static NODE_TOKEN_TEXT: OnceLock<Option<String>> = OnceLock::new();
-
-pub fn set_node_token(token: Option<String>) {
-    let _ = NODE_TOKEN_TEXT.set(token);
+/// Marks `host:port` as a fleet node (its URL is `https://host:port`).
+pub fn mark_fleet_endpoint(host_port: &str) {
+    install_fleet_client(&client_dir());
+    tls::mark_fleet_endpoint(host_port);
 }
 
-/// This client's credential: `MAKEPAD_AI_HUB_TOKEN`, else
-/// `~/.makepad/ai-hub/client.token`.
-pub fn client_token() -> Option<String> {
-    if let Ok(t) = std::env::var("MAKEPAD_AI_HUB_TOKEN") {
-        let t = t.trim().to_string();
-        return (!t.is_empty()).then_some(t);
-    }
-    fs::read_to_string(client_dir().join(CLIENT_TOKEN)).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
-}
-
-/// Verified fleet endpoints: `host:port` → pinned certificate fingerprint,
-/// kept by makepad-network so its HTTP and websocket clients see the same
-/// set. A fleet credential is only ever sent to an endpoint in here, over
-/// TLS pinned to the fingerprint recorded for it.
-pub fn pin_endpoint(host_port: &str, fingerprint: [u8; 32]) {
-    makepad_network::tls::set_pinned_credential_provider(own_token);
-    makepad_network::tls::pin_endpoint(host_port, fingerprint);
-}
-
-pub fn pin_for(host_port: &str) -> Option<[u8; 32]> {
-    makepad_network::tls::pin_for(host_port)
+pub fn is_fleet_endpoint(host_port: &str) -> bool {
+    tls::is_fleet_endpoint(host_port)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn authority() -> Authority {
-        Authority { key: tls::generate_p256().unwrap() }
-    }
-
-    fn trust_of(a: &Authority, revoked: &[&str]) -> Trust {
-        let point: [u8; 65] = a.key[..65].try_into().unwrap();
-        Trust::new(point, revoked.iter().map(|s| s.to_string()).collect())
-    }
-
     #[test]
-    fn token_round_trip_and_rejections() {
-        let a = authority();
-        let trust = trust_of(&a, &["stolen-laptop"]);
-        let token = a.issue("rik-mac", Role::Lan, 2_000).unwrap();
-        let cred = trust.verify_token(&token, 1_000).unwrap();
-        assert_eq!(cred.client_id, "rik-mac");
-        assert_eq!(cred.role, Role::Lan);
-        assert_eq!(trust.verify_token(&token, 2_000), Err(Rejection::Expired));
-        // Role or id swapped in the text: the signature no longer matches.
-        assert_eq!(trust.verify_token(&token.replace(".lan.", ".node."), 1_000), Err(Rejection::BadSignature));
-        assert_eq!(trust.verify_token(&token.replace("rik-mac", "rik-maz"), 1_000), Err(Rejection::BadSignature));
-        assert_eq!(trust.verify_token("Bearer x", 1_000), Err(Rejection::Malformed));
-        let revoked = a.issue("stolen-laptop", Role::Device, 2_000).unwrap();
-        assert_eq!(trust.verify_token(&revoked, 1_000), Err(Rejection::Revoked));
-        // Another authority's credential.
-        let other = authority().issue("rik-mac", Role::Lan, 2_000).unwrap();
-        assert_eq!(trust.verify_token(&other, 1_000), Err(Rejection::BadSignature));
-    }
-
-    #[test]
-    fn endorsement_round_trip_and_rejections() {
-        let a = authority();
-        let trust = trust_of(&a, &["0123456789abcdef0123456789abcdee"]);
-        let key = "0123456789abcdef0123456789abcdef";
-        let fp = [7u8; 32];
-        let e = a.endorse("gen", key, &fp, 5_000).unwrap();
-        let v = trust.verify_endorsement(&e, 1).unwrap();
-        assert_eq!((v.fleet.as_str(), v.node_key.as_str(), v.tls_fingerprint), ("gen", key, fp));
-        // Swapping the certificate fingerprint (a rogue node reusing a real
-        // endorsement for its own certificate) breaks the signature.
-        let forged = e.replace(&to_hex(&fp), &to_hex(&[8u8; 32]));
-        assert_eq!(trust.verify_endorsement(&forged, 1), Err(Rejection::BadSignature));
-        assert_eq!(trust.verify_endorsement(&e, 5_000), Err(Rejection::Expired));
-        let revoked = a.endorse("gen", "0123456789abcdef0123456789abcdee", &fp, 5_000).unwrap();
-        assert_eq!(trust.verify_endorsement(&revoked, 1), Err(Rejection::Revoked));
+    fn credential_proofs_bind_to_the_certificate() {
+        let key = FleetKey::generate().unwrap();
+        let node_fp = [7u8; 32];
+        let verifier = Verifier::new(FleetKey(key.0), node_fp, ["stolen-laptop".to_string()].into_iter().collect());
+        let text = key.issue("rik-mac", Role::Lan, 2_000).unwrap();
+        let cred = Credential::parse(&text).unwrap();
+        // The proof for this node's certificate passes.
+        let id = verifier.verify(&cred.authorization(&node_fp), 1_000).unwrap();
+        assert_eq!((id.client_id.as_str(), id.role), ("rik-mac", Role::Lan));
+        // A proof captured by anything presenting another certificate is
+        // useless against the real node.
+        assert_eq!(verifier.verify(&cred.authorization(&[8u8; 32]), 1_000), Err(Rejection::BadProof));
+        // Expiry, revocation, tampering, other fleets.
+        assert_eq!(verifier.verify(&cred.authorization(&node_fp), 2_000), Err(Rejection::Expired));
+        let stolen = Credential::parse(&key.issue("stolen-laptop", Role::Device, 2_000).unwrap()).unwrap();
+        assert_eq!(verifier.verify(&stolen.authorization(&node_fp), 1_000), Err(Rejection::Revoked));
+        let promoted = cred.authorization(&node_fp).replace(".lan.", ".node.");
+        assert_eq!(verifier.verify(&promoted, 1_000), Err(Rejection::BadProof));
+        let other_fleet = Credential::parse(&FleetKey::generate().unwrap().issue("rik-mac", Role::Lan, 2_000).unwrap()).unwrap();
+        assert_eq!(verifier.verify(&other_fleet.authorization(&node_fp), 1_000), Err(Rejection::BadProof));
+        assert_eq!(verifier.verify("Bearer x", 1_000), Err(Rejection::Malformed));
+        assert!(Credential::parse("mkc1.a.lan.1.00").is_none());
+        // Debug output never shows the secret.
+        let secret_hex = text.rsplit('.').next().unwrap();
+        assert!(!format!("{cred:?}").contains(secret_hex));
     }
 }

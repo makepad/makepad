@@ -46,18 +46,6 @@ const BEACON_INTERVAL: Duration = Duration::from_secs(2);
 /// discovered set (its fleet snapshot then goes down via health polling).
 const BEACON_EXPIRY: Duration = Duration::from_secs(15);
 
-#[derive(Clone, Debug, SerJson, DeJson)]
-pub struct BeaconJson {
-    /// Constant "makepad-asset-ai" — receivers ignore anything else.
-    pub service: String,
-    /// Random per-service-start id; matches the `/health` `node_id`.
-    pub node_id: u64,
-    /// The service's HTTP port on the sender's address.
-    pub port: u16,
-    /// Partition this box belongs to. Missing on older beacons = default.
-    pub fleet: Option<String>,
-}
-
 /// Random-enough node id: wall-clock nanos xor pid. Uniqueness only needs
 /// to hold across a handful of LAN boxes.
 pub fn mint_node_id() -> u64 {
@@ -68,75 +56,40 @@ pub fn mint_node_id() -> u64 {
     nanos ^ ((std::process::id() as u64) << 32)
 }
 
-/// Service side: broadcast a beacon every [`BEACON_INTERVAL`] until the
-/// process exits. Failures log once and end the thread — discovery is an
-/// extra, never a crash. `MAKEPAD_AI_NO_BEACON=1` disables.
-pub fn start_beacon(node_id: u64, http_port: u16, fleet: String) {
-    if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1") {
-        return;
-    }
-    std::thread::spawn(move || {
-        let socket = match UdpSocket::bind(("0.0.0.0", 0)) {
-            Ok(socket) => socket,
-            Err(e) => {
-                eprintln!("discovery: beacon socket bind failed: {e} — no LAN announce");
-                return;
-            }
-        };
-        if let Err(e) = socket.set_broadcast(true) {
-            eprintln!("discovery: SO_BROADCAST failed: {e} — no LAN announce");
-            return;
-        }
-        let beacon = BeaconJson {
-            service: "makepad-asset-ai".to_string(),
-            node_id,
-            port: http_port,
-            fleet: Some(normalize_fleet(&fleet)),
-        }
-        .serialize_json();
-        loop {
-            // Send errors are transient (interface down mid-sleep etc.) —
-            // keep beating rather than giving up.
-            let _ = socket.send_to(beacon.as_bytes(), ("255.255.255.255", DISCOVERY_PORT));
-            std::thread::sleep(BEACON_INTERVAL);
-        }
-    });
-}
-
-/// The fleet beacon of a node serving behind its TLS front: carries the
-/// node's endorsement (fleet, node key, certificate fingerprint, signed by
-/// the fleet authority). A listener that cannot verify it ignores it.
+/// The beacon of a node serving behind its TLS front. Nothing in it is
+/// trusted: a client reaches the advertised port over TLS, records the
+/// certificate (known nodes) and proves its own credential to it.
 #[derive(Clone, Debug, SerJson, DeJson)]
-pub struct SignedBeaconJson {
+pub struct FleetBeaconJson {
     /// Constant "makepad-ai-hub-tls".
     pub service: String,
     pub node_id: u64,
     /// The TLS front's port on the sender's address.
     pub port: u16,
+    pub fleet: String,
     pub node_key: String,
-    pub endorsement: String,
 }
 
-pub const SIGNED_SERVICE: &str = "makepad-ai-hub-tls";
+pub const FLEET_SERVICE: &str = "makepad-ai-hub-tls";
 
-pub fn start_signed_beacon(node_id: u64, tls_port: u16, _fleet: String, node_key: String, endorsement: String) {
+pub fn start_fleet_beacon(node_id: u64, tls_port: u16, fleet: String, node_key: String) {
     if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1") {
         return;
     }
     std::thread::spawn(move || {
         let Ok(socket) = UdpSocket::bind(("0.0.0.0", 0)) else {
-            eprintln!("discovery: signed beacon socket bind failed — no LAN announce");
+            eprintln!("discovery: beacon socket bind failed — no LAN announce");
             return;
         };
         if socket.set_broadcast(true).is_err() {
             return;
         }
-        let beacon = SignedBeaconJson {
-            service: SIGNED_SERVICE.to_string(),
+        let beacon = FleetBeaconJson {
+            service: FLEET_SERVICE.to_string(),
             node_id,
             port: tls_port,
+            fleet: normalize_fleet(&fleet),
             node_key,
-            endorsement,
         }
         .serialize_json();
         loop {
@@ -146,21 +99,10 @@ pub fn start_signed_beacon(node_id: u64, tls_port: u16, _fleet: String, node_key
     });
 }
 
-/// Checks a signed beacon from `from`: the endorsement verifies under the
-/// fleet authority, names this beacon's node key and the wanted fleet. The
-/// endpoint is then pinned to the endorsed certificate; returns its URL.
-pub fn accept_signed_beacon(
-    trust: &crate::fleet_auth::Trust,
-    beacon: &SignedBeaconJson,
-    from: std::net::IpAddr,
-    wanted_fleet: &str,
-    now: u64,
-) -> Option<(String, String)> {
-    if beacon.service != SIGNED_SERVICE {
-        return None;
-    }
-    let e = trust.verify_endorsement(&beacon.endorsement, now).ok()?;
-    if e.node_key != beacon.node_key || e.fleet != wanted_fleet {
+/// A beacon for the wanted fleet from `from`: the node's TLS endpoint,
+/// marked as a fleet endpoint; returns its URL.
+pub fn accept_fleet_beacon(beacon: &FleetBeaconJson, from: std::net::IpAddr, wanted_fleet: &str) -> Option<String> {
+    if beacon.service != FLEET_SERVICE || normalize_fleet(&beacon.fleet) != wanted_fleet || beacon.port == 0 {
         return None;
     }
     let host = match from {
@@ -168,8 +110,8 @@ pub fn accept_signed_beacon(
         v4 => v4.to_string(),
     };
     let host_port = format!("{host}:{}", beacon.port);
-    crate::fleet_auth::pin_endpoint(&host_port, e.tls_fingerprint);
-    Some((format!("https://{host_port}"), e.node_key))
+    crate::fleet_auth::mark_fleet_endpoint(&host_port);
+    Some(format!("https://{host_port}"))
 }
 
 /// One discovered node: url is derived from the beacon's SOURCE address +
@@ -250,8 +192,6 @@ fn spawn_listener() -> Discovered {
             }
         };
         let mut buffer = [0u8; 2048];
-        let mut signed = std::collections::HashSet::new();
-        let mut legacy_logged = std::collections::HashSet::new();
         let mut warned_no_credential = false;
         loop {
             let Ok((len, from)) = socket.recv_from(&mut buffer) else {
@@ -260,57 +200,20 @@ fn spawn_listener() -> Discovered {
             let Ok(text) = std::str::from_utf8(&buffer[..len]) else {
                 continue;
             };
-            // Endorsed nodes join the fleet over pinned TLS, for a process
-            // that holds a fleet credential (without one they would only
-            // answer 401; during the transition it keeps the legacy path).
-            let credentialed = crate::fleet_auth::own_token().is_some();
-            if let Ok(beacon) = SignedBeaconJson::deserialize_json(text) {
-                if !credentialed {
-                    if !warned_no_credential && crate::fleet_auth::legacy_fleet_allowed() {
-                        warned_no_credential = true;
-                        eprintln!("discovery: signed fleet nodes seen but this process has no fleet credential (~/.makepad/ai-hub/client.token); using legacy nodes during the transition");
-                    }
-                    continue;
-                }
-                let Some(trust) = crate::fleet_auth::verifier() else {
-                    continue;
-                };
-                let Some((base_url, _node_key)) =
-                    accept_signed_beacon(trust, &beacon, from.ip(), &wanted_fleet(), crate::fleet_auth::now_secs())
-                else {
-                    continue;
-                };
-                signed.insert(beacon.node_id);
-                nodes
-                    .lock()
-                    .unwrap()
-                    .insert(beacon.node_id, (base_url, Instant::now()));
-                continue;
-            }
-            // Open-fleet transition: an unsigned node is still used (no
-            // credential is ever sent to it: it is not pinned), logged, and
-            // only until the transition ends. A node that also sends a
-            // signed beacon is always reached through that.
-            if !crate::fleet_auth::legacy_fleet_allowed() {
-                continue;
-            }
-            let Ok(beacon) = BeaconJson::deserialize_json(text) else {
+            let Ok(beacon) = FleetBeaconJson::deserialize_json(text) else {
                 continue;
             };
-            if beacon.service != "makepad-asset-ai" || signed.contains(&beacon.node_id) {
+            // A node is only of use to a process with a fleet credential.
+            if crate::fleet_auth::own_credential().is_none() {
+                if !warned_no_credential {
+                    warned_no_credential = true;
+                    eprintln!("discovery: fleet nodes found, but this process has no fleet credential (~/.makepad/ai-hub/client.credential or MAKEPAD_AI_HUB_CREDENTIAL; see tools/aihub-fleet.md)");
+                }
                 continue;
             }
-            let fleet = normalize_fleet(beacon.fleet.as_deref().unwrap_or(""));
-            if fleet != wanted_fleet() {
+            let Some(base_url) = accept_fleet_beacon(&beacon, from.ip(), &wanted_fleet()) else {
                 continue;
-            }
-            let base_url = format!("http://{}:{}", from.ip(), beacon.port);
-            if legacy_logged.insert(base_url.clone()) {
-                eprintln!(
-                    "discovery: LEGACY unsigned node {base_url} accepted (open-fleet transition until {}; no credential is sent to it)",
-                    crate::fleet_auth::LEGACY_FLEET_UNTIL_TEXT
-                );
-            }
+            };
             nodes
                 .lock()
                 .unwrap()
@@ -325,51 +228,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn beacon_roundtrip() {
-        let beacon = BeaconJson {
-            service: "makepad-asset-ai".to_string(),
-            node_id: 0xDEAD_BEEF,
-            port: 8767,
-            fleet: Some("game".to_string()),
-        };
-        let json = beacon.serialize_json();
-        let back = BeaconJson::deserialize_json(&json).unwrap();
-        assert_eq!(back.node_id, 0xDEAD_BEEF);
-        assert_eq!(back.port, 8767);
-        assert_eq!(back.service, "makepad-asset-ai");
-        assert_eq!(back.fleet.as_deref(), Some("game"));
-    }
-
-    #[test]
-    fn signed_beacons_pin_endorsed_nodes_only() {
-        use crate::fleet_auth::{Authority, Trust};
-        let dir = std::env::temp_dir().join(format!("mk-beacon-{}", mint_node_id()));
-        let authority = Authority::create(&dir).unwrap();
-        let point = makepad_network::tls::from_hex::<65>(&authority.public_hex()).unwrap();
-        let trust = Trust::new(point, Default::default());
-        let key = "00112233445566778899aabbccddeeff";
-        let fp = [5u8; 32];
-        let beacon = SignedBeaconJson {
-            service: SIGNED_SERVICE.into(),
+    fn fleet_beacons_mark_tls_endpoints() {
+        let beacon = FleetBeaconJson {
+            service: FLEET_SERVICE.into(),
             node_id: 1,
             port: 8123,
-            node_key: key.into(),
-            endorsement: authority.endorse("gen", key, &fp, u64::MAX / 2).unwrap(),
+            fleet: "gen".into(),
+            node_key: "00112233445566778899aabbccddeeff".into(),
         };
+        let back = FleetBeaconJson::deserialize_json(&beacon.serialize_json()).unwrap();
+        assert_eq!(back.port, 8123);
         let from: std::net::IpAddr = "10.9.9.9".parse().unwrap();
-        let (url, _) = accept_signed_beacon(&trust, &beacon, from, "gen", 1).unwrap();
-        assert_eq!(url, "https://10.9.9.9:8123");
-        assert_eq!(crate::fleet_auth::pin_for("10.9.9.9:8123"), Some(fp));
-        // Another fleet, another node key, a forged endorsement: ignored.
-        assert!(accept_signed_beacon(&trust, &beacon, from, "game", 1).is_none());
-        let mut other = beacon.clone();
-        other.node_key = "ffffffffffffffffffffffffffffffff".into();
-        assert!(accept_signed_beacon(&trust, &other, from, "gen", 1).is_none());
-        let mut forged = beacon.clone();
-        forged.endorsement = forged.endorsement.replace(&makepad_network::tls::to_hex(&fp), &makepad_network::tls::to_hex(&[6u8; 32]));
-        assert!(accept_signed_beacon(&trust, &forged, "10.9.9.8".parse().unwrap(), "gen", 1).is_none());
-        assert_eq!(crate::fleet_auth::pin_for("10.9.9.8:8123"), None);
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(accept_fleet_beacon(&beacon, from, "gen").as_deref(), Some("https://10.9.9.9:8123"));
+        assert!(crate::fleet_auth::is_fleet_endpoint("10.9.9.9:8123"));
+        assert!(accept_fleet_beacon(&beacon, "10.9.9.8".parse().unwrap(), "game").is_none());
+        assert!(!crate::fleet_auth::is_fleet_endpoint("10.9.9.8:8123"));
     }
 
     #[test]

@@ -209,9 +209,6 @@ pub struct ServiceShared {
     /// every request it authenticated ([`crate::front`]). None on a
     /// loopback-only node, whose callers are all machine-local.
     front_secret: Option<String>,
-    /// Transition only (`MAKEPAD_AI_HUB_LEGACY_PLAIN=1`): the old plaintext
-    /// port stays open next to the TLS front until every client has moved.
-    legacy_open: bool,
     /// Which client submitted each job (cancel and leases are owner-only).
     job_owners: Mutex<HashMap<String, String>>,
     /// Random per-start id shared by /health and the discovery beacon.
@@ -332,22 +329,10 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     let fleet_mode = if addr.ip().is_loopback() {
         None
     } else {
-        match FleetMode::load(&config.cache_dir, &node_key, &crate::discovery::normalize_fleet(&config.fleet), addr) {
-            Ok(mode) => Some(mode),
-            Err(e) if crate::fleet_auth::legacy_fleet_allowed() => {
-                eprintln!(
-                    "fleet: LEGACY OPEN NODE: {e}. Serving plaintext without authentication, as before, \
-                     until the open-fleet transition ends on {}.",
-                    crate::fleet_auth::LEGACY_FLEET_UNTIL_TEXT
-                );
-                None
-            }
-            Err(e) => return Err(e),
-        }
+        Some(FleetMode::load(&config.cache_dir, &node_key, &crate::discovery::normalize_fleet(&config.fleet), addr)?)
     };
     let inner_addr = match &fleet_mode {
         None => addr,
-        Some(mode) if mode.legacy => addr,
         Some(_) => {
             let probe = TcpListener::bind(("127.0.0.1", 0))
                 .map_err(|e| AssetAiError::Http(format!("inner bind: {e}")))?;
@@ -387,7 +372,6 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         gpu: GpuCache::new(),
         vram_usable: residency::UsableVram::new(startup_usable_mb),
         front_secret: fleet_mode.as_ref().map(|m| m.front_secret.clone()),
-        legacy_open: fleet_mode.as_ref().is_some_and(|m| m.legacy),
         job_owners: Mutex::new(HashMap::new()),
         node_id,
         node_key,
@@ -402,10 +386,8 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     });
     // LAN autodiscovery: announce this node so clients pick it up without a
     // fleet-file edit. Frontends keep only beacons whose fleet matches.
-    // The legacy beacon only while the old plaintext port is open.
-    if fleet_mode.as_ref().is_none_or(|m| m.legacy) {
-        crate::discovery::start_beacon(node_id, port, shared.fleet.clone());
-    }
+    // A loopback node is found through ~/.makepad/run, not the LAN; a fleet
+    // node announces itself with its signed beacon once its front is up.
 
     let (request_tx, request_rx) = mpsc::channel::<HttpServerRequest>();
     // Character chains relay self-contained GLBs between mesh, rig, and
@@ -480,22 +462,21 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     })
 }
 
-/// Fleet operation of a network-reachable node: its TLS identity, its
-/// endorsement and the authority it trusts (all under `<cache>/fleet`).
+/// Fleet operation of a network-reachable node: its own TLS identity
+/// (made on first start) and the fleet key that checks client proofs (all
+/// under `<cache>/fleet`).
 struct FleetMode {
-    trust: Arc<crate::fleet_auth::Trust>,
+    verifier: Arc<crate::fleet_auth::Verifier>,
     identity: makepad_network::tls::TlsIdentity,
-    endorsement: String,
     fleet: String,
     listen: SocketAddr,
     edge: Option<SocketAddr>,
-    legacy: bool,
     front_secret: String,
-    node_token: Option<String>,
+    node_credential: Option<String>,
 }
 
-/// The node's TLS identity (created on first use) and node key, for
-/// endorsement by the fleet authority (`ai-fleet endorse`).
+/// The node key and TLS certificate fingerprint (made on first use), for
+/// status and for checking a known-nodes record by hand.
 pub fn fleet_identity(cache_dir: &Path) -> Result<(String, String), AssetAiError> {
     fs::create_dir_all(cache_dir).map_err(|e| AssetAiError::Io(format!("{}: {e}", cache_dir.display())))?;
     let node_key = load_or_create_node_key(cache_dir);
@@ -512,65 +493,54 @@ impl FleetMode {
         let dir = cache_dir.join("fleet");
         let refuse = |why: String| {
             AssetAiError::Io(format!(
-                "this node listens on {addr} but {why}; a network-reachable node serves only with fleet credentials \
-                 (see tools/aihub-fleet.md; `makepad-app-ai-hub --fleet-identity` prints what to endorse)"
+                "this node listens on {addr} but {why}; a network-reachable node serves only to fleet credentials \
+                 (see tools/aihub-fleet.md)"
             ))
         };
-        let trust = crate::fleet_auth::Trust::load(&dir).map_err(|e| refuse(format!("has no fleet trust ({e})")))?;
         let identity = makepad_network::tls::TlsIdentity::load_or_create(&dir.join("tls"), &format!("makepad ai node {node_key}"))
-            .map_err(|e| refuse(format!("cannot load its TLS identity ({e})")))?;
-        let endorsement = fs::read_to_string(dir.join(crate::fleet_auth::NODE_ENDORSEMENT))
-            .map_err(|e| refuse(format!("has no endorsement ({e})")))?
-            .trim()
-            .to_string();
-        let e = trust
-            .verify_endorsement(&endorsement, crate::fleet_auth::now_secs())
-            .map_err(|e| refuse(format!("its endorsement is not valid ({e})")))?;
-        if e.node_key != node_key || e.tls_fingerprint != identity.fingerprint || e.fleet != fleet {
-            return Err(refuse(format!(
-                "its endorsement names another node, certificate or fleet (node key {node_key}, certificate {}, fleet {fleet})",
-                identity.fingerprint_hex()
-            )));
-        }
-        let legacy = std::env::var("MAKEPAD_AI_HUB_LEGACY_PLAIN").is_ok_and(|v| v == "1")
-            && crate::fleet_auth::legacy_fleet_allowed();
-        let listen = if legacy { SocketAddr::new(addr.ip(), addr.port() + 1) } else { addr };
+            .map_err(|e| refuse(format!("cannot make or load its TLS identity ({e})")))?;
+        let verifier = crate::fleet_auth::Verifier::load(&dir, identity.fingerprint)
+            .map_err(|e| refuse(format!("has no fleet key ({e})")))?;
         let edge = match std::env::var("MAKEPAD_AI_HUB_EDGE") {
             Ok(text) => Some(text.parse().map_err(|_| refuse(format!("MAKEPAD_AI_HUB_EDGE {text:?} is not an address:port")))?),
             Err(_) => None,
         };
         let mut secret = [0u8; 32];
         makepad_network::tls::os_random(&mut secret).map_err(|e| AssetAiError::Io(format!("random: {e}")))?;
-        let node_token = fs::read_to_string(dir.join(crate::fleet_auth::NODE_TOKEN)).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        let node_credential = fs::read_to_string(dir.join(crate::fleet_auth::NODE_CREDENTIAL))
+            .ok()
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty());
         Ok(Self {
-            node_token,
-            trust: Arc::new(trust),
+            verifier: Arc::new(verifier),
             identity,
-            endorsement,
             fleet: fleet.to_string(),
-            listen,
+            listen: addr,
             edge,
-            legacy,
             front_secret: makepad_network::tls::to_hex(&secret),
+            node_credential,
         })
     }
 
-    /// Starts the TLS front (and the edge, when configured) and the signed
+    /// Starts the TLS front (and the edge, when configured) and the
     /// beacon; returns the public address.
     fn start(self, node_id: u64, inner: SocketAddr, shared: &Arc<ServiceShared>) -> Result<SocketAddr, AssetAiError> {
-        let cert = self.identity.cert_der.clone();
-        let key = self.identity.key;
         let server = |identity: makepad_network::tls::TlsIdentity| {
             makepad_network::tls::TlsServer::new(identity).map_err(|e| AssetAiError::Http(format!("TLS server: {e}")))
         };
         let fp = self.identity.fingerprint_hex();
         if let Some(edge) = self.edge {
-            let identity = makepad_network::tls::TlsIdentity { key, cert_der: cert.clone(), fingerprint: self.identity.fingerprint, dir: self.identity.dir.clone() };
+            let identity = makepad_network::tls::TlsIdentity {
+                key: self.identity.key,
+                cert_der: self.identity.cert_der.clone(),
+                fingerprint: self.identity.fingerprint,
+                dir: self.identity.dir.clone(),
+            };
             crate::front::start_front(crate::front::FrontConfig {
                 listen: edge,
                 inner,
                 tls: server(identity)?,
-                trust: self.trust.clone(),
+                verifier: self.verifier.clone(),
                 front_secret: self.front_secret.clone(),
                 edge: true,
             })
@@ -581,15 +551,15 @@ impl FleetMode {
             listen: self.listen,
             inner,
             tls: server(self.identity)?,
-            trust: self.trust.clone(),
+            verifier: self.verifier.clone(),
             front_secret: self.front_secret.clone(),
             edge: false,
         })
         .map_err(|e| AssetAiError::Http(format!("TLS front bind {}: {e}", self.listen)))?;
-        eprintln!("fleet: TLS front on {} (certificate {fp}){}", self.listen, if self.legacy { "; legacy plaintext port still open" } else { "" });
-        crate::discovery::start_signed_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone(), self.endorsement);
-        crate::fleet_auth::set_node_trust(self.trust);
-        crate::fleet_auth::set_node_token(self.node_token);
+        eprintln!("fleet: TLS front on {} (certificate {fp})", self.listen);
+        crate::fleet_auth::set_node_credential(self.node_credential);
+        crate::fleet_auth::install_fleet_client(&shared.cache_dir.join("fleet"));
+        crate::discovery::start_fleet_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone());
         Ok(self.listen)
     }
 }
@@ -736,9 +706,7 @@ fn caller_of(shared: &ServiceShared, headers: &HttpServerHeaders) -> Option<crat
     let Some(secret) = shared.front_secret.as_deref() else {
         return Some(crate::front::Caller::local());
     };
-    crate::front::caller_from_headers(&headers.lines, secret).or_else(|| {
-        shared.legacy_open.then(|| crate::front::Caller { client_id: "legacy".into(), role: crate::fleet_auth::Role::Lan })
-    })
+    crate::front::caller_from_headers(&headers.lines, secret)
 }
 
 fn unauthorized_response() -> HttpServerResponse {
@@ -3027,7 +2995,6 @@ mod lifecycle_tests {
             gpu: GpuCache::new(),
             vram_usable: residency::UsableVram::new(None),
             front_secret: front_secret.map(str::to_string),
-            legacy_open: false,
             job_owners: Mutex::new(HashMap::new()),
             node_id: 1,
             node_key: "f".repeat(32),

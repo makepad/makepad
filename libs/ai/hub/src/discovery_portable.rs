@@ -23,14 +23,6 @@ pub fn fleet_from_env() -> String {
     normalize_fleet(&std::env::var("MAKEPAD_ASSET_AI_FLEET").unwrap_or_default())
 }
 
-#[derive(Clone, Debug, SerJson, DeJson)]
-pub struct BeaconJson {
-    pub service: String,
-    pub node_id: u64,
-    pub port: u16,
-    pub fleet: Option<String>,
-}
-
 pub fn mint_node_id() -> u64 {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -39,7 +31,6 @@ pub fn mint_node_id() -> u64 {
     nanos ^ ((std::process::id() as u64) << 32)
 }
 
-pub fn start_beacon(_node_id: u64, _http_port: u16, _fleet: String) {}
 
 #[derive(Clone, Debug)]
 pub struct DiscoveredNode {
