@@ -33,7 +33,7 @@ const MARK: i32 = i32::MIN;
 
 /// Has no effect left visible after the trap that follows: only the operand
 /// stack and locals change, or the instruction traps itself.
-fn removable(instr: &Instr) -> bool {
+pub(crate) fn removable(instr: &Instr) -> bool {
     matches!(
         instr,
         Instr::Nop

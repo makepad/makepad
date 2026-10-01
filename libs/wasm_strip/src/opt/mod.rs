@@ -10,6 +10,7 @@ pub mod ir;
 pub mod remap;
 
 mod compact;
+pub mod data;
 mod dce;
 mod locals;
 mod merge;
@@ -212,6 +213,8 @@ pub fn wasm_optimize_checked(
         });
     }
     let sites = std::cell::RefCell::new(Vec::new());
+    // What the panic sites point at in the data, cleared once they are gone.
+    let panic_data = if opts.panic_trap { data::Objects::find(&module) } else { data::Objects::default() };
     if opts.panic_trap {
         run("panics", &mut module, &mut bytes, &|module| {
             *sites.borrow_mut() = panics::run(module, opts.symbols)
@@ -234,6 +237,11 @@ pub fn wasm_optimize_checked(
     }
     if opts.dce && (opts.merge || opts.peephole) {
         run("dce", &mut module, &mut bytes, &dce::run);
+    }
+    if panic_data.len() > 0 {
+        run("data", &mut module, &mut bytes, &|module| {
+            data::clear_dead_objects(module, &panic_data);
+        });
     }
     if opts.compact {
         run("compact", &mut module, &mut bytes, &compact::run);

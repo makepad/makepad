@@ -336,6 +336,9 @@ fn panics_become_traps_with_their_sites() {
     assert_eq!(module.funcs.len(), 1);
     assert!(module.imports.is_empty() && module.names.is_none());
     assert!(!module.funcs[0].body.iter().any(|i| matches!(i, Instr::Call(_))));
+    // The message, the location and its file name are cleared.
+    let data: Vec<u8> = module.datas.iter().flat_map(|d| d.bytes.clone()).collect();
+    assert!(data.iter().all(|b| *b == 0), "{data:?}");
 
     let symbols = report.symbols.unwrap();
     assert!(symbols.contains("F 0 get"), "{symbols}");
