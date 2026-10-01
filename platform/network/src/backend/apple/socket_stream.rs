@@ -1,8 +1,12 @@
 use makepad_apple_sys::{
     errSSLClosedAbort, errSSLClosedGraceful, errSSLServerAuthCompleted, errSSLWouldBlock,
-    kSSLClientSide, kSSLSessionOptionBreakOnServerAuth, kSSLStreamType, CFRelease, OSStatus,
-    SSLClose, SSLConnectionRef, SSLContextRef, SSLCreateContext, SSLHandshake, SSLRead,
-    SSLSetConnection, SSLSetIOFuncs, SSLSetPeerDomainName, SSLSetSessionOption, SSLWrite,
+    kSSLClientSide, kSSLServerSide, kSSLSessionOptionBreakOnServerAuth, kSSLStreamType,
+    CFArrayCreate, CFArrayGetCount, CFArrayGetValueAtIndex, CFDataGetBytePtr, CFDataGetLength,
+    CFRelease, OSStatus, SSLClose, SSLConnectionRef, SSLContextRef, SSLCopyPeerTrust,
+    SSLCreateContext, SSLHandshake, SSLProtocol, SSLRead, SSLSetCertificate, SSLSetConnection,
+    SSLSetIOFuncs, SSLSetPeerDomainName, SSLSetProtocolVersionMin, SSLSetSessionOption, SSLWrite,
+    SecCertificateCopyData, SecCertificateRef, SecIdentityRef, SecTrustCopyCertificateChain,
+    SecTrustRef,
 };
 use std::{
     io,
@@ -133,6 +137,45 @@ pub(crate) struct SecureTransportStream {
     is_closed: bool,
 }
 
+#[link(name = "Security", kind = "framework")]
+extern "C" {
+    fn SSLSetEnabledCiphers(context: SSLContextRef, ciphers: *const u16, count: usize) -> OSStatus;
+}
+
+/// kTLSProtocol12: the floor for the pinned and server paths.
+const TLS_PROTOCOL_12: SSLProtocol = 8;
+/// ECDHE-ECDSA with AES-GCM or ChaCha20-Poly1305 (the tunnel's P-256 keys).
+const MODERN_ECDSA_SUITES: [u16; 3] = [0xC02B, 0xC02C, 0xCCA9];
+
+/// The leaf certificate's DER from a context past server authentication.
+fn peer_leaf_der(ssl_context: SSLContextRef) -> io::Result<Vec<u8>> {
+    let mut trust: SecTrustRef = ptr::null();
+    check_ssl_status("SSLCopyPeerTrust", unsafe { SSLCopyPeerTrust(ssl_context, &mut trust) })?;
+    if trust.is_null() {
+        return Err(io_other("server sent no certificate"));
+    }
+    unsafe {
+        let chain = SecTrustCopyCertificateChain(trust);
+        CFRelease(trust);
+        if chain.is_null() || CFArrayGetCount(chain) < 1 {
+            if !chain.is_null() {
+                CFRelease(chain);
+            }
+            return Err(io_other("server sent no certificate"));
+        }
+        let leaf = CFArrayGetValueAtIndex(chain, 0) as SecCertificateRef;
+        let data = SecCertificateCopyData(leaf);
+        CFRelease(chain);
+        if data.is_null() {
+            return Err(io_other("cannot read server certificate"));
+        }
+        let len = CFDataGetLength(data) as usize;
+        let bytes = std::slice::from_raw_parts(CFDataGetBytePtr(data), len).to_vec();
+        CFRelease(data);
+        Ok(bytes)
+    }
+}
+
 unsafe impl Send for SecureTransportStream {}
 
 impl SecureTransportStream {
@@ -199,6 +242,118 @@ impl SecureTransportStream {
         })
     }
 
+    /// Client handshake that skips CA validation and instead requires the
+    /// server's leaf certificate to hash (SHA-256) to `pin`, checked at the
+    /// server-auth break before any application data is sent. TLS 1.2+,
+    /// ECDHE-ECDSA AEAD suites only.
+    pub(crate) fn connect_pinned(tcp_stream: TcpStream, pin: &[u8; 32]) -> io::Result<Self> {
+        // A peer that never answers (not a TLS server) must not hang us.
+        tcp_stream.set_read_timeout(Some(Duration::from_secs(20)))?;
+        let mut tcp_stream = Box::new(tcp_stream);
+        let ssl_context = unsafe { SSLCreateContext(ptr::null(), kSSLClientSide, kSSLStreamType) };
+        if ssl_context.is_null() {
+            return Err(io_other("SSLCreateContext returned null"));
+        }
+        let result = (|| -> io::Result<()> {
+            Self::configure(ssl_context, &mut tcp_stream)?;
+            check_ssl_status("SSLSetSessionOption(BreakOnServerAuth)", unsafe {
+                SSLSetSessionOption(ssl_context, kSSLSessionOptionBreakOnServerAuth, true)
+            })?;
+            let mut pinned = false;
+            loop {
+                let status = unsafe { SSLHandshake(ssl_context) };
+                match status {
+                    SSL_OK if pinned => return Ok(()),
+                    SSL_OK => return Err(io_other("TLS handshake finished without server authentication")),
+                    s if s == errSSLServerAuthCompleted => {
+                        let leaf = peer_leaf_der(ssl_context)?;
+                        let got = crate::digest::sha256_hash(&leaf);
+                        if !crate::tls::constant_time_eq(&got, pin) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                format!(
+                                    "server certificate fingerprint {} does not match the pin",
+                                    crate::tls::to_hex(&got)
+                                ),
+                            ));
+                        }
+                        pinned = true;
+                    }
+                    ERR_SSL_WOULD_BLOCK => {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))
+                    }
+                    _ => return Err(io_other(format!("SSLHandshake failed with status {status}"))),
+                }
+            }
+        })();
+        if let Err(err) = result {
+            unsafe {
+                let _ = SSLClose(ssl_context);
+                CFRelease(ssl_context);
+            }
+            return Err(err);
+        }
+        tcp_stream.set_read_timeout(None)?;
+        Ok(Self { tcp_stream, ssl_context, is_closed: false })
+    }
+
+    /// Server handshake with an in-memory identity.
+    pub(crate) fn accept(tcp_stream: TcpStream, identity: SecIdentityRef) -> io::Result<Self> {
+        let mut tcp_stream = Box::new(tcp_stream);
+        let ssl_context = unsafe { SSLCreateContext(ptr::null(), kSSLServerSide, kSSLStreamType) };
+        if ssl_context.is_null() {
+            return Err(io_other("SSLCreateContext returned null"));
+        }
+        let result = (|| -> io::Result<()> {
+            Self::configure(ssl_context, &mut tcp_stream)?;
+            let certs = [identity as *const std::ffi::c_void];
+            let array = unsafe { CFArrayCreate(ptr::null(), certs.as_ptr(), 1, ptr::null()) };
+            if array.is_null() {
+                return Err(io_other("CFArrayCreate failed"));
+            }
+            let status = unsafe { SSLSetCertificate(ssl_context, array) };
+            unsafe { CFRelease(array) };
+            check_ssl_status("SSLSetCertificate", status)?;
+            loop {
+                let status = unsafe { SSLHandshake(ssl_context) };
+                match status {
+                    SSL_OK => return Ok(()),
+                    ERR_SSL_WOULD_BLOCK => {
+                        return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"))
+                    }
+                    _ => return Err(io_other(format!("SSLHandshake failed with status {status}"))),
+                }
+            }
+        })();
+        if let Err(err) = result {
+            unsafe {
+                let _ = SSLClose(ssl_context);
+                CFRelease(ssl_context);
+            }
+            return Err(err);
+        }
+        Ok(Self { tcp_stream, ssl_context, is_closed: false })
+    }
+
+    fn configure(ssl_context: SSLContextRef, tcp_stream: &mut Box<TcpStream>) -> io::Result<()> {
+        check_ssl_status("SSLSetIOFuncs", unsafe {
+            SSLSetIOFuncs(ssl_context, Some(ssl_read_callback), Some(ssl_write_callback))
+        })?;
+        check_ssl_status("SSLSetConnection", unsafe {
+            SSLSetConnection(ssl_context, tcp_stream.as_mut() as *mut TcpStream as SSLConnectionRef)
+        })?;
+        check_ssl_status("SSLSetProtocolVersionMin", unsafe {
+            SSLSetProtocolVersionMin(ssl_context, TLS_PROTOCOL_12)
+        })?;
+        check_ssl_status("SSLSetEnabledCiphers", unsafe {
+            SSLSetEnabledCiphers(ssl_context, MODERN_ECDSA_SUITES.as_ptr(), MODERN_ECDSA_SUITES.len())
+        })
+    }
+
+    pub(crate) fn tcp(&self) -> &TcpStream {
+        &self.tcp_stream
+    }
+
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         self.tcp_stream.set_read_timeout(timeout)
     }
@@ -207,7 +362,7 @@ impl SecureTransportStream {
         self.tcp_stream.set_write_timeout(timeout)
     }
 
-    fn shutdown(&mut self) {
+    pub(crate) fn shutdown(&mut self) {
         if self.is_closed {
             return;
         }
@@ -317,6 +472,12 @@ impl SocketStream {
         } else {
             Ok(SocketStream::Plain(tcp_stream))
         }
+    }
+
+    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
+        let tcp_stream = TcpStream::connect(format!("{host}:{port}"))?;
+        let _ = tcp_stream.set_nodelay(true);
+        Ok(SocketStream::Tls(SecureTransportStream::connect_pinned(tcp_stream, pin)?))
     }
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {

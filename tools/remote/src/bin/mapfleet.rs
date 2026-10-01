@@ -25,13 +25,9 @@
 //! The hosts FILE is polled every 30s: append "ip:port" lines any time
 //! and new compute nodes join the running spiral live.
 
-#[path = "../protocol.rs"]
-#[allow(dead_code)] // shared with main.rs; each binary uses a subset
-mod protocol;
-use protocol::*;
+use makepad_network::tunnel::*;
 
 use std::io;
-use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -744,10 +740,8 @@ fn requeue(shared: &Shared, index: usize) {
         });
 }
 
-fn remote_connect(host: &str) -> io::Result<TcpStream> {
-    let stream = TcpStream::connect(host)?;
-    stream.set_nodelay(true).ok();
-    Ok(stream)
+fn remote_connect(host: &str) -> io::Result<TunnelConn> {
+    connect(host)
 }
 
 fn remote_run_capture(
@@ -782,7 +776,7 @@ fn remote_run_capture(
             _ => break,
         }
     }
-    stream.shutdown(std::net::Shutdown::Both).ok();
+    stream.shutdown();
     Ok((exit_code, output))
 }
 
@@ -821,7 +815,7 @@ fn remote_run(host: &str, cargo_args: &[&str], files: &[(String, PathBuf)]) -> i
             _ => break,
         }
     }
-    stream.shutdown(std::net::Shutdown::Both).ok();
+    stream.shutdown();
     Ok(exit_code)
 }
 

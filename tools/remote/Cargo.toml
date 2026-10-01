@@ -6,6 +6,9 @@ license = "MIT OR Apache-2.0"
 description = "Remote file-sync and cargo runner for Makepad"
 default-run = "makepad-remote"
 
+[dependencies]
+makepad-network = { path = "../../platform/network" }
+
 
 [[bin]]
 name = "makepad-remote"

@@ -1,598 +1,78 @@
-use std::env;
+//! `cargo makepad tunnel`: the client of the makepad-remote tunnel server
+//! (tools/remote). TLS with a pinned server certificate and a per-box key;
+//! see makepad_network::tunnel and tools/remote/TUNNEL.md. The server is
+//! `makepad-remote --server`.
+
 use std::fs;
-use std::io::{self, BufReader, Read, Write};
-use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
-use std::thread;
+use std::io::{self, Write};
+use std::path::Path;
+use std::process::Command;
 
-// --- Protocol tags ---
+use makepad_network::tunnel::{
+    connect, decode_file_data, encode_file_data, host_of, read_msg, write_msg, TunnelConn,
+    DEFAULT_PORT, STREAM_STDERR, TAG_ADMIN, TAG_CARGO_RUN, TAG_ERROR, TAG_EXIT_CODE,
+    TAG_FILE_DATA, TAG_FILE_PULL, TAG_KILL, TAG_OUTPUT, TAG_PS, TAG_SHELL_RUN, TAG_SPAWN,
+};
 
-const TAG_FILE_DATA: u8 = 0x01;
-const TAG_CARGO_RUN: u8 = 0x02;
-const TAG_SHELL_RUN: u8 = 0x03;
-const TAG_STDIN_DATA: u8 = 0x04;
-const TAG_STDIN_CLOSE: u8 = 0x05;
-// The makepad-remote server (tools/remote) interprets tag 0x04 as a file-pull
-// request instead of stdin data: payload is a relative path, the server
-// answers TAG_FILE_DATA followed by TAG_EXIT_CODE (or TAG_ERROR). The pull
-// and push verbs below speak that dialect; they never stream stdin, so the
-// overlapping tag value is unambiguous per connection.
-const TAG_FILE_PULL: u8 = 0x04;
-const TAG_SPAWN: u8 = 0x06;
-const TAG_PS: u8 = 0x07;
-const TAG_KILL: u8 = 0x08;
-
-const TAG_OUTPUT: u8 = 0x01;
-const TAG_EXIT_CODE: u8 = 0x02;
-const TAG_ERROR: u8 = 0x03;
-
-const STREAM_STDOUT: u8 = 1;
-const STREAM_STDERR: u8 = 2;
-
-// --- Protocol helpers ---
-
-fn write_u32(w: &mut dyn Write, v: u32) -> io::Result<()> {
-    w.write_all(&v.to_be_bytes())
-}
-
-fn read_u32(r: &mut dyn Read) -> io::Result<u32> {
-    let mut buf = [0u8; 4];
-    r.read_exact(&mut buf)?;
-    Ok(u32::from_be_bytes(buf))
-}
-
-fn write_msg(w: &mut dyn Write, tag: u8, payload: &[u8]) -> io::Result<()> {
-    w.write_all(&[tag])?;
-    write_u32(w, payload.len() as u32)?;
-    w.write_all(payload)?;
-    w.flush()
-}
-
-fn read_msg(r: &mut dyn Read) -> io::Result<(u8, Vec<u8>)> {
-    let mut tag_buf = [0u8; 1];
-    r.read_exact(&mut tag_buf)?;
-    let len = read_u32(r)? as usize;
-    let mut payload = vec![0u8; len];
-    if len > 0 {
-        r.read_exact(&mut payload)?;
-    }
-    Ok((tag_buf[0], payload))
-}
-
-// --- File data encoding/decoding ---
-
-fn encode_file_data(rel_path: &str, data: &[u8]) -> Vec<u8> {
-    let path_bytes = rel_path.as_bytes();
-    let mut buf = Vec::with_capacity(4 + path_bytes.len() + data.len());
-    buf.extend_from_slice(&(path_bytes.len() as u32).to_be_bytes());
-    buf.extend_from_slice(path_bytes);
-    buf.extend_from_slice(data);
-    buf
-}
-
-fn decode_file_data(payload: &[u8]) -> io::Result<(&str, &[u8])> {
-    if payload.len() < 4 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "file data too short",
-        ));
-    }
-    let path_len = u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize;
-    if payload.len() < 4 + path_len {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "file data truncated",
-        ));
-    }
-    let path = std::str::from_utf8(&payload[4..4 + path_len])
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let data = &payload[4 + path_len..];
-    Ok((path, data))
-}
-
-// --- Platform-specific process tree killing ---
-
-#[cfg(windows)]
-mod process_group {
-    use std::ffi::c_void;
-    use std::io;
-    use std::os::windows::io::AsRawHandle;
-    use std::process::{Child, Command};
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateJobObjectW(lp_job_attributes: *mut c_void, lp_name: *const u16) -> *mut c_void;
-        fn AssignProcessToJobObject(h_job: *mut c_void, h_process: *mut c_void) -> i32;
-        fn TerminateJobObject(h_job: *mut c_void, exit_code: u32) -> i32;
-        fn CloseHandle(h_object: *mut c_void) -> i32;
-    }
-
-    pub struct JobHandle(*mut c_void);
-    unsafe impl Send for JobHandle {}
-
-    impl JobHandle {
-        pub fn new() -> io::Result<Self> {
-            unsafe {
-                let job = CreateJobObjectW(std::ptr::null_mut(), std::ptr::null());
-                if job.is_null() {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(JobHandle(job))
-            }
-        }
-
-        pub fn assign(&mut self, child: &Child) -> io::Result<()> {
-            unsafe {
-                let proc_handle = child.as_raw_handle();
-                if AssignProcessToJobObject(self.0, proc_handle) == 0 {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            }
-        }
-
-        pub fn terminate(&self) {
-            unsafe {
-                TerminateJobObject(self.0, 1);
-            }
-        }
-    }
-
-    impl Drop for JobHandle {
-        fn drop(&mut self) {
-            unsafe {
-                CloseHandle(self.0);
-            }
-        }
-    }
-
-    pub fn configure_command(cmd: &mut Command) {
-        use std::os::windows::process::CommandExt;
-        // Input/output are piped through the tunnel; there is no local
-        // console to show. Job objects still own the entire process tree.
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-}
-
-#[cfg(unix)]
-mod process_group {
-    use std::io;
-    use std::os::unix::process::CommandExt;
-    use std::process::{Child, Command};
-
-    pub struct JobHandle(u32);
-
-    impl JobHandle {
-        pub fn new() -> io::Result<Self> {
-            // pid filled in after spawn
-            Ok(JobHandle(0))
-        }
-
-        pub fn assign(&mut self, child: &Child) -> io::Result<()> {
-            self.0 = child.id();
-            Ok(())
-        }
-
-        pub fn terminate(&self) {
-            if self.0 == 0 {
-                return;
-            }
-            extern "C" {
-                fn kill(pid: i32, sig: i32) -> i32;
-            }
-            const SIGKILL: i32 = 9;
-            unsafe {
-                kill(-(self.0 as i32), SIGKILL);
-            }
-        }
-    }
-
-    pub fn configure_command(cmd: &mut Command) {
-        // Set the child as its own process group leader BEFORE exec.
-        // This way all children it spawns (rustc, etc.) inherit the group.
-        unsafe {
-            cmd.pre_exec(|| {
-                extern "C" {
-                    fn setpgid(pid: i32, pgid: i32) -> i32;
-                }
-                setpgid(0, 0);
-                Ok(())
-            });
-        }
-    }
-}
-
-// --- Shared state for the running cargo ---
-
-struct RunningCargo {
-    child: Child,
-    job: process_group::JobHandle,
-    old_stream: TcpStream,
-}
-
-type CargoState = Arc<Mutex<Option<RunningCargo>>>;
-
-fn kill_previous(state: &CargoState) {
-    let mut lock = state.lock().unwrap();
-    if let Some(ref mut running) = *lock {
-        eprintln!(
-            "server: killing previous cargo (pid {})",
-            running.child.id()
-        );
-        // Kill entire process tree first
-        running.job.terminate();
-        // Wait for the direct child to be reaped
-        let _ = running.child.wait();
-        // Shutdown old client TCP so pipe writer threads also unblock
-        let _ = running.old_stream.shutdown(Shutdown::Both);
-    }
-    *lock = None;
-}
-
-// --- Server ---
-
-fn run_server(port: u16, allow_all: bool) -> io::Result<()> {
-    let cwd = env::current_dir()?.canonicalize()?;
-    eprintln!("server: cwd = {}", cwd.display());
-    if allow_all {
-        eprintln!("server: --all enabled, accepting arbitrary shell commands");
-    }
-
-    let addr: SocketAddr = ([0, 0, 0, 0], port).into();
-    let listener = TcpListener::bind(addr)?;
-    eprintln!("server: listening on {}", addr);
-
-    let state: CargoState = Arc::new(Mutex::new(None));
-
-    for stream in listener.incoming() {
-        let stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("server: accept error: {}", e);
-                continue;
-            }
-        };
-        let peer = stream.peer_addr().ok();
-        eprintln!("server: connection from {:?}", peer);
-
-        // Kill any previous cargo before handling new connection
-        kill_previous(&state);
-
-        let cwd = cwd.clone();
-        let state = state.clone();
-        thread::spawn(move || {
-            if let Err(e) = handle_connection(stream, &cwd, &state, allow_all) {
-                eprintln!("server: connection error: {}", e);
-            }
-        });
-    }
-    Ok(())
-}
-
-fn validate_and_resolve_path(cwd: &Path, rel_path: &str) -> io::Result<PathBuf> {
-    let rel = Path::new(rel_path);
-
-    if rel.is_absolute() {
-        return Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            "absolute paths not allowed",
-        ));
-    }
-
-    for component in rel.components() {
-        if let std::path::Component::ParentDir = component {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                ".. not allowed in paths",
-            ));
-        }
-    }
-
-    let full = cwd.join(rel);
-
-    if let Some(parent) = full.parent() {
-        fs::create_dir_all(parent)?;
-        let canonical_parent = parent.canonicalize()?;
-        if !canonical_parent.starts_with(cwd) {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                format!("path escapes working directory: {}", rel_path),
-            ));
-        }
-    }
-
-    Ok(full)
-}
-
-fn handle_connection(
-    mut stream: TcpStream,
-    cwd: &Path,
-    state: &CargoState,
-    allow_all: bool,
-) -> io::Result<()> {
-    let run_args: Vec<String>;
-    let mut is_shell = false;
-    loop {
-        let (tag, payload) = read_msg(&mut stream)?;
-        match tag {
-            TAG_FILE_DATA => {
-                let (rel_path, data) = decode_file_data(&payload)?;
-                let full_path = validate_and_resolve_path(cwd, rel_path)?;
-                fs::write(&full_path, data)?;
-                eprintln!("server: wrote {} ({} bytes)", rel_path, data.len());
-            }
-            TAG_CARGO_RUN => {
-                let args_str = String::from_utf8(payload)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                run_args = args_str
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(String::from)
-                    .collect();
-                break;
-            }
-            TAG_SHELL_RUN => {
-                if !allow_all {
-                    let msg = "shell commands not allowed (server not started with --all)";
-                    let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
-                    return Err(io::Error::new(io::ErrorKind::PermissionDenied, msg));
-                }
-                let args_str = String::from_utf8(payload)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-                run_args = args_str
-                    .lines()
-                    .filter(|l| !l.is_empty())
-                    .map(String::from)
-                    .collect();
-                is_shell = true;
-                break;
-            }
-            // 0x04 doubles as TAG_STDIN_DATA, but stdin frames only flow
-            // AFTER a run tag opens a process — in this pre-run loop the
-            // byte can only mean a pull. Same wire shape as the
-            // tools/remote server: reply TAG_OUTPUT carrying the
-            // (path, bytes) file-data encoding, then an exit code.
-            TAG_FILE_PULL => {
-                let rel_path = std::str::from_utf8(&payload)
-                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?
-                    .to_string();
-                let full_path = validate_and_resolve_path(cwd, &rel_path)?;
-                match fs::read(&full_path) {
-                    Ok(data) => {
-                        eprintln!("server: pull {} ({} bytes)", rel_path, data.len());
-                        let reply = encode_file_data(&rel_path, &data);
-                        write_msg(&mut stream, TAG_OUTPUT, &reply)?;
-                        write_msg(&mut stream, TAG_EXIT_CODE, &0i32.to_be_bytes())?;
-                    }
-                    Err(e) => {
-                        let msg = format!("pull {} failed: {}", rel_path, e);
-                        let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
-                    }
-                }
-                return Ok(());
-            }
-            _ => {
-                let msg = format!("unknown tag: 0x{:02x}", tag);
-                let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
-                return Err(io::Error::new(io::ErrorKind::InvalidData, msg));
-            }
-        }
-    }
-
-    // Kill any previous process (in case it wasn't killed at accept time)
-    kill_previous(state);
-
-    // Build command
-    let mut cmd = if is_shell {
-        eprintln!("server: shell {}", run_args.join(" "));
-        let shell_line = run_args.join(" ");
-        #[cfg(unix)]
-        {
-            let mut c = Command::new("sh");
-            c.arg("-c").arg(&shell_line);
-            c
-        }
-        #[cfg(windows)]
-        {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(&shell_line);
-            c
-        }
+fn open(addr: &str) -> io::Result<TunnelConn> {
+    if host_of(addr).len() < addr.len() {
+        connect(addr)
     } else {
-        eprintln!("server: cargo {}", run_args.join(" "));
-        let mut c = Command::new("cargo");
-        c.args(&run_args);
-        c
-    };
-    cmd.current_dir(cwd)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    process_group::configure_command(&mut cmd);
-
-    let mut child = cmd.spawn().map_err(|e| {
-        let msg = format!("failed to spawn cargo: {}", e);
-        let _ = write_msg(&mut stream, TAG_ERROR, msg.as_bytes());
-        e
-    })?;
-
-    // Create job handle and assign the child to it
-    let mut job = process_group::JobHandle::new()?;
-    job.assign(&child)?;
-
-    let child_stdin = child.stdin.take().unwrap();
-    let child_stdout = child.stdout.take().unwrap();
-    let child_stderr = child.stderr.take().unwrap();
-
-    // Store everything so a future connection can kill + unblock us
-    {
-        let mut lock = state.lock().unwrap();
-        *lock = Some(RunningCargo {
-            child,
-            job,
-            old_stream: stream.try_clone()?,
-        });
-    }
-
-    let stream_in = stream.try_clone()?;
-    let stream_out = stream.try_clone()?;
-    let stream_err = stream.try_clone()?;
-
-    let _stdin_thread = thread::spawn(move || stream_stdin(stream_in, child_stdin));
-    let stdout_thread = thread::spawn(move || stream_pipe(child_stdout, stream_out, STREAM_STDOUT));
-    let stderr_thread = thread::spawn(move || stream_pipe(child_stderr, stream_err, STREAM_STDERR));
-
-    stdout_thread.join().unwrap();
-    stderr_thread.join().unwrap();
-
-    let exit_code = {
-        let mut lock = state.lock().unwrap();
-        if let Some(ref mut running) = *lock {
-            let status = running.child.wait()?;
-            let code = status.code().unwrap_or(1);
-            *lock = None;
-            code
-        } else {
-            // Was killed by another connection
-            137
-        }
-    };
-
-    eprintln!("server: cargo exited with {}", exit_code);
-
-    let mut payload = Vec::new();
-    payload.extend_from_slice(&(exit_code as i32).to_be_bytes());
-    let _ = write_msg(&mut stream, TAG_EXIT_CODE, &payload);
-    let _ = stream.shutdown(Shutdown::Both);
-    Ok(())
-}
-
-fn stream_pipe(reader: impl Read, mut writer: TcpStream, stream_id: u8) {
-    let mut reader = BufReader::new(reader);
-    let mut buf = vec![0u8; 8192];
-    loop {
-        match reader.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let chunk = &buf[..n];
-                match stream_id {
-                    STREAM_STDOUT => {
-                        let _ = io::stdout().write_all(chunk);
-                    }
-                    STREAM_STDERR => {
-                        let _ = io::stderr().write_all(chunk);
-                    }
-                    _ => {}
-                }
-                let mut payload = Vec::with_capacity(1 + n);
-                payload.push(stream_id);
-                payload.extend_from_slice(chunk);
-                if write_msg(&mut writer, TAG_OUTPUT, &payload).is_err() {
-                    break;
-                }
-            }
-            Err(_) => break,
-        }
+        connect(&format!("{addr}:{DEFAULT_PORT}"))
     }
 }
 
-fn stream_stdin(mut reader: TcpStream, mut writer: impl Write) {
+/// Reads frames until the exit code, printing output as it arrives.
+fn read_until_exit(conn: &mut TunnelConn) -> io::Result<i32> {
     loop {
-        match read_msg(&mut reader) {
-            Ok((TAG_STDIN_DATA, payload)) => {
-                if writer.write_all(&payload).is_err() {
-                    break;
-                }
-                if writer.flush().is_err() {
-                    break;
-                }
-            }
-            Ok((TAG_STDIN_CLOSE, _)) => break,
-            Ok((tag, _)) => {
-                eprintln!(
-                    "server: unexpected client tag while streaming stdin: 0x{:02x}",
-                    tag
-                );
-                break;
-            }
-            Err(_) => break,
-        }
-    }
-}
-
-// --- Client ---
-
-fn run_simple(addr: &str, tag: u8, payload: &[u8]) -> io::Result<i32> {
-    eprintln!("client: connecting to {addr}");
-    let mut stream = TcpStream::connect(addr)?;
-    eprintln!("client: connected");
-    write_msg(&mut stream, tag, payload)?;
-    let exit_code;
-    loop {
-        let (tag, payload) = read_msg(&mut stream)?;
+        let (tag, payload) = read_msg(conn)?;
         match tag {
             TAG_OUTPUT => {
-                if payload.is_empty() {
-                    continue;
-                }
-                let data = &payload[1..];
-                match payload.first().copied() {
-                    Some(STREAM_STDOUT) => {
-                        io::stdout().write_all(data)?;
-                        io::stdout().flush()?;
-                    }
-                    Some(STREAM_STDERR) => {
-                        io::stderr().write_all(data)?;
-                        io::stderr().flush()?;
-                    }
-                    _ => {}
+                let Some((&stream, data)) = payload.split_first() else { continue };
+                if stream == STREAM_STDERR {
+                    io::stderr().write_all(data)?;
+                    io::stderr().flush()?;
+                } else {
+                    io::stdout().write_all(data)?;
+                    io::stdout().flush()?;
                 }
             }
             TAG_EXIT_CODE => {
-                exit_code = if payload.len() >= 4 {
+                return Ok(if payload.len() >= 4 {
                     i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
                 } else {
                     1
-                };
-                break;
+                })
             }
             TAG_ERROR => {
                 eprintln!("server error: {}", String::from_utf8_lossy(&payload));
-                exit_code = 1;
-                break;
+                return Ok(1);
             }
-            _ => {
-                eprintln!("client: unknown tag 0x{tag:02x}");
-                exit_code = 1;
-                break;
+            other => {
+                eprintln!("client: unknown tag 0x{other:02x}");
+                return Ok(1);
             }
         }
     }
-    let _ = stream.shutdown(Shutdown::Both);
-    Ok(exit_code)
 }
 
-fn run_client(
-    addr: &str,
-    cmd_args: &[String],
-    is_shell: bool,
-    sync_files: bool,
-) -> io::Result<i32> {
-    eprintln!("client: connecting to {}", addr);
-    let mut stream = TcpStream::connect(addr)?;
-    eprintln!("client: connected");
+fn finish(mut conn: TunnelConn) -> io::Result<i32> {
+    let code = read_until_exit(&mut conn);
+    conn.shutdown();
+    code
+}
 
+fn run_simple(addr: &str, tag: u8, payload: &[u8]) -> io::Result<i32> {
+    let mut conn = open(addr)?;
+    write_msg(&mut conn, tag, payload)?;
+    finish(conn)
+}
+
+fn run_client(addr: &str, cmd_args: &[String], is_shell: bool, sync_files: bool) -> io::Result<i32> {
+    let mut conn = open(addr)?;
     if sync_files {
-        let files = get_changed_files()?;
-
-        for (rel_path, is_tracked) in &files {
-            if rel_path.starts_with("local/") || rel_path.starts_with("local\\") {
-                continue;
-            }
-            if !rel_path.contains('/') {
+        for (rel_path, is_tracked) in get_changed_files()? {
+            if rel_path.starts_with("local/") || rel_path.starts_with("local\\") || !rel_path.contains('/') {
                 continue;
             }
             let normalized = rel_path.replace('\\', "/");
@@ -601,117 +81,45 @@ fn run_client(
             if !is_tracked {
                 if is_vendored {
                     let in_src = normalized.contains("/src/") && !normalized.contains("/src/test/");
-                    let keep_vendored = normalized.ends_with("/Cargo.toml")
+                    let keep = normalized.ends_with("/Cargo.toml")
                         || normalized.ends_with("/build.rs")
                         || in_src
                         || normalized.ends_with("/wayland.xml")
                         || (normalized.contains("/protocols/") && normalized.ends_with(".xml"));
-                    if !keep_vendored {
+                    if !keep {
                         continue;
                     }
                 } else if !is_common_src {
                     continue;
                 }
             }
-
-            let data = match fs::read(rel_path) {
+            let data = match fs::read(&rel_path) {
                 Ok(d) => d,
                 Err(e) => {
-                    eprintln!("client: skip {}: {}", rel_path, e);
+                    eprintln!("client: skip {rel_path}: {e}");
                     continue;
                 }
             };
-            eprintln!("client: sending {} ({} bytes)", rel_path, data.len());
-            let payload = encode_file_data(rel_path, &data);
-            write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
+            eprintln!("client: sending {rel_path} ({} bytes)", data.len());
+            write_msg(&mut conn, TAG_FILE_DATA, &encode_file_data(&rel_path, &data))?;
         }
     } else {
         eprintln!("client: file sync disabled (--no-sync)");
     }
-
-    let args_str = cmd_args.join("\n");
-    let tag = if is_shell {
-        TAG_SHELL_RUN
-    } else {
-        TAG_CARGO_RUN
-    };
-    write_msg(&mut stream, tag, args_str.as_bytes())?;
-    if is_shell {
-        eprintln!("client: shell {}", cmd_args.join(" "));
-    } else {
-        eprintln!("client: cargo {}", cmd_args.join(" "));
-    }
-
-    let _stdin_thread = {
-        let mut stream_in = stream.try_clone()?;
-        thread::spawn(move || forward_stdin(&mut stream_in))
-    };
-
-    let exit_code;
-    loop {
-        let (tag, payload) = read_msg(&mut stream)?;
-        match tag {
-            TAG_OUTPUT => {
-                if payload.is_empty() {
-                    continue;
-                }
-                let stream_id = payload[0];
-                let data = &payload[1..];
-                match stream_id {
-                    STREAM_STDOUT => {
-                        io::stdout().write_all(data)?;
-                        io::stdout().flush()?;
-                    }
-                    STREAM_STDERR => {
-                        io::stderr().write_all(data)?;
-                        io::stderr().flush()?;
-                    }
-                    _ => {}
-                }
-            }
-            TAG_EXIT_CODE => {
-                if payload.len() >= 4 {
-                    exit_code =
-                        i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                } else {
-                    exit_code = 1;
-                }
-                break;
-            }
-            TAG_ERROR => {
-                let msg = String::from_utf8_lossy(&payload);
-                eprintln!("server error: {}", msg);
-                exit_code = 1;
-                break;
-            }
-            _ => {
-                eprintln!("client: unknown tag 0x{:02x}", tag);
-                exit_code = 1;
-                break;
-            }
-        }
-    }
-
-    let _ = stream.shutdown(Shutdown::Both);
-    Ok(exit_code)
+    let tag = if is_shell { TAG_SHELL_RUN } else { TAG_CARGO_RUN };
+    write_msg(&mut conn, tag, cmd_args.join("\n").as_bytes())?;
+    finish(conn)
 }
 
 fn run_pull(addr: &str, remote_path: &str, local_path: &str) -> io::Result<i32> {
-    eprintln!("client: connecting to {}", addr);
-    let mut stream = TcpStream::connect(addr)?;
-    eprintln!("client: pull {} -> {}", remote_path, local_path);
-    write_msg(&mut stream, TAG_FILE_PULL, remote_path.as_bytes())?;
-
+    let mut conn = open(addr)?;
+    eprintln!("client: pull {remote_path} -> {local_path}");
+    write_msg(&mut conn, TAG_FILE_PULL, remote_path.as_bytes())?;
     let mut exit_code = 1;
     loop {
-        let (tag, payload) = match read_msg(&mut stream) {
-            Ok(msg) => msg,
-            Err(_) => break,
-        };
+        let (tag, payload) = read_msg(&mut conn)?;
         match tag {
-            TAG_OUTPUT => {
-                // Server implementations reuse 0x01 for pulled file data; the
-                // makepad-remote server encodes it as (path, bytes).
+            TAG_FILE_DATA => {
                 let (_rel, data) = decode_file_data(&payload)?;
                 if let Some(parent) = Path::new(local_path).parent() {
                     if !parent.as_os_str().is_empty() {
@@ -719,86 +127,40 @@ fn run_pull(addr: &str, remote_path: &str, local_path: &str) -> io::Result<i32> 
                     }
                 }
                 fs::write(local_path, data)?;
-                eprintln!("client: wrote {} ({} bytes)", local_path, data.len());
+                eprintln!("client: wrote {local_path} ({} bytes)", data.len());
                 exit_code = 0;
             }
-            TAG_EXIT_CODE => {
-                if payload.len() >= 4 && exit_code == 0 {
-                    exit_code =
-                        i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]);
-                }
-                break;
-            }
+            TAG_EXIT_CODE => break,
             TAG_ERROR => {
                 eprintln!("server error: {}", String::from_utf8_lossy(&payload));
                 exit_code = 1;
                 break;
             }
-            _ => {
-                eprintln!("client: unknown tag 0x{:02x}", tag);
+            other => {
+                eprintln!("client: unknown tag 0x{other:02x}");
                 exit_code = 1;
                 break;
             }
         }
     }
-    let _ = stream.shutdown(Shutdown::Both);
+    conn.shutdown();
     Ok(exit_code)
 }
 
 fn run_push(addr: &str, local_path: &str, remote_path: &str) -> io::Result<i32> {
     let data = fs::read(local_path)?;
-    eprintln!("client: connecting to {}", addr);
-    let mut stream = TcpStream::connect(addr)?;
-    eprintln!(
-        "client: push {} -> {} ({} bytes)",
-        local_path,
-        remote_path,
-        data.len()
-    );
-    let payload = encode_file_data(remote_path, &data);
-    write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
-    // Ask the server to echo so we get a positive confirmation + exit code
-    // instead of just closing the socket after the write.
-    write_msg(&mut stream, TAG_SHELL_RUN, b"echo push-ok")?;
-
-    let mut exit_code = 1;
-    loop {
-        let (tag, payload) = match read_msg(&mut stream) {
-            Ok(msg) => msg,
-            Err(_) => break,
-        };
-        match tag {
-            TAG_OUTPUT => {}
-            TAG_EXIT_CODE => {
-                exit_code = if payload.len() >= 4 {
-                    i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
-                } else {
-                    1
-                };
-                break;
-            }
-            TAG_ERROR => {
-                eprintln!("server error: {}", String::from_utf8_lossy(&payload));
-                break;
-            }
-            _ => break,
-        }
-    }
-    let _ = stream.shutdown(Shutdown::Both);
-    Ok(exit_code)
+    let mut conn = open(addr)?;
+    eprintln!("client: push {local_path} -> {remote_path} ({} bytes)", data.len());
+    write_msg(&mut conn, TAG_FILE_DATA, &encode_file_data(remote_path, &data))?;
+    // An echo after the write gives a positive confirmation and exit code.
+    write_msg(&mut conn, TAG_SHELL_RUN, b"echo push-ok")?;
+    finish(conn)
 }
 
-/// Push a local script file and execute it, in ONE connection: TAG_FILE_DATA
-/// stages it into the server's cwd, TAG_SHELL_RUN launches the right
-/// interpreter, output streams back as usual. Exists so remote scripting
-/// never needs stdin piping (absent on the tools/remote server variant) or
-/// -EncodedCommand base64 blobs (unreadable and token-hostile). The staged
-/// name is fixed per extension — reruns overwrite, nothing accumulates.
-fn run_script(
-    addr: &str,
-    local_script: &str,
-    script_args: &[String],
-) -> io::Result<i32> {
+/// Pushes a local script and runs it in one connection: TAG_FILE_DATA
+/// stages it in the server's working directory, TAG_SHELL_RUN starts the
+/// interpreter. Each run stages under a fresh name.
+fn run_script(addr: &str, local_script: &str, script_args: &[String]) -> io::Result<i32> {
     let data = fs::read(local_script)?;
     let ext = Path::new(local_script)
         .extension()
@@ -813,28 +175,25 @@ fn run_script(
             .map(|d| d.as_millis())
             .unwrap_or(0)
     );
-    let staged_owned;
-    let (staged, interpreter): (&str, String) = match ext.as_str() {
+    let (staged, interpreter) = match ext.as_str() {
         "ps1" => {
-            staged_owned = format!("_tunnel_staged_{stamp}.ps1");
-            (
-                staged_owned.as_str(),
-                format!(
-                    "powershell -NoProfile -ExecutionPolicy Bypass -File {staged_owned}"
-                ),
-            )
+            let s = format!("_tunnel_staged_{stamp}.ps1");
+            let i = format!("powershell -NoProfile -ExecutionPolicy Bypass -File {s}");
+            (s, i)
         }
         "py" => {
-            staged_owned = format!("_tunnel_staged_{stamp}.py");
-            (staged_owned.as_str(), format!("python {staged_owned}"))
+            let s = format!("_tunnel_staged_{stamp}.py");
+            let i = format!("python {s}");
+            (s, i)
         }
         "bat" | "cmd" => {
-            staged_owned = format!("_tunnel_staged_{stamp}.bat");
-            (staged_owned.as_str(), staged_owned.clone())
+            let s = format!("_tunnel_staged_{stamp}.bat");
+            (s.clone(), s)
         }
         "sh" => {
-            staged_owned = format!("_tunnel_staged_{stamp}.sh");
-            (staged_owned.as_str(), format!("sh {staged_owned}"))
+            let s = format!("_tunnel_staged_{stamp}.sh");
+            let i = format!("sh {s}");
+            (s, i)
         }
         other => {
             return Err(io::Error::new(
@@ -848,295 +207,97 @@ fn run_script(
         shell_line.push(' ');
         shell_line.push_str(a);
     }
-
-    eprintln!("client: connecting to {}", addr);
-    let mut stream = TcpStream::connect(addr)?;
-    eprintln!(
-        "client: run {} ({} bytes) as `{}`",
-        local_script,
-        data.len(),
-        shell_line
-    );
-    let payload = encode_file_data(staged, &data);
-    write_msg(&mut stream, TAG_FILE_DATA, &payload)?;
-    write_msg(&mut stream, TAG_SHELL_RUN, shell_line.as_bytes())?;
-
-    let exit_code;
-    loop {
-        let (tag, payload) = read_msg(&mut stream)?;
-        match tag {
-            TAG_OUTPUT => {
-                if payload.is_empty() {
-                    continue;
-                }
-                let data = &payload[1..];
-                match payload[0] {
-                    STREAM_STDOUT => {
-                        io::stdout().write_all(data)?;
-                        io::stdout().flush()?;
-                    }
-                    STREAM_STDERR => {
-                        io::stderr().write_all(data)?;
-                        io::stderr().flush()?;
-                    }
-                    _ => {}
-                }
-            }
-            TAG_EXIT_CODE => {
-                exit_code = if payload.len() >= 4 {
-                    i32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]])
-                } else {
-                    1
-                };
-                break;
-            }
-            TAG_ERROR => {
-                eprintln!("server error: {}", String::from_utf8_lossy(&payload));
-                exit_code = 1;
-                break;
-            }
-            _ => {
-                eprintln!("client: unknown tag 0x{:02x}", tag);
-                exit_code = 1;
-                break;
-            }
-        }
-    }
-    let _ = stream.shutdown(Shutdown::Both);
-    Ok(exit_code)
-}
-
-fn forward_stdin(stream: &mut TcpStream) -> io::Result<()> {
-    let mut stdin = io::stdin();
-    let mut buf = [0u8; 8192];
-
-    loop {
-        let n = stdin.read(&mut buf)?;
-        if n == 0 {
-            let _ = write_msg(stream, TAG_STDIN_CLOSE, &[]);
-            return Ok(());
-        }
-        write_msg(stream, TAG_STDIN_DATA, &buf[..n])?;
-    }
+    let mut conn = open(addr)?;
+    eprintln!("client: run {local_script} ({} bytes) as `{shell_line}`", data.len());
+    write_msg(&mut conn, TAG_FILE_DATA, &encode_file_data(&staged, &data))?;
+    write_msg(&mut conn, TAG_SHELL_RUN, shell_line.as_bytes())?;
+    finish(conn)
 }
 
 fn get_changed_files() -> io::Result<Vec<(String, bool)>> {
     let mut files = Vec::new();
-
-    let output = Command::new("git").args(["diff", "--name-only"]).output()?;
-    if output.status.success() {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let line = line.trim();
-            if !line.is_empty() {
-                files.push((line.to_string(), true));
+    for (args, tracked) in [
+        (&["diff", "--name-only"][..], true),
+        (&["diff", "--name-only", "--cached"][..], true),
+        (&["ls-files", "--others", "--exclude-standard"][..], false),
+    ] {
+        let output = Command::new("git").args(args).output()?;
+        if output.status.success() {
+            for line in String::from_utf8_lossy(&output.stdout).lines() {
+                let line = line.trim();
+                if !line.is_empty() {
+                    files.push((line.to_string(), tracked));
+                }
             }
         }
     }
-
-    let output = Command::new("git")
-        .args(["diff", "--name-only", "--cached"])
-        .output()?;
-    if output.status.success() {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let line = line.trim();
-            if !line.is_empty() {
-                files.push((line.to_string(), true));
-            }
-        }
-    }
-
-    let output = Command::new("git")
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .output()?;
-    if output.status.success() {
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let line = line.trim();
-            if !line.is_empty() {
-                files.push((line.to_string(), false));
-            }
-        }
-    }
-
     files.sort_by(|a, b| a.0.cmp(&b.0));
     files.dedup_by(|a, b| a.0 == b.0);
-
     Ok(files)
 }
 
-// --- Entry ---
-
 fn print_usage() {
-    eprintln!("Usage:");
-    eprintln!("  Server: cargo makepad tunnel --server [--port PORT] [--all]");
-    eprintln!("  Client: cargo makepad tunnel <ip:port> [--no-sync] cargo [args...]");
-    eprintln!(
-        "          cargo makepad tunnel <ip:port> [--no-sync] shell <command...>  (requires --all on server)"
-    );
-    eprintln!(
-        "          cargo makepad tunnel <ip:port> pull <remote-rel-path> <local-path>"
-    );
-    eprintln!(
-        "          cargo makepad tunnel <ip:port> push <local-path> <remote-rel-path>"
-    );
-    eprintln!(
-        "          cargo makepad tunnel <ip:port> [--no-sync] run <script.(ps1|py|bat|sh)> [args...]  (stage + execute, requires --all)"
-    );
-    eprintln!(
-        "          cargo makepad tunnel <ip:port> [--no-sync] spawn <command...>  (hidden, survives disconnect)"
-    );
-    eprintln!("          cargo makepad tunnel <ip:port> [--no-sync] ps [filter]");
-    eprintln!("          cargo makepad tunnel <ip:port> [--no-sync] kill [--tree] <pid>");
+    eprintln!("Usage (server: makepad-remote --server; keys and pins: makepad-remote keygen|pin|rotate):");
+    eprintln!("  cargo makepad tunnel <host[:port]> [--no-sync] cargo [args...]");
+    eprintln!("  cargo makepad tunnel <host[:port]> [--no-sync] shell <command...>   (server --all)");
+    eprintln!("  cargo makepad tunnel <host[:port]> pull <remote-rel-path> <local-path>");
+    eprintln!("  cargo makepad tunnel <host[:port]> push <local-path> <remote-rel-path>");
+    eprintln!("  cargo makepad tunnel <host[:port]> [--no-sync] run <script.(ps1|py|bat|sh)> [args...]");
+    eprintln!("  cargo makepad tunnel <host[:port]> spawn <command...>");
+    eprintln!("  cargo makepad tunnel <host[:port]> ps [filter]");
+    eprintln!("  cargo makepad tunnel <host[:port]> kill [--tree] <pid>");
+    eprintln!("  cargo makepad tunnel <host[:port]> admin <node-status|node-stop|node-start|node-restart|tunnel-restart>");
+}
+
+fn exit_on(result: io::Result<i32>) -> Result<(), String> {
+    match result {
+        Ok(0) => Ok(()),
+        Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1).max(1) as i32),
+        Err(e) => Err(format!("client error: {e}")),
+    }
 }
 
 pub fn handle_tunnel(args: &[String]) -> Result<(), String> {
-    if args.is_empty() {
+    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
         print_usage();
-        return Err("tunnel mode requires arguments".to_string());
+        return if args.is_empty() { Err("tunnel mode requires arguments".into()) } else { Ok(()) };
     }
-    if args[0] == "--help" || args[0] == "-h" {
-        print_usage();
-        return Ok(());
-    }
-
     if args[0] == "--server" {
-        let mut port: u16 = 8384;
-        let mut allow_all = false;
-        let mut i = 1;
-        while i < args.len() {
-            if args[i] == "--help" || args[i] == "-h" {
+        return Err("the tunnel server is `makepad-remote --server` (tools/remote)".into());
+    }
+    let addr = &args[0];
+    let mut sync_files = true;
+    let mut i = 1;
+    while i < args.len() && args[i] == "--no-sync" {
+        sync_files = false;
+        i += 1;
+    }
+    let Some(mode) = args.get(i) else {
+        print_usage();
+        return Err("missing tunnel command".into());
+    };
+    let rest = &args[i + 1..];
+    match mode.as_str() {
+        "pull" if rest.len() == 2 => exit_on(run_pull(addr, &rest[0], &rest[1])),
+        "push" if rest.len() == 2 => exit_on(run_push(addr, &rest[0], &rest[1])),
+        "run" if !rest.is_empty() => exit_on(run_script(addr, &rest[0], &rest[1..])),
+        "spawn" if !rest.is_empty() => exit_on(run_simple(addr, TAG_SPAWN, rest.join(" ").as_bytes())),
+        "ps" => exit_on(run_simple(addr, TAG_PS, rest.first().map(String::as_str).unwrap_or("").as_bytes())),
+        "kill" => {
+            let tree = rest.iter().any(|a| a == "--tree");
+            let Some(pid) = rest.iter().find(|a| *a != "--tree") else {
                 print_usage();
-                return Ok(());
-            }
-            if args[i] == "--port" && i + 1 < args.len() {
-                port = args[i + 1]
-                    .parse()
-                    .map_err(|_| format!("invalid port: {}", args[i + 1]))?;
-                i += 2;
-            } else if args[i] == "--all" {
-                allow_all = true;
-                i += 1;
-            } else {
-                print_usage();
-                return Err(format!("unknown server option: {}", args[i]));
-            }
-        }
-        run_server(port, allow_all).map_err(|e| format!("server error: {e}"))?;
-        Ok(())
-    } else {
-        let addr = &args[0];
-        let mut sync_files = true;
-        let mut mode_idx = 1;
-
-        while mode_idx < args.len() {
-            if args[mode_idx] == "--no-sync" {
-                sync_files = false;
-                mode_idx += 1;
-                continue;
-            }
-            break;
-        }
-
-        if mode_idx < args.len() && args[mode_idx] == "pull" {
-            let rest = &args[mode_idx + 1..];
-            if rest.len() != 2 {
-                print_usage();
-                return Err("pull requires: <remote-rel-path> <local-path>".to_string());
-            }
-            return match run_pull(addr, &rest[0], &rest[1]) {
-                Ok(0) => Ok(()),
-                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
-                Err(e) => Err(format!("client error: {e}")),
+                return Err("kill requires a pid".into());
             };
+            let payload = if tree { format!("{pid}\ntree") } else { pid.clone() };
+            exit_on(run_simple(addr, TAG_KILL, payload.as_bytes()))
         }
-        if mode_idx < args.len() && args[mode_idx] == "push" {
-            let rest = &args[mode_idx + 1..];
-            if rest.len() != 2 {
-                print_usage();
-                return Err("push requires: <local-path> <remote-rel-path>".to_string());
-            }
-            return match run_push(addr, &rest[0], &rest[1]) {
-                Ok(0) => Ok(()),
-                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
-                Err(e) => Err(format!("client error: {e}")),
-            };
-        }
-        if mode_idx < args.len() && args[mode_idx] == "run" {
-            let rest = &args[mode_idx + 1..];
-            if rest.is_empty() {
-                print_usage();
-                return Err("run requires: <script> [args...]".to_string());
-            }
-            return match run_script(addr, &rest[0], &rest[1..]) {
-                Ok(0) => Ok(()),
-                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
-                Err(e) => Err(format!("client error: {e}")),
-            };
-        }
-        if mode_idx < args.len() && args[mode_idx] == "spawn" {
-            let rest = &args[mode_idx + 1..];
-            if rest.is_empty() {
-                print_usage();
-                return Err("spawn requires a command".to_string());
-            }
-            return match run_simple(addr, TAG_SPAWN, rest.join(" ").as_bytes()) {
-                Ok(0) => Ok(()),
-                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
-                Err(e) => Err(format!("client error: {e}")),
-            };
-        }
-        if mode_idx < args.len() && args[mode_idx] == "ps" {
-            let filter = args.get(mode_idx + 1).cloned().unwrap_or_default();
-            return match run_simple(addr, TAG_PS, filter.as_bytes()) {
-                Ok(0) => Ok(()),
-                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
-                Err(e) => Err(format!("client error: {e}")),
-            };
-        }
-        if mode_idx < args.len() && args[mode_idx] == "kill" {
-            let rest = &args[mode_idx + 1..];
-            let mut tree = false;
-            let mut pid = None;
-            for a in rest {
-                if a == "--tree" {
-                    tree = true;
-                } else {
-                    pid = Some(a.as_str());
-                }
-            }
-            let Some(pid) = pid else {
-                print_usage();
-                return Err("kill requires a pid".to_string());
-            };
-            let payload = if tree {
-                format!("{pid}\ntree")
-            } else {
-                pid.to_string()
-            };
-            return match run_simple(addr, TAG_KILL, payload.as_bytes()) {
-                Ok(0) => Ok(()),
-                Ok(code) => std::process::exit(u8::try_from(code).unwrap_or(1) as i32),
-                Err(e) => Err(format!("client error: {e}")),
-            };
-        }
-
-        if mode_idx >= args.len() || (args[mode_idx] != "cargo" && args[mode_idx] != "shell") {
+        "admin" if rest.len() == 1 => exit_on(run_simple(addr, TAG_ADMIN, rest[0].as_bytes())),
+        "cargo" => exit_on(run_client(addr, rest, false, sync_files)),
+        "shell" => exit_on(run_client(addr, rest, true, sync_files)),
+        _ => {
             print_usage();
-            return Err(
-                "client mode requires: <ip:port> [--no-sync] cargo|shell|spawn|ps|kill|run [args...]"
-                    .to_string(),
-            );
-        }
-
-        let is_shell = args[mode_idx] == "shell";
-        let cmd_args = &args[mode_idx + 1..];
-
-        match run_client(addr, cmd_args, is_shell, sync_files) {
-            Ok(0) => Ok(()),
-            Ok(code) => {
-                let exit_code = u8::try_from(code).unwrap_or(1) as i32;
-                std::process::exit(exit_code);
-            }
-            Err(e) => Err(format!("client error: {e}")),
+            Err("client mode requires: <host[:port]> [--no-sync] cargo|shell|pull|push|run|spawn|ps|kill|admin".into())
         }
     }
 }

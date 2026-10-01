@@ -14,6 +14,14 @@ pub mod mpsc;
 pub mod plain_web_socket;
 pub mod runtime;
 pub mod socket_stream;
+// TLS server and pinned identities on each OS's own TLS stack (native only).
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod tls;
+// The remote tunnel's protocol and authentication.
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod tunnel;
 pub mod types;
 pub mod ui_signal;
 // TCP parsing helpers expose native socket deadlines alongside pure parsers.

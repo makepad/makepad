@@ -24,6 +24,14 @@ impl SocketStream {
         })
     }
 
+    /// TLS without CA validation, requiring the server certificate's
+    /// SHA-256 to equal `pin` (self-signed, pinned servers).
+    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
+        Ok(Self {
+            inner: crate::backend::linux::socket_stream::SocketStream::connect_pinned(host, port, pin)?,
+        })
+    }
+
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {
         Ok(Self {
             inner: self.inner.into_tls(host, ignore_ssl_cert)?,
@@ -63,7 +71,7 @@ impl Write for SocketStream {
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 #[path = "backend/apple/socket_stream.rs"]
-mod apple_impl;
+pub(crate) mod apple_impl;
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 pub struct SocketStream {
@@ -80,6 +88,14 @@ impl SocketStream {
     ) -> io::Result<Self> {
         Ok(Self {
             inner: apple_impl::SocketStream::connect(host, port, use_tls, ignore_ssl_cert)?,
+        })
+    }
+
+    /// TLS without CA validation, requiring the server certificate's
+    /// SHA-256 to equal `pin` (self-signed, pinned servers).
+    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
+        Ok(Self {
+            inner: apple_impl::SocketStream::connect_pinned(host, port, pin)?,
         })
     }
 
@@ -122,7 +138,7 @@ impl Write for SocketStream {
 
 #[cfg(target_os = "windows")]
 #[path = "backend/windows/socket_stream.rs"]
-mod windows_impl;
+pub(crate) mod windows_impl;
 
 #[cfg(target_os = "windows")]
 pub struct SocketStream {
@@ -139,6 +155,14 @@ impl SocketStream {
     ) -> io::Result<Self> {
         Ok(Self {
             inner: windows_impl::SocketStream::connect(host, port, use_tls, ignore_ssl_cert)?,
+        })
+    }
+
+    /// TLS without CA validation, requiring the server certificate's
+    /// SHA-256 to equal `pin` (self-signed, pinned servers).
+    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
+        Ok(Self {
+            inner: windows_impl::SocketStream::connect_pinned(host, port, pin)?,
         })
     }
 
@@ -202,6 +226,13 @@ impl SocketStream {
         })
     }
 
+    pub fn connect_pinned(_host: &str, _port: &str, _pin: &[u8; 32]) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "pinned TLS is not available on this target",
+        ))
+    }
+
     pub fn into_tls(self, _host: &str, _ignore_ssl_cert: bool) -> io::Result<Self> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
@@ -254,6 +285,13 @@ impl SocketStream {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "socket stream API is not available on this target",
+        ))
+    }
+
+    pub fn connect_pinned(_host: &str, _port: &str, _pin: &[u8; 32]) -> io::Result<Self> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "pinned TLS is not available on this target",
         ))
     }
 

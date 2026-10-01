@@ -10,15 +10,15 @@ use std::{
 };
 
 #[repr(C)]
-struct SSL_CTX {
+pub(crate) struct SSL_CTX {
     _private: [u8; 0],
 }
 #[repr(C)]
-struct SSL {
+pub(crate) struct SSL {
     _private: [u8; 0],
 }
 #[repr(C)]
-struct SSL_METHOD {
+pub(crate) struct SSL_METHOD {
     _private: [u8; 0],
 }
 
@@ -42,26 +42,31 @@ const SSL_R_UNEXPECTED_EOF_WHILE_READING: c_ulong = 0x0A00_0126;
 #[link(name = "ssl")]
 #[link(name = "crypto")]
 unsafe extern "C" {
-    fn OPENSSL_init_ssl(opts: u64, settings: *const c_void) -> c_int;
-    fn TLS_client_method() -> *const SSL_METHOD;
-    fn SSL_CTX_new(method: *const SSL_METHOD) -> *mut SSL_CTX;
-    fn SSL_CTX_free(ctx: *mut SSL_CTX);
-    fn SSL_CTX_set_verify(ctx: *mut SSL_CTX, mode: c_int, verify_callback: *mut c_void);
-    fn SSL_CTX_set_default_verify_paths(ctx: *mut SSL_CTX) -> c_int;
-    fn SSL_new(ctx: *mut SSL_CTX) -> *mut SSL;
-    fn SSL_free(ssl: *mut SSL);
-    fn SSL_set_fd(ssl: *mut SSL, fd: c_int) -> c_int;
-    fn SSL_connect(ssl: *mut SSL) -> c_int;
-    fn SSL_get_error(ssl: *mut SSL, ret_code: c_int) -> c_int;
-    fn SSL_read(ssl: *mut SSL, buf: *mut c_void, num: c_int) -> c_int;
-    fn SSL_write(ssl: *mut SSL, buf: *const c_void, num: c_int) -> c_int;
-    fn SSL_shutdown(ssl: *mut SSL) -> c_int;
-    fn SSL_ctrl(ssl: *mut SSL, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
+    pub(crate) fn OPENSSL_init_ssl(opts: u64, settings: *const c_void) -> c_int;
+    pub(crate) fn TLS_client_method() -> *const SSL_METHOD;
+    pub(crate) fn SSL_CTX_new(method: *const SSL_METHOD) -> *mut SSL_CTX;
+    pub(crate) fn SSL_CTX_free(ctx: *mut SSL_CTX);
+    pub(crate) fn SSL_CTX_set_verify(ctx: *mut SSL_CTX, mode: c_int, verify_callback: *mut c_void);
+    pub(crate) fn SSL_CTX_set_default_verify_paths(ctx: *mut SSL_CTX) -> c_int;
+    pub(crate) fn SSL_new(ctx: *mut SSL_CTX) -> *mut SSL;
+    pub(crate) fn SSL_free(ssl: *mut SSL);
+    pub(crate) fn SSL_set_fd(ssl: *mut SSL, fd: c_int) -> c_int;
+    pub(crate) fn SSL_connect(ssl: *mut SSL) -> c_int;
+    pub(crate) fn SSL_get_error(ssl: *mut SSL, ret_code: c_int) -> c_int;
+    pub(crate) fn SSL_read(ssl: *mut SSL, buf: *mut c_void, num: c_int) -> c_int;
+    pub(crate) fn SSL_write(ssl: *mut SSL, buf: *const c_void, num: c_int) -> c_int;
+    pub(crate) fn SSL_shutdown(ssl: *mut SSL) -> c_int;
+    pub(crate) fn SSL_ctrl(ssl: *mut SSL, cmd: c_int, larg: c_long, parg: *mut c_void) -> c_long;
 
-    fn ERR_get_error() -> c_ulong;
-    fn ERR_peek_error() -> c_ulong;
-    fn ERR_clear_error();
-    fn ERR_error_string_n(e: c_ulong, buf: *mut c_char, len: usize);
+    pub(crate) fn SSL_get1_peer_certificate(ssl: *const SSL) -> *mut c_void;
+    pub(crate) fn SSL_version(ssl: *const SSL) -> c_int;
+    pub(crate) fn i2d_X509(x: *mut c_void, out: *mut *mut u8) -> c_int;
+    pub(crate) fn X509_free(x: *mut c_void);
+
+    pub(crate) fn ERR_get_error() -> c_ulong;
+    pub(crate) fn ERR_peek_error() -> c_ulong;
+    pub(crate) fn ERR_clear_error();
+    pub(crate) fn ERR_error_string_n(e: c_ulong, buf: *mut c_char, len: usize);
 }
 
 fn io_other(msg: impl Into<String>) -> io::Error {
@@ -104,6 +109,16 @@ unsafe impl Send for OpenSslStream {}
 
 impl OpenSslStream {
     fn connect(tcp_stream: TcpStream, host: &str, verify_peer: bool) -> io::Result<Self> {
+        Self::connect_until(tcp_stream, host, verify_peer, None)
+    }
+
+    /// `deadline`: give up the handshake then (a peer that never answers).
+    fn connect_until(
+        tcp_stream: TcpStream,
+        host: &str,
+        verify_peer: bool,
+        deadline: Option<std::time::Instant>,
+    ) -> io::Result<Self> {
         init_openssl()?;
 
         let method = unsafe { TLS_client_method() };
@@ -177,6 +192,13 @@ impl OpenSslStream {
             if ret == 1 {
                 break;
             }
+            if deadline.is_some_and(|d| std::time::Instant::now() >= d) {
+                unsafe {
+                    SSL_free(ssl);
+                    SSL_CTX_free(ssl_ctx);
+                }
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "TLS handshake timed out"));
+            }
             let err = unsafe { SSL_get_error(ssl, ret) };
             match err {
                 SSL_ERROR_WANT_READ | SSL_ERROR_WANT_WRITE => {
@@ -216,6 +238,25 @@ impl OpenSslStream {
             ssl_ctx,
             ssl,
         })
+    }
+
+    fn peer_leaf_der(&self) -> io::Result<Vec<u8>> {
+        unsafe {
+            let cert = SSL_get1_peer_certificate(self.ssl);
+            if cert.is_null() {
+                return Err(io_other("server sent no certificate"));
+            }
+            let len = i2d_X509(cert, ptr::null_mut());
+            if len <= 0 {
+                X509_free(cert);
+                return Err(io_other("cannot encode server certificate"));
+            }
+            let mut der = vec![0u8; len as usize];
+            let mut out = der.as_mut_ptr();
+            i2d_X509(cert, &mut out);
+            X509_free(cert);
+            Ok(der)
+        }
     }
 
     fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
@@ -356,6 +397,39 @@ impl SocketStream {
         } else {
             Ok(SocketStream::Plain(tcp_stream))
         }
+    }
+
+    /// TLS 1.2+ without CA validation; the server certificate's SHA-256
+    /// must equal `pin` before the stream is handed out.
+    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
+        let tcp_stream = TcpStream::connect(format!("{host}:{port}"))?;
+        let _ = tcp_stream.set_nodelay(true);
+        let _ = tcp_stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut stream = OpenSslStream::connect_until(tcp_stream, host, false, Some(deadline))?;
+        let _ = stream.set_read_timeout(None);
+        let result = (|| {
+            if unsafe { SSL_version(stream.ssl) } < 0x0303 {
+                return Err(io_other("server negotiated a TLS version below 1.2"));
+            }
+            let leaf = stream.peer_leaf_der()?;
+            let got = crate::digest::sha256_hash(&leaf);
+            if !crate::tls::constant_time_eq(&got, pin) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "server certificate fingerprint {} does not match the pin",
+                        crate::tls::to_hex(&got)
+                    ),
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(err) = result {
+            stream.shutdown();
+            return Err(err);
+        }
+        Ok(SocketStream::Tls(stream))
     }
 
     pub fn into_tls(self, host: &str, ignore_ssl_cert: bool) -> io::Result<Self> {

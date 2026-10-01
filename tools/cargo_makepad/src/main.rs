@@ -307,7 +307,7 @@ fn show_help() {
     println!();
     println!("Tunnel commands:");
     println!();
-    println!("    tunnel --server [--port PORT] [--all]        Start tunnel execution server");
+    println!("    (the server is `makepad-remote --server`; keys and pins: tools/remote/TUNNEL.md)");
     println!(
         "    tunnel <ip:port> cargo <args...>             Sync changed files and run cargo through tunnel"
     );

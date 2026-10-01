@@ -53,6 +53,8 @@ impl SocketStream {
                     let _ = errors.Append(ChainValidationResult::Expired);
                     let _ = errors.Append(ChainValidationResult::IncompleteChain);
                     let _ = errors.Append(ChainValidationResult::Revoked);
+                    let _ = errors.Append(ChainValidationResult::WrongUsage);
+                    let _ = errors.Append(ChainValidationResult::BasicConstraintsError);
                 }
             }
         }
@@ -98,6 +100,48 @@ impl SocketStream {
             reader: Some(reader),
             writer: Some(writer),
         })
+    }
+
+    /// TLS without chain validation (self-signed server), then the server
+    /// certificate's SHA-256 must equal `pin` before the stream is used.
+    pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
+        let mut stream = Self::connect(host, port, true, true)?;
+        let check = (|| -> io::Result<()> {
+            let socket = stream
+                .socket
+                .as_ref()
+                .ok_or_else(|| io_other("socket closed"))?;
+            let blob = socket
+                .Information()
+                .and_then(|info| info.ServerCertificate())
+                .and_then(|cert| cert.GetCertificateBlob())
+                .map_err(|err| io_other(format!("cannot read server certificate: {err}")))?;
+            let len = blob
+                .Length()
+                .map_err(|err| io_other(format!("certificate buffer: {err}")))?;
+            let reader = DataReader::FromBuffer(&blob)
+                .map_err(|err| io_other(format!("certificate reader: {err}")))?;
+            let mut der = vec![0u8; len as usize];
+            reader
+                .ReadBytes(&mut der)
+                .map_err(|err| io_other(format!("certificate read: {err}")))?;
+            let got = crate::digest::sha256_hash(&der);
+            if !crate::tls::constant_time_eq(&got, pin) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "server certificate fingerprint {} does not match the pin",
+                        crate::tls::to_hex(&got)
+                    ),
+                ));
+            }
+            Ok(())
+        })();
+        if let Err(err) = check {
+            stream.shutdown();
+            return Err(err);
+        }
+        Ok(stream)
     }
 
     pub fn into_tls(self, _host: &str, _ignore_ssl_cert: bool) -> io::Result<Self> {
