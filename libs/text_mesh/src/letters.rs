@@ -50,6 +50,26 @@ pub fn set_fonts_dir(dir: impl Into<PathBuf>) {
     *FONTS_DIR.write().unwrap_or_else(|e| e.into_inner()) = Some(dir.into());
 }
 
+/// A host's font bytes by file path, consulted before the file system: a
+/// host without this machine's files (the browser player) hands over the
+/// bytes it fetched; `None` reads the file.
+pub type FontReader = dyn Fn(&std::path::Path) -> Option<Arc<[u8]>> + Send + Sync;
+
+static FONT_READER: std::sync::OnceLock<Box<FontReader>> = std::sync::OnceLock::new();
+
+/// Install the host's font reader (once; a later call is ignored: false).
+pub fn set_font_reader(reader: Box<FontReader>) -> bool {
+    FONT_READER.set(reader).is_ok()
+}
+
+/// A font file's bytes: the host's reader, else the file.
+fn read_font_file(path: &std::path::Path) -> std::io::Result<Vec<u8>> {
+    match FONT_READER.get().and_then(|reader| reader(path)) {
+        Some(bytes) => Ok(bytes.to_vec()),
+        None => std::fs::read(path),
+    }
+}
+
 /// Makepad's bundled font directory, as the host said ([`set_fonts_dir`]),
 /// or `MOTION3D_FONTS_DIR` when set. Without either there is no directory
 /// (the path is empty and a read of a bundled name says so).
@@ -95,9 +115,9 @@ impl FontSource {
                     return Err(format!("bundled font `{name}`: the host has not said where the fonts are (letters::set_fonts_dir)"));
                 }
                 let path = dir.join(file);
-                std::fs::read(&path).map_err(|e| format!("bundled font `{name}` ({}): {e}", path.display()))
+                read_font_file(&path).map_err(|e| format!("bundled font `{name}` ({}): {e}", path.display()))
             }
-            FontSource::Path(path) => std::fs::read(path).map_err(|e| format!("font {}: {e}", path.display())),
+            FontSource::Path(path) => read_font_file(path).map_err(|e| format!("font {}: {e}", path.display())),
             FontSource::Bytes(bytes) => Ok(bytes.as_ref().clone()),
         }
     }
@@ -1029,6 +1049,18 @@ mod tests {
         assert_eq!(t.letters.len(), 2);
         let m = t.merged();
         m.validate().unwrap();
+    }
+
+    /// A host without the files (the browser) hands the bytes over by path.
+    #[test]
+    fn a_font_the_host_hands_over_needs_no_file() {
+        let inter: Arc<[u8]> = std::fs::read(fonts_dir().join("Inter.ttf")).unwrap().into();
+        set_font_reader(Box::new(move |p| p.starts_with("/not-on-this-machine").then(|| inter.clone())));
+        let font = FontSource::Path("/not-on-this-machine/resources/Inter.ttf".into());
+        let t = build_text3d(&Text3dParams { text: "Hi".into(), font, ..Default::default() }).unwrap();
+        assert_eq!(t.letters.len(), 2);
+        // Paths it does not answer for are read as before.
+        assert!(build_text3d(&Text3dParams { text: "x".into(), font: FontSource::Path("/nowhere/x.ttf".into()), ..Default::default() }).is_err());
     }
 
     #[test]
