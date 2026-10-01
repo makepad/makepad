@@ -616,7 +616,11 @@ impl Renderer {
         // after a shader change) or if it failed, the city draws matte
         // rather than not at all.
         let hdr = self.hdr_output;
-        let mut draw = match city.as_deref_mut().filter(|c| c.pbr.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr)) && city_shader_on()) {
+        // Ready: the city lane's shader for this frame's features (variants.rs).
+        let stock = city.as_ref().and_then(|c| c.pbr.skinned.draw_vars.draw_shader_id);
+        let shader = if stock.is_some() { self.lane_shaders(cx.cx, super::variants::ModelLane::City, stock).0 } else { None };
+        let ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
+        let mut draw = match city.as_deref_mut().filter(|_| ready && city_shader_on()) {
             Some(c) => { c.city = vec4(night, stream_time, 0.0, 0.0); ModelDraw::City(c) }
             None => ModelDraw::Diffuse(diffuse),
         };
@@ -627,12 +631,22 @@ impl Renderer {
 
     fn draw_stream_with(&mut self, cx: &mut Cx3d, draw: &mut ModelDraw<'_>, eye: Vec3f, fog: (Vec3f, f32), sun: &SunLight) {
         self.bind_model_lane(cx, draw, eye, fog, sun);
-        // The lane's no-discard variant for layers that cut no pixel
-        // (renderer/opaque.rs): not dithered, texture fully opaque.
-        let opaque = match draw {
-            ModelDraw::City(_) => self.opaque_shader(cx.cx, super::opaque::OpaqueLane::City),
-            ModelDraw::Diffuse(_) => self.opaque_shader(cx.cx, super::opaque::OpaqueLane::Diffuse),
+        // The lane's shader variant for this frame's features, and for
+        // layers that cut no pixel (not dithered, texture fully opaque) the
+        // one without `clip` (renderer/variants.rs).
+        let model_lane = match draw {
+            ModelDraw::City(_) => Some(super::variants::ModelLane::City),
+            ModelDraw::Diffuse(_) => Some(super::variants::ModelLane::Diffuse),
             _ => None,
+        };
+        let opaque = match model_lane {
+            Some(model_lane) => {
+                let stock = draw.base().draw_vars.draw_shader_id;
+                let (full, opaque) = self.lane_shaders(cx.cx, model_lane, stock);
+                draw.base().draw_vars.draw_shader_id = full;
+                opaque.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
+            }
+            None => None,
         };
         // Statics: one transient-only light block for the whole lane.
         {

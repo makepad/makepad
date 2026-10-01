@@ -423,7 +423,7 @@ pub struct Renderer {
     /// The PBR pipeline can draw this frame (`draw_models_inner`).
     pbr_ready: bool,
     /// The diffuse and PBR lanes' no-discard variants (opaque.rs).
-    opaque_shaders: [opaque::OpaqueShader; 4],
+    lane_variants: variants::LaneVariants,
     /// Whether shiny loaded models use the PBR material lane. Enabled by
     /// default so existing hosts keep their rendering unchanged; CAD-style
     /// views can temporarily request the diffuse textured lane instead.
@@ -623,7 +623,7 @@ mod bake_passes;
 mod model_query;
 mod draw_models;
 mod occluder_fade;
-mod opaque;
+pub(crate) mod variants;
 mod skinned;
 mod frame;
 mod frame_layers;
@@ -717,7 +717,7 @@ impl Default for Renderer {
             foliage_ready: false,
             grass_rings: Default::default(),
             pbr_ready: false,
-            opaque_shaders: Default::default(),
+            lane_variants: Default::default(),
             pbr_materials_enabled: true,
             ssao: None,
             occluder: Default::default(),

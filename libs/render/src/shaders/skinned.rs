@@ -662,167 +662,33 @@ script_mod! {
             self.fb0 = depth_clip(self.world, self.pixel(), self.depth_clip)
         }
         morph_map: texture_2d(float)
+        // The weight of morph target k (0..31): morph_weights0..7, four each.
+        morph_weight: fn(k: float) -> float {
+            let i = floor(k / 4.0)
+            var w = self.morph_weights0
+            if i > 0.5 { w = self.morph_weights1 }
+            if i > 1.5 { w = self.morph_weights2 }
+            if i > 2.5 { w = self.morph_weights3 }
+            if i > 3.5 { w = self.morph_weights4 }
+            if i > 4.5 { w = self.morph_weights5 }
+            if i > 5.5 { w = self.morph_weights6 }
+            if i > 6.5 { w = self.morph_weights7 }
+            let c = k - i * 4.0
+            if c < 0.5 { return w.x }
+            if c < 1.5 { return w.y }
+            if c < 2.5 { return w.z }
+            return w.w
+        }
+        // The first morph_ctl.w targets' deltas, weighted, in target order
+        // (one loop: the body is compiled once, not per target).
         morph_delta: fn(vertex:float,lane:float)->vec3f {
             var delta=vec3(0.0,0.0,0.0)
-            if self.morph_ctl.w > 0.5 {
-                let index=(0.0*self.morph_ctl.z+vertex)*2.0+lane
+            var k=0.0
+            while k < 31.5 && self.morph_ctl.w > k + 0.5 {
+                let index=(k*self.morph_ctl.z+vertex)*2.0+lane
                 let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights0.x
-            }
-            if self.morph_ctl.w > 1.5 {
-                let index=(1.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights0.y
-            }
-            if self.morph_ctl.w > 2.5 {
-                let index=(2.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights0.z
-            }
-            if self.morph_ctl.w > 3.5 {
-                let index=(3.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights0.w
-            }
-            if self.morph_ctl.w > 4.5 {
-                let index=(4.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights1.x
-            }
-            if self.morph_ctl.w > 5.5 {
-                let index=(5.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights1.y
-            }
-            if self.morph_ctl.w > 6.5 {
-                let index=(6.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights1.z
-            }
-            if self.morph_ctl.w > 7.5 {
-                let index=(7.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights1.w
-            }
-            if self.morph_ctl.w > 8.5 {
-                let index=(8.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights2.x
-            }
-            if self.morph_ctl.w > 9.5 {
-                let index=(9.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights2.y
-            }
-            if self.morph_ctl.w > 10.5 {
-                let index=(10.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights2.z
-            }
-            if self.morph_ctl.w > 11.5 {
-                let index=(11.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights2.w
-            }
-            if self.morph_ctl.w > 12.5 {
-                let index=(12.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights3.x
-            }
-            if self.morph_ctl.w > 13.5 {
-                let index=(13.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights3.y
-            }
-            if self.morph_ctl.w > 14.5 {
-                let index=(14.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights3.z
-            }
-            if self.morph_ctl.w > 15.5 {
-                let index=(15.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights3.w
-            }
-            if self.morph_ctl.w > 16.5 {
-                let index=(16.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights4.x
-            }
-            if self.morph_ctl.w > 17.5 {
-                let index=(17.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights4.y
-            }
-            if self.morph_ctl.w > 18.5 {
-                let index=(18.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights4.z
-            }
-            if self.morph_ctl.w > 19.5 {
-                let index=(19.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights4.w
-            }
-            if self.morph_ctl.w > 20.5 {
-                let index=(20.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights5.x
-            }
-            if self.morph_ctl.w > 21.5 {
-                let index=(21.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights5.y
-            }
-            if self.morph_ctl.w > 22.5 {
-                let index=(22.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights5.z
-            }
-            if self.morph_ctl.w > 23.5 {
-                let index=(23.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights5.w
-            }
-            if self.morph_ctl.w > 24.5 {
-                let index=(24.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights6.x
-            }
-            if self.morph_ctl.w > 25.5 {
-                let index=(25.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights6.y
-            }
-            if self.morph_ctl.w > 26.5 {
-                let index=(26.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights6.z
-            }
-            if self.morph_ctl.w > 27.5 {
-                let index=(27.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights6.w
-            }
-            if self.morph_ctl.w > 28.5 {
-                let index=(28.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights7.x
-            }
-            if self.morph_ctl.w > 29.5 {
-                let index=(29.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights7.y
-            }
-            if self.morph_ctl.w > 30.5 {
-                let index=(30.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights7.z
-            }
-            if self.morph_ctl.w > 31.5 {
-                let index=(31.0*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
-                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weights7.w
+                delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weight(k)
+                k=k+1.0
             }
             return delta
         }

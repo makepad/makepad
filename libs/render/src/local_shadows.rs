@@ -459,6 +459,11 @@ impl LocalShadows {
                 .put_back_vec_f32(cx, packed, None);
         }
     }
+    /// Whether `bind` switches the lamps' shadows on (`local_shadow_on`).
+    pub fn active(&self) -> bool {
+        self.records.iter().any(|r| r.count != 0)
+    }
+
     pub fn bind(&self, cx: &Cx, vars: &mut DrawVars, fallback: &Texture) {
         vars.set_uniform(cx,live_id!(local_shadow_soft),&[if self.soft_filter{1.0}else{0.0}]);
         vars.set_uniform(cx,live_id!(local_shadow_source_radius),&[self.source_radius]);
@@ -1106,11 +1111,19 @@ pub(crate) mod sampling {
                     let range=max(radius-record.y,0.0001)
                     let dx=vec2(texel.x*search,0.0)
                     let dy=vec2(0.0,texel.y*search)
-                    let blockers=self.local_shadow_blocker(uv,lo,hi,z,record.y,range,search_bias)
-                        +self.local_shadow_blocker(uv+dx,lo,hi,z,record.y,range,search_bias)
-                        +self.local_shadow_blocker(uv-dx,lo,hi,z,record.y,range,search_bias)
-                        +self.local_shadow_blocker(uv+dy,lo,hi,z,record.y,range,search_bias)
-                        +self.local_shadow_blocker(uv-dy,lo,hi,z,record.y,range,search_bias)
+                    // The centre, then +x, -x, +y, -y: one call site in a
+                    // loop (a D3D compile inlines every site).
+                    var blockers=vec2(0.0,0.0)
+                    var k=0.0
+                    while k<4.5 {
+                        var o=vec2(0.0,0.0)
+                        if k>0.5 && k<1.5 {o=dx}
+                        if k>1.5 && k<2.5 {o=vec2(0.0,0.0)-dx}
+                        if k>2.5 && k<3.5 {o=dy}
+                        if k>3.5 {o=vec2(0.0,0.0)-dy}
+                        blockers=blockers+self.local_shadow_blocker(uv+o,lo,hi,z,record.y,range,search_bias)
+                        k=k+1.0
+                    }
                     if blockers.y>0.00001 {
                         let blocker=blockers.x/blockers.y
                         // Similar triangles: separated caster/receiver ->

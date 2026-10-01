@@ -9,10 +9,12 @@
 //! host passes the hooks it allows: Sandbox's game.material allows the
 //! albedo `surface` hook only (`HookMask::ALBEDO`).
 use makepad_draw::*;
-use makepad_draw::makepad_platform::makepad_script::script_eval;
 use makepad_render_material::{self as material, builtin, Builtin, HookMask, HookSet, MaterialDesc, MaterialError, ShadowVariant, VariantPlan};
 use makepad_scene::{BaseKind, Blend};
+use crate::renderer::variants::{self, Features};
 use crate::shaders::{DrawLmSunDepthCutout, DrawScenePbr};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 #[derive(Script, ScriptHook)]
 #[repr(C)]
@@ -117,9 +119,6 @@ script_mod! {
         }
     }
 
-    // `clip` emptied: the discard-free colour variant (see opaque.rs).
-    mod.draw.mat_clip_none = fn() {}
-
 }
 
 /// Install shader declarations in the owning isolate. Registration grants
@@ -140,13 +139,24 @@ pub fn register(vm: &mut ScriptVm) -> ScriptValue {
     script_mod(vm)
 }
 
+/// Runs `f` in the VM that owns a material's program (a level isolate's);
+/// false when that VM is busy. A material without one uses the Cx's VM.
+pub type MaterialVm = Rc<dyn Fn(&mut Cx, &mut dyn FnMut(&mut ScriptVm)) -> bool>;
+
 /// A built material: the colour draw, and what its plan derived.
 pub struct CustomMaterial {
     pub draw: DrawSceneCustom,
     pub plan: VariantPlan,
-    /// The colour program without `clip`, for draws that cut no pixel
-    /// (only built when no hook can discard; see opaque.rs).
-    pub opaque_variant: Option<DrawShaderId>,
+    /// The colour program, which the feature variants derive from
+    /// (renderer/variants.rs), and its stock shader.
+    program: Option<ScriptObjectRef>,
+    stock: Option<DrawShaderId>,
+    /// The VM that owns `program`, when it is not the Cx's.
+    pub host_vm: Option<MaterialVm>,
+    /// The variants built so far per feature set: the colour shader and,
+    /// for a material no hook of which can cut a pixel, the one without
+    /// `clip`. `None`: not available (its layout differs), stock instead.
+    variants: HashMap<Features, Option<(DrawShaderId, Option<DrawShaderId>)>>,
     /// The derived caster (`ShadowVariant::Derived`), when it compiled.
     pub shadow: Option<DrawShaderId>,
     pub cutoff: f32,
@@ -162,14 +172,15 @@ pub struct CustomMaterial {
     pub warnings: Vec<material::Diagnostic>,
 }
 
-impl From<DrawSceneCustom> for CustomMaterial {
-    /// A colour draw built elsewhere (Sandbox's albedo surfaces): the stock
-    /// caster, no derived variants.
-    fn from(draw: DrawSceneCustom) -> Self {
+impl CustomMaterial {
+    fn new(draw: DrawSceneCustom, plan: VariantPlan, program: Option<ScriptObjectRef>) -> Self {
         Self {
+            stock: draw.draw_vars.draw_shader_id,
             draw,
-            plan: VariantPlan { builtins: Vec::new(), can_discard: true, shadow: ShadowVariant::Stock },
-            opaque_variant: None,
+            plan,
+            program,
+            host_vm: None,
+            variants: HashMap::new(),
             shadow: None,
             cutoff: 0.0,
             bounds_pad: 0.0,
@@ -178,6 +189,80 @@ impl From<DrawSceneCustom> for CustomMaterial {
             warnings: Vec::new(),
         }
     }
+
+    /// The colour program's own shader (the one built for every feature).
+    pub fn stock_shader(&self) -> Option<DrawShaderId> {
+        self.stock
+    }
+
+    /// Whether the program composes light: the Unlit, Flat and error
+    /// programs do not, so their variants drop the lighting the lane
+    /// computes for the composition.
+    fn lit(&self) -> bool {
+        !self.plan.builtins.iter().any(|b| matches!(b, Builtin::Unlit | Builtin::Flat | Builtin::Error))
+    }
+
+    /// Whether no draw of this material cuts a pixel (no hook can discard,
+    /// opaque blend): it may draw through the variant without `clip`.
+    pub fn cuts_no_pixel(&self) -> bool {
+        !self.plan.can_discard && self.draw.pbr.alpha_mode == 0.0
+    }
+
+    /// The shaders for this frame's `features` (renderer/variants.rs): the
+    /// one the material draws through, and the one without `clip` when no
+    /// draw of it cuts a pixel. Built on first use; until then (its VM is
+    /// busy), or when a variant's layout differs, the stock shader.
+    pub(crate) fn shaders(&mut self, cx: &mut Cx, features: Features) -> (Option<DrawShaderId>, Option<DrawShaderId>) {
+        let Some(stock) = self.stock else { return (None, None) };
+        if std::env::var_os("MAKEPAD_SHADER_VARIANTS").is_some_and(|v| v == "0") {
+            return (Some(stock), None);
+        }
+        let features = Features { clip: true, ..features };
+        if !self.variants.contains_key(&features) {
+            let Some(program) = self.program.clone() else { return (Some(stock), None) };
+            let (lit, opaque) = (self.lit(), self.cuts_no_pixel() && std::env::var_os("MAKEPAD_OPAQUE_VARIANT").is_none_or(|v| v != "0"));
+            let mut built = None;
+            let mut run = |vm: &mut ScriptVm| {
+                // Only against the heap that owns the program.
+                if vm.bx.heap.heap_key() != program.heap_key() { built = Some(None); return; }
+                let full = build_variant(vm, program.as_object(), stock, features, lit);
+                let no_clip = if opaque { build_variant(vm, program.as_object(), stock, Features { clip: false, ..features }, lit) } else { None };
+                built = Some(full.map(|full| (full, no_clip)));
+            };
+            let ran = match &self.host_vm {
+                Some(host) => host(cx, &mut run),
+                None => cx.try_with_vm(|vm| run(vm)).is_some(),
+            };
+            match built {
+                Some(built) if ran => { self.variants.insert(features, built); }
+                _ => return (Some(stock), None),
+            }
+        }
+        match self.variants[&features] {
+            Some((full, no_clip)) => (Some(full), no_clip),
+            None => (Some(stock), None),
+        }
+    }
+}
+
+impl From<DrawSceneCustom> for CustomMaterial {
+    /// A colour draw built elsewhere: the stock caster, no derived
+    /// variants.
+    fn from(draw: DrawSceneCustom) -> Self {
+        Self::new(draw, VariantPlan { builtins: Vec::new(), can_discard: true, shadow: ShadowVariant::Stock }, None)
+    }
+}
+
+/// `program`'s variant for `features` (the stock shader when it replaces
+/// nothing), `None` when it does not build or its layout differs.
+fn build_variant(vm: &mut ScriptVm, program: ScriptObject, stock: DrawShaderId, features: Features, lit: bool) -> Option<DrawShaderId> {
+    let Some(obj) = variants::variant_object(vm, program, features, lit) else { return Some(stock) };
+    let variant = instance_custom(vm, obj).ok()?.draw_vars.draw_shader_id?;
+    if !variants::same_layout(vm.cx(), stock, variant) {
+        log!("render: a material's variant {features:?} has another layout than its shader; drawing through that");
+        return None;
+    }
+    Some(variant)
 }
 
 /// Build one program object on the lane and instance a draw struct from it.
@@ -193,12 +278,6 @@ fn instance_custom(vm: &mut ScriptVm, obj: ScriptObject) -> Result<DrawSceneCust
         return Err(MaterialError::new(format!("the material's shader did not build: {detail}")));
     }
     Ok(draw)
-}
-
-fn with_override(vm: &mut ScriptVm, obj: ScriptObject, method: LiveId, function: ScriptValue) -> Option<ScriptObject> {
-    let function = function.as_object().filter(|f| vm.bx.heap.is_fn(*f))?;
-    let variant = vm.bx.heap.new_with_proto_no_vec(obj.into());
-    vm.bx.heap.set_value(variant, method.into(), function.into(), NoTrap).is_nil().then_some(variant)
 }
 
 impl DrawSceneCustom {
@@ -258,12 +337,6 @@ impl DrawSceneCustom {
             _ => {}
         }
         let mut warnings = Vec::new();
-        let opaque_variant = if plan.can_discard || desc.blend != Blend::Opaque {
-            None
-        } else {
-            let clip = script_eval!(vm, { mod.draw.mat_clip_none });
-            with_override(vm, obj, id!(clip), clip).and_then(|v| instance_custom(vm, v).ok()).and_then(|d| d.draw_vars.draw_shader_id)
-        };
         let shadow = match plan.shadow {
             ShadowVariant::Derived { vertex, mask } => match Self::build_shadow(vm, hooks, vertex, mask, &overrides[..helpers.len()]) {
                 Ok(id) => Some(id),
@@ -277,17 +350,9 @@ impl DrawSceneCustom {
             },
             _ => None,
         };
-        Ok(CustomMaterial {
-            draw,
-            ibl: plan.builtins.contains(&Builtin::Ibl),
-            texture: None,
-            plan,
-            opaque_variant,
-            shadow,
-            cutoff,
-            bounds_pad: hooks.bounds_pad,
-            warnings,
-        })
+        let ibl = plan.builtins.contains(&Builtin::Ibl);
+        let program = vm.bx.heap.new_object_ref(obj);
+        Ok(CustomMaterial { ibl, shadow, cutoff, bounds_pad: hooks.bounds_pad, warnings, ..CustomMaterial::new(draw, plan, Some(program)) })
     }
 
     fn build_shadow(vm: &mut ScriptVm, hooks: &HookSet, vertex: bool, mask: bool, helpers: &[(LiveId, ScriptObject)]) -> Result<DrawShaderId, MaterialError> {
@@ -334,15 +399,17 @@ impl DrawSceneCustom {
             .ok_or_else(|| MaterialError::new("custom material shader registration failed"))?;
         let obj = material::build_program(vm, &material::ProgramRequest { base, kind: BaseKind::Unlit, hooks: &HookSet::new(), mask: HookMask::NONE, overrides: &overrides })?;
         let draw = instance_custom(vm, obj)?;
-        Ok(CustomMaterial { plan: VariantPlan { builtins: vec![Builtin::Error], can_discard: false, shadow: ShadowVariant::Stock }, ..CustomMaterial::from(draw) })
+        let program = vm.bx.heap.new_object_ref(obj);
+        Ok(CustomMaterial::new(draw, VariantPlan { builtins: vec![Builtin::Error], can_discard: false, shadow: ShadowVariant::Stock }, Some(program)))
     }
 
-    /// Sandbox's game.material: one albedo `surface(base: vec4) -> vec4`.
-    pub fn from_surface(vm: &mut ScriptVm, surface: ScriptObject, params: Vec4f) -> Result<Self, String> {
+    /// Sandbox's game.material: one albedo `surface(base: vec4) -> vec4`
+    /// (a host whose program lives in another VM than the Cx's sets the
+    /// material's `host_vm`).
+    pub fn from_surface(vm: &mut ScriptVm, surface: ScriptObject, params: Vec4f) -> Result<CustomMaterial, String> {
         if !vm.bx.heap.is_fn(surface) { return Err("surface is not a shader function".into()); }
         let hooks = HookSet::new().with(material::Hook::Surface, surface);
         Self::build(vm, &MaterialDesc::default(), &hooks, HookMask::ALBEDO, params)
-            .map(|m| m.draw)
             .map_err(|e| format!("surface shader failed frontend compilation: {e}"))
     }
 }
@@ -350,6 +417,7 @@ impl DrawSceneCustom {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_draw::makepad_platform::makepad_script::script_eval;
     use makepad_render_material::{frontend_errors_for, Hook, ShaderBackend};
     use makepad_scene::LightingModel;
 
@@ -400,7 +468,7 @@ mod tests {
             let m = DrawSceneCustom::build(vm, &desc, &hooks, HookMask::ALL, vec4(0.5, 0.0, 0.0, 0.0)).unwrap_or_else(|e| panic!("{e}"));
             assert!(m.draw.draw_vars.can_instance());
             assert_eq!(m.plan.builtins, vec![Builtin::HookedCompose, Builtin::Ibl]);
-            assert!(m.ibl && m.opaque_variant.is_none(), "a surface hook can cut pixels");
+            assert!(m.ibl && !m.cuts_no_pixel(), "a surface hook can cut pixels");
             assert!(m.shadow.is_some(), "displaced, masked caster: {:?}", m.warnings);
             assert_eq!((m.cutoff, m.draw.pbr.alpha_mode, m.bounds_pad), (0.4, 1.0, 0.05));
             // The same program lowers for every backend, not only Metal.
@@ -422,13 +490,16 @@ mod tests {
             let obj = spec(vm, "test://finish.splash", "finish: fn(c: vec4) -> vec4 { return vec4(c.xyz * 0.5, c.w) }");
             let hooks = HookSet::from_spec(vm, obj, HookMask::ALL).unwrap();
             let m = DrawSceneCustom::build(vm, &MaterialDesc::default(), &hooks, HookMask::ALL, Vec4f::default()).unwrap();
-            let (stock, variant) = (m.draw.draw_vars.draw_shader_id.unwrap(), m.opaque_variant.expect("no hook can cut"));
-            assert_ne!(stock, variant);
-            let cx = vm.cx();
-            let (a, b) = (&cx.draw_shaders[stock.index].mapping, &cx.draw_shaders[variant.index].mapping);
-            assert_eq!(a.instances.total_slots, b.instances.total_slots);
-            assert_eq!(a.dyn_uniforms.total_slots, b.dyn_uniforms.total_slots);
-            assert!(a.textures.iter().map(|t| t.id).eq(b.textures.iter().map(|t| t.id)));
+            assert!(m.cuts_no_pixel(), "no hook can cut");
+            let stock = m.stock_shader().unwrap();
+            let program = m.program.as_ref().unwrap().as_object();
+            // Every feature on but `clip`, and every feature off: each has
+            // the stock layout (build_variant checks it).
+            let all = Features { clip: false, gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true };
+            for features in [all, Features::default()] {
+                let variant = build_variant(vm, program, stock, features, true).expect("the stock layout");
+                assert_ne!(stock, variant);
+            }
             assert_eq!(m.shadow, None, "no displacement, no mask: the stock caster");
             assert!(m.plan.builtins.is_empty(), "no lighting hook: the stock composition");
         });
@@ -483,10 +554,18 @@ mod tests {
             assert_ne!(error.draw.draw_vars.draw_shader_id, unlit.draw.draw_vars.draw_shader_id);
             let obj = spec(vm, "test://albedo.splash", "surface: fn(base: vec4) -> vec4 { return vec4(base.xyz * 0.5, base.w) }");
             let surface = HookSet::from_spec(vm, obj, HookMask::ALBEDO).unwrap().get(Hook::Surface).unwrap();
-            let draw = DrawSceneCustom::from_surface(vm, surface, vec4(1.0, 2.0, 3.0, 4.0)).unwrap();
-            assert_eq!(draw.params, vec4(1.0, 2.0, 3.0, 4.0));
+            let albedo = DrawSceneCustom::from_surface(vm, surface, vec4(1.0, 2.0, 3.0, 4.0)).unwrap();
+            assert_eq!(albedo.draw.params, vec4(1.0, 2.0, 3.0, 4.0));
             let stock = DrawSceneCustom::script_new_with_default(vm).draw_vars.draw_shader_id;
-            assert_ne!(draw.draw_vars.draw_shader_id, stock);
+            assert_ne!(albedo.draw.draw_vars.draw_shader_id, stock);
+            // The unlit programs' variants drop the lighting with the
+            // features; the lit one keeps it.
+            assert!(!unlit.lit() && !error.lit() && albedo.lit());
+            for m in [&unlit, &error] {
+                let program = m.program.as_ref().unwrap().as_object();
+                let lit_on = Features { clip: true, csm: true, cluster: true, local_shadows: true, ..Default::default() };
+                assert!(build_variant(vm, program, m.stock_shader().unwrap(), lit_on, m.lit()).is_some_and(|v| Some(v) != m.stock_shader()));
+            }
             assert!(vm.take_errors().is_empty());
         });
     }

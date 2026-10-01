@@ -263,11 +263,12 @@ impl Renderer {
     /// Whether every custom material the last frame's items used, and the
     /// PBR lane, has its pipeline: until then those items draw through the
     /// stock (matte) lane, so a locked-time host waits for this before it
-    /// takes the frame.
+    /// takes the frame. A lane's shader is the variant for last frame's
+    /// features (variants.rs), the one it draws through.
     pub fn items_ready(&self, cx: &Cx) -> bool {
         // A material that is not installed (it did not build) draws through
         // the stock lane for good: nothing to wait for.
-        let custom = self.items.used_custom.iter().all(|name| self.custom_material_shader(name).is_none_or(|id| cx.draw_shader_ready(id, self.hdr_output)));
+        let custom = self.items.used_custom.iter().all(|name| self.custom_draws.get(name).and_then(|m| m.draw.draw_vars.draw_shader_id).is_none_or(|id| cx.draw_shader_ready(id, self.hdr_output)));
         // Shiny models draw matte (no emission, no maps) until the PBR
         // pipeline exists; it is made once a frame has any.
         let pbr = self.pbr_draw.as_ref().is_none_or(|d| d.skinned.draw_vars.draw_shader_id.is_some_and(|id| cx.draw_shader_ready(id, self.hdr_output)));

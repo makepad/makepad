@@ -584,7 +584,7 @@ impl Renderer {
     }
 
     pub fn custom_material_shader(&self, name: &str) -> Option<DrawShaderId> {
-        self.custom_draws.get(name).and_then(|m| m.draw.draw_shader_id)
+        self.custom_draws.get(name).and_then(|m| m.stock_shader())
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -609,9 +609,12 @@ impl Renderer {
             self.foliage_draw = cx.try_with_vm(|vm| Box::new(crate::shaders::DrawSceneFoliageLit::script_new_with_default(vm)));
         }
         let hdr = self.hdr_output;
+        // Ready: the foliage lane's shader for this frame's features (variants.rs).
+        let stock = self.foliage_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id);
+        let shader = if stock.is_some() { self.lane_shaders(cx, super::variants::ModelLane::Foliage, stock).0 } else { None };
         self.foliage_ready = self.pbr_materials_enabled
             && std::env::var_os("MAKEPAD_FOLIAGE_LANE").is_none_or(|v| v != "0")
-            && self.foliage_draw.as_ref().and_then(|d| d.pbr.skinned.draw_vars.draw_shader_id).is_some_and(|id| cx.draw_shader_ready(id, hdr));
+            && shader.is_some_and(|id| cx.draw_shader_ready(id, hdr));
     }
 
     pub(super) fn draw_custom_models(

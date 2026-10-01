@@ -610,6 +610,16 @@ impl ClusteredLights {
         self.stats
     }
 
+    /// Whether `bind` switches the clustered lights on (`cluster_on`).
+    pub fn active(&self, enabled: bool) -> bool {
+        enabled && self.texture.is_some()
+    }
+
+    /// Whether the lamps' shadow maps are on in a lane `bind` switched on.
+    pub fn shadows_active(&self, enabled: bool) -> bool {
+        self.active(enabled) && self.shadows.active()
+    }
+
     pub fn bind(&self, cx: &Cx, vars: &mut DrawVars, enabled: bool) {
         let on = enabled && self.texture.is_some();
         vars.set_uniform(cx, live_id!(lin_ctl), &self.lin_ctl);

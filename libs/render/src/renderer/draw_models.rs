@@ -269,21 +269,40 @@ impl Renderer {
         // diffuse pass; the PBR pass that follows reads the same answer.
         if !pbr_lane {
             let hdr = self.hdr_output;
-            self.pbr_ready = self.pbr_draw.as_ref().and_then(|d| d.skinned.draw_vars.draw_shader_id).is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
+            // The PBR lane's shader for this frame's features (variants.rs).
+            let stock = self.pbr_draw.as_ref().and_then(|d| d.skinned.draw_vars.draw_shader_id);
+            let shader = if stock.is_some() { self.lane_shaders(cx.cx, variants::ModelLane::Pbr, stock).0 } else { None };
+            self.pbr_ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
         }
         let custom_name = match &draw {
             ModelDraw::Custom(name, _) => Some((*name).to_string()),
             _ => None,
         };
         self.bind_model_lane(cx, &mut draw, eye, fog, sun);
-        // The lane's no-discard variant for draws that cut no pixel (opaque.rs).
-        let opaque = match &draw {
-            ModelDraw::Diffuse(_) => self.opaque_shader(cx.cx, opaque::OpaqueLane::Diffuse),
-            ModelDraw::Pbr(_) => self.opaque_shader(cx.cx, opaque::OpaqueLane::Pbr),
-            ModelDraw::Foliage(_) => self.opaque_shader(cx.cx, opaque::OpaqueLane::Foliage),
-            // A Splash material's own discard-free program, when no hook of
-            // it can cut a pixel (custom_material.rs).
-            ModelDraw::Custom(_, m) => m.opaque_variant.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output)),
+        // The lane draws through the shader variant for this frame's
+        // features, and draws that cut no pixel through the one without
+        // `clip` (variants.rs).
+        let model_lane = match &draw {
+            ModelDraw::Diffuse(_) => Some(variants::ModelLane::Diffuse),
+            ModelDraw::Pbr(_) => Some(variants::ModelLane::Pbr),
+            ModelDraw::Foliage(_) => Some(variants::ModelLane::Foliage),
+            _ => None,
+        };
+        let opaque = match (&mut draw, model_lane) {
+            (_, Some(model_lane)) => {
+                let stock = draw.base().draw_vars.draw_shader_id;
+                let (full, opaque) = self.lane_shaders(cx.cx, model_lane, stock);
+                draw.base().draw_vars.draw_shader_id = full;
+                opaque.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
+            }
+            // A Splash material's variants of its own program; the one
+            // without `clip` only when no hook of it can cut a pixel
+            // (custom_material.rs).
+            (ModelDraw::Custom(_, m), None) => {
+                let (full, opaque) = m.shaders(cx.cx, self.lane_features());
+                m.draw.draw_vars.draw_shader_id = full;
+                opaque.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output))
+            }
             _ => None,
         };
         // Swaying models (a layer with wind) draw in the foliage lane once
@@ -506,8 +525,8 @@ impl Renderer {
                 let ground = inst.model.starts_with("gen/surface/level-terrain") || inst.model.starts_with("gen/surface/level-road");
                 let screen_clip = adjust.w > 0.5
                     || !ground && occluder_focus.is_some_and(|focus| {
-                        let (center, radius) = opaque::bounding_sphere(root.min, root.max, &inst.transform);
-                        opaque::in_occluder_fade(eye, focus, center, radius)
+                        let (center, radius) = variants::bounding_sphere(root.min, root.max, &inst.transform);
+                        variants::in_occluder_fade(eye, focus, center, radius)
                     });
                 // This copy's window into the light atlas; zero disables — a
                 // dynamic prop or an unbaked model lights analytically as before.

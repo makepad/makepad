@@ -654,6 +654,9 @@ impl ShaderFnCompiler {
             .iter()
             .find(|v| v.fnobj == fnobj && v.args == resolved_args)
         {
+            // The name it was emitted under: one function reached by two
+            // names (`csm_vis_fast: csm_vis`) is emitted once, as the first.
+            let name = fun.name;
             let mut fn_name_base = String::new();
             if fun.overload != 0 {
                 write!(

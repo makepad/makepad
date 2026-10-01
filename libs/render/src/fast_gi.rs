@@ -532,6 +532,16 @@ impl FastGi {
         self.ao.pass.output().cloned()
     }
 
+    /// Whether the scene shaders' GI sampling and its debug views do
+    /// anything this frame (what `bind` writes: `gi_on` above 0, a debug
+    /// mode on): a lane draws through a shader variant without them when
+    /// not (renderer/variants.rs).
+    pub fn shader_features(&self)->(bool,bool){
+        let on=self.mode==GiMode::Fast&&self.gpu.is_some()&&!self.stats.rejected_scene&&self.cascades.iter().any(|c|c.origin.is_some());
+        let sampling=on&&self.config.strength>0.0;
+        (sampling,sampling&&(self.debug as u8)!=0)
+    }
+
     pub fn bind(&self,cx:&Cx,dv:&mut DrawVars){
         let on=self.mode==GiMode::Fast&&self.gpu.is_some()&&!self.stats.rejected_scene&&self.cascades.iter().any(|c|c.origin.is_some());
         dv.set_uniform(cx,live_id!(gi_on),&[if on{self.config.strength}else{0.0}]);
