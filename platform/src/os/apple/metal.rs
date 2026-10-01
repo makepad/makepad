@@ -4631,6 +4631,11 @@ impl CxOsDrawCall {
     pub(crate) fn take_backing(&mut self) -> Option<u64> {
         self.backing.take()
     }
+    /// GPU bytes of this item's own instance buffers (in use, pending and
+    /// spare), for `Cx::gpu_inventory`; a leased shared backing is not its own.
+    pub(crate) fn inventory_bytes(&self) -> u64 {
+        self.instance_buffer.capacity_bytes() as u64
+    }
 }
 
 #[derive(Default)]
@@ -4643,6 +4648,13 @@ pub struct CxOsUniformBuffer {
 pub struct CxOsGeometry {
     vertex_buffer: MetalBuffer,
     index_buffer: MetalBuffer,
+}
+
+impl CxOsGeometry {
+    /// GPU bytes of the vertex and index buffers, for `Cx::gpu_inventory`.
+    pub(crate) fn inventory_bytes(&self) -> u64 {
+        (self.vertex_buffer.capacity_bytes() + self.index_buffer.capacity_bytes()) as u64
+    }
 }
 
 #[derive(Default)]

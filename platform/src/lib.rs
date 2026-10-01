@@ -41,6 +41,7 @@ pub mod storage;
 pub mod video;
 pub mod gpu_texture;
 pub mod gpu_admission;
+pub mod gpu_inventory;
 pub mod resource_resolver;
 
 #[cfg(not(target_arch = "wasm32"))]
