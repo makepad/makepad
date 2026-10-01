@@ -1348,7 +1348,8 @@ public class MakepadActivity
         String buildNumber = Build.DISPLAY;
         int sdkVersion = Build.VERSION.SDK_INT;
 
-        // Makepad ignores the kernel version, but the slot stays so the native signature doesn't change.
+        // Makepad ignores the kernel version, but the slot stays so the native
+        // signature doesn't change.
         MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "");
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
