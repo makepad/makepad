@@ -210,7 +210,40 @@ fn animation_atlas_layout_with_limit(
     Ok((total_width, total_height))
 }
 
+/// `src` (`w` x `h`, four bytes a pixel) brought down to `tw` x `th` by
+/// averaging the source pixels under each target pixel, every byte on its
+/// own (so any channel order). `tw` and `th` must not exceed `w` and `h`.
+pub fn area_downscale(src: &[u32], w: usize, h: usize, tw: usize, th: usize) -> Vec<u32> {
+    let mut data = Vec::with_capacity(tw * th);
+    for y in 0..th {
+        let (y0, y1) = (y * h / th, ((y + 1) * h / th).max(y * h / th + 1));
+        for x in 0..tw {
+            let (x0, x1) = (x * w / tw, ((x + 1) * w / tw).max(x * w / tw + 1));
+            let mut sum = [0u32; 4];
+            for sy in y0..y1 {
+                for sx in x0..x1 {
+                    let p = src[sy * w + sx];
+                    for (c, sum) in sum.iter_mut().enumerate() {
+                        *sum += (p >> (c * 8)) & 0xff;
+                    }
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            data.push((0..4).fold(0u32, |p, c| p | ((sum[c] / n) << (c * 8))));
+        }
+    }
+    data
+}
+
 impl ImageBuffer {
+    /// This image brought down to `width` x `height` (never up): see
+    /// [`area_downscale`].
+    pub fn area_downscaled(&self, width: usize, height: usize) -> ImageBuffer {
+        let (width, height) = (width.clamp(1, self.width.max(1)), height.clamp(1, self.height.max(1)));
+        let data = area_downscale(&self.data, self.width, self.height, width, height);
+        ImageBuffer { width, height, data, animation: None, max_level: None }
+    }
+
     pub fn new(in_data: &[u8], width: usize, height: usize) -> Result<ImageBuffer, ImageError> {
         let pixels = checked_pixel_count(width, height)?;
         if in_data.len() % pixels != 0 {
@@ -1350,6 +1383,19 @@ mod tests {
     use super::*;
     use makepad_gif::{Encoder, Frame};
     use std::borrow::Cow;
+
+    #[test]
+    fn area_downscaling_averages_each_channel_and_never_scales_up() {
+        // 4x2: the left half 0x80 in every byte, the right half 0.
+        let data = (0..8).map(|i| if i % 4 < 2 { 0x8080_8080 } else { 0 }).collect();
+        let image = ImageBuffer { width: 4, height: 2, data, ..Default::default() };
+        let small = image.area_downscaled(2, 1);
+        assert_eq!((small.width, small.height, small.data.clone()), (2, 1, vec![0x8080_8080, 0]));
+        // Four columns into three: unequal columns share the source pixels under them.
+        assert_eq!(image.area_downscaled(3, 2).width, 3);
+        let same = image.area_downscaled(100, 100);
+        assert_eq!((same.width, same.height, same.data), (4, 2, image.data));
+    }
 
     #[test]
     fn web_decoded_image_policy_boundaries() {
