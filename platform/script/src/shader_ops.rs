@@ -12,6 +12,33 @@ use crate::vm::*;
 use crate::*;
 use std::fmt::Write;
 
+/// GLSL ES and WGSL have no implicit int -> uint conversion in operators: an
+/// integer literal next to a uint (or uint vector) operand is written `5u`.
+pub(crate) fn unsigned_literal(
+    backend: &ShaderBackend,
+    lit_ty: &ShaderType,
+    lit: &str,
+    other: &ShaderType,
+    builtins: &crate::mod_pod::ScriptPodBuiltins,
+) -> String {
+    if matches!(backend, ShaderBackend::Glsl | ShaderBackend::Wgsl)
+        && matches!(lit_ty, ShaderType::AbstractInt)
+        && !lit.is_empty()
+        && lit.chars().all(|c| c.is_ascii_digit())
+    {
+        if let ShaderType::Pod(pt) = other {
+            if *pt == builtins.pod_u32
+                || *pt == builtins.pod_vec2u
+                || *pt == builtins.pod_vec3u
+                || *pt == builtins.pod_vec4u
+            {
+                return format!("{}u", lit);
+            }
+        }
+    }
+    lit.to_string()
+}
+
 impl ShaderFnCompiler {
     pub(crate) fn handle_not(
         &mut self,
@@ -112,6 +139,9 @@ impl ShaderFnCompiler {
             _ => false,
         };
 
+        let pods = &vm.bx.code.builtins.pod;
+        let s1 = unsigned_literal(&output.backend, &t1, &s1, &t2, pods);
+        let s2 = unsigned_literal(&output.backend, &t2, &s2, &t1, pods);
         let lhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
             && is_int_like(&t1)
             && is_float_like(&t2)
@@ -260,6 +290,9 @@ impl ShaderFnCompiler {
             _ => false,
         };
 
+        let pods = &vm.bx.code.builtins.pod;
+        let s1 = unsigned_literal(&output.backend, &t1, &s1, &t2, pods);
+        let s2 = unsigned_literal(&output.backend, &t2, &s2, &t1, pods);
         let lhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
             && !is_int
             && matches!(t1, ShaderType::AbstractInt)
@@ -342,6 +375,7 @@ impl ShaderFnCompiler {
                     )
                 };
 
+                let s2 = unsigned_literal(&output.backend, &t2, &s2, &t1, &vm.bx.code.builtins.pod);
                 let mut s = self.stack.new_string();
                 let var_name = if matches!(var, ShaderScopeItem::Param { .. }) {
                     output.backend.map_param_name(id, shadow)
@@ -404,6 +438,7 @@ impl ShaderFnCompiler {
                         .pod_field_type(pod_ty, field_id, &vm.bx.code.builtins.pod)
                 {
                     let t1 = ShaderType::Pod(ret_ty);
+                    let s2 = unsigned_literal(&output.backend, &t2, &s2, &t1, &vm.bx.code.builtins.pod);
                     let op_res_ty = if is_int {
                         type_table_int_arithmetic(
                             &t1,
@@ -462,6 +497,7 @@ impl ShaderFnCompiler {
                         .pod_field_type(pod_ty, field_id, &vm.bx.code.builtins.pod)
                 {
                     let t1 = ShaderType::Pod(ret_ty);
+                    let s2 = unsigned_literal(&output.backend, &t2, &s2, &t1, &vm.bx.code.builtins.pod);
                     let op_res_ty = if is_int {
                         type_table_int_arithmetic(
                             &t1,

@@ -162,3 +162,33 @@ fn literal_nesting_over_the_budget_is_refused() {
     let src = ok("metal", "", "var s = 0f\nfor i in 0..64 { for j in 0..64 { s += 1f } }\nself.pixel = vec4(s)");
     assert!(!src.contains("{break;}"), "{src}");
 }
+
+#[test]
+fn uint_operands_take_unsigned_literals_in_glsl_and_wgsl() {
+    let extra = "bump: fn(a: u32, b: u32) -> u32 { return a + b }";
+    let body = "var u = u32(self.u_n)\n\
+                var c = 0.0\n\
+                if u == 5 { c = 1.0 }\n\
+                if 7 != u { c = 2.0 }\n\
+                if u > 3 { c = 3.0 }\n\
+                var w = u + 1\n\
+                w = 2 * w\n\
+                w += 3\n\
+                w = w & 255\n\
+                w = w % 4\n\
+                w = 9\n\
+                w = self.bump(w, 6)\n\
+                self.pixel = vec4(c, float(w), 0.0, 1.0)";
+    for backend in ["glsl", "wgsl"] {
+        let src = ok(backend, extra, body);
+        for needle in ["== 5u", "7u !=", "> 3u", "+ 1u", "2u *", "+= 3u", "& 255u", "% 4u", "= 9u", ", 6u)"] {
+            if backend == "wgsl" && needle == ", 6u)" {
+                continue; // WGSL converts abstract-int call arguments itself
+            }
+            assert!(src.contains(needle), "{backend}: missing {needle:?} in\n{src}");
+        }
+    }
+    // an int next to an int stays unsuffixed
+    let src = ok("glsl", "", "var i = int(self.u_n)\nif i == 5 { i = 6 }\nself.pixel = vec4(float(i))");
+    assert!(src.contains("== 5)") && !src.contains("5u"), "{src}");
+}

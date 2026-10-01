@@ -224,13 +224,20 @@ impl ShaderFnCompiler {
     }
 
     pub(crate) fn handle_assign(&mut self, vm: &mut ScriptVm, output: &mut ShaderOutput) {
-        let (_value_ty, value) = self.stack.pop(self.trap.pass());
+        let (value_ty, value) = self.stack.pop(self.trap.pass());
         let (id_ty, _id) = self.stack.pop(self.trap.pass());
         if let ShaderType::Id(id) = id_ty {
             if let Some((var, shadow)) = self.shader_scope.find_var(id) {
                 if !matches!(var, ShaderScopeItem::Var { .. }) {
                     script_err_immutable!(self.trap, "cannot assign to let binding {:?}", id);
                 }
+                let value = crate::shader_ops::unsigned_literal(
+                    &output.backend,
+                    &value_ty,
+                    &value,
+                    &ShaderType::Pod(var.ty()),
+                    &vm.bx.code.builtins.pod,
+                );
                 let mut s = self.stack.new_string();
                 let var_name = if matches!(var, ShaderScopeItem::Param { .. }) {
                     // Params are immutable and should not reach assignment, but keep this path stable.

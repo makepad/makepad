@@ -983,6 +983,14 @@ impl ShaderFnCompiler {
                 continue;
             }
             let resolved_ty = resolved_arg_types[i];
+            if resolved_ty == vm.bx.code.builtins.pod.pod_u32 {
+                let arg_index = explicit_start + i;
+                let value = parts[arg_index].trim();
+                if !value.is_empty() && value.chars().all(|c| c.is_ascii_digit()) {
+                    parts[arg_index] = format!("{}u", value);
+                }
+                continue;
+            }
             if !vm.bx.heap.pod_types[resolved_ty.index as usize]
                 .ty
                 .is_float_type()
