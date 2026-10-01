@@ -3774,6 +3774,13 @@ export class WasmWebBrowser extends WasmBridge {
         canvas.addEventListener('touchend', e => this.handlers.on_touch_end_cancel_leave(e), { passive: false });
         canvas.addEventListener('touchcancel', e => this.handlers.on_touch_end_cancel_leave(e), { passive: false });
         canvas.addEventListener('touchleave', e => this.handlers.on_touch_end_cancel_leave(e), { passive: false });
+        // Audio may start on any gesture the browser grants activation to, wherever on the
+        // page it lands (the credits button, an overlay): WebKit grants it on pointerup,
+        // touchend, mouseup, click and keydown, never on pointerdown/touchstart. Passive and
+        // capturing, so no handler's preventDefault can hide the gesture from the audio.
+        for (const type of ['pointerup', 'touchend', 'mouseup', 'click', 'keydown']) {
+            document.addEventListener(type, () => this.resume_audio_from_gesture(), { capture: true, passive: true });
+        }
 
         var last_wheel_time;
         var last_was_wheel;
