@@ -639,7 +639,10 @@ impl ShaderFnCompiler {
             });
             let pods = &vm.bx.code.builtins.pod;
             let (raw_ty, s) = match known_ret {
-                Some(r) if matches!(raw_ty, ShaderType::AbstractInt) && r == pods.pod_u32 => {
+                Some(r)
+                    if matches!(raw_ty, ShaderType::AbstractInt)
+                        && (r == pods.pod_u32 || r == pods.pod_f32 || r == pods.pod_f16) =>
+                {
                     let s2 = crate::shader_ops::unsigned_literal(
                         &output.backend,
                         &raw_ty,

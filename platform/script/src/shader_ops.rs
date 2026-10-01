@@ -12,8 +12,10 @@ use crate::vm::*;
 use crate::*;
 use std::fmt::Write;
 
-/// GLSL ES and WGSL have no implicit int -> uint conversion in operators: an
-/// integer literal next to a uint (or uint vector) operand is written `5u`.
+/// GLSL ES has no implicit int -> uint or int -> float conversion (WGSL
+/// concretizes literals but not typed ints): an integer constant next to, or
+/// assigned to, a uint or float operand is written `5u` / `5.0` (or wrapped in
+/// a conversion when it is an expression).
 pub(crate) fn unsigned_literal(
     backend: &ShaderBackend,
     lit_ty: &ShaderType,
@@ -21,22 +23,74 @@ pub(crate) fn unsigned_literal(
     other: &ShaderType,
     builtins: &crate::mod_pod::ScriptPodBuiltins,
 ) -> String {
-    if matches!(backend, ShaderBackend::Glsl | ShaderBackend::Wgsl)
-        && matches!(lit_ty, ShaderType::AbstractInt)
-        && !lit.is_empty()
-        && lit.chars().all(|c| c.is_ascii_digit())
+    if !matches!(backend, ShaderBackend::Glsl | ShaderBackend::Wgsl)
+        || !matches!(lit_ty, ShaderType::AbstractInt)
+        || lit.is_empty()
     {
-        if let ShaderType::Pod(pt) = other {
-            if *pt == builtins.pod_u32
-                || *pt == builtins.pod_vec2u
-                || *pt == builtins.pod_vec3u
-                || *pt == builtins.pod_vec4u
-            {
-                return format!("{}u", lit);
+        return lit.to_string();
+    }
+    let is_uint = |x: &ScriptPodType| {
+        *x == builtins.pod_u32
+            || *x == builtins.pod_vec2u
+            || *x == builtins.pod_vec3u
+            || *x == builtins.pod_vec4u
+    };
+    let is_float = |x: &ScriptPodType| {
+        *x == builtins.pod_f32
+            || *x == builtins.pod_f16
+            || *x == builtins.pod_vec2f
+            || *x == builtins.pod_vec3f
+            || *x == builtins.pod_vec4f
+            || *x == builtins.pod_vec2h
+            || *x == builtins.pod_vec3h
+            || *x == builtins.pod_vec4h
+    };
+    let digits = lit.strip_prefix('-').unwrap_or(lit);
+    let simple = !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit());
+    let wgsl = matches!(backend, ShaderBackend::Wgsl);
+    match other {
+        ShaderType::Pod(pt) if is_uint(pt) && !lit.starts_with('-') => {
+            if simple {
+                format!("{}u", lit)
+            } else {
+                format!("{}({})", if wgsl { "u32" } else { "uint" }, lit)
             }
         }
+        ShaderType::Pod(pt) if is_float(pt) => {
+            if simple {
+                format!("{}.0", lit)
+            } else {
+                format!("{}({})", if wgsl { "f32" } else { "float" }, lit)
+            }
+        }
+        ShaderType::AbstractFloat => {
+            if simple {
+                format!("{}.0", lit)
+            } else {
+                format!("{}({})", if wgsl { "f32" } else { "float" }, lit)
+            }
+        }
+        _ => lit.to_string(),
     }
-    lit.to_string()
+}
+
+/// The type an `unsigned_literal` result has, given the operand it was
+/// converted against.
+pub(crate) fn int_literal_type(
+    lit_ty: &ShaderType,
+    before: &str,
+    after: &str,
+    builtins: &crate::mod_pod::ScriptPodBuiltins,
+) -> ShaderType {
+    if matches!(lit_ty, ShaderType::AbstractInt) && before != after {
+        if after.ends_with('u') || after.starts_with("uint(") || after.starts_with("u32(") {
+            ShaderType::Pod(builtins.pod_u32)
+        } else {
+            ShaderType::AbstractFloat
+        }
+    } else {
+        lit_ty.clone()
+    }
 }
 
 impl ShaderFnCompiler {
@@ -140,8 +194,13 @@ impl ShaderFnCompiler {
         };
 
         let pods = &vm.bx.code.builtins.pod;
-        let s1 = unsigned_literal(&output.backend, &t1, &s1, &t2, pods);
-        let s2 = unsigned_literal(&output.backend, &t2, &s2, &t1, pods);
+        let n1 = unsigned_literal(&output.backend, &t1, &s1, &t2, pods);
+        let n2 = unsigned_literal(&output.backend, &t2, &s2, &t1, pods);
+        let (t1, t2) = (
+            int_literal_type(&t1, &s1, &n1, pods),
+            int_literal_type(&t2, &s2, &n2, pods),
+        );
+        let (s1, s2) = (n1, n2);
         let lhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
             && is_int_like(&t1)
             && is_float_like(&t2)
@@ -291,8 +350,13 @@ impl ShaderFnCompiler {
         };
 
         let pods = &vm.bx.code.builtins.pod;
-        let s1 = unsigned_literal(&output.backend, &t1, &s1, &t2, pods);
-        let s2 = unsigned_literal(&output.backend, &t2, &s2, &t1, pods);
+        let n1 = unsigned_literal(&output.backend, &t1, &s1, &t2, pods);
+        let n2 = unsigned_literal(&output.backend, &t2, &s2, &t1, pods);
+        let (t1, t2) = (
+            int_literal_type(&t1, &s1, &n1, pods),
+            int_literal_type(&t2, &s2, &n2, pods),
+        );
+        let (s1, s2) = (n1, n2);
         let lhs = if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust)
             && !is_int
             && matches!(t1, ShaderType::AbstractInt)

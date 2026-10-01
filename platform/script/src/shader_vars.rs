@@ -289,7 +289,9 @@ impl ShaderFnCompiler {
                         .pod_field_type(pod_ty, field_id, &vm.bx.code.builtins.pod)
                 {
                     let val_ty = if matches!(value_ty, ShaderType::AbstractInt)
-                        && ret_ty == vm.bx.code.builtins.pod.pod_u32
+                        && (ret_ty == vm.bx.code.builtins.pod.pod_u32
+                            || ret_ty == vm.bx.code.builtins.pod.pod_f32
+                            || ret_ty == vm.bx.code.builtins.pod.pod_f16)
                     {
                         ret_ty
                     } else {
@@ -595,7 +597,9 @@ impl ShaderFnCompiler {
                 }
 
                 let val_ty = if matches!(value_ty, ShaderType::AbstractInt)
-                    && ret_ty == builtins.pod_u32
+                    && (ret_ty == builtins.pod_u32
+                        || ret_ty == builtins.pod_f32
+                        || ret_ty == builtins.pod_f16)
                 {
                     ret_ty
                 } else {

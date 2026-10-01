@@ -210,3 +210,30 @@ fn uint_literals_in_returns_and_index_assignments() {
         }
     }
 }
+
+#[test]
+fn int_literals_become_floats_where_a_float_is_expected() {
+    let extra = "half: fn(a: f32) -> f32 { return a * 0.5 }\nzero: fn(a: f32) -> f32 { if a > 1.0 { return a }\nreturn 0 }";
+    // (statement, text every emitter must contain)
+    let cases = [
+        ("f = 2", "l_f = 2.0;"),
+        ("f += 3", "l_f += 3.0;"),
+        ("f = f + 1", "(l_f + 1.0)"),
+        ("f = 4 - f", "(4.0 - l_f)"),
+        ("if f < 5 { f = 1 }", "(l_f < 5.0)"),
+        ("f = self.half(8)", "io_half(8.0)"),
+        ("f = self.zero(f)", "return 0.0;"),
+        ("var v = vec2(1f)\nv.x = 3\nf = v.x", "l_v.x = 3.0;"),
+        ("var v = vec2(1f)\nv[1] = 4\nf = v.y", "l_v[1] = 4.0;"),
+        ("var v = vec2(1f)\nv += 1\nf = v.x", "l_v += 1.0;"),
+        ("var a = array(1f, 2f)\na[0] = 5\nf = a[0]", "l_a[0] = 5.0;"),
+        ("f = f * 2", "(l_f * 2.0)"),
+    ];
+    for backend in ["glsl", "wgsl"] {
+        for (st, needle) in cases {
+            let body = format!("var f = self.u_n\n{st}\nself.pixel = vec4(f)");
+            let src = ok(backend, extra, &body);
+            assert!(src.contains(needle), "{backend}: `{}` should emit {needle:?}:\n{src}", st.replace('\n', "; "));
+        }
+    }
+}

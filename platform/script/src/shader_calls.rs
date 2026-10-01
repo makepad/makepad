@@ -920,7 +920,7 @@ impl ShaderFnCompiler {
         let (ret, fn_name) =
             Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
         self.charge_loop_cost(output.last_call_cost);
-        if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust) {
+        if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust | ShaderBackend::Wgsl) {
             out = Self::glsl_rewrite_call_args(vm, &out, &arg_types, &resolved_arg_types);
         }
         out.insert_str(0, &fn_name);
