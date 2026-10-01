@@ -297,6 +297,64 @@ impl ScriptCode {
         Some((loc, text))
     }
 
+    /// Where `field` is written (`field: …`, `field := …`, `field +: …`) in
+    /// the object literal constructed at `made_at` (an object's
+    /// `ScriptHeap::made_at`), at that literal's own depth: the first such
+    /// key, read from the body's tokens. `None` when the literal does not
+    /// write the field (it inherits it, or it was set from Rust).
+    pub fn field_loc(&self, made_at: ScriptIp, field: LiveId) -> Option<ScriptLoc> {
+        if made_at.is_unknown() {
+            return None;
+        }
+        let bodies = self.bodies.borrow();
+        let body = bodies.get(made_at.body as usize)?;
+        let source_map = &body.parser.source_map;
+        let ip_index = (made_at.index as usize).min(source_map.len().saturating_sub(1));
+        let token_index = (0..=ip_index)
+            .rev()
+            .find_map(|i| source_map.get(i).and_then(|slot| *slot))
+            .or_else(|| ((ip_index + 1)..source_map.len()).find_map(|i| source_map.get(i).and_then(|slot| *slot)))? as usize;
+        let tokens = &body.tokenizer.tokens;
+        let mut k = tokens[token_index..].iter().position(|t| matches!(t.token, ScriptToken::OpenCurly))? + token_index;
+        let mut depth = 0usize;
+        while k < tokens.len() {
+            match &tokens[k].token {
+                ScriptToken::OpenCurly | ScriptToken::OpenRound | ScriptToken::OpenSquare => depth += 1,
+                ScriptToken::CloseCurly | ScriptToken::CloseRound | ScriptToken::CloseSquare => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        return None;
+                    }
+                }
+                ScriptToken::Identifier(id) if depth == 1 && *id == field => {
+                    let op = match tokens.get(k + 1).map(|t| &t.token) {
+                        Some(ScriptToken::Operator(op)) | Some(ScriptToken::Separator(op)) => *op,
+                        _ => LiveId(0),
+                    };
+                    if op == id!(:) || op == id!(:=) || op == id!(+:) {
+                        let (row, col) = body.tokenizer.token_index_to_row_col(k as u32)?;
+                        // A token's position may sit a character into it: back
+                        // to the identifier's first character.
+                        let chars: Vec<char> = body.effective_code.chars().collect();
+                        let pos = tokens[k].pos().min(chars.len());
+                        let mut start = pos;
+                        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+                            start -= 1;
+                        }
+                        let col = col.saturating_sub((pos - start) as u32);
+                        return Some(match &body.source {
+                            ScriptSource::Mod(script_mod) => ScriptLoc { file: script_mod.file.clone(), line: row + script_mod.line as u32, col },
+                            _ => ScriptLoc { file: "generated".into(), line: row, col },
+                        });
+                    }
+                }
+                _ => {}
+            }
+            k += 1;
+        }
+        None
+    }
+
     /// Visit the tokens of the fn whose body starts at `ip`, from its `fn`
     /// keyword through the body's closing `}`: each token with the `/** */`
     /// annotation in front of it and, for a `#(…)` token, the value it
