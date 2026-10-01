@@ -8,6 +8,7 @@ use crate::{
 };
 
 use crate::makepad_draw::DrawSvg;
+use crate::pointer_field::{FieldArbiter, PointerField};
 use crate::slider::CapMotion;
 
 script_mod! {
@@ -1102,6 +1103,17 @@ pub struct CheckBox {
     pub cap_viscosity: f64,
     #[rust]
     cap_motion: CapMotion,
+
+    /// How far from the knob, in points, the pointer's field reaches, for
+    /// a material whose knob answers the pointer's approach: the face gets
+    /// `cap_field`, `cap_pointer_along`, `cap_pointer_across` and
+    /// `cap_time` as uniforms while it is above zero. Only the nearest two
+    /// controls on a window carry a field at once. Zero, the default,
+    /// keeps it off.
+    #[live]
+    pub cap_field_reach: f64,
+    #[rust]
+    field: PointerField,
 }
 
 /// A drag in progress on the toggle's knob.
@@ -1350,6 +1362,65 @@ impl CheckBox {
         self.cap_motion.kick(cx, jump, value);
     }
 
+    /// The knob's centre on the window and its radius, from the face's
+    /// numbers: the pill stands 3 points in from the box's start (or its
+    /// end, with the label first), its knob half the pill's height across,
+    /// travelling the pill's length less its height; the knob is read where
+    /// the motion or a drag has it.
+    fn knob_centre(&mut self, cx: &mut Cx) -> Option<(f64, f64, f64)> {
+        let rect = self.draw_bg.area().rect(cx);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return None;
+        }
+        let mut aspect = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(pill_aspect), &mut aspect);
+        let mut size = [0.0f32];
+        self.draw_bg.get_uniform(cx, live_id!(size), &mut size);
+        let th = size[0] as f64;
+        let w = th * aspect[0] as f64;
+        if th <= 0.0 {
+            return None;
+        }
+        let x0 = if self.label_before { rect.pos.x + rect.size.x - w - 3.0 } else { rect.pos.x + 3.0 };
+        let (value, dragging) = self.knob_motion_value(cx);
+        let t = if self.cap_viscosity > 0.0 && self.cap_motion.moving() {
+            self.cap_motion.read(value, th * 0.5, dragging).5
+        } else {
+            value
+        };
+        Some((x0 + th * 0.5 + t * (w - th), rect.pos.y + rect.size.y * 0.5, th * 0.5))
+    }
+
+    /// The pointer's field over the knob: its frame steps, the pointer read
+    /// against the knob's centre (points from it; the distance to the
+    /// knob's edge goes to the arbiter, so knobs of every size compete
+    /// alike), and the leave. The face gets the values as uniforms.
+    fn knob_field_event(&mut self, cx: &mut Cx, event: &Event) {
+        let press = if self.drag.is_some() { 1.0 } else { 0.0 };
+        if self.field.tick(cx, event, press) {
+            let (f, a, c, t) = self.field.read(press);
+            self.draw_bg.set_uniform(cx, live_id!(cap_field), &[f]);
+            self.draw_bg.set_uniform(cx, live_id!(cap_pointer_along), &[a]);
+            self.draw_bg.set_uniform(cx, live_id!(cap_pointer_across), &[c]);
+            self.draw_bg.set_uniform(cx, live_id!(cap_time), &[t]);
+            self.draw_bg.redraw(cx);
+        }
+        match event {
+            Event::MouseMove(e) => {
+                let Some((kx, ky, kr)) = self.knob_centre(cx) else {
+                    return;
+                };
+                let rel = (e.abs.x - kx, e.abs.y - ky);
+                let dist = ((rel.0 * rel.0 + rel.1 * rel.1).sqrt() - kr).max(0.0);
+                let granted = FieldArbiter::report(e.abs, self.widget_uid().0, dist);
+                let near = dist < self.cap_field_reach && granted;
+                self.field.pointer(cx, rel, near);
+            }
+            Event::MouseLeave(_) => self.field.leave(cx),
+            _ => (),
+        }
+    }
+
     fn knob_travel(&mut self, cx: &mut Cx) -> f64 {
         let mut aspect = [0.0f32];
         self.draw_bg.get_uniform(cx, live_id!(pill_aspect), &mut aspect);
@@ -1546,6 +1617,9 @@ impl Widget for CheckBox {
             if self.cap_motion.tick(cx, event, value, dragging, self.cap_viscosity) {
                 self.draw_bg.redraw(cx);
             }
+        }
+        if self.cap_field_reach > 0.0 {
+            self.knob_field_event(cx, event);
         }
 
         match event.hits(cx, self.draw_bg.area()) {
