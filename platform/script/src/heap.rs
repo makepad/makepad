@@ -765,14 +765,23 @@ impl ScriptHeap {
     }
 
     pub fn type_default(&self, ty_index: ScriptTypeIndex) -> Option<ScriptObject> {
-        self.type_defaults.get(&ty_index).copied()
+        let obj = self.type_defaults.get(&ty_index).copied();
+        self.census_default_used(obj);
+        obj
     }
 
     pub fn type_default_for_id(&self, type_id: ScriptTypeId) -> Option<ScriptObject> {
-        if let Some(ty_index) = self.type_index.get(&type_id) {
-            self.type_defaults.get(ty_index).copied()
-        } else {
-            None
+        let obj = self.type_index.get(&type_id).and_then(|ty_index| self.type_defaults.get(ty_index).copied());
+        self.census_default_used(obj);
+        obj
+    }
+
+    /// A Rust type made from its registered default while a census records:
+    /// a use of the module that registered it (`census`).
+    #[inline]
+    fn census_default_used(&self, obj: Option<ScriptObject>) {
+        if let (Some(census), Some(obj)) = (&self.census, obj) {
+            census.default_used(obj);
         }
     }
 

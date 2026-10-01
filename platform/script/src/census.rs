@@ -40,11 +40,29 @@ pub struct Census {
     defines: HashMap<usize, LiveId>,
     /// The script bodies each registration evaluated (by body index).
     bodies: HashMap<usize, usize>,
+    /// The type defaults each registration set (`set_type_default() do
+    /// #(DrawX::script_shader(vm)){..}`): a Rust type's registration,
+    /// often with nothing set in a module scope.
+    defaults: HashMap<ScriptObject, usize>,
+    /// The type defaults Rust made an instance from while recording
+    /// (`script_new_with_default`, a typed field filled from its type's
+    /// default): uses no heap walk at the end can see, since the instance
+    /// may be gone by then.
+    defaults_used: std::cell::RefCell<HashSet<ScriptObject>>,
     stack: Vec<Bracket>,
+}
+
+impl Census {
+    pub(crate) fn default_used(&self, obj: ScriptObject) {
+        if let Ok(mut used) = self.defaults_used.try_borrow_mut() {
+            used.insert(obj);
+        }
+    }
 }
 
 struct Bracket {
     module: usize,
+    defaults: HashSet<ScriptObject>,
     scopes: HashSet<LiveId>,
     bodies: usize,
     values: HashMap<(ScriptObject, LiveId), ScriptValue>,
@@ -149,6 +167,7 @@ impl ScriptVm<'_> {
         let scopes = module_scopes(&self.bx.heap);
         let bodies = self.bx.code.bodies.borrow().len();
         let objects = alloced(&self.bx.heap).into_iter().collect();
+        let defaults = self.bx.heap.type_defaults.values().copied().collect();
         let census = self.bx.heap.census.as_mut().unwrap();
         let module = match census.modules.iter().position(|m| *m == module_path) {
             Some(i) => i,
@@ -157,7 +176,7 @@ impl ScriptVm<'_> {
                 census.modules.len() - 1
             }
         };
-        census.stack.push(Bracket { module, scopes, bodies, values, objects });
+        census.stack.push(Bracket { module, defaults, scopes, bodies, values, objects });
     }
 
     /// After it: what it set and made is its own (an inner module's keeps
@@ -169,7 +188,11 @@ impl ScriptVm<'_> {
         let held: Vec<ScriptObject> = self.bx.heap.root_objects.borrow().keys().copied().collect();
         let scopes = module_scopes(&self.bx.heap);
         let bodies = self.bx.code.bodies.borrow().len();
+        let defaults: Vec<ScriptObject> = self.bx.heap.type_defaults.values().copied().filter(|d| !bracket.defaults.contains(d)).collect();
         let census = self.bx.heap.census.as_mut().unwrap();
+        for default in defaults {
+            census.defaults.entry(default).or_insert(bracket.module);
+        }
         for body in bracket.bodies..bodies {
             census.bodies.entry(body).or_insert(bracket.module);
         }
@@ -251,6 +274,17 @@ pub fn census_used_from(vm: &mut ScriptVm, app_crates: &[&str]) -> Option<Module
         let Some(m) = tops.get(obj).map(|(m, _)| *m).or_else(|| census.made.get(obj).copied()) else { continue };
         if valid(heap, *obj) && !used.contains_key(&m) {
             used.insert(m, "held by Rust".into());
+            for o in owned.get(&m).into_iter().flatten() {
+                label.insert(*o, m);
+                seeds.push(*o);
+            }
+        }
+    }
+    // A Rust type made from a default a module registered uses the module.
+    for obj in census.defaults_used.borrow().iter() {
+        let Some(&m) = census.defaults.get(obj) else { continue };
+        if !used.contains_key(&m) {
+            used.insert(m, "a Rust type made from its default".into());
             for o in owned.get(&m).into_iter().flatten() {
                 label.insert(*o, m);
                 seeds.push(*o);
