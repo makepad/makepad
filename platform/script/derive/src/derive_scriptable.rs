@@ -2,6 +2,12 @@ use proc_macro::TokenStream;
 
 use makepad_micro_proc_macro::{error_result, Attribute, StructField, TokenBuilder, TokenParser};
 
+/// A field's name in script: a raw identifier (`r#in`, a keyword as a
+/// field name) is the keyword itself.
+fn script_name(name: &str) -> &str {
+    name.strip_prefix("r#").unwrap_or(name)
+}
+
 pub fn derive_script_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
@@ -159,7 +165,7 @@ fn derive_script_impl_inner(
                 // falls back to the type's registered default on a reload,
                 // and applies what it found to the field.
                 tb.add("vm.script_derive_apply_field(apply, scope, value, id!(")
-                    .ident(&field.name)
+                    .ident(script_name(&field.name))
                     .add("), &mut self.")
                     .ident(&field.name)
                     .add(");");
@@ -267,7 +273,7 @@ fn derive_script_impl_inner(
                 .find(|a| a.name == "live" || a.name == "apply_default")
             {
                 tb.add("vm.script_derive_field_to_value(obj,")
-                    .string(&field.name)
+                    .string(script_name(&field.name))
                     .add(", &self.")
                     .ident(&field.name)
                     .add(");");
@@ -410,7 +416,7 @@ fn derive_script_impl_inner(
                 tb.add("vm.script_derive_proto_field::<")
                     .stream(Some(field.ty.clone()))
                     .add(">(props,")
-                    .string(&field.name)
+                    .string(script_name(&field.name))
                     .add(");");
             }
         }

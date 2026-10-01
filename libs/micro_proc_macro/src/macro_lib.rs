@@ -271,8 +271,14 @@ impl TokenBuilder {
         self
     }
 
+    /// An identifier; `r#name` is the raw identifier `name` (a keyword used
+    /// as a name, as a struct field `r#in`).
     pub fn ident(&mut self, id: &str) -> &mut Self {
-        self.extend(TokenTree::from(Ident::new(id, Span::call_site())))
+        let ident = match id.strip_prefix("r#") {
+            Some(raw) => Ident::new_raw(raw, Span::call_site()),
+            None => Ident::new(id, Span::call_site()),
+        };
+        self.extend(TokenTree::from(ident))
     }
 
     pub fn ident_with_span(&mut self, id: &str, span: Span) -> &mut Self {

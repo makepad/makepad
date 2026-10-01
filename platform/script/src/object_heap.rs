@@ -531,10 +531,17 @@ impl ScriptHeap {
                 if found_in_vec {
                     return self.set_value_vec(top_ptr, key, value, trap);
                 }
+                let type_name = check
+                    .object
+                    .as_ref()
+                    .and_then(|o| o.name)
+                    .and_then(|name| name.as_string(|s| s.map(|s| format!(" {s}"))))
+                    .unwrap_or_default();
                 return script_err_not_found!(
                     trap,
-                    "property {:?} not defined on type{}",
+                    "property {:?} not defined on type{}{}",
                     key_id,
+                    type_name,
                     suggest_property(self, top_ptr, key)
                 );
             }
