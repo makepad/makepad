@@ -14,6 +14,22 @@ const MAKEPAD_WEBGL_FALLBACK_VERTEX_ATTRIBS = 16;
 const MAKEPAD_WEBGL_MAX_SUBMISSION_REPORTS = 64;
 // @section video-playback
 const MAKEPAD_WEBGL_VIDEO_UPLOAD_FORMAT = "video-rgba8";
+// With checks on (see gl_checks), an allocation's GL error is read at the
+// latest this long after it: getError waits for the GPU process, so it runs
+// when no earlier frame is still on the GPU, else at most this often.
+const MAKEPAD_WEBGL_ALLOCATION_CHECK_MS = 2000;
+
+// GL error and framebuffer-completeness queries (gl.getError,
+// gl.checkFramebufferStatus) run only when the page sets
+// `window.makepad_gl_checks = true` before the runtime starts: development
+// pages and the export's instrumented safety run do; a shipped page never
+// queries. Each query waits for the GPU process to finish everything
+// queued, behind a busy GPU a stall of whole GPU frames (25-100 ms) on
+// every allocating frame. Without them a failed allocation surfaces as a
+// lost context (webglcontextlost) or draws nothing.
+function makepad_gl_checks_on() {
+  return typeof window !== "undefined" && window.makepad_gl_checks === true;
+}
 // @end video-playback
 
 function makepad_webgl_limit(value) {
@@ -136,6 +152,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.xr = undefined;
     this._missing_shader_ids = new Set();
     this._gl_error_reports = new Set();
+    this.gl_checks = makepad_gl_checks_on();
     this._vertex_submission_reports = new Set();
     this._texture_upload_reports = new Set();
     this._invalid_texture_upload_ids = new Set();
@@ -394,23 +411,66 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.bindBufferBase(gl.UNIFORM_BUFFER, binding, gl_buf);
   }
 
-  assert_no_gl_error(gl, where) {
-    let err = gl.getError();
-    if (err !== gl.NO_ERROR) {
-      const key = where + ":" + err;
-      if (!this._gl_error_reports.has(key)) {
-        this._gl_error_reports.add(key);
-        const message = "WebGL2 error " + err + " at " + where;
-        console.error(message);
-        if (typeof window.makepad_report_browser_issue === "function") {
-          window.makepad_report_browser_issue("webgl.error", {
-            where: where,
-            error: err,
-            message: message,
-          });
-        }
+  // With checks on (gl_checks), allocations are checked for a GL error
+  // later, not where they happen: gl.getError() waits for the GPU process to
+  // finish everything queued, which behind a busy GPU stalls this thread for
+  // whole GPU frames (25-100 ms per allocating frame, every plate change and
+  // resize). `undo` takes back what one allocation made (delete what it
+  // created, invalidate what it re-specified) when a later check finds an
+  // error; until then the resource is used as allocated (a failed texture
+  // samples black, a failed buffer draws nothing). With checks off, nothing.
+  defer_allocation_check(undo) {
+    if (!this.gl_checks) {
+      return;
+    }
+    const pending = this.pending_allocation_checks || (this.pending_allocation_checks = []);
+    if (pending.length === 0) {
+      this.pending_allocation_since = performance.now();
+    }
+    pending.push(undo);
+  }
+
+  // One getError for every allocation since the last check: when `idle`
+  // (no earlier frame on the GPU, so it is cheap), when the oldest is
+  // MAKEPAD_WEBGL_ALLOCATION_CHECK_MS old, or when `force`d. On an error
+  // every allocation since the last clean check is undone (fail closed: the
+  // error cannot say which one failed). Returns the error read (0 if none
+  // or not checked).
+  check_allocations(force, idle) {
+    const pending = this.pending_allocation_checks;
+    if (!pending || pending.length === 0) {
+      return 0;
+    }
+    if (this.webgl_context_lost) {
+      this.pending_allocation_checks = [];
+      return 0;
+    }
+    if (!force && !idle && performance.now() - this.pending_allocation_since < MAKEPAD_WEBGL_ALLOCATION_CHECK_MS) {
+      return 0;
+    }
+    const gl = this.gl;
+    this.pending_allocation_checks = [];
+    const error = gl.getError();
+    if (error === gl.NO_ERROR) {
+      return 0;
+    }
+    const key = "allocation:" + error;
+    const reports = this._gl_error_reports || (this._gl_error_reports = new Set());
+    if (!reports.has(key)) {
+      reports.add(key);
+      const message = `WebGL2 error ${error} after ${pending.length} allocation(s): they are undone`;
+      console.error(message);
+      if (typeof window !== "undefined" && typeof window.makepad_report_browser_issue === "function") {
+        window.makepad_report_browser_issue("webgl.error", { where: "allocation", error, message });
       }
     }
+    for (const undo of pending) {
+      try {
+        undo(error);
+      } catch (_error) {
+      }
+    }
+    return error;
   }
 
   report_render_target_size_once(kind, detail) {
@@ -895,7 +955,7 @@ export class WasmWebGL extends WasmWebBrowser {
           pixel,
         );
       }
-      const allocation_error = gl.getError();
+      const allocation_error = this.gl_checks ? gl.getError() : gl.NO_ERROR;
       if (allocation_error !== gl.NO_ERROR) {
         throw new Error(`WebGL sampler fallback allocation error ${allocation_error}`);
       }
@@ -973,10 +1033,20 @@ export class WasmWebGL extends WasmWebBrowser {
       }
       upload(gl, target, allocation_changed, source, admission);
       if (allocation_changed) {
-        const allocation_error = gl.getError();
-        if (allocation_error !== gl.NO_ERROR) {
-          throw new Error(`WebGL texture allocation error ${allocation_error}`);
-        }
+        this.defer_allocation_check((allocation_error) => {
+          const current = this.textures[args.texture_id] === texture;
+          if (created && current) {
+            try {
+              gl.deleteTexture(texture);
+            } catch (_delete_error) {
+            }
+            this.textures[args.texture_id] = undefined;
+          }
+          this.invalidate_texture_dependencies(texture);
+          if (current) {
+            this.reject_texture_upload(args, "gl-upload", `WebGL texture upload failed: WebGL texture allocation error ${allocation_error}`);
+          }
+        });
       }
     } catch (error) {
       if (created) {
@@ -1052,12 +1122,15 @@ export class WasmWebGL extends WasmWebBrowser {
       if (needed !== 0) {
         gl.bufferSubData(target, 0, array);
       }
-      if (allocation_changed && typeof gl.getError === "function") {
-        const error = gl.getError();
-        if (error !== gl.NO_ERROR) {
-          buffer.gl_buf._buffer_byte_length = undefined;
-          return { ok: false, reason: `WebGL buffer upload error ${error}` };
-        }
+      if (allocation_changed) {
+        const gl_buf = buffer.gl_buf;
+        this.defer_allocation_check((error) => {
+          gl_buf._buffer_byte_length = undefined;
+          if (buffer.gl_buf === gl_buf) {
+            buffer.valid = false;
+          }
+          this.report_vertex_submission_once(`buffer-allocation:${error}`, `WebGL buffer upload error ${error}`, {});
+        });
       }
       return { ok: true };
     } catch (error) {
@@ -1406,7 +1479,8 @@ export class WasmWebGL extends WasmWebBrowser {
     gl.deleteShader(shader.fsh);
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
-    this.assert_no_gl_error(gl, "compile_shader_end");
+    // (an error here is read with the next allocation check)
+    this.defer_allocation_check(() => {});
     // The wasm side counts queued compiles; this closes one so
     // Cx::draw_shaders_pending can tell a bake its draws are no longer dropped.
     this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
@@ -1652,10 +1726,14 @@ export class WasmWebGL extends WasmWebBrowser {
         let capacity = 256;
         while (capacity < checked.byte_length) capacity *= 2;
         gl.bufferData(gl.ARRAY_BUFFER, capacity, gl.STATIC_DRAW);
-        if (typeof gl.getError === "function" && gl.getError() !== gl.NO_ERROR) {
-          reject("retained buffer allocation failed");
-          return;
-        }
+        const gl_buf = buffer.gl_buf;
+        this.defer_allocation_check(() => {
+          gl_buf._buffer_byte_length = undefined;
+          if (buffer.gl_buf === gl_buf) {
+            buffer.valid = false;
+            reject("retained buffer allocation failed");
+          }
+        });
         buffer.retained_capacity = capacity;
         buffer.gl_buf._buffer_byte_length = capacity;
         first = 0;
@@ -1725,7 +1803,6 @@ export class WasmWebGL extends WasmWebBrowser {
         if (!destination) { reject("retained allocation returned null"); return; }
         gl.bindBuffer(gl.COPY_WRITE_BUFFER, destination);
         gl.bufferData(gl.COPY_WRITE_BUFFER, args.capacity_bytes, gl.STATIC_DRAW);
-        if (gl.getError() !== gl.NO_ERROR) { reject("retained allocation failed"); return; }
         if (args.copies.length) {
           gl.bindBuffer(gl.COPY_READ_BUFFER, previous.gl_buf);
           for (const copy of args.copies) {
@@ -1739,14 +1816,22 @@ export class WasmWebGL extends WasmWebBrowser {
       for (const write of writes) {
         if (write.data.length) gl.bufferSubData(gl.COPY_WRITE_BUFFER, write.offset, write.data);
       }
-      if (gl.getError() !== gl.NO_ERROR) { reject("retained delta upload failed"); return; }
       destination._buffer_byte_length = args.capacity_bytes;
-      this.array_buffers[args.buffer_id] = {
+      const installed_buffer = this.array_buffers[args.buffer_id] = {
         gl_buf: destination, valid: true, byte_length: byteLength, length: args.slot_count,
         retained_capacity: args.capacity_bytes, source_kind: "f32",
         upload_version: (previous?.upload_version || 0) + 1,
       };
       installed = true;
+      if (args.replace) {
+        // A failed allocation sends the whole list again (the page asks for it).
+        this.defer_allocation_check(() => {
+          if (this.array_buffers[args.buffer_id] === installed_buffer) {
+            installed_buffer.valid = false;
+            reject("retained allocation failed");
+          }
+        });
+      }
       // The command stream retains storage read by earlier draws and copies.
       if (args.replace && previous?.gl_buf) gl.deleteBuffer(previous.gl_buf);
     } catch (error) {
@@ -2979,13 +3064,18 @@ export class WasmWebGL extends WasmWebBrowser {
       ) ||
       gl_framebuffer._depth_attachment !== depth_attachment;
     if (allocation_changed) {
-      const allocation_error = gl.getError();
-      if (allocation_error !== gl.NO_ERROR) {
-        throw new Error(`WebGL allocation error ${allocation_error}`);
-      }
+      // A failed target allocates again on its next use.
+      const allocated = depth_attachment ? [...color_attachments, depth_attachment] : color_attachments.slice();
+      this.defer_allocation_check(() => {
+        for (const texture of allocated) {
+          this.invalidate_texture_dependencies(texture);
+        }
+        this.report_render_target_size_once("allocation failed", { width: render_width, height: render_height });
+      });
     }
     if (
       (allocation_changed || attachments_changed) &&
+      this.gl_checks &&
       gl.checkFramebufferStatus(gl.FRAMEBUFFER) !== gl.FRAMEBUFFER_COMPLETE
     ) {
       throw new Error("WebGL framebuffer is incomplete");
@@ -3618,10 +3708,10 @@ export class WasmWebGL extends WasmWebBrowser {
             gl.UNSIGNED_BYTE,
             video,
           );
-          const allocation_error = gl.getError();
-          if (allocation_error !== gl.NO_ERROR) {
-            throw new Error(`WebGL video texture allocation error ${allocation_error}`);
-          }
+          this.defer_allocation_check(() => {
+            this.invalidate_texture_dependencies(gl_tex);
+            player.texture_initialized = false;
+          });
         } else {
           gl.texSubImage2D(
             gl.TEXTURE_2D,

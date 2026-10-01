@@ -525,6 +525,8 @@ function render_target_subject({ float_extension = true } = {}) {
   };
   const subject = Object.assign(Object.create(web_gl.WasmWebGL.prototype), {
     gl,
+    // Completeness is checked (a development page or the export's gate).
+    gl_checks: true,
     ext_color_buffer_float: float_extension ? {} : null,
     webgl_context_lost: false,
     render_target_rejected: false,

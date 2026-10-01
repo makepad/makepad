@@ -1550,18 +1550,25 @@ export class WasmWebBrowser extends WasmBridge {
     gpu_watchdog_submit() {
         const gl = this.gl;
         const watchdog = this.gpu_watchdog;
-        if (!gl || !watchdog || this.webgl_context_lost) {
+        if (!gl || this.webgl_context_lost) {
+            return;
+        }
+        if (!watchdog) {
+            // No fences: nothing says when the GPU is idle.
+            this.check_allocations(true, false);
             return;
         }
         const now = performance.now();
+        // getError waits for the GPU process, which behind a busy GPU is a
+        // 25-100 ms stall of this thread: with checks on (gl_checks, never
+        // in a shipped page) the frame's allocations are checked (see
+        // check_allocations) and the driver's own allocation failure read
+        // (at most once a second) only while no earlier frame is still on
+        // the GPU.
+        const idle = watchdog.in_flight.length === 0;
+        let error = this.check_allocations(false, idle);
         if (this.gpu_ledger) {
-            // The driver's own allocation failure, read at most once a
-            // second and only while no earlier frame is still on the GPU:
-            // getError waits for the GPU process, which behind a busy GPU
-            // is a 25-40 ms stall of this thread (a hitch every second in
-            // a GPU-bound scene).
-            let error = 0;
-            if (watchdog.in_flight.length === 0 && !(now - (this.gpu_ledger_error_checked || 0) < 1000)) {
+            if (this.gl_checks && !error && idle && !(now - (this.gpu_ledger_error_checked || 0) < 1000)) {
                 this.gpu_ledger_error_checked = now;
                 error = gl.getError();
             }
@@ -1611,7 +1618,8 @@ export class WasmWebBrowser extends WasmBridge {
         }
         // What holds GPU memory, by owner (the runtime's own view; rows carry
         // the page's texture slot to join the ledger): a Promise of
-        // {textures: [{texture_id, kind, format, w, h, bytes, owner}], ...}.
+        // {textures: [{texture_id, kind, format, w, h, bytes, owner, dropped}], ...}
+        // (dropped: every handle went; its storage is retired within frames).
         if (typeof window !== "undefined" && window && !window.makepad_gpu_inventory) {
             this.gpu_inventory_requests = new Map();
             this.gpu_inventory_next = 0;

@@ -430,6 +430,9 @@ pub fn generate_html(
                 }}
             }};
             window.makepad_report_browser_issue = reportBrowserIssue;
+            // A development page checks GL errors and framebuffer completeness
+            // (a shipped page never does: each query stalls on the GPU).
+            window.makepad_gl_checks = true;
             
             window.addEventListener('error', (event) => {{
                 let stack = '';

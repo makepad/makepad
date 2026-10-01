@@ -164,10 +164,12 @@ function mock_gl() {
   return gl;
 }
 
-function subject() {
+// `gl_checks`: the page's GL error queries (window.makepad_gl_checks).
+function subject(gl_checks = true) {
   const gl = mock_gl();
   return Object.assign(Object.create(WasmWebGL.prototype), {
     gl,
+    gl_checks,
     memory: { buffer: new ArrayBuffer(4096) },
     array_buffers: [],
     index_buffers: [],
@@ -403,6 +405,9 @@ test("updates within the buffer's storage avoid GL error queries while allocatio
   const s = subject();
   new Uint8Array(s.memory.buffer, 64, 512).fill(1);
   s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 8));
+  // The allocation is checked later (one deferred query), not where it happens.
+  assert.equal(s.gl.calls.get_errors, 0);
+  s.check_allocations(true);
   assert.equal(s.gl.calls.get_errors, 1);
 
   // Same size and other sizes within the storage (256 bytes) write in place.
@@ -410,6 +415,7 @@ test("updates within the buffer's storage avoid GL error queries while allocatio
     s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 8 + 8 * i));
   }
   assert.equal(s.gl.calls.buffer_sub_data.length, 9);
+  s.check_allocations(true);
   assert.equal(s.gl.calls.get_errors, 1);
   assert.equal(s.array_buffers[1].valid, true);
   assert.equal(s.array_buffers[1].byte_length, 64);
@@ -417,6 +423,8 @@ test("updates within the buffer's storage avoid GL error queries while allocatio
   // Growing past the storage re-specifies it (and checks for errors).
   s.gl.next_error = s.gl.OUT_OF_MEMORY;
   s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 300));
+  assert.equal(s.gl.calls.get_errors, 1);
+  assert.equal(s.check_allocations(true), s.gl.OUT_OF_MEMORY);
   assert.equal(s.gl.calls.get_errors, 2);
   assert.equal(s.array_buffers[1].valid, false);
   assert.equal(s.array_buffers[1].gl_buf._buffer_byte_length, undefined);
@@ -861,5 +869,21 @@ test("retained allocation failures reject the publication and recover", () => {
   assert.equal(s.array_buffers[1].valid, false);
   s.gl.bufferSubData = original;
   s.FromWasmRetainedArrayBuffer(args);
+  assert.equal(s.array_buffers[1].valid, true);
+});
+
+test("a shipped page (no makepad_gl_checks) never queries GL errors or framebuffer status", () => {
+  const s = subject(false);
+  let status_queries = 0;
+  const status = s.gl.checkFramebufferStatus;
+  s.gl.checkFramebufferStatus = function (...args) { status_queries += 1; return status.apply(this, args); };
+  new Uint8Array(s.memory.buffer, 64, 512).fill(1);
+  s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 8));
+  s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 300));
+  s.textures[7] = undefined;
+  s.FromWasmBeginRenderTexture(render_texture_args(7, 9));
+  s.check_allocations(true);
+  assert.equal(s.gl.calls.get_errors, 0);
+  assert.equal(status_queries, 0);
   assert.equal(s.array_buffers[1].valid, true);
 });

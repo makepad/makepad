@@ -127,10 +127,12 @@ function makeMockGl() {
   return gl;
 }
 
-function subject(memory_bytes = 4096) {
+// `gl_checks`: the page's GL error queries (window.makepad_gl_checks).
+function subject(memory_bytes = 4096, gl_checks = true) {
   const gl = makeMockGl();
   const value = Object.assign(Object.create(WasmWebGL.prototype), {
     gl,
+    gl_checks,
     memory: { buffer: new ArrayBuffer(memory_bytes) },
     textures: [],
     framebuffers: [],
@@ -340,11 +342,14 @@ test("invalid updates poison stale textures and a later valid allocation recover
   assert.equal(s.gl.calls.images.length, 2);
 });
 
-test("allocation errors delete new objects, invalidate existing ones, and recover", () => {
+test("allocation errors, read by the deferred check, delete new objects, invalidate existing ones, and recover", () => {
   const fresh = subject();
   new Uint8Array(fresh.memory.buffer, 4, 2).fill(1);
   fresh.gl.next_error = 77;
   fresh.FromWasmAllocTextureImage2D_Ru8(upload_args(3, 1, 1, 4, 1));
+  // No device query where the allocation happens: the check reads it later.
+  assert.equal(fresh.gl.calls.get_errors, 0);
+  assert.equal(fresh.check_allocations(true), 77);
   assert.equal(fresh.textures[3], undefined);
   assert.equal(fresh.gl.calls.deleted.length, 1);
   assert.equal(fresh._invalid_texture_upload_ids.has(3), true);
@@ -355,8 +360,10 @@ test("allocation errors delete new objects, invalidate existing ones, and recove
   new Uint8Array(existing.memory.buffer, 4, 2).fill(1);
   existing.FromWasmAllocTextureImage2D_Ru8(upload_args(4, 1, 1, 4, 1));
   const texture = existing.textures[4];
+  existing.check_allocations(true);
   existing.gl.next_error = 91;
   existing.FromWasmAllocTextureImage2D_Ru8(upload_args(4, 2, 1, 4, 2));
+  existing.check_allocations(true);
   assert.equal(existing.textures[4], texture);
   assert.equal(texture._render_target_valid, false);
   assert.equal(existing.gl.calls.deleted.length, 0);
@@ -412,6 +419,9 @@ test("same-size updates use sub-images without new allocation or device queries"
     assert.equal(s.gl.calls.create, 1);
     assert.equal(s.gl.calls.images.length, upload_count);
     assert.equal(s.gl.calls.sub_images.length, upload_count);
+    // The allocation's check is deferred; the update adds none.
+    assert.equal(s.gl.calls.get_errors, 0);
+    s.check_allocations(true);
     assert.equal(s.gl.calls.get_errors, 1);
     assert.equal(s.gl.calls.get_parameters, 0);
   }
@@ -590,6 +600,8 @@ test("video dimensions are admitted before GL and cached storage uses sub-images
   assert.equal(s.gl.calls.create, 1);
   assert.equal(s.gl.calls.images.length, 1);
   assert.equal(s.gl.calls.sub_images.length, 0);
+  assert.equal(s.gl.calls.get_errors, 0);
+  s.check_allocations(true);
   assert.equal(s.gl.calls.get_errors, 1);
   assert.equal(s.gl.calls.get_parameters, 0);
   assert.equal(s._invalid_texture_upload_ids.has(21), false);
@@ -599,6 +611,7 @@ test("video dimensions are admitted before GL and cached storage uses sub-images
   assert.equal(s.gl.calls.create, 1);
   assert.equal(s.gl.calls.images.length, 1);
   assert.equal(s.gl.calls.sub_images.length, 1);
+  s.check_allocations(true);
   assert.equal(s.gl.calls.get_errors, 1);
   assert.equal(s.gl.calls.get_parameters, 0);
   assert.equal(updates, 2);
@@ -608,6 +621,7 @@ test("video dimensions are admitted before GL and cached storage uses sub-images
   s.update_video_textures();
   assert.equal(s.gl.calls.images.length, 2);
   assert.equal(s.gl.calls.sub_images.length, 1);
+  s.check_allocations(true);
   assert.equal(s.gl.calls.get_errors, 2);
   assert.equal(updates, 3);
 });
@@ -648,4 +662,24 @@ test("diagnostics are deduplicated by fault class", () => {
   s.FromWasmAllocTextureImage2D_BGRAu8_32(args);
   s.FromWasmAllocTextureImage2D_BGRAu8_32(args);
   assert.deepEqual([...s._texture_upload_reports], ["invalid-dimensions"]);
+});
+
+test("allocation checks wait for an idle GPU or run at most every two seconds", () => {
+  const s = subject();
+  new Uint8Array(s.memory.buffer, 4, 2).fill(1);
+  s.FromWasmAllocTextureImage2D_Ru8(upload_args(3, 1, 1, 4, 1));
+  // The GPU is busy and the allocation is new: no query yet.
+  s.check_allocations(false, false);
+  assert.equal(s.gl.calls.get_errors, 0);
+  // Idle: one query for everything allocated.
+  s.check_allocations(false, true);
+  assert.equal(s.gl.calls.get_errors, 1);
+  // Nothing allocated since: no query even when idle.
+  s.check_allocations(false, true);
+  assert.equal(s.gl.calls.get_errors, 1);
+  // Busy for over two seconds since an allocation: it is checked anyway.
+  s.FromWasmAllocTextureImage2D_Ru8(upload_args(4, 1, 1, 4, 1));
+  s.pending_allocation_since = performance.now() - 2500;
+  s.check_allocations(false, false);
+  assert.equal(s.gl.calls.get_errors, 2);
 });
