@@ -303,6 +303,12 @@ pub struct WVertexAttrib {
     pub integer: u32,
 }
 
+/// Each program's first draw in a frame of its own (`Cx::spread_first_draws`).
+#[derive(FromWasm)]
+pub struct FromWasmSpreadFirstDraws {
+    pub on: bool,
+}
+
 #[derive(FromWasm)]
 pub struct FromWasmCompileWebGLShader {
     pub shader_id: usize,

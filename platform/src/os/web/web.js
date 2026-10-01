@@ -1368,6 +1368,7 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.xr !== undefined) {
                 return
             }
+            this.first_draw_this_frame = false;
             if (this.gpu_watchdog_hold()) {
                 // The GPU is still on earlier frames: no new work until it
                 // drains (the frame is only delayed, never dropped).
@@ -1395,6 +1396,13 @@ export class WasmWebBrowser extends WasmBridge {
             this.in_animation_frame = false;
             this.gpu_timer_end(gpu_query);
             this.gpu_watchdog_submit();
+            // Draws of programs waiting for their first draw were left out
+            // (first draws spread): the next frame draws again.
+            if (this.first_draws_deferred) {
+                this.first_draws_deferred = false;
+                this.to_wasm.ToWasmRedrawAll();
+                this.FromWasmRequestAnimationFrame();
+            }
         })
     }
 

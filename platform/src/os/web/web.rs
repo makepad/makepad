@@ -1611,6 +1611,7 @@ impl CxOsApi for Cx {
             FromWasmWebSocketSendBinary::to_js_code(),*/
             FromWasmXrStartPresenting::to_js_code(),
             FromWasmXrStopPresenting::to_js_code(),
+            FromWasmSpreadFirstDraws::to_js_code(),
             FromWasmCompileWebGLShader::to_js_code(),
             FromWasmAllocArrayBuffer::to_js_code(),
             FromWasmRetainedArrayBuffer::to_js_code(),

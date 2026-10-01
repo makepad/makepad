@@ -157,6 +157,11 @@ export class WasmWebGL extends WasmWebBrowser {
     this._sampler_fallback_texture_failures = new Set();
     this._webgl_shader_version = 0;
     this.pending_webgl_shader_count = 0;
+    // FromWasmSpreadFirstDraws: a program's first draw goes in a frame of its
+    // own (first_draw_this_frame), the others wait (first_draws_deferred).
+    this.first_draw_spread = false;
+    this.first_draw_this_frame = false;
+    this.first_draws_deferred = false;
     this.webgl_shader_poll_frame_id = 0;
     this.webgl_shader_timeline_start = undefined;
     this.webgl_shader_batch_program_count = 0;
@@ -1507,7 +1512,12 @@ export class WasmWebGL extends WasmWebBrowser {
     this.defer_allocation_check(() => {});
     // The wasm side counts queued compiles; this closes one so
     // Cx::draw_shaders_pending can tell a bake its draws are no longer dropped.
-    this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
+    // With first draws spread, it stays open until the program's first draw.
+    if (this.first_draw_spread) {
+      finished_shader.first_draw_waiting = true;
+    } else {
+      this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
+    }
     this.schedule_webgl_shader_summary();
     return true;
   }
@@ -1563,6 +1573,27 @@ export class WasmWebGL extends WasmWebBrowser {
       }
       this.schedule_webgl_shader_poll();
     });
+  }
+
+  // Spread programs' first draws one a frame (Cx::spread_first_draws). Off,
+  // the programs still waiting for theirs are released.
+  FromWasmSpreadFirstDraws(args) {
+    this.first_draw_spread = !!args.on;
+    if (this.first_draw_spread) {
+      return;
+    }
+    let released = 0;
+    for (const shader of this.draw_shaders) {
+      if (shader && shader.first_draw_waiting) {
+        shader.first_draw_waiting = false;
+        released++;
+      }
+    }
+    if (released != 0) {
+      this.to_wasm.ToWasmWebGLShadersDone({ count: released });
+      this.to_wasm.ToWasmRedrawAll();
+      this.FromWasmRequestAnimationFrame();
+    }
   }
 
   FromWasmCompileWebGLShader(args) {
@@ -2550,6 +2581,20 @@ export class WasmWebGL extends WasmWebBrowser {
         { shader_id: args.shader_id, vao_id: args.vao_id },
       );
       return;
+    }
+
+    // A program's first draw is where the driver builds it for this draw (on
+    // Direct3D, ANGLE compiles the shader variant then: up to seconds of the
+    // GPU process for a big one, whatever the link did). Spread, it is the
+    // frame's only first draw; another program's waits for the next frame.
+    if (shader.first_draw_waiting) {
+      if (this.first_draw_this_frame) {
+        this.first_draws_deferred = true;
+        return;
+      }
+      this.first_draw_this_frame = true;
+      shader.first_draw_waiting = false;
+      this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
     }
 
     let vao_bound = false;

@@ -1266,4 +1266,25 @@ impl Cx {
             false
         }
     }
+
+    /// WebGL: draw each program for the first time in a frame of its own. A
+    /// program's first draw is where the driver builds it for that draw; on
+    /// Direct3D (ANGLE) that compile takes up to seconds of the browser's GPU
+    /// process for a big shader, so a frame drawing several new programs held
+    /// it for their sum (a plate with six scene programs: 9 s). Spread, a
+    /// frame makes at most one first draw and leaves out the draws of the
+    /// other new programs, which count as pending
+    /// ([`Cx::draw_shaders_pending`]) until theirs; the next frames draw them.
+    /// For a host that draws ahead of showing (a player's load), not for UI
+    /// that must show at once. Native backends ignore it.
+    pub fn spread_first_draws(&mut self, on: bool) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            self.os.from_wasm(crate::os::web::from_wasm::FromWasmSpreadFirstDraws { on });
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let _ = on;
+        }
+    }
 }
