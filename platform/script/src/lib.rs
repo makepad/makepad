@@ -17,6 +17,7 @@ macro_rules! script_eval {
     }};
 }
 
+pub mod census;
 pub mod colorhex;
 mod clock;
 pub mod docs;

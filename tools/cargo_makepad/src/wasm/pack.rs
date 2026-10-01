@@ -154,6 +154,27 @@ pub fn link_env(config: &PackConfig, dir: &Path, manifest: &Manifest, report: &m
     (flags, env)
 }
 
+/// The registration strip: the linked wasm without the registration of
+/// every script module the collect run saw registered and not used (the
+/// web optimiser's `units::plan_modules`), and what only those reached.
+/// `None` when the run recorded no modules.
+pub fn strip_modules(wasm: &[u8], manifest: &Manifest, report: &mut PackReport) -> Result<Option<Vec<u8>>, String> {
+    if manifest.modules_registered.is_empty() {
+        return Ok(None);
+    }
+    let modules = makepad_wasm_strip::ModuleUse {
+        registered: manifest.modules_registered.clone(),
+        used: manifest.modules.keys().cloned().collect(),
+    };
+    let opts = makepad_wasm_strip::OptimizeOptions { modules: Some(modules), ..Default::default() };
+    let (out, opt) = makepad_wasm_strip::wasm_optimize_checked(wasm, &opts).map_err(|e| format!("module strip: {e}"))?;
+    if let Some(units) = &opt.units {
+        report.line(units.lines().next().unwrap_or("").to_string());
+    }
+    report.line(format!("module strip: {} -> {} bytes ({} of {} script modules used)", wasm.len(), out.len(), manifest.modules.len(), manifest.modules_registered.len()));
+    Ok(Some(out))
+}
+
 fn font_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut entries: Vec<_> = entries.flatten().map(|e| e.path()).collect();

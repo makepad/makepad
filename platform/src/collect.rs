@@ -346,6 +346,19 @@ impl Cx {
         self.collect.as_ref().map(|c| c.scan.clone())
     }
 
+    /// Records which script modules register and which the app uses (the
+    /// script's `census`), from now on: before the first script module.
+    /// A collect run does this itself; an app's own analysis calls it.
+    pub fn record_module_census(&mut self) {
+        self.with_vm(|vm| vm.census_record());
+    }
+
+    /// The script modules registered and used since
+    /// [`Self::record_module_census`]; ends the recording.
+    pub fn module_census(&mut self) -> Option<makepad_script::census::ModuleUse> {
+        self.with_vm(|vm| makepad_script::census::census_used(vm))
+    }
+
     /// Collect mode from the environment: called once as the Cx is made,
     /// before any script module runs, so the shader recording sees every
     /// shader.
@@ -354,6 +367,7 @@ impl Cx {
             return;
         }
         self.collect = Some(Box::new(Collector::new()));
+        self.record_module_census();
         #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
         self.record_shader_pack(true);
         crate::log!("collect-web: collecting into {}", collect_dir().display());
@@ -407,6 +421,7 @@ impl Cx {
             let _by = scan.by(s.name().to_string());
             s.finish(self, &scan);
         }
+        let modules = self.module_census().unwrap_or_default();
         let shaders = self.take_shader_pack();
         let shader_list: Vec<(u64, String)> = crate::shader_pack::read_shader_pack(&shaders).map(|e| e.into_iter().map(|e| (e.key, e.name)).collect()).unwrap_or_default();
         let entries = shader_list.len();
@@ -414,6 +429,9 @@ impl Cx {
         let dir = collect_dir();
         let mut manifest = manifest_of(&scan.state.borrow(), shaders, entries, frames);
         manifest.shader_list = shader_list;
+        manifest.summary.insert("modules_used".into(), format!("{} of {}", modules.used.len(), modules.registered.len()));
+        manifest.modules = modules.used;
+        manifest.modules_registered = modules.registered;
         match manifest.write(&dir) {
             Ok(()) => crate::log!(
                 "collect-web: wrote {} ({} shaders, {} fonts, {} glyphs, {} widget types)",

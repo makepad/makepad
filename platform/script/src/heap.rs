@@ -140,6 +140,9 @@ pub struct ScriptHeap {
     /// string without a preflight build it and charge its length after,
     /// instead of being refused. Off for Octoscript, which refuses them.
     pub(crate) charge_native_strings_after: bool,
+    /// The module registrations, while a collect run records them
+    /// (`census`).
+    pub census: Option<Box<crate::census::Census>>,
 }
 
 impl ScriptHeap {

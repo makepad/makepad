@@ -9,9 +9,16 @@ use {
 pub fn script_mod_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let ts = script_impl(input);
-    tb.add("pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{");
+    // Never inlined: each module's registration stays a function of its
+    // own, which the web optimiser's module-wise strip drops whole when the
+    // module is never used (libs/wasm_strip units).
+    // A collect run records what each module registers (`census`).
+    tb.add("#[inline(never)] pub fn script_mod(vm:&mut ScriptVm)->ScriptValue{");
+    tb.add("    vm.census_begin(module_path!());");
     tb.add("    let sb=").stream(Some(ts)).add(";");
-    tb.add("    vm.eval(sb)");
+    tb.add("    let value=vm.eval(sb);");
+    tb.add("    vm.census_end();");
+    tb.add("    value");
     tb.add("}");
     tb.end()
 }

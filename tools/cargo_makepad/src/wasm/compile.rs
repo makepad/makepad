@@ -1041,8 +1041,15 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
     };
 
     let named_wasm_dest = app_dir.join(format!("{}.names.wasm", build_bin));
-    let data = fs::read(&wasm_source)
+    let mut data = fs::read(&wasm_source)
         .map_err(|_| format!("Cannot read wasm file {:?}", wasm_source))?;
+    // `--pack`: the registrations of the script modules the run never used
+    // go, with what only they reached.
+    if let Some((_, manifest, _, _)) = &collected {
+        if let Some(stripped) = super::pack::strip_modules(&data, manifest, &mut pack_report)? {
+            data = stripped;
+        }
+    }
     if config.keep_names {
         fs::write(&named_wasm_dest, &data)
             .map_err(|error| format!("Can't write named wasm {:?}: {error}", named_wasm_dest))?;

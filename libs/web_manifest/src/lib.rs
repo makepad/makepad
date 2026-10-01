@@ -58,6 +58,13 @@ pub mod files {
     pub const JS: &str = "js.txt";
     /// Assets the app loads: `<path>\t<by>`.
     pub const ASSETS: &str = "assets.txt";
+    /// The script modules (`module_path!()` of a `script_mod!`) the run
+    /// used: `<module>\t<by>` (`by`: the app's script, the module that used
+    /// it, or Rust holding one of its values).
+    pub const MODULES: &str = "modules.txt";
+    /// Every script module that registered in the run, one per line. The web
+    /// optimiser drops the registration of those not in [`MODULES`].
+    pub const MODULES_REGISTERED: &str = "modules-registered.txt";
     /// Written last: the run finished.
     pub const DONE: &str = "done";
 }
@@ -202,6 +209,10 @@ pub struct Manifest {
     pub js: BTreeMap<String, BTreeSet<String>>,
     /// Path -> the first emitter.
     pub assets: BTreeMap<String, String>,
+    /// Script module used -> what used it ([`files::MODULES`]).
+    pub modules: BTreeMap<String, String>,
+    /// Every script module registered ([`files::MODULES_REGISTERED`]).
+    pub modules_registered: BTreeSet<String>,
 }
 
 /// A kernel name as a file name: anything but `[A-Za-z0-9._-]` becomes `_`.
@@ -271,6 +282,10 @@ impl Manifest {
         std::fs::write(dir.join(files::JS), js)?;
         let assets: String = self.assets.iter().map(|(p, by)| format!("{}\t{}\n", escape(p), escape(by))).collect();
         std::fs::write(dir.join(files::ASSETS), assets)?;
+        let modules: String = self.modules.iter().map(|(m, by)| format!("{m}\t{}\n", escape(by))).collect();
+        std::fs::write(dir.join(files::MODULES), modules)?;
+        let registered: String = self.modules_registered.iter().map(|m| format!("{m}\n")).collect();
+        std::fs::write(dir.join(files::MODULES_REGISTERED), registered)?;
         let diagnostics: String = self.diagnostics.iter().map(|d| diagnostic_line(d.severity.as_str(), &d.file, d.line, d.col, &d.message)).collect();
         std::fs::write(dir.join(files::DIAGNOSTICS), diagnostics)?;
         let mut summary = std::fs::File::create(dir.join(files::SUMMARY))?;
@@ -339,6 +354,13 @@ impl Manifest {
                 m.assets.insert(unescape(path), f.next().map(unescape).unwrap_or_default());
             }
         }
+        for line in opt(files::MODULES).lines() {
+            let mut f = line.splitn(2, '\t');
+            if let Some(module) = f.next().filter(|s| !s.is_empty()) {
+                m.modules.insert(module.to_string(), f.next().map(unescape).unwrap_or_default());
+            }
+        }
+        m.modules_registered = opt(files::MODULES_REGISTERED).lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect();
         m.diagnostics = read_diagnostics(dir);
         for line in opt(files::SUMMARY).lines() {
             if let Some((k, v)) = line.split_once('=') {
@@ -391,6 +413,9 @@ mod tests {
         m.widgets.insert("Button".into(), WidgetUse { instances: 2, by: "main.ok".into() });
         m.js.entry("text-input".into()).or_default().insert("TextInput at main.name".into());
         m.assets.insert("app/resources/logo.png".into(), "Image at main.logo".into());
+        m.modules.insert("makepad_widgets_core::view".into(), "the app's script".into());
+        m.modules_registered.insert("makepad_widgets_core::view".into());
+        m.modules_registered.insert("makepad_widgets_core::card".into());
         m.write(&dir).unwrap();
         assert!(Manifest::is_done(&dir));
         let mut back = Manifest::read(&dir).unwrap();
