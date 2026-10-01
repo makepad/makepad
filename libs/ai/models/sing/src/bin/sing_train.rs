@@ -132,11 +132,18 @@ fn fresh_schedule(opt: &mut Optimizer) {
     opt.cfg.start = opt.step;
 }
 
+/// A held-out loss (evaluated at log steps) and how many log steps without
+/// improvement end the round early; the best weights are saved as `<name>-best`.
+type Val<'a> = Option<(&'a dyn Fn(&Optimizer) -> f32, usize)>;
+
+#[allow(clippy::too_many_arguments)]
 fn run<B>(
     name: &str, opt: &mut Optimizer, use_gpu: bool, steps: usize, log_every: usize, save_every: usize, out: &Path,
     config: &[(String, String)], rx: &Receiver<B>, loss: &dyn Fn(&mut Graph, &B, &mut Rng) -> Vec<(&'static str, usize)>,
-    on_save: &dyn Fn(&Optimizer, usize),
+    on_save: &dyn Fn(&Optimizer, usize), val: Val,
 ) {
+    let mut best = f32::INFINITY;
+    let mut since_best = 0usize;
     fresh_schedule(opt);
     #[cfg(any(target_os = "linux", target_os = "windows"))]
     if use_gpu {
@@ -234,6 +241,27 @@ fn run<B>(
             }
             t_log = Instant::now();
             wait = 0.0;
+            if let Some((vf, patience)) = val {
+                let v = vf(opt);
+                if v < best {
+                    best = v;
+                    since_best = 0;
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
+                    opt.sync_host();
+                    opt.save(&out.join(format!("{name}-best")), config).expect("best checkpoint");
+                } else {
+                    since_best += 1;
+                }
+                eprintln!("[{name}] step {} | held-out {v:.4} (best {best:.4}, {since_best} logs without improvement)", opt.step);
+                if since_best >= patience {
+                    eprintln!("[{name}] early stop at step {}: held-out loss has not improved for {patience} logs", opt.step);
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
+                    opt.sync_host();
+                    opt.save(&out.join(name), config).expect("checkpoint");
+                    on_save(opt, opt.step);
+                    return;
+                }
+            }
         }
         if opt.step % save_every == 0 || opt.step == start_step + steps {
             #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -586,7 +614,7 @@ fn main() {
             run("voc", &mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &VocBatch, _r| {
                 let l = train::vocoder_loss(g, &voc_c, b);
                 vec![("total", l.total), ("stft", l.stft), ("mel", l.mel)]
-            }, &|o, step| sample_render(&outc, step, None, Some(&o.ema_params()), &acc, &vc, Some(&refc)));
+            }, &|o, step| sample_render(&outc, step, None, Some(&o.ema_params()), &acc, &vc, Some(&refc)), None);
             drop(rx);
             let voc_params = opt.ema_params();
             let s3 = synth.clone();
@@ -602,7 +630,7 @@ fn main() {
             run("ac", &mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &AcBatch, r| {
                 let l = train::acoustic_loss(g, &ac_c, b, r);
                 vec![("total", l.total), ("mel", l.mel), ("dur", l.dur), ("f0", l.f0), ("voicing", l.voicing), ("flow", l.flow), ("prior", l.prior)]
-            }, &|o, step| sample_render(&outc, step, Some(&o.ema_params()), Some(&voc_params), &acc, &vc, None));
+            }, &|o, step| sample_render(&outc, step, Some(&o.ema_params()), Some(&voc_params), &acc, &vc, None), None);
         }
         "voc" => {
             let store = Arc::new(data::Store::open(&a.all("--data")).expect("data"));
@@ -656,7 +684,7 @@ fn main() {
                 run("voc", &mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &VocBatch, _r| {
                     let l = train::vocoder_loss(g, &voc_c, b);
                     vec![("total", l.total), ("stft", l.stft), ("mel", l.mel)]
-                }, &save);
+                }, &save, None);
             }
         }
         "gta" => {
@@ -718,7 +746,15 @@ fn main() {
                     })
                     .collect()
             };
-            let (speech, lyric) = (pick(Kind::Speech), pick(Kind::SungText));
+            let (speech, mut lyric) = (pick(Kind::Speech), pick(Kind::SungText));
+            // --holdout P: whole songs (shards) held out of training, P% by hash; their
+            // segments score each log step (--patience logs without improvement stop the round).
+            let holdout: u64 = a.num("--holdout", 0u64);
+            let held: Vec<usize> = lyric.iter().copied().filter(|i| (store.items[*i].shard as u64).wrapping_mul(2654435761) % 100 < holdout).collect();
+            lyric.retain(|i| !held.contains(i));
+            if holdout > 0 {
+                eprintln!("held out {} sung-lyric segments from {}% of the songs", held.len(), holdout);
+            }
             // --mix lyric=0.5,speech=0.25,sung=0.25 (shares of batches; empty pools drop out).
             let mut mix = [("lyric", 0.0f32), ("speech", 0.0), ("sung", 0.0)];
             match a.get("--mix") {
@@ -772,13 +808,32 @@ fn main() {
                 Optimizer::new(declare(Some(&ac), None, 3), oc.clone())
             };
             let voc_params = a.get("--vocoder").map(|p| makepad_ai_sing::weights::read(Path::new(&p)).unwrap().params);
+            let val_batch = (!held.is_empty()).then(|| {
+                let v: Vec<Aligned> = held.iter().take(64).filter_map(|i| Aligned::from_sungtext_item(&store.item(&store.items[*i]), speech_frames)).collect();
+                train::ac_batch(&v)
+            });
+            let ac_v = ac.clone();
+            let val_fn = move |o: &Optimizer| -> f32 {
+                let Some(b) = &val_batch else { return 0.0 };
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                let mut g = match &o.dev {
+                    Some(d) => Graph::new_gpu(&o.params, &d.params, false),
+                    None => Graph::new(&o.params, false),
+                };
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+                let mut g = Graph::new(&o.params, false);
+                let l = train::acoustic_loss(&mut g, &ac_v, b, &mut Rng::new(1));
+                g.host(l.mel)[0]
+            };
+            let patience = a.num("--patience", 4usize);
+            let val: Val = if held.is_empty() { None } else { Some((&val_fn, patience)) };
             let ac_c = ac.clone();
             let (acc, vc) = (ac.clone(), voc.clone());
             let outc = out.clone();
             run("ac", &mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &AcBatch, r| {
                 let l = train::acoustic_loss(g, &ac_c, b, r);
                 vec![("total", l.total), ("mel", l.mel), ("dur", l.dur), ("f0", l.f0), ("voicing", l.voicing), ("flow", l.flow), ("prior", l.prior)]
-            }, &|o, step| sample_render(&outc, step, Some(&o.ema_params()), voc_params.as_ref(), &acc, &vc, None));
+            }, &|o, step| sample_render(&outc, step, Some(&o.ema_params()), voc_params.as_ref(), &acc, &vc, None), val);
         }
         _ => {
             eprintln!("usage: sing_train check | t0 | voc | ac  (see the file header)");

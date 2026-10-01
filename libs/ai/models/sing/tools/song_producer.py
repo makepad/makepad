@@ -2,13 +2,14 @@
 """Sung-lyric training data: original lyrics -> songs on one fleet node.
 
 Writes original lyrics (a procedural lyric grammar over a phonetically varied
-word bank) and a music description, asks one AI Hub node for a song with the
-music model, and saves <inbox>/<id>.wav plus <id>.json (lyrics, caption,
-seed, model, node). Standard library only. One job at a time; respects the
-node's admission (a refused or paused node is retried later, never forced)
-and keeps the job lease alive while it runs.
+word bank) and a music description, asks one AI Hub node for --takes songs
+(seeds) of each with the music model, separates their vocals in a batch, and
+saves <inbox>/<group>-t<k>.wav, .vocals.wav.v and .json (lyrics, caption,
+seed, model, node, group, takes). Standard library only. One job at a time;
+respects the node's admission (a refused or paused node is retried later,
+never forced) and keeps the job lease alive while it runs.
 
-    song_producer.py --node http://10.0.0.123:8123 --inbox DIR [--count N] [--seconds 90]
+    song_producer.py --node http://10.0.0.123:8123 --inbox DIR [--takes 2] [--batch 4] [--model ace-step-1.5-xl]
 """
 import argparse
 import array
@@ -22,7 +23,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-MODEL = "minimax-music3-q4"
+MODEL = "minimax-music3-q4"  # --model overrides (e.g. ace-step-1.5-xl)
 
 # A word bank chosen for phonetic coverage: every English vowel (short, long,
 # diphthongs, r-coloured) and consonant, and clusters (str, spl, nd, mps...).
@@ -60,10 +61,9 @@ LINES = [
 GENRES = ["pop", "synth pop", "indie pop", "soft rock", "acoustic pop", "r&b", "folk pop", "electro pop", "ballad"]
 KEYS = ["C major", "D major", "E major", "F major", "G major", "A major", "B flat major", "A minor", "E minor", "D minor"]
 VOICE_MAIN = "female pop lead vocal, clear diction, upfront dry vocals, every word clearly sung"
-# Caption variants for the main voice; which one gives the cleanest, most
-# intelligible solo vocal is measured from the harvest keep rate.
+# Every song asks for one clear solo voice (style "b"; "a", a sparse
+# arrangement alone, kept more ad-libs and backing vocals).
 STYLES = {
-    "a": "simple sparse arrangement",
     "b": "solo lead vocal only, no backing vocals, no harmonies, no ad-libs, sparse arrangement",
 }
 VOICE_OTHER = ["male pop lead vocal, clear diction, upfront vocals", "soft female vocal, clear diction",
@@ -146,6 +146,42 @@ def generate(base, lyrics, caption, seed, seconds, log, body=None):
     return data, art, time.monotonic() - start
 
 
+def to_44k1(wav):
+    """16-bit stereo WAV at any rate -> 44.1 kHz (the separator's rate), by
+    linear interpolation; unchanged when already 44.1 kHz or not 16-bit stereo."""
+    if wav[:4] != b"RIFF":
+        return wav
+    i, rate, ch, bits, pcm = 12, 0, 0, 0, None
+    while i + 8 <= len(wav):
+        cid, size = wav[i:i + 4], int.from_bytes(wav[i + 4:i + 8], "little")
+        if cid == b"fmt ":
+            ch = int.from_bytes(wav[i + 10:i + 12], "little")
+            rate = int.from_bytes(wav[i + 12:i + 16], "little")
+            bits = int.from_bytes(wav[i + 22:i + 24], "little")
+        elif cid == b"data":
+            pcm = wav[i + 8:i + 8 + size]
+            break
+        i += 8 + size + (size & 1)
+    if pcm is None or rate == 44100 or ch != 2 or bits != 16:
+        return wav
+    src = array.array("h")
+    src.frombytes(pcm[:len(pcm) // 4 * 4])
+    n = len(src) // 2
+    m = int(n * 44100 / rate)
+    out = array.array("h", [0]) * (2 * m)
+    step = rate / 44100
+    for j in range(m):
+        x = j * step
+        k = int(x)
+        f = x - k
+        k1 = min(k + 1, n - 1)
+        out[2 * j] = int(src[2 * k] * (1 - f) + src[2 * k1] * f)
+        out[2 * j + 1] = int(src[2 * k + 1] * (1 - f) + src[2 * k1 + 1] * f)
+    body = out.tobytes()
+    return b"RIFF" + (36 + len(body)).to_bytes(4, "little") + b"WAVEfmt " + (16).to_bytes(4, "little") + (1).to_bytes(2, "little") + (2).to_bytes(2, "little") \
+        + (44100).to_bytes(4, "little") + (44100 * 4).to_bytes(4, "little") + (4).to_bytes(2, "little") + (16).to_bytes(2, "little") + b"data" + len(body).to_bytes(4, "little") + body
+
+
 def separate(node, wav, log):
     """The vocal of a 44.1 kHz stereo WAV via a node's four-stem separator:
     16-bit stereo WAV bytes."""
@@ -172,50 +208,69 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--node", required=True)
     ap.add_argument("--inbox", required=True)
-    ap.add_argument("--count", type=int, default=0, help="0 = forever")
+    ap.add_argument("--count", type=int, default=0, help="lyric sets to make; 0 = forever")
     ap.add_argument("--seconds", type=float, default=35.0)
     ap.add_argument("--seed", type=int, default=int(time.time()))
-    ap.add_argument("--sep-node", default=None, help="a node that separates each song's vocal (else the harvester does)")
+    ap.add_argument("--model", default=MODEL)
+    ap.add_argument("--takes", type=int, default=2, help="songs (seeds) per lyric set; the harvester keeps each line's best take")
+    ap.add_argument("--batch", type=int, default=4, help="lyric sets generated before the batch is separated")
+    ap.add_argument("--sep-node", default=None, help="the node that separates the vocals (default: --node)")
     a = ap.parse_args()
+    sep_node = a.sep_node or a.node
     inbox = pathlib.Path(a.inbox)
     inbox.mkdir(parents=True, exist_ok=True)
     rng = random.Random(a.seed)
     log = lambda m: print(time.strftime("%H:%M:%S"), m, flush=True)
     made = 0
     while a.count == 0 or made < a.count:
-        if not admission_open(a.node):
-            log("node busy or not admitting; waiting")
-            time.sleep(60)
-            continue
-        lyrics, caption, voice, style = song(rng)
-        seed = rng.randrange(1 << 31)
-        sid = f"{time.strftime('%Y%m%d-%H%M%S')}-{seed:08x}"
-        try:
-            data, art, secs = generate(a.node, lyrics, caption, seed, a.seconds, log)
-        except Exception as e:
-            log(f"generation failed: {e}; retrying in 60 s")
-            time.sleep(60)
-            continue
-        ext = ".wav" if data[:4] == b"RIFF" else ".bin"
-        style_note = {"style": style}
-        if a.sep_node and ext == ".wav":
-            # The vocal first: the harvester picks a song up when its .wav appears.
-            try:
-                vocals, ssecs = separate(a.sep_node, data, log)
-                (inbox / (sid + ".vocals.part")).write_bytes(vocals)
-                (inbox / (sid + ".vocals.part")).rename(inbox / (sid + ".vocals.wav.v"))
-                log(f"  separated on {a.sep_node} in {ssecs:.0f} s")
-            except Exception as e:
-                log(f"  separation failed ({e}); the harvester will separate")
-        (inbox / (sid + ".json")).write_text(json.dumps({"lyrics": lyrics, "caption": caption, "voice": voice, "seed": seed,
-                                                       "model": MODEL, "node": a.node, "seconds": a.seconds, **style_note,
-                                                       "content_type": art.get("content_type"), "gen_seconds": secs}, indent=1))
-        (inbox / (sid + ".lyrics.txt")).write_text(lyrics + "\n")
-        (inbox / (sid + ".caption.txt")).write_text(caption + "\n")
-        (inbox / (sid + ext + ".part")).write_bytes(data)
-        (inbox / (sid + ext + ".part")).rename(inbox / (sid + ext))
-        made += 1
-        log(f"song {made}: {sid}{ext} ({len(data) / 1e6:.1f} MB, {secs:.0f} s)")
+        # A batch: every take of every lyric set on the music model (resident
+        # across the batch), then every vocal on the separator, so each model
+        # loads once per batch rather than once per song.
+        batch = []
+        for _ in range(a.batch if a.count == 0 else min(a.batch, a.count - made)):
+            lyrics, caption, voice, style = song(rng)
+            group = f"{time.strftime('%Y%m%d-%H%M%S')}-{rng.randrange(1 << 31):08x}"
+            takes = []
+            while len(takes) < a.takes:
+                if not admission_open(a.node):
+                    log("node busy or not admitting; waiting")
+                    time.sleep(60)
+                    continue
+                seed = rng.randrange(1 << 31)
+                try:
+                    body = {"model": a.model, "prompt": caption, "lyrics": lyrics, "seconds": a.seconds, "seed": seed, "queue_policy": "reject"}
+                    data, art, secs = generate(a.node, lyrics, caption, seed, a.seconds, log, body=body)
+                    data = to_44k1(data)
+                except Exception as e:
+                    log(f"generation failed: {e}; retrying in 60 s")
+                    time.sleep(60)
+                    continue
+                takes.append((seed, data, art, secs))
+                log(f"{group} take {len(takes)}/{a.takes} ({len(data) / 1e6:.1f} MB, {secs:.0f} s)")
+            batch.append((group, lyrics, caption, voice, style, takes))
+        for group, lyrics, caption, voice, style, takes in batch:
+            for k, (seed, data, art, secs) in enumerate(takes):
+                sid = f"{group}-t{k}"
+                ext = ".wav" if data[:4] == b"RIFF" else ".bin"
+                if ext == ".wav":
+                    # The vocal first: the harvester picks a song up when its .wav appears.
+                    try:
+                        vocals, ssecs = separate(sep_node, data, log)
+                        (inbox / (sid + ".vocals.part")).write_bytes(vocals)
+                        (inbox / (sid + ".vocals.part")).rename(inbox / (sid + ".vocals.wav.v"))
+                        log(f"  {sid} separated on {sep_node} in {ssecs:.0f} s")
+                    except Exception as e:
+                        log(f"  {sid} separation failed ({e}); the harvester will separate")
+                (inbox / (sid + ".json")).write_text(json.dumps({"lyrics": lyrics, "caption": caption, "voice": voice, "seed": seed,
+                                                               "model": a.model, "node": a.node, "seconds": a.seconds, "style": style,
+                                                               "group": group, "take": k, "takes": len(takes),
+                                                               "content_type": art.get("content_type"), "gen_seconds": secs}, indent=1))
+                (inbox / (sid + ".lyrics.txt")).write_text(lyrics + "\n")
+                (inbox / (sid + ".caption.txt")).write_text(caption + "\n")
+                (inbox / (sid + ext + ".part")).write_bytes(data)
+                (inbox / (sid + ext + ".part")).rename(inbox / (sid + ext))
+            made += 1
+            log(f"set {made}: {group} ({len(takes)} takes)")
 
 
 if __name__ == "__main__":
