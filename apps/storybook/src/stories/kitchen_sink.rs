@@ -333,14 +333,15 @@ script_mod! {
                         SliderFaderY{height: 110. default: 0.3}
                     }
                 }
-                // A big knob and a small one, so a sheet's knob is seen at
-                // the sizes a panel gives it.
+                // A big knob and the panel knob, so a sheet's knob is seen at
+                // the sizes a panel gives it; the small one has no readout, as
+                // the panel knob has none.
                 Group{
                     GroupCaption{text: "Knobs"}
                     Line{
                         align: Align{x: 0. y: 1.}
                         Rotary{width: 140. height: 165. text: "Gain" default: 0.6}
-                        Rotary{width: 44. height: 69. text: "Pan" default: 0.4}
+                        RotaryKnob{text: "Pan" default: 0.4}
                     }
                 }
             }
