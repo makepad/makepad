@@ -1,9 +1,10 @@
 #!/bin/bash
 # Cantor trained from scratch on the sung-lyric distill (prep/lyrics, growing),
 # in rounds proportional to the data: a round runs when the clean set has grown
-# by half since the last one; its steps scale with the set; the acoustic model
-# holds out 10% of the songs and stops early when they stop improving. After
-# each acoustic round, the DSP-vs-neural eval (on the best held-out weights).
+# by half since the last one; its steps scale with the set (about 100 passes);
+# half the lyric segments are speed-perturbed. The acoustic model holds out 10%
+# of the songs; its checkpoints are scored by held-out word error rate and the
+# best is kept (lyric/eval/best.mksing), sung on the eval lines against DSP.
 #   start: setsid nohup ~/nv1/distill_train.sh > ~/nv1/lyric/distill.out 2>&1 < /dev/null &
 #   stop:  touch ~/nv1/lyric/STOP  (finishes the current round)
 set -u
@@ -37,26 +38,34 @@ log "distill training (data-proportional rounds) start: $(items) segments, $(sec
   while ! stopped; do
     n=$(items)
     if [ $((n * 100)) -ge $((last * GROW)) ] || [ $last -eq 0 ]; then
-      steps=$(clamp $((100 * n / 32)) 1000 30000)   # up to 100 passes; the held-out early stop ends it once it stops helping
+      steps=$(clamp $((100 * n / 32)) 2000 30000)   # about 100 passes over the set
+      half=$((steps / 2))
       resume=""; [ -f runs/distill-ac/ac.mksing ] && resume="--resume"
-      log "acoustic round: $n segments, up to $steps steps (10% of songs held out, early stop)"
-      rm -f runs/distill-ac/ac-best.*
+      log "acoustic round: $n segments, $steps steps, speed augmentation on half the segments; checkpoints scored by held-out WER"
+      rm -f runs/distill-ac/ac-0*.ema.mksing
       $B/sing_train ac --data prep/lyrics --config base $resume --steps $steps --warmup 200 --batch 32 --speech-frames 1000 \
-        --mix lyric=1 --holdout 10 --patience 4 --log 250 --save $steps --workers 8 --out runs/distill-ac >> runs/distill-ac/train.log 2>&1 \
-        || log "acoustic round failed"
+        --mix lyric=1 --augment 0.5 --holdout 10 --patience 1000000 --log 500 --save $half --keep --workers 8 \
+        --out runs/distill-ac >> runs/distill-ac/train.log 2>&1 || log "acoustic round failed"
       last=$n
-      log "acoustic round done: $(grep 'held-out' runs/distill-ac/train.log | tail -1 | cut -c1-120)"
-      # The next round resumes from the best held-out weights, not the overfit end.
-      if [ -f runs/distill-ac/ac-best.mksing ]; then
-        for x in mksing opt.mksing ema.mksing; do cp runs/distill-ac/ac-best.$x runs/distill-ac/ac.$x; done
-      fi
-      ac=runs/distill-ac/ac-best.ema.mksing; [ -f $ac ] || ac=runs/distill-ac/ac.ema.mksing
+      # Held-out mel loss bottoms out long before the voice is intelligible: each
+      # kept checkpoint is scored by word error rate on the held-out songs, and the
+      # best so far is lyric/eval/best.mksing (its WER in best.txt).
       if [ -f runs/distill-voc/voc.ema.mksing ]; then
-        step=$(grep -a -o "^step=[0-9]*" runs/distill-ac/ac-best.mksing 2>/dev/null | head -1 | cut -d= -f2)
-        tag="distill-${step:-x}"
-        $B/sing_train export --ac $ac --voc runs/distill-voc/voc.ema.mksing --out $L/eval/$tag.mksing > /dev/null 2>&1
-        $B/voice_eval --whisper models/ggml-large-v3-turbo.bin --cantor $L/eval/$tag.mksing --singer 1600 --out $L/eval/$tag > $L/eval/$tag.txt 2>&1
-        log "eval $tag ($n segments): $(grep -E '^(dsp|cantor) ' $L/eval/$tag.txt | tr -s ' ' | tr '\n' ';')"
+        for ck in runs/distill-ac/ac-0*.ema.mksing; do
+          step=$(basename $ck .ema.mksing | cut -d- -f2 | sed 's/^0*//')
+          tag=distill-$step
+          $B/sing_train export --ac $ck --voc runs/distill-voc/voc.ema.mksing --out $L/eval/$tag.mksing > /dev/null 2>&1
+          $B/voice_eval --whisper models/ggml-large-v3-turbo.bin --cantor $L/eval/$tag.mksing --diag prep/lyrics --held --items 24 --out $L/eval/$tag-held > $L/eval/$tag-held.txt 2>/dev/null
+          w=$(grep "^free " $L/eval/$tag-held.txt | awk '{print $2}' | tr -d %)
+          log "eval $tag ($n segments): held-out WER $(grep -E '^(tf|free) ' $L/eval/$tag-held.txt | awk '{printf "%s %s ", $1, $2}')"
+          b=$(cut -d' ' -f1 $L/eval/best.txt 2>/dev/null || echo 101)
+          if awk "BEGIN {exit !($w < $b)}"; then
+            cp $L/eval/$tag.mksing $L/eval/best.mksing
+            echo "$w $tag" > $L/eval/best.txt
+            $B/voice_eval --whisper models/ggml-large-v3-turbo.bin --cantor $L/eval/best.mksing --singer 1600 --out $L/eval/best-lines > $L/eval/best-lines.txt 2>&1
+            log "new best $tag: held-out free WER $w%; eval lines $(grep -E '^(dsp|cantor) ' $L/eval/best-lines.txt | tr -s ' ' | tr '\n' ';')"
+          fi
+        done
       fi
     fi
     sleep 120
