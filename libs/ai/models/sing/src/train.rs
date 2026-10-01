@@ -124,6 +124,18 @@ impl Aligned {
         })
     }
 
+    /// A sung-lyric item: tokens and notes, no durations (aligned by MAS in
+    /// training). None when longer than `max_frames` or too dense.
+    pub fn from_sungtext_item(it: &Item, max_frames: usize) -> Option<Aligned> {
+        if it.kind != Kind::SungText || it.frames() > max_frames || it.frames() < 2 * it.tokens.len() {
+            return None;
+        }
+        let nf = it.frames();
+        let mut notes = it.notes.clone();
+        notes.resize(nf, 0.0);
+        Some(Aligned { tokens: it.tokens.clone(), dur: Vec::new(), notes, f0: it.f0.clone(), vel: vec![0.8; nf], audio: it.audio_f32(), singer: it.speaker as usize, band: it.band_hz })
+    }
+
     /// A window of at most `max_frames` frames at a random start; the tokens
     /// it overlaps, each clipped to the window.
     pub fn crop(&self, max_frames: usize, rng: &mut Rng) -> Aligned {

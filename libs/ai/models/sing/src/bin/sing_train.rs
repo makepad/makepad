@@ -710,25 +710,59 @@ fn main() {
             let max_frames = a.num("--ac-frames", 600usize);
             let speech_frames = a.num("--speech-frames", 1000usize);
             let sung: Vec<Aligned> = store.items.iter().filter(|r| r.kind == Kind::Sung).filter_map(|r| Aligned::from_vowel_item(&store.item(r))).collect();
-            let speech: Vec<usize> = (0..store.items.len())
-                .filter(|i| {
-                    let r = &store.items[*i];
-                    r.kind == Kind::Speech && r.frames as usize <= speech_frames && r.frames >= 2 * r.tokens
-                })
-                .collect();
-            let speech_frac: f32 = a.num("--speech-frac", if sung.is_empty() { 1.0 } else if speech.is_empty() { 0.0 } else { 0.7 });
-            eprintln!("{} sung items, {} speech items ({:.1} h in the store); speech batches {:.0}%", sung.len(), speech.len(), store.hours(), speech_frac * 100.0);
+            let pick = |kind: Kind| -> Vec<usize> {
+                (0..store.items.len())
+                    .filter(|i| {
+                        let r = &store.items[*i];
+                        r.kind == kind && r.frames as usize <= speech_frames && r.frames >= 2 * r.tokens
+                    })
+                    .collect()
+            };
+            let (speech, lyric) = (pick(Kind::Speech), pick(Kind::SungText));
+            // --mix lyric=0.5,speech=0.25,sung=0.25 (shares of batches; empty pools drop out).
+            let mut mix = [("lyric", 0.0f32), ("speech", 0.0), ("sung", 0.0)];
+            match a.get("--mix") {
+                Some(m) => {
+                    for part in m.split(',') {
+                        if let Some((k, v)) = part.split_once('=') {
+                            if let Some(e) = mix.iter_mut().find(|e| e.0 == k) {
+                                e.1 = v.parse().unwrap_or(0.0);
+                            }
+                        }
+                    }
+                }
+                None => {
+                    let sf: f32 = a.num("--speech-frac", if sung.is_empty() { 1.0 } else if speech.is_empty() { 0.0 } else { 0.7 });
+                    mix = [("lyric", 0.0), ("speech", sf), ("sung", 1.0 - sf)];
+                }
+            }
+            for (e, n) in mix.iter_mut().zip([lyric.len(), speech.len(), sung.len()]) {
+                if n == 0 {
+                    e.1 = 0.0;
+                }
+            }
+            let total: f32 = mix.iter().map(|e| e.1).sum::<f32>().max(1e-6);
+            eprintln!(
+                "{} sung-lyric, {} speech, {} sung-vowel items ({:.1} h in the store); batch shares lyric {:.0}% speech {:.0}% sung {:.0}%",
+                lyric.len(), speech.len(), sung.len(), store.hours(), mix[0].1 / total * 100.0, mix[1].1 / total * 100.0, mix[2].1 / total * 100.0
+            );
             let sung = Arc::new(sung);
             let st2 = store.clone();
             let rx = prefetch(workers, 8, 2, Arc::new(move |rng: &mut Rng| {
-                // Batches are all speech (aligned on the fly) or all sung.
-                let v: Vec<Aligned> = if !speech.is_empty() && (sung.is_empty() || rng.unit() < speech_frac) {
-                    (0..batch).map(|_| {
-                        let r = &st2.items[speech[rng.below(speech.len())]];
-                        Aligned::from_speech_item(&st2.item(r), speech_frames).unwrap()
-                    }).collect()
-                } else {
-                    (0..batch).map(|_| sung[rng.below(sung.len())].crop(max_frames, rng)).collect()
+                // Each batch is one kind: unaligned (lyric, speech; aligned on the fly) or sung vowels.
+                let mut x = rng.unit() * total;
+                let mut kind = 2;
+                for (k, e) in mix.iter().enumerate() {
+                    if x < e.1 {
+                        kind = k;
+                        break;
+                    }
+                    x -= e.1;
+                }
+                let v: Vec<Aligned> = match kind {
+                    0 => (0..batch).map(|_| Aligned::from_sungtext_item(&st2.item(&st2.items[lyric[rng.below(lyric.len())]]), speech_frames).unwrap()).collect(),
+                    1 => (0..batch).map(|_| Aligned::from_speech_item(&st2.item(&st2.items[speech[rng.below(speech.len())]]), speech_frames).unwrap()).collect(),
+                    _ => (0..batch).map(|_| sung[rng.below(sung.len())].crop(max_frames, rng)).collect(),
                 };
                 train::ac_batch(&v)
             }));

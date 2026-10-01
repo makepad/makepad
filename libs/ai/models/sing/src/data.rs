@@ -21,6 +21,9 @@ pub enum Kind {
     Sung = 1,
     /// Audio only (the vocoder).
     Audio = 2,
+    /// Sung lyrics with a phoneme transcript and notes, no durations
+    /// (aligned in training like speech).
+    SungText = 3,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -74,6 +77,7 @@ impl Item {
         let kind = match u(0) {
             0 => Kind::Speech,
             1 => Kind::Sung,
+            3 => Kind::SungText,
             _ => Kind::Audio,
         };
         let (speaker, ns, nf, nt, nn) = (u(1), u(2) as usize, u(3) as usize, u(4) as usize, u(5) as usize);
@@ -151,6 +155,26 @@ pub fn notes_from_f0(f0: &[f32]) -> Vec<f32> {
             cur = m.round();
         }
         out[t] = cur;
+    }
+    out
+}
+
+/// Octave slips in a sung f0 curve: a frame an octave (or two) away from
+/// the median of its neighbourhood (±15 frames) is moved back by octaves.
+pub fn fix_octaves(f0: &[f32]) -> Vec<f32> {
+    let mut out = f0.to_vec();
+    for t in 0..f0.len() {
+        if f0[t] <= 0.0 {
+            continue;
+        }
+        let mut w: Vec<f32> = f0[t.saturating_sub(15)..(t + 16).min(f0.len())].iter().filter(|v| **v > 0.0).map(|v| dsp::hz_to_midi(*v)).collect();
+        w.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let med = w[w.len() / 2];
+        let m = dsp::hz_to_midi(f0[t]);
+        let oct = ((m - med) / 12.0).round();
+        if oct != 0.0 && ((m - med) - 12.0 * oct).abs() < 2.0 {
+            out[t] = dsp::midi_to_hz(m - 12.0 * oct);
+        }
     }
     out
 }
@@ -285,6 +309,7 @@ impl Store {
                 let kind = match u(0) {
                     0 => Kind::Speech,
                     1 => Kind::Sung,
+                    3 => Kind::SungText,
                     _ => Kind::Audio,
                 };
                 let r = ItemRef {
