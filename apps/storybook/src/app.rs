@@ -111,15 +111,24 @@ script_mod! {
         height: Fill
         flow: Down
 
-        toolbar := mod.storybook.CatalogueToolbar{}
+        // The panes are inset panels, so a sheet draws them as it draws
+        // its panels (a bezelled window, a soft card) and the window's own
+        // ground shows between them.
+        toolbar_pane := InsetPanelView{
+            width: Fill
+            height: Fit
+            margin: Inset{left: 4. right: 4. top: 4. bottom: 2.}
+            toolbar := mod.storybook.CatalogueToolbar{}
+        }
 
         split := Splitter{
             axis: SplitterAxis.Horizontal
             align: SplitterAlign.FromA(260.)
-            a: View{
+            a: InsetPanelView{
                 width: Fill
                 height: Fill
                 flow: Down
+                margin: Inset{left: 4. right: 2. top: 2. bottom: 4.}
                 // Star the story on the canvas; list the starred ones only.
                 star_row := View{
                     width: Fill
@@ -145,18 +154,20 @@ script_mod! {
             b: Splitter{
                 axis: SplitterAxis.Horizontal
                 align: SplitterAlign.FromB(380.)
-                a: View{
+                a: InsetPanelView{
                     width: Fill
                     height: Fill
                     padding: theme.mspace_2
+                    margin: Inset{left: 2. right: 2. top: 2. bottom: 4.}
                     canvas := mod.storybook.StoryCanvas{}
                 }
-                b: View{
+                b: InsetPanelView{
                     width: Fill
                     height: Fill
                     flow: Down
                     spacing: theme.space_2
                     padding: theme.mspace_2
+                    margin: Inset{left: 2. right: 4. top: 2. bottom: 4.}
                     tabs := View{
                         width: Fill
                         height: Fit
