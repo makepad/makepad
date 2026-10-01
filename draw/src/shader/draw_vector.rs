@@ -162,7 +162,10 @@ script_mod! {
                 let half_v = 0.5 / tex_size.y;
                 let u = clamp(t, 0.0, 1.0) * (1.0 - 2.0 * half_u) + half_u;
                 let v = clamp(row_v, half_v, 1.0 - half_v);
-                return self.gradient_texture.sample(vec2(u, v))
+                // Float texels (HDR stops above 1 keep their value), read
+                // nearest: 32-bit float textures do not filter everywhere,
+                // and 2048 texels a row is finer than any ramp is drawn.
+                return self.gradient_texture.sample_nearest(vec2(u, v))
             }
             // No gradient texture row — return solid vertex color
             return self.v_color
@@ -373,7 +376,7 @@ pub struct DrawVector {
     pub cur_use_color: Option<(f32, f32, f32, f32)>,
     // gradient texture: Nx2048 BGRA, one row per gradient
     #[rust]
-    pub gradient_texture_data: Vec<u32>,
+    pub gradient_texture_data: Vec<f32>,
     #[rust]
     pub gradient_row_count: usize,
     #[rust]
@@ -464,19 +467,16 @@ impl DrawVector {
         const TEX_WIDTH: usize = 2048;
         let row = self.gradient_row_count;
         self.gradient_row_count += 1;
-        self.gradient_texture_data.reserve(TEX_WIDTH);
+        self.gradient_texture_data.reserve(TEX_WIDTH * 4);
 
         // Rasterize stops into TEX_WIDTH pixels
         for i in 0..TEX_WIDTH {
             let t = i as f32 / (TEX_WIDTH - 1) as f32;
             let (r, g, b, a) = sample_gradient_stops(stops, t);
-            // Pack as BGRA u32 (premultiplied alpha already in stops)
-            let rb = (b.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-            let rg = (g.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-            let rr = (r.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-            let ra = (a.clamp(0.0, 1.0) * 255.0 + 0.5) as u32;
-            self.gradient_texture_data
-                .push(rb | (rg << 8) | (rr << 16) | (ra << 24));
+            // Premultiplied (as the stops are), unclamped above 1: an HDR
+            // stop stays HDR. Alpha stays within 0..1.
+            let c = |v: f32| if v.is_finite() { v.max(0.0) } else { 0.0 };
+            self.gradient_texture_data.extend_from_slice(&[c(r), c(g), c(b), a.clamp(0.0, 1.0)]);
         }
 
         // Return center of the row in normalized texture V coordinates.
@@ -773,7 +773,7 @@ impl DrawVector {
             let tex = self.gradient_texture.get_or_insert_with(|| {
                 Texture::new_with_format(
                     cx.cx.cx,
-                    TextureFormat::VecBGRAu8_32 {
+                    TextureFormat::VecRGBAf32 {
                         width: TEX_WIDTH,
                         height,
                         data: None,
@@ -784,7 +784,7 @@ impl DrawVector {
 
             // Update texture format with current dimensions and data
             let format = tex.get_format(cx.cx.cx);
-            *format = TextureFormat::VecBGRAu8_32 {
+            *format = TextureFormat::VecRGBAf32 {
                 width: TEX_WIDTH,
                 height,
                 data: Some(std::mem::take(&mut self.gradient_texture_data)),
