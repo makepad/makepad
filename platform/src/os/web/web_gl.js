@@ -1384,6 +1384,7 @@ export class WasmWebGL extends WasmWebBrowser {
         shader.program,
         "liveUniforms",
       ),
+      clip_y_flip_loc: gl.getUniformLocation(shader.program, "mp_clip_y_flip"),
       pass_uniform_buf,
       draw_list_uniform_buf,
       live_uniform_buf,
@@ -2359,9 +2360,17 @@ export class WasmWebGL extends WasmWebBrowser {
       } else {
         gl.disable(gl.CULL_FACE);
       }
-      // Texture passes render with an inverted projection Y (web_gl.rs
-      // setup_render_pass), which reverses triangle winding: front faces are
-      // clockwise there and counter-clockwise on the canvas, matching Metal.
+      // A framebuffer's rows are stored bottom-up: texture passes invert
+      // every vertex shader's clip-space Y (`mp_clip_y_flip`, applied after
+      // the shader's own vertex code, see shader_glsl.rs), so the texels land
+      // in the top-left row order Metal and D3D produce and every consumer
+      // plain-samples. The inversion reverses triangle winding: front faces
+      // are clockwise there and counter-clockwise on the canvas, matching Metal.
+      const clip_y_flip = this.texture_pass_front_face_cw ? 1 : 0;
+      if (shader.clip_y_flip_loc && shader._clip_y_flip !== clip_y_flip) {
+        gl.uniform1f(shader.clip_y_flip_loc, clip_y_flip);
+        shader._clip_y_flip = clip_y_flip;
+      }
       gl.frontFace(this.texture_pass_front_face_cw ? gl.CW : gl.CCW);
       gl.bindVertexArray(vao.gl_vao);
       vao_bound = true;
@@ -3682,6 +3691,7 @@ export class WasmWebGL extends WasmWebBrowser {
       this.ensure_video_animation_frame();
     }
   }
+  // @end video-playback
 
   handle_device_pixel_ratio_change() {
     const next = makepad_device_pixel_ratio(window.devicePixelRatio);
@@ -3700,7 +3710,6 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     return true;
   }
-  // @end video-playback
 
   release_device_pixel_ratio_media_query() {
     const mq = this._dpr_media_query;

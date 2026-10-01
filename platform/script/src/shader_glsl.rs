@@ -209,6 +209,13 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         // Keep the vertex position register available as a global for shaders
         // that write `self.pos` directly instead of returning a vec4 from io_vertex().
         writeln!(out, "vec4 vtx_pos;").ok();
+        // The platform's Y law for render targets stored bottom-up (WebGL's
+        // framebuffers): the host sets this to 1 for a texture pass, and the
+        // clip position's Y is inverted after the shader's own vertex code,
+        // so every shader lands texels in the top-left row order Metal and
+        // D3D produce, whether it projects through the pass camera or writes
+        // clip space itself. Never set (0) it changes nothing.
+        writeln!(out, "uniform float mp_clip_y_flip;").ok();
         for io in &self.io {
             let type_name = self.glsl_type_name_from_ty(vm, io.ty);
             let io_name = self.backend.map_io_name(io.name);
@@ -486,7 +493,11 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
                 writeln!(out, "    {} = {};", dst, src).ok();
             }
         }
-        writeln!(out, "    gl_Position = vtx_pos;").ok();
+        writeln!(
+            out,
+            "    gl_Position = mp_clip_y_flip > 0.5 ? vec4(vtx_pos.x, -vtx_pos.y, vtx_pos.z, vtx_pos.w) : vtx_pos;"
+        )
+        .ok();
         writeln!(out, "}}").ok();
     }
 

@@ -393,6 +393,16 @@ impl Cx {
                     }
                 }
 
+                live_id!(ToWasmGpuFrameTimes) => {
+                    let tw = ToWasmGpuFrameTimes::read_to_wasm(&mut to_wasm);
+                    for (start, ms) in tw.starts.iter().zip(&tw.times) {
+                        self.os.gpu_timer_frame += 1;
+                        let frame = self.os.gpu_timer_frame;
+                        crate::gpu_frame_timer::record_pass(frame, "frame", start / 1000.0, (start + ms) / 1000.0);
+                        crate::gpu_frame_timer::finish_frame(frame);
+                    }
+                }
+
                 live_id!(ToWasmModuleLinked) => {
                     let tw = ToWasmModuleLinked::read_to_wasm(&mut to_wasm);
                     super::wasm_link::linked(tw.request_id, tw.slots, tw.error);
@@ -947,10 +957,25 @@ impl Cx {
             if self.need_redrawing() {
                 self.call_draw_event(time);
             }
+            // Frame completion is polled by the frame loop, not left to the
+            // application: the upload budget frees a draw item's previous
+            // buffer only once the GPU is past its last draw, so a serial
+            // that is never polled turns the budget into a count of every
+            // upload (an animated scene filled it within seconds and every
+            // draw was refused from then on). Once before the repaint, so this
+            // frame's collection sees the last completion, and once after, so
+            // this frame's fence is issued at once.
+            let timing = crate::gpu_frame_timer::enabled();
+            if timing != self.os.gpu_timer_on {
+                self.os.gpu_timer_on = timing;
+                self.os.from_wasm(FromWasmGpuFrameTimer { on: timing });
+            }
+            self.poll_texture_lifetimes();
             // Draw-event teardown may have freed passes/lists/resources. Drain
             // them before computing and encoding this frame's pass graph.
             self.retire_webgl_resources();
             self.handle_repaint(time);
+            self.poll_texture_lifetimes();
         }
 
         if network_responses.len() != 0 {
@@ -1494,6 +1519,7 @@ impl CxOsApi for Cx {
             ToWasmTextCopy::to_js_code(),
             ToWasmStorageResult::to_js_code(),
             ToWasmModuleLinked::to_js_code(),
+            ToWasmGpuFrameTimes::to_js_code(),
             ToWasmRenderTextureCapture::to_js_code(),
             ToWasmGpuCompletion::to_js_code(),
             ToWasmTimerFired::to_js_code(),
@@ -1543,6 +1569,7 @@ impl CxOsApi for Cx {
             FromWasmTextCopyResponse::to_js_code(),
             FromWasmStorageGet::to_js_code(),
             FromWasmLinkModule::to_js_code(),
+            FromWasmGpuFrameTimer::to_js_code(),
             FromWasmUnlinkSlots::to_js_code(),
             FromWasmStorageSet::to_js_code(),
             FromWasmStorageDelete::to_js_code(),
@@ -1698,6 +1725,9 @@ pub struct CxOs {
     /// linked or failed (`ToWasmWebGLShadersDone`). While non-zero, draw calls
     /// on those programs are dropped by the browser side.
     pub(crate) webgl_shaders_pending: usize,
+    /// The page measures frames' GPU time (`gpu_frame_timer` is on).
+    pub(crate) gpu_timer_on: bool,
+    pub(crate) gpu_timer_frame: u64,
     pub(crate) completion_pending: u64,
 
     pub(crate) to_wasm_js: Vec<String>,
@@ -1727,6 +1757,8 @@ impl Default for CxOs {
             index_buffers: 0,
             vaos: 0,
             webgl_shaders_pending: 0,
+            gpu_timer_on: false,
+            gpu_timer_frame: 0,
             completion_pending: 0,
 
             to_wasm_js: Vec::new(),

@@ -978,6 +978,15 @@ impl Cx {
         CxRef(self.self_ref.clone().unwrap())
     }
 
+    /// Supplies a dependency's bytes by its dependency path (as a package
+    /// names it, e.g. `makepad_widgets/resources/Inter.ttf`), so loads of it
+    /// are answered from memory instead of the file system or the network
+    /// (an app that carries its resources in its own data, such as a
+    /// self-contained web build). Takes effect for loads that start after.
+    pub fn provide_dependency(&mut self, path: &str, data: Rc<Vec<u8>>) {
+        self.dependencies.insert(path.to_string(), crate::cx::CxDependency { data: Some(Ok(data)) });
+    }
+
     pub fn take_dependency(&mut self, path: &str) -> Result<Rc<Vec<u8>>, String> {
         if let Some(data) = self.dependencies.get_mut(path) {
             if let Some(data) = data.data.take() {

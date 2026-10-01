@@ -83,6 +83,13 @@ pub struct FromWasmTextCopyResponse {
     pub response: String,
 }
 
+/// Measure each frame's GPU time where the browser offers a timer query
+/// (EXT_disjoint_timer_query_webgl2), for `gpu_frame_timer`.
+#[derive(FromWasm)]
+pub struct FromWasmGpuFrameTimer {
+    pub on: bool,
+}
+
 /// A runtime-generated module to instantiate against this module's memory
 /// and link into its function table (see `wasm_link`).
 #[derive(FromWasm)]

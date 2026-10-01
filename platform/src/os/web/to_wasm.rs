@@ -562,6 +562,14 @@ impl Into<TextInputEvent> for ToWasmTextInput {
 #[derive(ToWasm)]
 pub struct ToWasmTextCopy {}
 
+/// Finished frames' GPU times (timer queries, read a few frames late):
+/// the frame's start (ms, the page clock) and its GPU time (ms).
+#[derive(ToWasm)]
+pub struct ToWasmGpuFrameTimes {
+    pub starts: Vec<f64>,
+    pub times: Vec<f64>,
+}
+
 /// A link request's answer: the table slot of each export, or an error.
 #[derive(ToWasm)]
 pub struct ToWasmModuleLinked {

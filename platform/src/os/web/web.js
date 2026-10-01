@@ -1214,11 +1214,70 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.xr !== undefined) {
                 return
             }
+            this.gpu_timer_poll();
+            const gpu_query = this.gpu_timer_begin();
             this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0 });
             this.in_animation_frame = true;
             this.do_wasm_pump();
             this.in_animation_frame = false;
+            this.gpu_timer_end(gpu_query);
         })
+    }
+
+    // Frame GPU time (gpu_frame_timer): one TIME_ELAPSED query around each
+    // animation frame's GL work, read when the GPU has it (a few frames
+    // later). Browsers without EXT_disjoint_timer_query_webgl2 (Safari,
+    // Firefox by default) report nothing.
+    FromWasmGpuFrameTimer(args) {
+        this.gpu_timer_on = args.on;
+    }
+
+    gpu_timer_begin() {
+        const gl = this.gl;
+        if (!this.gpu_timer_on || !gl || this.webgl_context_lost) {
+            return null;
+        }
+        if (this.gpu_timer_ext === undefined) {
+            this.gpu_timer_ext = gl.getExtension("EXT_disjoint_timer_query_webgl2") || null;
+            this.gpu_timer_pending = [];
+        }
+        if (!this.gpu_timer_ext || this.gpu_timer_pending.length >= 4) {
+            return null;
+        }
+        const query = gl.createQuery();
+        gl.beginQuery(this.gpu_timer_ext.TIME_ELAPSED_EXT, query);
+        return { query, start: performance.now() };
+    }
+
+    gpu_timer_end(entry) {
+        if (!entry || this.webgl_context_lost) {
+            return;
+        }
+        this.gl.endQuery(this.gpu_timer_ext.TIME_ELAPSED_EXT);
+        this.gpu_timer_pending.push(entry);
+    }
+
+    gpu_timer_poll() {
+        const gl = this.gl;
+        const pending = this.gpu_timer_pending;
+        if (!pending || pending.length === 0 || this.webgl_context_lost) {
+            return;
+        }
+        const disjoint = gl.getParameter(this.gpu_timer_ext.GPU_DISJOINT_EXT);
+        const starts = [];
+        const times = [];
+        while (pending.length > 0 && gl.getQueryParameter(pending[0].query, gl.QUERY_RESULT_AVAILABLE)) {
+            const entry = pending.shift();
+            const ns = gl.getQueryParameter(entry.query, gl.QUERY_RESULT);
+            gl.deleteQuery(entry.query);
+            if (!disjoint) {
+                starts.push(entry.start);
+                times.push(ns / 1e6);
+            }
+        }
+        if (starts.length > 0) {
+            this.to_wasm.ToWasmGpuFrameTimes({ starts, times });
+        }
     }
 
     FromWasmSetDocumentTitle(args) {
@@ -1301,6 +1360,7 @@ export class WasmWebBrowser extends WasmBridge {
             request.onerror = () => reject(request.error || new Error("IndexedDB request failed"));
         });
     }
+    // @end storage
 
     // Runtime-generated modules (wasm_link.rs): instantiated against our
     // memory, their exports placed in our function table and called from
@@ -1358,7 +1418,6 @@ export class WasmWebBrowser extends WasmBridge {
             this.storage_send_result(args, 0, { error: this.storage_error_text(error) });
         });
     }
-    // @end storage
 
     FromWasmStorageSet(args) {
         const value = this.clone_data_u8(args.value);
@@ -1552,6 +1611,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.free_data_u8(args.data);
     }
+    // @end websocket
 
     dispose_audio_worklet(audio_worklet) {
         if (!audio_worklet) {
@@ -1617,7 +1677,6 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }, 3000);
     }
-    // @end websocket
 
     resume_audio_from_gesture() {
         if (this.webgl_context_lost) {
@@ -1948,6 +2007,7 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmStartPresentingXR() {
 
     }
+    // @end xr
 
     alloc_thread_stack(request_id, context_ptr, requested_stack_size) {
         if (!this.wasm._has_thread_support) {
@@ -2004,7 +2064,6 @@ export class WasmWebBrowser extends WasmBridge {
         }
         return ret;
     }
-    // @end xr
 
     // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
     // https://github.com/Zaplib/zaplib/blob/650305c856ea64d9c2324cbd4b8751ffbb971ac3/zaplib/cargo-zaplib/src/build.rs#L48
@@ -2210,6 +2269,7 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }
     }
+    // @end legacy-http
 
     id_to_key(id_lo, id_hi) {
         return `${id_lo}:${id_hi}`;
@@ -2237,7 +2297,6 @@ export class WasmWebBrowser extends WasmBridge {
         copy.set(u8);
         return copy;
     }
-    // @end legacy-http
 
     js_network_http_request(
         request_id_lo,
@@ -3101,6 +3160,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.do_wasm_pump();
     }
+    // @end permissions
 
     // calling into wasm
 
@@ -3162,7 +3222,6 @@ export class WasmWebBrowser extends WasmBridge {
             throw error;
         }
     }
-    // @end permissions
 
 
     wasm_process_msg(to_wasm) {
@@ -3278,6 +3337,7 @@ export class WasmWebBrowser extends WasmBridge {
     query_xr_capabilities() {
         return Promise.all([]);
     }
+    // @end xr
 
     bind_screen_resize() {
         this.handlers.on_screen_resize = () => {
@@ -3312,7 +3372,6 @@ export class WasmWebBrowser extends WasmBridge {
         document.addEventListener('fullscreenchange', _ => this.handlers.on_screen_resize())
         document.addEventListener('webkitfullscreenchange', _ => this.handlers.on_screen_resize())
     }
-    // @end xr
 
     bind_mouse_and_touch() {
 
