@@ -278,7 +278,7 @@ impl fmt::Display for LiveId {
         else {
             self.as_string(|string| {
                 if let Some(id) = string {
-                    write!(f, "{}", id)
+                    f.write_str(id)
                 } else {
                     write!(f, "{:016x}", self.0)
                 }
