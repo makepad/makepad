@@ -196,6 +196,8 @@ pub struct PassNode {
     pub reads: Vec<Resource>,
     /// Output size relative to the frame (0.5 = half resolution).
     pub scale: f32,
+    /// `scale` is of a frame this tall instead of the frame.
+    pub scale_height: Option<f32>,
     /// A fixed size in pixels instead (simulation state, a lookup).
     pub size: Option<(u32, u32)>,
     pub format: Format,
@@ -440,7 +442,7 @@ impl FramePlan {
                 let v = Version(targets.len() as u32);
                 let px = match node.size {
                     Some((w, h)) => (w.clamp(1, 16384), h.clamp(1, 16384)),
-                    None => scaled(size, node.scale),
+                    None => scaled(size, node.scale * node.scale_height.map_or(1.0, |h| h / size.1.max(1) as f32)),
                 };
                 targets.push(TargetDesc { format: node.format, scale: node.scale, size: px, writer: id });
                 match node.name {
@@ -464,6 +466,7 @@ impl FramePlan {
                 }
                 (stage, &node.reads, node.name, node.format, node.program, node.history, node.size, &node.outputs).hash(&mut hasher);
                 node.scale.to_bits().hash(&mut hasher);
+                node.scale_height.map(f32::to_bits).hash(&mut hasher);
                 passes.push(PlannedPass { id, node: ni, stage, inputs, output: v, extra, size: px });
             }
             stage_color[si] = color;
@@ -524,6 +527,7 @@ mod tests {
             stage,
             reads: reads.iter().map(|r| Resource::by_name(r)).collect(),
             scale,
+            scale_height: None,
             format: Format::default_for(stage),
             program: ProgramId(reads.len() as u64),
             history: false,

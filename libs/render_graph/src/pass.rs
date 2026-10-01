@@ -81,6 +81,11 @@ pub struct PassDecl {
     /// times this (0.5: a quarter of the pixels), in renders and exports at
     /// `scale` (the same shader, so exports are untouched). 1 by default.
     pub preview_scale: f32,
+    /// `scale_height`: `scale` is of a frame this many pixels tall instead
+    /// of the frame (a bloom pyramid's levels keep their size, so the light
+    /// spreads over the same part of the picture at 720p as at 1080p). At
+    /// that height it is `scale` exactly.
+    pub scale_height: Option<f32>,
     /// A fixed output size in pixels (simulation state, a lookup) instead
     /// of `scale`.
     pub size: Option<(u32, u32)>,
@@ -291,7 +296,7 @@ pub fn namespace(decls: &mut [PassDecl], prefix: &str) {
 /// Whether `d` can run inside a fused pass: a `map` pass writing the frame
 /// colour at the frame's size, nothing else.
 fn fusable(d: &PassDecl) -> bool {
-    d.map && d.name.is_none() && d.scale == 1.0 && d.preview_scale == 1.0 && d.size.is_none() && d.format.is_none() && d.outputs.is_empty() && !d.history
+    d.map && d.name.is_none() && d.scale == 1.0 && d.scale_height.is_none() && d.preview_scale == 1.0 && d.size.is_none() && d.format.is_none() && d.outputs.is_empty() && !d.history
         && d.reads.first().is_some_and(|r| r == "color") && d.slot(0) == "color"
 }
 
@@ -420,6 +425,7 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
             slots,
             scale: 1.0,
             preview_scale: 1.0,
+            scale_height: None,
             size: None,
             format: None,
             uniforms,
@@ -450,6 +456,7 @@ mod tests {
             slots: Vec::new(),
             scale: 1.0,
             preview_scale: 1.0,
+            scale_height: None,
             size: None,
             format: None,
             uniforms: uniforms.iter().map(|u| UniformDecl { name: u.to_string(), width: 1 }).collect(),
@@ -489,6 +496,7 @@ mod tests {
             slots: Vec::new(),
             scale: 0.5,
             preview_scale: 1.0,
+            scale_height: None,
             size: None,
             format: None,
             uniforms: vec![UniformDecl { name: "amount".into(), width: 1 }, UniformDecl { name: "tint".into(), width: 4 }],

@@ -201,7 +201,10 @@ $M.kit_glow = fn(p) {
 // 1/16 level's luma, tinted by `halation_tint`: linear 1, 0.18, 0.04), added too.
 // `compress` (0..1): very bright light spreads less (what passes the
 // threshold is divided by 1 + its brightness): a small hot core glows
-// instead of flooding the frame.
+// instead of flooding the frame. The pyramid's levels are sized for a
+// 1080p frame whatever the frame (`scale_height: 1080`), so the light
+// spreads over the same part of the picture at any size: a 720p preview or
+// the web player looks as the 1080p export does.
 $M.Bloom = $M.Bloom{strength: 0.7 threshold: 0.85 knee: 0.5 radius: 0.75 halation: 0 halation_tint: #ff7638 compress: 0}
 $M.kit_bloom = fn(p) {
     // The pyramid's filters are the render graph's BloomDown13 and BloomTent.
@@ -213,7 +216,7 @@ $M.kit_bloom = fn(p) {
         return vec4(self.same.sample(self.uv()).xyz + self.bloom_tent(self.uv(), self.texel() * 0.5 * (0.5 + self.radius)), 1.0)
     }
     return [
-        {at: @hdr name: "d0" reads: [@color] slots: ["source"] scale: 0.5 uniforms: {threshold: p.threshold knee: p.knee compress: p.compress}
+        {at: @hdr name: "d0" reads: [@color] slots: ["source"] scale: 0.5 scale_height: 1080 uniforms: {threshold: p.threshold knee: p.knee compress: p.compress}
             pixel: fn() -> vec4 {
                 let t = self.texel() * 0.25
                 let uv = self.uv()
@@ -226,18 +229,18 @@ $M.kit_bloom = fn(p) {
                 let w = max(rq, l - self.threshold) / max(l, 0.0001)
                 return vec4(s * w / (1.0 + l * w * self.compress), 1.0)
             }}
-        {at: @hdr name: "d1" reads: ["d0"] slots: ["src"] scale: 0.25 helpers: down_taps pixel: down}
-        {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125 helpers: down_taps pixel: down}
-        {at: @hdr name: "d3" reads: ["d2"] slots: ["src"] scale: 0.0625 helpers: down_taps pixel: down}
-        {at: @hdr name: "d4" reads: ["d3"] slots: ["src"] scale: 0.03125 helpers: down_taps pixel: down}
-        {at: @hdr name: "d5" reads: ["d4"] slots: ["src"] scale: 0.015625 helpers: down_taps pixel: down}
-        {at: @hdr name: "d6" reads: ["d5"] slots: ["src"] scale: 0.0078125 helpers: down_taps pixel: down}
-        {at: @hdr name: "u5" reads: ["d6", "d5"] slots: ["small", "same"] scale: 0.015625 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
-        {at: @hdr name: "u4" reads: ["u5", "d4"] slots: ["small", "same"] scale: 0.03125 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
-        {at: @hdr name: "u3" reads: ["u4", "d3"] slots: ["small", "same"] scale: 0.0625 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
-        {at: @hdr name: "u2" reads: ["u3", "d2"] slots: ["small", "same"] scale: 0.125 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
-        {at: @hdr name: "u1" reads: ["u2", "d1"] slots: ["small", "same"] scale: 0.25 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
-        {at: @hdr name: "u0" reads: ["u1", "d0"] slots: ["small", "same"] scale: 0.5 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "d1" reads: ["d0"] slots: ["src"] scale: 0.25 scale_height: 1080 helpers: down_taps pixel: down}
+        {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125 scale_height: 1080 helpers: down_taps pixel: down}
+        {at: @hdr name: "d3" reads: ["d2"] slots: ["src"] scale: 0.0625 scale_height: 1080 helpers: down_taps pixel: down}
+        {at: @hdr name: "d4" reads: ["d3"] slots: ["src"] scale: 0.03125 scale_height: 1080 helpers: down_taps pixel: down}
+        {at: @hdr name: "d5" reads: ["d4"] slots: ["src"] scale: 0.015625 scale_height: 1080 helpers: down_taps pixel: down}
+        {at: @hdr name: "d6" reads: ["d5"] slots: ["src"] scale: 0.0078125 scale_height: 1080 helpers: down_taps pixel: down}
+        {at: @hdr name: "u5" reads: ["d6", "d5"] slots: ["small", "same"] scale: 0.015625 scale_height: 1080 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u4" reads: ["u5", "d4"] slots: ["small", "same"] scale: 0.03125 scale_height: 1080 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u3" reads: ["u4", "d3"] slots: ["small", "same"] scale: 0.0625 scale_height: 1080 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u2" reads: ["u3", "d2"] slots: ["small", "same"] scale: 0.125 scale_height: 1080 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u1" reads: ["u2", "d1"] slots: ["small", "same"] scale: 0.25 scale_height: 1080 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u0" reads: ["u1", "d0"] slots: ["small", "same"] scale: 0.5 scale_height: 1080 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
         {map: true at: @hdr reads: [@color, "u0", "u3"] slots: ["color", "bloom", "wide"] uniforms: {strength: p.strength halation: p.halation tint: p.halation_tint}
             pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())
