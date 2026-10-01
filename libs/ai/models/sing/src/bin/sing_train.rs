@@ -546,7 +546,17 @@ fn main() {
                         params.insert(n, (**t).clone());
                     }
                 }
-                cfg = w.config.clone();
+                // Each file's own section of the config (a small acoustic model with
+                // a base vocoder); the other section only where nothing set it yet.
+                let own = if key == "--ac" { "ac." } else { "voc." };
+                for (k, v) in &w.config {
+                    let set = cfg.iter().position(|(k2, _)| k2 == k);
+                    match set {
+                        Some(i) if k.starts_with(own) => cfg[i].1 = v.clone(),
+                        None => cfg.push((k.clone(), v.clone())),
+                        _ => {}
+                    }
+                }
             }
         }
         let ac = AcousticConfig::from_kv(&makepad_ai_sing::weights::section(&cfg, "ac.")).expect("acoustic config");
@@ -835,13 +845,22 @@ fn main() {
             };
             let patience = a.num("--patience", 4usize);
             let val: Val = if held.is_empty() { None } else { Some((&val_fn, patience)) };
+            let keep = a.flag("--keep");
             let ac_c = ac.clone();
             let (acc, vc) = (ac.clone(), voc.clone());
             let outc = out.clone();
             run("ac", &mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &AcBatch, r| {
                 let l = train::acoustic_loss(g, &ac_c, b, r);
                 vec![("total", l.total), ("mel", l.mel), ("dur", l.dur), ("f0", l.f0), ("voicing", l.voicing), ("flow", l.flow), ("prior", l.prior)]
-            }, &|o, step| sample_render(&outc, step, Some(&o.ema_params()), voc_params.as_ref(), &acc, &vc, None), val);
+            }, &|o, step| {
+                // --keep: every save also leaves the EMA weights as ac-<step>.ema.mksing.
+                if keep {
+                    let mut kv = cfg_kv.clone();
+                    kv.push(("step".into(), step.to_string()));
+                    makepad_ai_sing::weights::write(&outc.join(format!("ac-{step:07}.ema.mksing")), &kv, &o.ema_params(), makepad_ai_sing::weights::Dtype::F32).expect("kept checkpoint");
+                }
+                sample_render(&outc, step, Some(&o.ema_params()), voc_params.as_ref(), &acc, &vc, None)
+            }, val);
         }
         _ => {
             eprintln!("usage: sing_train check | t0 | voc | ac  (see the file header)");
