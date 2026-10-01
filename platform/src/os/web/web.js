@@ -698,6 +698,13 @@ function makepad_create_crash_reporter() {
                     return Promise.resolve(true);
                 }
                 if (makepad_is_wasm_trap(kind, data)) {
+                    // A build whose panics are plain traps (a published film)
+                    // names no message: the function and code offset look the
+                    // panic up in the build's symbol file.
+                    const site = /wasm-function\[(\d+)\]:0x([0-9a-f]+)/i.exec(makepad_report_stack(data));
+                    if (site) {
+                        console.error(`makepad: wasm trap in function ${site[1]} at 0x${site[2]} (see the build's film.symbols)`);
+                    }
                     reporter.mark_wasm_dead(data);
                     const panic = take_pending_panic();
                     if (panic) {
