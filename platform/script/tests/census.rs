@@ -66,3 +66,24 @@ fn the_app_crate_is_a_root_with_everything_it_names() {
     assert!(used.used.contains_key("lib::window"), "what the app names is used: {used:?}");
     assert!(!used.used.contains_key("lib::unused"), "{used:?}");
 }
+
+#[test]
+fn a_registration_that_patches_a_used_definition_is_used() {
+    let vm = &mut test_vm();
+    vm.new_module(id!(cz));
+    vm.census_record();
+    // `hardware` sets no name of its own: it replaces a field of `sampling`'s
+    // definition (render's hardware shadow sampling), and `shader` spreads it.
+    register(vm, "t::sampling", "mod.cz.Sampling = {map: {kind: 1}}");
+    register(vm, "t::hardware", "mod.cz.Sampling.map = {kind: 2}");
+    register(vm, "t::shader", "mod.cz.Shader = {..mod.cz.Sampling}");
+    register(vm, "t::unused", "mod.cz.Unused = {x: 3}");
+    let app = vm.eval(script("app", "app", "let held = mod.cz.Shader{}\nheld"));
+    if let Some(obj) = app.as_object() {
+        std::mem::forget(vm.bx.heap.new_object_ref(obj));
+    }
+    let used = makepad_script::census::census_used(vm).expect("recording");
+    assert!(used.used.contains_key("t::sampling"), "{used:?}");
+    assert!(used.used.contains_key("t::hardware"), "a patch of a used definition must stay: {used:?}");
+    assert!(!used.used.contains_key("t::unused"), "{used:?}");
+}

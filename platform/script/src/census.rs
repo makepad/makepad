@@ -373,6 +373,16 @@ pub fn census_used_from(vm: &mut ScriptVm, app_crates: &[&str]) -> Option<Module
                     fresh.push(*m);
                 }
                 label.insert(to, *m);
+            } else if let Some(m) = census.made.get(&to).copied().filter(|m| !used.contains_key(m)) {
+                // An object a registration made, reached from something in
+                // use, uses that registration even without a top of its own:
+                // one that patches another module's definition
+                // (`mod.draw.LocalShadowSampling.local_shadow_map = …`, render's
+                // hardware shadow sampling) made what the patched definition
+                // now holds, and the build without it makes other shaders.
+                used.insert(m, from_label.map_or_else(|| "the app's script".to_string(), name));
+                fresh.push(m);
+                label.insert(to, m);
             } else if let Some(l) = from_label {
                 label.insert(to, l);
             }
