@@ -227,9 +227,19 @@ pub struct ScriptTokenPos {
     /// True if any whitespace separated this token from the previous one.
     /// Inside an array literal `[a] [b]` is two elements, `a[b]` an index.
     pub preceded_by_space: bool,
+    /// The characters the token was written in, as char indices into the
+    /// source (`start` first character, `end` one past the last). Exact for
+    /// every token but an unterminated string.
+    start: u32,
+    end: u32,
 }
 
 impl ScriptTokenPos {
+    /// The token's characters in the source, as char indices.
+    pub fn span(&self) -> std::ops::Range<usize> {
+        self.start as usize..self.end as usize
+    }
+
     /// Where the token starts in its body's code (a character index).
     pub fn pos(&self) -> usize {
         self.pos
@@ -272,6 +282,36 @@ enum State {
     Color,
 }
 
+impl State {
+    /// A token is being lexed (not whitespace or a comment).
+    fn lexing_token(&self) -> bool {
+        matches!(
+            self,
+            State::Identifier
+                | State::Operator
+                | State::RustValue
+                | State::Number
+                | State::Color
+                | State::String(_)
+                | State::EscapeInString(_)
+                | State::UnicodeHexInString(_)
+                | State::UnicodeCurlyInString(_)
+                | State::AsciiHexInString(_)
+        )
+    }
+
+    fn in_string(&self) -> bool {
+        matches!(
+            self,
+            State::String(_)
+                | State::EscapeInString(_)
+                | State::UnicodeHexInString(_)
+                | State::UnicodeCurlyInString(_)
+                | State::AsciiHexInString(_)
+        )
+    }
+}
+
 #[derive(Default)]
 pub struct ScriptTokenizer {
     pos: usize,
@@ -299,6 +339,10 @@ pub struct ScriptTokenizer {
     unfinished: String,
     temp: String,
     state: State,
+    /// First character of the token being lexed, and one past its last
+    /// when it is emitted (see `ScriptTokenPos::span`).
+    lex_start: usize,
+    tok_end: usize,
 }
 
 pub struct ScriptLoc {
@@ -318,7 +362,9 @@ impl ScriptTokenizer {
         self.line_starts.clear();
         self.unfinished.clear();
         self.temp.clear();
-        self.state = State::Whitespace
+        self.state = State::Whitespace;
+        self.lex_start = 0;
+        self.tok_end = 0;
     }
 
     /// Iterate over all string values in the token stream.
@@ -356,6 +402,8 @@ impl ScriptTokenizer {
             pos,
             preceded_by_newline,
             preceded_by_space,
+            start: self.lex_start as u32,
+            end: self.tok_end as u32,
         });
     }
 
@@ -429,6 +477,7 @@ impl ScriptTokenizer {
         let space_pending = self.space_pending;
         let temp = self.temp.clone();
         let state = self.state.clone();
+        let (lex_start, tok_end) = (self.lex_start, self.tok_end);
         let (tokens_len, docs_len, original_len, lines_len) =
             (self.tokens.len(), self.docs.len(), self.original.len(), self.line_starts.len());
         self.tokenize("\n", heap);
@@ -438,6 +487,8 @@ impl ScriptTokenizer {
         self.space_pending = space_pending;
         self.temp = temp;
         self.state = state;
+        self.lex_start = lex_start;
+        self.tok_end = tok_end;
         self.tokens.truncate(tokens_len);
         self.docs.truncate(docs_len);
         self.original.truncate(original_len);
@@ -587,6 +638,8 @@ impl ScriptTokenizer {
         if self.temp.len() != 0 {
             panic!()
         }
+        self.lex_start = self.pos.saturating_sub(1);
+        self.tok_end = self.pos;
         self.temp.push(c);
         let id = match LiveId::from_str_with_lut(&self.temp) {
             Err(str) => {
@@ -621,6 +674,8 @@ impl ScriptTokenizer {
     /// has already advanced `pos` past it, so its position is one back;
     /// every other token records its first character the same way.
     fn emit_token_here(&mut self, token: ScriptToken) {
+        self.lex_start = self.pos.saturating_sub(1);
+        self.tok_end = self.pos;
         self.push_tok(self.pos.saturating_sub(1), token)
     }
 
@@ -655,6 +710,7 @@ impl ScriptTokenizer {
     }
 
     fn finish_string(&mut self, heap: &mut ScriptHeap) {
+        self.tok_end = self.pos;
         if let Some(ScriptTokenPos {
             token: ScriptToken::StringUnfinished,
             ..
@@ -729,6 +785,10 @@ impl ScriptTokenizer {
         while let Some(c) = iter.next() {
             self.original.push(c);
             self.pos += 1;
+            self.tok_end = self.pos - 1;
+            let was_lexing = self.state.lexing_token() && !(self.state == State::Operator && self.temp.is_empty());
+            let was_in_string = self.state.in_string();
+            let tokens_before = self.tokens.len();
             if c == '\n' {
                 self.line_starts.push(self.pos as u32);
             }
@@ -906,6 +966,7 @@ impl ScriptTokenizer {
                     // Emit complete operators that can't be extended
                     else if is_valid_operator(&self.temp) && !could_be_operator_prefix(&self.temp)
                     {
+                        self.tok_end = self.pos;
                         self.emit_operator();
                     }
                 }
@@ -1071,9 +1132,12 @@ impl ScriptTokenizer {
                         self.temp.push(c);
                     } else if c == '.' && self.temp.chars().last() == Some('.') {
                         self.temp.pop();
+                        self.tok_end = self.lex_start + self.temp.chars().count();
                         self.emit_f64();
                         self.temp.push('.');
                         self.temp.push('.');
+                        self.lex_start = self.pos - 2;
+                        self.tok_end = self.pos;
                         self.emit_operator();
                         self.state = State::Whitespace
                     } else if c == '.' && self.temp.chars().position(|v| v == '.').is_none() {
@@ -1100,15 +1164,19 @@ impl ScriptTokenizer {
                     {
                         self.temp.push(c);
                     } else if c == 'f' {
+                        self.tok_end = self.pos;
                         self.emit_f32();
                         self.state = State::Whitespace
                     } else if c == 'u' {
+                        self.tok_end = self.pos;
                         self.emit_u32();
                         self.state = State::Whitespace
                     } else if c == 'i' {
+                        self.tok_end = self.pos;
                         self.emit_i32();
                         self.state = State::Whitespace
                     } else if c == 'h' {
+                        self.tok_end = self.pos;
                         self.emit_f16();
                         self.state = State::Whitespace
                     } else if c == '_' {
@@ -1162,6 +1230,7 @@ impl ScriptTokenizer {
                     } else if c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F' {
                         self.temp.push(c);
                         if self.temp.len() == 8 {
+                            self.tok_end = self.pos;
                             self.emit_color();
                             self.state = State::Whitespace
                         }
@@ -1198,6 +1267,14 @@ impl ScriptTokenizer {
                     }
                 }
             }
+            // A token begins at this character when none was being lexed, or
+            // when this character ended the one that was.
+            if self.state.lexing_token()
+                && !was_in_string
+                && (!was_lexing || self.tokens.len() != tokens_before)
+            {
+                self.lex_start = self.pos - 1;
+            }
             // Register the newline AFTER this char's token emission, so a token
             // terminated BY this newline keeps whatever preceded it, and the flag
             // attaches to the NEXT token instead.
@@ -1210,6 +1287,47 @@ impl ScriptTokenizer {
         }
         &self.tokens[start..self.tokens.len()]
     }
+}
+
+/// One token of a source as the real tokenizer reads it, with the bytes it
+/// was written in. Nothing is evaluated or parsed.
+#[derive(Clone, Debug)]
+pub struct LexedToken {
+    pub token: ScriptToken,
+    /// Byte range in the source.
+    pub span: std::ops::Range<usize>,
+    /// A string token's value, escapes resolved.
+    pub string: Option<String>,
+    pub preceded_by_newline: bool,
+    pub preceded_by_space: bool,
+}
+
+/// The tokens of `source`, each with its byte range. Comments are not
+/// tokens: they stay in the gaps between ranges, so a host that edits by
+/// range keeps them. This is the tokenizer a script runs on, so anything
+/// the language reads as one token is one token here.
+pub fn lex(source: &str) -> Vec<LexedToken> {
+    let mut heap = ScriptHeap::default();
+    let mut tokenizer = ScriptTokenizer::default();
+    tokenizer.tokenize(source, &mut heap);
+    tokenizer.finish(&mut heap);
+    let mut bytes: Vec<usize> = source.char_indices().map(|(at, _)| at).collect();
+    bytes.push(source.len());
+    tokenizer
+        .tokens
+        .iter()
+        .map(|pos| {
+            let span = pos.span();
+            let string = pos.token.as_string().and_then(|value| heap.string_with(value, |_, text| text.to_string()));
+            LexedToken {
+                token: pos.token,
+                span: bytes[span.start.min(bytes.len() - 1)]..bytes[span.end.min(bytes.len() - 1)],
+                string,
+                preceded_by_newline: pos.preceded_by_newline,
+                preceded_by_space: pos.preceded_by_space,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1305,5 +1423,27 @@ mod tests {
         assert_eq!(tokenizer.tokens[0].token.as_u40(), Some(1));
         assert_eq!(tokenizer.tokens[1].token.as_u40(), Some(2));
         assert!(matches!(tokenizer.tokens[2].token, ScriptToken::Separator(_)));
+    }
+
+    #[test]
+    fn tokens_carry_the_exact_characters_they_were_written_in() {
+        let source = "Rect{a:-1.5 b: @ease_out c: #ff5a36, d: \"h\\\"i\" // note\n e: vec2(1..2) f: 1.0f g: x->y}\n";
+        let mut heap = ScriptHeap::default();
+        let mut tokenizer = ScriptTokenizer::default();
+        tokenizer.tokenize(source, &mut heap);
+        tokenizer.finish(&mut heap);
+        let chars: Vec<char> = source.chars().collect();
+        let texts: Vec<String> = tokenizer
+            .tokens
+            .iter()
+            .map(|token| chars[token.span()].iter().collect())
+            .collect();
+        assert_eq!(
+            texts,
+            [
+                "Rect", "{", "a", ":", "-", "1.5", "b", ":", "@", "ease_out", "c", ":", "#ff5a36", ",", "d", ":",
+                "\"h\\\"i\"", "e", ":", "vec2", "(", "1", "..", "2", ")", "f", ":", "1.0f", "g", ":", "x", "->", "y", "}"
+            ]
+        );
     }
 }
