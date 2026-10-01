@@ -513,33 +513,26 @@ impl Cx {
         let sploded = self.passes[draw_pass_id].sploded.is_some();
         let debug_dump_count = self.draw_lists[draw_list_id].debug_dump_count;
         let debug_dump = debug_dump_count > 0;
-        // An RGBA16Float colour target (an HDR scene pass) draws ordinary
-        // BGRA8-declared shaders through their float16 PSO variant.
-        let float16_target = self.passes[draw_pass_id]
-            .color_textures
-            .first()
-            .is_some_and(|ct| {
-                matches!(
-                    self.textures[ct.texture.texture_id()].format,
-                    crate::texture::TextureFormat::RenderRGBAf16 { .. }
-                )
-            });
-        // A pass with several color attachments (MRT) draws through
-        // pipelines built for exactly its attachment formats.
-        let mrt_formats: Option<Vec<MTLPixelFormat>> =
-            (self.passes[draw_pass_id].color_textures.len() > 1).then(|| {
-                self.passes[draw_pass_id]
-                    .color_textures
-                    .iter()
-                    .map(|ct| {
-                        self.textures[ct.texture.texture_id()]
-                            .alloc
-                            .as_ref()
-                            .map(|alloc| texture_pixel_to_mtl_pixel(&alloc.pixel))
-                            .unwrap_or(MTLPixelFormat::BGRA8Unorm)
-                    })
-                    .collect()
-            });
+        // The pass's attachment formats (a window draws into BGRA8): every
+        // draw uses a pipeline built for exactly them. A shader's own
+        // pipelines are built for its declared format ahead of time; a pass
+        // of other formats (an HDR scene target, a float data target, MRT)
+        // gets a variant built from the same functions on first use.
+        let target_formats: Vec<MTLPixelFormat> = if self.passes[draw_pass_id].color_textures.is_empty() {
+            vec![MTLPixelFormat::BGRA8Unorm]
+        } else {
+            self.passes[draw_pass_id]
+                .color_textures
+                .iter()
+                .map(|ct| {
+                    self.textures[ct.texture.texture_id()]
+                        .alloc
+                        .as_ref()
+                        .map(|alloc| texture_pixel_to_mtl_pixel(&alloc.pixel))
+                        .unwrap_or(MTLPixelFormat::BGRA8Unorm)
+                })
+                .collect()
+        };
         if self.draw_lists[draw_list_id].debug_dump {
             self.draw_lists[draw_list_id].debug_dump = false;
             self.draw_lists[draw_list_id].debug_dump_count = 6; // dump 6 consecutive frames
@@ -722,36 +715,23 @@ impl Cx {
                 }
                 encoders.set_scissor(encoder, draw_call.options.scissor);
 
-                let float16 = float16_target
-                    && mrt_formats.is_none()
-                    && matches!(shp.color_format, crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm);
-                if float16
-                    && !shp.pipelines.float16_queued.load(Ordering::Relaxed)
-                    && MetalPipelines::enqueue_float16(metal_cx.allocator(), metal_cx.device, &shp.pipelines)
-                {
-                    shp.pipelines.float16_queued.store(true, Ordering::Relaxed);
-                }
-                let mrt_variant;
-                let pipeline = if let Some(formats) = &mrt_formats {
+                let format_variant;
+                let declared = mtl_declared_format(shp.color_format);
+                let pipeline = if target_formats.len() == 1 && target_formats[0] == declared {
+                    if draw_call.options.alpha_blend { &shp.pipelines.blend } else { &shp.pipelines.solid }
+                } else {
                     if matches!(shp.pipelines.blend.get(), Some(Err(_))) {
                         continue; // the library itself failed (already reported)
                     }
                     let blend = draw_call.options.alpha_blend
                         && matches!(shp.color_format, crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm);
-                    mrt_variant = shp.pipelines.mrt_variant(formats, blend);
-                    if !mrt_variant.queued.load(Ordering::Relaxed)
-                        && MetalPipelines::enqueue_mrt(metal_cx.allocator(), metal_cx.device, &shp.pipelines, &mrt_variant)
+                    format_variant = shp.pipelines.mrt_variant(&target_formats, blend);
+                    if !format_variant.queued.load(Ordering::Relaxed)
+                        && MetalPipelines::enqueue_mrt(metal_cx.allocator(), metal_cx.device, &shp.pipelines, &format_variant)
                     {
-                        mrt_variant.queued.store(true, Ordering::Relaxed);
+                        format_variant.queued.store(true, Ordering::Relaxed);
                     }
-                    &mrt_variant.pipeline
-                } else {
-                    match (float16, draw_call.options.alpha_blend) {
-                        (false, true) => &shp.pipelines.blend,
-                        (false, false) => &shp.pipelines.solid,
-                        (true, true) => &shp.pipelines.float16_blend,
-                        (true, false) => &shp.pipelines.float16_solid,
-                    }
+                    &format_variant.pipeline
                 };
                 let render_pipeline_state = match pipeline.get() {
                     Some(Ok(pipeline)) => pipeline.as_id(),
@@ -2335,19 +2315,26 @@ impl Cx {
         let Some(os) = self.draw_shaders.shaders.get(shader.index).and_then(|s| s.os_shader_id) else { return false };
         let shp = &self.draw_shaders.os_shaders[os];
         if !matches!(shp.pipelines.solid.get(), Some(Ok(_))) { return false; }
-        if !float16 || !matches!(shp.color_format, crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm) { return true; }
-        // The HDR pair is built on first use; asking counts as a use.
-        shp.pipelines.float16_wanted.store(true, Ordering::Relaxed);
-        matches!(shp.pipelines.float16_solid.get(), Some(Ok(_)))
+        if !float16 || mtl_declared_format(shp.color_format) == MTLPixelFormat::RGBA16Float { return true; }
+        // The HDR variant is built on first use; asking counts as a use
+        // (`retry_metal_pipelines` queues what is wanted).
+        let blend = matches!(shp.color_format, crate::draw_shader::DrawShaderColorFormat::Bgra8Unorm);
+        let variant = shp.pipelines.mrt_variant(&[MTLPixelFormat::RGBA16Float], blend);
+        shp.pipelines.variant_wanted.store(true, Ordering::Relaxed);
+        matches!(variant.pipeline.get(), Some(Ok(_)))
     }
 
     fn retry_metal_pipelines(&mut self, metal_cx: &MetalCx) {
         for shader in &mut self.draw_shaders.os_shaders {
-            if shader.pipelines.float16_wanted.load(Ordering::Relaxed)
-                && !shader.pipelines.float16_queued.load(Ordering::Relaxed)
-                && MetalPipelines::enqueue_float16(metal_cx.allocator(), metal_cx.device, &shader.pipelines)
-            {
-                shader.pipelines.float16_queued.store(true, Ordering::Relaxed);
+            if shader.pipelines.variant_wanted.load(Ordering::Relaxed) {
+                let variants: Vec<_> = shader.pipelines.mrt.lock().unwrap().clone();
+                for variant in variants {
+                    if !variant.queued.load(Ordering::Relaxed)
+                        && MetalPipelines::enqueue_mrt(metal_cx.allocator(), metal_cx.device, &shader.pipelines, &variant)
+                    {
+                        variant.queued.store(true, Ordering::Relaxed);
+                    }
+                }
             }
             if !shader.compile_queued {
                 shader.compile_queued = MetalPipelines::enqueue(
@@ -4131,12 +4118,9 @@ struct MetalPipelines {
     /// pair for that attachment format is built on the first such draw, with
     /// the same premultiplied-over blend state.
     functions: std::sync::OnceLock<(RcObjcId, RcObjcId)>,
-    float16_queued: std::sync::atomic::AtomicBool,
-    /// Set by `metal_draw_shader_ready`: build the float16 pair before the
-    /// first draw asks for it.
-    float16_wanted: std::sync::atomic::AtomicBool,
-    float16_blend: std::sync::OnceLock<Result<RcObjcId, String>>,
-    float16_solid: std::sync::OnceLock<Result<RcObjcId, String>>,
+    /// Set by `metal_draw_shader_ready`: build the variants it asked for
+    /// before the first draw needs them.
+    variant_wanted: std::sync::atomic::AtomicBool,
     /// Bit `i` set when the shader writes color output `i`
     /// (`CxDrawShaderMapping::fragment_outputs`).
     written_outputs: u8,
@@ -4155,6 +4139,18 @@ struct MetalMrtPipeline {
     blend: bool,
     queued: std::sync::atomic::AtomicBool,
     pipeline: std::sync::OnceLock<Result<RcObjcId, String>>,
+}
+
+/// The attachment format a shader's own pipelines are built for (its
+/// `color_format`); a pass of any other formats draws it through a variant.
+fn mtl_declared_format(format: crate::draw_shader::DrawShaderColorFormat) -> MTLPixelFormat {
+    use crate::draw_shader::DrawShaderColorFormat as F;
+    match format {
+        F::Bgra8Unorm | F::Bgra8NoBlend => MTLPixelFormat::BGRA8Unorm,
+        F::Rf32 => MTLPixelFormat::R32Float,
+        F::Rgba16F => MTLPixelFormat::RGBA16Float,
+        F::Rgba32F => MTLPixelFormat::RGBA32Float,
+    }
 }
 
 /// Attachments the premultiplied-over blend applies to: four-channel
@@ -4214,9 +4210,7 @@ impl MetalPipelines {
         crate::shader_error::note(error.clone());
         crate::error!("Metal shader: {}", error);
         let _ = self.blend.set(Err(error.clone()));
-        let _ = self.solid.set(Err(error.clone()));
-        let _ = self.float16_blend.set(Err(error.clone()));
-        let _ = self.float16_solid.set(Err(error));
+        let _ = self.solid.set(Err(error));
         crate::thread::wake_ui_loop();
     }
 
@@ -4232,25 +4226,6 @@ impl MetalPipelines {
         let () = msg_send![color_attachment, setSourceAlphaBlendFactor: MTLBlendFactor::One];
         let () = msg_send![color_attachment, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
         let () = msg_send![color_attachment, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
-    }
-
-    /// Queue the RGBA16Float PSO pair for a `Bgra8Unorm` shader whose
-    /// functions exist. False when the allocator queue is full or the base
-    /// library is not compiled yet: the caller retries on a later frame.
-    fn enqueue_float16(
-        allocator: &crate::makepad_network::mpsc::SyncSender<MetalAllocationRequest>,
-        device: ObjcId,
-        ready: &Arc<Self>,
-    ) -> bool {
-        if ready.functions.get().is_none() {
-            return false;
-        }
-        allocator
-            .try_send(MetalAllocationRequest::Float16Pipelines(
-                RcObjcId::from_unowned(NonNull::new(device).unwrap()),
-                ready.clone(),
-            ))
-            .is_ok()
     }
 
     /// The MRT variant for a pass with attachment `formats`, created on
@@ -4329,58 +4304,6 @@ impl MetalPipelines {
         }
     }
 
-    /// Build the RGBA16Float PSO pair from the retained functions. Blending
-    /// on RGBA16Float is supported by every Metal GPU family.
-    fn compile_float16(device: ObjcId, ready: Arc<Self>) {
-        let Some((vertex_function, fragment_function)) = ready.functions.get() else {
-            return;
-        };
-        for blend in [true, false] {
-            let descriptor = RcObjcId::from_owned(unsafe {
-                msg_send![class!(MTLRenderPipelineDescriptor), new]
-            });
-            unsafe {
-                let _: () = msg_send![descriptor.as_id(), setVertexFunction: vertex_function.as_id()];
-                let _: () = msg_send![descriptor.as_id(), setFragmentFunction: fragment_function.as_id()];
-                let color_attachments: ObjcId = msg_send![descriptor.as_id(), colorAttachments];
-                let color_attachment: ObjcId =
-                    msg_send![color_attachments, objectAtIndexedSubscript: 0];
-                let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::RGBA16Float];
-                if blend {
-                    Self::set_over_blend(color_attachment, ready.blend_max);
-                } else {
-                    let () = msg_send![color_attachment, setBlendingEnabled: NO];
-                }
-                let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float];
-            }
-            let ready = ready.clone();
-            let completion = objc_block!(move |pipeline: ObjcId, error: ObjcId| {
-                let result = if let Some(pipeline) = NonNull::new(pipeline) {
-                    Ok(RcObjcId::from_unowned(pipeline))
-                } else {
-                    let message = if error == nil {
-                        "Metal returned no pipeline".into()
-                    } else {
-                        nsstring_to_string(unsafe { msg_send![error, localizedDescription] })
-                    };
-                    crate::error!("Metal float16 pipeline: {}", message);
-                    Err(message)
-                };
-                let _ = if blend {
-                    ready.float16_blend.set(result)
-                } else {
-                    ready.float16_solid.set(result)
-                };
-                crate::thread::wake_ui_loop();
-            });
-            unsafe {
-                let _: () = msg_send![device,
-                    newRenderPipelineStateWithDescriptor: descriptor.as_id()
-                    completionHandler: &completion];
-            }
-        }
-    }
-
     fn compile(
         device: ObjcId,
         source: String,
@@ -4431,8 +4354,8 @@ impl MetalPipelines {
             if let (Some(vertex_function), Some(fragment_function)) =
                 (vertex_function, fragment_function)
             {
-                // Kept for the variants built on first use: the float16 pair
-                // (Bgra8Unorm shaders only) and the MRT pipelines.
+                // Kept for the variants built on first use: the pipelines
+                // for passes of other attachment formats (an HDR target, MRT).
                 let _ = ready
                     .functions
                     .set((vertex_function.clone(), fragment_function.clone()));
@@ -5050,7 +4973,6 @@ enum MetalAllocationRequest {
     ),
     RetireInstances(MetalBuffer, Arc<AtomicUsize>, Option<crate::present_trace::Trace>),
     RenderSetup(RcObjcId, Arc<std::sync::OnceLock<Option<MetalRenderSetup>>>),
-    Float16Pipelines(RcObjcId, Arc<MetalPipelines>),
     MrtPipeline(RcObjcId, Arc<MetalPipelines>, Arc<MetalMrtPipeline>),
 }
 
@@ -5068,9 +4990,6 @@ fn spawn_allocator() -> (crate::makepad_network::mpsc::SyncSender<MetalAllocatio
                 match request {
                     MetalAllocationRequest::Pipelines(device, source, color_format, ready) => {
                         MetalPipelines::compile(device.as_id(), source, color_format, ready);
-                    }
-                    MetalAllocationRequest::Float16Pipelines(device, ready) => {
-                        MetalPipelines::compile_float16(device.as_id(), ready);
                     }
                     MetalAllocationRequest::MrtPipeline(device, ready, variant) => {
                         MetalPipelines::compile_mrt(device.as_id(), ready, variant);
