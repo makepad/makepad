@@ -1,0 +1,20 @@
+[package]
+name = "makepad-font-subset"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "TrueType subsetting that keeps glyph ids: the glyphs a set of shaped runs needs keep their outlines and variations, every other glyph is emptied, and the tables the runtime text stack never reads are dropped"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+# The same parser, shaper and segmentation as the draw crate's text stack, so
+# the closure shapes exactly as the runtime does.
+rustybuzz = { version = "0.18.0", path = "../rustybuzz" }
+ttf-parser = { version = "0.24.1", path = "../ttf-parser", features = ["gvar-alloc"] }
+unicode-segmentation = { version = "1.12.0", path = "../unicode/unicode-segmentation" }
+
+[dev-dependencies]
+# Size report only: the web export serves fonts inside a brotli-compressed wasm.
+brotli = "8.0"
