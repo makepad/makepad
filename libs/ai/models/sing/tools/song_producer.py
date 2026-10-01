@@ -19,8 +19,10 @@ import json
 import pathlib
 import random
 import time
-import urllib.error
-import urllib.request
+import http.client
+import os
+import ssl
+import urllib.parse
 import uuid
 
 MODEL = "minimax-music3-q4"  # --model overrides (e.g. ace-step-1.5-xl)
@@ -101,11 +103,44 @@ def song(rng):
     return lyrics, caption, voice, style
 
 
-def request(base, path, body=None, timeout=15):
+HUB = pathlib.Path(os.path.expanduser("~/.makepad/ai-hub"))
+
+
+def fetch(base, path, body=None, timeout=15):
+    """One request to a node: http://host:port as is; https://host:port over TLS
+    pinned to the node's certificate (fleet-pins.txt), checked before the
+    credential (client.token) is sent as a Bearer header."""
+    u = urllib.parse.urlsplit(base)
     data = None if body is None else json.dumps(body).encode()
-    req = urllib.request.Request(base + path, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+    headers = {"Content-Type": "application/json"}
+    if u.scheme == "https":
+        pins = dict(l.split()[:2] for l in (HUB / "fleet-pins.txt").read_text().splitlines() if l.strip() and not l.startswith("#"))
+        pin = pins[f"{u.hostname}:{u.port}"]
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        conn = http.client.HTTPSConnection(u.hostname, u.port, context=ctx, timeout=timeout)
+        conn.connect()
+        if hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest() != pin:
+            conn.close()
+            raise RuntimeError(f"{u.hostname}:{u.port}: certificate does not match its pin")
+        headers["Authorization"] = "Bearer " + (HUB / "client.token").read_text().strip()
+    else:
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
+    try:
+        conn.request("GET" if data is None else "POST", path, body=data, headers=headers)
+        r = conn.getresponse()
+        out = r.read()
+        if r.status >= 400:
+            raise RuntimeError(f"HTTP {r.status}: {out[:200].decode(errors='replace')}")
+        return out
+    finally:
+        conn.close()
+
+
+def request(base, path, body=None, timeout=15):
+    return json.loads(fetch(base, path, body, timeout))
 
 
 def admission_open(base):
@@ -141,8 +176,7 @@ def generate(base, lyrics, caption, seed, seconds, log, body=None):
     if st["state"] != "done":
         raise RuntimeError(st.get("error") or st["state"])
     art = [a for a in st["artifacts"] if a.get("url", "").startswith("/artifact/")][0]
-    with urllib.request.urlopen(base + art["url"], timeout=60) as r:
-        data = r.read()
+    data = fetch(base, art["url"], timeout=60)
     if art.get("sha256") and hashlib.sha256(data).hexdigest() != art["sha256"]:
         raise RuntimeError("artifact sha256 mismatch")
     return data, art, time.monotonic() - start
