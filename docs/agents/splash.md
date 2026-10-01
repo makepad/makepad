@@ -198,6 +198,28 @@ component must be reused outside that Dock. For custom widgets, turtle
 drawing, FileTree traversal, and full animation state definitions, follow
 the linked implementations instead of maintaining duplicate tutorials.
 
+### `scan:` on widgets that create children from data
+
+A web build ships only what a collect run saw the app use (see
+[web-pack.md](web-pack.md)). A widget that creates children from data or
+strings (PortalList, FlatList, page and tab switchers, anything that picks a
+template at run time) gets a `scan:` list of every template it can create,
+written together with the templates, by default:
+
+```rust
+list := PortalList{
+    scan: [@Item, @Header]
+    Item := View{ title := Label{text: "Default"} }
+    Header := View{ caption := Label{text: "Section"} }
+}
+```
+
+Entries name the widget's own templates (`@Item`) or are template objects
+themselves (`RowView{}`). Without a `scan:` list the collect run spawns every
+template the widget holds. When a web build misses something, its log names
+the widget path and file:line: add the missing template to that widget's
+`scan:` list.
+
 ## Shaders and animation
 
 - Per-draw shader values use `instance(value)`; shared values use
