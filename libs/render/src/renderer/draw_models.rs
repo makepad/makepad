@@ -590,6 +590,12 @@ impl Renderer {
                     if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
                     draw.base().prelit = if prelit { 1.0 } else { 0.0 };
                     draw.set_material(cx.cx, material);
+                    // A world item's copy may glow on its own (items.rs).
+                    if matches!(lane, WorldModelLane::Placed) {
+                        if let Some(e) = i.checked_sub(instances.len().saturating_sub(self.items.appended)).and_then(|k| self.items.glow.get(k)).filter(|e| e.x + e.y + e.z > 0.0) {
+                            draw.add_emission(*e);
+                        }
+                    }
                     // A far stand-in's cards in the foliage lane skip the
                     // cascade tap (tex_mag.y < 0: foliage.rs).
                     if foliage_lane && material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0) {

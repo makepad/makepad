@@ -407,6 +407,14 @@ impl ModelDraw<'_> {
         }
     }
 
+    /// Add light a copy gives off to the layer's emission (the PBR lane's;
+    /// the diffuse lane has none).
+    pub(super) fn add_emission(&mut self, e: Vec3f) {
+        if let Some(d) = self.pbr() {
+            d.emissive = d.emissive + e;
+        }
+    }
+
     /// Bind one layer's metallic-roughness. A no-op on the diffuse lane,
     /// which has no such lanes to bind — that is the whole reason the two
     /// shaders are siblings.

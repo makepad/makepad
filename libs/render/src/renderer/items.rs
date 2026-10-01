@@ -28,27 +28,34 @@ use std::sync::Arc;
 /// with this layout).
 pub const LAYOUT_TRANSFORM_TINT: LayoutId = LayoutId(1);
 
-/// One instance of `LAYOUT_TRANSFORM_TINT`: a column-major model matrix and
-/// a linear RGBA tint (alpha is the instance's opacity).
+/// One instance of `LAYOUT_TRANSFORM_TINT`: a column-major model matrix, a
+/// linear RGBA tint (alpha is the instance's opacity) and a glow: light the
+/// copy gives off in its own colour (the material's base colour times the
+/// tint, times `glow`), added to the material's emission, so one copy of a
+/// thousand can shine into the bloom.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[repr(C)]
 pub struct TransformTint {
     pub transform: Mat4f,
     pub tint: Vec4f,
+    pub glow: f32,
 }
 
 impl TransformTint {
+    /// Floats per record.
+    pub const FLOATS: usize = 21;
+
     /// The records as the packed floats an `InstanceSource::Packed` holds.
     pub fn floats(records: &[TransformTint]) -> &[f32] {
-        // repr(C) of 20 f32s with f32 alignment: no padding.
-        const _: () = assert!(std::mem::size_of::<TransformTint>() == 20 * 4 && std::mem::align_of::<TransformTint>() == 4);
-        unsafe { std::slice::from_raw_parts(records.as_ptr() as *const f32, records.len() * 20) }
+        // repr(C) of 21 f32s with f32 alignment: no padding.
+        const _: () = assert!(std::mem::size_of::<TransformTint>() == TransformTint::FLOATS * 4 && std::mem::align_of::<TransformTint>() == 4);
+        unsafe { std::slice::from_raw_parts(records.as_ptr() as *const f32, records.len() * TransformTint::FLOATS) }
     }
 
     /// Packed floats read back as records (a trailing partial record is
     /// left out).
     pub fn records(floats: &[f32]) -> &[TransformTint] {
-        unsafe { std::slice::from_raw_parts(floats.as_ptr() as *const TransformTint, floats.len() / 20) }
+        unsafe { std::slice::from_raw_parts(floats.as_ptr() as *const TransformTint, floats.len() / TransformTint::FLOATS) }
     }
 }
 
@@ -129,6 +136,9 @@ pub(super) struct ItemState {
     failed: Vec<Builtin>,
     /// How many item instances this frame appended to `placed_models`.
     pub(super) appended: usize,
+    /// The light each appended instance gives off (linear, added to its
+    /// material's emission on the PBR lane), in `placed_models`' order.
+    pub(super) glow: Vec<Vec3f>,
     /// The custom materials this frame's items draw through.
     used_custom: Vec<String>,
     /// Items this frame the model lanes do not draw (lines, points, cards,
@@ -423,6 +433,7 @@ impl Renderer {
     /// again by [`Self::pop_item_instances`]).
     pub(super) fn push_item_instances(&mut self, cx: &mut Cx, world: &World) {
         self.items.appended = 0;
+        self.items.glow.clear();
         self.items.skipped = 0;
         self.items.used_custom.clear();
         if world.items.is_empty() {
@@ -435,10 +446,10 @@ impl Renderer {
                 self.items.skipped += 1;
                 continue;
             }
-            let (geometry, material, instances): (GeometryRef, _, Vec<(Mat4f, Vec4f)>) = match &item.kind {
-                ItemKind::Mesh { geometry, material, transform } => (*geometry, *material, vec![(*transform, vec4(1.0, 1.0, 1.0, 1.0))]),
+            let (geometry, material, instances): (GeometryRef, _, Vec<(Mat4f, Vec4f, f32)>) = match &item.kind {
+                ItemKind::Mesh { geometry, material, transform } => (*geometry, *material, vec![(*transform, vec4(1.0, 1.0, 1.0, 1.0), 0.0)]),
                 ItemKind::Instances { geometry, material, source: InstanceSource::Packed { data, layout }, count } if *layout == LAYOUT_TRANSFORM_TINT => {
-                    let list = TransformTint::records(data).iter().take(*count as usize).map(|r| (r.transform, r.tint)).collect();
+                    let list = TransformTint::records(data).iter().take(*count as usize).map(|r| (r.transform, r.tint, r.glow)).collect();
                     (*geometry, *material, list)
                 }
                 _ => {
@@ -471,12 +482,18 @@ impl Renderer {
                 _ => Vec4f::default(),
             };
             let color = base_color(material);
-            for (transform, tint) in instances {
+            let unlit = matches!(material.kind, MaterialKind::Unlit(_));
+            for (transform, tint, glow) in instances {
+                let lit = vec3f(color.x * tint.x, color.y * tint.y, color.z * tint.z);
+                // An unlit copy is its colour: its glow brightens the colour
+                // itself; a lit one's is emission on top of its shading.
+                let (shade, emit) = if unlit { (lit * (1.0 + glow), vec3f(0.0, 0.0, 0.0)) } else { (lit, lit * glow) };
+                self.items.glow.push(emit);
                 out.push(ModelInstance {
                     model: model.clone(),
                     custom_material: custom.clone().map(|name| CustomMaterialInstance { name, params }),
                     transform,
-                    tint: vec4(color.x * tint.x, color.y * tint.y, color.z * tint.z, color.w * tint.w),
+                    tint: vec4(shade.x, shade.y, shade.z, color.w * tint.w),
                     color_adjust: vec4(0.0, 1.0, 1.0, 0.0),
                     dynamic: true,
                     depth_order: 0.0,
@@ -492,6 +509,7 @@ impl Renderer {
         let keep = self.placed_models.len().saturating_sub(self.items.appended);
         self.placed_models.truncate(keep);
         self.items.appended = 0;
+        self.items.glow.clear();
     }
 }
 
