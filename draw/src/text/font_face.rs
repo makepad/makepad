@@ -15,6 +15,9 @@ pub struct FontFace {
     /// Same lifetime considerations as `ParsedFontFace::face` — the rustybuzz
     /// face borrows from the same stable heap-allocated font data.
     cached_rb_face: RefCell<Option<rustybuzz::Face<'static>>>,
+    /// Plans compiled against `cached_rb_face`. A plan bakes in the face's variation
+    /// coordinates, so `set_variations` drops these along with the face.
+    cached_shape_plans: RefCell<Vec<CachedShapePlan>>,
     /// Lazily-built CoreText fallback for glyph outlines ttf_parser cannot
     /// read (`hvgl`-only Apple system fonts). Outer `None` = not attempted
     /// yet; inner `None` = attempted and unavailable (never retried).
@@ -94,6 +97,14 @@ struct ParsedFontFace {
     face: ttf_parser::Face<'static>,
 }
 
+struct CachedShapePlan {
+    direction: rustybuzz::Direction,
+    script: Option<rustybuzz::Script>,
+    language: Option<rustybuzz::Language>,
+    features: Vec<rustybuzz::Feature>,
+    plan: rustybuzz::ShapePlan,
+}
+
 impl Clone for FontFace {
     fn clone(&self) -> Self {
         Self {
@@ -101,6 +112,7 @@ impl Clone for FontFace {
             variations: self.variations.clone(),
             cached_ttf_face: RefCell::new(None),
             cached_rb_face: RefCell::new(None),
+            cached_shape_plans: RefCell::new(Vec::new()),
             #[cfg(target_os = "macos")]
             cached_coretext_face: RefCell::new(None),
         }
@@ -154,6 +166,7 @@ impl FontFace {
             variations: Vec::new(),
             cached_ttf_face: RefCell::new(None),
             cached_rb_face: RefCell::new(None),
+            cached_shape_plans: RefCell::new(Vec::new()),
             #[cfg(target_os = "macos")]
             cached_coretext_face: RefCell::new(None),
         })
@@ -195,6 +208,49 @@ impl FontFace {
         f(rb_cache.as_ref().unwrap())
     }
 
+    /// Same output as `rustybuzz::shape`, but compiles each distinct plan only once.
+    pub fn shape(
+        &self,
+        features: &[rustybuzz::Feature],
+        mut buffer: rustybuzz::UnicodeBuffer,
+    ) -> rustybuzz::GlyphBuffer {
+        // This is the guess `rustybuzz::shape` makes before compiling its plan. A guess
+        // never stores `UNKNOWN`, so reading that back means the script is unset.
+        buffer.guess_segment_properties();
+        let direction = buffer.direction();
+        let script = Some(buffer.script()).filter(|&script| script != rustybuzz::script::UNKNOWN);
+        let language = buffer.language();
+        self.with_rustybuzz_face(|face| {
+            let mut plans = self.cached_shape_plans.borrow_mut();
+            let index = match plans.iter().position(|cached| {
+                cached.direction == direction
+                    && cached.script == script
+                    && cached.language == language
+                    && cached.features == features
+            }) {
+                Some(index) => index,
+                None => {
+                    let plan = rustybuzz::ShapePlan::new(
+                        face,
+                        direction,
+                        script,
+                        language.as_ref(),
+                        features,
+                    );
+                    plans.push(CachedShapePlan {
+                        direction,
+                        script,
+                        language,
+                        features: features.to_vec(),
+                        plan,
+                    });
+                    plans.len() - 1
+                }
+            };
+            rustybuzz::shape_with_plan(face, &plans[index].plan, buffer)
+        })
+    }
+
     pub fn data(&self) -> &FontData {
         &self.parsed.data
     }
@@ -209,6 +265,7 @@ impl FontFace {
         *self.cached_ttf_face.borrow_mut() = None;
         // Invalidate the cached rustybuzz face since variations affect shaping.
         *self.cached_rb_face.borrow_mut() = None;
+        self.cached_shape_plans.borrow_mut().clear();
         // The CoreText fallback carries variation coordinates on its CTFont.
         #[cfg(target_os = "macos")]
         {

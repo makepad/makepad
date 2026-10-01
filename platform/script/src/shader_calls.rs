@@ -558,7 +558,7 @@ impl ShaderFnCompiler {
         fnobj: ScriptObject,
         sself: ShaderType,
         args: Vec<ShaderType>,
-    ) -> (ScriptPodType, String) {
+    ) -> (ScriptPodType, String, Option<usize>) {
         let mut method_name_prefix = String::new();
         if let ShaderType::PodType(ty) = sself {
             if let Some(name) = vm.bx.heap.pod_type_name(ty) {
@@ -647,10 +647,11 @@ impl ShaderFnCompiler {
         }
 
         // lets see if we already have fnobj with our argstypes
-        if let Some(fun) = output
+        if let Some((index, fun)) = output
             .functions
             .iter()
-            .find(|v| v.fnobj == fnobj && v.args == resolved_args)
+            .enumerate()
+            .find(|(_, v)| v.fnobj == fnobj && v.args == resolved_args)
         {
             let mut fn_name_base = String::new();
             if fun.overload != 0 {
@@ -665,7 +666,7 @@ impl ShaderFnCompiler {
             }
             let mut fn_name = output.backend.map_function_name(&fn_name_base);
             write!(fn_name, "(").ok(); // Add opening paren to match new function path
-            return (fun.ret, fn_name);
+            return (fun.ret, fn_name, Some(index));
         }
 
         let overload = output.functions.iter().filter(|v| v.name == name).count();
@@ -831,7 +832,7 @@ impl ShaderFnCompiler {
                         name
                     ));
                     script_err_not_allowed!(trap, "shader functions cannot recurse");
-                    (vm.bx.code.builtins.pod.pod_void, fn_name)
+                    (vm.bx.code.builtins.pod.pod_void, fn_name, None)
                 } else {
                     output.recur_block.push(fnobj);
                     let ret = compiler.compile_fn(vm, output, fnip);
@@ -875,6 +876,7 @@ impl ShaderFnCompiler {
                         }
                     }
 
+                    let index = output.functions.len();
                     output.functions.push(ShaderFn {
                         overload,
                         call_sig,
@@ -882,10 +884,11 @@ impl ShaderFnCompiler {
                         args: resolved_args,
                         fnobj,
                         out: compiler.out,
+                        callees: compiler.callees,
                         ret,
                     });
                     write!(fn_name, "(").ok();
-                    (ret, fn_name)
+                    (ret, fn_name, Some(index))
                 }
             } else {
                 panic!()
@@ -910,8 +913,11 @@ impl ShaderFnCompiler {
         let arg_types = args.clone();
         let resolved_arg_types =
             Self::resolve_script_call_arg_types(vm, fnobj, &arg_types, self.trap.pass());
-        let (ret, fn_name) =
+        let (ret, fn_name, callee) =
             Self::compile_shader_def(vm, output, self.trap.pass(), name, fnobj, sself, args);
+        if let Some(callee) = callee {
+            self.callees.push(callee);
+        }
         if matches!(output.backend, ShaderBackend::Glsl | ShaderBackend::Rust) {
             out = Self::glsl_rewrite_call_args(vm, &out, &arg_types, &resolved_arg_types);
         }

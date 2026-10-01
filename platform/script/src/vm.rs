@@ -529,8 +529,8 @@ impl<'a> ScriptVm<'a> {
             .heap
             .to_debug_string(obj.into(), &mut recur, &mut out, false, 0);
         // Truncate if too long
-        if out.len() > 200 {
-            out.truncate(197);
+        if out.chars().count() > 200 {
+            out = out.chars().take(197).collect();
             out.push_str("...");
         }
         out

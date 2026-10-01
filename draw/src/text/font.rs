@@ -113,8 +113,12 @@ impl Font {
         self.face.with_ttf_parser_face(f)
     }
 
-    pub(super) fn with_rustybuzz_face<R>(&self, f: impl FnOnce(&rustybuzz::Face<'_>) -> R) -> R {
-        self.face.with_rustybuzz_face(f)
+    pub(super) fn shape(
+        &self,
+        features: &[rustybuzz::Feature],
+        buffer: rustybuzz::UnicodeBuffer,
+    ) -> rustybuzz::GlyphBuffer {
+        self.face.shape(features, buffer)
     }
 
     pub fn units_per_em(&self) -> f32 {

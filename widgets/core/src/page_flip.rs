@@ -208,6 +208,12 @@ impl PageFlip {
 }
 
 impl PageFlipRef {
+    /// See [`PageFlip::page()`].
+    pub fn page(&self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
+        let mut inner = self.borrow_mut()?;
+        inner.page(cx, page_id)
+    }
+
     /// See [`PageFlip::set_active_page()`].
     pub fn set_active_page(&self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
         let mut inner = self.borrow_mut()?;

@@ -585,6 +585,7 @@ pub struct CxVulkan {
     xr_render_pass: vk::RenderPass,
     framebuffers: Vec<vk::Framebuffer>,
     pipelines: HashMap<VulkanPipelineKey, VulkanPipeline>,
+    pipeline_cache: vk::PipelineCache,
     offscreen_render_passes: HashMap<VulkanRenderPassKey, vk::RenderPass>,
     /// The render passes offscreen draws record into, by what they are made
     /// of; destroyed with `offscreen_render_passes`.
@@ -1022,6 +1023,10 @@ impl CxVulkan {
                 return Err(format!("Android Vulkan init failed: create_fence: {err:?}"));
             }
         };
+        let pipeline_cache = unsafe {
+            device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+        }
+        .unwrap_or_default();
 
         let mut vulkan = Self {
             _entry: entry,
@@ -1055,6 +1060,7 @@ impl CxVulkan {
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
+            pipeline_cache,
             offscreen_render_passes: HashMap::new(),
             offscreen_draw_render_passes: HashMap::new(),
             offscreen_framebuffers: HashMap::new(),
@@ -1439,6 +1445,10 @@ impl CxVulkan {
                 ));
             }
         };
+        let pipeline_cache = unsafe {
+            device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+        }
+        .unwrap_or_default();
 
         let mut vulkan = Self {
             _entry: entry,
@@ -1472,6 +1482,7 @@ impl CxVulkan {
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
+            pipeline_cache,
             offscreen_render_passes: HashMap::new(),
             offscreen_draw_render_passes: HashMap::new(),
             offscreen_framebuffers: HashMap::new(),
@@ -7785,7 +7796,7 @@ impl CxVulkan {
 
         let pipeline_result = unsafe {
             self.device.create_graphics_pipelines(
-                vk::PipelineCache::null(),
+                self.pipeline_cache,
                 &[create_info_write, create_info_no_write],
                 None,
             )
@@ -9119,6 +9130,9 @@ impl Drop for CxVulkan {
             }
             if self.command_pool != vk::CommandPool::null() {
                 self.device.destroy_command_pool(self.command_pool, None);
+            }
+            if self.pipeline_cache != vk::PipelineCache::null() {
+                self.device.destroy_pipeline_cache(self.pipeline_cache, None);
             }
             if destroy_parents {
                 self.device.destroy_device(None);

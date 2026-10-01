@@ -710,6 +710,11 @@ impl Cx {
                 }
             }
         }
+        // If no render ran the retirement step under this beat's repaint_id, run it here.
+        #[cfg(not(linux_direct))]
+        if self.draw_lists.1.retirement_frame != Some(self.repaint_id) {
+            self.maintain_instance_retirements();
+        }
     }
 
     #[cfg(not(all(use_vulkan, linux_direct)))]

@@ -710,7 +710,8 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
     is_emulator: jni_sys::jboolean,
     android_version: jni_sys::jstring,
     build_number: jni_sys::jstring,
-    kernel_version: jni_sys::jstring,
+    // Unused, but it keeps this matching `MakepadNative.onAndroidParams` in every cargo-makepad.
+    _kernel_version: jni_sys::jstring,
 ) {
     send_from_java_message(FromJavaMessage::Init(AndroidParams {
         cache_path: jstring_to_string(env, cache_path),
@@ -719,7 +720,6 @@ pub unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onAndroidParams(
         is_emulator: is_emulator != 0,
         android_version: jstring_to_string(env, android_version),
         build_number: jstring_to_string(env, build_number),
-        kernel_version: jstring_to_string(env, kernel_version),
         #[cfg(quest)]
         has_xr_mode: true,
         #[cfg(not(quest))]

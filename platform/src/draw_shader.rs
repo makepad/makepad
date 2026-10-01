@@ -105,7 +105,8 @@ pub struct CxDrawShaders {
     /// with the app heap's and must never hit its entries.
     pub cache_object_id_to_shader: HashMap<(usize, ScriptObject), DrawShaderId>,
     pub cache_functions_to_shader: LiveIdMap<LiveId, DrawShaderId>,
-    pub cache_code_to_shader: HashMap<CxDrawShaderCode, DrawShaderId>,
+    // Every lookup hashes whole generated shader sources, so use a fast hasher.
+    pub cache_code_to_shader: HashMap<CxDrawShaderCode, DrawShaderId, foldhash::fast::RandomState>,
     //pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
     //pub fingerprints: Vec<DrawShaderFingerprint>,
     //pub error_set: HashSet<DrawShaderPtr>,

@@ -336,6 +336,7 @@ pub struct ShaderFn {
     pub args: Vec<ScriptPodType>,
     pub fnobj: ScriptObject,
     pub out: String,
+    pub callees: Vec<usize>,
     pub ret: ScriptPodType,
 }
 
@@ -446,6 +447,8 @@ impl ShaderOutput {
     /// Note: RustInstance and DynInstance are handled separately - RustInstance via
     /// pre_collect_rust_instance_io (from Rust type properties), DynInstance during compilation.
     pub fn pre_collect_shader_io(&mut self, vm: &mut ScriptVm, io_self: ScriptObject) {
+        self.backend.register_ids();
+
         // Use recursion to process from deepest prototype first (no temporary Vec needed)
         self.pre_collect_shader_io_recursive(vm, io_self);
 

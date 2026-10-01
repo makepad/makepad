@@ -293,6 +293,10 @@ impl DesktopInit {
                 "Vulkan direct: VK_KHR_present_id/present_wait enabled; acquires wait for the previous present to complete"
             );
         }
+        let pipeline_cache = unsafe {
+            device.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+        }
+        .unwrap_or_default();
         let mut renderer = CxVulkan {
             frame_serial_in_flight: 0,
             retained_instances: HashMap::new(),
@@ -325,6 +329,7 @@ impl DesktopInit {
             xr_render_pass: vk::RenderPass::null(),
             framebuffers: Vec::new(),
             pipelines: HashMap::new(),
+            pipeline_cache,
             offscreen_render_passes: HashMap::new(),
             offscreen_draw_render_passes: HashMap::new(),
             offscreen_framebuffers: HashMap::new(),
@@ -2993,7 +2998,7 @@ impl CxVulkan {
             .subpass(0);
         let result = unsafe {
             self.device
-                .create_graphics_pipelines(vk::PipelineCache::null(), &[create_info], None)
+                .create_graphics_pipelines(self.pipeline_cache, &[create_info], None)
         };
         unsafe {
             self.device.destroy_shader_module(vertex_module, None);
