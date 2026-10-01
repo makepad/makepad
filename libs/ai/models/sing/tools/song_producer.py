@@ -11,6 +11,8 @@ and keeps the job lease alive while it runs.
     song_producer.py --node http://10.0.0.123:8123 --inbox DIR [--count N] [--seconds 90]
 """
 import argparse
+import array
+import base64
 import hashlib
 import json
 import pathlib
@@ -58,6 +60,12 @@ LINES = [
 GENRES = ["pop", "synth pop", "indie pop", "soft rock", "acoustic pop", "r&b", "folk pop", "electro pop", "ballad"]
 KEYS = ["C major", "D major", "E major", "F major", "G major", "A major", "B flat major", "A minor", "E minor", "D minor"]
 VOICE_MAIN = "female pop lead vocal, clear diction, upfront dry vocals, every word clearly sung"
+# Caption variants for the main voice; which one gives the cleanest, most
+# intelligible solo vocal is measured from the harvest keep rate.
+STYLES = {
+    "a": "simple sparse arrangement",
+    "b": "solo lead vocal only, no backing vocals, no harmonies, no ad-libs, sparse arrangement",
+}
 VOICE_OTHER = ["male pop lead vocal, clear diction, upfront vocals", "soft female vocal, clear diction",
                "warm male tenor vocal, clear diction"]
 
@@ -86,8 +94,9 @@ def song(rng):
     lyrics = "\n".join(parts)
     voice = VOICE_MAIN if rng.random() < 0.8 else rng.choice(VOICE_OTHER)
     bpm = rng.randrange(80, 128)
-    caption = f"{rng.choice(GENRES)}, {bpm} BPM, {rng.choice(KEYS)}, {voice}, simple sparse arrangement"
-    return lyrics, caption, voice
+    style = rng.choice(sorted(STYLES))
+    caption = f"{rng.choice(GENRES)}, {bpm} BPM, {rng.choice(KEYS)}, {voice}, {STYLES[style]}"
+    return lyrics, caption, voice, style
 
 
 def request(base, path, body=None, timeout=15):
@@ -105,10 +114,10 @@ def admission_open(base):
         return False
 
 
-def generate(base, lyrics, caption, seed, seconds, log):
+def generate(base, lyrics, caption, seed, seconds, log, body=None):
     origin = {"origin_key": uuid.uuid4().hex, "origin_epoch": time.time_ns() // 1_000_000}
-    acc = request(base, "/generate", {**origin, "model": MODEL, "prompt": caption, "lyrics": lyrics,
-                                      "seconds": seconds, "seed": seed, "queue_policy": "reject"})
+    body = body or {"model": MODEL, "prompt": caption, "lyrics": lyrics, "seconds": seconds, "seed": seed, "queue_policy": "reject"}
+    acc = request(base, "/generate", {**origin, **body}, timeout=120)
     job = acc["job_id"]
     start = time.monotonic()
     last = None
@@ -137,6 +146,28 @@ def generate(base, lyrics, caption, seed, seconds, log):
     return data, art, time.monotonic() - start
 
 
+def separate(node, wav, log):
+    """The vocal of a 44.1 kHz stereo WAV via a node's four-stem separator:
+    16-bit stereo WAV bytes."""
+    body = {"model": "bs-roformer-4stem", "input_b64": base64.b64encode(wav).decode(), "queue_policy": "queue"}
+    data, art, secs = generate(node, None, None, None, None, log, body=body)
+    if data[:4] != b"MPST":
+        raise RuntimeError("not a stems artifact")
+    rate = int.from_bytes(data[8:12], "little")
+    frames = int.from_bytes(data[12:20], "little")
+    planar = array.array("f")
+    planar.frombytes(data[20:20 + 8 * frames * 4])
+    left, right = planar[6 * frames:7 * frames], planar[7 * frames:8 * frames]
+    pcm = array.array("h", [0]) * (2 * frames)
+    for i in range(frames):
+        pcm[2 * i] = max(-32768, min(32767, int(left[i] * 32767)))
+        pcm[2 * i + 1] = max(-32768, min(32767, int(right[i] * 32767)))
+    body = pcm.tobytes()
+    hdr = b"RIFF" + (36 + len(body)).to_bytes(4, "little") + b"WAVEfmt " + (16).to_bytes(4, "little") + (1).to_bytes(2, "little") + (2).to_bytes(2, "little") \
+        + rate.to_bytes(4, "little") + (rate * 4).to_bytes(4, "little") + (4).to_bytes(2, "little") + (16).to_bytes(2, "little") + b"data" + len(body).to_bytes(4, "little")
+    return hdr + body, secs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--node", required=True)
@@ -144,6 +175,7 @@ def main():
     ap.add_argument("--count", type=int, default=0, help="0 = forever")
     ap.add_argument("--seconds", type=float, default=35.0)
     ap.add_argument("--seed", type=int, default=int(time.time()))
+    ap.add_argument("--sep-node", default=None, help="a node that separates each song's vocal (else the harvester does)")
     a = ap.parse_args()
     inbox = pathlib.Path(a.inbox)
     inbox.mkdir(parents=True, exist_ok=True)
@@ -155,7 +187,7 @@ def main():
             log("node busy or not admitting; waiting")
             time.sleep(60)
             continue
-        lyrics, caption, voice = song(rng)
+        lyrics, caption, voice, style = song(rng)
         seed = rng.randrange(1 << 31)
         sid = f"{time.strftime('%Y%m%d-%H%M%S')}-{seed:08x}"
         try:
@@ -165,12 +197,22 @@ def main():
             time.sleep(60)
             continue
         ext = ".wav" if data[:4] == b"RIFF" else ".bin"
-        (inbox / (sid + ext + ".part")).write_bytes(data)
+        style_note = {"style": style}
+        if a.sep_node and ext == ".wav":
+            # The vocal first: the harvester picks a song up when its .wav appears.
+            try:
+                vocals, ssecs = separate(a.sep_node, data, log)
+                (inbox / (sid + ".vocals.part")).write_bytes(vocals)
+                (inbox / (sid + ".vocals.part")).rename(inbox / (sid + ".vocals.wav.v"))
+                log(f"  separated on {a.sep_node} in {ssecs:.0f} s")
+            except Exception as e:
+                log(f"  separation failed ({e}); the harvester will separate")
         (inbox / (sid + ".json")).write_text(json.dumps({"lyrics": lyrics, "caption": caption, "voice": voice, "seed": seed,
-                                                       "model": MODEL, "node": a.node, "seconds": a.seconds,
+                                                       "model": MODEL, "node": a.node, "seconds": a.seconds, **style_note,
                                                        "content_type": art.get("content_type"), "gen_seconds": secs}, indent=1))
         (inbox / (sid + ".lyrics.txt")).write_text(lyrics + "\n")
         (inbox / (sid + ".caption.txt")).write_text(caption + "\n")
+        (inbox / (sid + ext + ".part")).write_bytes(data)
         (inbox / (sid + ext + ".part")).rename(inbox / (sid + ext))
         made += 1
         log(f"song {made}: {sid}{ext} ({len(data) / 1e6:.1f} MB, {secs:.0f} s)")
