@@ -129,12 +129,12 @@ pub fn register(vm: &mut ScriptVm) -> ScriptValue {
         builtin::register(vm);
         return NIL;
     }
+    // The scene shaders exactly as `crate::script_mod` registers them (the
+    // shared stdlib, the shadow sampling this build uses, ...): a second,
+    // partial list here made different shaders (and shader-pack keys)
+    // depending on which registration ran first.
     if vm.bx.heap.type_default_for_id(DrawScenePbr::script_type_id_static()).is_none() {
-        crate::local_shadows::sampling::script_mod(vm);
-        crate::clustered::script_mod(vm);
-        crate::fast_gi::script_mod(vm);
-        crate::shaders::script_mod(vm);
-        crate::local_shadows::script_mod(vm);
+        crate::script_mod(vm);
     }
     builtin::register(vm);
     script_mod(vm)
