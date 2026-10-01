@@ -493,9 +493,15 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
                 writeln!(out, "    {} = {};", dst, src).ok();
             }
         }
+        // One clip-z convention on every backend: clip z runs 0..w, as
+        // Metal, D3D, Vulkan and WebGPU take it, and a depth buffer holds
+        // ndc z. OpenGL clips z at -w..w and stores (ndc + 1) / 2, so its
+        // z is moved there: the same draws are clipped and the same depth
+        // values written as everywhere else.
+        let z = if self.use_vulkan { "vtx_pos.z" } else { "2.0 * vtx_pos.z - vtx_pos.w" };
         writeln!(
             out,
-            "    gl_Position = mp_clip_y_flip > 0.5 ? vec4(vtx_pos.x, -vtx_pos.y, vtx_pos.z, vtx_pos.w) : vtx_pos;"
+            "    gl_Position = vec4(vtx_pos.x, mp_clip_y_flip > 0.5 ? -vtx_pos.y : vtx_pos.y, {z}, vtx_pos.w);"
         )
         .ok();
         writeln!(out, "}}").ok();

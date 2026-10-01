@@ -645,6 +645,7 @@ fn define_shader_compile_natives(heap: &mut ScriptHeap, native: &mut ScriptNativ
                 ShaderBackend::Glsl => {
                     let mut shared_defs = String::new();
                     output.create_struct_defs(vm, &mut shared_defs);
+                    output.glsl_create_vertex_shader(vm, &shared_defs, &mut out);
                     output.glsl_create_fragment_shader(vm, &shared_defs, &mut out);
                 }
                 ShaderBackend::Wgsl => {

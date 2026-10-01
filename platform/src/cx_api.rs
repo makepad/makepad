@@ -1239,28 +1239,6 @@ impl Cx {
         &self.gpu_info
     }
 
-    /// GL maps clip-space z/w from [-1, 1] to window depth [0, 1].
-    /// Metal, Vulkan and D3D use [0, 1] clip depth directly.
-    pub fn clip_depth_scale_bias(&self) -> (f32, f32) {
-        // Desktop Linux decides its API at startup (a Vulkan-capable build can
-        // render with OpenGL ES), so it asks the running backend; every other
-        // target's API is fixed at build time.
-        let gl_clip = if cfg!(gpusim) {
-            false
-        } else if cfg!(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")) {
-            cfg!(not(use_vulkan))
-        } else if cfg!(target_os = "linux") {
-            matches!(self.gpu_backend(), GpuBackend::OpenGl)
-        } else {
-            false
-        };
-        if gl_clip {
-            (0.5, 0.5)
-        } else {
-            (1.0, 0.0)
-        }
-    }
-
     pub fn update_macos_menu(&mut self, menu: MacosMenu) {
         if self.script_data.std.host_io_only() { return; }
         self.platform_ops.push_back(CxOsOp::UpdateMacosMenu(menu));

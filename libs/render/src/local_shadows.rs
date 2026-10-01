@@ -431,14 +431,13 @@ impl LocalShadows {
                 texel_world_per_depth,
             ]);
         }
-        // Face depth windows: generation window folded with the backend's
-        // clip-z -> depth mapping (the hardware compare's reference space).
-        let (clip_scale, clip_bias) = cx.clip_depth_scale_bias();
+        // Face depth windows: the generation window (clip z is the stored
+        // depth on every backend: the hardware compare's reference space).
         for (f, face) in self.faces.iter().enumerate() {
             let (gs, go) = local_generation_window(face.generation);
             let at = f * FACE_FLOATS + 16;
-            self.data[at] = gs * clip_scale;
-            self.data[at + 1] = go * clip_scale + clip_bias;
+            self.data[at] = gs;
+            self.data[at + 1] = go;
         }
         let start = self.records.len() * 4;
         packed[start..start + self.data.len()].copy_from_slice(&self.data);

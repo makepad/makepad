@@ -748,13 +748,12 @@ impl Renderer {
             return;
         }
         let c = &frame.cascades;
-        let (clip_scale, clip_bias) = cx.clip_depth_scale_bias();
         let mut da = [0.0f32; 4];
         let mut db = [0.0f32; 4];
         for i in 0..crate::shadow_csm::CSM_CASCADES {
             let (gs, go) = crate::shadow_csm::CSM_DEPTH_WINDOW;
-            da[i] = gs * clip_scale;
-            db[i] = go * clip_scale + clip_bias;
+            da[i] = gs;
+            db[i] = go;
         }
         dv.set_uniform(cx, live_id!(csm_p), &[1.0, *inv_res, 0.0, 0.0]);
         dv.set_uniform(cx, live_id!(csm_da), &da);

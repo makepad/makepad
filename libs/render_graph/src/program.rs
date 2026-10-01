@@ -30,8 +30,7 @@ script_mod! {
         // x = exposure, y = aspect (w / h), z = 1 when @history holds the
         // pass's previous output, w = this pass's pixels per output pixel
         g_misc: uniform(vec4(1.0, 1.0, 0.0, 1.0))
-        // The camera for depth reads: proj[10], proj[14], orthographic,
-        // depth stores clip z / w directly (else z * 0.5 + 0.5).
+        // The camera for depth reads: proj[10], proj[14], orthographic.
         g_cam: uniform(vec4(-1.0, -0.2, 0.0, 1.0))
         // The view (when the host gives one): the inverse view-projection
         // by rows, the eye (w = 1 when set) and the view's forward axis.
@@ -73,12 +72,9 @@ script_mod! {
         // footprint, so filtered detail aliases).
         px_scale: fn() -> float { return self.g_misc.w }
         // The view distance of a depth-buffer value (a sample of a depth
-        // read), for depth of field, outlines and fog passes.
-        view_depth: fn(d: float) -> float {
-            var z = d
-            if self.g_cam.w < 0.5 {
-                z = d * 2.0 - 1.0
-            }
+        // read, ndc z on every backend), for depth of field, outlines and
+        // fog passes.
+        view_depth: fn(z: float) -> float {
             if self.g_cam.z > 0.5 {
                 return 0.0 - (z - self.g_cam.y) / self.g_cam.x
             }
@@ -96,11 +92,7 @@ script_mod! {
         }
         view_distance: fn(p: vec3) -> float { return dot(p - self.g_eye.xyz, self.g_fwd.xyz) }
         // The world point a depth-buffer sample shows at `uv`.
-        world_at: fn(uv: vec2, d: float) -> vec3 {
-            var z = d
-            if self.g_cam.w < 0.5 {
-                z = d * 2.0 - 1.0
-            }
+        world_at: fn(uv: vec2, z: float) -> vec3 {
             let n = vec4(uv.x * 2.0 - 1.0, 1.0 - uv.y * 2.0, z, 1.0)
             let w = vec4(dot(self.g_ivp0, n), dot(self.g_ivp1, n), dot(self.g_ivp2, n), dot(self.g_ivp3, n))
             return w.xyz / w.w

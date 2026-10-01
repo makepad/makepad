@@ -73,9 +73,9 @@ pub struct FrameUniforms {
     /// The frame's seed in 0..1.
     pub seed: f32,
     pub exposure: f32,
-    /// The camera for depth reads: projection z terms `proj[10]`,
-    /// `proj[14]`, 1 for orthographic, 1 when the depth buffer stores
-    /// clip z / w directly (Metal) rather than z * 0.5 + 0.5.
+    /// The camera for depth reads (a depth buffer holds ndc z on every
+    /// backend): projection z terms `proj[10]`, `proj[14]`, 1 for
+    /// orthographic; the fourth lane pads the vec4.
     pub camera: [f32; 4],
 }
 
