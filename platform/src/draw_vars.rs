@@ -1416,11 +1416,11 @@ impl DrawVars {
     }
 
     /// Compute a hash of all functions on an object by iterating through
-    /// the prototype chain and hashing each function's code (its body's
-    /// content and opcode index, [`ScriptCode::fn_content_key`]), and its
-    /// pipeline state ([`DrawVars::pipeline_state_hash`]). Content, not the
-    /// ip: a body re-evaluated with new text keeps its ips, and the same
-    /// text in another body is the same shader.
+    /// the prototype chain and hashing each function's code (its body, the
+    /// text it was parsed from and its opcode index,
+    /// [`ScriptCode::fn_content_key`]), and its pipeline state
+    /// ([`DrawVars::pipeline_state_hash`]). Not the ip alone: a body
+    /// re-evaluated with new text keeps its ips.
     pub fn compute_shader_functions_hash(heap: &ScriptHeap, code: &ScriptCode, obj: ScriptObject) -> LiveId {
         let mut hash = Self::pipeline_state_hash(heap, obj);
 

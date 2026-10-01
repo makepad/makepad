@@ -83,9 +83,9 @@ fn fn_content_key_follows_the_text() {
     let a = vm.eval(module("gen://same", "{f: fn() { return 1 }}")).as_object().unwrap();
     let _keep_a = vm.bx.heap.new_object_ref(a);
     let key_a = vm.bx.code.fn_content_key(fn_ip(&vm, a, id!(f)));
-    // The same text in another body: the same key.
+    // The same text in another body can name other things: another key.
     let b = vm.eval(module("gen://elsewhere", "{f: fn() { return 1 }}")).as_object().unwrap();
-    assert_eq!(vm.bx.code.fn_content_key(fn_ip(&vm, b, id!(f))), key_a);
+    assert_ne!(vm.bx.code.fn_content_key(fn_ip(&vm, b, id!(f))), key_a);
     // The first body re-evaluated with other text keeps its ips but not its key.
     let c = vm.eval(module("gen://same", "{f: fn() { return 2 }}")).as_object().unwrap();
     let ip_c = fn_ip(&vm, c, id!(f));

@@ -174,12 +174,13 @@ impl std::fmt::Display for ScriptLoc {
 
 impl ScriptCode {
     /// What a fn's code is, for caches keyed by it (the draw shader cache):
-    /// the content of its body and its opcode index. Unlike the ip itself
-    /// it changes when a body is re-evaluated with new text, and two bodies
-    /// with the same text give the same key.
+    /// its body, the content that body was last parsed from and its opcode
+    /// index. Unlike the ip alone it changes when a body is re-evaluated
+    /// with new text. The body is part of it: the same text in another body
+    /// can name other things (its scope, its imports), so it is another fn.
     pub fn fn_content_key(&self, ip: ScriptIp) -> u64 {
-        let content = self.bodies.borrow().get(ip.body as usize).map_or(ip.body as u64, |b| b.content_hash);
-        LiveId(content).bytes_append(&ip.index.to_le_bytes()).0
+        let content = self.bodies.borrow().get(ip.body as usize).map_or(0, |b| b.content_hash);
+        LiveId(content).bytes_append(&ip.to_u40().to_le_bytes()).0
     }
 
     /// The source text of the fn whose body starts at `ip` — the `fn` token's
