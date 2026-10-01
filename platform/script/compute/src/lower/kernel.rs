@@ -246,7 +246,7 @@ impl Lowerer {
                 fields.push((f.name.clone(), t, f.offset, init));
             }
             fields.sort_by_key(|f| f.2);
-            self.structs.push(StructDef { name: lay.name.clone(), fields, words: lay.stride.max(1) });
+            self.structs.push(StructDef { name: lay.name.clone(), fields, words: lay.stride.max(1), opaque: Vec::new() });
         }
         Ok(())
     }

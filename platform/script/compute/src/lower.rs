@@ -185,7 +185,14 @@ struct StructDef {
     /// (name, type, word offset, default init).
     fields: Vec<(String, T, u32, CInit)>,
     words: u32,
+    /// A plain object's fields a kernel cannot hold (a string, a function,
+    /// a value that is not a constant): (name, why). Reading one is the
+    /// error.
+    opaque: Vec<(String, String)>,
 }
+
+/// The struct name of plain objects (`{a: 1, b: vec3(..)}`).
+const OBJECT: &str = "object";
 
 #[derive(Clone, Debug)]
 struct Place {
@@ -218,6 +225,9 @@ enum Bind {
     ConstVec(u8, [u32; 16]),
     /// An immutable SSA value (loop indices).
     Value(V),
+    /// A local function (`let f = fn(x) {..}`, `fn f(x) {..}` in a body):
+    /// inlined where called, seeing the scopes it was defined in.
+    Closure(Box<FnDecl>, Vec<HashMap<String, Bind>>),
     /// A mutable scalar or vec2 local (or a promoted state scalar).
     Local(T, Vec<Var>),
     Place(Place),
@@ -918,6 +928,14 @@ struct Lowerer {
     func_cache: HashMap<(String, Vec<u8>, Vec<u64>), Option<u16>>,
     /// Call sites per helper name in the source (counted once).
     call_sites: Option<HashMap<String, usize>>,
+    /// Top-level tables holding plain objects, by root: their constant
+    /// image, so a read by constant path (`CAM.pos.y`, `L[1].power`)
+    /// folds to the constant.
+    object_tables: HashMap<u32, CInit>,
+    /// Evaluating a top-level table: a plain object's field that is not a
+    /// constant is kept as unreadable (an error where read) instead of
+    /// failing the whole `let`.
+    lenient_objects: bool,
 }
 
 /// How a call of a lowered function passes and returns values.
@@ -1353,6 +1371,7 @@ impl Lowerer {
     /// scalar, so the deterministic math works in initializers too).
     fn cinit(&mut self, e: &Expr, ann: Option<&TypeAnn>) -> LResult<CInit> {
         match &e.kind {
+            ExprKind::StructLit(name, fields) if name.is_empty() => self.object_cinit(fields),
             ExprKind::StructLit(name, fields) => {
                 let Some(s) = self.structs.iter().position(|d| d.name == *name) else {
                     return err(e.span, format!("unknown struct `{}`", name));
@@ -1439,6 +1458,144 @@ impl Lowerer {
         }
     }
 
+    /// A plain object's constant image. Strings and functions are kept as
+    /// unreadable fields (kernels have neither); so is a field that is not
+    /// a constant when the object is a top-level table (see
+    /// `lenient_objects`), so reading the other fields works.
+    fn object_cinit(&mut self, fields: &[(String, Expr)]) -> LResult<CInit> {
+        let mut vals: Vec<(String, CInit)> = Vec::new();
+        let mut opaque: Vec<(String, String)> = Vec::new();
+        for (fname, fe) in fields {
+            if vals.iter().any(|v| v.0 == *fname) || opaque.iter().any(|v| v.0 == *fname) {
+                return err(fe.span, format!("field `{}` is given twice", fname));
+            }
+            match &fe.kind {
+                ExprKind::Unreadable(why) => {
+                    opaque.push((fname.clone(), format!("{} (an object a kernel reads holds numbers, vectors, colours, bools, arrays and objects of those)", why)));
+                    continue;
+                }
+                ExprKind::Lambda(_) => {
+                    opaque.push((fname.clone(), "a function kept in an object: a kernel calls functions by name (write it as `fn name(..)` or `let name = fn(..)` at the top level)".into()));
+                    continue;
+                }
+                ExprKind::StructLit(n, _) if !n.is_empty() && !self.structs.iter().any(|d| d.name == *n) => {
+                    opaque.push((fname.clone(), format!("an object made from `{}`: a kernel sees only plain objects (`{{a: 1}}`), whose fields are all written out", n)));
+                    continue;
+                }
+                _ => {}
+            }
+            let c = match self.cinit(fe, None) {
+                Ok(c) => c,
+                Err(e) => match self.fold_const(fe)? {
+                    Some(c) => c,
+                    None if self.lenient_objects => {
+                        opaque.push((
+                            fname.clone(),
+                            format!("not a constant ({}): an object a kernel reads holds constants only; read params, inputs and the time inside the kernel's functions", e.message),
+                        ));
+                        continue;
+                    }
+                    None => return Err(e),
+                },
+            };
+            vals.push((fname.clone(), c));
+        }
+        let types: Vec<(String, T)> = vals.iter().map(|(n, c)| (n.clone(), self.cinit_ty(c))).collect();
+        let sid = self.object_struct(&types, opaque);
+        Ok(CInit::Struct(sid, vals.into_iter().map(|v| v.1).collect()))
+    }
+
+    /// The struct of plain objects with these fields (one per shape).
+    fn object_struct(&mut self, types: &[(String, T)], opaque: Vec<(String, String)>) -> usize {
+        let same = |d: &StructDef| {
+            d.name == OBJECT && d.opaque == opaque && d.fields.len() == types.len() && d.fields.iter().zip(types).all(|(f, (n, t))| f.0 == *n && f.1 == *t)
+        };
+        if let Some(k) = self.structs.iter().position(same) {
+            return k;
+        }
+        let mut fields = Vec::new();
+        let mut off = 0;
+        for (n, t) in types {
+            let init = self.zero_cinit(t);
+            fields.push((n.clone(), t.clone(), off, init));
+            off += self.words(t);
+        }
+        self.structs.push(StructDef { name: OBJECT.into(), fields, words: off.max(1), opaque });
+        self.structs.len() - 1
+    }
+
+    /// The zero value of a type, as an initializer.
+    fn zero_cinit(&self, t: &T) -> CInit {
+        match t {
+            T::Vec(n) => CInit::Vec(*n, [0; 16]),
+            T::Struct(s) => CInit::Struct(*s, self.structs[*s].fields.iter().map(|f| f.3.clone()).collect()),
+            T::Array(e, n) => CInit::Array((**e).clone(), vec![self.zero_cinit(e); *n as usize]),
+            t => CInit::W(0, t.clone()),
+        }
+    }
+
+    /// Whether an initializer holds a plain object.
+    fn has_object(&self, c: &CInit) -> bool {
+        match c {
+            CInit::Struct(s, f) => self.structs[*s].name == OBJECT || f.iter().any(|c| self.has_object(c)),
+            CInit::Array(_, f) => f.first().is_some_and(|c| self.has_object(c)),
+            _ => false,
+        }
+    }
+
+    /// The constant a read of a top-level table of plain objects by a
+    /// constant path gives (`CAM.pos.y`, `LIGHTS[1].power`, `P[k]` in an
+    /// unrolled loop): a number reads as a literal, as the same field
+    /// written as its own top-level `let` would. None: read it from the
+    /// table.
+    fn object_read(&mut self, e: &Expr) -> Option<V> {
+        // `init()` may fill tables: their words are only known after it.
+        if self.in_init || self.fns.contains_key("init") {
+            return None;
+        }
+        fn path<'a>(l: &'a Lowerer, e: &Expr) -> Option<&'a CInit> {
+            match &e.kind {
+                ExprKind::Ident(n) => match l.lookup(n) {
+                    Some(Bind::Place(p)) if p.region == Region::Shared && p.off.is_none() && p.stat == 0 => l.object_tables.get(&p.root),
+                    _ => None,
+                },
+                ExprKind::Field(b, f) => match path(l, b)? {
+                    CInit::Struct(s, vals) => vals.get(l.structs[*s].fields.iter().position(|x| x.0 == *f)?),
+                    _ => None,
+                },
+                ExprKind::Index(b, i) => {
+                    let k = match &i.kind {
+                        ExprKind::Num(x, _) => *x,
+                        ExprKind::Ident(n) => match l.lookup(n) {
+                            Some(Bind::Const(V::Lit(x))) => x,
+                            _ => return None,
+                        },
+                        _ => return None,
+                    };
+                    match path(l, b)? {
+                        CInit::Array(_, items) if !items.is_empty() => items.get((k.floor() as i64).rem_euclid(items.len() as i64) as usize),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        }
+        let c = path(self, e)?.clone();
+        Some(match c {
+            CInit::W(w, T::F) => V::Lit(f32::from_bits(w) as f64),
+            CInit::W(w, T::I) => V::I(self.b.ci(w as i32)),
+            CInit::W(w, T::B) => V::B(self.b.cb(w != 0)),
+            CInit::Vec(n, w) => {
+                let mut lanes = [Val(0); 16];
+                for (k, l) in lanes.iter_mut().enumerate().take(n as usize) {
+                    *l = self.b.cf(f32::from_bits(w[k]));
+                }
+                V::Vec(n, lanes)
+            }
+            _ => return None,
+        })
+    }
+
     fn coerce_cinit(&self, c: CInit, want: &T, span: Span) -> LResult<CInit> {
         let have = self.cinit_ty(&c);
         if have == *want {
@@ -1454,6 +1611,23 @@ impl Lowerer {
             }
             (CInit::W(w, T::I), T::F) => Ok(CInit::W((w as i32 as f32).to_bits(), T::F)),
             (CInit::W(w, T::F), T::Vec(n)) => Ok(CInit::Vec(*n, [w; 16])),
+            // Plain objects of one array: the same fields, in any order.
+            (CInit::Struct(s, vals), T::Struct(w)) if self.structs[s].name == OBJECT && self.structs[*w].name == OBJECT => {
+                let (have, want_d) = (&self.structs[s], &self.structs[*w]);
+                for (n, ..) in &have.fields {
+                    if !want_d.fields.iter().any(|f| f.0 == *n) {
+                        return err(span, format!("the objects of an array need the same fields: this one has `{}`, the first does not", n));
+                    }
+                }
+                let mut out = Vec::new();
+                for (n, t, _, _) in &want_d.fields {
+                    let Some(k) = have.fields.iter().position(|f| f.0 == *n) else {
+                        return err(span, format!("the objects of an array need the same fields: this one has no `{}`", n));
+                    };
+                    out.push(self.coerce_cinit(vals[k].clone(), t, span)?);
+                }
+                Ok(CInit::Struct(*w, out))
+            }
             _ => err(span, format!("expected {}, found {}", self.tname(want), self.tname(&have))),
         }
     }
@@ -1540,7 +1714,7 @@ impl Lowerer {
                         defs.push((fname.clone(), t, off, c));
                         off += w;
                     }
-                    self.structs.push(StructDef { name: name.clone(), fields: defs, words: off.max(1) });
+                    self.structs.push(StructDef { name: name.clone(), fields: defs, words: off.max(1), opaque: Vec::new() });
                     if off == 0 {
                         return err(*span, "a struct needs at least one field");
                     }
@@ -1560,9 +1734,15 @@ impl Lowerer {
                         }
                     }
                     if matches!(value.kind, ExprKind::ArrayRepeat(..) | ExprKind::ArrayList(..) | ExprKind::StructLit(..)) {
-                        let c = self.cinit(value, ann.as_ref())?;
+                        self.lenient_objects = self.domain == Domain::Kernel;
+                        let c = self.cinit(value, ann.as_ref());
+                        self.lenient_objects = false;
+                        let c = c?;
                         let t = self.cinit_ty(&c);
                         let root = self.shared_init.len() as u32;
+                        if self.has_object(&c) {
+                            self.object_tables.insert(root, c.clone());
+                        }
                         let mut w = std::mem::take(&mut self.shared_init);
                         self.flatten(&c, &mut w);
                         self.shared_init = w;
@@ -1879,6 +2059,18 @@ impl Lowerer {
         if let Some(v) = self.try_outline(f, &args, span)? {
             return Ok(v);
         }
+        self.inline_call(f, args, span, Vec::new())
+    }
+
+    /// Inlines a call of `f`; `outer`: the scopes a local function was
+    /// defined in (it sees them, under its parameters).
+    fn inline_call(&mut self, f: &FnDecl, args: Vec<V>, span: Span, outer: Vec<HashMap<String, Bind>>) -> LResult<V> {
+        if self.call_stack.iter().any(|n| *n == f.name) {
+            return err(span, format!("`{}` calls itself; kernels and audio shaders have no recursion", f.name));
+        }
+        if args.len() != f.params.len() {
+            return err(span, format!("`{}` takes {} arguments, got {}", f.name, f.params.len(), args.len()));
+        }
         let mut scope = HashMap::new();
         for ((name, ann), a) in f.params.iter().zip(args) {
             let bind = match (a, ann) {
@@ -1911,7 +2103,9 @@ impl Lowerer {
             scope.insert(name.clone(), bind);
         }
         self.call_stack.push(f.name.clone());
-        self.frames.push(vec![scope]);
+        let mut frame = outer;
+        frame.push(scope);
+        self.frames.push(frame);
         self.rets.push(Ret { vars: None, used: false });
         self.loops.push(LoopKind::Wrapper);
         self.b.open();
@@ -1976,6 +2170,7 @@ impl Lowerer {
                     ExprKind::ArrayList(xs) => xs.iter().for_each(|x| expr(x, out)),
                     ExprKind::StructLit(_, fs) => fs.iter().for_each(|(_, x)| expr(x, out)),
                     ExprKind::Block(b) => stmts(b, out),
+                    ExprKind::Lambda(f) => stmts(&f.body, out),
                     ExprKind::If(arms, else_) => {
                         for (c, b) in arms {
                             expr(c, out);
@@ -2045,6 +2240,7 @@ impl Lowerer {
                     ExprKind::ArrayList(xs) => xs.iter().any(|x| expr(l, x, seen)),
                     ExprKind::StructLit(_, fs) => fs.iter().any(|(_, x)| expr(l, x, seen)),
                     ExprKind::Block(b) => walk(l, b, seen),
+                    ExprKind::Lambda(f) => walk(l, &f.body, seen),
                     ExprKind::If(arms, else_) => arms.iter().any(|(c, b)| expr(l, c, seen) || walk(l, b, seen)) || else_.as_ref().is_some_and(|b| walk(l, b, seen)),
                     ExprKind::Match(x, arms) => expr(l, x, seen) || arms.iter().any(|(_, b)| walk(l, b, seen)),
                     _ => false,
@@ -2419,6 +2615,11 @@ impl Lowerer {
         for (k, s) in stmts.iter().enumerate() {
             last = V::Unit;
             match s {
+                Stmt::Let { name, value: Expr { kind: ExprKind::Lambda(f), .. }, .. } => {
+                    let scopes = self.frames.last().cloned().unwrap_or_default();
+                    let f = FnDecl { name: name.clone(), ..(**f).clone() };
+                    self.bind(name, Bind::Closure(Box::new(f), scopes));
+                }
                 Stmt::Let { name, ann, value, span } => {
                     let v = self.expr(value)?;
                     let v = match ann {
@@ -2610,6 +2811,9 @@ impl Lowerer {
             T::Struct(s) => {
                 let d = &self.structs[*s];
                 let Some((_, ft, off, _)) = d.fields.iter().find(|f| f.0 == field) else {
+                    if let Some((_, why)) = d.opaque.iter().find(|f| f.0 == field) {
+                        return err(span, format!("field `{}` is {}", field, why));
+                    }
                     let fields: Vec<&str> = d.fields.iter().map(|f| f.0.as_str()).collect();
                     return err(span, format!("`{}` has no field `{}` (it has {})", d.name, field, fields.join(", ")));
                 };
@@ -2732,6 +2936,9 @@ impl Lowerer {
                 ExprKind::Index(a, b) | ExprKind::Bin(_, a, b) | ExprKind::ArrayRepeat(a, b) => expr(l, a, memo, stack) + expr(l, b, memo, stack),
                 ExprKind::ArrayList(xs) => xs.iter().map(|x| expr(l, x, memo, stack)).sum(),
                 ExprKind::StructLit(_, fs) => fs.iter().map(|(_, x)| expr(l, x, memo, stack)).sum(),
+                ExprKind::Unreadable(_) => 0,
+                // A local function: about one call's worth.
+                ExprKind::Lambda(f) => stmts(l, &f.body, memo, stack),
                 ExprKind::Block(b) => stmts(l, b, memo, stack),
                 ExprKind::If(arms, else_) => arms.iter().map(|(c, b)| expr(l, c, memo, stack) + stmts(l, b, memo, stack)).sum::<u64>() + else_.as_ref().map_or(0, |b| stmts(l, b, memo, stack)),
                 ExprKind::Match(x, arms) => expr(l, x, memo, stack) + arms.iter().map(|(_, b)| 2 + stmts(l, b, memo, stack)).sum::<u64>(),
@@ -2910,11 +3117,31 @@ impl Lowerer {
                 Ok(V::B(self.b.get(t)))
             }
             ExprKind::Bin(op, a, b) => {
-                let av = self.expr(a)?;
-                let bv = self.expr(b)?;
+                let mut av = self.expr(a)?;
+                let mut bv = self.expr(b)?;
+                // In a kernel a number written with a fraction or exponent
+                // (`4.0`) is a float: `i / 4.0` divides as floats, as in
+                // the documents (an integer-valued literal `4` still takes
+                // the other side's type).
+                if self.domain == Domain::Kernel {
+                    let float_lit = |e: &Expr| matches!(&e.kind, ExprKind::Num(_, false)) || matches!(&e.kind, ExprKind::Neg(x) if matches!(x.kind, ExprKind::Num(_, false)));
+                    if let (V::I(_), V::Lit(y)) = (&av, &bv) {
+                        if float_lit(b) {
+                            bv = V::F(self.b.cf(*y as f32));
+                        }
+                    }
+                    if let (V::Lit(x), V::I(_)) = (&av, &bv) {
+                        if float_lit(a) {
+                            av = V::F(self.b.cf(*x as f32));
+                        }
+                    }
+                }
                 self.binary(*op, av, bv, span)
             }
             ExprKind::Field(base, field) => {
+                if let Some(v) = self.object_read(e) {
+                    return Ok(v);
+                }
                 let v = self.expr(base)?;
                 match v {
                     V::Vec(n, l) => self.swizzle(n, &l, field, span),
@@ -2926,11 +3153,16 @@ impl Lowerer {
                 }
             }
             ExprKind::Index(base, idx) => {
+                if let Some(v) = self.object_read(e) {
+                    return Ok(v);
+                }
                 let p = self.place(base)?;
                 let iv = self.expr(idx)?;
                 let ep = self.index_place(&p, &iv, idx.span)?;
                 Ok(self.read(&ep))
             }
+            ExprKind::Unreadable(why) => err(span, format!("this is {}", why)),
+            ExprKind::Lambda(_) => err(span, "a function value is bound with `let name = fn(..) {..}` and called by its name; kernels cannot store, pass or return functions"),
             ExprKind::Call(name, args) => self.call_expr(name, args, span),
             ExprKind::If(arms, else_) => self.if_expr(arms, else_.as_ref(), span),
             ExprKind::Match(subject, arms) => {
@@ -2979,6 +3211,45 @@ impl Lowerer {
             return Ok(V::Place(p));
         }
         match &e.kind {
+            ExprKind::StructLit(name, fields) if name.is_empty() => {
+                // A plain object of values: its shape from the values.
+                let mut vals = Vec::new();
+                let mut types = Vec::new();
+                let mut opaque = Vec::new();
+                for (fname, fe) in fields {
+                    match &fe.kind {
+                        ExprKind::Unreadable(why) => {
+                            opaque.push((fname.clone(), why.clone()));
+                            continue;
+                        }
+                        ExprKind::Lambda(_) => {
+                            opaque.push((fname.clone(), "a function kept in an object: bind it with `let name = fn(..)` and call it by name".to_string()));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                    let v = self.expr(fe)?;
+                    let t = match &v {
+                        V::Place(p) => p.ty.clone(),
+                        V::Lit(_) => T::F,
+                        v => Self::value_t(v).ok_or_else(|| ShaderError::new(fe.span.start, fe.span.end, format!("an object field holds a value, found {}", self.vname(v))))?,
+                    };
+                    if types.iter().any(|(n, _)| n == fname) {
+                        return err(fe.span, format!("field `{}` is given twice", fname));
+                    }
+                    types.push((fname.clone(), t));
+                    vals.push((fname, v, fe.span));
+                }
+                let s = self.object_struct(&types, opaque);
+                let words = self.structs[s].words;
+                let root = self.alloc_frame(words, e.span)?;
+                let p = Place { region: Region::Frame, root, extent: words, off: None, stat: 0, ty: T::Struct(s) };
+                for (fname, v, span) in vals {
+                    let fp = self.field_place(&p, fname, span)?;
+                    self.write(&fp, &v, span)?;
+                }
+                Ok(V::Place(p))
+            }
             ExprKind::StructLit(name, fields) => {
                 let Some(s) = self.structs.iter().position(|d| d.name == *name) else {
                     return err(e.span, format!("unknown struct `{}`", name));
@@ -3110,6 +3381,9 @@ impl Lowerer {
     fn ident(&mut self, name: &str, span: Span) -> LResult<V> {
         match self.lookup(name) {
             Some(Bind::Const(v)) | Some(Bind::Value(v)) => return Ok(v),
+            Some(Bind::Closure(..)) => {
+                return err(span, format!("`{}` is a function: call it (`{}(..)`); kernels cannot store, pass or return functions", name, name))
+            }
             Some(Bind::ConstVec(n, w)) => {
                 let mut lanes = [Val(0); 16];
                 for (k, l) in lanes.iter_mut().enumerate().take(n as usize) {
@@ -3625,6 +3899,17 @@ impl Lowerer {
     }
 
     fn call_expr(&mut self, name: &str, args: &[Expr], span: Span) -> LResult<V> {
+        if let Some(Bind::Closure(f, scopes)) = self.frames.last().and_then(|fr| fr.iter().rev().find_map(|s| s.get(name))).cloned() {
+            let mut vals = Vec::new();
+            for a in args {
+                vals.push(self.expr(a)?);
+            }
+            // Its own name is in its scope: a call of itself is recursion
+            // (an error), not an unknown name.
+            let mut scopes = scopes;
+            scopes.push(HashMap::from([(name.to_string(), Bind::Closure(f.clone(), Vec::new()))]));
+            return self.inline_call(&f, vals, span, scopes);
+        }
         if name == "emit" && self.domain == Domain::Kernel && !self.fns.contains_key("emit") {
             return self.kernel_emit(args, span);
         }
@@ -4151,6 +4436,8 @@ fn assigns(body: &[Stmt], name: &str) -> bool {
             ExprKind::Neg(a) | ExprKind::Not(a) | ExprKind::Field(a, _) => expr(a, name),
             ExprKind::Call(_, args) | ExprKind::ArrayList(args) => args.iter().any(|a| expr(a, name)),
             ExprKind::StructLit(_, f) => f.iter().any(|(_, a)| expr(a, name)),
+            // A local function assigning a captured name assigns it.
+            ExprKind::Lambda(f) => stmts(&f.body, name),
             _ => false,
         }
     }
@@ -4221,6 +4508,8 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         funcs_out: Vec::new(),
         func_cache: HashMap::new(),
         call_sites: None,
+        object_tables: HashMap::new(),
+        lenient_objects: false,
     }
 }
 

@@ -295,7 +295,12 @@ impl Renamer {
                 }
             }
             ExprKind::Block(b) => self.block(b),
-            ExprKind::Num(..) | ExprKind::Bool(_) => {}
+            ExprKind::Lambda(f) => {
+                self.scopes.push(f.params.iter().map(|p| p.0.clone()).collect());
+                self.block(&mut f.body);
+                self.scopes.pop();
+            }
+            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => {}
         }
     }
 }

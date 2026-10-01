@@ -13,6 +13,8 @@
 mod kernel_gen;
 #[path = "support/wasm_case.rs"]
 mod wasm_case;
+#[path = "support/ai_corpus.rs"]
+mod ai_corpus;
 
 use kernel_gen::*;
 use makepad_script_compute::ir::{self, Regions};
@@ -103,6 +105,22 @@ fn scalar_wasm_equals_interpreter_on_kernels_from_source() {
     for (name, src) in CORPUS {
         for n in [1u32, 7, 1029] {
             let case = source_case(name, src, &[], &[("amp", 3.0)], 1.25, n);
+            match check(&case) {
+                None => panic!("{}: declined", case.name),
+                Some(Err(e)) => panic!("{}: {}", case.name, e),
+                Some(Ok(())) => {}
+            }
+        }
+    }
+}
+
+#[test]
+fn scalar_wasm_equals_interpreter_on_ai_style_kernels() {
+    // Local functions, closures, plain objects and tables of them, palette
+    // constants (tests/ai_style.rs checks their values).
+    for (name, src) in ai_corpus::AI_CORPUS {
+        for n in [1u32, 9, 1029] {
+            let case = source_case(name, src, &[], &[], 0.5, n);
             match check(&case) {
                 None => panic!("{}: declined", case.name),
                 Some(Err(e)) => panic!("{}: {}", case.name, e),

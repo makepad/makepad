@@ -436,7 +436,12 @@ impl Walk<'_> {
                     self.expr(x);
                 }
             }
-            ExprKind::Num(..) | ExprKind::Bool(_) => {}
+            ExprKind::Lambda(f) => {
+                self.scopes.push(f.params.iter().map(|p| p.0.clone()).collect());
+                self.stmts(&mut f.body);
+                self.scopes.pop();
+            }
+            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => {}
         }
     }
 }
@@ -479,7 +484,8 @@ fn qualified_calls(b: &[Stmt], out: &mut HashSet<String>) {
             ExprKind::Block(b) => qualified_calls(b, out),
             ExprKind::ArrayList(l) => l.iter().for_each(|x| expr(x, out)),
             ExprKind::StructLit(_, f) => f.iter().for_each(|(_, x)| expr(x, out)),
-            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Ident(_) => {}
+            ExprKind::Lambda(f) => qualified_calls(&f.body, out),
+            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Ident(_) | ExprKind::Unreadable(_) => {}
         }
     }
     for s in b {
@@ -566,7 +572,8 @@ fn item_names(it: &Item, out: &mut HashSet<String>) {
             }
             ExprKind::Block(b) => stmts(b, out),
             ExprKind::ArrayList(l) => l.iter().for_each(|x| expr(x, out)),
-            ExprKind::Num(..) | ExprKind::Bool(_) => {}
+            ExprKind::Lambda(f) => stmts(&f.body, out),
+            ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Unreadable(_) => {}
         }
     }
     fn stmts(b: &[Stmt], out: &mut HashSet<String>) {

@@ -300,7 +300,15 @@ pub enum ExprKind {
     Block(Vec<Stmt>),
     ArrayRepeat(Box<Expr>, Box<Expr>),
     ArrayList(Vec<Expr>),
+    /// `Name { field: value }`; an empty name is a plain object
+    /// `{ field: value }` (its fields give its shape).
     StructLit(String, Vec<(String, Expr)>),
+    /// An object's field value a kernel cannot hold (a string, a value
+    /// that does not parse as kernel code), and why: reading the field is
+    /// the error, the object's other fields stay readable.
+    Unreadable(String),
+    /// A function value `fn(a, b) { .. }`: bound by `let`, then called.
+    Lambda(Box<FnDecl>),
 }
 
 #[derive(Clone, Debug)]
@@ -421,10 +429,11 @@ impl<'a> Parser<'a> {
                 self.expect("=")?;
                 let value = self.expr()?;
                 let span = Span { start, end: self.prev_end() };
-                items.push(if is_var {
-                    Item::Var { name, ann, value, span }
-                } else {
-                    Item::Let { name, ann, value, span }
+                items.push(match value.kind {
+                    // `let f = fn(a) { .. }` (the documents' way): a function.
+                    ExprKind::Lambda(f) if !is_var && ann.is_none() => Item::Fn(FnDecl { name, span, ..*f }),
+                    _ if is_var => Item::Var { name, ann, value, span },
+                    _ => Item::Let { name, ann, value, span },
                 });
             } else if self.is_kw("struct") {
                 self.bump();
@@ -530,8 +539,58 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// A plain object's `name: value` pairs up to its `}` (already past
+    /// `{`); a value may be a string (the field is then unreadable by a
+    /// kernel, not an error until read).
+    fn object_fields(&mut self) -> PResult<Vec<(String, Expr)>> {
+        let mut fields = Vec::new();
+        loop {
+            self.skip_seps();
+            if self.eat("}") {
+                return Ok(fields);
+            }
+            let name = self.ident()?;
+            self.expect(":")?;
+            let t = self.tok().clone();
+            let value = if let Tk::Str(_) = &t.tk {
+                self.bump();
+                Expr { kind: ExprKind::Unreadable("a string: kernels have no strings".into()), span: Span { start: t.start, end: t.end } }
+            } else {
+                let at = self.pos;
+                match self.expr() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        // Skip the value (to the next field or the `}`).
+                        self.pos = at;
+                        let mut depth = 0i32;
+                        loop {
+                            match self.peek() {
+                                Tk::Eof => break,
+                                Tk::Punct("(" | "[" | "{") => depth += 1,
+                                Tk::Punct(")" | "]" | "}") if depth == 0 => break,
+                                Tk::Punct(")" | "]" | "}") => depth -= 1,
+                                Tk::Punct("," | ";") if depth == 0 => break,
+                                _ if depth == 0 && self.pos > at && self.tok().nl => break,
+                                _ => {}
+                            }
+                            self.bump();
+                        }
+                        Expr { kind: ExprKind::Unreadable(format!("a value kernel code cannot hold ({})", e.message)), span: Span { start: t.start, end: self.prev_end() } }
+                    }
+                }
+            };
+            fields.push((name, value));
+        }
+    }
+
     fn fn_decl(&mut self, start: usize) -> PResult<FnDecl> {
         let name = self.ident()?;
+        self.fn_rest(name, start)
+    }
+
+    /// A function's parameters and body (after its name, or after `fn` of
+    /// a function value).
+    fn fn_rest(&mut self, name: String, start: usize) -> PResult<FnDecl> {
         self.expect("(")?;
         let mut params = Vec::new();
         loop {
@@ -572,13 +631,21 @@ impl<'a> Parser<'a> {
     fn stmt(&mut self) -> PResult<Stmt> {
         let start = self.tok().start;
         let span = |p: &Self| Span { start, end: p.prev_end() };
-        if self.is_kw("let") || self.is_kw("var") {
+        if self.is_kw("let") || self.is_kw("var") || self.is_kw("const") {
             self.bump();
             let name = self.ident()?;
             let ann = self.type_ann()?;
             self.expect("=")?;
             let value = self.expr()?;
             return Ok(Stmt::Let { name, ann, value, span: span(self) });
+        }
+        // `fn name(a) { .. }` inside a body: a local function.
+        if self.is_kw("fn") && matches!(self.toks.get(self.pos + 1).map(|t| &t.tk), Some(Tk::Ident(_))) {
+            self.bump();
+            let f = self.fn_decl(start)?;
+            let name = f.name.clone();
+            let s = span(self);
+            return Ok(Stmt::Let { name, ann: None, value: Expr { kind: ExprKind::Lambda(Box::new(f)), span: s }, span: s });
         }
         if self.is_kw("for") {
             self.bump();
@@ -772,6 +839,14 @@ impl<'a> Parser<'a> {
                 Ok(e)
             }
             Tk::Punct("{") => {
+                // `{name: value ..}`: a plain object (a block never starts
+                // with `name:`).
+                let at = |k: usize| self.toks.get(self.pos + k).map(|t| &t.tk);
+                if matches!(at(1), Some(Tk::Ident(_))) && matches!(at(2), Some(Tk::Punct(":"))) {
+                    self.bump();
+                    let fields = self.object_fields()?;
+                    return done(self, ExprKind::StructLit(String::new(), fields));
+                }
                 let b = self.block()?;
                 done(self, ExprKind::Block(b))
             }
@@ -805,6 +880,11 @@ impl<'a> Parser<'a> {
                     }
                     "if" => return self.if_expr(),
                     "match" => return self.match_expr(),
+                    "fn" if matches!(self.toks.get(self.pos + 1).map(|t| &t.tk), Some(Tk::Punct("("))) => {
+                        self.bump();
+                        let f = self.fn_rest("fn".into(), start)?;
+                        return done(self, ExprKind::Lambda(Box::new(f)));
+                    }
                     "let" | "var" | "fn" | "for" | "while" | "loop" | "return" | "break" | "continue" => {
                         return self.err(format!("`{}` cannot be used as a value here", name))
                     }
