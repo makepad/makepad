@@ -95,10 +95,6 @@ fn helpers(split: &Split, values: &KitValues) -> String {
     s
 }
 
-fn marker(src: &str) -> String {
-    format!("    kin_src_{:016x}: fn() -> float {{ return 0.0 }}\n", LiveId::from_str(src).0)
-}
-
 /// Register the draw shaders and the kit module (after `makepad_draw::script_mod`
 /// and `makepad_render_graph::script_mod_passes`).
 pub fn script_mod(vm: &mut ScriptVm) {
@@ -123,9 +119,11 @@ fn compile_shader<T: ScriptNew + ScriptApply>(cx: &mut Cx, base: &str, members: 
         if members.trim().is_empty() {
             return Ok(draw);
         }
-        let code = format!("use mod.std.*\nuse mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nuse mod.shared.*\nmod.draw.{base}{{\n{}{}{members}}}\n", marker(members), makepad_audio_reactive::SPLASH);
+        let code = format!("use mod.std.*\nuse mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nuse mod.shared.*\nmod.draw.{base}{{\n{}{members}}}\n", makepad_audio_reactive::SPLASH);
         vm.bx.captured_errors = Some(Vec::new());
-        let value = vm.eval(ScriptMod { file: file.to_string(), code, ..Default::default() });
+        // A body of its own the VM reclaims once the shader is built (the
+        // shader cache keys a compile by its body and text).
+        let value = vm.eval_transient(ScriptMod { file: file.to_string(), code, ..Default::default() });
         let errors = vm.take_errors();
         if value.is_err() || !errors.is_empty() {
             return Err(if errors.is_empty() { format!("{file}: the look did not evaluate") } else { errors.join("; ") });
