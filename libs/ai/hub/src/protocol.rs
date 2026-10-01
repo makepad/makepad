@@ -89,6 +89,9 @@ pub struct ActivityJson {
     pub quiet_seconds: u64,
     pub gpu_threshold_percent: f64,
     pub sample_age_ms: u64,
+    /// The failing probe step behind an `unknown` state (a fixed identifier
+    /// such as `gpu_counter_array_unknown`), so operators can tell causes apart.
+    pub probe_error: Option<String>,
 }
 
 /// What a box advertises about its concurrent decode capacity.

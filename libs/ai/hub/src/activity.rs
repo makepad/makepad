@@ -1,6 +1,6 @@
 //! Machine activity safety gate. The monitor alone probes the OS. Readers use
 //! atomics, including cancellation checks made by independent backend lanes.
-use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::{Duration, Instant};
 use crate::protocol::ActivityJson;
 
@@ -83,27 +83,47 @@ fn reason(code:u64)->(&'static str,&'static str) { match code {
 fn permits(code:u64, config:&Config)->bool { code==IDLE || code==DISABLED || (code==UNSUPPORTED && !config.enabled) }
 
 const GPU_BUSY_MS: u64 = 3_000;
+/// A failed GPU counter read reuses the last good reading for this long. One
+/// unreadable sample (a GPU context created or destroyed between two PDH
+/// collections, or the warmup after a query reset) happens every few minutes
+/// on a working box; failing closed on it closed admission for the quiet
+/// period and cancelled running jobs. Sustained load already needs
+/// GPU_BUSY_MS to count, so a short blind spot hides nothing new.
+const GPU_ERROR_GRACE_MS: u64 = 3_000;
 
-pub struct Policy { config: Config, quiet_since: Option<u64>, controller_last: Option<u64>, last_sample: Option<u64>, gpu_busy_since: Option<u64> }
+pub struct Policy { config: Config, quiet_since: Option<u64>, controller_last: Option<u64>, last_sample: Option<u64>, gpu_busy_since: Option<u64>, gpu_last_good: Option<(u64,f64)> }
 impl Policy {
-    pub fn new(config:Config)->Self { Self {config, quiet_since:None,controller_last:None,last_sample:None,gpu_busy_since:None} }
+    pub fn new(config:Config)->Self { Self {config, quiet_since:None,controller_last:None,last_sample:None,gpu_busy_since:None,gpu_last_good:None} }
+    /// The foreign GPU load to judge by: this sample's, or within the grace
+    /// period after a failed read, the last good one.
+    fn gpu_load(&mut self, now:u64, sample:&Result<f64,&'static str>)->Result<f64,&'static str> {
+        match sample {
+            Ok(v) if v.is_finite() && *v>=0.0 => { self.gpu_last_good=Some((now,*v)); Ok(*v) }
+            Ok(_) => Err("gpu_counter_value_invalid"),
+            Err(e) => match self.gpu_last_good {
+                Some((at,v)) if now>=at && now-at<=GPU_ERROR_GRACE_MS => Ok(v),
+                _ => Err(e),
+            },
+        }
+    }
     fn observe(&mut self, now:u64, o:&Observation)->(u64,Option<u64>) {
-        let c=&self.config;
-        if c.invalid {return (CONFIG_ERROR,o.idle_seconds)}
-        if !c.supported {return (UNSUPPORTED,o.idle_seconds)}
-        if !c.enabled {return (DISABLED,o.idle_seconds)}
-        if self.last_sample.is_some_and(|last| now.saturating_sub(last)>c.stale_ms || now<last) { self.quiet_since=None; self.gpu_busy_since=None; }
+        if self.config.invalid {return (CONFIG_ERROR,o.idle_seconds)}
+        if !self.config.supported {return (UNSUPPORTED,o.idle_seconds)}
+        if !self.config.enabled {return (DISABLED,o.idle_seconds)}
+        if self.last_sample.is_some_and(|last| now.saturating_sub(last)>self.config.stale_ms || now<last) { self.quiet_since=None; self.gpu_busy_since=None; self.gpu_last_good=None; }
         self.last_sample=Some(now);
+        let gpu=self.gpu_load(now,&o.foreign_gpu_percent);
+        let c=&self.config;
         if o.controller_active==Ok(true) {self.controller_last=Some(now);}
         let idle=o.idle_seconds.map(|idle| self.controller_last.map_or(idle, |last| idle.min(now.saturating_sub(last)/1000)));
         let mut code=if o.session_error.is_some() || idle.is_none() {SESSION_ERROR}
             else if o.fullscreen.is_err() {FULLSCREEN_ERROR}
             else if o.controller_active.is_err() {CONTROLLER_ERROR}
-            else if o.foreign_gpu_percent.as_ref().map_or(true,|v| !v.is_finite() || *v<0.0) {GPU_ERROR}
+            else if gpu.is_err() {GPU_ERROR}
             else if o.fullscreen==Ok(true) {FULLSCREEN}
             else if o.controller_active==Ok(true) {CONTROLLER}
             else if idle.unwrap()<c.idle_seconds {INPUT}
-            else if o.foreign_gpu_percent.unwrap()>=c.gpu_percent {GPU}
+            else if gpu.unwrap()>=c.gpu_percent {GPU}
             else {IDLE};
         if code==GPU {
             // Driver upload/copy bursts and background redraws are not proof
@@ -121,12 +141,13 @@ impl Policy {
 pub struct ActivityGate {
     config: Config, clock: Instant, sequence:AtomicU64, code:AtomicU64,
     sampled_ms:AtomicU64, idle:AtomicU64, gpu:AtomicU64, epoch:AtomicU64, retiring:AtomicBool,
+    probe_error:Mutex<Option<&'static str>>,
 }
 impl ActivityGate {
     pub fn new(config:Config)->Arc<Self> {
         let code=if config.invalid {CONFIG_ERROR} else if !config.supported {UNSUPPORTED} else if !config.enabled {DISABLED} else {START};
         Arc::new(Self { config,clock:Instant::now(),sequence:AtomicU64::new(0),code:AtomicU64::new(code),
-            sampled_ms:AtomicU64::new(0),idle:AtomicU64::new(u64::MAX),gpu:AtomicU64::new(f64::NAN.to_bits()),epoch:AtomicU64::new(0),retiring:AtomicBool::new(false) })
+            sampled_ms:AtomicU64::new(0),idle:AtomicU64::new(u64::MAX),gpu:AtomicU64::new(f64::NAN.to_bits()),epoch:AtomicU64::new(0),retiring:AtomicBool::new(false),probe_error:Mutex::new(None) })
     }
     pub fn epoch(&self)->u64 {self.epoch.load(Ordering::SeqCst)}
     fn now(&self)->u64 {self.clock.elapsed().as_millis() as u64}
@@ -153,7 +174,8 @@ impl ActivityGate {
         let (code,age,idle,gpu)=self.read();let (state,why)=reason(code);
         ActivityJson {version:1, enabled:self.config.enabled, state:state.into(), reason:why.into(),idle_seconds:idle,
             foreign_gpu_percent:gpu,admission_open:permits(code,&self.config),idle_threshold_seconds:self.config.idle_seconds,
-            quiet_seconds:self.config.quiet_seconds,gpu_threshold_percent:self.config.gpu_percent,sample_age_ms:age}
+            quiet_seconds:self.config.quiet_seconds,gpu_threshold_percent:self.config.gpu_percent,sample_age_ms:age,
+            probe_error:if state=="unknown" {self.probe_error.lock().ok().and_then(|e|*e).map(String::from)} else {None}}
     }
     fn publish(&self,code:u64,idle:Option<u64>,gpu:Option<f64>) {
         self.sequence.fetch_add(1,Ordering::SeqCst);
@@ -200,6 +222,9 @@ impl Sampler {
         #[cfg(not(target_os="windows"))]
         let o=Observation {idle_seconds:None,fullscreen:Err("unsupported"),controller_active:Err("unsupported"),foreign_gpu_percent:Err("unsupported"),session_error:Some("unsupported")};
         let (code,idle)=self.policy.observe(gate.now(),&o);
+        let error=match code {SESSION_ERROR=>o.session_error, FULLSCREEN_ERROR=>o.fullscreen.err(),
+            CONTROLLER_ERROR=>o.controller_active.err(), GPU_ERROR=>o.foreign_gpu_percent.err(), _=>None};
+        if let Ok(mut slot)=gate.probe_error.lock() {*slot=error;}
         gate.publish(code,idle,o.foreign_gpu_percent.ok());
     }
 }
@@ -233,7 +258,26 @@ mod tests {
         assert_eq!(p.observe(21000,&o).0,QUIET);
         o.fullscreen=Ok(true);assert_eq!(p.observe(22000,&o).0,FULLSCREEN);
         o.fullscreen=Ok(false);
-        o.foreign_gpu_percent=Err("warmup");assert_eq!(p.observe(23000,&o).0,GPU_ERROR);
+        // A failed read within the grace period reuses the last good value;
+        // one that persists past it fails closed.
+        o.foreign_gpu_percent=Err("warmup");assert_eq!(p.observe(23000,&o).0,QUIET);
+        assert_eq!(p.observe(24000,&o).0,QUIET);
+        assert_eq!(p.observe(25000,&o).0,QUIET);
+        assert_eq!(p.observe(26000,&o).0,GPU_ERROR);
+    }
+    #[test] fn single_unreadable_gpu_sample_keeps_admission_open() {
+        let mut p=Policy::new(config());let mut o=quiet();
+        for t in 0..=20 {p.observe(t*1000,&o);}
+        assert_eq!(p.observe(21000,&o).0,IDLE);
+        o.foreign_gpu_percent=Err("gpu_counter_sample_unknown");
+        assert_eq!(p.observe(22000,&o).0,IDLE);
+        o.foreign_gpu_percent=Err("gpu_counter_warmup");
+        assert_eq!(p.observe(23000,&o).0,IDLE);
+        o.foreign_gpu_percent=Ok(0.0);
+        assert_eq!(p.observe(24000,&o).0,IDLE);
+        // Without a recent good reading there is nothing to fall back on.
+        let mut p=Policy::new(config());
+        assert_eq!(p.observe(0,&Observation{foreign_gpu_percent:Err("gpu_counter_warmup"),..quiet()}).0,GPU_ERROR);
     }
     #[test] fn invalid_settings_never_disable() {
         for v in ["NaN","0","101","-1","oops"] {
@@ -263,7 +307,6 @@ mod tests {
             (Observation{idle_seconds:Some(0),..quiet()},INPUT),
             (Observation{fullscreen:Ok(true),..quiet()},FULLSCREEN),
             (Observation{controller_active:Ok(true),..quiet()},CONTROLLER),
-            (Observation{foreign_gpu_percent:Err("unavailable"),..quiet()},GPU_ERROR),
         ] {
             let mut p=Policy::new(config());let mut o=quiet();
             for t in 0..=20 {p.observe(t*1000,&o);}

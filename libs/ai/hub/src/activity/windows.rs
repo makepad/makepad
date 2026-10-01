@@ -894,8 +894,11 @@ mod tests {
             observation.foreign_gpu_percent = foreign_load(&[engine(100 + second, 0, 90.0)], &BTreeSet::new());
             assert_eq!(policy.observe(u64::from(second) * 1000, &observation).0, if second == 28 {GPU} else {IDLE});
         }
+        // An unreadable sample keeps the last reading for the grace period,
+        // then fails closed.
         observation.foreign_gpu_percent = foreign_load(&[], &BTreeSet::new());
-        assert_eq!(policy.observe(29000, &observation).0, GPU_ERROR);
+        assert_eq!(policy.observe(29000, &observation).0, GPU);
+        assert_eq!(policy.observe(32000, &observation).0, GPU_ERROR);
     }
     #[test]
     fn unknown_counter_instances_fail_closed() {
