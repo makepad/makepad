@@ -541,7 +541,7 @@ mod tests {
         let root_pass = DrawPass::new(&mut cx);
         window.set_pass(&mut cx, &root_pass);
         let child_pass = DrawPass::new(&mut cx);
-        child_pass.set_pass_parent(&mut cx, &root_pass);
+        child_pass.set_pass_parent(&mut cx, root_pass.draw_pass_id());
         child_pass.set_size(&mut cx, dvec2(64.0, 48.0));
 
         let event = DrawEvent::default();
@@ -775,7 +775,7 @@ mod tests {
         let root_pass = DrawPass::new(&mut cx);
         root_pass.set_size(&mut cx, dvec2(500.0, 400.0));
         let child_pass = DrawPass::new(&mut cx);
-        child_pass.set_pass_parent(&mut cx, &root_pass);
+        child_pass.set_pass_parent(&mut cx, root_pass.draw_pass_id());
         child_pass.set_size(&mut cx, dvec2(64.0, 48.0));
         let event = DrawEvent::default();
         let mut draw = CxDraw::new(&mut cx, &event);

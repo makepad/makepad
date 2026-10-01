@@ -243,15 +243,13 @@ impl Renderer {
         });
         let id = pass.draw_pass_id();
         let scene_id = scene_pass.draw_pass_id();
-        let parent = cx.cx.passes[scene_id].parent.clone();
         pass.set_size(cx, size);
         pass.clear_color_textures(cx.cx);
         // Load, never clear: the scene is already in the target.
         pass.set_color_texture(cx.cx, color, DrawPassClearColor::InitWith(vec4(0.0, 0.0, 0.0, 0.0)));
-        cx.cx.passes[id].depth_texture = None;
-        cx.cx.passes[id].keep_camera_matrix = true;
-        cx.cx.passes[id].parent = parent;
-        cx.cx.passes[scene_id].parent = CxDrawPassParent::DrawPass(id);
+        pass.clear_depth_texture(cx.cx);
+        pass.set_keep_camera_matrix(cx.cx, true);
+        pass.insert_after(cx.cx, scene_id);
         crate::scene::set_pass_camera(cx.cx, &pass, &frame.scene);
         if let Some(ms) = pass.take_gpu_times_ms(cx.cx).last() {
             self.vfx.note_gpu_ms(*ms);

@@ -2471,9 +2471,7 @@ impl Widget for FlowTweenView {
                     );
                     match chain_parent {
                         Some(parent_id) => {
-                            let child_id = st.pass.draw_pass_id();
-                            cx.cx.passes[child_id].parent =
-                                CxDrawPassParent::DrawPass(parent_id);
+                            st.pass.set_pass_parent(cx.cx, parent_id);
                         }
                         None => cx.make_child_pass(&st.pass),
                     }

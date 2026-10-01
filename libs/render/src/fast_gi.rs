@@ -482,7 +482,7 @@ impl FastGi {
             let next=if i<3{Some(gpu.stages[i+1].pass.draw_pass_id())}else{None};
             let stage=&mut gpu.stages[i];
             cx2.make_child_pass(&stage.pass);
-            if let Some(next)=next{cx2.passes[stage.pass.draw_pass_id()].parent=CxDrawPassParent::DrawPass(next);}
+            if let Some(next)=next{stage.pass.set_pass_parent(cx2.cx,next);}
             cx2.begin_pass(&stage.pass,Some(1.0));
             stage.pass.set_size(cx2.cx,dvec2(width as f64,height as f64));stage.pass.clear_color_textures(cx2.cx);
             // The field keeps its contents; the batch targets are rewritten.

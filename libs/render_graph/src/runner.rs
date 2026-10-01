@@ -328,11 +328,7 @@ impl GraphRunner {
             h.cold = true;
         }
         for slot in &self.slots {
-            let pass = &mut cx.passes[slot.pass.draw_pass_id()];
-            pass.main_draw_list_id = None;
-            pass.parent = CxDrawPassParent::None;
-            pass.attached_by = None;
-            pass.paint_dirty = false;
+            slot.pass.withdraw(cx);
             let items = &mut cx.draw_lists[slot.list.id()].draw_items;
             items.clear();
             items.finish_recording();
@@ -537,16 +533,13 @@ impl GraphRunner {
 /// Record one pass: `target` is attachment 0, `extra` the further outputs
 /// (MRT attachments 1..).
 fn record(cx: &mut Cx2d, slot: &mut PassSlot, size: DVec2, target: &Texture, extra: &[Texture], draw: &mut DrawGraphPass) {
-    let id = slot.pass.draw_pass_id();
-    let parent = cx.cx.passes[id].parent.clone();
     slot.pass.set_size(cx, size);
     slot.pass.clear_color_textures(cx.cx);
     slot.pass.set_color_texture(cx, target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
     for t in extra {
         slot.pass.add_color_texture(cx.cx, t, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
     }
-    cx.cx.passes[id].depth_texture = None;
-    cx.cx.passes[id].parent = parent;
+    slot.pass.clear_depth_texture(cx.cx);
     cx.begin_pass(&slot.pass, Some(1.0));
     slot.pass.set_size(cx, size);
     slot.list.begin_always(cx);

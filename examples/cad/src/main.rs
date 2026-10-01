@@ -1377,7 +1377,7 @@ impl CadViewport {
         );
         self.pass
             .set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
+        self.pass.set_keep_camera_matrix(cx, true);
     }
 
     fn set_mesh(&mut self, cx: &mut Cx, mesh_data: CadMeshData) -> CadStats {

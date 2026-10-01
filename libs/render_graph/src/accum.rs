@@ -488,13 +488,10 @@ pub(crate) fn attach(cx: &mut Cx2d, pass: &DrawPass, parent: Option<DrawPassId>)
 }
 
 fn record(cx: &mut Cx2d, slot: &mut Slot, size: DVec2, target: &Texture, draw: &mut DrawQuad) {
-    let id = slot.pass.draw_pass_id();
-    let parent = cx.cx.passes[id].parent.clone();
     slot.pass.set_size(cx, size);
     slot.pass.clear_color_textures(cx.cx);
     slot.pass.set_color_texture(cx, target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 0.0)));
-    cx.cx.passes[id].depth_texture = None;
-    cx.cx.passes[id].parent = parent;
+    slot.pass.clear_depth_texture(cx.cx);
     cx.begin_pass(&slot.pass, Some(1.0));
     slot.pass.set_size(cx, size);
     slot.list.begin_always(cx);

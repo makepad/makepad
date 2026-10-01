@@ -270,9 +270,79 @@ impl DrawPass {
         cxpass.parent = CxDrawPassParent::Xr;
     }
 
-    pub fn set_pass_parent(&self, cx: &mut Cx, pass: &DrawPass) {
+    /// Paint this pass before `parent` (which samples its output), without
+    /// changing what attached it ([`Cx::set_pass_parent`]).
+    pub fn set_pass_parent(&self, cx: &mut Cx, parent: DrawPassId) {
+        cx.set_pass_parent(self.draw_pass_id(), parent);
+    }
+
+    /// Put this pass between `producer` and what `producer` paints for:
+    /// this pass takes `producer`'s parent, and `producer` now paints for
+    /// this pass (which samples its output).
+    pub fn insert_after(&self, cx: &mut Cx, producer: DrawPassId) {
+        let parent = cx.passes[producer].parent.clone();
+        cx.passes[self.draw_pass_id()].parent = parent;
+        cx.set_pass_parent(producer, self.draw_pass_id());
+    }
+
+    /// Take this pass out of the paint tree (no parent, nothing attaching
+    /// it) until something attaches it again; its draw list stays.
+    pub fn detach(&self, cx: &mut Cx) {
+        let pass = &mut cx.passes[self.draw_pass_id()];
+        pass.parent = CxDrawPassParent::None;
+        pass.attached_by = None;
+    }
+
+    /// Stop painting this pass until it is attached and recorded again: no
+    /// parent, nothing attaching it, no draw list, nothing dirty. Its
+    /// attachments stay.
+    pub fn withdraw(&self, cx: &mut Cx) {
+        let pass = &mut cx.passes[self.draw_pass_id()];
+        pass.main_draw_list_id = None;
+        pass.parent = CxDrawPassParent::None;
+        pass.attached_by = None;
+        pass.paint_dirty = false;
+    }
+
+    /// Render without a depth attachment.
+    pub fn clear_depth_texture(&self, cx: &mut Cx) {
+        cx.passes[self.draw_pass_id()].depth_texture = None;
+    }
+
+    /// Keep the camera this pass was given ([`Self::set_camera`]) when it is
+    /// begun, instead of the 2D ortho matrix of its size.
+    pub fn set_keep_camera_matrix(&self, cx: &mut Cx, keep: bool) {
+        cx.passes[self.draw_pass_id()].keep_camera_matrix = keep;
+    }
+
+    /// The camera every draw in this pass sees: `view` and `projection`
+    /// (and the inverse view), also as the depth camera.
+    pub fn set_camera(&self, cx: &mut Cx, view: Mat4f, projection: Mat4f) {
+        let camera_inv = view.invert();
+        let uniforms_gen = cx.next_uniform_gen();
         let cxpass = &mut cx.passes[self.draw_pass_id()];
-        cxpass.parent = CxDrawPassParent::DrawPass(pass.draw_pass_id());
+        let u = &mut cxpass.pass_uniforms;
+        u.camera_projection = projection;
+        u.camera_projection_r = projection;
+        u.camera_view = view;
+        u.camera_view_r = view;
+        u.depth_projection = projection;
+        u.depth_projection_r = projection;
+        u.depth_view = view;
+        u.depth_view_r = view;
+        u.camera_inv = camera_inv;
+        u.camera_inv_r = camera_inv;
+        cxpass.mark_pass_uniforms_dirty(uniforms_gen);
+    }
+
+    /// The projection [`Self::set_camera`] gave this pass.
+    pub fn camera_projection(&self, cx: &Cx) -> Mat4f {
+        cx.passes[self.draw_pass_id()].pass_uniforms.camera_projection
+    }
+
+    /// What this pass paints for (a window, another pass, nothing).
+    pub fn parent(&self, cx: &Cx) -> CxDrawPassParent {
+        cx.passes[self.draw_pass_id()].parent.clone()
     }
 
     pub fn set_pass_name(&self, cx: &mut Cx, name: &str) {

@@ -1065,12 +1065,13 @@ impl XrRoot {
     fn handle_draw_event(&mut self, cx: &mut Cx, e: &DrawEvent, scope: &mut Scope) {
         let started = Instant::now();
         self.ensure_initialized(cx);
-        cx.passes[self.pass.handle.draw_pass_id()].keep_camera_matrix =
+        let keep =
             if cx.in_xr_mode() || !self.permissions_ui_visible() {
                 self.pass.keep_camera_matrix
             } else {
                 false
             };
+        self.pass.handle.set_keep_camera_matrix(cx, keep);
         self.pass.handle.set_window_clear_color(
             cx,
             if cx.in_xr_mode() {

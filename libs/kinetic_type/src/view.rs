@@ -157,24 +157,6 @@ fn instance_layout(cx: &Cx, draw: &DrawKineticGlyph) -> Result<Layout, String> {
     Ok(Layout { name: "KineticGlyph".into(), stride: l.stride_words, fields })
 }
 
-fn set_pass_camera(cx: &mut Cx, pass: &DrawPass, view: Mat4f, projection: Mat4f) {
-    let camera_inv = view.invert();
-    let gen = cx.next_uniform_gen();
-    let p = &mut cx.passes[pass.draw_pass_id()];
-    let u = &mut p.pass_uniforms;
-    u.camera_projection = projection;
-    u.camera_projection_r = projection;
-    u.camera_view = view;
-    u.camera_view_r = view;
-    u.depth_projection = projection;
-    u.depth_projection_r = projection;
-    u.depth_view = view;
-    u.depth_view_r = view;
-    u.camera_inv = camera_inv;
-    u.camera_inv_r = camera_inv;
-    p.mark_pass_uniforms_dirty(gen);
-}
-
 /// A u x v grid over 0..1 (face class 6), shaped in the vertex stage by
 /// the look's `surface(uv)`.
 fn surface_shape(id: usize, u: u32, v: u32) -> shapes::Shape {
@@ -224,7 +206,7 @@ fn bind_named(cx: &Cx, dv: &mut DrawVars, id: LiveId, tex: &Texture) {
 impl Picture {
     fn new(cx: &mut Cx) -> Self {
         let pass = DrawPass::new_with_name(cx, "kinetic picture");
-        cx.passes[pass.draw_pass_id()].keep_camera_matrix = true;
+        pass.set_keep_camera_matrix(cx, true);
         Self {
             pass,
             list: DrawList::new(cx),
@@ -378,7 +360,7 @@ impl KineticView {
         };
         let pass = DrawPass::new_with_name(cx, "kinetic");
         // The pass keeps the camera this view sets (not the 2D ortho).
-        cx.passes[pass.draw_pass_id()].keep_camera_matrix = true;
+        pass.set_keep_camera_matrix(cx, true);
         let color = Texture::new_with_format(cx, TextureFormat::RenderRGBAf16 { size: TextureSize::Auto, initial: true });
         let depth = Texture::new_with_format(cx, TextureFormat::DepthD32 { size: TextureSize::Auto, initial: true });
         let mut graph = GraphRunner::default();
@@ -781,7 +763,7 @@ impl KineticView {
             proj.v[5] = 2.0 / view_h.max(1e-6);
             proj.v[10] = -1.0 / (far - near);
             proj.v[14] = -near / (far - near);
-            set_pass_camera(cx.cx, &pp.pass, view, proj);
+            pp.pass.set_camera(cx.cx, view, proj);
             pp.list.begin_always(cx);
             let pview = [pw as f32, ph as f32, self.text_at, 1.0];
             Self::set_uniforms(&self.values, &mut self.draw, cx.cx, &s, p, bands, misc, pview, textu, share);
@@ -799,7 +781,7 @@ impl KineticView {
         cx.make_child_pass(&self.pass);
         cx.begin_pass(&self.pass, Some(1.0));
         self.pass.set_size(cx.cx, size_px);
-        set_pass_camera(cx.cx, &self.pass, view, projection);
+        self.pass.set_camera(cx.cx, view, projection);
         self.list.begin_always(cx);
         if let Some(b) = self.backdrop.as_mut().filter(|_| !self.overlay) {
             Self::set_uniforms(&self.values, &mut b.draw_super, cx.cx, &s, p, bands, misc, viewu, textu, share);
@@ -837,7 +819,7 @@ impl KineticView {
         self.list.end(cx);
         cx.end_pass(&self.pass);
         if let (Some(pp), Some(_)) = (&self.picture, picture) {
-            cx.cx.passes[pp.pass.draw_pass_id()].parent = CxDrawPassParent::DrawPass(self.pass.draw_pass_id());
+            pp.pass.set_pass_parent(cx.cx, self.pass.draw_pass_id());
         }
         // ---- the kit's passes
         let mut out = self.color.clone();
@@ -848,7 +830,7 @@ impl KineticView {
             for stage in Stage::ALL {
                 let inputs = StageInputs { color: &out, depth: None, normal: None, velocity: None, glow: None, id: None, named: &[] };
                 if let Some((tex, first)) = self.graph.run_stage(cx, stage, &inputs, &values, fu, None) {
-                    cx.cx.passes[producer].parent = CxDrawPassParent::DrawPass(first);
+                    cx.cx.set_pass_parent(producer, first);
                     if let Some(last) = self.graph.pass_ids(stage).last() {
                         producer = *last;
                     }

@@ -489,7 +489,7 @@ impl Box3dViewport {
         );
         self.pass
             .set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
-        cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
+        self.pass.set_keep_camera_matrix(cx, true);
 
         self.sim = Some(PhysicsSim::new());
         self.next_frame = cx.new_next_frame();

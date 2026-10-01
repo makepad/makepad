@@ -335,7 +335,7 @@ impl Widget for MaterialLab {
             self.pass.set_color_texture(cx.cx, &self.color_texture, DrawPassClearColor::ClearWith(vec4(0.05, 0.06, 0.09, 1.0)));
             self.pass.set_depth_texture(cx.cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
             // The 3D camera is ours (set_pass_camera), not the 2D pass's.
-            cx.cx.passes[self.pass.draw_pass_id()].keep_camera_matrix = true;
+            self.pass.set_keep_camera_matrix(cx.cx, true);
             if let Err(e) = self.renderer.load_model(cx.cx, "lab/cube", &cube_glb(), None) {
                 log!("material lab: cube did not load: {e}");
             }

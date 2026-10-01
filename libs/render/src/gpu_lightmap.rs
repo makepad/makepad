@@ -688,8 +688,7 @@ impl<'a> PassSeq<'a> {
         // whatever pass is open right now.
         if k + 1 < n {
             let parent_id = self.pool[self.order[k + 1]].pass.draw_pass_id();
-            let child_id = self.pool[self.order[k]].pass.draw_pass_id();
-            cx.cx.passes[child_id].parent = CxDrawPassParent::DrawPass(parent_id);
+            self.pool[self.order[k]].pass.set_pass_parent(cx.cx, parent_id);
         } else {
             cx.make_child_pass(&self.pool[self.order[k]].pass);
         }
@@ -704,7 +703,7 @@ impl<'a> PassSeq<'a> {
                     .set_depth_texture(cx.cx, t, DrawPassClearDepth::ClearWith(1.0));
             }
             None => {
-                cx.cx.passes[bp.pass.draw_pass_id()].depth_texture = None;
+                bp.pass.clear_depth_texture(cx.cx);
             }
         }
         bp.list.begin_always(cx);

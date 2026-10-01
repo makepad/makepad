@@ -317,20 +317,17 @@ impl BloomPass {
         }
         order.push(self.adapt.as_ref().unwrap().pass.draw_pass_id());
         for w in order.windows(2) {
-            cx.cx.passes[w[0]].parent = CxDrawPassParent::DrawPass(w[1]);
+            cx.cx.set_pass_parent(w[0], w[1]);
         }
         if let Some(last) = order.last() {
-            cx.cx.passes[*last].parent = CxDrawPassParent::DrawPass(parent);
+            cx.cx.set_pass_parent(*last, parent);
         }
 
         fn record(cx: &mut Cx2d, stage: &mut Stage, size: DVec2, target: &Texture, draw: &mut dyn FnMut(&mut Cx2d, Rect)) {
-            let id = stage.pass.draw_pass_id();
-            let parent = cx.cx.passes[id].parent.clone();
             stage.pass.set_size(cx, size);
             stage.pass.clear_color_textures(cx.cx);
             stage.pass.set_color_texture(cx, target, DrawPassClearColor::ClearWith(vec4(0.0, 0.0, 0.0, 1.0)));
-            cx.cx.passes[id].depth_texture = None;
-            cx.cx.passes[id].parent = parent;
+            stage.pass.clear_depth_texture(cx.cx);
             cx.begin_pass(&stage.pass, Some(1.0));
             stage.pass.set_size(cx, size);
             stage.list.begin_always(cx);

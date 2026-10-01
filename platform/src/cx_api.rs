@@ -2024,6 +2024,13 @@ impl Cx {
         }
     }
 
+    /// Paint `child` before `parent`, which samples its output, keeping what
+    /// attached it (see [`Self::attach_child_pass`]): a chain of passes
+    /// under one attached pass.
+    pub fn set_pass_parent(&mut self, child: DrawPassId, parent: DrawPassId) {
+        self.passes[child].parent = CxDrawPassParent::DrawPass(parent);
+    }
+
     /// Parent `child` under `parent` for painting order on behalf of
     /// `attached_by`: the draw list being recorded, whose draw calls consume
     /// the child's output. That list is remembered with its current redraw

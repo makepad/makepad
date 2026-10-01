@@ -489,9 +489,8 @@ impl SsaoPass {
                 st.pass.clear_color_textures(cx.cx);
                 st.pass
                     .set_color_texture(cx, target, DrawPassClearColor::ClearWith(vec4(1.0, 1.0, 1.0, 1.0)));
-                let id = st.pass.draw_pass_id();
-                cx.cx.passes[id].depth_texture = None;
-                cx.cx.passes[id].parent = CxDrawPassParent::DrawPass(parent_id);
+                st.pass.clear_depth_texture(cx.cx);
+                st.pass.set_pass_parent(cx.cx, parent_id);
                 cx.begin_pass(&st.pass, None);
                 st.pass.set_size(cx, size);
                 st.list.begin_always(cx);

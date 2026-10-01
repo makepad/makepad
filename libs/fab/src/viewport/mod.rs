@@ -354,21 +354,6 @@ impl DrawGeometry for DrawFabLine {
     }
 }
 
-fn set_pass_camera(cx: &mut Cx, pass: &DrawPass, scene: &SceneState3D) {
-    let camera_inv = scene.view.invert();
-    let u = &mut cx.passes[pass.draw_pass_id()].pass_uniforms;
-    u.camera_projection = scene.projection;
-    u.camera_projection_r = scene.projection;
-    u.camera_view = scene.view;
-    u.camera_view_r = scene.view;
-    u.depth_projection = scene.projection;
-    u.depth_projection_r = scene.projection;
-    u.depth_view = scene.view;
-    u.depth_view_r = scene.view;
-    u.camera_inv = camera_inv;
-    u.camera_inv_r = camera_inv;
-}
-
 /// A ground quad big enough to read as infinite; the shader fades it.
 fn ground_quad(cx: &mut Cx, half: f32) -> Geometry {
     let g = Geometry::new(cx);
@@ -700,7 +685,7 @@ impl FabViewport {
             },
         );
         for p in [&self.aux_pass, &self.lit_pass, &self.comp_pass] {
-            cx.passes[p.draw_pass_id()].keep_camera_matrix = true;
+            p.set_keep_camera_matrix(cx, true);
         }
         // Cascaded shadow maps every frame: a BIM model's sun moves whenever
         // the sun-study slider does, and an atlas bake cannot follow that.
@@ -1763,7 +1748,7 @@ impl Widget for FabViewport {
         cx.make_child_pass(&self.comp_pass);
         let comp_id = self.comp_pass.draw_pass_id();
         let lit_id = self.lit_pass.draw_pass_id();
-        cx.cx.passes[lit_id].parent = CxDrawPassParent::DrawPass(comp_id);
+        self.lit_pass.set_pass_parent(cx.cx, comp_id);
         let ssao_on = wants_ssao_pass(state.view_at(self.view))
             && !state.scene.is_empty()
             && self.ssao.ensure(cx.cx);
@@ -1772,7 +1757,7 @@ impl Widget for FabViewport {
         } else {
             lit_id
         };
-        cx.cx.passes[self.aux_pass.draw_pass_id()].parent = CxDrawPassParent::DrawPass(aux_parent);
+        self.aux_pass.set_pass_parent(cx.cx, aux_parent);
 
         // ---- path tracer (the frozen B↔F seam, api.rs) ---------------------
         // Lane F parents its trace/accumulate/tonemap passes under `comp`,
@@ -1835,7 +1820,7 @@ impl Widget for FabViewport {
             .set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
         cx.begin_pass(&self.aux_pass, None);
         self.aux_pass.set_size(cx, rect.size);
-        set_pass_camera(cx.cx, &self.aux_pass, &fab_state);
+        self.aux_pass.set_camera(cx.cx, fab_state.view, fab_state.projection);
         // PASS-LOCAL DRAW LIST + ROOT TURTLE, both load-bearing, in this
         // order (`apps/vj/src/flow_tween.rs`'s stage chain, verbatim):
         // the list because everything drawn before the pass has one lands in
@@ -1917,7 +1902,7 @@ impl Widget for FabViewport {
             .set_depth_texture(cx, &self.depth_texture, DrawPassClearDepth::ClearWith(1.0));
         cx.begin_pass(&self.lit_pass, None);
         self.lit_pass.set_size(cx, rect.size);
-        set_pass_camera(cx.cx, &self.lit_pass, &render_state);
+        self.lit_pass.set_camera(cx.cx, render_state.view, render_state.projection);
         // Realtime consumes the AO through the renderer's ambient-only hook:
         // the factor multiplies the sky fill, never the direct sun or the
         // cascades, so a sunlit facade keeps its brightness while the eaves
@@ -1946,7 +1931,7 @@ impl Widget for FabViewport {
         );
         cx.begin_pass(&self.comp_pass, None);
         self.comp_pass.set_size(cx, rect.size);
-        set_pass_camera(cx.cx, &self.comp_pass, &fab_state);
+        self.comp_pass.set_camera(cx.cx, fab_state.view, fab_state.projection);
         // A DRAW LIST, FIRST, ALWAYS. `begin_pass` clears the pass's
         // `main_draw_list_id`; whatever calls `begin_always` first becomes it,
         // and anything drawn before that lands in the *enclosing* list —

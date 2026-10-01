@@ -361,7 +361,7 @@ impl Default for LocalShadows {
 const FACE_FLOATS: usize = 20;
 
 impl LocalShadows {
-    pub(crate) fn parent_to(&self,cx:&mut Cx,parent:DrawPassId){if let Some(pass)=&self.pass{cx.passes[pass.draw_pass_id()].parent=CxDrawPassParent::DrawPass(parent);}}
+    pub(crate) fn parent_to(&self,cx:&mut Cx,parent:DrawPassId){if let Some(pass)=&self.pass{pass.set_pass_parent(cx,parent);}}
     pub fn config(&self) -> LocalShadowConfig {
         self.config
     }
