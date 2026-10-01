@@ -2992,7 +2992,11 @@ impl Slider {
         };
         let cap_at = fader_cap_center(self.relative_value, extent, self.cap_size, self.track_inset);
         let rel = (along - cap_at, across);
-        let near = (rel.0 * rel.0 + rel.1 * rel.1).sqrt() < self.cap_field_reach + self.cap_size;
+        // The distance to the cap's edge goes to the arbiter: only the
+        // nearest two controls on the window carry a field at once.
+        let dist = ((rel.0 * rel.0 + rel.1 * rel.1).sqrt() - self.cap_size * 0.5).max(0.0);
+        let granted = crate::pointer_field::FieldArbiter::report(abs, self.widget_uid().0, dist);
+        let near = dist < self.cap_field_reach + self.cap_size * 0.5 && granted;
         let target = if near { 1.0 } else { 0.0 };
         let moved = match self.cap_motion.pointer {
             Some(p) => (p.0 - rel.0).abs() > 0.01 || (p.1 - rel.1).abs() > 0.01,
