@@ -111,10 +111,13 @@ script_mod! {
         height: Fill
         flow: Down
 
-        // The panes are inset panels, so a sheet draws them as it draws
-        // its panels (a bezelled window, a soft card) and the window's own
-        // ground shows between them.
-        toolbar_pane := InsetPanelView{
+        // The panes are panels, so a sheet draws them as it draws its
+        // panels (a bezelled window, a soft card) and the window's own
+        // ground shows between them. Not inset panels: most sheets draw an
+        // inset panel as their sunken well, and a well the size of a pane
+        // is not what any of them meant (the futuristic metal sheet's is a
+        // pocket of circuit board).
+        toolbar_pane := PanelView{
             width: Fill
             height: Fit
             margin: Inset{left: 6. right: 6. top: 6. bottom: 4.}
@@ -125,7 +128,7 @@ script_mod! {
             axis: SplitterAxis.Horizontal
             align: SplitterAlign.FromA(260.)
             size: 6.
-            a: InsetPanelView{
+            a: PanelView{
                 width: Fill
                 height: Fill
                 flow: Down
@@ -156,14 +159,14 @@ script_mod! {
                 axis: SplitterAxis.Horizontal
                 align: SplitterAlign.FromB(380.)
                 size: 6.
-                a: InsetPanelView{
+                a: PanelView{
                     width: Fill
                     height: Fill
                     padding: theme.mspace_2
                     margin: Inset{left: 2. right: 2. top: 4. bottom: 6.}
                     canvas := mod.storybook.StoryCanvas{}
                 }
-                b: InsetPanelView{
+                b: PanelView{
                     width: Fill
                     height: Fill
                     flow: Down
