@@ -90,7 +90,11 @@ fn respond(root: &Path, headers: &makepad_network::HttpServerHeaders) -> HttpSer
     let len = f.metadata().map(|m| m.len()).unwrap_or(0);
     let name = file.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
     let encoding = if name.ends_with(".wasm.br") { "Content-Encoding: br\r\n" } else { "" };
-    let common = format!("Content-Type: {}\r\n{encoding}Cache-Control: no-store\r\nAccept-Ranges: bytes\r\nConnection: close\r\n", mime(&name));
+    // Cross-origin isolated, so a threaded build gets SharedArrayBuffer.
+    let common = format!(
+        "Content-Type: {}\r\n{encoding}Cache-Control: no-store\r\nAccept-Ranges: bytes\r\nCross-Origin-Opener-Policy: same-origin\r\nCross-Origin-Embedder-Policy: require-corp\r\nConnection: close\r\n",
+        mime(&name)
+    );
     if encoding.is_empty() {
         if let Some((start, end)) = range(headers.header("Range"), len) {
             let n = end - start + 1;
