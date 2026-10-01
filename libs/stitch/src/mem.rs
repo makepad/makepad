@@ -1,7 +1,7 @@
 use {
     crate::{
         data::{Data, DataEntity},
-        decode::{Decode, DecodeError, Decoder},
+        
         limits::Limits,
         stack::Stack,
         store::{Handle, HandlePair, Store, StoreId, UnguardedHandle},
@@ -114,14 +114,6 @@ impl MemType {
     /// other's.
     pub fn is_subtype_of(self, other: Self) -> bool {
         self.limits.is_sublimit_of(other.limits)
-    }
-}
-
-impl Decode for MemType {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        Ok(Self {
-            limits: Limits::decode(decoder)?,
-        })
     }
 }
 

@@ -29,8 +29,8 @@ fn optimize(bytes: &[u8], opts: &OptimizeOptions) -> Module {
     for pass in &report.passes {
         assert!(pass.reverted.is_none(), "{} reverted: {:?}", pass.name, pass.reverted);
     }
-    let module = decode::decode(&out).unwrap();
-    validate::validate(&module).unwrap();
+    let module = ir::decode(&out).unwrap();
+    ir::validate_module(&module).unwrap();
     module
 }
 
@@ -53,8 +53,8 @@ fn roundtrip_is_exact() {
             local.get 0
             call_indirect (type 0))
         (data "hello"))"#);
-    let module = decode::decode(&bytes).unwrap();
-    validate::validate(&module).unwrap();
+    let module = ir::decode(&bytes).unwrap();
+    ir::validate_module(&module).unwrap();
     assert_eq!(encode::encode(&module), bytes);
 }
 
@@ -210,13 +210,13 @@ fn strip_keeps_names_on_request() {
         ..OptimizeOptions::default()
     };
     let (out, _) = wasm_optimize_checked(&bytes, &opts).unwrap();
-    let module = decode::decode(&out).unwrap();
+    let module = ir::decode(&out).unwrap();
     assert!(module.customs.is_empty());
     let names = module.names.unwrap();
     assert_eq!(names.funcs, vec![(0, "kept".to_string())]);
 
     let (out, _) = wasm_optimize_checked(&bytes, &OptimizeOptions::default()).unwrap();
-    assert!(decode::decode(&out).unwrap().names.is_none());
+    assert!(ir::decode(&out).unwrap().names.is_none());
 }
 
 #[test]

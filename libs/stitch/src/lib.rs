@@ -1,4 +1,5 @@
 mod aliasable_box;
+pub mod binary;
 mod code;
 mod compile;
 mod config;

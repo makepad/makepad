@@ -1,11 +1,9 @@
 //! Size profile of a wasm module: bytes per function (named from the `name`
 //! section and demangled), grouped by crate and by module path prefix, plus
-//! section and data segment sizes. Reads the sections directly, so it works
-//! on any module the section layout of which is sound, optimised or not.
+//! section and data segment sizes, from where the decoder found each part.
 
-use super::decode::{expr, Reader};
 use super::demangle::demangle;
-use super::ir::{DataMode, Instr};
+use super::ir::{DataMode, Features, Instr, Module};
 use super::Res;
 use crate::wasm_strip::WasmParseError;
 use std::collections::HashMap;
@@ -94,136 +92,50 @@ fn section_name(id: u8) -> &'static str {
     }
 }
 
-fn read_func_names(data: &[u8]) -> Res<HashMap<u32, String>> {
-    let mut r = Reader::new(data);
-    let mut out = HashMap::new();
-    while !r.is_empty() {
-        let id = r.u8()?;
-        let len = r.u32()? as usize;
-        let mut sub = Reader::new(r.bytes(len)?);
-        if id == 1 {
-            let count = sub.u32()?;
-            for _ in 0..count {
-                let index = sub.u32()?;
-                out.insert(index, sub.name()?);
-            }
-        }
-    }
-    Ok(out)
-}
-
 fn profile(buf: &[u8], opts: &ProfileOptions) -> Res<Profile> {
-    let mut r = Reader::new(buf);
-    if r.bytes(8)? != b"\0asm\x01\0\0\0" {
-        return Err("not a wasm module".into());
-    }
+    let (module, layout) =
+        Module::decode_with_layout(buf, Features::default()).map_err(|e| e.to_string())?;
     let mut out = Profile {
         total_bytes: buf.len(),
         ..Profile::default()
     };
-    let mut imported_funcs = 0u32;
-    let mut bodies: Vec<usize> = Vec::new();
-    let mut names = HashMap::new();
-    while !r.is_empty() {
-        let start = r.pos();
-        let id = r.u8()?;
-        let len = r.u32()? as usize;
-        let payload = r.bytes(len)?;
-        let bytes = r.pos() - start;
-        let mut s = Reader::new(payload);
-        let name = if id == 0 {
-            let name = s.name()?;
-            if name == "name" {
-                names = read_func_names(&payload[s.pos()..]).unwrap_or_default();
-            }
-            format!("custom:{name}")
-        } else {
-            section_name(id).to_string()
+    for section in &layout.sections {
+        let bytes = section.bytes.len();
+        let name = match section.id {
+            0 => format!("custom:{}", section.name),
+            id => section_name(id).to_string(),
         };
         out.sections.push(SectionSize { name, bytes });
-        match id {
-            2 => {
-                for _ in 0..s.u32()? {
-                    s.name()?;
-                    s.name()?;
-                    match s.u8()? {
-                        0 => {
-                            s.u32()?;
-                            imported_funcs += 1;
-                        }
-                        1 => {
-                            s.u8()?;
-                            let flags = s.u8()?;
-                            s.u32()?;
-                            if flags & 1 != 0 {
-                                s.u32()?;
-                            }
-                        }
-                        2 => {
-                            let flags = s.u8()?;
-                            s.u32()?;
-                            if flags & 1 != 0 {
-                                s.u32()?;
-                            }
-                        }
-                        3 => {
-                            s.u8()?;
-                            s.u8()?;
-                        }
-                        _ => return Err("unknown import kind".into()),
-                    }
-                }
-            }
-            10 => {
-                out.code_bytes = bytes;
-                for _ in 0..s.u32()? {
-                    let at = s.pos();
-                    let size = s.u32()? as usize;
-                    s.bytes(size)?;
-                    bodies.push(s.pos() - at);
-                }
-            }
-            11 => {
-                out.data_bytes = bytes;
-                for index in 0..s.u32()? as usize {
-                    let mode = match s.u32()? {
-                        0 => DataMode::Active {
-                            memory: 0,
-                            offset: expr(&mut s)?,
-                        },
-                        1 => DataMode::Passive,
-                        2 => {
-                            let memory = s.u32()?;
-                            DataMode::Active {
-                                memory,
-                                offset: expr(&mut s)?,
-                            }
-                        }
-                        _ => return Err("unknown data segment kind".into()),
-                    };
-                    let size = s.u32()? as usize;
-                    s.bytes(size)?;
-                    let (offset, passive) = match mode {
-                        DataMode::Active { offset, .. } => (
-                            match offset.as_slice() {
-                                [Instr::I32Const(value), Instr::End] => Some(*value as u32 as i64),
-                                _ => None,
-                            },
-                            false,
-                        ),
-                        DataMode::Passive => (None, true),
-                    };
-                    out.datas.push(DataSegmentSize {
-                        index,
-                        bytes: size,
-                        offset,
-                        passive,
-                    });
-                }
-            }
+        match section.id {
+            10 => out.code_bytes = bytes,
+            11 => out.data_bytes = bytes,
             _ => {}
         }
     }
+    for (index, (data, range)) in module.datas.iter().zip(&layout.datas).enumerate() {
+        let (offset, passive) = match &data.mode {
+            DataMode::Active { offset, .. } => (
+                match offset.as_slice() {
+                    [Instr::I32Const(value), Instr::End] => Some(*value as u32 as i64),
+                    _ => None,
+                },
+                false,
+            ),
+            DataMode::Passive => (None, true),
+        };
+        out.datas.push(DataSegmentSize {
+            index,
+            bytes: range.len(),
+            offset,
+            passive,
+        });
+    }
+    let imported_funcs = module.num_imported_funcs();
+    let names: HashMap<u32, String> = module
+        .names
+        .map(|names| names.funcs.into_iter().collect())
+        .unwrap_or_default();
+    let bodies: Vec<usize> = layout.funcs.iter().map(|range| range.len()).collect();
 
     let mut crates: HashMap<String, GroupSize> = HashMap::new();
     let mut modules: HashMap<String, GroupSize> = HashMap::new();

@@ -11,8 +11,8 @@ metadata.makepad-auto-version = "m7axzkghrdOa6GR1SQQZ-atSk3s="
 
 [features] 
 [dependencies]
+# The wasm decoder and validator.
+makepad-stitch = { path = "../stitch", version = "0.1.0" }
 
 [dev-dependencies]
-# Differential tests run modules before and after optimising.
-makepad-stitch = { path = "../stitch", version = "0.1.0" }
 wast = "200.0.0"

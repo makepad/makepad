@@ -4,12 +4,10 @@
 //! validate is undone and named in the report, so the result is always a
 //! valid module.
 
-pub mod decode;
 pub mod demangle;
 pub mod encode;
 pub mod ir;
 pub mod remap;
-pub mod validate;
 
 mod compact;
 mod dce;
@@ -42,8 +40,8 @@ pub struct OptimizeOptions {
     pub compact: bool,
     pub order: bool,
     /// Validate after every pass and undo a pass whose result is invalid.
-    /// When off, only the final module is validated (and the input returned
-    /// unchanged if that fails).
+    /// The encoded result is always decoded and validated again; when it
+    /// does not validate, optimising fails.
     pub validate_each_pass: bool,
 }
 
@@ -119,7 +117,7 @@ fn percent(before: usize, after: usize) -> f64 {
 /// Checks that `buf` is a module the optimiser understands and that it is
 /// valid, with the reason when it is not.
 pub fn wasm_validate(buf: &[u8]) -> Result<(), String> {
-    validate::validate(&decode::decode(buf)?)
+    ir::validate_module(&ir::decode(buf)?)
 }
 
 /// The detailed form of `wasm_optimize`: the error says why the input was
@@ -128,8 +126,8 @@ pub fn wasm_optimize_checked(
     buf: &[u8],
     opts: &OptimizeOptions,
 ) -> Result<(Vec<u8>, OptimizeReport), String> {
-    let mut module = decode::decode(buf)?;
-    validate::validate(&module).map_err(|msg| format!("input does not validate: {msg}"))?;
+    let mut module = ir::decode(buf)?;
+    ir::validate_module(&module).map_err(|msg| format!("input does not validate: {msg}"))?;
     let mut report = OptimizeReport {
         input_bytes: buf.len(),
         functions_before: module.funcs.len() + module.num_imported_funcs() as usize,
@@ -152,7 +150,7 @@ pub fn wasm_optimize_checked(
         pass(module);
         let mut reverted = None;
         if let Some(backup) = backup {
-            if let Err(msg) = validate::validate(module) {
+            if let Err(msg) = ir::validate_module(module) {
                 *module = backup;
                 reverted = Some(msg);
             }
@@ -197,10 +195,10 @@ pub fn wasm_optimize_checked(
         run("order", &mut module, &mut bytes, &order::run);
     }
 
-    if !opts.validate_each_pass {
-        if let Err(msg) = validate::validate(&module) {
-            return Err(format!("optimised module does not validate: {msg}"));
-        }
+    // The bytes that ship, decoded and validated again: every function's
+    // operand stack and block types, and the encoder with them.
+    if let Err(msg) = ir::decode(&bytes).and_then(|module| ir::validate_module(&module)) {
+        return Err(format!("optimised module does not validate: {msg}"));
     }
     report.functions_after = module.funcs.len() + module.num_imported_funcs() as usize;
     report.output_bytes = bytes.len();

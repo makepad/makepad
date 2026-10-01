@@ -1,5 +1,5 @@
 //! Prints a module's functions as decoded instructions: `wasm_dump <file.wasm> [func]`.
-use makepad_wasm_strip::opt::decode::decode;
+use makepad_wasm_strip::opt::ir::decode;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();

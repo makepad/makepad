@@ -280,6 +280,10 @@ pub fn instr(out: &mut Vec<u8>, instr: &Instr) {
             prefixed(out, 0xfe, 0x03);
             out.push(0);
         }
+        Instr::ExtMath(sub) => {
+            out.push(0xe0);
+            out.push(*sub);
+        }
     }
 }
 

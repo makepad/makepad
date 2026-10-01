@@ -1,5 +1,5 @@
 use crate::{
-    decode::{Decode, DecodeError, Decoder},
+    
     func::{Func, FuncType, UnguardedFunc},
     global::{Global, GlobalType, UnguardedGlobal},
     mem::{Mem, MemType, UnguardedMem},
@@ -178,18 +178,6 @@ pub(crate) enum ExternValDesc {
     Global(u32),
 }
 
-impl Decode for ExternValDesc {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        match decoder.read_byte()? {
-            0x00 => Ok(Self::Func(decoder.decode()?)),
-            0x01 => Ok(Self::Table(decoder.decode()?)),
-            0x02 => Ok(Self::Memory(decoder.decode()?)),
-            0x03 => Ok(Self::Global(decoder.decode()?)),
-            _ => Err(DecodeError::new("malformed external value descriptor")),
-        }
-    }
-}
-
 /// The type of an [`ExternVal`].
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum ExternType {
@@ -277,26 +265,4 @@ impl From<GlobalType> for ExternType {
     }
 }
 
-/// A descriptor for an [`ExternType`].
-///
-/// This is just like an [`ExternType`], except that function types are represented by an index
-/// into the type section of a module.
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum ExternTypeDesc {
-    Func(u32),
-    Table(TableType),
-    Memory(MemType),
-    Global(GlobalType),
-}
 
-impl Decode for ExternTypeDesc {
-    fn decode(decoder: &mut Decoder<'_>) -> Result<Self, DecodeError> {
-        match decoder.read_byte()? {
-            0x00 => Ok(ExternTypeDesc::Func(decoder.decode()?)),
-            0x01 => Ok(ExternTypeDesc::Table(decoder.decode()?)),
-            0x02 => Ok(ExternTypeDesc::Memory(decoder.decode()?)),
-            0x03 => Ok(ExternTypeDesc::Global(decoder.decode()?)),
-            _ => Err(DecodeError::new("malformed external type descriptor"))?,
-        }
-    }
-}
