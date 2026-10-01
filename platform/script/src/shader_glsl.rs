@@ -689,7 +689,8 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         offset: &mut usize,
         out: &mut Vec<GlslPackedField>,
     ) {
-        let io_name = self.backend.map_io_name(io.name);
+        let mut name = prefix.to_string();
+        self.backend.write_io_name(&mut name, io.name);
         let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
         let slots = pod_ty.ty.slots();
         let attr_format = if attribute_packing {
@@ -706,7 +707,7 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
             *offset += 4 - (*offset & 3);
         }
         out.push(GlslPackedField {
-            name: format!("{}{}", prefix, io_name),
+            name,
             ty: io.ty,
             slots,
             offset: *offset,
