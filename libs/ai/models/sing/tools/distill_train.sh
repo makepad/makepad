@@ -37,7 +37,7 @@ log "distill training (data-proportional rounds) start: $(items) segments, $(sec
   while ! stopped; do
     n=$(items)
     if [ $((n * 100)) -ge $((last * GROW)) ] || [ $last -eq 0 ]; then
-      steps=$(clamp $((30 * n / 32)) 500 30000)   # at most 30 passes; early stop usually ends it sooner
+      steps=$(clamp $((100 * n / 32)) 1000 30000)   # up to 100 passes; the held-out early stop ends it once it stops helping
       resume=""; [ -f runs/distill-ac/ac.mksing ] && resume="--resume"
       log "acoustic round: $n segments, up to $steps steps (10% of songs held out, early stop)"
       rm -f runs/distill-ac/ac-best.*
