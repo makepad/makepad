@@ -1,132 +1,19 @@
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    mem,
-};
+//! The section-level tools of `cargo makepad wasm`: custom section
+//! stripping, function splitting into a primary and a secondary module, and
+//! data segment splitting. Modules are read with stitch's decoder (as the
+//! optimiser reads them); sections and bodies that pass through unchanged
+//! are copied byte for byte.
 
-#[derive(Clone, Debug)]
-struct Reader<'a> {
-    bytes: &'a [u8],
-    offset: usize,
-}
+use crate::opt::encode;
+use crate::opt::ir::*;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct WasmParseError;
 
-impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Reader<'a> {
-        Reader { bytes, offset: 0 }
-    }
-
-    fn skip(&mut self, count: usize) -> Result<(), WasmParseError> {
-        if count > self.bytes.len() {
-            return Err(WasmParseError);
-        }
-        self.offset += count;
-        self.bytes = &self.bytes[count..];
-        Ok(())
-    }
-
-    fn read(&mut self, bytes: &mut [u8]) -> Result<(), WasmParseError> {
-        if bytes.len() > self.bytes.len() {
-            return Err(WasmParseError);
-        }
-        bytes.copy_from_slice(&self.bytes[..bytes.len()]);
-        self.bytes = &self.bytes[bytes.len()..];
-        self.offset += bytes.len();
-        Ok(())
-    }
-
-    fn read_u8(&mut self) -> Result<u8, WasmParseError> {
-        let mut bytes = [0; mem::size_of::<u8>()];
-        self.read(&mut bytes)?;
-        Ok(u8::from_le_bytes(bytes))
-    }
-
-    fn read_u32(&mut self) -> Result<u32, WasmParseError> {
-        let mut bytes = [0; mem::size_of::<u32>()];
-        self.read(&mut bytes)?;
-        Ok(u32::from_le_bytes(bytes))
-    }
-
-    fn read_var_u32(&mut self) -> Result<u32, WasmParseError> {
-        let byte = self.read_u8()? as u32;
-        if byte & 0x80 == 0 {
-            return Ok(byte);
-        }
-
-        let mut result = byte & 0x7F;
-        let mut shift = 7;
-        loop {
-            let byte = self.read_u8()?;
-            result |= ((byte & 0x7F) as u32) << shift;
-            if shift >= 25 && (byte >> (32 - shift)) != 0 {
-                // The continuation bit or unused bits are set.
-                return Err(WasmParseError);
-            }
-            shift += 7;
-            if (byte & 0x80) == 0 {
-                break;
-            }
-        }
-        Ok(result)
-    }
-
-    fn read_var_i32(&mut self) -> Result<i32, WasmParseError> {
-        let mut result = 0i32;
-        let mut shift = 0;
-        let mut byte;
-
-        loop {
-            byte = self.read_u8()?;
-            result |= ((byte & 0x7f) as i32) << shift;
-            shift += 7;
-            if (byte & 0x80) == 0 {
-                break;
-            }
-            if shift >= 35 {
-                return Err(WasmParseError);
-            }
-        }
-
-        if shift < 32 && (byte & 0x40) != 0 {
-            result |= !0 << shift;
-        }
-
-        Ok(result)
-    }
-
-    fn read_var_i64(&mut self) -> Result<i64, WasmParseError> {
-        let mut result = 0i64;
-        let mut shift = 0;
-        let mut byte;
-
-        loop {
-            byte = self.read_u8()?;
-            result |= ((byte & 0x7f) as i64) << shift;
-            shift += 7;
-            if (byte & 0x80) == 0 {
-                break;
-            }
-            if shift >= 70 {
-                return Err(WasmParseError);
-            }
-        }
-
-        if shift < 64 && (byte & 0x40) != 0 {
-            result |= !0 << shift;
-        }
-
-        Ok(result)
-    }
-
-    fn read_vec(&mut self, len: usize) -> Result<Vec<u8>, WasmParseError> {
-        if len > self.bytes.len() {
-            return Err(WasmParseError);
-        }
-        let out = self.bytes[..len].to_vec();
-        self.skip(len)?;
-        Ok(out)
-    }
+/// The module decoded by stitch's decoder, with where its parts sit.
+fn decode_module(buf: &[u8]) -> Result<(Module, Layout), WasmParseError> {
+    Module::decode_with_layout(buf, Features::default()).map_err(|_| WasmParseError)
 }
 
 #[derive(Clone, Debug)]
@@ -161,51 +48,22 @@ pub struct WasmDataSplitResult {
 }
 
 fn read_wasm_sections(buf: &[u8]) -> Result<Vec<WasmSection>, WasmParseError> {
-    let mut sections = Vec::new();
-    let mut reader = Reader::new(buf);
-    if reader.read_u32()? != 0x6d736100 {
-        println!("Not a wasm file!");
-        return Err(WasmParseError);
-    }
-    if reader.read_u32()? != 0x1 {
-        println!("Wrong version");
-        return Err(WasmParseError);
-    }
-    loop {
-        let offset = reader.offset;
-        if let Ok(type_id) = reader.read_u8() {
-            let payload_len = reader.read_var_u32()? as usize;
-            let start = reader.offset;
-            if type_id == 0 {
-                let name_len = reader.read_var_u32()? as usize;
-                if let Ok(name) = std::str::from_utf8(&reader.bytes[0..name_len]) {
-                    sections.push(WasmSection {
-                        start: offset,
-                        type_id,
-                        end: offset + payload_len + (start - offset),
-                        payload_start: start,
-                        name: name.to_string(),
-                    })
-                } else {
-                    return Err(WasmParseError);
-                }
-                let end = reader.offset;
-                reader.skip(payload_len - (end - start))?;
-            } else {
-                sections.push(WasmSection {
-                    start: offset,
-                    type_id,
-                    end: offset + payload_len + (start - offset),
-                    payload_start: start,
-                    name: "".to_string(),
-                });
-                reader.skip(payload_len)?;
-            }
-        } else {
-            break;
-        }
-    }
-    Ok(sections)
+    let (_, layout) = decode_module(buf)?;
+    Ok(sections_of(&layout))
+}
+
+fn sections_of(layout: &Layout) -> Vec<WasmSection> {
+    layout
+        .sections
+        .iter()
+        .map(|section| WasmSection {
+            type_id: section.id,
+            start: section.bytes.start,
+            end: section.bytes.end,
+            payload_start: section.payload.start,
+            name: section.name.clone(),
+        })
+        .collect()
 }
 
 fn is_debug_section(section: &WasmSection) -> bool {
@@ -323,52 +181,28 @@ fn encode_const_i32_expr(offset: u32) -> Vec<u8> {
     out
 }
 
-fn parse_const_i32_expr(reader: &mut Reader<'_>) -> Result<u32, WasmParseError> {
-    if reader.read_u8()? != 0x41 {
-        return Err(WasmParseError);
-    }
-    let value = reader.read_var_i32()?;
-    if value < 0 {
-        return Err(WasmParseError);
-    }
-    if reader.read_u8()? != 0x0b {
-        return Err(WasmParseError);
-    }
-    Ok(value as u32)
-}
-
-fn parse_data_segments(
-    buf: &[u8],
-    data_section: &WasmSection,
-) -> Result<Vec<WasmDataSegment>, WasmParseError> {
-    let mut reader = Reader::new(&buf[data_section.payload_start..data_section.end]);
-    let segment_count = reader.read_var_u32()? as usize;
-    let mut segments = Vec::with_capacity(segment_count);
-
-    for _ in 0..segment_count {
-        let flags = reader.read_var_u32()?;
-        let kind = match flags {
-            0 => WasmDataSegmentKind::Active {
-                memory_index: 0,
-                offset: parse_const_i32_expr(&mut reader)?,
-            },
-            1 => WasmDataSegmentKind::Passive,
-            2 => WasmDataSegmentKind::Active {
-                memory_index: reader.read_var_u32()?,
-                offset: parse_const_i32_expr(&mut reader)?,
-            },
-            _ => return Err(WasmParseError),
-        };
-        let len = reader.read_var_u32()? as usize;
-        let bytes = reader.read_vec(len)?;
-        segments.push(WasmDataSegment { kind, bytes });
-    }
-
-    if !reader.bytes.is_empty() {
-        return Err(WasmParseError);
-    }
-
-    Ok(segments)
+/// The data segments, every active one at a non-negative constant offset.
+fn data_segments(module: &Module) -> Result<Vec<WasmDataSegment>, WasmParseError> {
+    module
+        .datas
+        .iter()
+        .map(|data| {
+            let kind = match &data.mode {
+                DataMode::Passive => WasmDataSegmentKind::Passive,
+                DataMode::Active { memory, offset } => match offset.as_slice() {
+                    [Instr::I32Const(at), Instr::End] if *at >= 0 => WasmDataSegmentKind::Active {
+                        memory_index: *memory,
+                        offset: *at as u32,
+                    },
+                    _ => return Err(WasmParseError),
+                },
+            };
+            Ok(WasmDataSegment {
+                kind,
+                bytes: data.bytes.clone(),
+            })
+        })
+        .collect()
 }
 
 fn encode_split_data(segments: &[WasmDataSegment]) -> Vec<u8> {
@@ -524,20 +358,11 @@ struct WasmModuleInfo {
     globals: Vec<WasmGlobalDef>,
     exports: Vec<WasmExport>,
     code_bodies: Vec<WasmCodeBody>,
+    /// The functions each defined function calls or references directly.
+    direct_refs: Vec<BTreeSet<u32>>,
     active_element_func_indices: BTreeSet<u32>,
     start_func_index: Option<u32>,
     sections: Vec<WasmSection>,
-}
-
-fn read_limits(reader: &mut Reader<'_>) -> Result<WasmLimits, WasmParseError> {
-    let flag = reader.read_u8()?;
-    let min = reader.read_var_u32()?;
-    let (has_max, max) = if flag & 1 != 0 {
-        (true, reader.read_var_u32()?)
-    } else {
-        (false, 0)
-    };
-    Ok(WasmLimits { has_max, min, max })
 }
 
 fn encode_limits(limits: &WasmLimits) -> Vec<u8> {
@@ -553,541 +378,132 @@ fn encode_limits(limits: &WasmLimits) -> Vec<u8> {
     out
 }
 
-fn read_string(reader: &mut Reader<'_>) -> Result<String, WasmParseError> {
-    let len = reader.read_var_u32()? as usize;
-    let bytes = reader.read_vec(len)?;
-    String::from_utf8(bytes).map_err(|_| WasmParseError)
-}
-
 fn encode_string(s: &str) -> Vec<u8> {
     let mut out = encode_var_u32(s.len() as u32);
     out.extend_from_slice(s.as_bytes());
     out
 }
 
-fn parse_type_section(
-    buf: &[u8],
-    section: &WasmSection,
-) -> Result<Vec<WasmFuncType>, WasmParseError> {
-    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-    let count = reader.read_var_u32()? as usize;
-    let mut types = Vec::with_capacity(count);
-    for _ in 0..count {
-        if reader.read_u8()? != 0x60 {
-            return Err(WasmParseError);
-        }
-        let param_count = reader.read_var_u32()? as usize;
-        let params = reader.read_vec(param_count)?;
-        let result_count = reader.read_var_u32()? as usize;
-        let results = reader.read_vec(result_count)?;
-        types.push(WasmFuncType { params, results });
+fn limits_of(limits: &Limits) -> WasmLimits {
+    WasmLimits {
+        has_max: limits.max.is_some(),
+        min: limits.min,
+        max: limits.max.unwrap_or(0),
     }
-    Ok(types)
-}
-
-fn parse_import_section(
-    buf: &[u8],
-    section: &WasmSection,
-) -> Result<Vec<WasmImport>, WasmParseError> {
-    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-    let count = reader.read_var_u32()? as usize;
-    let mut imports = Vec::with_capacity(count);
-    for _ in 0..count {
-        let module = read_string(&mut reader)?;
-        let field = read_string(&mut reader)?;
-        let kind = reader.read_u8()?;
-        let desc_start = reader.offset;
-        match kind {
-            0 => {
-                reader.read_var_u32()?;
-            } // func: type index
-            1 => {
-                reader.read_u8()?;
-                read_limits(&mut reader)?;
-            } // table: reftype + limits
-            2 => {
-                read_limits(&mut reader)?;
-            } // memory: limits
-            3 => {
-                reader.read_u8()?;
-                reader.read_u8()?;
-            } // global: valtype + mut
-            _ => return Err(WasmParseError),
-        }
-        let desc_end = reader.offset;
-        let desc_bytes =
-            buf[section.payload_start + desc_start..section.payload_start + desc_end].to_vec();
-        imports.push(WasmImport {
-            module,
-            field,
-            kind,
-            descriptor: desc_bytes,
-        });
-    }
-    Ok(imports)
-}
-
-fn parse_function_section(buf: &[u8], section: &WasmSection) -> Result<Vec<u32>, WasmParseError> {
-    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-    let count = reader.read_var_u32()? as usize;
-    let mut indices = Vec::with_capacity(count);
-    for _ in 0..count {
-        indices.push(reader.read_var_u32()?);
-    }
-    Ok(indices)
-}
-
-fn parse_table_section(
-    buf: &[u8],
-    section: &WasmSection,
-) -> Result<Vec<WasmTableDef>, WasmParseError> {
-    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-    let count = reader.read_var_u32()? as usize;
-    let mut tables = Vec::with_capacity(count);
-    for _ in 0..count {
-        let reftype = reader.read_u8()?;
-        let limits = read_limits(&mut reader)?;
-        tables.push(WasmTableDef { reftype, limits });
-    }
-    Ok(tables)
-}
-
-fn parse_memory_section(
-    buf: &[u8],
-    section: &WasmSection,
-) -> Result<Vec<WasmMemoryDef>, WasmParseError> {
-    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-    let count = reader.read_var_u32()? as usize;
-    let mut memories = Vec::with_capacity(count);
-    for _ in 0..count {
-        let limits = read_limits(&mut reader)?;
-        memories.push(WasmMemoryDef { limits });
-    }
-    Ok(memories)
-}
-
-fn parse_global_section(
-    buf: &[u8],
-    section: &WasmSection,
-) -> Result<Vec<WasmGlobalDef>, WasmParseError> {
-    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-    let count = reader.read_var_u32()? as usize;
-    let mut globals = Vec::with_capacity(count);
-    for _ in 0..count {
-        let valtype = reader.read_u8()?;
-        let mutable = reader.read_u8()?;
-        // Skip init_expr: scan for end byte (0x0b) at top block level.
-        // MVP init_exprs have no nested blocks.
-        loop {
-            let byte = reader.read_u8()?;
-            if byte == 0x0b {
-                break;
-            }
-            // Skip operands of common init_expr instructions
-            match byte {
-                0x41 => {
-                    reader.read_var_i32()?;
-                } // i32.const
-                0x42 => {
-                    // i64.const (var_i64)
-                    loop {
-                        let b = reader.read_u8()?;
-                        if b & 0x80 == 0 {
-                            break;
-                        }
-                    }
-                }
-                0x43 => {
-                    reader.skip(4)?;
-                } // f32.const
-                0x44 => {
-                    reader.skip(8)?;
-                } // f64.const
-                0x23 => {
-                    reader.read_var_u32()?;
-                } // global.get
-                0xD2 => {
-                    reader.read_var_u32()?;
-                } // ref.func
-                0xD0 => {
-                    reader.read_u8()?;
-                } // ref.null
-                _ => {} // unknown, hope it has no operands
-            }
-        }
-        globals.push(WasmGlobalDef { valtype, mutable });
-    }
-    Ok(globals)
-}
-
-fn parse_export_section(
-    buf: &[u8],
-    section: &WasmSection,
-) -> Result<Vec<WasmExport>, WasmParseError> {
-    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-    let count = reader.read_var_u32()? as usize;
-    let mut exports = Vec::with_capacity(count);
-    for _ in 0..count {
-        let name = read_string(&mut reader)?;
-        let kind = reader.read_u8()?;
-        let index = reader.read_var_u32()?;
-        exports.push(WasmExport { name, kind, index });
-    }
-    Ok(exports)
-}
-
-fn parse_expr_func_refs(reader: &mut Reader<'_>) -> Result<BTreeSet<u32>, WasmParseError> {
-    let mut refs = BTreeSet::new();
-    loop {
-        let opcode = reader.read_u8()?;
-        if opcode == 0x0b {
-            break;
-        }
-        match opcode {
-            0x41 => {
-                reader.read_var_i32()?;
-            }
-            0x42 => {
-                reader.read_var_i64()?;
-            }
-            0x43 => {
-                reader.skip(4)?;
-            }
-            0x44 => {
-                reader.skip(8)?;
-            }
-            0x23 => {
-                reader.read_var_u32()?;
-            }
-            0xd0 => {
-                reader.read_var_i32()?;
-            }
-            0xd2 => {
-                refs.insert(reader.read_var_u32()?);
-            }
-            _ => {}
-        }
-    }
-    Ok(refs)
-}
-
-fn parse_element_section(
-    buf: &[u8],
-    section: &WasmSection,
-) -> Result<BTreeSet<u32>, WasmParseError> {
-    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-    let count = reader.read_var_u32()? as usize;
-    let mut refs = BTreeSet::new();
-    for _ in 0..count {
-        match reader.read_var_u32()? {
-            0 => {
-                let _ = parse_expr_func_refs(&mut reader)?;
-                let item_count = reader.read_var_u32()? as usize;
-                for _ in 0..item_count {
-                    refs.insert(reader.read_var_u32()?);
-                }
-            }
-            1 => {
-                reader.read_u8()?;
-                let item_count = reader.read_var_u32()? as usize;
-                for _ in 0..item_count {
-                    reader.read_var_u32()?;
-                }
-            }
-            2 => {
-                reader.read_var_u32()?;
-                let _ = parse_expr_func_refs(&mut reader)?;
-                reader.read_u8()?;
-                let item_count = reader.read_var_u32()? as usize;
-                for _ in 0..item_count {
-                    refs.insert(reader.read_var_u32()?);
-                }
-            }
-            3 => {
-                reader.read_u8()?;
-                let item_count = reader.read_var_u32()? as usize;
-                for _ in 0..item_count {
-                    reader.read_var_u32()?;
-                }
-            }
-            4 => {
-                let _ = parse_expr_func_refs(&mut reader)?;
-                let item_count = reader.read_var_u32()? as usize;
-                for _ in 0..item_count {
-                    refs.extend(parse_expr_func_refs(&mut reader)?);
-                }
-            }
-            5 => {
-                reader.read_u8()?;
-                let item_count = reader.read_var_u32()? as usize;
-                for _ in 0..item_count {
-                    let _ = parse_expr_func_refs(&mut reader)?;
-                }
-            }
-            6 => {
-                reader.read_var_u32()?;
-                let _ = parse_expr_func_refs(&mut reader)?;
-                reader.read_u8()?;
-                let item_count = reader.read_var_u32()? as usize;
-                for _ in 0..item_count {
-                    refs.extend(parse_expr_func_refs(&mut reader)?);
-                }
-            }
-            7 => {
-                reader.read_u8()?;
-                let item_count = reader.read_var_u32()? as usize;
-                for _ in 0..item_count {
-                    let _ = parse_expr_func_refs(&mut reader)?;
-                }
-            }
-            _ => return Err(WasmParseError),
-        }
-    }
-    Ok(refs)
-}
-
-fn parse_code_bodies(
-    buf: &[u8],
-    section: &WasmSection,
-) -> Result<Vec<WasmCodeBody>, WasmParseError> {
-    let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-    let count = reader.read_var_u32()? as usize;
-    let mut bodies = Vec::with_capacity(count);
-    for _ in 0..count {
-        let body_start = section.payload_start + reader.offset;
-        let body_size = reader.read_var_u32()? as usize;
-        let content_start = section.payload_start + reader.offset;
-        reader.skip(body_size)?;
-        let _ = content_start; // body bytes are at content_start..content_start+body_size
-        bodies.push(WasmCodeBody {
-            start: body_start,
-            end: section.payload_start + reader.offset,
-        });
-    }
-    Ok(bodies)
 }
 
 fn parse_wasm_module_info(buf: &[u8]) -> Result<WasmModuleInfo, WasmParseError> {
-    let sections = read_wasm_sections(buf)?;
-    let mut info = WasmModuleInfo {
-        types: Vec::new(),
-        imports: Vec::new(),
-        num_func_imports: 0,
-        num_table_imports: 0,
-        num_memory_imports: 0,
-        num_global_imports: 0,
-        func_type_indices: Vec::new(),
-        tables: Vec::new(),
-        memories: Vec::new(),
-        globals: Vec::new(),
-        exports: Vec::new(),
-        code_bodies: Vec::new(),
-        active_element_func_indices: BTreeSet::new(),
-        start_func_index: None,
-        sections,
+    let (module, layout) = decode_module(buf)?;
+    let kind_byte = |kind: ExternKind| match kind {
+        ExternKind::Func => 0,
+        ExternKind::Table => 1,
+        ExternKind::Memory => 2,
+        ExternKind::Global => 3,
     };
-
-    for section in &info.sections {
-        match section.type_id {
-            1 => info.types = parse_type_section(buf, section)?,
-            2 => info.imports = parse_import_section(buf, section)?,
-            3 => info.func_type_indices = parse_function_section(buf, section)?,
-            4 => info.tables = parse_table_section(buf, section)?,
-            5 => info.memories = parse_memory_section(buf, section)?,
-            6 => info.globals = parse_global_section(buf, section)?,
-            7 => info.exports = parse_export_section(buf, section)?,
-            8 => {
-                let mut reader = Reader::new(&buf[section.payload_start..section.end]);
-                info.start_func_index = Some(reader.read_var_u32()?);
+    let imports = module
+        .imports
+        .iter()
+        .map(|import| {
+            let mut desc = Vec::new();
+            encode::import_desc(&mut desc, &import.desc);
+            WasmImport {
+                module: import.module.clone(),
+                field: import.name.clone(),
+                kind: kind_byte(import_kind(&import.desc)),
+                descriptor: desc[1..].to_vec(),
             }
-            9 => info.active_element_func_indices = parse_element_section(buf, section)?,
-            10 => info.code_bodies = parse_code_bodies(buf, section)?,
-            _ => {}
+        })
+        .collect();
+    // Functions an active element segment puts in a table.
+    let mut active_element_func_indices = BTreeSet::new();
+    for elem in &module.elems {
+        if !matches!(elem.mode, ElemMode::Active { .. }) {
+            continue;
         }
-    }
-
-    // Count imports by kind
-    for imp in &info.imports {
-        match imp.kind {
-            0 => info.num_func_imports += 1,
-            1 => info.num_table_imports += 1,
-            2 => info.num_memory_imports += 1,
-            3 => info.num_global_imports += 1,
-            _ => {}
-        }
-    }
-
-    Ok(info)
-}
-
-fn skip_block_type(reader: &mut Reader<'_>) -> Result<(), WasmParseError> {
-    let byte = reader.read_u8()?;
-    match byte {
-        0x40 | 0x7f | 0x7e | 0x7d | 0x7c | 0x7b | 0x70 | 0x6f => Ok(()),
-        _ => {
-            if byte & 0x80 == 0 {
-                Ok(())
-            } else {
-                while reader.read_u8()? & 0x80 != 0 {}
-                Ok(())
-            }
-        }
-    }
-}
-
-fn skip_memarg(reader: &mut Reader<'_>) -> Result<(), WasmParseError> {
-    reader.read_var_u32()?;
-    reader.read_var_u32()?;
-    Ok(())
-}
-
-fn skip_vec_types(reader: &mut Reader<'_>) -> Result<(), WasmParseError> {
-    let count = reader.read_var_u32()? as usize;
-    for _ in 0..count {
-        reader.read_u8()?;
-    }
-    Ok(())
-}
-
-fn scan_prefixed_fc_instruction(reader: &mut Reader<'_>) -> Result<(), WasmParseError> {
-    match reader.read_var_u32()? {
-        0..=7 => Ok(()),
-        8 => {
-            reader.read_var_u32()?;
-            reader.read_var_u32()?;
-            Ok(())
-        }
-        9 => {
-            reader.read_var_u32()?;
-            Ok(())
-        }
-        10 => {
-            reader.read_var_u32()?;
-            reader.read_var_u32()?;
-            Ok(())
-        }
-        11 => {
-            reader.read_var_u32()?;
-            Ok(())
-        }
-        12 => {
-            reader.read_var_u32()?;
-            reader.read_var_u32()?;
-            Ok(())
-        }
-        13 => {
-            reader.read_var_u32()?;
-            Ok(())
-        }
-        14 => {
-            reader.read_var_u32()?;
-            reader.read_var_u32()?;
-            Ok(())
-        }
-        15..=17 => {
-            reader.read_var_u32()?;
-            Ok(())
-        }
-        _ => Err(WasmParseError),
-    }
-}
-
-fn scan_prefixed_fd_instruction(reader: &mut Reader<'_>) -> Result<(), WasmParseError> {
-    match reader.read_var_u32()? {
-        0..=11 | 84..=91 | 92..=99 => skip_memarg(reader),
-        12 | 13 => {
-            reader.skip(16)?;
-            Ok(())
-        }
-        21 | 22 | 23 | 24 | 25 | 26 | 27 | 28 | 29 | 30 | 31 | 32 | 33 | 34 => {
-            reader.read_u8()?;
-            Ok(())
-        }
-        35..=83 | 100..=255 => Ok(()),
-        _ => Err(WasmParseError),
-    }
-}
-
-fn scan_prefixed_fe_instruction(reader: &mut Reader<'_>) -> Result<(), WasmParseError> {
-    match reader.read_var_u32()? {
-        0..=2 => skip_memarg(reader),
-        3 => {
-            reader.read_u8()?;
-            Ok(())
-        }
-        16..=30 | 31..=78 => skip_memarg(reader),
-        _ => Err(WasmParseError),
-    }
-}
-
-fn scan_function_body_direct_refs(body: &[u8]) -> Result<BTreeSet<u32>, WasmParseError> {
-    let mut reader = Reader::new(body);
-    let body_size = reader.read_var_u32()? as usize;
-    if body_size != reader.bytes.len() {
-        return Err(WasmParseError);
-    }
-
-    let local_group_count = reader.read_var_u32()? as usize;
-    for _ in 0..local_group_count {
-        reader.read_var_u32()?;
-        reader.read_u8()?;
-    }
-
-    let mut refs = BTreeSet::new();
-    while !reader.bytes.is_empty() {
-        match reader.read_u8()? {
-            0x02 | 0x03 | 0x04 => skip_block_type(&mut reader)?,
-            0x0c | 0x0d | 0x20 | 0x21 | 0x22 | 0x23 | 0x24 | 0x25 | 0x26 => {
-                reader.read_var_u32()?;
-            }
-            0x0e => {
-                let count = reader.read_var_u32()? as usize;
-                for _ in 0..count {
-                    reader.read_var_u32()?;
+        match &elem.items {
+            ElemItems::Funcs(funcs) => active_element_func_indices.extend(funcs.iter().copied()),
+            ElemItems::Exprs(_, exprs) => {
+                for instr in exprs.iter().flatten() {
+                    if let Instr::RefFunc(func) = instr {
+                        active_element_func_indices.insert(*func);
+                    }
                 }
-                reader.read_var_u32()?;
             }
-            0x10 | 0x12 => {
-                refs.insert(reader.read_var_u32()?);
-            }
-            0x11 | 0x13 => {
-                reader.read_var_u32()?;
-                reader.read_var_u32()?;
-            }
-            0x14 => {
-                reader.read_var_u32()?;
-            }
-            0x1c => skip_vec_types(&mut reader)?,
-            0x28..=0x3e => skip_memarg(&mut reader)?,
-            0x3f | 0x40 => {
-                reader.read_var_u32()?;
-            }
-            0x41 => {
-                reader.read_var_i32()?;
-            }
-            0x42 => {
-                reader.read_var_i64()?;
-            }
-            0x43 => {
-                reader.skip(4)?;
-            }
-            0x44 => {
-                reader.skip(8)?;
-            }
-            0xd0 => {
-                reader.read_var_i32()?;
-            }
-            0xd2 => {
-                refs.insert(reader.read_var_u32()?);
-            }
-            0xfc => scan_prefixed_fc_instruction(&mut reader)?,
-            0xfd => scan_prefixed_fd_instruction(&mut reader)?,
-            0xfe => scan_prefixed_fe_instruction(&mut reader)?,
-            _ => {}
         }
     }
-
-    Ok(refs)
+    let direct_refs = module
+        .funcs
+        .iter()
+        .map(|func| {
+            func.body
+                .iter()
+                .filter_map(|instr| match instr {
+                    Instr::Call(f) | Instr::ReturnCall(f) | Instr::RefFunc(f) => Some(*f),
+                    _ => None,
+                })
+                .collect()
+        })
+        .collect();
+    Ok(WasmModuleInfo {
+        types: module
+            .types
+            .iter()
+            .map(|ty| WasmFuncType {
+                params: ty.params.iter().map(|ty| ty.to_byte()).collect(),
+                results: ty.results.iter().map(|ty| ty.to_byte()).collect(),
+            })
+            .collect(),
+        imports,
+        num_func_imports: module.num_imported(ExternKind::Func),
+        num_table_imports: module.num_imported(ExternKind::Table),
+        num_memory_imports: module.num_imported(ExternKind::Memory),
+        num_global_imports: module.num_imported(ExternKind::Global),
+        func_type_indices: module.funcs.iter().map(|func| func.ty).collect(),
+        tables: module
+            .tables
+            .iter()
+            .map(|table| WasmTableDef {
+                reftype: table.elem.to_byte(),
+                limits: limits_of(&table.limits),
+            })
+            .collect(),
+        memories: module
+            .memories
+            .iter()
+            .map(|memory| WasmMemoryDef {
+                limits: limits_of(&memory.limits),
+            })
+            .collect(),
+        globals: module
+            .globals
+            .iter()
+            .map(|global| WasmGlobalDef {
+                valtype: global.ty.ty.to_byte(),
+                mutable: global.ty.mutable as u8,
+            })
+            .collect(),
+        exports: module
+            .exports
+            .iter()
+            .map(|export| WasmExport {
+                name: export.name.clone(),
+                kind: kind_byte(export.kind),
+                index: export.index,
+            })
+            .collect(),
+        code_bodies: layout
+            .funcs
+            .iter()
+            .map(|range| WasmCodeBody {
+                start: range.start,
+                end: range.end,
+            })
+            .collect(),
+        direct_refs,
+        active_element_func_indices,
+        start_func_index: module.start,
+        sections: sections_of(&layout),
+    })
 }
 
 fn exported_function_indices(info: &WasmModuleInfo) -> BTreeSet<u32> {
@@ -1098,10 +514,7 @@ fn exported_function_indices(info: &WasmModuleInfo) -> BTreeSet<u32> {
         .collect()
 }
 
-fn startup_hot_function_indices(
-    buf: &[u8],
-    info: &WasmModuleInfo,
-) -> Result<BTreeSet<usize>, WasmParseError> {
+fn startup_hot_function_indices(info: &WasmModuleInfo) -> BTreeSet<usize> {
     let mut hot = BTreeSet::new();
     let mut queue = Vec::new();
 
@@ -1120,17 +533,14 @@ fn startup_hot_function_indices(
             continue;
         }
 
-        let refs = scan_function_body_direct_refs(
-            &buf[info.code_bodies[defined_index].start..info.code_bodies[defined_index].end],
-        )?;
-        for callee in refs {
+        for callee in info.direct_refs[defined_index].iter().copied() {
             if callee >= info.num_func_imports {
                 queue.push(callee);
             }
         }
     }
 
-    Ok(hot)
+    hot
 }
 
 // Phase 2: Stub generation
@@ -1684,7 +1094,7 @@ pub fn wasm_split_functions_to_target_primary_size_cold(
         return Ok(empty_function_split_result(buf, num_defined));
     }
 
-    let startup_hot = startup_hot_function_indices(buf, &info)?;
+    let startup_hot = startup_hot_function_indices(&info);
     let mut ranked = selectable_function_indices(&info)
         .into_iter()
         .filter(|index| !startup_hot.contains(index))
@@ -1744,7 +1154,7 @@ pub fn wasm_split_functions_cold(buf: &[u8]) -> Result<WasmFunctionSplitResult, 
     let info = parse_wasm_module_info(buf)?;
     let num_defined = info.func_type_indices.len();
 
-    let startup_hot = startup_hot_function_indices(buf, &info)?;
+    let startup_hot = startup_hot_function_indices(&info);
     let mut split_indices = selectable_function_indices(&info)
         .into_iter()
         .filter(|index| !startup_hot.contains(index))
@@ -1761,16 +1171,15 @@ pub fn wasm_split_functions_cold(buf: &[u8]) -> Result<WasmFunctionSplitResult, 
 // ---------------------------------------------------------------------------
 
 pub fn wasm_split_data_segments(buf: &[u8]) -> Result<WasmDataSplitResult, WasmParseError> {
-    let sections = read_wasm_sections(buf)?;
-    let Some(data_section) = sections.iter().find(|section| section.type_id == 11) else {
+    let (module, layout) = decode_module(buf)?;
+    if !layout.sections.iter().any(|section| section.id == 11) {
         return Ok(WasmDataSplitResult {
             primary_wasm: buf.to_vec(),
             split_data: Vec::new(),
             segment_count: 0,
         });
-    };
-
-    let segments = parse_data_segments(buf, data_section)?;
+    }
+    let segments = data_segments(&module)?;
     let rewritten_payload = encode_rewritten_data_section(&segments)?;
     let primary_wasm = rewrite_wasm_section(buf, 11, &rewritten_payload)?;
     let split_data = encode_split_data(&segments);
@@ -2230,12 +1639,7 @@ mod tests {
         ]);
 
         let result = wasm_split_functions(&wasm, 10).unwrap();
-        let sections = read_wasm_sections(&result.primary_wasm).unwrap();
-        let export_section = sections
-            .iter()
-            .find(|section| section.type_id == 7)
-            .unwrap();
-        let exports = parse_export_section(&result.primary_wasm, export_section).unwrap();
+        let exports = parse_wasm_module_info(&result.primary_wasm).unwrap().exports;
         assert!(exports
             .iter()
             .any(|export| export.name == "$s" && export.kind == 0x01));
@@ -2264,11 +1668,7 @@ mod tests {
         let sections = read_wasm_sections(&result.secondary_wasm).unwrap();
         assert!(!sections.iter().any(|section| section.type_id == 9));
 
-        let export_section = sections
-            .iter()
-            .find(|section| section.type_id == 7)
-            .unwrap();
-        let exports = parse_export_section(&result.secondary_wasm, export_section).unwrap();
+        let exports = parse_wasm_module_info(&result.secondary_wasm).unwrap().exports;
         assert!(exports
             .iter()
             .any(|export| export.name == "$s0" && export.kind == 0x00));

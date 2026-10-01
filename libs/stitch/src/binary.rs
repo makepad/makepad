@@ -213,6 +213,8 @@ pub struct SectionLayout {
     pub name: String,
     /// The whole section, its id and size included.
     pub bytes: std::ops::Range<usize>,
+    /// Its payload (for a custom section, its name included).
+    pub payload: std::ops::Range<usize>,
 }
 
 /// Where the parts of a module sit in the decoded bytes, for size
@@ -999,6 +1001,7 @@ fn decode_module(
                     String::new()
                 },
                 bytes: section_start..d.position(),
+                payload: base..d.position(),
             });
         }
         if id == 0 {

@@ -399,6 +399,28 @@ fn elem_segment(out: &mut Vec<u8>, elem: &Elem) {
     }
 }
 
+/// An import's kind byte and descriptor.
+pub fn import_desc(out: &mut Vec<u8>, desc: &ImportDesc) {
+    match desc {
+        ImportDesc::Func(ty) => {
+            out.push(0);
+            u32(out, *ty);
+        }
+        ImportDesc::Table(ty) => {
+            out.push(1);
+            table_type(out, ty);
+        }
+        ImportDesc::Memory(ty) => {
+            out.push(2);
+            limits(out, &ty.limits, ty.shared);
+        }
+        ImportDesc::Global(ty) => {
+            out.push(3);
+            global_type(out, ty);
+        }
+    }
+}
+
 pub fn encode(module: &Module) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(b"\0asm");
@@ -437,24 +459,7 @@ pub fn encode(module: &Module) -> Vec<u8> {
                 for import in &module.imports {
                     name(&mut payload, &import.module);
                     name(&mut payload, &import.name);
-                    match &import.desc {
-                        ImportDesc::Func(ty) => {
-                            payload.push(0);
-                            u32(&mut payload, *ty);
-                        }
-                        ImportDesc::Table(ty) => {
-                            payload.push(1);
-                            table_type(&mut payload, ty);
-                        }
-                        ImportDesc::Memory(ty) => {
-                            payload.push(2);
-                            limits(&mut payload, &ty.limits, ty.shared);
-                        }
-                        ImportDesc::Global(ty) => {
-                            payload.push(3);
-                            global_type(&mut payload, ty);
-                        }
-                    }
+                    import_desc(&mut payload, &import.desc);
                 }
                 Some(2)
             }
