@@ -131,48 +131,6 @@ impl DrawVars {
 
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
-            #[cfg(use_vulkan)]
-            let mut compiled_vulkan_shader: [Option<CxVulkanShaderBinary>;
-                NUM_SHADER_VARIANTS] = std::array::from_fn(|_| None);
-
-            // Only while this process renders with Vulkan; a Vulkan-capable
-            // desktop Linux build that fell back to OpenGL ES compiles GLSL
-            // below instead. Android and Quest have no such fallback.
-            #[cfg(use_vulkan)]
-            if !cfg!(target_os = "linux") || vm.host.cx().os.vulkan_active() {
-                for (shader_variant, xr_multiview) in [false, true].into_iter().enumerate() {
-                    match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
-                        vm,
-                        io_self,
-                        &output,
-                        xr_multiview,
-                    ) {
-                        Ok(vk_shader) => compiled_vulkan_shader[shader_variant] = Some(vk_shader),
-                        Err(err) => {
-                            use std::sync::atomic::{AtomicUsize, Ordering};
-                            static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
-                            const MAX_ERROR_LOGS: usize = 2;
-                            let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
-                            // Tracing the WGSL asks for every failure, not the first two.
-                            let tracing = crate::makepad_error_log::trace_enabled("shader.wgsl");
-                            if index < MAX_ERROR_LOGS || tracing {
-                                let variant_name = if xr_multiview { "xr" } else { "window" };
-                                crate::error!(
-                                    "Vulkan WGSL/SPIR-V compilation failed for {} variant: {}",
-                                    variant_name,
-                                    err
-                                );
-                            } else if index == MAX_ERROR_LOGS {
-                                crate::warning!(
-                                    "Suppressing further Vulkan WGSL/SPIR-V compilation logs after {} errors",
-                                    MAX_ERROR_LOGS
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-
             if crate::makepad_error_log::trace_enabled("shader.glsl_ir") {
                 crate::trace!("shader.glsl_ir", "---- Linux GLSL IR io list ----");
                 for io in &output.io {
@@ -215,6 +173,52 @@ impl DrawVars {
                         .insert(fnhash, shader_id);
                     self.finalize_cached_shader(vm, shader_id);
                     return;
+                }
+            }
+
+            #[cfg(use_vulkan)]
+            let mut compiled_vulkan_shader: [Option<CxVulkanShaderBinary>;
+                NUM_SHADER_VARIANTS] = std::array::from_fn(|_| None);
+
+            // Only while this process renders with Vulkan; a Vulkan-capable
+            // desktop Linux build that fell back to OpenGL ES compiles GLSL
+            // above instead. Android and Quest have no such fallback.
+            #[cfg(use_vulkan)]
+            if !cfg!(target_os = "linux") || vm.host.cx().os.vulkan_active() {
+                for (shader_variant, xr_multiview) in [false, true].into_iter().enumerate() {
+                    // Only Android ever draws the XR variant.
+                    if xr_multiview && !cfg!(target_os = "android") {
+                        continue;
+                    }
+                    match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
+                        vm,
+                        io_self,
+                        &output,
+                        xr_multiview,
+                    ) {
+                        Ok(vk_shader) => compiled_vulkan_shader[shader_variant] = Some(vk_shader),
+                        Err(err) => {
+                            use std::sync::atomic::{AtomicUsize, Ordering};
+                            static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
+                            const MAX_ERROR_LOGS: usize = 2;
+                            let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                            // Tracing the WGSL asks for every failure, not the first two.
+                            let tracing = crate::makepad_error_log::trace_enabled("shader.wgsl");
+                            if index < MAX_ERROR_LOGS || tracing {
+                                let variant_name = if xr_multiview { "xr" } else { "window" };
+                                crate::error!(
+                                    "Vulkan WGSL/SPIR-V compilation failed for {} variant: {}",
+                                    variant_name,
+                                    err
+                                );
+                            } else if index == MAX_ERROR_LOGS {
+                                crate::warning!(
+                                    "Suppressing further Vulkan WGSL/SPIR-V compilation logs after {} errors",
+                                    MAX_ERROR_LOGS
+                                );
+                            }
+                        }
+                    }
                 }
             }
 
