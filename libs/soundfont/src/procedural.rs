@@ -30,6 +30,7 @@ pub fn piano_fallback(key: u8, velocity: u8) -> VoiceParameters {
         filter_cutoff_hz: 8_500.0,
         filter_resonance_db: 0.0,
         exclusive_class: 0,
+        modulation: crate::model::Modulation::NONE,
     }
 }
 
@@ -63,5 +64,6 @@ pub fn metronome_click(accent: bool) -> VoiceParameters {
         filter_cutoff_hz: 20_000.0,
         filter_resonance_db: 0.0,
         exclusive_class: 0,
+        modulation: crate::model::Modulation::NONE,
     }
 }

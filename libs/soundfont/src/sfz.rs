@@ -251,6 +251,7 @@ fn finish_region(
             filter_cutoff_hz: 20_000.0,
             filter_resonance_db: 0.0,
             exclusive_class: 0,
+            modulation: crate::model::Modulation::NONE,
         },
         fixed_key: None,
         fixed_velocity: None,

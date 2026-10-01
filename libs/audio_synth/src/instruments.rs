@@ -379,11 +379,16 @@ impl Instrument for SoundFontInstrument {
             self.push(SamplerEvent::NoteOn { note_id: id, parameters: piano_fallback(note, velocity) });
             return;
         }
-        let row = note as usize * SF_LAYERS + (velocity as usize / 16).min(SF_LAYERS - 1);
+        let layer = (velocity as usize / 16).min(SF_LAYERS - 1);
+        let row = note as usize * SF_LAYERS + layer;
+        // The table's gain is its layer's velocity; the note's own sets it.
+        let table_velocity = (layer * 16 + 8).min(127) as u8;
+        let rescale = makepad_soundfont::velocity_gain(velocity) / makepad_soundfont::velocity_gain(table_velocity);
         for zone in self.table[row] {
             if let Some(mut parameters) = zone {
                 parameters.key = note;
                 parameters.velocity = velocity;
+                parameters.gain *= rescale;
                 self.push(SamplerEvent::NoteOn { note_id: id, parameters });
             }
         }
