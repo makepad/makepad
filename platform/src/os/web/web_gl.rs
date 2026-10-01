@@ -287,23 +287,11 @@ impl Cx {
                     };
                     if replaces {
                         let capacity = plain_capacity;
-                        let Some(charge) = upload_budget.allocations.reserve(capacity) else {
-                            // Said once: a draw that cannot upload is not
-                            // drawn, and a budget that stays full draws
-                            // nothing at all.
-                            static REFUSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-                            if !REFUSING.swap(true, std::sync::atomic::Ordering::Relaxed) {
-                                crate::error!(
-                                    "webgl: instance upload of {} bytes refused by the upload budget ({} of {} bytes in use); draws wait",
-                                    capacity,
-                                    upload_budget.allocations.bytes(),
-                                    upload_budget.allocations.limit()
-                                );
-                            }
-                            draw_item.instance_upload_pending = true;
-                            self.demo_time_repaint = true;
-                            continue;
-                        };
+                        // Accounting only: the storage an item needs is
+                        // allocated (a refused upload drew nothing, and a
+                        // budget that stayed full drew nothing at all). Real
+                        // exhaustion shows as GL OUT_OF_MEMORY on the page.
+                        let charge = upload_budget.allocations.reserve_visible(capacity);
                         draw_item.os.inst_capacity = capacity;
                         draw_item.os.inst_charge = Some(charge);
                     }
