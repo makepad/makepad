@@ -1,5 +1,6 @@
 pub mod draw_cube;
 pub mod draw_glyph;
+pub mod draw_nv12;
 pub mod draw_pbr;
 pub mod draw_quad;
 pub mod draw_rotated_text;

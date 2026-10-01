@@ -14,6 +14,7 @@ use makepad_draw::*;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
+    use mod.shared.*
 
     // The tone curves, one of each for every host: DrawToneMap, the
     // Sandbox composite and graph passes (a pass's `helpers` may derive
@@ -121,9 +122,7 @@ script_mod! {
             return clamp(c, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
         }
         srgb: fn(c: vec3) -> vec3 {
-            let lo = c * 12.92
-            let hi = pow(max(c, vec3(0.0, 0.0, 0.0)), vec3(0.41666, 0.41666, 0.41666)) * 1.055 - vec3(0.055, 0.055, 0.055)
-            return mix(lo, hi, step(vec3(0.0031308, 0.0031308, 0.0031308), c))
+            return linear_to_srgb(max(c, vec3(0.0, 0.0, 0.0)))
         }
         // One scene texel, exposed and tone mapped; the scene is
         // premultiplied by coverage (alpha).

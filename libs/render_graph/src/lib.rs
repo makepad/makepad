@@ -92,6 +92,7 @@ pub fn script_mod_passes(vm: &mut ScriptVm) {
         !v.is_nil() && !v.is_err()
     });
     if !have {
+        pass_stdlib(vm);
         for e in kits::install_filters(vm) {
             log!("render_graph: {e}");
         }

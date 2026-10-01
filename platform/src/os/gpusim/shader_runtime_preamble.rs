@@ -1634,6 +1634,7 @@ pub struct Sdf2d {
     pub old_shape: f32,
     pub blur: f32,
     pub aa: f32,
+    pub edge: f32,
     pub scale_factor: f32,
     pub dist: f32,
 }
@@ -1651,6 +1652,7 @@ impl Sdf2d {
             old_shape: 1e+20,
             blur: 0.00001,
             aa: 1.5,
+            edge: 0.0,
             scale_factor: 1.0,
             dist: 0.0,
         }

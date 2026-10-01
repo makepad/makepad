@@ -4808,7 +4808,7 @@ impl MaterialMirror {
         if crate::makepad_platform::makepad_error_log::trace_enabled("tweak") {
             if let Area::Instance(ia) = area {
                 if let Some(dc) = cx.draw_lists[ia.draw_list_id].draw_items[ia.draw_item_id].draw_call() {
-                    trace!("tweak", "swatch copy shader={:?} inst={:?} uniforms[..24]={:?}", dc.draw_shader_id, &inst, &dc.dyn_uniforms[..24]);
+                    trace!("tweak", "swatch copy shader={:?} inst={:?} uniforms[..24]={:?}", dc.draw_shader_id, &inst, &dc.dyn_uniforms[..dc.dyn_uniforms.len().min(24)]);
                 }
             }
         }
@@ -4841,7 +4841,7 @@ fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, area: Area, base: &DrawV
             draw_call.draw_shader_id,
             stride,
             &buf[inst.instance_offset..inst.instance_offset + stride],
-            &draw_call.dyn_uniforms[..24]
+            &draw_call.dyn_uniforms[..draw_call.dyn_uniforms.len().min(24)]
         );
     }
     let mut draw_vars = base.clone();
@@ -4849,7 +4849,7 @@ fn capture_material_mirror(cx: &Cx, widget: &WidgetRef, area: Area, base: &DrawV
     draw_vars.draw_shader_id = Some(draw_call.draw_shader_id);
     draw_vars.geometry_id = draw_call.geometry_id;
     draw_vars.options = draw_call.options.clone();
-    draw_vars.dyn_uniforms = draw_call.dyn_uniforms;
+    draw_vars.dyn_uniforms = draw_call.dyn_uniforms.clone();
     draw_vars.texture_slots = draw_call.texture_slots.clone();
     draw_vars.uniform_buffer_slots = draw_call.uniform_buffer_slots.clone();
     Some(MaterialMirror {

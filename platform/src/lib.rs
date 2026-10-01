@@ -220,7 +220,7 @@ pub use {
             CxDrawPassParent, CxDrawPassRect, DrawPass, DrawPassClearColor, DrawPassClearDepth,
             DrawPassId, ScriptDrawPass,
         },
-        draw_vars::{DrawVars, DRAW_CALL_DYN_UNIFORMS},
+        draw_vars::{DrawVars, DRAW_CALL_MAX_UNIFORM_FLOATS},
         sploded::{SplodedParams, SplodedView},
         event::{
             AppOpenEvent,

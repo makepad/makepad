@@ -1574,6 +1574,27 @@ impl Texture {
         texture
     }
 
+    /// A tight NV12 frame, `width` x `height` (the Y plane, then the
+    /// interleaved UV rows), as one byte texture `width` x
+    /// [`Texture::nv12_rows`]`(height)`: what `DrawNv12` draws as RGB.
+    /// `data` is the frame's bytes (`take_vec_u8` / `put_back_vec_u8`
+    /// replace them in place).
+    pub fn new_nv12(cx: &mut Cx, width: u32, height: u32, data: Vec<u8>) -> Self {
+        Self::new_with_format(cx, TextureFormat::VecRu8 {
+            width: width as usize,
+            height: Self::nv12_rows(height) as usize,
+            data: Some(data),
+            unpack_row_length: None,
+            updated: TextureUpdated::Full,
+        })
+    }
+
+    /// The rows of an NV12 frame `height` tall: the Y plane's and the
+    /// chroma plane's.
+    pub fn nv12_rows(height: u32) -> u32 {
+        height * 3 / 2
+    }
+
     pub fn set_animation(&self, cx: &mut Cx, animation: Option<TextureAnimation>) {
         cx.textures[self.texture_id()].animation = animation;
     }

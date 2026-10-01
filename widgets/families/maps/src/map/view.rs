@@ -3464,7 +3464,9 @@ impl UniformSlot {
         }
         let offset = self.offset as usize;
         for (i, v) in value.iter().take(self.slots as usize).enumerate() {
-            buf[offset + i] = *v;
+            if let Some(lane) = buf.get_mut(offset + i) {
+                *lane = *v;
+            }
         }
     }
 }

@@ -458,13 +458,12 @@ impl GraphRunner {
             let decl = &self.decls[p.node];
             let Some(draw) = self.programs.get_mut(program) else { continue };
             let dv = &mut draw.draw_super.draw_vars;
-            // A pass whose uniforms do not fit a draw call is refused by
-            // name instead of writing past the call's uniforms.
+            // A pass whose uniforms do not fit a draw call's block is
+            // refused by name.
             if let Some(sid) = dv.draw_shader_id {
                 let total = cx.cx.draw_shaders[sid.index].mapping.dyn_uniforms.total_slots;
-                let room = dv.dyn_uniforms.len();
-                if total > room {
-                    let e = format!("{}: its uniforms (with the standard block's) take {total} floats, over the {room} a pass can have; pack parameters into fewer vectors, or read tables from a named texture", decl.label);
+                if total > DRAW_CALL_MAX_UNIFORM_FLOATS {
+                    let e = format!("{}: its uniforms (with the standard block's) take {total} floats, over the {DRAW_CALL_MAX_UNIFORM_FLOATS} a draw call can have", decl.label);
                     if !self.errors.contains(&e) {
                         self.errors.push(e);
                     }

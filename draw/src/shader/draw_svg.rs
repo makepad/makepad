@@ -372,6 +372,7 @@ impl DrawSvg {
 
             // svg_scale at uniform offset 0..1, svg_offset at 2..3, svg_time
             // at 4, svg_rotation at 5
+            self.draw_super.draw_vars.fit_dyn_uniforms(6);
             let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
             uniforms[0] = sx;
             uniforms[1] = sy;
@@ -380,6 +381,7 @@ impl DrawSvg {
             uniforms[4] = time;
             uniforms[5] = self.rotation;
         } else {
+            self.draw_super.draw_vars.fit_dyn_uniforms(6);
             let uniforms = &mut self.draw_super.draw_vars.dyn_uniforms;
             uniforms[0] = 1.0;
             uniforms[1] = 1.0;

@@ -348,9 +348,10 @@ fn helper_names(helpers: &str) -> Vec<String> {
 /// passes to run and, for each, the original passes it holds (in order; a
 /// pass alone holds itself), whose uniform values go in that order.
 pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
-    // At most this many floats of uniforms and textures in one fused pass
-    // (the standard block takes its own).
-    const MAX_FLOATS: usize = 96;
+    // At most this many floats of uniforms in one fused pass: a draw
+    // call's uniform block (platform DRAW_CALL_MAX_UNIFORM_FLOATS, 16 KB)
+    // less the standard block's.
+    const MAX_FLOATS: usize = 4096 - 64;
     const MAX_READS: usize = 8;
     let floats = |d: &PassDecl| d.uniforms.iter().map(|u| if u.width == 1 { 1 } else { 4 }).sum::<usize>();
     let mut out = Vec::new();

@@ -4,7 +4,7 @@ use crate::{
     draw_pass::DrawPassId,
     draw_shader::{CxDrawShader, CxDrawShaderMapping, CxDrawShaderOptions, DrawShaderId},
     draw_vars::{
-        DrawVars, DRAW_CALL_DYN_UNIFORMS, DRAW_CALL_TEXTURE_SLOTS, DRAW_CALL_UNIFORM_BUFFER_SLOTS,
+        DrawVars, DRAW_CALL_TEXTURE_SLOTS, DRAW_CALL_UNIFORM_BUFFER_SLOTS,
     },
     geometry::GeometryId,
     id_pool::*,
@@ -1717,7 +1717,8 @@ pub struct CxDrawCall {
     pub append_group_id: u64,
     pub draw_call_uniforms: DrawCallUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
-    pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS], // user uniforms
+    /// The shader's dyn-uniform block (`mapping.dyn_uniforms.total_slots`).
+    pub dyn_uniforms: Vec<f32>,
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     pub uniform_buffer_slots: [Option<UniformBuffer>; DRAW_CALL_UNIFORM_BUFFER_SLOTS],
     /// Replaced with a process-wide generation whenever either uniform block
@@ -1729,6 +1730,29 @@ pub struct CxDrawCall {
     /// Stamped always (one f32 write per call creation); read only while the
     /// mode is up.
     pub turtle_depth: f32,
+}
+
+/// `dst` = `src` at exactly `floats` lanes (cut or padded with zeros): a
+/// draw call's block is its shader's size whatever the vars hold.
+fn sized_dyn_uniforms(dst: &mut Vec<f32>, src: &[f32], floats: usize) {
+    dst.clear();
+    dst.extend_from_slice(&src[..src.len().min(floats)]);
+    dst.resize(floats, 0.0);
+}
+
+/// `dst` takes `src`'s values, keeping at least its own length (a call's
+/// block stays its shader's size).
+pub(crate) fn copy_dyn_uniforms(dst: &mut Vec<f32>, src: &[f32]) {
+    let n = dst.len().max(src.len());
+    dst.clear();
+    dst.extend_from_slice(src);
+    dst.resize(n, 0.0);
+}
+
+/// Whether a call's block differs from the vars' (missing lanes read 0).
+fn dyn_uniforms_differ(call: &[f32], vars: &[f32]) -> bool {
+    let n = call.len().max(vars.len());
+    (0..n).any(|i| call.get(i).copied().unwrap_or(0.0).to_bits() != vars.get(i).copied().unwrap_or(0.0).to_bits())
 }
 
 impl CxDrawCall {
@@ -1746,7 +1770,7 @@ impl CxDrawCall {
         self.draw_shader_id = draw_vars.draw_shader_id.unwrap();
         self.total_instance_slots = mapping.instances.total_slots;
         self.draw_call_uniforms = DrawCallUniforms::default();
-        self.dyn_uniforms.copy_from_slice(&draw_vars.dyn_uniforms);
+        sized_dyn_uniforms(&mut self.dyn_uniforms, &draw_vars.dyn_uniforms, mapping.dyn_uniforms.total_slots);
         self.texture_slots.clone_from(&draw_vars.texture_slots);
         self.uniform_buffer_slots
             .clone_from(&draw_vars.uniform_buffer_slots);
@@ -1770,7 +1794,11 @@ impl CxDrawCall {
             draw_shader_id: draw_vars.draw_shader_id.unwrap(),
             total_instance_slots: mapping.instances.total_slots,
             draw_call_uniforms: DrawCallUniforms::default(),
-            dyn_uniforms: draw_vars.dyn_uniforms,
+            dyn_uniforms: {
+                let mut u = Vec::new();
+                sized_dyn_uniforms(&mut u, &draw_vars.dyn_uniforms, mapping.dyn_uniforms.total_slots);
+                u
+            },
             texture_slots: draw_vars.texture_slots.clone(),
             uniform_buffer_slots: draw_vars.uniform_buffer_slots.clone(),
             instance_dirty: true,
@@ -1959,11 +1987,11 @@ impl CxDrawItems {
             .draw_call_mut()
             .expect("retained presentation requires a draw call");
         assert_eq!(Some(call.draw_shader_id), vars.draw_shader_id);
-        if call.dyn_uniforms != vars.dyn_uniforms
+        if dyn_uniforms_differ(&call.dyn_uniforms, &vars.dyn_uniforms)
             || call.texture_slots != vars.texture_slots
             || call.uniform_buffer_slots != vars.uniform_buffer_slots
         {
-            call.dyn_uniforms = vars.dyn_uniforms;
+            copy_dyn_uniforms(&mut call.dyn_uniforms, &vars.dyn_uniforms);
             call.texture_slots = vars.texture_slots.clone();
             call.uniform_buffer_slots = vars.uniform_buffer_slots.clone();
             call.mark_uniforms_dirty(generation);
@@ -2578,7 +2606,8 @@ impl CxDrawList {
                         }
                         let mut diff = false;
                         for i in 0..sh.mapping.dyn_uniforms.total_slots {
-                            if draw_call.dyn_uniforms[i] != draw_vars.dyn_uniforms[i] {
+                            let lane = |u: &[f32]| u.get(i).copied().unwrap_or(0.0);
+                            if lane(&draw_call.dyn_uniforms) != lane(&draw_vars.dyn_uniforms) {
                                 diff = true;
                                 break;
                             }
@@ -3186,7 +3215,7 @@ mod uniform_generation_tests {
             total_instance_slots: 0,
             draw_call_uniforms: DrawCallUniforms::default(),
             geometry_id: None,
-            dyn_uniforms: [0.0; DRAW_CALL_DYN_UNIFORMS],
+            dyn_uniforms: vec![0.0; 4],
             texture_slots: Default::default(),
             uniform_buffer_slots: Default::default(),
             instance_dirty: true,
@@ -3530,7 +3559,7 @@ mod uniform_generation_tests {
             append_group_id: 0,
             draw_shader_id: Some(call.draw_shader_id),
             geometry_id: None,
-            dyn_uniforms: call.dyn_uniforms,
+            dyn_uniforms: call.dyn_uniforms.clone(),
             texture_slots: call.texture_slots.clone(),
             uniform_buffer_slots: call.uniform_buffer_slots.clone(),
             dyn_instances_pad: Default::default(),

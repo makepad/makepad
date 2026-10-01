@@ -37,6 +37,7 @@ script_mod! {
     use mod.math.*
     use mod.shader.*
     use mod.draw
+    use mod.shared.*
 
     mod.draw.DrawGraphAccumBase = mod.std.set_type_default() do #(DrawGraphAccumBase::script_shader(vm)){
         ..mod.draw.DrawQuad
@@ -106,7 +107,7 @@ script_mod! {
         disp: fn(x: vec3) -> vec3 {
             let y = vec3(1.0, 1.0, 1.0) - exp(max(x, vec3(0.0, 0.0, 0.0)) * (0.0 - self.u_err.w))
             let s = clamp(y, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
-            return mix(s * 12.92, pow(s, vec3(1.0 / 2.4, 1.0 / 2.4, 1.0 / 2.4)) * 1.055 - vec3(0.055, 0.055, 0.055), step(vec3(0.0031308, 0.0031308, 0.0031308), s))
+            return linear_to_srgb(s)
         }
         pixel: fn() -> vec4f {
             let b = self.u_err.z

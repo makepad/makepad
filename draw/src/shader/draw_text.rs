@@ -3015,6 +3015,7 @@ impl DrawText {
         let fonts = cx.fonts.borrow();
         let rasterizer = fonts.rasterizer().borrow();
         let sdfer_settings = rasterizer.sdfer().settings();
+        self.draw_vars.fit_dyn_uniforms(2);
         self.draw_vars.dyn_uniforms[0] = sdfer_settings.radius;
         self.draw_vars.dyn_uniforms[1] = sdfer_settings.cutoff;
         self.draw_vars.texture_slots[0] = Some(fonts.grayscale_texture().clone());

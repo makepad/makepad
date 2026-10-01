@@ -12,9 +12,9 @@ script_mod! {
     use mod.math.*
     use mod.shader.*
     use mod.draw
-
-    // The shared stdlib every pass's code has in scope (`mod.shared`).
-    let shared_std = #(crate::pass_stdlib(vm))
+    // The shared stdlib (`mod.shared`, registered first) every pass's
+    // code has in scope.
+    use mod.shared.*
 
     // The standard block of a graph pass: a fullscreen quad whose `pixel`
     // the author writes.
@@ -109,12 +109,10 @@ script_mod! {
             return self.hash(vec2(self.g_frame.y * 0.618 + i * 1.7 + 0.5, self.g_frame.w * 97.0 + i * 0.37))
         }
         to_srgb: fn(c: vec3) -> vec3 {
-            let x = max(c, vec3(0.0, 0.0, 0.0))
-            return mix(x * 12.92, pow(x, vec3(1.0 / 2.4, 1.0 / 2.4, 1.0 / 2.4)) * 1.055 - vec3(0.055, 0.055, 0.055), step(vec3(0.0031308, 0.0031308, 0.0031308), x))
+            return linear_to_srgb(max(c, vec3(0.0, 0.0, 0.0)))
         }
         from_srgb: fn(c: vec3) -> vec3 {
-            let x = max(c, vec3(0.0, 0.0, 0.0))
-            return mix(x / 12.92, pow((x + vec3(0.055, 0.055, 0.055)) / 1.055, vec3(2.4, 2.4, 2.4)), step(vec3(0.04045, 0.04045, 0.04045), x))
+            return srgb_to_linear(max(c, vec3(0.0, 0.0, 0.0)))
         }
 
         pixel: fn() -> vec4f {

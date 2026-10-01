@@ -67,6 +67,29 @@ script_mod! {
         }
     }
 
+    // A quad placed by a 2D affine map per instance: `affine_m` (a b c d) and
+    // `affine_t` (e f) take the quad's own box (0..affine_size) to pixels,
+    // x' = a x + c y + e, y' = b x + d y + f. `pos` is 0..1 over the box, as
+    // for DrawQuad; `place(p)` maps a point of the box for a vertex fn of its
+    // own (a box grown for an edge, say).
+    mod.draw.DrawAffineQuad = mod.std.set_type_default() do #(DrawAffineQuad::script_shader(vm)){
+        ..mod.draw.DrawQuad
+
+        place: fn(p: vec2) -> vec2 {
+            return vec2(
+                self.affine_m.x * p.x + self.affine_m.z * p.y + self.affine_t.x
+                self.affine_m.y * p.x + self.affine_m.w * p.y + self.affine_t.y
+            )
+        }
+
+        vertex: fn() {
+            let w = self.place(self.geom.pos * self.affine_size)
+            self.pos = self.geom.pos
+            self.world = self.draw_list.view_transform * vec4(w.x, w.y, self.draw_depth + self.draw_call.zbias, 1.0)
+            self.vertex_pos = self.draw_pass.camera_projection * (self.draw_pass.camera_view * self.world)
+        }
+    }
+
     mod.draw.DrawColor = mod.std.set_type_default() do #(DrawColor::script_shader(vm)){
         ..mod.draw.DrawQuad
         pixel: fn(){
@@ -105,6 +128,31 @@ pub struct DrawColor {
     pub draw_super: DrawQuad,
     #[live]
     pub color: Vec4f,
+}
+
+/// A quad of `affine_size` placed by the affine `affine_m` / `affine_t` (see
+/// the shader): a turned, sheared or mirrored box in one instance.
+#[derive(Script, ScriptHook, Debug)]
+#[repr(C)]
+pub struct DrawAffineQuad {
+    #[deref]
+    pub draw_super: DrawQuad,
+    #[live]
+    pub affine_m: Vec4f,
+    #[live]
+    pub affine_t: Vec2f,
+    #[live]
+    pub affine_size: Vec2f,
+}
+
+impl DrawAffineQuad {
+    /// Place the box `size` (its own units) by `m` = [a, b, c, d, e, f]:
+    /// x' = a x + c y + e, y' = b x + d y + f.
+    pub fn set_affine(&mut self, m: [f64; 6], size: DVec2) {
+        self.affine_m = vec4(m[0] as f32, m[1] as f32, m[2] as f32, m[3] as f32);
+        self.affine_t = vec2(m[4] as f32, m[5] as f32);
+        self.affine_size = vec2(size.x as f32, size.y as f32);
+    }
 }
 
 impl DrawQuad {

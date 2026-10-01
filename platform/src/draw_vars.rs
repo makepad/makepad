@@ -23,7 +23,11 @@ use crate::makepad_script::{
 };
 use crate::makepad_script::mod_shader::SHADER_IO_VERTEX_BUFFER;
 
-pub const DRAW_CALL_DYN_UNIFORMS: usize = 256;
+/// The largest dyn-uniform block a shader may declare, in f32 lanes: 16 KB,
+/// the uniform-block size every backend takes (GL/WebGL 2's guaranteed
+/// minimum; Metal, D3D11 and WGSL take more). A block is as big as its
+/// shader's uniforms (reflection), not this.
+pub const DRAW_CALL_MAX_UNIFORM_FLOATS: usize = 4096;
 // Combined bindings, not the fragment-stage limit. Full rigid PBR uses
 // 16 fragment textures plus one vertex-only morph texture with GI enabled.
 // WebGL2 guarantees 16 per stage and at least 32 combined units.
@@ -38,9 +42,8 @@ pub const DRAW_CALL_DYN_INSTANCES: usize = 32;
 /// shifts every one of those fields by a lane. On wasm32 (4-byte pointers and
 /// usize) the 8-byte-aligned struct ended 4 bytes past the array: the shader
 /// read `char_index` where `texture_index` was, and web text drew as boxes.
-#[cfg(target_pointer_width = "32")]
-const DRAW_VARS_TAIL_PAD: usize = 1;
-#[cfg(not(target_pointer_width = "32"))]
+/// With the fields before it as they are, no target needs a lane (the
+/// assert below names a layout change that does).
 const DRAW_VARS_TAIL_PAD: usize = 0;
 
 #[derive(Clone, Script, Debug)]
@@ -60,8 +63,10 @@ pub struct DrawVars {
     pub draw_shader_id: Option<DrawShaderId>,
     #[rust]
     pub geometry_id: Option<GeometryId>,
-    #[rust([0f32; DRAW_CALL_DYN_UNIFORMS])]
-    pub dyn_uniforms: [f32; DRAW_CALL_DYN_UNIFORMS],
+    /// The shader's dyn-uniform block, `mapping.dyn_uniforms.total_slots`
+    /// lanes (sized when the shader is bound).
+    #[rust]
+    pub dyn_uniforms: Vec<f32>,
     #[rust]
     pub texture_slots: [Option<Texture>; DRAW_CALL_TEXTURE_SLOTS],
     #[rust]
@@ -320,7 +325,7 @@ impl DrawVars {
                     if obj_map.contains_key(&key) {
                         for i in 0..input.slots {
                             draw_call.dyn_uniforms[input.offset + i] =
-                                self.dyn_uniforms[input.offset + i]
+                                self.dyn_uniforms.get(input.offset + i).copied().unwrap_or(0.0)
                         }
                         any_updated = true;
                     }
@@ -494,6 +499,14 @@ impl DrawVars {
         found
     }
 
+    /// Grow the dyn-uniform block to `floats` lanes (a shader bound, or
+    /// swapped in by its id, has that many).
+    pub fn fit_dyn_uniforms(&mut self, floats: usize) {
+        if self.dyn_uniforms.len() < floats {
+            self.dyn_uniforms.resize(floats, 0.0);
+        }
+    }
+
     pub fn get_uniform(&self, cx: &mut Cx, uniform: LiveId, value: &mut [f32]) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let sh = &cx.draw_shaders[draw_shader_id.index];
@@ -502,7 +515,7 @@ impl DrawVars {
                 let slots = input.slots;
                 if input.id == uniform {
                     for i in 0..value.len().min(slots) {
-                        value[i] = self.dyn_uniforms[offset + i];
+                        value[i] = self.dyn_uniforms.get(offset + i).copied().unwrap_or(0.0);
                     }
                 }
             }
@@ -512,6 +525,7 @@ impl DrawVars {
     pub fn set_uniform(&mut self, cx: &Cx, uniform: LiveId, value: &[f32]) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let sh = &cx.draw_shaders[draw_shader_id.index];
+            self.fit_dyn_uniforms(sh.mapping.dyn_uniforms.total_slots);
             for input in &sh.mapping.dyn_uniforms.inputs {
                 let offset = input.offset;
                 let slots = input.slots;
@@ -537,6 +551,7 @@ impl DrawVars {
     pub fn set_uniform_on_area(&mut self, cx: &mut Cx, id: LiveId, value: &[f32]) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let sh = &cx.draw_shaders[draw_shader_id.index];
+            self.fit_dyn_uniforms(sh.mapping.dyn_uniforms.total_slots);
 
             // Find the uniform input
             if let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) {
@@ -597,7 +612,7 @@ impl DrawVars {
         if draw_call.draw_shader_id != draw_shader_id {
             return false;
         }
-        draw_call.dyn_uniforms = self.dyn_uniforms;
+        crate::draw_list::copy_dyn_uniforms(&mut draw_call.dyn_uniforms, &self.dyn_uniforms);
         draw_call.texture_slots = self.texture_slots.clone();
         draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
         draw_call.mark_uniforms_dirty(uniforms_gen);
@@ -634,7 +649,7 @@ impl DrawVars {
             if draw_call.draw_shader_id != draw_shader_id {
                 continue;
             }
-            draw_call.dyn_uniforms = self.dyn_uniforms;
+            crate::draw_list::copy_dyn_uniforms(&mut draw_call.dyn_uniforms, &self.dyn_uniforms);
             draw_call.texture_slots = self.texture_slots.clone();
             draw_call.uniform_buffer_slots = self.uniform_buffer_slots.clone();
             draw_call.mark_uniforms_dirty(Cx::next_uniform_gen_from(uniform_gen));
@@ -658,6 +673,7 @@ impl DrawVars {
         let Some(draw_shader_id) = self.draw_shader_id else { return };
         let Some(draw_list_id) = list.draw_list_id() else { return };
         let sh = &cx.draw_shaders[draw_shader_id.index];
+        self.fit_dyn_uniforms(sh.mapping.dyn_uniforms.total_slots);
         let Some(input) = sh.mapping.dyn_uniforms.inputs.iter().find(|i| i.id == id) else { return };
         let slots = input.slots.min(value.len());
         let offset = input.offset;
@@ -783,6 +799,7 @@ impl DrawVars {
     ) {
         if let Some(draw_shader_id) = self.draw_shader_id {
             let mapping = &cx.draw_shaders.shaders[draw_shader_id.index].mapping;
+            self.fit_dyn_uniforms(mapping.dyn_uniforms.total_slots);
 
             for input in &mapping.dyn_uniforms.inputs {
                 let value = Self::extract_shader_io_value(
@@ -1360,6 +1377,7 @@ impl DrawVars {
         if !self.bind_dyn_instances(vm, io_self, &mapping) {
             return;
         }
+        self.fit_dyn_uniforms(mapping.dyn_uniforms.total_slots);
 
         // The shader's type name, for GPU diagnostics (`gpu.shaders`).
         let debug_id = vm.bx.heap.object_type_name_in_chain(io_self).unwrap_or(LiveId(0));
@@ -1501,6 +1519,8 @@ impl DrawVars {
         // A registered shader's dyn instances fit (`bind_dyn_instances`).
         self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
         self.dyn_instance_slots = mapping.instances.total_slots;
+        let floats = mapping.dyn_uniforms.total_slots;
+        self.fit_dyn_uniforms(floats);
 
         // Set draw_shader on self
         self.draw_shader_id = Some(shader_id);
