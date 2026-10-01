@@ -247,8 +247,9 @@ impl DrawVars {
             );
             mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
 
-            self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
-            self.dyn_instance_slots = mapping.instances.total_slots;
+            if !self.bind_dyn_instances(vm, io_self, &mapping) {
+                return;
+            }
 
             let os_shader_id = {
                 #[cfg(use_vulkan)]

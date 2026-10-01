@@ -473,7 +473,10 @@ impl DrawVars {
         true
     }
 
-    pub fn set_dyn_instance(&mut self, cx: &Cx, instance: LiveId, value: &[f32]) {
+    /// Set a script-declared instance field (`name: instance(..)`) by name
+    /// for the next draw. False when the shader has no such field.
+    pub fn set_dyn_instance(&mut self, cx: &Cx, instance: LiveId, value: &[f32]) -> bool {
+        let mut found = false;
         if let Some(draw_shader_id) = self.draw_shader_id {
             let sh = &cx.draw_shaders[draw_shader_id.index];
             for input in &sh.mapping.dyn_instances.inputs {
@@ -484,9 +487,11 @@ impl DrawVars {
                     for i in 0..value.len().min(slots) {
                         self.dyn_instances[offset + i] = value[i];
                     }
+                    found = true;
                 }
             }
         }
+        found
     }
 
     pub fn get_uniform(&self, cx: &mut Cx, uniform: LiveId, value: &mut [f32]) {
@@ -1351,8 +1356,9 @@ impl DrawVars {
         );
         mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
 
-        self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
-        self.dyn_instance_slots = mapping.instances.total_slots;
+        if !self.bind_dyn_instances(vm, io_self, &mapping) {
+            return;
+        }
 
         // The shader's type name, for GPU diagnostics (`gpu.shaders`).
         let debug_id = vm.bx.heap.object_type_name_in_chain(io_self).unwrap_or(LiveId(0));
@@ -1447,13 +1453,51 @@ impl DrawVars {
         hash
     }
 
+    /// Point this draw's dyn instance window at a newly compiled shader's
+    /// fields (the script-declared `name: instance(..)` values, set by name
+    /// with [`Self::set_dyn_instance`]). A shader declaring more of them
+    /// than a draw holds ([`DRAW_CALL_DYN_INSTANCES`] floats) fails like a
+    /// compile error: reported, never registered, not drawn.
+    pub fn bind_dyn_instances(&mut self, vm: &ScriptVm, io_self: ScriptObject, mapping: &CxDrawShaderMapping) -> bool {
+        let total = mapping.dyn_instances.total_slots;
+        if total > self.dyn_instances.len() {
+            let name = vm
+                .bx
+                .heap
+                .object_type_name_in_chain(io_self)
+                .map(|id| format!("{}", id))
+                .unwrap_or_else(|| format!("<script object {}>", io_self.index()));
+            let names: Vec<String> = mapping.dyn_instances.inputs.iter().map(|i| format!("{} ({})", i.id, i.slots)).collect();
+            let report = format!(
+                "{name}: its instance fields take {total} floats, more than the {} a draw holds: {}",
+                self.dyn_instances.len(),
+                names.join(", ")
+            );
+            crate::shader_error::note(report.clone());
+            crate::error!("draw shader {report}; it will NOT be drawn");
+            return false;
+        }
+        self.dyn_instance_start = self.dyn_instances.len() - total;
+        self.dyn_instance_slots = mapping.instances.total_slots;
+        true
+    }
+
+    /// The script-declared instance fields of this draw's shader (name,
+    /// offset, floats): what [`Self::set_dyn_instance`] can set.
+    pub fn dyn_instance_inputs<'a>(&self, cx: &'a Cx) -> &'a [DrawShaderInput] {
+        match self.draw_shader_id {
+            Some(id) => &cx.draw_shaders.shaders[id.index].mapping.dyn_instances.inputs,
+            None => &[],
+        }
+    }
+
     /// Helper to finalize shader setup after finding a cached shader ID.
     /// Uses the geometry_id stored on the mapping instead of re-running pre_collect_shader_io.
     pub fn finalize_cached_shader(&mut self, vm: &mut ScriptVm, shader_id: DrawShaderId) {
         let cx = vm.host.cx();
         let mapping = &cx.draw_shaders.shaders[shader_id.index].mapping;
 
-        // Set dyn_instance_start and dyn_instance_slots based on mapping
+        // A registered shader's dyn instances fit (`bind_dyn_instances`).
         self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
         self.dyn_instance_slots = mapping.instances.total_slots;
 

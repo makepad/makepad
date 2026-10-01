@@ -4156,9 +4156,9 @@ impl DrawVars {
             // Fill the scope uniform buffer from current script values
             mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
 
-            // Set dyn_instance_start and dyn_instance_slots based on mapping
-            self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
-            self.dyn_instance_slots = mapping.instances.total_slots;
+            if !self.bind_dyn_instances(vm, io_self, &mapping) {
+                return;
+            }
 
             // Access Cx from the vm host
             let cx = vm.host.cx_mut();

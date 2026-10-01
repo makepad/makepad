@@ -168,8 +168,9 @@ impl DrawVars {
             mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
             mapping.varying_total_slots = varying_total_slots;
 
-            self.dyn_instance_start = self.dyn_instances.len() - mapping.dyn_instances.total_slots;
-            self.dyn_instance_slots = mapping.instances.total_slots;
+            if !self.bind_dyn_instances(vm, io_self, &mapping) {
+                return;
+            }
 
             let cx = vm.host.cx_mut();
             mapping.scope_uniforms_gen = cx.next_uniform_gen();
