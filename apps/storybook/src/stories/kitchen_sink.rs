@@ -175,6 +175,13 @@ script_mod! {
                         LevelMeterColumn{height: 100. level: 0.62}
                         Rotary{width: 80. height: 105. text: "Dial" default: 0.35}
                     }
+                    // A big knob and a small one beside the dial, so a sheet's
+                    // knob is seen at the sizes a panel gives it.
+                    Line{
+                        align: Align{x: 0. y: 1.}
+                        Rotary{width: 140. height: 165. text: "Big" default: 0.6}
+                        Rotary{width: 44. height: 69. text: "Small" default: 0.4}
+                    }
                 }
                 Group{
                     GroupCaption{text: "Choice"}
