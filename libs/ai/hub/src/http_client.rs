@@ -727,6 +727,7 @@ fn same_origin(a: &ParsedUrl, b: &ParsedUrl) -> bool {
 
 /// A fleet node: TLS checked against the known-nodes record, then the
 /// request with this process's credential proof for the certificate seen.
+#[cfg(not(target_arch = "wasm32"))]
 fn fetch_fleet(
     url: &ParsedUrl,
     method: &str,
@@ -749,6 +750,7 @@ fn fetch_fleet(
     read_response_head(transport)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn is_fleet(url: &ParsedUrl) -> bool {
     url.https && makepad_network::tls::is_fleet_endpoint(&format!("{}:{}", url.host, url.port))
 }
@@ -761,6 +763,7 @@ fn fetch_once(
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
+    #[cfg(not(target_arch = "wasm32"))]
     if is_fleet(url) {
         return fetch_fleet(url, method, req, body, send_extra_headers);
     }
@@ -784,6 +787,7 @@ fn fetch_once(
     body: Option<(&str, &[u8])>,
     send_extra_headers: bool,
 ) -> Result<HttpClientResponse, AssetAiError> {
+    #[cfg(not(target_arch = "wasm32"))]
     if is_fleet(url) {
         return fetch_fleet(url, method, req, body, send_extra_headers);
     }

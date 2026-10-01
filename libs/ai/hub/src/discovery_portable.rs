@@ -1,7 +1,6 @@
 //! Portable fleet discovery: keep the shared vocabulary while reporting
 //! that UDP LAN discovery is unavailable.
 
-use makepad_micro_serde::*;
 
 pub const DISCOVERY_PORT: u16 = 41830;
 pub const DEFAULT_FLEET: &str = "gen";
@@ -75,3 +74,5 @@ mod tests {
         assert_eq!(normalize_fleet(" Game "), "game");
     }
 }
+
+pub fn start_fleet_beacon(_node_id: u64, _tls_port: u16, _fleet: String, _node_key: String) {}

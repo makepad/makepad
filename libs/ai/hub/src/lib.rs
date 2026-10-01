@@ -53,7 +53,13 @@ pub mod fleet;
 // Fleet authority, credentials, pins, and the TLS front (native only).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fleet_auth;
+#[cfg(target_arch = "wasm32")]
+#[path = "fleet_auth_portable.rs"]
+pub mod fleet_auth;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod front;
+#[cfg(target_arch = "wasm32")]
+#[path = "front_portable.rs"]
 pub mod front;
 pub mod job;
 pub mod gpu;

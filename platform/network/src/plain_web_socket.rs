@@ -8,7 +8,6 @@ use std::{
     io::{Read, Write},
     net::{Shutdown, TcpStream},
     sync::mpsc::{channel, Sender},
-    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -16,7 +15,8 @@ use std::{
 /// writer thread (the reader holds the lock only for short timed reads).
 enum Conn {
     Plain(TcpStream),
-    Tls(Arc<Mutex<crate::SocketStream>>),
+    #[cfg(not(target_arch = "wasm32"))]
+    Tls(std::sync::Arc<std::sync::Mutex<crate::SocketStream>>),
 }
 
 impl Conn {
@@ -25,6 +25,7 @@ impl Conn {
             Conn::Plain(s) => {
                 let _ = s.shutdown(Shutdown::Both);
             }
+            #[cfg(not(target_arch = "wasm32"))]
             Conn::Tls(s) => {
                 if let Ok(mut s) = s.lock() {
                     s.shutdown();
@@ -79,6 +80,7 @@ impl PlainWebSocket {
         let split = request.split_url();
         match split.proto {
             "http" | "ws" => {}
+            #[cfg(not(target_arch = "wasm32"))]
             "https" | "wss" => return Self::open_pinned(request, rx_sender),
             _ => {
                 let _ = rx_sender.send(WebSocketMessage::Error(format!(
@@ -265,6 +267,7 @@ impl PlainWebSocket {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     /// `wss://` to a fleet endpoint ([`crate::tls::mark_fleet_endpoint`]):
     /// self-signed TLS checked against the fleet known-hosts record, with
     /// the fleet authorization bound to the certificate presented. Other
@@ -303,10 +306,10 @@ impl PlainWebSocket {
             Ok(l) => l,
             Err(err) => return failed(&rx_sender, err),
         };
-        let shared = Arc::new(Mutex::new(stream));
+        let shared = std::sync::Arc::new(std::sync::Mutex::new(stream));
         // The writer raises this while it wants the lock; the reader steps
         // aside between reads so outgoing frames never starve.
-        let write_wanted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let write_wanted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (sender, receiver) = channel();
         let writer = shared.clone();
         let wants = write_wanted.clone();

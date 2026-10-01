@@ -465,6 +465,7 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
 /// Fleet operation of a network-reachable node: its own TLS identity
 /// (made on first start) and the fleet key that checks client proofs (all
 /// under `<cache>/fleet`).
+#[cfg(not(target_arch = "wasm32"))]
 struct FleetMode {
     verifier: Arc<crate::fleet_auth::Verifier>,
     identity: makepad_network::tls::TlsIdentity,
@@ -477,6 +478,7 @@ struct FleetMode {
 
 /// The node key and TLS certificate fingerprint (made on first use), for
 /// status and for checking a known-nodes record by hand.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn fleet_identity(cache_dir: &Path) -> Result<(String, String), AssetAiError> {
     fs::create_dir_all(cache_dir).map_err(|e| AssetAiError::Io(format!("{}: {e}", cache_dir.display())))?;
     let node_key = load_or_create_node_key(cache_dir);
@@ -488,6 +490,24 @@ pub fn fleet_identity(cache_dir: &Path) -> Result<(String, String), AssetAiError
     Ok((node_key, identity.fingerprint_hex()))
 }
 
+/// A browser cannot listen: no fleet mode on the web.
+#[cfg(target_arch = "wasm32")]
+struct FleetMode {
+    front_secret: String,
+}
+
+#[cfg(target_arch = "wasm32")]
+impl FleetMode {
+    fn load(_cache_dir: &Path, _node_key: &str, _fleet: &str, addr: SocketAddr) -> Result<Self, AssetAiError> {
+        Err(AssetAiError::Io(format!("cannot serve on {addr} from a browser")))
+    }
+
+    fn start(self, _node_id: u64, inner: SocketAddr, _shared: &Arc<ServiceShared>) -> Result<SocketAddr, AssetAiError> {
+        Ok(inner)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl FleetMode {
     fn load(cache_dir: &Path, node_key: &str, fleet: &str, addr: SocketAddr) -> Result<Self, AssetAiError> {
         let dir = cache_dir.join("fleet");
