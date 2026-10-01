@@ -2448,6 +2448,123 @@ pub struct DrawSlider {
     cap_px: f32,
     #[live]
     inset_px: f32,
+    /// The cap's motion, for a material whose cap is a liquid: how far
+    /// the cap's tail trails its head (0 at rest, 1 fully stretched),
+    /// which way along the track it trails (-1 or 1), the press as a
+    /// spring (0 at rest, overshooting past 1 on a press), and the squash
+    /// along and across (1 and 1 but as the tail lands). All at rest unless
+    /// the widget's `cap_viscosity` is above zero.
+    #[live]
+    cap_stretch: f32,
+    #[live(1.0)]
+    cap_dir: f32,
+    #[live]
+    cap_press: f32,
+    #[live(1.0)]
+    cap_squash_along: f32,
+    #[live(1.0)]
+    cap_squash_across: f32,
+}
+
+/// The cap's motion: a head that is the value (or travels to it on a spring
+/// after a jump), a tail that follows the head on a viscous spring, and a
+/// press spring, each stepped on the frames after a kick until all are at
+/// rest. Positions along the track in points, so the springs read the same
+/// at every size.
+#[derive(Default)]
+pub struct CapMotion {
+    head: f64,
+    head_v: f64,
+    tail: Option<f64>,
+    tail_v: f64,
+    press: f64,
+    press_v: f64,
+    last_dir: f64,
+    travel: bool,
+    /// The track's travel in points at the last draw, which the value is
+    /// scaled by.
+    travel_px: f64,
+    next_frame: Option<NextFrame>,
+    last_time: Option<f64>,
+}
+
+impl CapMotion {
+    /// The spring constants for a viscosity 0..1: stiff and quick at 0,
+    /// slow and loose at 1, the tail's (k, c) and the press's (kp, cp).
+    fn constants(viscosity: f64) -> (f64, f64, f64, f64) {
+        let v = viscosity.clamp(0.0, 1.0);
+        let (w0, z) = if v < 0.5 {
+            let t = v * 2.0;
+            (22.0 * (6.0f64 / 22.0).powf(t), 0.57 + (0.7 - 0.57) * t)
+        } else {
+            let t = (v - 0.5) * 2.0;
+            (6.0 * (7.0f64 / 6.0).powf(t), 0.7 + 0.5 * t)
+        };
+        (w0 * w0, 2.0 * z * w0, 4.0 * w0 * w0, 2.0 * 0.6 * 2.0 * w0)
+    }
+
+    fn spring(x: &mut f64, v: &mut f64, target: f64, k: f64, c: f64, dt: f64) {
+        let a = k * (target - *x) - c * *v;
+        *v += a * dt;
+        *x += *v * dt;
+    }
+
+    /// One step: true while anything still moves.
+    fn step(&mut self, dt: f64, value: f64, radius: f64, dragging: bool, viscosity: f64) -> bool {
+        let (k, c, kp, cp) = Self::constants(viscosity);
+        let target = value * self.travel_px;
+        if self.travel {
+            Self::spring(&mut self.head, &mut self.head_v, target, kp, cp, dt);
+            if (self.head - target).abs() < 0.15 && self.head_v.abs() < 3.0 {
+                self.travel = false;
+                self.head = target;
+                self.head_v = 0.0;
+            }
+        } else {
+            self.head = target;
+            self.head_v = 0.0;
+        }
+        let head = self.head;
+        let mut tail = self.tail.unwrap_or(head);
+        Self::spring(&mut tail, &mut self.tail_v, head, k, c, dt);
+        self.tail = Some(tail);
+        let press_target = if dragging { 1.0 } else { 0.0 };
+        Self::spring(&mut self.press, &mut self.press_v, press_target, kp, cp, dt);
+        let gap = head - tail;
+        if gap.abs() > 0.05 {
+            self.last_dir = if gap > 0.0 { 1.0 } else { -1.0 };
+        }
+        self.travel
+            || dragging
+            || self.tail_v.abs() > 0.5
+            || gap.abs() > 0.05
+            || self.press_v.abs() > 1e-3
+            || (self.press - press_target).abs() > 1e-3
+            || radius <= 0.0
+    }
+
+    /// What the material reads: stretch, direction, press, squash along,
+    /// squash across; and the value the cap is drawn at.
+    fn read(&self, value: f64, radius: f64, dragging: bool) -> (f32, f32, f32, f32, f32, f64) {
+        let tail = self.tail.unwrap_or(self.head);
+        let gap = self.head - tail;
+        let dir = if self.last_dir == 0.0 { 1.0 } else { self.last_dir };
+        let r = radius.max(1.0);
+        let stretch = (gap.abs() / (1.69 * r)).min(1.0);
+        let sq = -gap * dir;
+        let (sqa, sqx) = if sq > 0.0 && !dragging {
+            let sr = (sq / r).min(0.6);
+            (1.0 - sr, 1.0 + 0.36 * sr)
+        } else {
+            (1.0, 1.0)
+        };
+        let drawn = if self.travel && self.travel_px > 0.0 {
+            (self.head / self.travel_px).clamp(0.0, 1.0)
+        } else {
+            value
+        };
+        (stretch as f32, dir as f32, self.press as f32, sqa as f32, sqx as f32, drawn)
+    }
 }
 
 #[derive(Script, Widget, Animator)]
@@ -2551,6 +2668,18 @@ pub struct Slider {
     #[live]
     track_inset: f64,
 
+    /// Above zero, the cap moves like a liquid: its tail follows the head
+    /// on a spring this viscous (0 stiff, 1 slow), a press spreads it on a
+    /// spring, and a value that jumps (a reset, a wheel step, a host's
+    /// write) sends the cap travelling to it. The material reads the
+    /// motion from `cap_stretch`, `cap_dir`, `cap_press` and the two
+    /// `cap_squash_*` instances. Zero, the default, draws every frame at
+    /// rest and never asks for another.
+    #[live]
+    cap_viscosity: f64,
+    #[rust]
+    cap_motion: CapMotion,
+
     #[live]
     bind: String,
 
@@ -2646,12 +2775,32 @@ impl Slider {
     }
 
     pub fn draw_walk_slider(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_bg.slide_pos = self.relative_value as f32;
+        // The cap's motion: at rest (and off) it reads 0, 1, 0, 1, 1 and
+        // the cap is drawn at the value; travelling, the cap is drawn at
+        // its head and the value bar follows it.
+        let drawn = if self.cap_viscosity > 0.0 {
+            let (stretch, dir, press, sqa, sqx, drawn) =
+                self.cap_motion.read(self.relative_value, self.cap_size * 0.5, self.dragging.is_some());
+            self.draw_bg.cap_stretch = stretch;
+            self.draw_bg.cap_dir = dir;
+            self.draw_bg.cap_press = press;
+            self.draw_bg.cap_squash_along = sqa;
+            self.draw_bg.cap_squash_across = sqx;
+            drawn
+        } else {
+            self.draw_bg.cap_stretch = 0.0;
+            self.draw_bg.cap_dir = 1.0;
+            self.draw_bg.cap_press = 0.0;
+            self.draw_bg.cap_squash_along = 1.0;
+            self.draw_bg.cap_squash_across = 1.0;
+            self.relative_value
+        };
+        self.draw_bg.slide_pos = drawn as f32;
         let origin =
             taper_to_travel(self.taper, self.default, self.min, self.max, self.default, self.step);
         self.draw_bg.origin_pos = origin as f32;
         self.draw_bg.arc_origin = if self.arc_from_origin { 1.0 } else { 0.0 };
-        let (lo, hi) = fill_span(origin, self.relative_value, self.arc_from_origin);
+        let (lo, hi) = fill_span(origin, drawn, self.arc_from_origin);
         self.draw_bg.fill_lo = lo as f32;
         self.draw_bg.fill_hi = hi as f32;
         // The face and the drag read the same `axis`, so a fader cannot be
@@ -2684,6 +2833,27 @@ impl Slider {
         }
 
         self.draw_bg.end(cx);
+        // The track's travel in points, for the motion's springs, which
+        // work in points so a long fader and a short one feel the same.
+        if self.cap_viscosity > 0.0 {
+            let size = self.draw_bg.area().rect(cx).size;
+            let extent = match self.axis {
+                DragAxis::Horizontal => size.x - self.draw_bg.label_size as f64,
+                DragAxis::Vertical => size.y,
+            };
+            let travel = self.cap_travel(extent).max(1.0);
+            if (travel - self.cap_motion.travel_px).abs() > 0.5 {
+                // A new length: positions scale with it rather than snap.
+                if self.cap_motion.travel_px > 0.0 {
+                    let k = travel / self.cap_motion.travel_px;
+                    self.cap_motion.head *= k;
+                    if let Some(t) = self.cap_motion.tail.as_mut() {
+                        *t *= k;
+                    }
+                }
+                self.cap_motion.travel_px = travel;
+            }
+        }
     }
 
     pub fn value(&self) -> f64 {
@@ -2696,6 +2866,7 @@ impl Slider {
         // the old one instead said yes for a value that quantises or clamps
         // onto the travel already in effect, and then repainted for nothing.
         if self.set_internal(v) {
+            self.cap_motion_kick(cx, true);
             self.update_text_input(cx);
             // And draw the material again. `update_text_input` only dirties
             // the readout's own area, which was the whole repaint a caller
@@ -2710,8 +2881,57 @@ impl Slider {
     /// Snap back to the DSL `default:` value, as a title-click reset does.
     pub fn reset_to_default(&mut self, cx: &mut Cx) {
         self.set_internal(self.default);
+        self.cap_motion_kick(cx, true);
         self.update_text_input(cx);
         self.draw_bg.redraw(cx);
+    }
+
+    /// Starts the cap's motion on the next frame, if the widget has a
+    /// viscosity: after a press, a release, a drag move, or (`jump`) a
+    /// value that arrived without a drag, which the cap then travels to.
+    fn cap_motion_kick(&mut self, cx: &mut Cx, jump: bool) {
+        if self.cap_viscosity <= 0.0 {
+            return;
+        }
+        if jump && self.cap_motion.travel_px > 0.0 {
+            let target = self.relative_value * self.cap_motion.travel_px;
+            if (self.cap_motion.head - target).abs() > 0.2 {
+                self.cap_motion.travel = true;
+            }
+        }
+        if self.cap_motion.next_frame.is_none() {
+            self.cap_motion.last_time = None;
+            self.cap_motion.next_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// One step of the cap's motion on its frame, and the next frame asked
+    /// for while anything still moves.
+    fn cap_motion_tick(&mut self, cx: &mut Cx, event: &Event) {
+        let Some(nf) = self.cap_motion.next_frame else {
+            return;
+        };
+        let Some(ne) = nf.is_event(event) else {
+            return;
+        };
+        self.cap_motion.next_frame = None;
+        let dt = match self.cap_motion.last_time {
+            Some(t) => (ne.time - t).clamp(0.001, 0.05),
+            None => 1.0 / 60.0,
+        };
+        self.cap_motion.last_time = Some(ne.time);
+        let dragging = self.dragging.is_some();
+        let active = self.cap_motion.step(
+            dt,
+            self.relative_value,
+            self.cap_size * 0.5,
+            dragging,
+            self.cap_viscosity,
+        );
+        self.draw_bg.redraw(cx);
+        if active {
+            self.cap_motion.next_frame = Some(cx.new_next_frame());
+        }
     }
 }
 
@@ -2757,6 +2977,7 @@ impl Widget for Slider {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
+        self.cap_motion_tick(cx, event);
 
         for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
             match action.as_widget_action().cast() {
@@ -2840,6 +3061,7 @@ impl Widget for Slider {
                     if delta != 0.0 && self.dragging.is_none() {
                         self.relative_value = (self.relative_value + delta).max(0.0).min(1.0);
                         self.set_internal(self.to_external());
+                        self.cap_motion_kick(cx, true);
                         self.draw_bg.redraw(cx);
                         self.update_text_input(cx);
                         cx.widget_action(uid, SliderAction::Slide(self.to_external()));
@@ -2885,6 +3107,7 @@ impl Widget for Slider {
                 self.dragging = Some(self.relative_value);
                 self.drag_from = None;
                 self.drag_travelled = self.relative_value;
+                self.cap_motion_kick(cx, false);
                 cx.widget_action(uid, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
@@ -2904,6 +3127,7 @@ impl Widget for Slider {
                 }
                 self.dragging = None;
                 self.drag_from = None;
+                self.cap_motion_kick(cx, false);
                 // A TAP on the label puts the control back to its DSL
                 // default.
                 //
@@ -2975,6 +3199,7 @@ impl Widget for Slider {
                     );
                     self.relative_value = self.drag_travelled.max(0.0).min(1.0);
                     self.set_internal(self.to_external());
+                    self.cap_motion_kick(cx, false);
                     self.draw_bg.redraw(cx);
                     self.update_text_input(cx);
                     cx.widget_action(uid, SliderAction::Slide(self.to_external()));
