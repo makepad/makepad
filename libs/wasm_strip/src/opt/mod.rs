@@ -9,6 +9,7 @@ pub mod encode;
 pub mod ir;
 pub mod remap;
 
+mod bulk;
 mod compact;
 pub mod data;
 mod dce;
@@ -217,6 +218,11 @@ pub fn wasm_optimize_checked(
             strip(module, opts)
         });
     }
+    // A shared memory's bulk operations, safe where an engine keeps a
+    // stale size for memory another thread grew (see `bulk`).
+    run("bulk", &mut module, &mut bytes, &|module| {
+        bulk::run(module);
+    });
     let sites = std::cell::RefCell::new(Vec::new());
     // What the panic sites point at in the data, cleared once they are gone.
     let panic_data = if opts.panic_trap { data::Objects::find(&module) } else { data::Objects::default() };

@@ -193,7 +193,10 @@ pub fn simd_supported(p: &Program) -> bool {
 /// lane 0. An engine without relaxed SIMD refuses to compile it; one whose
 /// madd is unfused answers `PROBE` with 0 instead of `PROBE_FUSED`. A host
 /// sets [`Target::relaxed_fma`] only when it compiled and answered fused.
-pub fn fma_probe() -> Vec<u8> {
+/// It imports the memory as `target`'s modules do (a threaded host links
+/// every module against its shared memory, which an unshared import
+/// refuses); `target.relaxed_fma` is not read.
+pub fn fma_probe(target: Target) -> Vec<u8> {
     let mut f = Body::with_params(3);
     for k in 0..3 {
         f.get(k);
@@ -202,7 +205,7 @@ pub fn fma_probe() -> Vec<u8> {
     f.fd(op::F32X4_RELAXED_MADD);
     f.fd(op::F32X4_EXTRACT_LANE);
     f.b(0);
-    assemble(&[(f, 0)], &[(&[op::F32; 3], &[op::F32])], &[("fma".into(), 0)], Target::default())
+    assemble(&[(f, 0)], &[(&[op::F32; 3], &[op::F32])], &[("fma".into(), 0)], target)
 }
 
 /// The probe's arguments: (1 + 2^-23)^2 - (1 + 2^-22) is 2^-46 exactly,

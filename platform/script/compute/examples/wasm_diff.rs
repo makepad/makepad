@@ -64,7 +64,7 @@ fn batch(cases: &[Case]) -> Vec<u8> {
     let mut out = Vec::new();
     let u = |out: &mut Vec<u8>, x: u32| out.extend_from_slice(&x.to_le_bytes());
     u(&mut out, 0x3146_4457);
-    let probe = wasm::fma_probe();
+    let probe = wasm::fma_probe(wasm::Target::default());
     u(&mut out, probe.len() as u32);
     out.extend_from_slice(&probe);
     u(&mut out, cases.len() as u32);
