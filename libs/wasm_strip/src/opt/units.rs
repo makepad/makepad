@@ -490,12 +490,12 @@ fn live_vtable_slots(module: &Module, data: &DataLive, boundaries: &BTreeSet<u32
                 out.insert(w);
                 at += 4;
             }
-        } else {
-            // Another static (a thread local's key, a struct with a
+        } else if a % 4 == 0 {
+            // Another aligned static (a thread local's key, a struct with a
             // callback): its first words, up to the next address anything
-            // names.
+            // names. (An unaligned address is text.)
             let next_bound = boundaries.range(a + 1..).next().copied().unwrap_or(u32::MAX);
-            let end = list.get(k + 1).copied().unwrap_or(u32::MAX).min(next_bound).min(a4 + 64);
+            let end = list.get(k + 1).copied().unwrap_or(u32::MAX).min(next_bound).min(a4 + 16);
             let mut at = a4;
             while at < end {
                 if let Some(w) = word(at) {
