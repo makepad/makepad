@@ -58,9 +58,35 @@ pub use plan::{Attachments, Format, PostGraph, Resource, Stage};
 #[cfg(feature = "gpu")]
 pub use runner::{FrameUniforms, GraphRunner, PassView, StageInputs};
 
-/// A pass's uniform values for one frame, `[f32; 4]` per uniform in
+/// One uniform's value for a frame: as many of the 16 floats as the
+/// uniform's width (1..4, or 16 for a `mat4x4f`, column-major).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UniformValue(pub [f32; 16]);
+
+impl From<[f32; 4]> for UniformValue {
+    fn from(v: [f32; 4]) -> Self {
+        let mut a = [0.0; 16];
+        a[..4].copy_from_slice(&v);
+        UniformValue(a)
+    }
+}
+
+impl From<[f32; 16]> for UniformValue {
+    fn from(v: [f32; 16]) -> Self {
+        UniformValue(v)
+    }
+}
+
+impl std::ops::Deref for UniformValue {
+    type Target = [f32; 16];
+    fn deref(&self) -> &[f32; 16] {
+        &self.0
+    }
+}
+
+/// A pass's uniform values for one frame, one per uniform in
 /// declaration order.
-pub type PassValues = Vec<[f32; 4]>;
+pub type PassValues = Vec<UniformValue>;
 
 #[cfg(feature = "gpu")]
 /// Register the graph's draw shaders. Call after `makepad_widgets::script_mod`

@@ -57,7 +57,8 @@ use crate::plan::{Format, ProgramId, Resource, Stage};
 use std::hash::{Hash, Hasher};
 
 
-/// One uniform a pass declares: its name and width (1..4 floats).
+/// One uniform a pass declares: its name and width (1..4 floats, or 16:
+/// a `mat4x4f`).
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct UniformDecl {
     pub name: String,
@@ -181,8 +182,8 @@ impl PassDecl {
             if seen.contains(&u.name.as_str()) {
                 return Err(format!("`{}` is both a read and a uniform", u.name));
             }
-            if !(1..=4).contains(&u.width) {
-                return Err(format!("uniform `{}` must be a number or a vector of up to 4", u.name));
+            if !(1..=4).contains(&u.width) && u.width != 16 {
+                return Err(format!("uniform `{}` must be a number, a vector of up to 4 or a mat4x4f", u.name));
             }
             seen.push(&u.name);
         }
@@ -247,6 +248,7 @@ impl PassDecl {
                 1 => "0.0".to_string(),
                 2 => "vec2(0.0, 0.0)".to_string(),
                 3 => "vec3(0.0, 0.0, 0.0)".to_string(),
+                16 => "mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)".to_string(),
                 _ => "vec4(0.0, 0.0, 0.0, 0.0)".to_string(),
             };
             s.push_str(&format!("    {}: uniform({init})\n", u.name));
@@ -353,7 +355,7 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
     // less the standard block's.
     const MAX_FLOATS: usize = 4096 - 64;
     const MAX_READS: usize = 8;
-    let floats = |d: &PassDecl| d.uniforms.iter().map(|u| if u.width == 1 { 1 } else { 4 }).sum::<usize>();
+    let floats = |d: &PassDecl| d.uniforms.iter().map(|u| match u.width { 1 => 1, 16 => 16, _ => 4 }).sum::<usize>();
     let mut out = Vec::new();
     let mut map = Vec::new();
     let mut i = 0;

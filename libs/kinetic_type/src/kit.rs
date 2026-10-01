@@ -153,7 +153,7 @@ pub struct KitValues {
     /// or fade them out; None: they vanish with the old text.
     pub dying: Option<f32>,
     pub passes: Vec<makepad_render_graph::PassDecl>,
-    pub pass_values: Vec<Vec<[f32; 4]>>,
+    pub pass_values: Vec<makepad_render_graph::PassValues>,
 }
 
 fn field(vm: &ScriptVm, o: ScriptObject, name: &str) -> ScriptValue {
@@ -406,7 +406,7 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
                     return Err(format!("{}: uniform `{name}` is a number or a colour", decl.label));
                 };
                 decl.uniforms.push(makepad_render_graph::UniformDecl { name, width });
-                v.push(value);
+                v.push(value.into());
             }
             decl.validate().map_err(|e| format!("{}: {e}", decl.label))?;
             passes.push(decl);
