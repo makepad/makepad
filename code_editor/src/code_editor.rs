@@ -109,6 +109,9 @@ script_mod! {
         draw_diff_added +: {color: theme.color_success}
         draw_diff_removed +: {color: theme.color_error}
         draw_diff_changed +: {color: theme.color_warning}
+        // Find: every match a soft wash, the current one a strong one.
+        draw_find_match +: {color: theme.color_focus}
+        draw_find_current +: {color: theme.color_focus}
         draw_decoration +: {
         }
         draw_selection +: {
@@ -238,6 +241,16 @@ pub struct CodeEditor {
     draw_diff_removed: DrawColor,
     #[live]
     draw_diff_changed: DrawColor,
+    #[live]
+    draw_find_match: DrawColor,
+    #[live]
+    draw_find_current: DrawColor,
+    /// Find matches, sorted, each within one line; drawn behind the text.
+    #[rust]
+    pub find_matches: Vec<(Position, Position)>,
+    /// The match navigation is on, drawn stronger than the rest.
+    #[rust]
+    pub find_current: Option<usize>,
     #[rust]
     document_read_only: bool,
     #[live]
@@ -858,6 +871,7 @@ impl CodeEditor {
         };
         self.draw_bg.draw_abs(cx, bg_rect);
         self.draw_diff_backgrounds(cx, session);
+        self.draw_find_layer(cx, session);
         for vars in [&mut self.draw_cursor.draw_vars, &mut self.draw_cursor_bg.draw_vars, &mut self.draw_selection.draw_vars] {
             vars.set_dyn_instance(cx, live_id!(content_opacity), &[self.content_opacity]);
         }
@@ -1519,6 +1533,59 @@ impl CodeEditor {
                     self.draw_diff_rect(cx, decoration.ty, rect, 0.14);
                 }
             }
+        }
+    }
+
+    /// The find matches on the visible lines, as rects in draw space; a match
+    /// a wrap splits gets one rect per row.
+    fn find_rects(&self, session: &CodeSession) -> Vec<(Rect, bool)> {
+        let mut rects = Vec::new();
+        if self.find_matches.is_empty() || self.cell_size.x <= 0.0 {
+            return rects;
+        }
+        let layout = session.layout();
+        let view = layout.view_line_range();
+        let lines = layout.as_text().as_lines();
+        let first = self.find_matches.partition_point(|m| m.0.line_index < self.line_start);
+        for (index, &(start, end)) in self.find_matches.iter().enumerate().skip(first) {
+            if start.line_index >= self.line_end {
+                break;
+            }
+            if !view.contains(&start.line_index) || start.line_index >= lines.len() {
+                continue;
+            }
+            let range = layout.line_byte_range(start.line_index);
+            if start.byte_index < range.start || end.byte_index > range.end || end.byte_index <= start.byte_index {
+                continue;
+            }
+            let line = layout.line(start.line_index);
+            let (first_row, first_column) = line.logical_to_grid_position(start.byte_index, Affinity::After);
+            let (last_row, last_column) = line.logical_to_grid_position(end.byte_index, Affinity::Before);
+            for row in first_row..=last_row {
+                let from = if row == first_row { first_column } else { line.wrap_indent_column_count() };
+                let to = if row == last_row { last_column } else { line.column_count() };
+                if to <= from {
+                    continue;
+                }
+                let mut rect = self.grid_rect(line, row, from, to - from);
+                rect.pos += self.unscrolled_rect.pos;
+                rects.push((rect, Some(index) == self.find_current));
+            }
+        }
+        rects
+    }
+
+    fn draw_find_layer(&mut self, cx: &mut Cx2d, session: &CodeSession) {
+        for (rect, current) in self.find_rects(session) {
+            let (draw, opacity) = if current {
+                (&mut self.draw_find_current, 0.55)
+            } else {
+                (&mut self.draw_find_match, 0.22)
+            };
+            let color = draw.color;
+            draw.color.w *= opacity * self.content_opacity;
+            draw.draw_abs(cx, rect);
+            draw.color = color;
         }
     }
 
