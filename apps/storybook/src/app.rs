@@ -116,8 +116,11 @@ script_mod! {
         // ground shows between them. Not inset panels: most sheets draw an
         // inset panel as their sunken well, and a well the size of a pane
         // is not what any of them meant (the futuristic metal sheet's is a
-        // pocket of circuit board).
+        // pocket of circuit board). Only the sheets whose design frames
+        // the panes draw them (theme::frames_panes): under the others the
+        // panes are clear and the window's own ground shows, as it did.
         toolbar_pane := PanelView{
+            show_bg: #(crate::theme::frames_panes())
             width: Fill
             height: Fit
             margin: Inset{left: 6. right: 6. top: 6. bottom: 4.}
@@ -129,6 +132,7 @@ script_mod! {
             align: SplitterAlign.FromA(260.)
             size: 6.
             a: PanelView{
+                show_bg: #(crate::theme::frames_panes())
                 width: Fill
                 height: Fill
                 flow: Down
@@ -160,6 +164,7 @@ script_mod! {
                 align: SplitterAlign.FromB(380.)
                 size: 6.
                 a: PanelView{
+                    show_bg: #(crate::theme::frames_panes())
                     width: Fill
                     height: Fill
                     padding: theme.mspace_2
@@ -167,6 +172,7 @@ script_mod! {
                     canvas := mod.storybook.StoryCanvas{}
                 }
                 b: PanelView{
+                    show_bg: #(crate::theme::frames_panes())
                     width: Fill
                     height: Fill
                     flow: Down
