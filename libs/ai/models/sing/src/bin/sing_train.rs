@@ -76,6 +76,7 @@ fn prefetch<T: Send + 'static>(workers: usize, depth: usize, seed: u64, make: Ar
 fn configs(a: &Args) -> (AcousticConfig, VocoderConfig) {
     match a.get("--config").as_deref() {
         Some("base") => (AcousticConfig::base(), VocoderConfig::base()),
+        Some("small") => (AcousticConfig::small(), VocoderConfig::base()),
         _ => (AcousticConfig::tiny(), VocoderConfig::tiny()),
     }
 }
@@ -750,7 +751,7 @@ fn main() {
             // --holdout P: whole songs (shards) held out of training, P% by hash; their
             // segments score each log step (--patience logs without improvement stop the round).
             let holdout: u64 = a.num("--holdout", 0u64);
-            let held: Vec<usize> = lyric.iter().copied().filter(|i| (store.items[*i].shard as u64).wrapping_mul(2654435761) % 100 < holdout).collect();
+            let held: Vec<usize> = lyric.iter().copied().filter(|i| store.held_out(&store.items[*i], holdout)).collect();
             lyric.retain(|i| !held.contains(i));
             if holdout > 0 {
                 eprintln!("held out {} sung-lyric segments from {}% of the songs", held.len(), holdout);
@@ -783,6 +784,7 @@ fn main() {
                 lyric.len(), speech.len(), sung.len(), store.hours(), mix[0].1 / total * 100.0, mix[1].1 / total * 100.0, mix[2].1 / total * 100.0
             );
             let sung = Arc::new(sung);
+            let augment: f32 = a.num("--augment", 0.0f32);
             let st2 = store.clone();
             let rx = prefetch(workers, 8, 2, Arc::new(move |rng: &mut Rng| {
                 // Each batch is one kind: unaligned (lyric, speech; aligned on the fly) or sung vowels.
@@ -796,7 +798,13 @@ fn main() {
                     x -= e.1;
                 }
                 let v: Vec<Aligned> = match kind {
-                    0 => (0..batch).map(|_| Aligned::from_sungtext_item(&st2.item(&st2.items[lyric[rng.below(lyric.len())]]), speech_frames).unwrap()).collect(),
+                    0 => (0..batch)
+                        .map(|_| {
+                            let a = Aligned::from_sungtext_item(&st2.item(&st2.items[lyric[rng.below(lyric.len())]]), speech_frames).unwrap();
+                            // --augment P: speed perturbation (0.9..1.1) on P of the segments.
+                            if rng.unit() < augment { a.speed(0.9 + 0.2 * rng.unit()) } else { a }
+                        })
+                        .collect(),
                     1 => (0..batch).map(|_| Aligned::from_speech_item(&st2.item(&st2.items[speech[rng.below(speech.len())]]), speech_frames).unwrap()).collect(),
                     _ => (0..batch).map(|_| sung[rng.below(sung.len())].crop(max_frames, rng)).collect(),
                 };

@@ -136,6 +136,27 @@ impl Aligned {
         Some(Aligned { tokens: it.tokens.clone(), dur: Vec::new(), notes, f0: it.f0.clone(), vel: vec![0.8; nf], audio: it.audio_f32(), singer: it.speaker as usize, band: it.band_hz })
     }
 
+    /// Speed perturbation of an unaligned item: played `f` times faster (0.9..1.1),
+    /// so pitch rises by 12·log2 f semitones and it lasts 1/f as long; f0 and
+    /// notes follow. Formants move with it, as in a tape-speed change.
+    pub fn speed(&self, f: f32) -> Aligned {
+        assert!(self.dur.is_empty(), "speed perturbation is for unaligned items");
+        let audio = dsp::resample(&self.audio, (SR as f32 * f).round() as u32, SR as u32);
+        let nf = audio.len() / HOP;
+        let src = |q: usize| ((q as f32 * f).round() as usize).min(self.f0.len().saturating_sub(1));
+        let semis = 12.0 * f.log2();
+        Aligned {
+            tokens: self.tokens.clone(),
+            dur: Vec::new(),
+            notes: (0..nf).map(|q| self.notes[src(q).min(self.notes.len() - 1)]).map(|n| if n > 0.0 { n + semis } else { 0.0 }).collect(),
+            f0: (0..nf).map(|q| self.f0[src(q)] * f).collect(),
+            vel: vec![0.8; nf],
+            audio: audio[..nf * HOP].to_vec(),
+            singer: self.singer,
+            band: self.band,
+        }
+    }
+
     /// A window of at most `max_frames` frames at a random start; the tokens
     /// it overlaps, each clipped to the window.
     pub fn crop(&self, max_frames: usize, rng: &mut Rng) -> Aligned {

@@ -35,6 +35,11 @@ impl AcousticConfig {
     }
 
     /// A tiny model for tests and first runs.
+    /// About a third of base's weights, for small corpora.
+    pub fn small() -> Self {
+        AcousticConfig { d: 192, heads: 4, enc_layers: 3, dec_layers: 4, ffn: 768, conv_k: 31, refine_layers: 4, refine_hidden: 384, singers: 2048 }
+    }
+
     pub fn tiny() -> Self {
         AcousticConfig { d: 32, heads: 2, enc_layers: 1, dec_layers: 1, ffn: 64, conv_k: 7, refine_layers: 1, refine_hidden: 64, singers: 4 }
     }

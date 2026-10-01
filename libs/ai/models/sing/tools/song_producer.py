@@ -59,7 +59,9 @@ LINES = [
     "my {noun} is a {adj} {noun}",
 ]
 GENRES = ["pop", "synth pop", "indie pop", "soft rock", "acoustic pop", "r&b", "folk pop", "electro pop", "ballad"]
-KEYS = ["C major", "D major", "E major", "F major", "G major", "A major", "B flat major", "A minor", "E minor", "D minor"]
+# Every major and minor key, so the sung range moves from set to set.
+TONICS = ["C", "C sharp", "D", "E flat", "E", "F", "F sharp", "G", "A flat", "A", "B flat", "B"]
+KEYS = [f"{t} {m}" for t in TONICS for m in ("major", "minor")]
 VOICE_MAIN = "female pop lead vocal, clear diction, upfront dry vocals, every word clearly sung"
 # Every song asks for one clear solo voice (style "b"; "a", a sparse
 # arrangement alone, kept more ad-libs and backing vocals).

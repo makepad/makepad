@@ -255,6 +255,8 @@ impl ItemRef {
 /// keeps what is hot), so a corpus larger than memory streams.
 pub struct Store {
     files: Vec<std::fs::File>,
+    /// Each shard's file stem (`ItemRef::shard` indexes it).
+    pub names: Vec<String>,
     pub items: Vec<ItemRef>,
 }
 
@@ -293,6 +295,7 @@ impl Store {
         paths.sort();
         let mut files = Vec::new();
         let mut items = Vec::new();
+        let names = paths.iter().map(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default()).collect();
         for (si, p) in paths.iter().enumerate() {
             let f = std::fs::File::open(p)?;
             let len = f.metadata()?.len();
@@ -328,7 +331,15 @@ impl Store {
             }
             files.push(f);
         }
-        Ok(Store { files, items })
+        Ok(Store { files, names, items })
+    }
+
+    /// Whether `r`'s shard (a song, or a lyric set's takes) is among the `pct`%
+    /// held out of training: by a hash of the shard's name, so the same songs
+    /// stay out whatever else the store holds.
+    pub fn held_out(&self, r: &ItemRef, pct: u64) -> bool {
+        let h = self.names[r.shard as usize].bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+        h % 100 < pct
     }
 
     fn bytes(&self, r: &ItemRef, at: u64, n: usize) -> Vec<u8> {
