@@ -817,7 +817,7 @@ impl SynthBus {
     /// [`SynthBus::external_send`], and passes through the same master
     /// dynamics, so samples and synthesis share one bus.
     pub fn render(&mut self, out_l: &mut [f32], out_r: &mut [f32]) {
-        let started = std::time::Instant::now();
+        let started = cpu_seconds();
         let n = out_l.len().min(out_r.len());
         let mut at = 0;
         let mut peak = 0.0f32;
@@ -827,9 +827,12 @@ impl SynthBus {
             at += len;
         }
         // CPU accounting and graceful shedding.
-        let spent = started.elapsed().as_secs_f32();
+        let spent = match (started, cpu_seconds()) {
+            (Some(a), Some(b)) => (b - a) as f32,
+            _ => 0.0,
+        };
         let budget = n as f32 / self.rate;
-        if budget > 0.0 {
+        if budget > 0.0 && started.is_some() {
             let load = spent / budget;
             self.stats.cpu_load += (load - self.stats.cpu_load) * 0.05;
             self.stats.peak_cpu_load = self.stats.peak_cpu_load.max(load);
@@ -1155,4 +1158,20 @@ mod tests {
         bus.render(&mut l, &mut r);
         assert_eq!(bus.live_counts().1, 0);
     }
+}
+
+/// Seconds on a monotonic clock for the bus's CPU accounting, where the
+/// platform has one std can read; on the web (wasm32, no std clock) the
+/// bus renders without measuring itself, so it never sheds voices there.
+#[cfg(not(target_arch = "wasm32"))]
+fn cpu_seconds() -> Option<f64> {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    Some(START.get_or_init(Instant::now).elapsed().as_secs_f64())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn cpu_seconds() -> Option<f64> {
+    None
 }
