@@ -243,6 +243,24 @@ impl CodeSession {
         }
     }
 
+    /// Re-measure every line, after the document's inline inlays changed
+    /// ([`CodeDocument::set_inline_inlays`]): widths, wraps and positions.
+    pub fn relayout_inline(&self) {
+        let line_count = self.document.as_text().as_lines().len();
+        {
+            let mut layout = self.layout.borrow_mut();
+            for i in 0..line_count {
+                layout.column_count[i] = None;
+                layout.wrap_data[i] = None;
+            }
+            layout.y.clear();
+        }
+        for line in 0..line_count {
+            self.update_wrap_data(line);
+        }
+        self.update_y();
+    }
+
     pub fn document(&self) -> &CodeDocument {
         &self.document
     }

@@ -395,6 +395,34 @@ impl CodeDocument {
         self.0.layout.borrow_mut().block_inlays = inlays;
     }
 
+    /// Whether `other` is this document (not a copy of its text).
+    pub fn is_same(&self, other: &CodeDocument) -> bool {
+        Rc::ptr_eq(&self.0, &other.0)
+    }
+
+    /// Reserve columns inside lines for controls a host draws over the
+    /// editor (a colour swatch before a colour, a curve before an ease):
+    /// `(line, byte, inlay)` in any order, replacing the previous set. The
+    /// text after an inlay moves right by its columns; carets, selections
+    /// and hits skip it. Edits carry the inlays along with their text; a
+    /// host sets them again after the text changes, then calls
+    /// [`crate::CodeSession::relayout_inline`] on each session.
+    pub fn set_inline_inlays(&self, inlays: Vec<(usize, usize, crate::inlays::InlineInlay)>) {
+        let mut layout = self.0.layout.borrow_mut();
+        let lines = &mut layout.inline_inlays;
+        for line in lines.iter_mut() {
+            line.clear();
+        }
+        for (line, byte, inlay) in inlays {
+            if let Some(line) = lines.get_mut(line) {
+                line.push((byte, inlay));
+            }
+        }
+        for line in lines.iter_mut() {
+            line.sort_by_key(|(byte, _)| *byte);
+        }
+    }
+
     pub fn add_session(
         &mut self,
         session_id: SessionId,

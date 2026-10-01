@@ -557,6 +557,9 @@ impl<'a> Iterator for WrappedElements<'a> {
                 WrappedElement::Text { is_inlay, text }
             }
             InlineElement::Widget(widget) => {
+                // A widget counts as one position (as `compute_wrap_data`
+                // counts it); the text after it follows.
+                self.element = self.elements.next();
                 self.position += 1;
                 WrappedElement::Widget(widget)
             }

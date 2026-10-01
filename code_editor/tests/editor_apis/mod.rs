@@ -870,3 +870,52 @@ fn block_walk_from_any_start_line_agrees_with_line_y() {
         }
     }
 }
+
+/// An inline inlay moves the text after it right by its columns, and an
+/// edit before it carries it along with its text.
+#[test]
+fn inline_inlays_reserve_columns_and_follow_their_text() {
+    use crate::inlays::InlineInlay;
+    use crate::widgets::InlineWidget;
+    use crate::selection::Affinity;
+    let document = doc("fill: #ff5a36\nsize: 4\n");
+    document.set_inline_inlays(vec![(0, 6, InlineInlay::Widget(InlineWidget { column_count: 2 }))]);
+    let session = CodeSession::new(document.clone());
+    session.relayout_inline();
+    {
+        let layout = session.layout();
+        let line = layout.line(0);
+        assert_eq!(line.logical_to_grid_position(5, Affinity::After), (0, 5));
+        assert_eq!(line.logical_to_grid_position(6, Affinity::After), (0, 8));
+        assert_eq!(layout.line(1).logical_to_grid_position(6, Affinity::After), (0, 6));
+    }
+    // Two bytes typed before it: the inlay stays in front of the colour.
+    edit(&document, Change::Insert(pos(0, 0), "  ".into()));
+    let layout = session.layout();
+    assert_eq!(layout.line(0).logical_to_grid_position(8, Affinity::After), (0, 10));
+}
+
+/// Every byte of every line maps to a grid position with inline inlays
+/// anywhere (a line's start, its end, two at one byte, after a tab).
+#[test]
+fn inline_inlays_every_byte_has_a_grid_position() {
+    use crate::inlays::InlineInlay;
+    use crate::widgets::InlineWidget;
+    use crate::selection::Affinity;
+    let text = "Motion{layers: [\n\tText{text: \"Make it move\" align: @center}\n    Rect{fill: #1d2a44}\n]}\n";
+    let document = doc(text);
+    let w = |n| InlineInlay::Widget(InlineWidget { column_count: n });
+    document.set_inline_inlays(vec![(1, 12, w(2)), (1, 42, w(2)), (1, 49, w(2)), (1, 49, w(3)), (2, 15, w(2)), (0, 0, w(1)), (3, 2, w(2))]);
+    let session = CodeSession::new(document.clone());
+    session.relayout_inline();
+    let layout = session.layout();
+    for (index, line_text) in text.split('\n').enumerate() {
+        let line = layout.line(index);
+        for byte in (0..=line_text.len()).filter(|b| line_text.is_char_boundary(*b)) {
+            for affinity in [Affinity::Before, Affinity::After] {
+                let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| line.logical_to_grid_position(byte, affinity))).is_ok();
+                assert!(ok, "line {index} byte {byte} {affinity:?}");
+            }
+        }
+    }
+}
