@@ -28,6 +28,15 @@ fn rand_seq(seed, i) {
     t = t ^ (t + (t ^ (t >>> 7)) * (t | 61))
     float((t ^ (t >>> 14)) >>> 8) * (1.0 / 16777216.0)
 }
+// The documents' hashn(a, b[, c]) to 24 bits, for whole numbers (lattice
+// points, indices, seeds): FNV-1a over x * 1000003 with murmur finalisers.
+fn hashn_step(h, x) {
+    let k = (h ^ (int(x) * 1000003)) * 16777619
+    let m = (k ^ (k >>> 13)) * 0x5bd1e995
+    m ^ (m >>> 15)
+}
+fn hashn2(a, b) { float(hashn_step(hashn_step(0x811C9DC5, a), b) >>> 8) * (1.0 / 16777216.0) }
+fn hashn3(a, b, c) { float(hashn_step(hashn_step(hashn_step(0x811C9DC5, a), b), c) >>> 8) * (1.0 / 16777216.0) }
 // A random unit vector.
 fn rand_dir(s, i, k) {
     let z = rand11(s, i, k)
@@ -43,6 +52,17 @@ fn fade(t) { t * t * t * (t * (t * 6.0 - 15.0) + 10.0) }
 fn lattice2(x, y) { float(hash2(x, y) >>> 8) * (1.0 / 16777216.0) }
 fn lattice3(x, y, z) { float(hash3(x, y, z) >>> 8) * (1.0 / 16777216.0) }
 
+// The documents' vnoise(x, y, seed): value noise in -1..1 over hashn's
+// lattice (whole-number seed).
+fn vnoise(x, y, seed) {
+    let ix = floor(x)
+    let iy = floor(y)
+    let u = fade(x - ix)
+    let v = fade(y - iy)
+    let a = mix(hashn3(ix, iy, seed), hashn3(ix + 1.0, iy, seed), u)
+    let b = mix(hashn3(ix, iy + 1.0, seed), hashn3(ix + 1.0, iy + 1.0, seed), u)
+    mix(a, b, v) * 2.0 - 1.0
+}
 // Value noise, 0..1.
 fn value_noise2(p) {
     let i = floor(p)
