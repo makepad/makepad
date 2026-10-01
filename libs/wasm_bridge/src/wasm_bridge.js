@@ -167,6 +167,26 @@ export class WasmBridge {
         msg.free();
         // this class can also be loaded from file.
         this.msg_class = new Function("ToWasmMsg", "FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
+        this.stub_missing_handlers(code);
+    }
+
+    // A runtime may be built without the handlers of features its app does
+    // not use (a film's stripped runtime: `// @section` markers). A message
+    // for a missing handler then warns once instead of throwing mid-pump.
+    stub_missing_handlers(code) {
+        for (const match of code.matchAll(/\bapp\.(FromWasm\w+)\(/g)) {
+            const name = match[1];
+            if (typeof this[name] === "function") {
+                continue;
+            }
+            let warned = false;
+            this[name] = () => {
+                if (!warned) {
+                    warned = true;
+                    console.warn(`makepad: ${name} is not in this runtime; ignored`);
+                }
+            };
+        }
     }
 
     clear_memory_refs() {

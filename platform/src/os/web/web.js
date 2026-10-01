@@ -341,6 +341,7 @@ function makepad_create_crash_reporter() {
         data
     });
 
+    // @section crash-upload
     const fallback_get = async payload => {
         try {
             if (typeof fetch !== "function") {
@@ -353,6 +354,7 @@ function makepad_create_crash_reporter() {
             return false;
         }
     };
+    // @end crash-upload
 
     const send = async (kind, data) => {
         try {
@@ -363,6 +365,7 @@ function makepad_create_crash_reporter() {
             if (!gate.accept(kind, data)) {
                 return false;
             }
+            // @section crash-upload
             const payload = build_payload(kind, data);
             const text = makepad_truncate_report(payload, MAKEPAD_CRASH_POST_BYTES);
             if (page_hiding && typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
@@ -387,6 +390,7 @@ function makepad_create_crash_reporter() {
                 return fallback_get(payload);
             }
             return response.ok;
+            // @end crash-upload
         } catch (_error) {
             return false;
         }
@@ -540,13 +544,21 @@ export class WasmWebBrowser extends WasmBridge {
             }
         });
         this.timers = [];
+        // @section clipboard
         this.text_copy_response = "";
+        // @end clipboard
+        // @section websocket
         this.web_sockets = [];
         this.network_web_sockets = {};
+        // @end websocket
         this.network_http_requests = new Map();
         this.network_http_hosts = new Map();
+        // @section legacy-http
         this.legacy_http_requests = new Set();
+        // @end legacy-http
+        // @section storage
         this.storage_db_promise = null;
+        // @end storage
         this.window_info = {}
         this.physical_device_dpi = makepad_device_pixel_ratio(window.devicePixelRatio);
         this.render_quality = null;
@@ -555,7 +567,9 @@ export class WasmWebBrowser extends WasmBridge {
             vr_supported: false,
             ar_supported: false
         };
+        // @section xr
         this.xr_supported = false;
+        // @end xr
         this.signal_timeout = null;
         this.workers = new Map();
         this.worker_console_recent = new Map();
@@ -568,11 +582,15 @@ export class WasmWebBrowser extends WasmBridge {
         this.loader_quiet_animation_frames = 0;
         this.loader_after_presented_frame_id = 0;
         this.loader_fallback_timer = null;
+        // @section file-dialog
         this.virtual_file_max_size = 512 * 1024 * 1024;
         this.virtual_file_max_total_size = 512 * 1024 * 1024;
+        // @end file-dialog
         this.init_detection();
+        // @section midi
         this.midi_inputs = [];
         this.midi_outputs = [];
+        // @end midi
         this.audio_context = null;
         this.audio_worklet = null;
         this.audio_callback_started = false;
@@ -677,13 +695,16 @@ export class WasmWebBrowser extends WasmBridge {
         if (this.network_http_hosts) {
             this.network_http_hosts.clear();
         }
+        // @section legacy-http
         for (const request of this.legacy_http_requests || []) {
             safely("XHR", () => request.abort());
         }
         if (this.legacy_http_requests) {
             this.legacy_http_requests.clear();
         }
+        // @end legacy-http
 
+        // @section websocket
         for (const socket of Object.values(this.network_web_sockets || {})) {
             socket.onopen = null;
             socket.onmessage = null;
@@ -692,18 +713,23 @@ export class WasmWebBrowser extends WasmBridge {
             safely("WebSocket", () => socket.close());
         }
         this.network_web_sockets = {};
+        // @end websocket
 
+        // @section midi
         for (const input of this.midi_inputs || []) {
             if (input.port) {
                 input.port.onmidimessage = null;
             }
         }
         this.reload_midi_ports = null;
+        // @end midi
+        // @section geolocation
         if (this.geo_watch_id !== undefined && navigator.geolocation) {
             const watch_id = this.geo_watch_id;
             this.geo_watch_id = undefined;
             safely("geolocation", () => navigator.geolocation.clearWatch(watch_id));
         }
+        // @end geolocation
         safely("audio", () => this.stop_audio_output());
     }
 
@@ -806,6 +832,7 @@ export class WasmWebBrowser extends WasmBridge {
 
     }
 
+    // @section history
     emit_location_change() {
         if (this.webgl_context_lost) {
             return;
@@ -816,7 +843,9 @@ export class WasmWebBrowser extends WasmBridge {
             hash: location.hash + "",
         });
     }
+    // @end history
 
+    // @section live-reload
     install_live_reload_bridge() {
         window.makepad_wasm_live_file_change = (file_name, content) => {
             if (this.webgl_context_lost) {
@@ -832,12 +861,17 @@ export class WasmWebBrowser extends WasmBridge {
             window.makepad_wasm_live_file_change(file_name, content);
         }
     }
+    // @end live-reload
 
     async load_deps() {
         this.to_wasm = this.new_to_wasm();
+        // @section live-reload
         this.install_live_reload_bridge();
+        // @end live-reload
 
+        // @section xr
         await this.query_xr_capabilities();
+        // @end xr
         if (this.webgl_context_lost) {
             return;
         }
@@ -868,10 +902,13 @@ export class WasmWebBrowser extends WasmBridge {
         // only bind the event handlers now
         // to stop them firing into wasm early
         this.bind_mouse_and_touch();
+        // @section file-dialog
         this.bind_file_drop();
+        // @end file-dialog
         this.bind_keyboard();
         this.bind_screen_resize();
         this.bind_app_lifecycle();
+        // @section history
         window.addEventListener("popstate", () => {
             this.emit_location_change();
             this.do_wasm_pump();
@@ -880,6 +917,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.emit_location_change();
             this.do_wasm_pump();
         });
+        // @end history
         this.focus_keyboard_input();
         this.to_wasm.ToWasmRedrawAll();
         this.start_signal_poll();
@@ -974,6 +1012,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
     }
 
+    // @section history
     FromWasmOpenUrl(args) {
         if (args.in_place) {
             window.location.href = args.url;
@@ -1012,6 +1051,7 @@ export class WasmWebBrowser extends WasmBridge {
             window.history.go(args.delta);
         }
     }
+    // @end history
 
     FromWasmStartTimer(args) {
         if (this.webgl_context_lost) {
@@ -1077,6 +1117,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
     }
 
+    // @section geolocation
     FromWasmStartLocationUpdates() {
         if (this.webgl_context_lost) {
             return;
@@ -1124,6 +1165,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.geo_watch_id = undefined;
         }
     }
+    // @end geolocation
 
     FromWasmFullScreen() {
         if (document.body.requestFullscreen) {
@@ -1188,10 +1230,13 @@ export class WasmWebBrowser extends WasmBridge {
         document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
     }
 
+    // @section clipboard
     FromWasmTextCopyResponse(args) {
         this.text_copy_response = args.response
     }
+    // @end clipboard
 
+    // @section storage
     storage_database() {
         if (this.storage_db_promise !== null) {
             return this.storage_db_promise;
@@ -1313,6 +1358,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.storage_send_result(args, 0, { error: this.storage_error_text(error) });
         });
     }
+    // @end storage
 
     FromWasmStorageSet(args) {
         const value = this.clone_data_u8(args.value);
@@ -1438,7 +1484,9 @@ export class WasmWebBrowser extends WasmBridge {
             this.storage_send_result(args, 6, { error: this.storage_error_text(error) });
         });
     }
+    // @end storage
 
+    // @section text-input
     FromWasmShowTextIME(args) {
         this.update_text_area_pos(args);
     }
@@ -1446,6 +1494,9 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmHideTextIME() {
         this.update_text_area_pos({ x: -3000, y: -3000 });
     }
+    // @end text-input
+
+    // @section websocket
     /*
     FromWasmWebSocketOpen(args) {
         let id_lo = args.id_lo;
@@ -1566,6 +1617,7 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }, 3000);
     }
+    // @end websocket
 
     resume_audio_from_gesture() {
         if (this.webgl_context_lost) {
@@ -1668,7 +1720,7 @@ export class WasmWebBrowser extends WasmBridge {
             let load_timeout = null;
             try {
                 await Promise.race([
-                    audio_context.audioWorklet.addModule("./makepad_platform/audio_worklet.js", { credentials: 'omit' }),
+                    audio_context.audioWorklet.addModule(globalThis.makepad_audio_worklet_url || "./makepad_platform/audio_worklet.js", { credentials: 'omit' }),
                     new Promise((_, reject) => {
                         load_timeout = setTimeout(() => reject(new Error("worklet module load stalled")), 4000);
                     }),
@@ -1801,6 +1853,7 @@ export class WasmWebBrowser extends WasmBridge {
         });
     }
 
+    // @section midi
     FromWasmUseMidiInputs(args) {
         if (this.webgl_context_lost) {
             return;
@@ -1889,7 +1942,9 @@ export class WasmWebBrowser extends WasmBridge {
             }, () => {});
         }
     }
+    // @end midi
 
+    // @section xr
     FromWasmStartPresentingXR() {
 
     }
@@ -1949,6 +2004,7 @@ export class WasmWebBrowser extends WasmBridge {
         }
         return ret;
     }
+    // @end xr
 
     // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
     // https://github.com/Zaplib/zaplib/blob/650305c856ea64d9c2324cbd4b8751ffbb971ac3/zaplib/cargo-zaplib/src/build.rs#L48
@@ -2144,6 +2200,7 @@ export class WasmWebBrowser extends WasmBridge {
         }, 0.016 * 1000.0);
     }
 
+    // @section legacy-http
     parse_and_set_headers(request, headers_string) {
         let lines = headers_string.split("\r\n");
         for (let line of lines) {
@@ -2180,6 +2237,7 @@ export class WasmWebBrowser extends WasmBridge {
         copy.set(u8);
         return copy;
     }
+    // @end legacy-http
 
     js_network_http_request(
         request_id_lo,
@@ -2511,6 +2569,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.network_http_requests.delete(request_key);
     }
 
+    // @section websocket
     js_network_ws_open(socket_id_lo, socket_id_hi, url_ptr, url_len, _headers_ptr, _headers_len) {
         if (this.webgl_context_lost) {
             return;
@@ -2592,7 +2651,9 @@ export class WasmWebBrowser extends WasmBridge {
             delete this.network_web_sockets[socket_key];
         }
     }
+    // @end websocket
 
+    // @section legacy-http
     FromWasmHTTPRequest(args) {
         if (this.webgl_context_lost) {
             return;
@@ -2728,7 +2789,9 @@ export class WasmWebBrowser extends WasmBridge {
         // Web doesn't provide a way to cancel XHR requests by ID
         // This would require tracking requests, which we don't currently do
     }
+    // @end legacy-http
 
+    // @section file-dialog
     FromWasmSetVirtualFileLimits(args) {
         this.virtual_file_max_size = args.max_file_size;
         this.virtual_file_max_total_size = args.max_total_size;
@@ -2855,7 +2918,9 @@ export class WasmWebBrowser extends WasmBridge {
             finish(true, [], "browser rejected file picker: " + error);
         }
     }
+    // @end file-dialog
 
+    // @section permissions
     async FromWasmCheckPermission(args) {
         if (this.webgl_context_lost) {
             return;
@@ -3097,6 +3162,7 @@ export class WasmWebBrowser extends WasmBridge {
             throw error;
         }
     }
+    // @end permissions
 
 
     wasm_process_msg(to_wasm) {
@@ -3208,6 +3274,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.window_info.can_fullscreen = can_fullscreen();
     }
 
+    // @section xr
     query_xr_capabilities() {
         return Promise.all([]);
     }
@@ -3245,6 +3312,7 @@ export class WasmWebBrowser extends WasmBridge {
         document.addEventListener('fullscreenchange', _ => this.handlers.on_screen_resize())
         document.addEventListener('webkitfullscreenchange', _ => this.handlers.on_screen_resize())
     }
+    // @end xr
 
     bind_mouse_and_touch() {
 
@@ -3513,6 +3581,7 @@ export class WasmWebBrowser extends WasmBridge {
         canvas.addEventListener('wheel', e => this.handlers.on_mouse_wheel(e))
     }
 
+    // @section file-dialog
     bind_file_drop() {
         const canvas = this.canvas;
         const file_count = event => {
@@ -3590,6 +3659,7 @@ export class WasmWebBrowser extends WasmBridge {
             });
         });
     }
+    // @end file-dialog
 
     bind_keyboard() {
         if (this.detect.is_mobile_safari || this.detect.is_android) { // mobile keyboards are unusable on a UI like this. Not happening.
@@ -3645,6 +3715,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.neutralize_ime = false;
         var last_len = 0;
 
+        // @section clipboard
         this.handlers.on_cut = e => {
             setTimeout(_ => {
                 ta.value = "";
@@ -3668,7 +3739,9 @@ export class WasmWebBrowser extends WasmBridge {
         }
 
         ta.addEventListener('paste', e => this.handlers.on_paste(e));
+        // @end clipboard
 
+        // @section text-input
         this.handlers.on_select = e => { }
 
         ta.addEventListener('select', e => this.handlers.on_select(e))
@@ -3746,6 +3819,7 @@ export class WasmWebBrowser extends WasmBridge {
             ta.value = "";
             last_len = 0;
         });
+        // @end text-input
 
         ta.addEventListener('mousedown', e => this.handlers.on_mouse_down(e));
         ta.addEventListener('mouseup', e => this.handlers.on_mouse_up(e));
@@ -3769,6 +3843,7 @@ export class WasmWebBrowser extends WasmBridge {
             if (code === 121 && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
                 e.preventDefault() // Shift+F10: tweaker
             }
+            // @section clipboard
             if ((code === 88 || code == 67) && (e.metaKey || e.ctrlKey)) { // copy or cut
                 // we need to request the clipboard
                 this.to_wasm.ToWasmTextCopy();
@@ -3777,10 +3852,12 @@ export class WasmWebBrowser extends WasmBridge {
                 ta.selectionStart = 0;
                 ta.selectionEnd = ta.value.length;
             }
+            // @end clipboard
             //    this.keyboardCut = true // x cut
             //if(code === 65 && (e.metaKey || e.ctrlKey)) this.keyboardSelectAll = true     // all (select all)
             if (code === 89 && (e.metaKey || e.ctrlKey)) e.preventDefault() // all (select all)
             if (code === 83 && (e.metaKey || e.ctrlKey)) e.preventDefault() // ctrl s
+            // @section text-input
             if (code === 90 && (e.metaKey || e.ctrlKey)) {
                 this.update_text_area_pos();
                 ta.value = "";
@@ -3788,6 +3865,7 @@ export class WasmWebBrowser extends WasmBridge {
                 ta.readOnly = true;
                 e.preventDefault()
             }
+            // @end text-input
             // if we are using arrow keys, home or end
             let key_code = e.keyCode;
 
@@ -3817,6 +3895,7 @@ export class WasmWebBrowser extends WasmBridge {
 
             if (code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
             if (code == 91) { e.preventDefault(); }
+            // @section text-input
             var ta = this.text_area;
             if (ugly_ime_hack) {
                 ugly_ime_hack = false;
@@ -3824,6 +3903,7 @@ export class WasmWebBrowser extends WasmBridge {
                 this.bind_keyboard();
                 this.update_text_area_pos();
             }
+            // @end text-input
             this.to_wasm.ToWasmKeyUp({
                 key: {
                     key_code: e.keyCode,
@@ -3844,6 +3924,7 @@ export class WasmWebBrowser extends WasmBridge {
     // internal helper api
 
 
+    // @section text-input
     update_text_area_pos(pos) {
         if (this.text_area && pos) {
             //this.text_area.style.left = (Math.round(pos.x) -2) + "px";
@@ -3852,6 +3933,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.text_area.style.top = (Math.round(pos.y) + 4) + "px"
         }
     }
+    // @end text-input
 
     focus_keyboard_input() {
         if (!this.text_area) return;

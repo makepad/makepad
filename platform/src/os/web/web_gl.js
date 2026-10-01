@@ -11,7 +11,9 @@ const MAKEPAD_WEBGL_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
 const MAKEPAD_WEBGL_MAX_TEXTURE_BYTES = 64 * 1024 * 1024;
 const MAKEPAD_WEBGL_MAX_EXPANDED_TRIANGLES = 16 * 1024 * 1024;
 const MAKEPAD_WEBGL_MAX_SUBMISSION_REPORTS = 64;
+// @section video-playback
 const MAKEPAD_WEBGL_VIDEO_UPLOAD_FORMAT = "video-rgba8";
+// @end video-playback
 
 function makepad_webgl_limit(value) {
   const number = Number(value);
@@ -145,7 +147,9 @@ export class WasmWebGL extends WasmWebBrowser {
     this.webgl_shader_batch_program_count = 0;
     this.webgl_shader_batch_failed_count = 0;
     this.webgl_shader_summary_timer = undefined;
+    // @section video-playback
     this.video_players = {};
+    // @end video-playback
     this.pending_render_texture_captures = new Set();
     this.bgra_upload_scratch = new Uint32Array(0);
     if (this.init_webgl_context()) {
@@ -155,6 +159,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
   // webGL API
 
+  // @section xr
   on_xr_animation_frame(time, frame) {
     if (this.webgl_context_lost) {
       return;
@@ -326,6 +331,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmXrStopPresenting() {}
+  // @end xr
 
   get_uniform_block_binding(program, name) {
     let gl = this.gl;
@@ -3242,6 +3248,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
   // Video Playback API
 
+  // @section video-playback
   FromWasmPrepareVideoPlayback(args) {
     if (this.webgl_context_lost) {
       return;
@@ -3693,6 +3700,7 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     return true;
   }
+  // @end video-playback
 
   release_device_pixel_ratio_media_query() {
     const mq = this._dpr_media_query;
@@ -3806,6 +3814,7 @@ export class WasmWebGL extends WasmWebBrowser {
     if (this.pending_render_texture_captures) {
       this.pending_render_texture_captures.clear();
     }
+    // @section video-playback
     for (const player of Object.values(this.video_players || {})) {
       try {
         this.dispose_video_player(player);
@@ -3814,6 +3823,7 @@ export class WasmWebGL extends WasmWebBrowser {
       }
     }
     this.video_players = {};
+    // @end video-playback
     try {
       this.stop_terminal_web_runtime();
     } catch (error) {
