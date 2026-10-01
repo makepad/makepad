@@ -2464,6 +2464,21 @@ pub struct DrawSlider {
     cap_squash_along: f32,
     #[live(1.0)]
     cap_squash_across: f32,
+    /// The pointer's field over the cap, for a material whose cap answers
+    /// the pointer (a magnetic liquid): its strength 0..1 (a spring toward
+    /// 1 while the pointer is within `cap_field_reach` of the cap, plus the
+    /// press), the pointer's position in the cap's frame in points (along,
+    /// across, from the cap's centre) and a clock in seconds that runs while
+    /// the field is up. All zero unless the widget's `cap_field_reach` is
+    /// above zero.
+    #[live]
+    cap_field: f32,
+    #[live]
+    cap_pointer_along: f32,
+    #[live]
+    cap_pointer_across: f32,
+    #[live]
+    cap_time: f32,
 }
 
 /// The cap's motion: a head that is the value (or travels to it on a spring
@@ -2486,6 +2501,13 @@ pub struct CapMotion {
     travel_px: f64,
     next_frame: Option<NextFrame>,
     last_time: Option<f64>,
+    /// The pointer's field: a hover spring toward 1 while the pointer is
+    /// near, the pointer in the cap's frame, and the clock the field runs.
+    hover: f64,
+    hover_v: f64,
+    hover_target: f64,
+    pointer: Option<(f64, f64)>,
+    time: f64,
 }
 
 impl CapMotion {
@@ -2534,13 +2556,29 @@ impl CapMotion {
         if gap.abs() > 0.05 {
             self.last_dir = if gap > 0.0 { 1.0 } else { -1.0 };
         }
+        // The field: critically damped so it settles without crossing
+        // zero, and its clock runs while it is up.
+        Self::spring(&mut self.hover, &mut self.hover_v, self.hover_target, 40.0, 12.7, dt);
+        self.hover = self.hover.max(0.0);
+        if self.field() > 0.001 {
+            self.time += dt;
+        }
         self.travel
             || dragging
             || self.tail_v.abs() > 0.5
             || gap.abs() > 0.05
             || self.press_v.abs() > 1e-3
             || (self.press - press_target).abs() > 1e-3
+            || self.hover_v.abs() > 1e-3
+            || (self.hover - self.hover_target).abs() > 1e-3
+            || self.field() > 0.001
             || radius <= 0.0
+    }
+
+    /// The field's strength: most of the hover plus the press, never below
+    /// zero nor above one.
+    fn field(&self) -> f64 {
+        (0.7 * self.hover + self.press).clamp(0.0, 1.0)
     }
 
     /// What the material reads: stretch, direction, press, squash along,
@@ -2677,6 +2715,13 @@ pub struct Slider {
     /// rest and never asks for another.
     #[live]
     cap_viscosity: f64,
+    /// Above zero, the pointer's field reaches this far (in points) from
+    /// the cap: the material gets `cap_field`, `cap_pointer_along`,
+    /// `cap_pointer_across` and `cap_time`, and the widget follows the
+    /// pointer over the whole window while it is near. Zero, the default,
+    /// tracks nothing.
+    #[live]
+    cap_field_reach: f64,
     #[rust]
     cap_motion: CapMotion,
 
@@ -2778,7 +2823,7 @@ impl Slider {
         // The cap's motion: at rest (and off) it reads 0, 1, 0, 1, 1 and
         // the cap is drawn at the value; travelling, the cap is drawn at
         // its head and the value bar follows it.
-        let drawn = if self.cap_viscosity > 0.0 {
+        let drawn = if self.cap_viscosity > 0.0 || self.cap_field_reach > 0.0 {
             let (stretch, dir, press, sqa, sqx, drawn) =
                 self.cap_motion.read(self.relative_value, self.cap_size * 0.5, self.dragging.is_some());
             self.draw_bg.cap_stretch = stretch;
@@ -2786,6 +2831,18 @@ impl Slider {
             self.draw_bg.cap_press = press;
             self.draw_bg.cap_squash_along = sqa;
             self.draw_bg.cap_squash_across = sqx;
+            if self.cap_field_reach > 0.0 {
+                let (pa, pc) = self.cap_motion.pointer.unwrap_or((0.0, 0.0));
+                self.draw_bg.cap_field = self.cap_motion.field() as f32;
+                self.draw_bg.cap_pointer_along = pa as f32;
+                self.draw_bg.cap_pointer_across = pc as f32;
+                self.draw_bg.cap_time = self.cap_motion.time as f32;
+            } else {
+                self.draw_bg.cap_field = 0.0;
+                self.draw_bg.cap_pointer_along = 0.0;
+                self.draw_bg.cap_pointer_across = 0.0;
+                self.draw_bg.cap_time = 0.0;
+            }
             drawn
         } else {
             self.draw_bg.cap_stretch = 0.0;
@@ -2793,6 +2850,10 @@ impl Slider {
             self.draw_bg.cap_press = 0.0;
             self.draw_bg.cap_squash_along = 1.0;
             self.draw_bg.cap_squash_across = 1.0;
+            self.draw_bg.cap_field = 0.0;
+            self.draw_bg.cap_pointer_along = 0.0;
+            self.draw_bg.cap_pointer_across = 0.0;
+            self.draw_bg.cap_time = 0.0;
             self.relative_value
         };
         self.draw_bg.slide_pos = drawn as f32;
@@ -2835,7 +2896,7 @@ impl Slider {
         self.draw_bg.end(cx);
         // The track's travel in points, for the motion's springs, which
         // work in points so a long fader and a short one feel the same.
-        if self.cap_viscosity > 0.0 {
+        if self.cap_viscosity > 0.0 || self.cap_field_reach > 0.0 {
             let size = self.draw_bg.area().rect(cx).size;
             let extent = match self.axis {
                 DragAxis::Horizontal => size.x - self.draw_bg.label_size as f64,
@@ -2890,7 +2951,7 @@ impl Slider {
     /// viscosity: after a press, a release, a drag move, or (`jump`) a
     /// value that arrived without a drag, which the cap then travels to.
     fn cap_motion_kick(&mut self, cx: &mut Cx, jump: bool) {
-        if self.cap_viscosity <= 0.0 {
+        if self.cap_viscosity <= 0.0 && self.cap_field_reach <= 0.0 {
             return;
         }
         if jump && self.cap_motion.travel_px > 0.0 {
@@ -2902,6 +2963,45 @@ impl Slider {
         if self.cap_motion.next_frame.is_none() {
             self.cap_motion.last_time = None;
             self.cap_motion.next_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// The pointer, wherever it is on the window, read against the cap:
+    /// within the field's reach of the cap's centre the field's target is
+    /// one, beyond it zero; its position in the cap's frame is handed to
+    /// the material. Points; `a` runs up the screen on a vertical control.
+    fn cap_field_pointer(&mut self, cx: &mut Cx, abs: Vec2d) {
+        if self.cap_field_reach <= 0.0 {
+            return;
+        }
+        let rect = self.draw_bg.area().rect(cx);
+        if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+            return;
+        }
+        let (extent, along, across) = match self.axis {
+            DragAxis::Horizontal => (
+                rect.size.x - self.draw_bg.label_size as f64,
+                abs.x - rect.pos.x,
+                abs.y - (rect.pos.y + rect.size.y * 0.5),
+            ),
+            DragAxis::Vertical => (
+                rect.size.y,
+                (rect.pos.y + rect.size.y) - abs.y,
+                abs.x - (rect.pos.x + rect.size.x * 0.5),
+            ),
+        };
+        let cap_at = fader_cap_center(self.relative_value, extent, self.cap_size, self.track_inset);
+        let rel = (along - cap_at, across);
+        let near = (rel.0 * rel.0 + rel.1 * rel.1).sqrt() < self.cap_field_reach + self.cap_size;
+        let target = if near { 1.0 } else { 0.0 };
+        let moved = match self.cap_motion.pointer {
+            Some(p) => (p.0 - rel.0).abs() > 0.01 || (p.1 - rel.1).abs() > 0.01,
+            None => true,
+        };
+        self.cap_motion.pointer = Some(rel);
+        if target != self.cap_motion.hover_target || (moved && self.cap_motion.field() > 0.001) {
+            self.cap_motion.hover_target = target;
+            self.cap_motion_kick(cx, false);
         }
     }
 
@@ -2978,6 +3078,16 @@ impl Widget for Slider {
         let uid = self.widget_uid();
         self.animator_handle_event(cx, event);
         self.cap_motion_tick(cx, event);
+        match event {
+            Event::MouseMove(e) => self.cap_field_pointer(cx, e.abs),
+            Event::MouseLeave(_) if self.cap_field_reach > 0.0 => {
+                if self.cap_motion.hover_target != 0.0 {
+                    self.cap_motion.hover_target = 0.0;
+                    self.cap_motion_kick(cx, false);
+                }
+            }
+            _ => (),
+        }
 
         for action in cx.capture_actions(|cx| self.text_input.handle_event(cx, event, scope)) {
             match action.as_widget_action().cast() {
