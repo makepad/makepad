@@ -858,6 +858,30 @@ pub fn ibl_texture(env: &EnvMap, intensity: f32, rotation_deg: f32) -> IblTextur
     pack_ibl(&atlas, &sh9(env), intensity, rotation_deg)
 }
 
+/// An environment's prefiltered atlas and irradiance, kept for the process
+/// by `key` (a name for this one map's content): every scene lighting with
+/// the same map shares one CPU prefilter, which takes a large part of a
+/// second (more on a browser's UI thread). A host can run it ahead of the
+/// first draw, behind its loader.
+pub fn prefiltered(key: u64, env: &EnvMap) -> std::sync::Arc<(EnvAtlas, [[f32; 3]; 9])> {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    static KEPT: Mutex<Option<HashMap<u64, Arc<(EnvAtlas, [[f32; 3]; 9])>>>> = Mutex::new(None);
+    if let Some(kept) = KEPT.lock().unwrap().as_ref().and_then(|kept| kept.get(&key)) {
+        return kept.clone();
+    }
+    let made = Arc::new((prefilter(env, 256, 6), sh9(env)));
+    KEPT.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, made.clone());
+    made
+}
+
+/// [`ibl_texture`] for a map named by `key`, its prefilter shared through
+/// [`prefiltered`].
+pub fn ibl_texture_kept(key: u64, env: &EnvMap, intensity: f32, rotation_deg: f32) -> IblTexture {
+    let kept = prefiltered(key, env);
+    pack_ibl(&kept.0, &kept.1, intensity, rotation_deg)
+}
+
 pub fn pack_ibl(atlas: &EnvAtlas, sh: &[[f32; 3]; 9], intensity: f32, rotation_deg: f32) -> IblTexture {
     let width = atlas.width.max(10);
     let height = atlas.height + 1;

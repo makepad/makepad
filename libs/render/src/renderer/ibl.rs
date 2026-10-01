@@ -113,7 +113,13 @@ impl Renderer {
             self.ibl.texture = None;
             return;
         };
-        let t = ibl_texture(&map, ibl.intensity, ibl.rotation_deg);
+        // An HDRI's prefilter is kept for the process under its reference
+        // (a reference names one image's content), so a host may run it
+        // ahead (ibl::prefiltered) and scenes sharing a map share it.
+        let t = match ibl.source {
+            IblSource::Hdri(r) => makepad_render_material::ibl::ibl_texture_kept(r.0, &map, ibl.intensity, ibl.rotation_deg),
+            IblSource::Procedural(_) => ibl_texture(&map, ibl.intensity, ibl.rotation_deg),
+        };
         self.ibl.texture = Some(Texture::new_with_format(cx, TextureFormat::VecRGBAf32 {
             width: t.width,
             height: t.height,

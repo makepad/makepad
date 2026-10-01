@@ -90,6 +90,21 @@ pub struct LineStyle {
     /// Round end caps (false: butt ends; joints between segments of one
     /// polyline are round either way where caps overlap).
     pub round_caps: bool,
+    /// How the stroke's edge is antialiased.
+    pub edge: LineEdge,
+}
+
+/// How a stroke's edge is antialiased.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LineEdge {
+    /// The exact box-filter coverage of `ink.rs`: the ink a pixel holds is
+    /// the stroke's area in it, so a hairline keeps its weight anywhere.
+    #[default]
+    Exact,
+    /// Within the stroke's own outline only (at least a pixel wide, round
+    /// caps, hard trim and dash ends): crisper hairlines that snap to the
+    /// pixel rows they cross.
+    Inner,
 }
 
 impl Default for LineStyle {
@@ -111,6 +126,7 @@ impl Default for LineStyle {
             life: 0.0,
             min_px: crate::ink::MIN_PX,
             round_caps: true,
+            edge: LineEdge::Exact,
         }
     }
 }

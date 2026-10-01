@@ -43,7 +43,7 @@ script_mod! {
         u_mode: uniform(vec4(0.0, 0.0, 1.0, 0.7))
         // dash, gap, dash offset, intensity
         u_dash: uniform(vec4(0.0, 0.0, 0.0, 1.0))
-        // trim start, trim end, tail, 0
+        // trim start, trim end, tail, inner edge (LineEdge::Inner)
         u_trim: uniform(vec4(0.0, 1.0e30, 0.0, 0.0))
         // fade near, far, active, 0
         u_fade: uniform(vec4(0.0, 0.0, 0.0, 0.0))
@@ -106,9 +106,20 @@ script_mod! {
             let wa = self.phys_width(mix(self.s_a.w, self.s_b.w, t0), pa.w)
             let wb = self.phys_width(mix(self.s_a.w, self.s_b.w, t1), pb.w)
             let floor = max(self.u_mode.w, 0.001)
-            let ha = max(wa, floor) * 0.5
-            let hb = max(wb, floor) * 0.5
-            let reach = max(ha, hb) + 1.0
+            var ha = max(wa, floor) * 0.5
+            var hb = max(wb, floor) * 0.5
+            var reach = max(ha, hb) + 1.0
+            var alpha_a = min(wa / floor, 1.0)
+            var alpha_b = min(wb / floor, 1.0)
+            if self.u_trim.w > 0.5 {
+                // Inner edge: the stroke's own outline, at least a pixel
+                // wide, its edge softened inside it only.
+                ha = max(wa * 0.5, 0.5)
+                hb = max(wb * 0.5, 0.5)
+                reach = max(ha, hb)
+                alpha_a = 1.0
+                alpha_b = 1.0
+            }
             let t = corner.x * 0.5 + 0.5
             let along = mix(0.0 - reach, len + reach, t)
             let across = corner.y * reach
@@ -124,7 +135,7 @@ script_mod! {
             self.v_len = len
             self.v_w = vec2(pa.w, pb.w)
             self.v_half = vec2(ha, hb)
-            self.v_alpha = vec2(min(wa / floor, 1.0), min(wb / floor, 1.0))
+            self.v_alpha = vec2(alpha_a, alpha_b)
             self.v_dist = vec2(mix(self.s_m.x, self.s_m.y, t0), mix(self.s_m.x, self.s_m.y, t1))
             self.v_birth = vec2(mix(self.s_m.z, self.s_m.w, t0), mix(self.s_m.z, self.s_m.w, t1))
             self.v_ca = mix(self.s_ca, self.s_cb, t0)
@@ -142,12 +153,18 @@ script_mod! {
             let fx = clamp(x / len, 0.0, 1.0)
             let half = mix(self.v_half.x, self.v_half.y, fx)
             var a = 0.0
-            if self.u_mode.z > 0.5 {
+            let inner = self.u_trim.w > 0.5
+            if inner {
                 let d = length(vec2(x - clamp(x, 0.0, len), self.v_px.y))
-                a = self.cover(d, half)
+                a = clamp(half - d + 0.5, 0.0, 1.0)
             } else {
-                let along = clamp(min(x + 0.5, len) - max(x - 0.5, 0.0), 0.0, 1.0)
-                a = self.cover(abs(self.v_px.y), half) * along
+                if self.u_mode.z > 0.5 {
+                    let d = length(vec2(x - clamp(x, 0.0, len), self.v_px.y))
+                    a = self.cover(d, half)
+                } else {
+                    let along = clamp(min(x + 0.5, len) - max(x - 0.5, 0.0), 0.0, 1.0)
+                    a = self.cover(abs(self.v_px.y), half) * along
+                }
             }
             a = a * mix(self.v_alpha.x, self.v_alpha.y, fx)
             // Perspective-correct parameter along the segment.
@@ -158,8 +175,13 @@ script_mod! {
             let color = mix(self.v_ca, self.v_cb, u)
             // Trim window, with one pixel of AA in distance units.
             let dd = max(abs(self.v_dist.y - self.v_dist.x) / len, 0.000001)
-            a = a * clamp((dist - self.u_trim.x) / dd + 0.5, 0.0, 1.0)
-            a = a * clamp((self.u_trim.y - dist) / dd + 0.5, 0.0, 1.0)
+            if inner {
+                // Hard trim ends.
+                a = a * step(self.u_trim.x, dist) * step(dist, self.u_trim.y)
+            } else {
+                a = a * clamp((dist - self.u_trim.x) / dd + 0.5, 0.0, 1.0)
+                a = a * clamp((self.u_trim.y - dist) / dd + 0.5, 0.0, 1.0)
+            }
             if self.u_trim.z > 0.0 {
                 a = a * clamp((dist - (self.u_trim.y - self.u_trim.z)) / self.u_trim.z, 0.0, 1.0)
             }
@@ -167,7 +189,11 @@ script_mod! {
                 let period = self.u_dash.x + self.u_dash.y
                 let q = dist + self.u_dash.z
                 let m = q - floor(q / period) * period
-                a = a * clamp((self.u_dash.x - m) / dd + 0.5, 0.0, 1.0) * clamp(m / dd + 0.5, 0.0, 1.0)
+                if inner {
+                    a = a * step(m, self.u_dash.x)
+                } else {
+                    a = a * clamp((self.u_dash.x - m) / dd + 0.5, 0.0, 1.0) * clamp(m / dd + 0.5, 0.0, 1.0)
+                }
             }
             if self.u_fade.z > 0.5 {
                 let w = 1.0 / max(mix(ia, ib, fx), 0.0000001)
@@ -470,7 +496,7 @@ impl LineRenderer {
         dv.set_uniform(cx.cx, live_id!(u_mode), &[flag(world), flag(s.blend == Blend::Add), flag(s.round_caps), s.min_px]);
         dv.set_uniform(cx.cx, live_id!(u_dash), &[s.dash.max(0.0), s.gap.max(0.0), s.dash_offset, s.intensity]);
         let end = if s.trim_end < 0.0 { 1.0e30 } else { s.trim_end };
-        dv.set_uniform(cx.cx, live_id!(u_trim), &[s.trim_start, end, s.tail.max(0.0), 0.0]);
+        dv.set_uniform(cx.cx, live_id!(u_trim), &[s.trim_start, end, s.tail.max(0.0), flag(s.edge == LineEdge::Inner)]);
         let fade_on = s.space == Space::World && s.fade.1 > s.fade.0;
         dv.set_uniform(cx.cx, live_id!(u_fade), &[s.fade.0, s.fade.1, flag(fade_on), 0.0]);
         dv.set_uniform(cx.cx, live_id!(u_birth), &[s.time, s.birth_fade.max(0.0), s.life.max(0.0), 0.0]);

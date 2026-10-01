@@ -343,8 +343,14 @@ impl Renderer {
         let (fog_color, fog_density) = crate::world_lights::world_fog(world).unwrap_or((fog_color, fog_density));
         // HDR lane: per-pixel exponential height fog (clustered.rs
         // scene_fog) with the game's density at the base height.
+        // A world's linear or exp2 fog is fogged with distance as it says.
         let fog_on = self.hdr_output && fog_density > 0.0;
-        self.clustered.fog_ctl = if fog_on { [HDR_FOG_BASE, 1.0 / HDR_FOG_SCALE_HEIGHT, 0.0, 1.0] } else { [0.0; 4] };
+        self.clustered.fog_ctl = match (fog_on, &world.environment.fog) {
+            (false, _) => [0.0; 4],
+            (true, makepad_scene::Fog::Linear { start, end, .. }) if world.environment.validate().is_ok() => [*start, *end, 1.0, 1.0],
+            (true, makepad_scene::Fog::Exp2 { .. }) if world.environment.validate().is_ok() => [0.0, 0.0, 2.0, 1.0],
+            (true, _) => [HDR_FOG_BASE, 1.0 / HDR_FOG_SCALE_HEIGHT, 0.0, 1.0],
+        };
         self.clustered.fog_eye = [camera_pos.x, camera_pos.y, camera_pos.z, 0.0];
         apply_sun(cx.cx, draws, &sun, fog_color);
         // The ground light field for the cube family (statics AND dynamics —

@@ -127,11 +127,22 @@ script_mod! {
             var j = 0.0
             while j < ss * ss {
                 let o = vec2(floor(j / ss), j - floor(j / ss) * ss) - vec2((ss - 1.0) * 0.5, (ss - 1.0) * 0.5)
-                let m = self.mapped(self.pos + o * self.texel)
-                acc = acc + vec4(m.xyz * m.w, m.w)
+                if self.tone.w > 0.5 {
+                    // Linear output: the premultiplied light as it is
+                    // (additive light without coverage too), exposed.
+                    let src = self.scene_texture.sample_nearest(self.pos + o * self.texel)
+                    acc = acc + vec4(max(src.xyz * self.tone.y, vec3(0.0, 0.0, 0.0)), src.w)
+                } else {
+                    let m = self.mapped(self.pos + o * self.texel)
+                    acc = acc + vec4(m.xyz * m.w, m.w)
+                }
                 j = j + 1.0
             }
             acc = acc / (ss * ss)
+            if self.tone.w > 0.5 {
+                // Linear output: exposed, resolved, premultiplied light.
+                return acc
+            }
             var c = vec3(0.0, 0.0, 0.0)
             if acc.w > 0.0001 {
                 c = acc.xyz / acc.w
@@ -190,7 +201,9 @@ pub struct Grade {
 pub struct DrawToneMap {
     #[deref]
     pub draw_super: DrawQuad,
-    /// x = curve code, y = exposure, z = supersampling factor, w unused.
+    /// x = curve code, y = exposure, z = supersampling factor, w = linear
+    /// output (no curve, grade, encoding or dither; see
+    /// [`DrawToneMap::set_linear_output`]).
     #[live(vec4(4.0, 1.0, 1.0, 0.0))]
     pub tone: Vec4f,
     /// One scene texel in uv.
@@ -223,5 +236,12 @@ impl DrawToneMap {
             }
             None => self.g3.w = 0.0,
         }
+    }
+
+    /// After [`Self::set`]: write the exposed, supersample-resolved linear
+    /// light (premultiplied, into a float target) instead of the display
+    /// picture, for a host that tone maps a whole composed frame itself.
+    pub fn set_linear_output(&mut self) {
+        self.tone.w = 1.0;
     }
 }

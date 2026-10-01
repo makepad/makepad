@@ -686,16 +686,26 @@ script_mod! {
             if self.lin_ctl.x < 0.5 { return c }
             return c * (c * (c * 0.305306011 + vec3(0.682171111, 0.682171111, 0.682171111)) + vec3(0.012522878, 0.012522878, 0.012522878))
         }
-        // HDR lane fog (Renderer::set_hdr_output): exponential HEIGHT fog
-        // evaluated per pixel. fog_ctl = (base height, 1/scale height, 0,
-        // on); fog_eye = the true world camera. The game's fog density is
-        // the density AT the base height, so a view from above looks
-        // through far less haze than one along the ground.
+        // HDR lane fog (Renderer::set_hdr_output), evaluated per pixel.
+        // fog_ctl.z picks the kind: 0 = exponential HEIGHT fog, fog_ctl =
+        // (base height, 1/scale height, 0, on), the game's fog density
+        // being the density AT the base height, so a view from above looks
+        // through far less haze than one along the ground; 1 = linear with
+        // distance, fog_ctl = (start, end, 1, on); 2 = exp2 with distance
+        // (the density). fog_eye = the true world camera.
         fog_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         fog_eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         scene_fog: fn(legacy: float, wp: vec3, density: float) -> float {
             if self.lin_ctl.x < 0.5 || self.fog_ctl.w < 0.5 { return legacy }
             let d = wp - self.fog_eye.xyz
+            if self.fog_ctl.z > 0.5 {
+                let dist = length(d)
+                if self.fog_ctl.z < 1.5 {
+                    return clamp((dist - self.fog_ctl.x) / max(self.fog_ctl.y - self.fog_ctl.x, 0.001), 0.0, 1.0)
+                }
+                let kd = density * dist
+                return 1.0 - exp(0.0 - kd * kd)
+            }
             let k = self.fog_ctl.y
             // Optical depth of exp(-(h - h0) k) along the segment, written
             // with both exponents bounded (no overflow from high cameras).
