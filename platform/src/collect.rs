@@ -354,9 +354,11 @@ impl Cx {
     }
 
     /// The script modules registered and used since
-    /// [`Self::record_module_census`]; ends the recording.
-    pub fn module_census(&mut self) -> Option<makepad_script::census::ModuleUse> {
-        self.with_vm(|vm| makepad_script::census::census_used(vm))
+    /// [`Self::record_module_census`]; ends the recording. `app_crates`
+    /// (crate names as in module paths) are the app's own: all their
+    /// modules are used, and what they name.
+    pub fn module_census(&mut self, app_crates: &[&str]) -> Option<makepad_script::census::ModuleUse> {
+        self.with_vm(|vm| makepad_script::census::census_used_from(vm, app_crates))
     }
 
     /// Collect mode from the environment: called once as the Cx is made,
@@ -421,7 +423,9 @@ impl Cx {
             let _by = scan.by(s.name().to_string());
             s.finish(self, &scan);
         }
-        let modules = self.module_census().unwrap_or_default();
+        // The app's crate: the binary's name as a crate name.
+        let app = std::env::current_exe().ok().and_then(|p| p.file_stem().map(|s| s.to_string_lossy().replace('-', "_"))).unwrap_or_default();
+        let modules = self.module_census(&[app.as_str()]).unwrap_or_default();
         let shaders = self.take_shader_pack();
         let shader_list: Vec<(u64, String)> = crate::shader_pack::read_shader_pack(&shaders).map(|e| e.into_iter().map(|e| (e.key, e.name)).collect()).unwrap_or_default();
         let entries = shader_list.len();

@@ -21,6 +21,11 @@ use crate::value::*;
 use crate::vm::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+/// Some VM records a census: registrations in other VMs are noted.
+static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The modules other VMs registered while one recorded.
+static OTHER_VMS: std::sync::Mutex<BTreeSet<&'static str>> = std::sync::Mutex::new(BTreeSet::new());
+
 /// What the module registrations made, while recording.
 #[derive(Default)]
 pub struct Census {
@@ -122,6 +127,7 @@ fn reach(
 impl ScriptVm<'_> {
     /// Records the module registrations from now on.
     pub fn census_record(&mut self) {
+        RECORDING.store(true, std::sync::atomic::Ordering::Relaxed);
         if self.bx.heap.census.is_none() {
             self.bx.heap.census = Some(Box::default());
         }
@@ -130,6 +136,13 @@ impl ScriptVm<'_> {
     /// Before a module's `script_mod` registers (a no-op unless recording).
     pub fn census_begin(&mut self, module_path: &'static str) {
         if self.bx.heap.census.is_none() {
+            // Another VM (a document's own) registering while one records:
+            // the module is used there, whatever the recording VM does.
+            if RECORDING.load(std::sync::atomic::Ordering::Relaxed) {
+                if let Ok(mut other) = OTHER_VMS.lock() {
+                    other.insert(module_path);
+                }
+            }
             return;
         }
         let values = module_values(&self.bx.heap);
@@ -180,6 +193,15 @@ impl ScriptVm<'_> {
 /// The modules registered and used (see the module docs); `None` when the
 /// census was not recording. Runs a garbage collection first.
 pub fn census_used(vm: &mut ScriptVm) -> Option<ModuleUse> {
+    census_used_from(vm, &[])
+}
+
+/// [`census_used`] with the app's own crates as roots: every module of
+/// those crates is used (the app's script registers its UI inside its own
+/// `script_mod`, which Rust holds from that registration on, so no walk
+/// from the app's objects would start there), and so is everything their
+/// scripts name.
+pub fn census_used_from(vm: &mut ScriptVm, app_crates: &[&str]) -> Option<ModuleUse> {
     vm.bx.heap.census.as_ref()?;
     vm.gc();
     let census = vm.bx.heap.census.take()?;
@@ -235,6 +257,24 @@ pub fn census_used(vm: &mut ScriptVm) -> Option<ModuleUse> {
             }
         }
     }
+    let other_vms: BTreeSet<&'static str> = OTHER_VMS.lock().map(|o| o.clone()).unwrap_or_default();
+    for (m, path) in census.modules.iter().enumerate() {
+        let krate = path.split("::").next().unwrap_or("");
+        let why = if app_crates.contains(&krate) {
+            "the app"
+        } else if other_vms.contains(path) {
+            "registered by another VM"
+        } else {
+            continue;
+        };
+        if !used.contains_key(&m) {
+            used.insert(m, why.to_string());
+            for o in owned.get(&m).into_iter().flatten() {
+                label.insert(*o, m);
+                seeds.push(*o);
+            }
+        }
+    }
     for (m, scope) in &census.defines {
         if !used.contains_key(m) {
             used.insert(*m, format!("defines mod.{scope}"));
@@ -263,10 +303,25 @@ pub fn census_used(vm: &mut ScriptVm) -> Option<ModuleUse> {
                 // spread (`..X`); a bare name is a value (`place: Right`),
                 // too often another module's word for something else.
                 let next = tokens.get(i + 1).map(|t| &t.token);
-                let prev = i.checked_sub(1).map(|p| &tokens[p].token);
-                let named = matches!(next, Some(ScriptToken::OpenCurly | ScriptToken::OpenRound))
+                // The start of the dotted path this name ends (`mod.draw.X`).
+                let mut start = i;
+                while start >= 2
+                    && matches!(&tokens[start - 1].token, ScriptToken::Operator(op) if *op == dot)
+                    && matches!(&tokens[start - 2].token, ScriptToken::Identifier(_))
+                {
+                    start -= 2;
+                }
+                let before = start.checked_sub(1).map(|p| &tokens[p].token);
+                let is_use = matches!(before, Some(ScriptToken::Identifier(u)) if *u == id!(use));
+                // A qualified name (`mod.draw.DrawVector`) outside a `use`
+                // names exactly that definition: a use, whatever it is used
+                // for (a spread `..mod.draw.DrawVector` copies its fields at
+                // registration, so no heap edge ever leads to it).
+                let qualified = start < i && !is_use;
+                let named = qualified
+                    || matches!(next, Some(ScriptToken::OpenCurly | ScriptToken::OpenRound))
                     || matches!(next, Some(ScriptToken::Operator(op)) if *op == dot)
-                    || matches!(prev, Some(ScriptToken::Operator(op)) if *op == spread);
+                    || matches!(before, Some(ScriptToken::Operator(op)) if *op == spread);
                 if named {
                     out.extend(modules.iter().map(|m| (*m, id)));
                 }

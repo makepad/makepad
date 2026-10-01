@@ -321,6 +321,15 @@ pub fn plan_modules(module: &Module, modules: &ModuleUse, keep: &[String]) -> Pl
     let Some(names) = &module.names else { return out };
     let imported = module.num_imported_funcs();
     let pinned: HashSet<u32> = module.exports.iter().filter(|e| e.kind == ExternKind::Func).map(|e| e.index).collect();
+    // A registration whose address is taken (it sits in the function table)
+    // is called through a pointer: by a host that registers modules into
+    // VMs of its own (a document's), which the census never sees. It stays.
+    let mut addressed: HashSet<u32> = HashSet::new();
+    for e in &module.elems {
+        if let ElemItems::Funcs(funcs) = &e.items {
+            addressed.extend(funcs.iter().copied());
+        }
+    }
     for (index, symbol) in &names.funcs {
         if *index < imported || pinned.contains(index) {
             continue;
@@ -333,6 +342,8 @@ pub fn plan_modules(module: &Module, modules: &ModuleUse, keep: &[String]) -> Pl
         let bytes = body_size(&module.funcs[(*index - imported) as usize]);
         let kept_by = if modules.used.contains(path) {
             None
+        } else if addressed.contains(index) {
+            Some("called through a pointer".to_string())
         } else {
             keep.iter().find(|k| keeps(k, path)).map(|k| format!("keep {k}"))
         };
