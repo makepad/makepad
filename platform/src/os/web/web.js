@@ -1602,6 +1602,19 @@ export class WasmWebBrowser extends WasmBridge {
         if (typeof window !== "undefined" && window && !window.makepad_gpu_stats) {
             window.makepad_gpu_stats = () => this.gpu_safety_stats();
         }
+        // What holds GPU memory, by owner (the runtime's own view; rows carry
+        // the page's texture slot to join the ledger): a Promise of
+        // {textures: [{texture_id, kind, format, w, h, bytes, owner}], ...}.
+        if (typeof window !== "undefined" && window && !window.makepad_gpu_inventory) {
+            this.gpu_inventory_requests = new Map();
+            this.gpu_inventory_next = 0;
+            window.makepad_gpu_inventory = () => new Promise((resolve) => {
+                const request_id = ++this.gpu_inventory_next;
+                this.gpu_inventory_requests.set(request_id, resolve);
+                this.to_wasm.ToWasmGpuInventory({ request_id });
+                this.do_wasm_pump();
+            });
+        }
     }
 
     // What the GPU safety layer saw: for test harnesses and the export's
@@ -1683,6 +1696,14 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmSetMouseCursor(args) {
         //console.log(args);
         document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
+    }
+
+    FromWasmGpuInventory(args) {
+        const resolve = this.gpu_inventory_requests && this.gpu_inventory_requests.get(args.request_id);
+        if (resolve) {
+            this.gpu_inventory_requests.delete(args.request_id);
+            resolve(JSON.parse(args.json));
+        }
     }
 
     // @section clipboard

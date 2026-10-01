@@ -382,6 +382,12 @@ impl Cx {
                     self.call_event_handler(&Event::TextInput(tw.into()));
                 }
 
+                live_id!(ToWasmGpuInventory) => {
+                    let tw = ToWasmGpuInventory::read_to_wasm(&mut to_wasm);
+                    let json = gpu_inventory_json(&self.gpu_inventory());
+                    self.os.from_wasm(FromWasmGpuInventory { request_id: tw.request_id, json });
+                }
+
                 live_id!(ToWasmTextCopy) => {
                     let response = Rc::new(RefCell::new(None));
                     self.call_event_handler(&Event::TextCopy(TextClipboardEvent {
@@ -1520,6 +1526,7 @@ impl CxOsApi for Cx {
             ToWasmStorageResult::to_js_code(),
             ToWasmModuleLinked::to_js_code(),
             ToWasmGpuFrameTimes::to_js_code(),
+            ToWasmGpuInventory::to_js_code(),
             ToWasmRenderTextureCapture::to_js_code(),
             ToWasmGpuCompletion::to_js_code(),
             ToWasmTimerFired::to_js_code(),
@@ -1570,6 +1577,7 @@ impl CxOsApi for Cx {
             FromWasmStorageGet::to_js_code(),
             FromWasmLinkModule::to_js_code(),
             FromWasmGpuFrameTimer::to_js_code(),
+            FromWasmGpuInventory::to_js_code(),
             FromWasmUnlinkSlots::to_js_code(),
             FromWasmStorageSet::to_js_code(),
             FromWasmStorageDelete::to_js_code(),
@@ -1847,3 +1855,40 @@ pub unsafe extern "C" fn init_panic_hook() {
 
 #[no_mangle]
 pub static mut BASE_ADDR: usize = 10;
+
+/// The inventory as the page's `makepad_gpu_inventory()` resolves it:
+/// `{textures: [{texture_id, kind, format, w, h, bytes, owner}], retired_texture_bytes,
+/// retained_allocation_bytes, geometry_bytes}`; `texture_id` is the page's
+/// texture slot, so its GL ledger joins on it.
+fn gpu_inventory_json(inv: &crate::gpu_inventory::GpuInventory) -> String {
+    fn esc(s: &str) -> String {
+        let mut o = String::with_capacity(s.len());
+        for c in s.chars() {
+            match c {
+                '"' => o.push_str("\\\""),
+                '\\' => o.push_str("\\\\"),
+                c if (c as u32) < 0x20 => o.push_str(&format!("\\u{:04x}", c as u32)),
+                c => o.push(c),
+            }
+        }
+        o
+    }
+    let mut out = String::from("{\"textures\":[");
+    for (k, t) in inv.textures.iter().enumerate() {
+        if k > 0 {
+            out.push(',');
+        }
+        let kind = if t.depth { "depth" } else if t.render_target { "target" } else { "data" };
+        out.push_str(&format!(
+            "{{\"texture_id\":{},\"kind\":\"{}\",\"format\":\"{}\",\"w\":{},\"h\":{},\"bytes\":{},\"owner\":\"{}\"}}",
+            t.slot, kind, t.format, t.width, t.height, t.bytes(), esc(&t.name())
+        ));
+    }
+    out.push_str(&format!(
+        "],\"retired_texture_bytes\":{},\"retained_allocation_bytes\":{},\"geometry_bytes\":{}}}",
+        inv.retired_texture_bytes,
+        inv.retained_allocation_bytes,
+        inv.geometry_gpu_bytes.unwrap_or(inv.geometry_cpu_bytes)
+    ));
+    out
+}

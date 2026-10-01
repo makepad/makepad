@@ -90,6 +90,14 @@ pub struct FromWasmGpuFrameTimer {
     pub on: bool,
 }
 
+/// The GPU inventory (`Cx::gpu_inventory`) as JSON, answering
+/// `ToWasmGpuInventory`.
+#[derive(FromWasm)]
+pub struct FromWasmGpuInventory {
+    pub request_id: u32,
+    pub json: String,
+}
+
 /// A runtime-generated module to instantiate against this module's memory
 /// and link into its function table (see `wasm_link`).
 #[derive(FromWasm)]

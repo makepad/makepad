@@ -570,6 +570,12 @@ pub struct ToWasmGpuFrameTimes {
     pub times: Vec<f64>,
 }
 
+/// The page asks for the GPU inventory (`makepad_gpu_inventory()`).
+#[derive(ToWasm)]
+pub struct ToWasmGpuInventory {
+    pub request_id: u32,
+}
+
 /// A link request's answer: the table slot of each export, or an error.
 #[derive(ToWasm)]
 pub struct ToWasmModuleLinked {
