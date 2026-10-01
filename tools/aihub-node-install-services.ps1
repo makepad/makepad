@@ -400,6 +400,18 @@ if ($doNode) {
         throw "node identity changed ($($before.node_key) -> $($health.node_key))"
     }
     $result.node = [ordered]@{ pid = $process.ProcessId; version = $health.version; node_key = $health.node_key; admission_open = $health.activity.admission_open; sha256 = (Get-FileHash $nodeExe -Algorithm SHA256).Hash }
+    # The node updater, run by the tunnel's account, authenticates to the
+    # node's /health with the node's own credential: it may read exactly
+    # that and the certificate fingerprint (not fleet.key, not the TLS key).
+    $tunnelSid = $null
+    try { $tunnelSid = (New-Object Security.Principal.NTAccount $TunnelAccount).Translate([Security.Principal.SecurityIdentifier]).Value } catch {}
+    if ($tunnelSid) {
+        foreach ($file in @((Join-Path $CacheDir 'fleet\node.credential'), (Join-Path $CacheDir 'fleet\tls\tls-fingerprint.txt'))) {
+            if (Test-Path $file) { & icacls.exe $file /grant "*$($tunnelSid):R" /Q | Out-Null }
+        }
+        & icacls.exe (Join-Path $CacheDir 'fleet') /grant "*$($tunnelSid):(X)" /Q | Out-Null
+        & icacls.exe (Join-Path $CacheDir 'fleet\tls') /grant "*$($tunnelSid):(X)" /Q | Out-Null
+    }
 }
 if ($doTunnel) {
     $fp = (Get-Content (Join-Path $tunnelIdentity 'tls-fingerprint.txt') -ErrorAction SilentlyContinue | Select-Object -First 1)

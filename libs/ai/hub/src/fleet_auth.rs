@@ -301,6 +301,17 @@ pub fn is_fleet_endpoint(host_port: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The wire format, fixed: scripts (the Python producers) compute the
+    /// same proof from the same credential text.
+    #[test]
+    fn proof_test_vector() {
+        let cred = Credential::parse(&format!("mkc2.nv1.lan.99.{}", "11".repeat(32))).unwrap();
+        assert_eq!(
+            cred.authorization(&[0x22; 32]),
+            "MKC2 nv1.lan.99.df3a1b11b48ebe2984d0126f6e6ae0b24689950227021138a5fd10b738d6cc6c"
+        );
+    }
+
     #[test]
     fn credential_proofs_bind_to_the_certificate() {
         let key = FleetKey::generate().unwrap();

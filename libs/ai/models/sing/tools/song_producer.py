@@ -15,6 +15,7 @@ import argparse
 import array
 import base64
 import hashlib
+import hmac
 import json
 import pathlib
 import random
@@ -22,6 +23,7 @@ import time
 import http.client
 import os
 import ssl
+import sys
 import urllib.parse
 import uuid
 
@@ -106,26 +108,53 @@ def song(rng):
 HUB = pathlib.Path(os.path.expanduser("~/.makepad/ai-hub"))
 
 
+def fleet_authorization(fingerprint_hex):
+    """MKC2 proof for a node presenting this certificate (tools/aihub-fleet.md):
+    the credential itself (client.credential) never leaves this machine."""
+    tag, ident, role, expiry, secret = (HUB / "client.credential").read_text().strip().split(".")
+    if tag != "mkc2":
+        raise RuntimeError("client.credential is not an mkc2 fleet credential")
+    proof = hmac.new(bytes.fromhex(secret), ("mkfleet2 proof|" + fingerprint_hex).encode(), hashlib.sha256).hexdigest()
+    return f"MKC2 {ident}.{role}.{expiry}.{proof}"
+
+
+def known_node(host_port, fingerprint_hex):
+    """ssh-style known nodes (~/.makepad/ai-hub/known_nodes, shared with the
+    Rust clients): record on first contact; a changed certificate is warned
+    about loudly, logged, recorded, and the request goes on."""
+    path = HUB / "known_nodes"
+    lines = path.read_text().splitlines() if path.exists() else []
+    old = next((l.split()[1] for l in lines if l.split()[:1] == [host_port]), None)
+    if old == fingerprint_hex:
+        return
+    if old is not None:
+        print(f"@@@ WARNING: THE TLS CERTIFICATE OF {host_port} HAS CHANGED\n@@@ was {old}\n@@@ now {fingerprint_hex}", file=sys.stderr, flush=True)
+        with open(HUB / "known_nodes.log", "a") as log:
+            log.write(f"{int(time.time())} {host_port} changed {old} -> {fingerprint_hex}\n")
+    lines = [l for l in lines if l.split()[:1] != [host_port]] + [f"{host_port} {fingerprint_hex}"]
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text("\n".join(lines) + "\n")
+    tmp.replace(path)
+
+
 def fetch(base, path, body=None, timeout=15):
-    """One request to a node: http://host:port as is; https://host:port over TLS
-    pinned to the node's certificate (fleet-pins.txt), checked before the
-    credential (client.token) is sent as a Bearer header."""
+    """One request to a node. https://host:port is a fleet node: TLS whose
+    certificate is checked against (and recorded in) known_nodes, then the
+    credential proof bound to that certificate. http://host:port is only for
+    a node not yet on the fleet TLS (sent no credential)."""
     u = urllib.parse.urlsplit(base)
     data = None if body is None else json.dumps(body).encode()
     headers = {"Content-Type": "application/json"}
     if u.scheme == "https":
-        pins = dict(l.split()[:2] for l in (HUB / "fleet-pins.txt").read_text().splitlines() if l.strip() and not l.startswith("#"))
-        pin = pins[f"{u.hostname}:{u.port}"]
         ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ctx.check_hostname = False
         ctx.verify_mode = ssl.CERT_NONE
         ctx.minimum_version = ssl.TLSVersion.TLSv1_2
         conn = http.client.HTTPSConnection(u.hostname, u.port, context=ctx, timeout=timeout)
         conn.connect()
-        if hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest() != pin:
-            conn.close()
-            raise RuntimeError(f"{u.hostname}:{u.port}: certificate does not match its pin")
-        headers["Authorization"] = "Bearer " + (HUB / "client.token").read_text().strip()
+        fingerprint = hashlib.sha256(conn.sock.getpeercert(binary_form=True)).hexdigest()
+        known_node(f"{u.hostname}:{u.port}", fingerprint)
+        headers["Authorization"] = fleet_authorization(fingerprint)
     else:
         conn = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
     try:
