@@ -12,6 +12,9 @@ pub enum Tk {
     Punct(&'static str),
     /// A string (one line, no escapes): only `use lib("id", "rev")`.
     Str(String),
+    /// A colour literal (`#eee9df`, `#fff`, `#ff000080`) as Splash reads
+    /// it: `0xRRGGBBAA`, the channels sRGB-encoded as written.
+    Color(u32),
     Eof,
 }
 
@@ -104,6 +107,24 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShaderError> {
                 i += 1;
             }
             Tk::Ident(src[start..i].to_string())
+        } else if c == b'#' {
+            // A colour, as the document's VM reads it: `#` (an optional `x`)
+            // and 1, 2, 3, 4, 6 or 8 hex digits.
+            i += 1;
+            if b.get(i) == Some(&b'x') {
+                i += 1;
+            }
+            let digits = i;
+            while i < b.len() && b[i].is_ascii_hexdigit() && i - digits < 8 {
+                i += 1;
+            }
+            if i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                return Err(ShaderError::new(start, i + 1, format!("bad colour `{}`: a colour is `#` and 1, 2, 3, 4, 6 or 8 hex digits", &src[start..=i])));
+            }
+            match color_hex(&src[digits..i]) {
+                Some(v) => Tk::Color(v),
+                None => return Err(ShaderError::new(start, i.max(start + 1), format!("bad colour `{}`: a colour is `#` and 1, 2, 3, 4, 6 or 8 hex digits", &src[start..i]))),
+            }
         } else if c == b'"' {
             i += 1;
             while i < b.len() && b[i] != b'"' && b[i] != b'\n' {
@@ -133,6 +154,28 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShaderError> {
     }
     out.push(Token { tk: Tk::Eof, start: b.len(), end: b.len(), nl: true });
     Ok(out)
+}
+
+/// A colour's hex digits as `0xRRGGBBAA`, as Splash reads them (`#w`,
+/// `#ww`, `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`).
+fn color_hex(d: &str) -> Option<u32> {
+    let h = |k: usize| u32::from_str_radix(&d[k..k + 1], 16).ok();
+    let hh = |k: usize| u32::from_str_radix(&d[k..k + 2], 16).ok();
+    Some(match d.len() {
+        1 => {
+            let v = h(0)? * 17;
+            (v << 24) | (v << 16) | (v << 8) | 0xff
+        }
+        2 => {
+            let v = hh(0)?;
+            (v << 24) | (v << 16) | (v << 8) | 0xff
+        }
+        3 => ((h(0)? * 17) << 24) | ((h(1)? * 17) << 16) | ((h(2)? * 17) << 8) | 0xff,
+        4 => ((h(0)? * 17) << 24) | ((h(1)? * 17) << 16) | ((h(2)? * 17) << 8) | (h(3)? * 17),
+        6 => (hh(0)? << 24) | (hh(2)? << 16) | (hh(4)? << 8) | 0xff,
+        8 => (hh(0)? << 24) | (hh(2)? << 16) | (hh(4)? << 8) | hh(6)?,
+        _ => return None,
+    })
 }
 
 /// `1.max(2)`-style method calls on integers are not a thing here, but
@@ -714,6 +757,14 @@ impl<'a> Parser<'a> {
                 self.bump();
                 done(self, ExprKind::Num(v, int))
             }
+            Tk::Color(c) => {
+                // `vec4(r, g, b, a)`, each channel / 255 (what the VM and
+                // shaders give a colour literal).
+                self.bump();
+                let span = Span { start, end: self.prev_end() };
+                let ch = |k: u32| Expr { kind: ExprKind::Num(((c >> (24 - 8 * k)) & 0xff) as f64 / 255.0, false), span };
+                done(self, ExprKind::Call("vec4".into(), vec![ch(0), ch(1), ch(2), ch(3)]))
+            }
             Tk::Punct("(") => {
                 self.bump();
                 let e = self.expr()?;
@@ -859,6 +910,7 @@ fn describe(tk: &Tk) -> String {
         Tk::Num(v, _) => format!("`{}`", v),
         Tk::Punct(p) => format!("`{}`", p),
         Tk::Str(_) => "a string".into(),
+        Tk::Color(c) => format!("`#{:08x}`", c),
         Tk::Eof => "the end of the code".into(),
     }
 }

@@ -96,10 +96,32 @@ pub fn parse_prelude(src: &str, user_len: usize) -> Vec<parse::Item> {
     parse::Parser::new(&toks).items().expect("the prelude parses")
 }
 
-/// Prelude items the program does not redefine, then the program's own.
-pub fn with_prelude(items: &[parse::Item], prelude: Vec<parse::Item>) -> Vec<parse::Item> {
+/// The prelude's items, then the program's own. The program's names shadow
+/// the prelude's for the program only: a prelude item the program redefines
+/// (`let fade = param(1.0)` over the prelude's `fade`) stays, as
+/// `prelude.<name>`, for the prelude's own bodies and for the library items
+/// (modules) among `items`, so a user's name never leaks into a library's
+/// bodies. `own` names the program's own items (the rest of `items` came
+/// from modules).
+pub fn with_prelude(items: &[parse::Item], prelude: Vec<parse::Item>, own: &std::collections::HashSet<String>) -> Vec<parse::Item> {
     let names: std::collections::HashSet<String> = items.iter().map(|i| i.name().to_string()).collect();
-    let mut all: Vec<parse::Item> = prelude.into_iter().filter(|i| !names.contains(i.name())).collect();
+    let shadowed: std::collections::HashMap<String, String> =
+        prelude.iter().filter(|i| names.contains(i.name())).map(|i| (i.name().to_string(), format!("prelude.{}", i.name()))).collect();
+    let mut all: Vec<parse::Item> = prelude;
     all.extend(items.iter().cloned());
+    if shadowed.is_empty() {
+        return all;
+    }
+    let n_prelude = all.len() - items.len();
+    for (k, it) in all.iter_mut().enumerate() {
+        if k < n_prelude {
+            module::rename_refs(it, &shadowed);
+            if let Some(q) = shadowed.get(it.name()) {
+                module::set_name(it, q.clone());
+            }
+        } else if !own.contains(it.name()) {
+            module::rename_refs(it, &shadowed);
+        }
+    }
     all
 }

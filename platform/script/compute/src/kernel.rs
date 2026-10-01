@@ -128,7 +128,7 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
     // prelude) are compiled in only when reached.
     let roots: std::collections::HashSet<String> = items.iter().filter(|i| !matches!(i, crate::parse::Item::Use { .. })).map(|i| i.name().to_string()).collect();
     let items = crate::module::resolve(items, src.len() + 1 + KERNEL_PRELUDE.len() + 1, modules, &prelude).map_err(|e| vec![e])?;
-    let all = crate::module::prune(crate::with_prelude(&items, prelude), &roots);
+    let all = crate::module::prune(crate::with_prelude(&items, prelude, &roots), &roots);
     let lowered = kl::lower_kernel(&all, src.len() + 1, layouts).map_err(|e| vec![e])?;
     let ctx_words = K_PARAMS as usize + lowered.params.len();
     let shared_words = lowered.shared_init.len().max(1);

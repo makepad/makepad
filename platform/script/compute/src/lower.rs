@@ -212,6 +212,10 @@ enum V {
 #[derive(Clone, Debug)]
 enum Bind {
     Const(V),
+    /// A constant vector (a top-level `let` folded at lowering: a colour,
+    /// `vec3(..)`, a pure function of constants): its lanes' f32 bits,
+    /// materialised as constants wherever it is read.
+    ConstVec(u8, [u32; 16]),
     /// An immutable SSA value (loop indices).
     Value(V),
     /// A mutable scalar or vec2 local (or a promoted state scalar).
@@ -1403,7 +1407,7 @@ impl Lowerer {
                         _ => None,
                     }
                 };
-                let bad = || err(e.span, "initial values must be constants (numbers, constants, math on them)");
+                let bad = || err(e.span, "initial values must be constants (numbers, colours, vectors, constants and pure functions of them)");
                 Ok(match (&v2, ann) {
                     (V::Lit(x), Some(TypeAnn::I32)) => {
                         if x.fract() != 0.0 {
@@ -1424,12 +1428,12 @@ impl Lowerer {
                         for k in 0..*n as usize {
                             match scratch.cst(l[k]) {
                                 Some(c) => w[k] = c,
-                                None => return err(e.span, "initial values must be constants (numbers, constants, math on them)"),
+                                None => return err(e.span, "initial values must be constants (numbers, colours, vectors, constants and pure functions of them)"),
                             }
                         }
                         CInit::Vec(*n, w)
                     }
-                    _ => return err(e.span, "initial values must be constants (numbers, constants, math on them)"),
+                    _ => return err(e.span, "initial values must be constants (numbers, colours, vectors, constants and pure functions of them)"),
                 })
             }
         }
@@ -1581,14 +1585,32 @@ impl Lowerer {
                             self.globals.insert(name.clone(), Bind::Const(v));
                         }
                         _ => {
-                            // A folded non-literal constant (e.g. `sin(1)`).
-                            let c = self.cinit(value, ann.as_ref())?;
-                            let v = match c {
-                                CInit::W(w, T::F) => V::Lit(f32::from_bits(w) as f64),
-                                CInit::W(w, T::I) => V::Lit(w as i32 as f64),
-                                _ => return err(*span, "a top-level `let` must be a constant, a `param(...)` or a table; use `var` for state"),
+                            // A folded non-literal constant (e.g. `sin(1)`,
+                            // `linear_rgb(#eee9df)`): the builder's folding,
+                            // else the expression run once at lowering.
+                            let c = match self.cinit(value, ann.as_ref()) {
+                                Ok(c) => c,
+                                Err(e) => match self.fold_const(value)? {
+                                    Some(c) => c,
+                                    None if self.domain == Domain::Kernel => {
+                                        return err(
+                                            *span,
+                                            format!(
+                                                "`{}` is not a constant: a top-level `let` holds a number, colour or vector computed from constants only (numbers, colours, other constants and pure functions of them); read params, inputs and the time inside the kernel's functions",
+                                                name
+                                            ),
+                                        )
+                                    }
+                                    None => return Err(e),
+                                },
                             };
-                            self.globals.insert(name.clone(), Bind::Const(v));
+                            let bind = match c {
+                                CInit::W(w, T::F) => Bind::Const(V::Lit(f32::from_bits(w) as f64)),
+                                CInit::W(w, T::I) => Bind::Const(V::Lit(w as i32 as f64)),
+                                CInit::Vec(n, w) => Bind::ConstVec(n, w),
+                                _ => return err(*span, "a top-level `let` must be a constant (a number, a vec2/3/4 or colour, a pure function of constants), a `param(...)` or a table; use `var` for state"),
+                            };
+                            self.globals.insert(name.clone(), bind);
                         }
                     }
                 }
@@ -3013,6 +3035,70 @@ impl Lowerer {
         }
     }
 
+    /// A pure constant expression the builder cannot fold by itself (a
+    /// helper with branches and returns: `linear_rgb(#eee9df)`), run once
+    /// at lowering: only constants and tables are in scope, and a program
+    /// that reads anything else (params, inputs, state, the time) is not a
+    /// constant (None). Its value as a constant initializer.
+    fn fold_const(&mut self, e: &Expr) -> LResult<Option<CInit>> {
+        let scratch = self.scratch();
+        let saved_b = std::mem::replace(&mut self.b, scratch);
+        let saved_frame = std::mem::replace(&mut self.frame_words, 0);
+        let saved_entry = self.entry.take();
+        let saved_globals = self.globals.clone();
+        let saved_init = std::mem::replace(&mut self.in_init, true);
+        self.globals.retain(|_, b| matches!(b, Bind::Const(_) | Bind::ConstVec(..)) || matches!(b, Bind::Place(p) if p.region == Region::Shared));
+        let base = self.shared_init.len() as u32;
+        let r = self.expr(e).map(|v| {
+            let (lanes, ty): (Vec<Val>, Option<T>) = match v {
+                V::F(x) => (vec![x], Some(T::F)),
+                V::I(x) => (vec![x], Some(T::I)),
+                V::Vec(n, l) => (l[..n as usize].to_vec(), Some(T::Vec(n))),
+                _ => (Vec::new(), None),
+            };
+            for (k, x) in lanes.iter().enumerate() {
+                self.b.store(Region::Shared, base + k as u32, 1, None, *x);
+            }
+            ty
+        });
+        self.in_init = saved_init;
+        self.globals = saved_globals;
+        self.entry = saved_entry;
+        let frame_words = std::mem::replace(&mut self.frame_words, saved_frame);
+        let b = std::mem::replace(&mut self.b, saved_b);
+        let Ok(Some(ty)) = r else { return Ok(None) };
+        let mut prog = b.prog;
+        prog.body = b.blocks.into_iter().next().unwrap();
+        prog.frame_words = frame_words;
+        let regions = ir::Regions { ctx: 0, state: 0, shared: base + 16, frame: frame_words, shared_writable: true, bufs: Vec::new(), io: false };
+        if ir::validate(&prog, &regions).is_err() {
+            return Ok(None);
+        }
+        if prog.total_cost() > MAX_INIT_COST {
+            return err(e.span, format!("this constant may take {} operations to compute; the limit is {}", prog.total_cost(), MAX_INIT_COST));
+        }
+        let mut shared = self.shared_init.clone();
+        shared.resize(base as usize + 16, 0);
+        let mut scratch = vec![0u32; prog.scratch_words()];
+        let (mut ctx, mut state) = ([0u32; 0], [0u32; 0]);
+        let zeros = [0f32; 1];
+        let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
+        let mut mem = ir::Mem { ctx: &mut ctx, state: &mut state, shared: ir::Shared::Write(&mut shared), bufs: &[] };
+        let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
+        ir::run(&prog, &mut scratch, &mut mem, &mut io, 1);
+        let w = |k: u32| shared[(base + k) as usize];
+        Ok(Some(match ty {
+            T::Vec(n) => {
+                let mut lanes = [0u32; 16];
+                for (k, l) in lanes.iter_mut().enumerate().take(n as usize) {
+                    *l = w(k as u32);
+                }
+                CInit::Vec(n, lanes)
+            }
+            t => CInit::W(w(0), t),
+        }))
+    }
+
     /// `cinit` without touching the main builder when it fails.
     fn cinit_quiet(&mut self, e: &Expr) -> LResult<CInit> {
         let saved_frame = self.frame_words;
@@ -3024,6 +3110,13 @@ impl Lowerer {
     fn ident(&mut self, name: &str, span: Span) -> LResult<V> {
         match self.lookup(name) {
             Some(Bind::Const(v)) | Some(Bind::Value(v)) => return Ok(v),
+            Some(Bind::ConstVec(n, w)) => {
+                let mut lanes = [Val(0); 16];
+                for (k, l) in lanes.iter_mut().enumerate().take(n as usize) {
+                    *l = self.b.cf(f32::from_bits(w[k]));
+                }
+                return Ok(V::Vec(n, lanes));
+            }
             Some(Bind::Local(t, vars)) => return Ok(self.read_vars(&t, &vars)),
             Some(Bind::Place(p)) => return Ok(self.read(&p)),
             Some(Bind::Param(k)) => {

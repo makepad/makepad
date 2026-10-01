@@ -227,3 +227,42 @@ fn the_shared_stdlib_compiles_in_kernels() {
     let e = compile("let o = output(f32)\nfn element(i) { o[i] = aa_step(0.5, float(i)) }").map(|_| ()).unwrap_err();
     assert!(e[0].message.contains("dFdx"), "{}", e[0].message);
 }
+
+#[test]
+fn the_prelude_resolves_in_its_own_scope() {
+    // A kernel param named like a prelude helper (`fade`) shadows it for the
+    // kernel only: the prelude's `vnoise` still calls its own `fade`.
+    let plain = compile("let o = output(f32)\nfn element(i) { o[i] = vnoise(float(i) * 0.37, 0.5, 3.0) }").unwrap_or_else(|e| panic!("{:?}", e));
+    let want = run(&plain, 8, &[], "o", 1);
+    let k = compile("let fade = param(1.0)\nlet o = output(f32)\nfn element(i) { o[i] = vnoise(float(i) * 0.37, 0.5, 3.0) * fade }").unwrap_or_else(|e| panic!("{:?}", e));
+    assert_eq!(run(&k, 8, &[], "o", 1), want);
+    // A kernel fn of the same name is the kernel's: its own calls get it,
+    // the prelude's bodies keep theirs.
+    let k = compile("let o = output(f32)\nfn fade(t) { 100.0 }\nfn element(i) { o[i] = vnoise(float(i) * 0.37, 0.5, 3.0) + fade(0.0) }").unwrap_or_else(|e| panic!("{:?}", e));
+    assert_eq!(run(&k, 8, &[], "o", 1), want.iter().map(|x| x + 100.0).collect::<Vec<_>>());
+    // A module calling a prelude helper sees the prelude's, not the kernel's.
+    let m = [Module { path: "lib:smooth@1", source: "fn s(t) { fade(t) }" }];
+    let k = compile_with_modules("use lib(\"smooth\", \"1\") as sm\nlet fade = param(1.0)\nlet o = output(f32)\nfn element(i) { o[i] = sm.s(0.5) * fade }", &[], Backend::Native, &m).unwrap_or_else(|e| panic!("{:?}", e));
+    assert_eq!(run(&k, 1, &[], "o", 1), vec![0.5]);
+}
+
+#[test]
+fn vector_and_colour_constants_fold_at_lowering() {
+    // A document's palette: colours, vectors and pure functions of them.
+    let src = "let BONE_L = linear_rgb(#eee9df)\nlet C = vec3(0.25, 0.5, 1.0)\nlet K = #ff8000\nlet H = #fff\nlet o = output(vec4)\nfn element(i) { o[i] = vec4(BONE_L + C * 2.0, K.g + H.b) }";
+    let k = compile(src).unwrap_or_else(|e| panic!("{:?}", e));
+    let o = run(&k, 2, &[], "o", 4);
+    let lin = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
+    let want = [lin(238.0 / 255.0) + 0.5, lin(233.0 / 255.0) + 1.0, lin(223.0 / 255.0) + 2.0, 128.0 / 255.0 + 1.0];
+    for e in 0..2 {
+        for (a, b) in o[e * 4..e * 4 + 4].iter().zip(want) {
+            assert!((a - b).abs() < 1e-5, "{:?} vs {:?}", &o[e * 4..e * 4 + 4], want);
+        }
+    }
+    // What does not fold is refused, saying what a constant is.
+    let e = compile("let p = param(1.0)\nlet V = vec3(p, 0.0, 0.0)\nlet o = output(vec3)\nfn element(i) { o[i] = V }").map(|_| ()).unwrap_err();
+    assert!(e[0].message.contains("constants"), "{}", e[0].message);
+    // A malformed colour is a lexing error, not a stray `#`.
+    let e = compile("let K = #12345\nlet o = output(f32)\nfn element(i) { o[i] = K.x }").map(|_| ()).unwrap_err();
+    assert!(e[0].message.contains("bad colour"), "{}", e[0].message);
+}

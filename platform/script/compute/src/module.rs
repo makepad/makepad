@@ -250,6 +250,30 @@ pub fn resolve(items: Vec<Item>, next_base: usize, host: &[Module], prelude: &[I
     r.resolve(items, true, &keep)
 }
 
+/// Renames `it` (a library item placed under a private name).
+pub(crate) fn set_name(it: &mut Item, name: String) {
+    rename(it, name)
+}
+
+/// Rewrites `it`'s references to the names in `map` (names bound locally
+/// shadow them).
+pub(crate) fn rename_refs(it: &mut Item, map: &HashMap<String, String>) {
+    let mut w = Walk { map: &|n: &str| map.get(n).cloned(), fields: None, scopes: Vec::new() };
+    match it {
+        Item::Let { value, .. } | Item::Var { value, .. } => w.expr(value),
+        Item::Struct { fields, .. } => {
+            for (_, e) in fields {
+                w.expr(e);
+            }
+        }
+        Item::Fn(f) => {
+            w.scopes.push(f.params.iter().map(|p| p.0.clone()).collect());
+            w.stmts(&mut f.body);
+        }
+        Item::Use { .. } => {}
+    }
+}
+
 fn rename(it: &mut Item, name: String) {
     match it {
         Item::Let { name: n, .. } | Item::Var { name: n, .. } | Item::Struct { name: n, .. } => *n = name,
