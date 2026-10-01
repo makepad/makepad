@@ -9,8 +9,15 @@ use super::remap::Remap;
 use std::collections::HashMap;
 
 pub fn run(module: &mut Module) {
+    run_mapped(module);
+}
+
+/// `run`, saying where every function went: old index to new index (a
+/// merged function goes where its copy went).
+pub fn run_mapped(module: &mut Module) -> Vec<u32> {
     // Equal types under different indices would hide equal bodies.
     compact_types(module);
+    let mut moved: Vec<u32> = (0..module.num_imported_funcs() + module.funcs.len() as u32).collect();
     loop {
         let imported = module.num_imported_funcs() as usize;
         let total = imported + module.funcs.len();
@@ -27,7 +34,7 @@ pub fn run(module: &mut Module) {
         }
         drop(first);
         if merged == 0 {
-            return;
+            return moved;
         }
         let mut new_index = vec![0u32; total];
         let mut next = 0u32;
@@ -38,6 +45,9 @@ pub fn run(module: &mut Module) {
             }
         }
         let map: Vec<u32> = (0..total).map(|f| new_index[keep_of[f]]).collect();
+        for to in &mut moved {
+            *to = map[*to as usize];
+        }
         // Exports of two merged functions would now share a name's target;
         // that is fine, but the name map must keep the first copy's name.
         Remap {

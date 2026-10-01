@@ -792,6 +792,29 @@ fn expr(d: &mut Decoder, features: Features) -> Result<Vec<Instr>, DecodeError> 
     }
 }
 
+/// Where every instruction of a function body sits: `entry` is the body's
+/// code section entry (size prefix included, see [`Layout::funcs`]); the
+/// offsets are relative to its start, one per instruction of
+/// [`Func::body`].
+pub fn body_offsets(entry: &[u8], features: Features) -> Result<Vec<usize>, DecodeError> {
+    let mut d = Decoder::new(entry);
+    let size: u32 = d.decode()?;
+    if d.remaining() != size as usize {
+        return err("section size mismatch in function body");
+    }
+    let groups: u32 = d.decode()?;
+    for _ in 0..groups {
+        d.decode::<u32>()?;
+        val_type(&mut d)?;
+    }
+    let mut out = Vec::new();
+    while !d.is_at_end() {
+        out.push(d.position());
+        instr(&mut d, features)?;
+    }
+    Ok(out)
+}
+
 /// Engines refuse functions with more locals than this; a body declaring
 /// more is not a usable module.
 const MAX_LOCALS: u64 = 50_000;

@@ -301,3 +301,58 @@ fn units_never_used_are_cut_with_their_data() {
     let module = ir::decode(&instrumented).unwrap();
     assert!(module.exports.iter().any(|e| e.name == units::COVERAGE_EXPORT && e.kind == ExternKind::Memory));
 }
+
+#[test]
+fn panics_become_traps_with_their_sites() {
+    // `get` checks its index and panics through `$panic` (which logs and
+    // never returns) with a message and a location in the data.
+    let bytes = wat(r#"(module
+        (import "env" "log" (func $log (param i32 i32)))
+        (memory (export "memory") 1)
+        (func $panic (param i32 i32 i32)
+            local.get 0 local.get 1 call $log
+            unreachable)
+        (func $get (export "get") (param i32) (result i32)
+            local.get 0
+            i32.const 4
+            i32.ge_u
+            if
+                i32.const 120 i32.const 18 i32.const 160
+                call $panic
+                unreachable
+            end
+            local.get 0
+            i32.const 2
+            i32.mul)
+        (data (i32.const 100) "src/lib.rs")
+        (data (i32.const 120) "index out of range")
+        (data (i32.const 160) "\64\00\00\00\0a\00\00\00\0c\00\00\00\05\00\00\00"))"#);
+    let opts = OptimizeOptions { panic_trap: true, symbols: true, ..OptimizeOptions::default() };
+    let (out, report) = wasm_optimize_checked(&bytes, &opts).unwrap();
+    assert!(report.passes.iter().all(|p| p.reverted.is_none()), "{}", report.to_text());
+    let module = ir::decode(&out).unwrap();
+    // The panic function and the import only it called are gone; the
+    // names went too.
+    assert_eq!(module.funcs.len(), 1);
+    assert!(module.imports.is_empty() && module.names.is_none());
+    assert!(!module.funcs[0].body.iter().any(|i| matches!(i, Instr::Call(_))));
+
+    let symbols = report.symbols.unwrap();
+    assert!(symbols.contains("F 0 get"), "{symbols}");
+    let site = symbols.lines().find(|l| l.starts_with("P ")).expect("a panic site");
+    assert!(site.ends_with("panic | index out of range | src/lib.rs:12:5"), "{site}");
+    // The offset is the trap's `unreachable` in the shipped bytes.
+    let at = usize::from_str_radix(site.split(' ').nth(1).unwrap().trim_start_matches("0x"), 16).unwrap();
+    assert_eq!(out[at], 0x00);
+
+    // In range it still answers; out of range it traps.
+    let engine = makepad_stitch::Engine::new();
+    let mut store = makepad_stitch::Store::new(engine.clone());
+    let module = makepad_stitch::Module::new(&engine, &out).unwrap();
+    let instance = makepad_stitch::Linker::new().instantiate(&mut store, &module).unwrap();
+    let get = instance.exported_func("get").unwrap();
+    let mut result = [makepad_stitch::Val::I32(0)];
+    get.call(&mut store, &[makepad_stitch::Val::I32(3)], &mut result).unwrap();
+    assert_eq!(result[0].to_i32(), Some(6));
+    assert!(get.call(&mut store, &[makepad_stitch::Val::I32(9)], &mut result).is_err());
+}

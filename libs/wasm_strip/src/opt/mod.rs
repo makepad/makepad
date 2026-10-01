@@ -14,6 +14,7 @@ mod dce;
 mod locals;
 mod merge;
 mod order;
+mod panics;
 mod peephole;
 pub mod profile;
 pub mod units;
@@ -54,6 +55,15 @@ pub struct OptimizeOptions {
     /// Units kept whatever the coverage says (`crate::module`, `crate`, or
     /// a `prefix*`).
     pub keep_units: Vec<String>,
+    /// Panics become traps (see `panics`): every call of a function that
+    /// never returns becomes `unreachable`, and the panic machinery behind
+    /// them goes. A panic then traps without its message; `symbols` keeps
+    /// what each site said.
+    pub panic_trap: bool,
+    /// Build the symbol file (`OptimizeReport::symbols`): the output's
+    /// function names and, with `panic_trap`, every trap site's code offset
+    /// with its message and location, to read a trap's stack offline.
+    pub symbols: bool,
 }
 
 impl Default for OptimizeOptions {
@@ -72,6 +82,8 @@ impl Default for OptimizeOptions {
             coverage: None,
             modules: None,
             keep_units: Vec::new(),
+            panic_trap: false,
+            symbols: false,
         }
     }
 }
@@ -94,6 +106,8 @@ pub struct OptimizeReport {
     pub passes: Vec<OptimizePassReport>,
     /// The module-wise strip's units, when it ran.
     pub units: Option<String>,
+    /// The symbol file, when `OptimizeOptions::symbols` asked for it.
+    pub symbols: Option<String>,
 }
 
 impl OptimizeReport {
@@ -171,7 +185,7 @@ pub fn wasm_optimize_checked(
                 reverted = Some(msg);
             }
         }
-        let after = encode::encode(module);
+        let after = shipped(module, opts);
         report.passes.push(OptimizePassReport {
             name,
             bytes_before: bytes.len(),
@@ -197,6 +211,12 @@ pub fn wasm_optimize_checked(
             strip(module, opts)
         });
     }
+    let sites = std::cell::RefCell::new(Vec::new());
+    if opts.panic_trap {
+        run("panics", &mut module, &mut bytes, &|module| {
+            *sites.borrow_mut() = panics::run(module, opts.symbols)
+        });
+    }
     if opts.dce {
         run("dce", &mut module, &mut bytes, &dce::run);
     }
@@ -220,6 +240,26 @@ pub fn wasm_optimize_checked(
     }
     if opts.order {
         run("order", &mut module, &mut bytes, &order::run);
+    }
+
+    let sites = sites.into_inner();
+    let mut traps = if sites.is_empty() { Vec::new() } else { panics::unmark(&mut module, sites.len()) };
+    if !traps.is_empty() {
+        // Functions that differed only in their site markers are equal now;
+        // a merged function's traps sit where its copy's do.
+        if opts.merge {
+            let moved = merge::run_mapped(&mut module);
+            for (func, _, _) in &mut traps {
+                *func = moved[*func as usize];
+            }
+        }
+        bytes = shipped(&mut module, opts);
+    }
+    if opts.symbols {
+        report.symbols = Some(symbols(&module, &bytes, &sites, &traps)?);
+    }
+    if !opts.keep_names {
+        module.names = None;
     }
 
     // The bytes that ship, decoded and validated again: every function's
@@ -261,7 +301,70 @@ fn strip(module: &mut ir::Module, opts: &OptimizeOptions) {
     module
         .customs
         .retain(|custom| opts.keep_custom_sections.iter().any(|keep| *keep == custom.name));
-    if !opts.keep_names {
+    // The symbol file is built from the names at the end; they go then.
+    if !opts.keep_names && !opts.symbols {
         module.names = None;
     }
+}
+
+/// The bytes that ship: without the names a symbol file alone kept.
+fn shipped(module: &mut ir::Module, opts: &OptimizeOptions) -> Vec<u8> {
+    if opts.keep_names {
+        return encode::encode(module);
+    }
+    let names = module.names.take();
+    let bytes = encode::encode(module);
+    module.names = names;
+    bytes
+}
+
+/// The symbol file: every function of `bytes` by index with its demangled
+/// name, then every panic site's trap by its code offset (the offset a
+/// browser's wasm stack frame shows) with what the panic said.
+fn symbols(
+    module: &ir::Module,
+    bytes: &[u8],
+    sites: &[panics::Site],
+    traps: &[(u32, usize, usize)],
+) -> Res<String> {
+    use std::fmt::Write;
+    let mut out = String::from(
+        "# wasm symbols\n# F <function index> <name>\n# P <code offset> <function index> <callee> | <message> | <location>\n",
+    );
+    let names: std::collections::HashMap<u32, &str> = module
+        .names
+        .iter()
+        .flat_map(|names| names.funcs.iter().map(|(i, s)| (*i, s.as_str())))
+        .collect();
+    let total = module.num_imported_funcs() as usize + module.funcs.len();
+    for index in 0..total as u32 {
+        if let Some(symbol) = names.get(&index) {
+            let name = demangle::demangle(symbol).map(|d| d.name).unwrap_or_else(|| symbol.to_string());
+            let _ = writeln!(out, "F {index} {name}");
+        }
+    }
+    if traps.is_empty() {
+        return Ok(out);
+    }
+    let (_, layout) = ir::Module::decode_with_layout(bytes, ir::Features::default()).map_err(|e| e.to_string())?;
+    let imported = module.num_imported_funcs();
+    let mut offsets: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    let one_line = |text: &str| text.replace('\n', "\\n").replace('|', "/");
+    for &(func, pos, site) in traps {
+        let entry = layout.funcs[(func - imported) as usize].clone();
+        if !offsets.contains_key(&func) {
+            let within = ir::body_offsets(&bytes[entry.clone()], ir::Features::default()).map_err(|e| e.to_string())?;
+            offsets.insert(func, within);
+        }
+        let at = entry.start + offsets[&func][pos];
+        let site = &sites[site];
+        let _ = writeln!(
+            out,
+            "P 0x{at:x} {func} {} | {} | {}",
+            one_line(&site.callee),
+            site.message.as_deref().map(one_line).unwrap_or_default(),
+            site.location.as_deref().unwrap_or("")
+        );
+    }
+    Ok(out)
 }
