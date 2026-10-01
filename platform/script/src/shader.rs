@@ -414,7 +414,6 @@ impl ShaderFnCompiler {
         fnip: ScriptIp,
     ) -> ScriptPodType {
         //output.backend = ShaderBackend::Wgsl;
-        output.backend.register_ids();
 
         // Each call site inlines a fresh copy of the callee, so a branching
         // call graph expands exponentially with depth. `recur_block` stops
