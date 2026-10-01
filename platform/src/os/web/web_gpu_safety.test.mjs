@@ -20,7 +20,6 @@ const web = new Function(
     MAKEPAD_GPU_MAX_FRAMES_IN_FLIGHT,
     makepad_create_gpu_watchdog,
     makepad_gpu_watchdog_complete,
-    makepad_gpu_degraded_budget,
     makepad_create_gpu_ledger,
     makepad_gpu_ledger_set,
     makepad_gpu_ledger_free,
@@ -38,7 +37,7 @@ const web = new Function(
   { log() {}, warn() {}, error() {} },
 );
 
-test("frames of any ordinary length never degrade", () => {
+test("frames of any ordinary length are not hung", () => {
   const w = web.makepad_create_gpu_watchdog();
   for (const ms of [4, 16, 33, 100, 500, web.MAKEPAD_GPU_HUNG_FRAME_MS]) {
     for (let i = 0; i < 100; i++) assert.equal(web.makepad_gpu_watchdog_complete(w, ms), false);
@@ -47,24 +46,10 @@ test("frames of any ordinary length never degrade", () => {
   assert.equal(w.worst_ms, web.MAKEPAD_GPU_HUNG_FRAME_MS);
 });
 
-test("a frame running past the hang bound degrades", () => {
+test("a frame running past the hang bound is counted as hung", () => {
   const w = web.makepad_create_gpu_watchdog();
   assert.equal(web.makepad_gpu_watchdog_complete(w, web.MAKEPAD_GPU_HUNG_FRAME_MS + 1), true);
   assert.equal(w.hung_frames, 1);
-});
-
-test("the drawable halves down to a quarter of the CSS pixels and stays there", () => {
-  const css = 1920 * 1080;
-  let budget = css * 4; // a DPR 2 drawable
-  const seen = [];
-  for (let i = 0; i < 8; i++) {
-    budget = web.makepad_gpu_degraded_budget(budget, css);
-    seen.push(budget);
-  }
-  assert.deepEqual(seen.slice(0, 4), [css * 2, css, css / 2, css / 4]);
-  assert.equal(seen.at(-1), css / 4);
-  // A drawable already below the floor never grows from a degrade.
-  assert.equal(web.makepad_gpu_degraded_budget(1000, css), 1000);
 });
 
 test("the ledger counts live bytes, re-specification replaces, deletion frees", () => {

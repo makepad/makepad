@@ -6,6 +6,14 @@ use makepad_live_id::{id, LiveId};
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
+/// GLSL ES 3.00's minimum MAX_VERTEX_ATTRIBS: the vertex inputs every
+/// WebGL 2 device takes (see [`ShaderOutput::glsl_webgl2`]).
+pub const WEBGL2_MAX_VERTEX_ATTRIBS: usize = 16;
+/// GLSL ES 3.00's minimum MAX_VARYING_VECTORS.
+pub const WEBGL2_MAX_VARYING_VECTORS: usize = 15;
+/// WebGL's largest vertex attribute stride, in bytes.
+pub const WEBGL_MAX_ATTRIB_STRIDE: usize = 255;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GlslPackedFormat {
     Float,
@@ -37,6 +45,7 @@ impl ShaderOutput {
         let geometry_fields = self.glsl_collect_geometry_fields(vm);
         let instance_fields = self.glsl_collect_instance_fields(vm);
         let varying_fields = self.glsl_collect_varying_pack_fields(vm);
+        let instance_fetch_from = self.glsl_instance_fetch_from(vm, &geometry_fields, &instance_fields);
 
         let varying_slots = varying_fields
             .last()
@@ -59,11 +68,11 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         // `samplerExternalOES` + `camera_projection[int(VIEW_ID)]` (driver ICE).
         self.glsl_write_texture_uniforms(out, /*include_video_external*/ false);
         self.glsl_write_vertex_globals(vm, out);
-        self.glsl_write_vertex_input_attrs(vm, &geometry_fields, &instance_fields, out);
+        self.glsl_write_vertex_input_attrs(vm, &geometry_fields, &instance_fields, instance_fetch_from, out);
         self.glsl_write_varying_interface(varying_slots, true, out);
         let vertex_entry = self.backend.map_function_name("io_vertex");
         self.glsl_write_functions_for_entries(out, &[vertex_entry.as_str()]);
-        self.glsl_write_vertex_main(vm, &geometry_fields, &instance_fields, &varying_fields, out);
+        self.glsl_write_vertex_main(vm, &geometry_fields, &instance_fields, instance_fetch_from, &varying_fields, out);
     }
 
     pub fn glsl_create_fragment_shader(&self, vm: &ScriptVm, shared_defs: &str, out: &mut String) {
@@ -268,27 +277,71 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         })
     }
 
+    fn glsl_packed_slots(fields: &[GlslPackedField]) -> usize {
+        fields
+            .last()
+            .map(|field| field.offset + field.slots)
+            .unwrap_or(0)
+    }
+
+    /// WebGL 2 (`glsl_webgl2`): the first packed instance vec4 read from
+    /// the instance data texture (`mp_inst_data`) instead of an attribute,
+    /// when the geometry and instance vec4s together are more vertex inputs
+    /// than every WebGL 2 device has. An instance record wider than an
+    /// attribute stride can be is read from the texture whole. `None`: all
+    /// instance data are attributes.
+    fn glsl_instance_fetch_from(
+        &self,
+        vm: &ScriptVm,
+        geometry_fields: &[GlslPackedField],
+        instance_fields: &[GlslPackedField],
+    ) -> Option<usize> {
+        if !self.glsl_webgl2 || !self.glsl_vertex_fetch_is_f32(vm) {
+            return None;
+        }
+        let geometry = Self::glsl_num_packed_vec4s(Self::glsl_packed_slots(geometry_fields));
+        let instance_slots = Self::glsl_packed_slots(instance_fields);
+        let instance = Self::glsl_num_packed_vec4s(instance_slots);
+        if geometry + instance <= WEBGL2_MAX_VERTEX_ATTRIBS {
+            return None;
+        }
+        if instance_slots * 4 > WEBGL_MAX_ATTRIB_STRIDE {
+            return Some(0);
+        }
+        Some(WEBGL2_MAX_VERTEX_ATTRIBS.saturating_sub(geometry))
+    }
+
     fn glsl_write_vertex_input_attrs(
         &self,
         vm: &ScriptVm,
         geometry_fields: &[GlslPackedField],
         instance_fields: &[GlslPackedField],
+        instance_fetch_from: Option<usize>,
         out: &mut String,
     ) {
         if self.glsl_vertex_fetch_is_f32(vm) {
-            let geometry_slots = geometry_fields
-                .last()
-                .map(|field| field.offset + field.slots)
-                .unwrap_or(0);
-            let instance_slots = instance_fields
-                .last()
-                .map(|field| field.offset + field.slots)
-                .unwrap_or(0);
+            let geometry_slots = Self::glsl_packed_slots(geometry_fields);
+            let instance_slots = Self::glsl_packed_slots(instance_fields);
             for idx in 0..Self::glsl_num_packed_vec4s(geometry_slots) {
                 writeln!(out, "in vec4 packed_geometry_{};", idx).ok();
             }
             for idx in 0..Self::glsl_num_packed_vec4s(instance_slots) {
-                writeln!(out, "in vec4 packed_instance_{};", idx).ok();
+                if instance_fetch_from.is_some_and(|from| idx >= from) {
+                    writeln!(out, "vec4 packed_instance_{};", idx).ok();
+                } else {
+                    writeln!(out, "in vec4 packed_instance_{};", idx).ok();
+                }
+            }
+            if instance_fetch_from.is_some() {
+                // The instance buffer's words as an R32UI texture, row-major
+                // at the texture's width: word `slot` of this instance.
+                writeln!(out, "uniform highp usampler2D mp_inst_data;").ok();
+                writeln!(
+                    out,
+                    "float _mp_inst_word(int slot) {{ int i = gl_InstanceID * {} + slot; int w = textureSize(mp_inst_data, 0).x; return uintBitsToFloat(texelFetch(mp_inst_data, ivec2(i % w, i / w), 0).r); }}",
+                    instance_slots
+                )
+                .ok();
             }
             return;
         }
@@ -439,10 +492,26 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         vm: &ScriptVm,
         geometry_fields: &[GlslPackedField],
         instance_fields: &[GlslPackedField],
+        instance_fetch_from: Option<usize>,
         varying_fields: &[GlslPackedField],
         out: &mut String,
     ) {
         writeln!(out, "void main() {{").ok();
+        if let Some(from) = instance_fetch_from {
+            let instance_slots = Self::glsl_packed_slots(instance_fields);
+            for idx in from..Self::glsl_num_packed_vec4s(instance_slots) {
+                let words: Vec<String> = (idx * 4..idx * 4 + 4)
+                    .map(|slot| {
+                        if slot < instance_slots {
+                            format!("_mp_inst_word({})", slot)
+                        } else {
+                            "0.0".to_string()
+                        }
+                    })
+                    .collect();
+                writeln!(out, "    packed_instance_{} = vec4({});", idx, words.join(", ")).ok();
+            }
+        }
         if self.glsl_vertex_fetch_is_f32(vm) {
             for field in geometry_fields {
                 self.glsl_unpack_field_to_statements(
@@ -590,6 +659,23 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         Some(name.to_string())
     }
 
+    /// `ident` appears in `body` as a whole identifier.
+    fn glsl_body_mentions(body: &str, ident: &str) -> bool {
+        let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let mut search_start = 0;
+        while let Some(pos) = body[search_start..].find(ident) {
+            let abs = search_start + pos;
+            let end = abs + ident.len();
+            let before = body[..abs].chars().next_back().is_some_and(is_ident);
+            let after = body[end..].chars().next().is_some_and(is_ident);
+            if !before && !after {
+                return true;
+            }
+            search_start = end;
+        }
+        false
+    }
+
     fn glsl_body_calls_function(body: &str, function_name: &str) -> bool {
         let pattern = format!("{}(", function_name);
         let mut search_start = 0;
@@ -682,17 +768,47 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         out
     }
 
+    /// The varyings: every instance field, then the shader's own varyings.
+    /// WebGL 2 (`glsl_webgl2`): when they are more vectors than every WebGL 2
+    /// device has, only the instance fields the fragment stage reads.
     fn glsl_collect_varying_pack_fields(&self, vm: &ScriptVm) -> Vec<GlslPackedField> {
+        let all = self.glsl_pack_varying_fields(vm, &|_| true);
+        let slots = Self::glsl_packed_slots(&all);
+        if !self.glsl_webgl2 || Self::glsl_num_packed_vec4s(slots) <= WEBGL2_MAX_VARYING_VECTORS {
+            return all;
+        }
+        let entry = self.backend.map_function_name("io_fragment");
+        let reachable = self.glsl_collect_reachable_functions(&[entry.as_str()]);
+        let fragment_reads = |name: &str| {
+            reachable
+                .iter()
+                .any(|&index| Self::glsl_body_mentions(&self.functions[index].out, name))
+        };
+        self.glsl_pack_varying_fields(vm, &fragment_reads)
+    }
+
+    fn glsl_pack_varying_fields(
+        &self,
+        vm: &ScriptVm,
+        keep_instance: &dyn Fn(&str) -> bool,
+    ) -> Vec<GlslPackedField> {
         let mut out = Vec::new();
         let mut offset = 0;
-        for io in &self.io {
-            if let ShaderIoKind::DynInstance = io.kind {
-                self.glsl_push_field(vm, io, "dyninst_", false, &mut offset, &mut out);
-            }
-        }
-        for io in &self.io {
-            if let ShaderIoKind::RustInstance = io.kind {
-                self.glsl_push_field(vm, io, "rustinst_", false, &mut offset, &mut out);
+        for rust_instance in [false, true] {
+            let prefix = if rust_instance { "rustinst_" } else { "dyninst_" };
+            for io in &self.io {
+                let wanted = match io.kind {
+                    ShaderIoKind::DynInstance => !rust_instance,
+                    ShaderIoKind::RustInstance => rust_instance,
+                    _ => false,
+                };
+                if !wanted {
+                    continue;
+                }
+                let name = format!("{}{}", prefix, self.backend.map_io_name(io.name));
+                if keep_instance(&name) {
+                    self.glsl_push_field(vm, io, prefix, false, &mut offset, &mut out);
+                }
             }
         }
         for io in &self.io {
@@ -1118,7 +1234,7 @@ mod typed_vertex_tests {
             ..Default::default()
         };
         let mut source = String::new();
-        compact.glsl_write_vertex_input_attrs(&vm, &[], &[], &mut source);
+        compact.glsl_write_vertex_input_attrs(&vm, &[], &[], None, &mut source);
         compact.glsl_assign_typed_vertex_inputs(&vm, &mut source);
         let off_name = compact.backend.map_field_name(id!(off));
         let color_name = compact.backend.map_field_name(id!(color));
@@ -1161,10 +1277,103 @@ mod typed_vertex_tests {
         };
         let geometry_fields = legacy.glsl_collect_geometry_fields(&vm);
         let mut source = String::new();
-        legacy.glsl_write_vertex_input_attrs(&vm, &geometry_fields, &[], &mut source);
+        legacy.glsl_write_vertex_input_attrs(&vm, &geometry_fields, &[], None, &mut source);
         assert!(source.contains("in vec4 packed_geometry_0;"), "{source}");
         assert!(source.contains("in vec4 packed_geometry_1;"), "{source}");
         assert!(source.contains("in vec4 packed_geometry_2;"), "{source}");
         assert!(!source.contains("geom_a"), "{source}");
+    }
+
+    fn instance_io(name: LiveId, ty: ScriptPodType) -> ShaderIo {
+        ShaderIo {
+            kind: ShaderIoKind::RustInstance,
+            name,
+            ty,
+            buffer_index: None,
+        }
+    }
+
+    /// WebGL 2: instance data past the vertex inputs every device has are
+    /// read from `mp_inst_data`; a record wider than an attribute stride is
+    /// read whole from it; a shader that fits is emitted unchanged.
+    #[test]
+    fn webgl2_instance_data_past_the_attribute_limit_comes_from_a_texture() {
+        let mut host = ScriptVmHost::new((), ());
+        let mut vm = ScriptVm {
+            host: &mut host,
+            bx: Box::new(ScriptVmBase::new()),
+        };
+        let vec4f = vm.bx.code.builtins.pod.pod_vec4f;
+        let make = |vm: &mut ScriptVm, geometry_vec4s: usize, instance_vec4s: usize, webgl2: bool| {
+            let names = [id!(a), id!(b), id!(c), id!(d), id!(e), id!(f), id!(g), id!(h), id!(i), id!(j), id!(k), id!(l), id!(m), id!(n), id!(o), id!(p), id!(q), id!(r), id!(s), id!(t)];
+            let mut io = Vec::new();
+            let object = vm.bx.heap.new_object();
+            let geometry_ty = vm.bx.heap.new_pod_type(
+                object,
+                None,
+                ScriptPodTy::new_struct((0..geometry_vec4s).map(|n| field(&vm.bx, names[n], vec4f)).collect()),
+                NIL,
+            );
+            io.push(vertex_io(id!(geom), geometry_ty));
+            for n in 0..instance_vec4s {
+                io.push(instance_io(names[n], vec4f));
+            }
+            ShaderOutput {
+                backend: ShaderBackend::Glsl,
+                glsl_webgl2: webgl2,
+                io,
+                ..Default::default()
+            }
+        };
+        let emit = |vm: &ScriptVm, output: &ShaderOutput| {
+            let geometry = output.glsl_collect_geometry_fields(vm);
+            let instance = output.glsl_collect_instance_fields(vm);
+            let from = output.glsl_instance_fetch_from(vm, &geometry, &instance);
+            let mut source = String::new();
+            output.glsl_write_vertex_input_attrs(vm, &geometry, &instance, from, &mut source);
+            output.glsl_write_vertex_main(vm, &geometry, &instance, from, &[], &mut source);
+            (from, source)
+        };
+
+        // 2 + 14 inputs: fits, unchanged.
+        let fits = make(&mut vm, 2, 14, true);
+        let (from, source) = emit(&vm, &fits);
+        assert_eq!(from, None);
+        assert!(source.contains("in vec4 packed_instance_13;"), "{source}");
+        assert!(!source.contains("mp_inst_data"), "{source}");
+
+        // 2 + 15 inputs (a 240-byte record): the 15th instance vec4 is fetched.
+        let over = make(&mut vm, 2, 15, true);
+        let (from, source) = emit(&vm, &over);
+        assert_eq!(from, Some(14));
+        assert!(source.contains("in vec4 packed_instance_13;"), "{source}");
+        assert!(source.contains("\nvec4 packed_instance_14;"), "{source}");
+        assert!(source.contains("uniform highp usampler2D mp_inst_data;"), "{source}");
+        assert!(source.contains("gl_InstanceID * 60 + slot"), "{source}");
+        assert!(
+            source.contains("packed_instance_14 = vec4(_mp_inst_word(56), _mp_inst_word(57), _mp_inst_word(58), _mp_inst_word(59));"),
+            "{source}"
+        );
+
+        // A 320-byte record cannot be an attribute stride: all of it is fetched.
+        let wide = make(&mut vm, 1, 20, true);
+        let (from, source) = emit(&vm, &wide);
+        assert_eq!(from, Some(0));
+        assert!(!source.contains("in vec4 packed_instance_"), "{source}");
+        assert!(source.contains("packed_instance_0 = vec4(_mp_inst_word(0)"), "{source}");
+
+        // Native GL: unchanged whatever the size.
+        let native = make(&mut vm, 2, 15, false);
+        let (from, source) = emit(&vm, &native);
+        assert_eq!(from, None);
+        assert!(source.contains("in vec4 packed_instance_14;"), "{source}");
+    }
+
+    #[test]
+    fn body_mentions_matches_whole_identifiers_only() {
+        assert!(ShaderOutput::glsl_body_mentions("x = rustinst_fur.x;", "rustinst_fur"));
+        assert!(!ShaderOutput::glsl_body_mentions("x = rustinst_fur_layer.x;", "rustinst_fur"));
+        assert!(!ShaderOutput::glsl_body_mentions("x = my_rustinst_fur;", "rustinst_fur"));
+        assert!(ShaderOutput::glsl_body_mentions("rustinst_fur_layer + rustinst_fur", "rustinst_fur"));
     }
 }

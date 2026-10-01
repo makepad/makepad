@@ -216,6 +216,12 @@ pub struct ShaderOutput {
     pub mode: ShaderMode,
     pub backend: ShaderBackend,
     pub use_vulkan: bool,
+    /// GLSL for WebGL 2 (the web backend): the vertex inputs and varyings
+    /// are fitted to what every WebGL 2 device has (GLSL ES 3.00's
+    /// minimums, [`crate::shader_glsl::WEBGL2_MAX_VERTEX_ATTRIBS`] and
+    /// [`crate::shader_glsl::WEBGL2_MAX_VARYING_VECTORS`]). A shader that
+    /// fits is emitted as without it.
+    pub glsl_webgl2: bool,
     pub io: Vec<ShaderIo>,
     pub recur_block: Vec<ScriptObject>,
     pub structs: BTreeSet<ScriptPodType>,

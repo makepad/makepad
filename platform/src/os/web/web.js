@@ -4,8 +4,8 @@ import { WasmBridge } from "../makepad_wasm_bridge/wasm_bridge.js"
 // canvas is the CSS size at the device's pixel ratio, bounded only by the
 // device's reported limits (MAX_TEXTURE_SIZE, MAX_RENDERBUFFER_SIZE,
 // MAX_VIEWPORT_DIMS). A page author can still choose a budget
-// (`renderpixelbudget`) or a ceiling (`maxdpr`) on the canvas; the GPU
-// watchdog lowers the budget only when a frame runs too long.
+// (`renderpixelbudget`) or a ceiling (`maxdpr`) on the canvas. Nothing in
+// the runtime lowers it: an app scales its own targets on measured GPU time.
 export const MAKEPAD_WEBGL_PIXEL_BUDGET = Infinity;
 
 function makepad_positive_number(value, fallback) {
@@ -94,14 +94,12 @@ export function makepad_compute_webgl_size(
 //   browser's own swap chain) are unsignalled, the next animation frame
 //   waits instead of queueing more work, so queued GPU work never grows with
 //   time. The frame is delayed, never dropped.
-// - A frame the GPU is still running after HUNG_FRAME_MS (half of the
+// - A frame the GPU ran for longer than HUNG_FRAME_MS (half of the
 //   shortest operating-system GPU watchdog, Windows' 2 s TDR, after which the
-//   driver resets the device for every application) halves the drawable's
-//   pixels, with one console error per step, down to a quarter of the
-//   viewport's CSS pixels: the content keeps drawing, at fewer pixels.
-// Ordinary GPU-bound slowness (a frame rate below the display's) is the
-// app's to handle (it can scale its own targets); this layer only stands
-// between the page and a device reset.
+//   driver resets the device for every application) is counted and
+//   reported (`hung_frames`, `worst_frame_ms`); the drawable is never
+//   changed for it. GPU-bound slowness is the app's to handle (it scales its
+//   own targets on measured GPU time).
 export const MAKEPAD_GPU_MAX_FRAMES_IN_FLIGHT = 3;
 export const MAKEPAD_GPU_HUNG_FRAME_MS = 1000;
 
@@ -112,13 +110,11 @@ export function makepad_create_gpu_watchdog() {
         held_frames: 0,
         hung_frames: 0,
         worst_ms: 0,
-        degrade_steps: 0,
-        at_floor_reported: false,
     };
 }
 
-// Records one completed frame's latency (as seen running). Returns true when
-// the drawable should shrink one step.
+// Records one completed frame's latency (as seen running). Returns true for
+// a hung frame (longer than HUNG_FRAME_MS).
 export function makepad_gpu_watchdog_complete(watchdog, latency_ms) {
     watchdog.frames += 1;
     if (latency_ms > watchdog.worst_ms) {
@@ -129,13 +125,6 @@ export function makepad_gpu_watchdog_complete(watchdog, latency_ms) {
         return true;
     }
     return false;
-}
-
-// The pixel budget one degrade step gives: half, but never below a quarter
-// of the viewport's CSS pixels (half its CSS resolution on each axis).
-export function makepad_gpu_degraded_budget(pixel_budget, css_pixels) {
-    const floor = Math.max(1, Math.floor(css_pixels / 4));
-    return Math.max(Math.min(floor, pixel_budget), Math.floor(pixel_budget / 2));
 }
 
 // Ledger: live GPU bytes by object (textures, buffers, renderbuffers), kept
@@ -1539,19 +1528,13 @@ export class WasmWebBrowser extends WasmBridge {
                 for (const queued of watchdog.in_flight) {
                     queued.seen_running = now;
                 }
-                // A frame far past the hang bound degrades once while it
-                // is still running, not only when it ends.
-                if (!frame.flagged && now - frame.submitted > MAKEPAD_GPU_HUNG_FRAME_MS) {
-                    frame.flagged = true;
-                    this.gpu_watchdog_degrade(now - frame.submitted);
-                }
                 break;
             }
             watchdog.in_flight.shift();
             gl.deleteSync(frame.sync);
             const latency = frame.seen_running > 0 ? frame.seen_running - frame.submitted : 0;
-            if (makepad_gpu_watchdog_complete(watchdog, latency) && !frame.flagged) {
-                this.gpu_watchdog_degrade(latency);
+            if (makepad_gpu_watchdog_complete(watchdog, latency)) {
+                makepad_page_console.error(`makepad: a GPU frame ran ${Math.round(latency)} ms, over the ${MAKEPAD_GPU_HUNG_FRAME_MS} ms that keeps clear of the operating systems' GPU reset`);
             }
         }
         if (watchdog.in_flight.length >= MAKEPAD_GPU_MAX_FRAMES_IN_FLIGHT) {
@@ -1591,31 +1574,7 @@ export class WasmWebBrowser extends WasmBridge {
         const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
         if (sync) {
             gl.flush();
-            watchdog.in_flight.push({ sync, submitted: now, seen_running: 0, flagged: false });
-        }
-    }
-
-    // One step down in drawable pixels, with one console error per step.
-    gpu_watchdog_degrade(latency_ms) {
-        const watchdog = this.gpu_watchdog;
-        const quality = this.ensure_render_quality();
-        const canvas_pixels = this.canvas ? this.canvas.width * this.canvas.height : Infinity;
-        const budget = Math.min(quality.pixel_budget, canvas_pixels);
-        const info = this.window_info || {};
-        const css_pixels = (info.inner_width || 0) * (info.inner_height || 0);
-        const next = makepad_gpu_degraded_budget(budget, css_pixels);
-        if (next >= budget) {
-            if (!watchdog.at_floor_reported) {
-                watchdog.at_floor_reported = true;
-                makepad_page_console.error(`makepad: a GPU frame ran ${Math.round(latency_ms)} ms at the smallest drawable (${budget} pixels): this content is too heavy for this GPU`);
-            }
-            return;
-        }
-        watchdog.degrade_steps += 1;
-        makepad_page_console.error(`makepad: a GPU frame ran ${Math.round(latency_ms)} ms, over the ${MAKEPAD_GPU_HUNG_FRAME_MS} ms that keeps clear of the operating systems' GPU reset: the drawable drops from ${budget} to ${next} pixels`);
-        quality.pixel_budget = next;
-        if (this.handlers && this.handlers.on_screen_resize) {
-            this.handlers.on_screen_resize();
+            watchdog.in_flight.push({ sync, submitted: now, seen_running: 0 });
         }
     }
 
@@ -1655,7 +1614,6 @@ export class WasmWebBrowser extends WasmBridge {
             held_frames: watchdog.held_frames,
             hung_frames: watchdog.hung_frames,
             worst_frame_ms: Math.round(watchdog.worst_ms),
-            degrade_steps: watchdog.degrade_steps,
             // null: no budget (the device's limits only).
             pixel_budget: Number.isFinite(this.ensure_render_quality().pixel_budget) ? this.ensure_render_quality().pixel_budget : null,
             ledger: this.gpu_ledger ? makepad_gpu_ledger_stats(this.gpu_ledger) : null,

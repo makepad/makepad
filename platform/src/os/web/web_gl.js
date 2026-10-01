@@ -1,5 +1,4 @@
 import {
-  MAKEPAD_WEBGL_PIXEL_BUDGET,
   WasmWebBrowser,
   makepad_compute_webgl_size,
   makepad_device_pixel_ratio,
@@ -7,6 +6,8 @@ import {
 
 const MAKEPAD_WEBGL_FALLBACK_DIMENSION = 2048;
 const MAKEPAD_WEBGL_FALLBACK_VERTEX_ATTRIBS = 16;
+// WebGL's largest vertex attribute stride, in bytes.
+const MAKEPAD_WEBGL_MAX_ATTRIB_STRIDE = 255;
 // No byte or triangle caps of the runtime's own (GPU-SAFETY.md): sizes are
 // bounded by the device's reported limits and by the wasm memory a slice
 // must lie in; a driver that cannot allocate says so (GL_OUT_OF_MEMORY,
@@ -101,12 +102,10 @@ export function makepad_query_webgl_limits(gl) {
   };
 }
 
-export function makepad_render_target_size(
-  width,
-  height,
-  limits,
-  pixel_budget = MAKEPAD_WEBGL_PIXEL_BUDGET,
-) {
+// A render target is bounded by the device's limits only: the drawable's
+// pixel budget (a page author's `renderpixelbudget`) sizes the canvas, never
+// the app's own targets, which it sizes itself.
+export function makepad_render_target_size(width, height, limits) {
   if (
     !Number.isSafeInteger(width) ||
     !Number.isSafeInteger(height) ||
@@ -115,13 +114,7 @@ export function makepad_render_target_size(
   ) {
     return { ok: false, reason: "dimensions must be positive safe integers" };
   }
-  const size = makepad_compute_webgl_size(
-    width,
-    height,
-    1.0,
-    limits,
-    pixel_budget,
-  );
+  const size = makepad_compute_webgl_size(width, height, 1.0, limits);
   if (size.width <= 0 || size.height <= 0) {
     return { ok: false, reason: "dimensions cannot fit the WebGL limits" };
   }
@@ -144,6 +137,10 @@ export class WasmWebGL extends WasmWebBrowser {
     }
     this.draw_shaders = [];
     this.array_buffers = [];
+    // Per instance buffer id: the R32UI texture a shader reads instance
+    // data from when they do not fit its vertex attributes (`mp_inst_data`,
+    // shader_glsl.rs), with the upload it mirrors.
+    this.instance_data_textures = new Map();
     this.index_buffers = [];
     this.vaos = [];
     this.textures = [];
@@ -906,19 +903,24 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
-  get_sampler_fallback_texture(target) {
+  // A 1x1 texture for a sampler the draw gave none: opaque black RGBA, or
+  // for a shadow sampler (`shadow`) a depth texture at the far plane (a
+  // shadow sampler reading a colour texture is a GL_INVALID_OPERATION that
+  // drops the whole draw), so nothing is shadowed.
+  get_sampler_fallback_texture(target, shadow = false) {
     const gl = this.gl;
     if (!gl || this.webgl_context_lost) {
       return null;
     }
+    const key = shadow ? "shadow" : target;
     const textures = this._sampler_fallback_textures ||
       (this._sampler_fallback_textures = new Map());
-    if (textures.has(target)) {
-      return textures.get(target);
+    if (textures.has(key)) {
+      return textures.get(key);
     }
     const failures = this._sampler_fallback_texture_failures ||
       (this._sampler_fallback_texture_failures = new Set());
-    if (failures.has(target)) {
+    if (failures.has(key)) {
       return null;
     }
 
@@ -942,25 +944,39 @@ export class WasmWebGL extends WasmWebBrowser {
             gl.TEXTURE_CUBE_MAP_NEGATIVE_Z,
           ]
         : [gl.TEXTURE_2D];
-      for (const face of faces) {
+      if (shadow) {
         gl.texImage2D(
-          face,
+          gl.TEXTURE_2D,
           0,
-          gl.RGBA,
+          gl.DEPTH_COMPONENT32F,
           1,
           1,
           0,
-          gl.RGBA,
-          gl.UNSIGNED_BYTE,
-          pixel,
+          gl.DEPTH_COMPONENT,
+          gl.FLOAT,
+          new Float32Array([1]),
         );
+      } else {
+        for (const face of faces) {
+          gl.texImage2D(
+            face,
+            0,
+            gl.RGBA,
+            1,
+            1,
+            0,
+            gl.RGBA,
+            gl.UNSIGNED_BYTE,
+            pixel,
+          );
+        }
       }
       const allocation_error = this.gl_checks ? gl.getError() : gl.NO_ERROR;
       if (allocation_error !== gl.NO_ERROR) {
         throw new Error(`WebGL sampler fallback allocation error ${allocation_error}`);
       }
     } catch (_error) {
-      failures.add(target);
+      failures.add(key);
       if (texture) {
         try {
           gl.deleteTexture(texture);
@@ -972,7 +988,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
     texture._texture_target = target;
     texture._render_target_valid = true;
-    textures.set(target, texture);
+    textures.set(key, texture);
     return texture;
   }
 
@@ -1413,6 +1429,9 @@ export class WasmWebGL extends WasmWebBrowser {
       });
     }
 
+    // Instance data past the vertex attributes (shader_glsl.rs).
+    const inst_data_loc = gl.getUniformLocation(shader.program, "mp_inst_data");
+
     let pass_uniform_buf = null;
     let draw_list_uniform_buf = null;
     let live_uniform_buf = null;
@@ -1433,14 +1452,19 @@ export class WasmWebGL extends WasmWebBrowser {
               "packed_geometry_",
               shader.geometry_slots,
             ),
+      // A record wider than an attribute stride is read whole from
+      // `mp_inst_data`: no instance attributes.
       inst_attribs:
-        shader.inst_attribs && shader.inst_attribs.length
+        inst_data_loc && shader.instance_slots * 4 > MAKEPAD_WEBGL_MAX_ATTRIB_STRIDE
+          ? []
+          : shader.inst_attribs && shader.inst_attribs.length
           ? this.webgl_typed_attrib_locations(shader.program, shader.inst_attribs)
           : this.webgl_attrib_locations(
               shader.program,
               "packed_instance_",
               shader.instance_slots,
             ),
+      inst_data_loc,
       pass_uniforms_binding: this.get_uniform_block_binding(
         shader.program,
         "passUniforms",
@@ -2003,7 +2027,11 @@ export class WasmWebGL extends WasmWebBrowser {
       }
     }
 
-    const instance_stride = layout.instance.stride;
+    // A shader reading instance data from `mp_inst_data` has the record's
+    // whole width as its stride, whichever part of it are attributes.
+    const instance_stride = shader.inst_data_loc
+      ? shader.instance_slots * 4
+      : layout.instance.stride;
     let instances = 0;
     if (instance_stride === 0) {
       if (instance_buffer.byte_length !== 0) {
@@ -2078,7 +2106,7 @@ export class WasmWebGL extends WasmWebBrowser {
         : this.gl.TEXTURE_2D;
       let texture;
       if (texture_id === undefined) {
-        texture = this.get_sampler_fallback_texture(expected_target);
+        texture = this.get_sampler_fallback_texture(expected_target, texture_loc.ty === "sampler2DShadow");
       } else {
         if (!Number.isSafeInteger(texture_id) || texture_id < 0) {
           return { ok: false, reason: `texture ${i} has an invalid id` };
@@ -2091,7 +2119,7 @@ export class WasmWebGL extends WasmWebBrowser {
           ) {
             return { ok: false, reason: `texture ${texture_id} is invalid` };
           }
-          texture = this.get_sampler_fallback_texture(expected_target);
+          texture = this.get_sampler_fallback_texture(expected_target, texture_loc.ty === "sampler2DShadow");
         } else {
           if (texture._render_target_valid === false) {
             return { ok: false, reason: `texture ${texture_id} is invalid` };
@@ -2122,6 +2150,15 @@ export class WasmWebGL extends WasmWebBrowser {
       sampler_textures[i] = texture;
     }
 
+    let instance_data_texture = null;
+    if (shader.inst_data_loc) {
+      const mirrored = this.instance_data_texture(vao.inst_vb_id, instance_buffer);
+      if (!mirrored.ok) {
+        return mirrored;
+      }
+      instance_data_texture = mirrored.texture;
+    }
+
     return {
       ok: true,
       geometry_buffer,
@@ -2129,9 +2166,88 @@ export class WasmWebGL extends WasmWebBrowser {
       index_buffer,
       layout,
       sampler_textures,
+      instance_data_texture,
       indices: index_buffer.length,
       instances,
     };
+  }
+
+  // The instance buffer's words as an R32UI texture (`mp_inst_data`): row
+  // major at the device's widest texture, copied on the GPU from the buffer
+  // (PIXEL_UNPACK_BUFFER) whenever the buffer was uploaded again. Rows grow
+  // to the next power of two and shrink below a quarter, as buffers do, so
+  // instance counts that change every frame update it in place.
+  instance_data_texture(buffer_id, buffer) {
+    const gl = this.gl;
+    if (!this.instance_data_textures) {
+      this.instance_data_textures = new Map();
+    }
+    let entry = this.instance_data_textures.get(buffer_id);
+    if (
+      entry &&
+      entry.buffer === buffer &&
+      entry.upload_version === buffer.upload_version &&
+      entry.gl_buf === buffer.gl_buf &&
+      entry.byte_length === buffer.byte_length
+    ) {
+      return { ok: true, texture: entry.texture };
+    }
+    const words = buffer.byte_length / 4;
+    const max = this.webgl_limits.max_texture_size;
+    const width = max;
+    const rows = Math.max(1, Math.ceil(words / width));
+    if (rows > max) {
+      return { ok: false, reason: `instance data of ${words} words exceed a ${max}x${max} texture` };
+    }
+    let bound_unpack = false;
+    try {
+      if (!entry) {
+        const texture = gl.createTexture();
+        if (!texture) {
+          return { ok: false, reason: "instance data texture allocation returned null" };
+        }
+        entry = { texture, rows: 0 };
+        this.instance_data_textures.set(buffer_id, entry);
+      }
+      gl.bindTexture(gl.TEXTURE_2D, entry.texture);
+      let capacity = 1;
+      while (capacity < rows) capacity *= 2;
+      capacity = Math.min(capacity, max);
+      if (entry.rows < rows || (rows * 4 < entry.rows && capacity !== entry.rows)) {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32UI, width, capacity, 0, gl.RED_INTEGER, gl.UNSIGNED_INT, null);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        entry.rows = capacity;
+      }
+      if (words > 0) {
+        gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, buffer.gl_buf);
+        bound_unpack = true;
+        const full_rows = Math.floor(words / width);
+        if (full_rows > 0) {
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, width, full_rows, gl.RED_INTEGER, gl.UNSIGNED_INT, 0);
+        }
+        const rest = words - full_rows * width;
+        if (rest > 0) {
+          gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, full_rows, rest, 1, gl.RED_INTEGER, gl.UNSIGNED_INT, full_rows * width * 4);
+        }
+      }
+    } catch (error) {
+      return { ok: false, reason: `instance data texture upload failed: ${error && error.message ? error.message : String(error)}` };
+    } finally {
+      if (bound_unpack) {
+        try {
+          gl.bindBuffer(gl.PIXEL_UNPACK_BUFFER, null);
+        } catch (_error) {
+        }
+      }
+    }
+    entry.buffer = buffer;
+    entry.upload_version = buffer.upload_version;
+    entry.gl_buf = buffer.gl_buf;
+    entry.byte_length = buffer.byte_length;
+    return { ok: true, texture: entry.texture };
   }
 
   configure_webgl_vao(vao, shader, preflight) {
@@ -2312,6 +2428,11 @@ export class WasmWebGL extends WasmWebBrowser {
       this.vaos[id] = undefined;
     }
     for (const id of array_buffer_ids) {
+      const mirror = this.instance_data_textures && this.instance_data_textures.get(id);
+      if (mirror) {
+        gl.deleteTexture(mirror.texture);
+        this.instance_data_textures.delete(id);
+      }
       const buffer = this.array_buffers[id];
       if (!buffer) continue;
       if (buffer.gl_buf) gl.deleteBuffer(buffer.gl_buf);
@@ -2531,13 +2652,26 @@ export class WasmWebGL extends WasmWebBrowser {
           : gl.TEXTURE_2D;
         gl.activeTexture(gl.TEXTURE0 + i);
         gl.bindTexture(target, preflight.sampler_textures[i]);
+        const texture = preflight.sampler_textures[i];
         if (tex_loc.ty === "sampler2DShadow") {
           gl.texParameteri(target, gl.TEXTURE_COMPARE_MODE, gl.COMPARE_REF_TO_TEXTURE);
           gl.texParameteri(target, gl.TEXTURE_COMPARE_FUNC, gl.LEQUAL);
           gl.texParameteri(target, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
           gl.texParameteri(target, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+          texture._compare_ref = true;
+        } else if (texture._compare_ref) {
+          // A depth texture an earlier draw compared in a shadow sampler:
+          // a plain sampler reads its values, which needs comparison off.
+          gl.texParameteri(target, gl.TEXTURE_COMPARE_MODE, gl.NONE);
+          texture._compare_ref = false;
         }
         gl.uniform1i(tex_loc.loc, i);
+      }
+      if (shader.inst_data_loc) {
+        const unit = shader.texture_locs.length;
+        gl.activeTexture(gl.TEXTURE0 + unit);
+        gl.bindTexture(gl.TEXTURE_2D, preflight.instance_data_texture);
+        gl.uniform1i(shader.inst_data_loc, unit);
       }
 
       const xr = this.xr;
@@ -2854,12 +2988,10 @@ export class WasmWebGL extends WasmWebBrowser {
       );
       return;
     }
-    const quality = this.ensure_render_quality();
     const size = makepad_render_target_size(
       args.width,
       args.height,
       this.webgl_limits,
-      quality.pixel_budget,
     );
     if (!size.ok) {
       this.reject_render_target(

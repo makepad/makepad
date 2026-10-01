@@ -887,3 +887,68 @@ test("a shipped page (no makepad_gl_checks) never queries GL errors or framebuff
   assert.equal(status_queries, 0);
   assert.equal(s.array_buffers[1].valid, true);
 });
+
+test("instance data past the attributes are read from a texture mirrored on the GPU and re-copied only after an upload", () => {
+  const s = subject();
+  const gl = s.gl;
+  Object.assign(gl, {
+    TEXTURE_2D: 30,
+    TEXTURE0: 40,
+    R32UI: 31,
+    RED_INTEGER: 32,
+    UNSIGNED_INT: 33,
+    PIXEL_UNPACK_BUFFER: 34,
+    created: [],
+    sub_images: [],
+    unpack_binds: [],
+    createTexture() { const t = { id: `t${this.created.length}` }; this.created.push(t); return t; },
+    deleteTexture(texture) { this.calls.deleted_textures.push(texture); },
+    texSubImage2D(...args) { this.sub_images.push(args); },
+    bindBuffer(target, buffer) { if (target === this.PIXEL_UNPACK_BUFFER) this.unpack_binds.push(buffer); },
+    createBuffer() { return { id: "buffer" }; },
+    deleteBuffer() {},
+    deleteVertexArray() {},
+    uniform1i(loc, unit) { this.inst_data_unit = [loc, unit]; },
+  });
+  s.webgl_limits = { max_width: 1024, max_height: 1024, max_texture_size: 8 };
+  // A 21-word record read whole from the texture (no instance attributes).
+  new Float32Array(s.memory.buffer, 64, 6).set([0, 0, 1, 0, 0, 1]);
+  new Float32Array(s.memory.buffer, 512, 42).fill(3);
+  new Uint32Array(s.memory.buffer, 256, 3).set([0, 1, 2]);
+  const draw_shader = shader(gl, [attr(gl, 0, 2, 8, 0)], []);
+  draw_shader.instance_slots = 21;
+  draw_shader.inst_data_loc = { id: "mp_inst_data" };
+  s.draw_shaders[1] = draw_shader;
+  s.FromWasmAllocArrayBuffer(f32_upload(1, 64, 6));
+  s.FromWasmAllocArrayBuffer(f32_upload(2, 512, 42));
+  s.FromWasmAllocIndexBuffer(u32_indices(1, 256, 3));
+  alloc_vao(s);
+  s.FromWasmDrawCall(draw_args());
+
+  // Two 21-word instances: 42 words, 5 full 8-wide rows and 2 words.
+  assert.deepEqual(gl.calls.draws, [[gl.TRIANGLES, 3, gl.UNSIGNED_INT, 0, 2]]);
+  assert.equal(gl.created.length, 1);
+  const image = gl.calls.texture_images.find((args) => args[2] === gl.R32UI);
+  assert.deepEqual(image.slice(3, 5), [8, 8]);
+  assert.deepEqual(gl.sub_images, [
+    [gl.TEXTURE_2D, 0, 0, 0, 8, 5, gl.RED_INTEGER, gl.UNSIGNED_INT, 0],
+    [gl.TEXTURE_2D, 0, 0, 5, 2, 1, gl.RED_INTEGER, gl.UNSIGNED_INT, 160],
+  ]);
+  assert.deepEqual(gl.inst_data_unit, [draw_shader.inst_data_loc, 0]);
+
+  // The same data draw again without a copy; a new upload copies again.
+  s.FromWasmDrawCall(draw_args());
+  assert.equal(gl.sub_images.length, 2);
+  s.FromWasmAllocArrayBuffer(f32_upload(2, 512, 21));
+  s.FromWasmDrawCall(draw_args());
+  assert.equal(gl.created.length, 1);
+  assert.deepEqual(gl.sub_images.slice(2), [
+    [gl.TEXTURE_2D, 0, 0, 0, 8, 2, gl.RED_INTEGER, gl.UNSIGNED_INT, 0],
+    [gl.TEXTURE_2D, 0, 0, 2, 5, 1, gl.RED_INTEGER, gl.UNSIGNED_INT, 64],
+  ]);
+  assert.deepEqual(gl.calls.draws.at(-1), [gl.TRIANGLES, 3, gl.UNSIGNED_INT, 0, 1]);
+
+  // Freeing the buffer frees its mirror.
+  s.FromWasmFreeWebGLResources({ array_buffer_ids: [2] });
+  assert.deepEqual(gl.calls.deleted_textures, [gl.created[0]]);
+});
