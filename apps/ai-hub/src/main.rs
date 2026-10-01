@@ -155,7 +155,8 @@ fn run() -> Result<(), AssetAiError> {
     })?;
 
     println!("{SERVICE_NAME} {SERVICE_VERSION}");
-    println!("  listening on http://{}", handle.addr);
+    let scheme = if handle.addr.ip().is_loopback() { "http" } else { "https (fleet TLS front)" };
+    println!("  listening on {scheme} {}", handle.addr);
     println!("  fleet {fleet}");
     println!("  cache dir {}", cache_dir.display());
     if std::env::var("HF_TOKEN").is_ok() {
