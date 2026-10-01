@@ -113,8 +113,13 @@ pub(crate) struct DataLive {
 
 impl DataLive {
     pub(crate) fn new(module: &Module, extra: &BTreeSet<u32>) -> DataLive {
+        DataLive::of_code(module, extra, &HashSet::new())
+    }
+
+    /// With the code of the functions in `skip` left out (not live).
+    pub(crate) fn of_code(module: &Module, extra: &BTreeSet<u32>, skip: &HashSet<u32>) -> DataLive {
         let spans = data_spans(module);
-        let code = code_anchors(module, &HashSet::new());
+        let code = code_anchors(module, skip);
         let inside = |a: u32| spans.iter().any(|(s, e, _)| a >= *s && a < *e);
         let mut words: BTreeMap<u32, u32> = BTreeMap::new();
         for (s, e, i) in &spans {

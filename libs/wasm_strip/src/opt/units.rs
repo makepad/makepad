@@ -163,6 +163,9 @@ pub struct Plan {
     pub stripped: HashSet<u32>,
     /// Stripped registration functions: their calls drop the arguments.
     pub registration: HashSet<u32>,
+    /// Prune the table even when it is exported (a host that only grows
+    /// it, as the web runtime's kernel linker does, names no entry).
+    pub prune_exported_table: bool,
     pub units: Vec<UnitReport>,
 }
 
@@ -436,116 +439,204 @@ pub fn apply(module: &mut Module, plan: &Plan) {
     }
 }
 
-/// Table entries nothing can name: a function pointer is a table index,
-/// written in live code (`i32.const`) or held in the data (a vtable, a
-/// stored callback) that is left once what only dead code pointed at is
-/// cleared. An entry whose index neither holds points at a
-/// trapping stub of its type, and dead-code elimination drops the function
-/// when nothing else uses it; repeated until nothing changes (a dropped
-/// function's constants and the data only it reached go with it). Left
-/// alone when the table is imported or exported (the host can name any
-/// entry). `boundaries`: data anchors of the code before the strip, which
-/// keep the regions of what it pointed at apart. Returns the entries
-/// stubbed.
-pub fn prune_table(module: &mut Module, boundaries: &BTreeSet<u32>) -> usize {
-    if module.imports.iter().any(|i| matches!(i.desc, ImportDesc::Table(_))) || module.exports.iter().any(|e| e.kind == ExternKind::Table) {
+/// The slots the vtables live code or any data points at hold.
+fn live_vtable_slots(module: &Module, data: &DataLive, boundaries: &BTreeSet<u32>) -> HashSet<u32> {
+    let slots = table_slots(module);
+    let word = |addr: u32| -> Option<u32> {
+        let (s, _, i) = data.spans.iter().find(|(s, e, _)| addr >= *s && addr + 4 <= *e)?;
+        let b = &module.datas[*i].bytes[(addr - s) as usize..];
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    // What live code names, and what the data live code reaches points at.
+    let mut starts: BTreeSet<u32> = data.code.clone();
+    for live in &data.live {
+        let (lo, hi) = data.region(*live);
+        let mut a = (lo + 3) & !3;
+        while a < hi {
+            match word(a) {
+                Some(w) if data.spans.iter().any(|(s, e, _)| w >= *s && w < *e) => {
+                    starts.insert(w);
+                }
+                None => break,
+                _ => {}
+            }
+            a += 4;
+        }
+    }
+    let mut out = HashSet::new();
+    let list: Vec<u32> = starts.iter().copied().collect();
+    for (k, &a) in list.iter().enumerate() {
+        let a4 = (a + 3) & !3;
+        let vtable = match (word(a4), word(a4 + 4), word(a4 + 8)) {
+            (Some(drop), Some(size), Some(align)) => a4 == a && drop < slots && size < 1 << 24 && matches!(align, 1 | 2 | 4 | 8 | 16),
+            _ => false,
+        };
+        if vtable {
+            out.insert(word(a).unwrap_or(0));
+            // Its methods, up to the next vtable (vtables sit back to back,
+            // and a header's size and align look like slots).
+            let header = |at: u32| match (word(at), word(at + 4), word(at + 8)) {
+                (Some(d), Some(sz), Some(al)) => at % 4 == 0 && d < slots && sz < 1 << 24 && matches!(al, 1 | 2 | 4 | 8 | 16),
+                _ => false,
+            };
+            // (Code also names a slot inside a vtable, loading a method from
+            // a known one: only another header ends this one.)
+            let next = boundaries.range(a + 1..).chain(starts.range(a + 1..)).copied().filter(|b| header(*b)).min().unwrap_or(u32::MAX);
+            let mut at = a + 12;
+            while let Some(w) = word(at) {
+                if w == 0 || w >= slots || at >= next {
+                    break;
+                }
+                out.insert(w);
+                at += 4;
+            }
+        } else {
+            // Another static (a thread local's key, a struct with a
+            // callback): its first words, up to the next address anything
+            // names.
+            let next_bound = boundaries.range(a + 1..).next().copied().unwrap_or(u32::MAX);
+            let end = list.get(k + 1).copied().unwrap_or(u32::MAX).min(next_bound).min(a4 + 64);
+            let mut at = a4;
+            while at < end {
+                if let Some(w) = word(at) {
+                    out.insert(w);
+                }
+                at += 4;
+            }
+        }
+    }
+    out
+}
+
+fn table_slots(module: &Module) -> u32 {
+    module
+        .elems
+        .iter()
+        .filter_map(|e| match (&e.mode, &e.items) {
+            (ElemMode::Active { table: 0, offset }, items) => match offset.as_slice() {
+                [Instr::I32Const(b), Instr::End] => Some(*b as u32 + items.len() as u32),
+                _ => None,
+            },
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// Table entries nothing live can name. A function pointer is a table
+/// index: written by code (an `i32.const` that is not an operand of
+/// arithmetic, a comparison, a branch or a load address), or held in data:
+/// a vtable (`[drop fn or 0, size, align, method...]` at an address code or
+/// reachable data names) or the first words of another static named so (a
+/// thread local's key, a struct with a callback), up to the next address
+/// anything named before the strip. Liveness is a mark from the exports
+/// and the start function: a function is live when live code calls it or a
+/// live function or the data it reaches names its slot. Every other entry
+/// points at a trapping stub of its type and dead-code elimination drops
+/// the function. Left alone when the table is imported or exported (the
+/// host can name any entry) unless `exported_ok`. `boundaries`: the data
+/// anchors of the code before the strip. Returns the entries stubbed.
+pub fn prune_table(module: &mut Module, boundaries: &BTreeSet<u32>, exported_ok: bool) -> usize {
+    if !exported_ok && (module.imports.iter().any(|i| matches!(i.desc, ImportDesc::Table(_))) || module.exports.iter().any(|e| e.kind == ExternKind::Table)) {
         return 0;
     }
-    let mut total = 0;
+    let imported = module.num_imported_funcs();
+    let count = imported + module.funcs.len() as u32;
+    let mut slot_funcs: HashMap<u32, u32> = HashMap::new();
+    for e in &module.elems {
+        if let (ElemMode::Active { table: 0, offset }, ElemItems::Funcs(funcs)) = (&e.mode, &e.items) {
+            if let [Instr::I32Const(base), Instr::End] = offset.as_slice() {
+                for (k, f) in funcs.iter().enumerate() {
+                    slot_funcs.insert(*base as u32 + k as u32, *f);
+                }
+            }
+        }
+    }
+    let consts = |instrs: &[Instr], named: &mut HashSet<u32>| {
+        for (i, instr) in instrs.iter().enumerate() {
+            if let Instr::I32Const(v) = instr {
+                if !matches!(instrs.get(i + 1), Some(Instr::Num(_) | Instr::Load(..) | Instr::SimdMem(..) | Instr::BrTable(..) | Instr::If(_) | Instr::BrIf(_))) {
+                    named.insert(*v as u32);
+                }
+            }
+        }
+    };
+    let mut live: HashSet<u32> = module.exports.iter().filter(|e| e.kind == ExternKind::Func).map(|e| e.index).collect();
+    live.extend(module.start);
+    let mut named: HashSet<u32> = HashSet::new();
+    for global in &module.globals {
+        consts(&global.init, &mut named);
+    }
+    let mut seen: HashSet<u32> = HashSet::new();
     loop {
-        // The trapping stubs there are (any function that only traps).
-        let imported = module.num_imported_funcs();
-        let mut stubs: HashMap<u32, u32> = HashMap::new();
-        for (i, func) in module.funcs.iter().enumerate() {
-            if func.locals.is_empty() && func.body == [Instr::Unreachable, Instr::End] {
-                stubs.entry(func.ty).or_insert(imported + i as u32);
+        // Direct calls and the constants of what is live.
+        let mut work: Vec<u32> = live.iter().copied().filter(|f| !seen.contains(f)).collect();
+        while let Some(f) = work.pop() {
+            if !seen.insert(f) || f < imported {
+                continue;
             }
-        }
-        let mut named: HashSet<u32> = HashSet::new();
-        // A constant names an entry unless it is plainly a number: an
-        // operand of arithmetic or a comparison, or an address loaded from.
-        let mut consts = |instrs: &[Instr]| {
-            for (i, instr) in instrs.iter().enumerate() {
-                if let Instr::I32Const(v) = instr {
-                    if !matches!(instrs.get(i + 1), Some(Instr::Num(_) | Instr::Load(..) | Instr::SimdMem(..) | Instr::BrTable(..) | Instr::If(_) | Instr::BrIf(_))) {
-                        named.insert(*v as u32);
+            let body = &module.funcs[(f - imported) as usize].body;
+            consts(body, &mut named);
+            for instr in body {
+                if let Instr::Call(c) | Instr::ReturnCall(c) | Instr::RefFunc(c) = instr {
+                    if live.insert(*c) {
+                        work.push(*c);
                     }
                 }
             }
-        };
-        for func in &module.funcs {
-            consts(&func.body);
         }
-        for global in &module.globals {
-            consts(&global.init);
-        }
-        // Every aligned word of the data live code reaches (a region per
-        // anchor, through the pointers the live regions hold).
-        // Region bounds from the code before the strip as well: a dead
-        // vtable keeps its own region instead of joining its neighbour's.
-        let data = DataLive::new(module, boundaries);
-        for start in &data.live {
-            let (start, end) = data.region(*start);
-            for (s, e, i) in &data.spans {
-                let (lo, hi) = (start.max(*s), end.min(*e));
-                let bytes = &module.datas[*i].bytes;
-                let mut a = (lo + 3) & !3;
-                // A word that starts in the region counts, wherever the
-                // next anchor falls.
-                while a < hi && a + 4 <= *e {
-                    let at = (a - s) as usize;
-                    named.insert(u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]));
-                    a += 4;
-                }
+        // The data the live code reaches.
+        let skip: HashSet<u32> = (imported..count).filter(|f| !live.contains(f)).collect();
+        let data = DataLive::of_code(module, boundaries, &skip);
+        named.extend(live_vtable_slots(module, &data, boundaries));
+        let before = live.len();
+        for slot in &named {
+            if let Some(f) = slot_funcs.get(slot) {
+                live.insert(*f);
             }
         }
-        // Data no anchor reaches before its first anchor stays named too.
-        for (s, e, i) in &data.spans {
-            let first = data.anchors.range(*s..*e).next().copied().unwrap_or(*e);
-            let bytes = &module.datas[*i].bytes;
-            let mut a = (s + 3) & !3;
-            while a + 4 <= first {
-                let at = (a - s) as usize;
-                named.insert(u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]));
-                a += 4;
-            }
-        }
-        let func_types = module.func_type_indices();
-        let stub_set: HashSet<u32> = stubs.values().copied().collect();
-        let mut changed = 0;
-        for e in 0..module.elems.len() {
-            let ElemMode::Active { table: 0, offset } = &module.elems[e].mode else { continue };
-            let [Instr::I32Const(base), Instr::End] = offset.as_slice() else { continue };
-            let base = *base as u32;
-            let ElemItems::Funcs(funcs) = &module.elems[e].items else { continue };
-            let mut funcs = funcs.clone();
-            for (k, f) in funcs.iter_mut().enumerate() {
-                if stub_set.contains(f) || named.contains(&(base + k as u32)) {
-                    continue;
-                }
-                let ty = func_types[*f as usize];
-                let stub = *stubs.entry(ty).or_insert_with(|| {
-                    module.funcs.push(Func { ty, locals: Vec::new(), body: vec![Instr::Unreachable, Instr::End] });
-                    let index = imported + module.funcs.len() as u32 - 1;
-                    if let Some(names) = &mut module.names {
-                        names.funcs.push((index, format!("__unnamed_entry_stub_{ty}")));
-                    }
-                    index
-                });
-                *f = stub;
-                changed += 1;
-            }
-            module.elems[e].items = ElemItems::Funcs(funcs);
-        }
-        if changed == 0 {
+        if live.len() == before {
             break;
         }
-        total += changed;
-        let before = code_anchors(module, &HashSet::new());
-        super::dce::run(module);
-        zero_dead_data(module, &before);
     }
-    total
+    // Every entry nothing live names traps.
+    let func_types = module.func_type_indices();
+    let mut stubs: HashMap<u32, u32> = HashMap::new();
+    for (i, func) in module.funcs.iter().enumerate() {
+        if func.locals.is_empty() && func.body == [Instr::Unreachable, Instr::End] {
+            stubs.entry(func.ty).or_insert(imported + i as u32);
+        }
+    }
+    let stub_set: HashSet<u32> = stubs.values().copied().collect();
+    let mut changed = 0;
+    for e in 0..module.elems.len() {
+        let ElemMode::Active { table: 0, offset } = &module.elems[e].mode else { continue };
+        let [Instr::I32Const(base), Instr::End] = offset.as_slice() else { continue };
+        let base = *base as u32;
+        let ElemItems::Funcs(funcs) = &module.elems[e].items else { continue };
+        let mut funcs = funcs.clone();
+        for (k, f) in funcs.iter_mut().enumerate() {
+            if live.contains(f) || named.contains(&(base + k as u32)) || stub_set.contains(f) {
+                continue;
+            }
+            let ty = func_types[*f as usize];
+            let stub = *stubs.entry(ty).or_insert_with(|| {
+                module.funcs.push(Func { ty, locals: Vec::new(), body: vec![Instr::Unreachable, Instr::End] });
+                let index = imported + module.funcs.len() as u32 - 1;
+                if let Some(names) = &mut module.names {
+                    names.funcs.push((index, format!("__unnamed_entry_stub_{ty}")));
+                }
+                index
+            });
+            *f = stub;
+            changed += 1;
+        }
+        module.elems[e].items = ElemItems::Funcs(funcs);
+    }
+    if changed > 0 {
+        super::dce::run(module);
+    }
+    changed
 }
 
 /// The whole strip: stub, drop the dead code, clear its data. Returns the
@@ -555,6 +646,6 @@ pub fn strip(module: &mut Module, plan: &Plan) -> usize {
     apply(module, plan);
     super::dce::run(module);
     let cleared = zero_dead_data(module, &before);
-    prune_table(module, &before);
+    prune_table(module, &before, plan.prune_exported_table);
     cleared
 }

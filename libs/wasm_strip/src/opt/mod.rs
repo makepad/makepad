@@ -56,6 +56,9 @@ pub struct OptimizeOptions {
     /// Units kept whatever the coverage says (`crate::module`, `crate`, or
     /// a `prefix*`).
     pub keep_units: Vec<String>,
+    /// The strip's table pruning also for a table the module exports (the
+    /// host only grows it, as the web runtime's kernel linker does).
+    pub prune_exported_table: bool,
     /// Panics become traps (see `panics`): every call of a function that
     /// never returns becomes `unreachable`, and the panic machinery behind
     /// them goes. A panic then traps without its message; `symbols` keeps
@@ -83,6 +86,7 @@ impl Default for OptimizeOptions {
             coverage: None,
             modules: None,
             keep_units: Vec::new(),
+            prune_exported_table: false,
             panic_trap: false,
             symbols: false,
         }
@@ -202,7 +206,8 @@ pub fn wasm_optimize_checked(
         (None, Some(modules)) => Some(units::plan_modules(&module, modules, &opts.keep_units)),
         (None, None) => None,
     };
-    if let Some(plan) = plan {
+    if let Some(mut plan) = plan {
+        plan.prune_exported_table = opts.prune_exported_table;
         let cleared = std::cell::Cell::new(0);
         run("units", &mut module, &mut bytes, &|module| cleared.set(units::strip(module, &plan)));
         report.units = Some(format!("{}data cleared: {} bytes\n", plan.to_text(), cleared.get()));

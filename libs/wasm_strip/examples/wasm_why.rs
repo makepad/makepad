@@ -13,6 +13,60 @@ fn main() {
         .unwrap_or_default();
     let imported = module.num_imported_funcs();
     let name = |i: u32| names.get(&i).cloned().unwrap_or_else(|| format!("#{i}"));
+    if args[2] == "--root" {
+        // The way a function is reached: back through its callers to one
+        // that sits in the table or is exported, and what names that slot.
+        let mut callers: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+        for (j, f) in module.funcs.iter().enumerate() {
+            for x in &f.body {
+                if let Instr::Call(c) | Instr::ReturnCall(c) | Instr::RefFunc(c) = x {
+                    callers.entry(*c).or_default().push(imported + j as u32);
+                }
+            }
+        }
+        let mut slot_of: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        for e in &module.elems {
+            if let (ElemMode::Active { offset, .. }, ElemItems::Funcs(fs)) = (&e.mode, &e.items) {
+                let base = match offset.first() { Some(Instr::I32Const(b)) => *b as u32, _ => 0 };
+                for (k, f) in fs.iter().enumerate() { slot_of.entry(*f).or_insert(base + k as u32); }
+            }
+        }
+        let exported: std::collections::HashSet<u32> = module.exports.iter().map(|e| e.index).collect();
+        let start = *names.iter().find(|(_, n)| n.contains(args[3].as_str())).expect("no such function").0;
+        let mut prev: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+        let mut queue = std::collections::VecDeque::from([start]);
+        let mut seen = std::collections::HashSet::from([start]);
+        while let Some(f) = queue.pop_front() {
+            if slot_of.contains_key(&f) || exported.contains(&f) {
+                let mut at = f;
+                loop {
+                    let n = name(at);
+                    println!("{}", &n[..n.len().min(180)]);
+                    match prev.get(&at) { Some(p) => at = *p, None => break }
+                }
+                if let Some(slot) = slot_of.get(&f) {
+                    println!("in table slot {slot}; i32.const {slot} in:");
+                    for (j, g) in module.funcs.iter().enumerate() {
+                        if g.body.contains(&Instr::I32Const(*slot as i32)) {
+                            let c = name(imported + j as u32);
+                            println!("   {}", &c[..c.len().min(160)]);
+                        }
+                    }
+                } else {
+                    println!("exported");
+                }
+                return;
+            }
+            for c in callers.get(&f).into_iter().flatten() {
+                if seen.insert(*c) {
+                    prev.insert(*c, f);
+                    queue.push_back(*c);
+                }
+            }
+        }
+        println!("no root found");
+        return;
+    }
     if args[2] == "--addr" {
         // Code and data pointing at or up to 400 bytes before an address.
         let addr: u32 = args[3].parse().expect("addr");
