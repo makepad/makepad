@@ -15,39 +15,21 @@ script_mod! {
 
     mod.draw.DrawSceneTexture = mod.std.set_type_default() do #(DrawSceneTexture::script_shader(vm)){
         ..mod.draw.DrawQuad,
+        ..mod.draw.ToneCurves,
         scene_texture: texture_2d(float)
         // HDR lane post inputs (post.rs BloomPass): the half-res bloom and
         // the 1x1 adapted mean luminance.
         bloom_texture: texture_2d(float)
         exposure_texture: texture_2d(float)
 
-        // AgX (Sobotka), the minimal polynomial fit (Wrensch): inset into the
-        // AgX primaries, log2 encode over [-12.47, 4.03] EV, a sigmoid, then
-        // back out. Output is display-encoded (no extra sRGB OETF). A light
-        // "punch" restores the contrast and saturation plain AgX gives up.
-        agx_curve: fn(x: vec3) -> vec3 {
-            let x2 = x * x
-            let x4 = x2 * x2
-            return x4 * x2 * 15.5 - x4 * x * 40.14 + x4 * 31.96 - x2 * x * 6.868 + x2 * 0.4298 + x * 0.1191 - vec3(0.00232, 0.00232, 0.00232)
-        }
-        agx: fn(c: vec3) -> vec3 {
-            let i = vec3(
-                dot(c, vec3(0.842479062253094, 0.0784335999999992, 0.0792237451477643)),
-                dot(c, vec3(0.0423282422610123, 0.878468636469772, 0.0791661274605434)),
-                dot(c, vec3(0.0423756549057051, 0.0784336, 0.879142973793104))
-            )
-            let lo = -12.47393
-            let hi = 4.026069
-            var e = (clamp(log2(max(i, vec3(0.0000001, 0.0000001, 0.0000001))), vec3(lo, lo, lo), vec3(hi, hi, hi)) - vec3(lo, lo, lo)) / (hi - lo)
-            // The game's contrast (grade.x): a slope about mid-grey (0.18
-            // encodes to 0.606) before the sigmoid, which rolls both ends off.
-            e = clamp((e - vec3(0.606, 0.606, 0.606)) * self.grade.x + vec3(0.606, 0.606, 0.606), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
-            let s = self.agx_curve(e)
-            let o = vec3(
-                dot(s, vec3(1.19687900512017, -0.0980208811401368, -0.0990297440797205)),
-                dot(s, vec3(-0.0528968517574562, 1.15190312990417, -0.0989611768448433)),
-                dot(s, vec3(-0.0529716355144438, -0.0980434501171241, 1.15107367264116))
-            )
+        // AgX (ToneCurves' encode, sigmoid and decode) with the game's
+        // contrast (grade.x) as a slope about mid-grey (0.18 encodes to
+        // 0.606) before the sigmoid, which rolls both ends off. Output is
+        // display-encoded (no extra sRGB OETF). A light "punch" restores
+        // the contrast and saturation plain AgX gives up.
+        agx_graded: fn(c: vec3) -> vec3 {
+            let e = clamp((self.agx_encode(c) - vec3(0.606, 0.606, 0.606)) * self.grade.x + vec3(0.606, 0.606, 0.606), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
+            let o = self.agx_decode(self.agx_contrast(e))
             let p = pow(clamp(o, vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0)), vec3(1.1, 1.1, 1.1))
             let luma = dot(p, vec3(0.2126, 0.7152, 0.0722))
             return clamp(vec3(luma, luma, luma) + (p - vec3(luma, luma, luma)) * (1.35 * self.grade.y), vec3(0.0, 0.0, 0.0), vec3(1.0, 1.0, 1.0))
@@ -64,7 +46,7 @@ script_mod! {
                 let soft = self.tilt.x * smoothstep(self.tilt.z, self.tilt.z + 0.3, abs(uv.y - self.tilt.y))
                 c = mix(c, self.bloom_texture.sample(uv).xyz * self.post2.w, min(self.post2.x + soft, 1.0))
             }
-            return self.agx(c * e)
+            return self.agx_graded(c * e)
         }
         // Perceptual luma of an HDR texel for FXAA's edge search, without
         // paying the full tone map per tap.

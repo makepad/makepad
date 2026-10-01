@@ -8,16 +8,17 @@
 //! `agx`, `filmic`), computed as the Scene3D renderer always did; a document
 //! may replace the curve with its own Splash function (`curve: fn(c: vec3)
 //! -> vec3`, installed on the draw like a material hook), so a look never
-//! needs Rust. The Sandbox lane keeps its own composite (composite.rs).
+//! needs Rust. The curves themselves are [`ToneCurves`](mod.draw.ToneCurves),
+//! the one copy the Sandbox composite (composite.rs) and graph passes use too.
 use makepad_draw::*;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
 
-    mod.draw.DrawToneMap = mod.std.set_type_default() do #(DrawToneMap::script_shader(vm)){
-        ..mod.draw.DrawQuad
-        scene_texture: texture_2d(float)
-
+    // The tone curves, one of each for every host: DrawToneMap, the
+    // Sandbox composite and graph passes (a pass's `helpers` may derive
+    // from it: `helpers: mod.draw.ToneCurves{mine: fn..}`). Linear in.
+    mod.draw.ToneCurves = {
         aces: fn(x: vec3) -> vec3 {
             let a = x * (x * 2.51 + vec3(0.03, 0.03, 0.03))
             let b = x * (x * 2.43 + vec3(0.59, 0.59, 0.59)) + vec3(0.14, 0.14, 0.14)
@@ -32,12 +33,11 @@ script_mod! {
             let f = 0.3
             return ((x * (x * a + vec3(c * b, c * b, c * b)) + vec3(d * e, d * e, d * e)) / (x * (x * a + vec3(b, b, b)) + vec3(d * f, d * f, d * f))) - vec3(e / f, e / f, e / f)
         }
-        agx_contrast: fn(x: vec3) -> vec3 {
-            let x2 = x * x
-            let x4 = x2 * x2
-            return x4 * x2 * 15.5 - x4 * x * 40.14 + x4 * 31.96 - x2 * x * 6.868 + x2 * 0.4298 + x * 0.1191 - vec3(0.00232, 0.00232, 0.00232)
-        }
-        agx: fn(c: vec3) -> vec3 {
+        // AgX (Sobotka) in three steps, so a host can grade between them:
+        // into the AgX primaries and log2-encoded over [-12.47, 4.03] EV
+        // (0..1), the sigmoid (the minimal polynomial fit), and back out
+        // (display-encoded).
+        agx_encode: fn(c: vec3) -> vec3 {
             let v = vec3(
                 c.x * 0.842479 + c.y * 0.078434 + c.z * 0.079224,
                 c.x * 0.042328 + c.y * 0.878469 + c.z * 0.079166,
@@ -45,17 +45,25 @@ script_mod! {
             )
             let lo = -12.47393
             let hi = 4.026069
-            let e = (clamp(log2(max(v, vec3(0.0000001, 0.0000001, 0.0000001))), vec3(lo, lo, lo), vec3(hi, hi, hi)) - vec3(lo, lo, lo)) / (hi - lo)
-            let s = self.agx_contrast(e)
-            let o = vec3(
+            return (clamp(log2(max(v, vec3(0.0000001, 0.0000001, 0.0000001))), vec3(lo, lo, lo), vec3(hi, hi, hi)) - vec3(lo, lo, lo)) / (hi - lo)
+        }
+        agx_contrast: fn(x: vec3) -> vec3 {
+            let x2 = x * x
+            let x4 = x2 * x2
+            return x4 * x2 * 15.5 - x4 * x * 40.14 + x4 * 31.96 - x2 * x * 6.868 + x2 * 0.4298 + x * 0.1191 - vec3(0.00232, 0.00232, 0.00232)
+        }
+        agx_decode: fn(s: vec3) -> vec3 {
+            return vec3(
                 s.x * 1.196879 + s.y * -0.098021 + s.z * -0.099029,
                 s.x * -0.052897 + s.y * 1.151903 + s.z * -0.098935,
                 s.x * -0.052968 + s.y * -0.098043 + s.z * 1.151073
             )
+        }
+        // AgX to linear light again (display-encoded, then 2.2).
+        agx: fn(c: vec3) -> vec3 {
+            let o = self.agx_decode(self.agx_contrast(self.agx_encode(c)))
             return pow(max(o, vec3(0.0, 0.0, 0.0)), vec3(2.2, 2.2, 2.2))
         }
-        // The tone curve, linear in and out (tone.x picks the standard
-        // one). A document's `curve: fn(c: vec3) -> vec3` replaces this.
         // The shoulder (PDOOM R5) for a 2D frame: identity up to 1, so its
         // ordinary colours show exactly as authored; above, the hue is kept
         // (the brightest channel held at 1) and very bright light
@@ -69,6 +77,15 @@ script_mod! {
             let white = clamp((m - 1.0) / 8.0, 0.0, 1.0)
             return mix(x / m, vec3(1.0, 1.0, 1.0), white * white)
         }
+    }
+
+    mod.draw.DrawToneMap = mod.std.set_type_default() do #(DrawToneMap::script_shader(vm)){
+        ..mod.draw.DrawQuad,
+        ..mod.draw.ToneCurves,
+        scene_texture: texture_2d(float)
+
+        // The tone curve, linear in and out (tone.x picks the standard
+        // one). A document's `curve: fn(c: vec3) -> vec3` replaces this.
         curve: fn(c: vec3) -> vec3 {
             let m = self.tone.x
             if m > 5.5 {
