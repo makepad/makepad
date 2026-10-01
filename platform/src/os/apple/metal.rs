@@ -6035,7 +6035,7 @@ pub(crate) struct MetalReadbacks {
 
 impl Cx {
     pub(crate) fn poll_texture_readbacks(&mut self) {
-        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
+        use crate::texture::ReadbackError;
         if !self
             .textures
             .1
@@ -6065,7 +6065,7 @@ impl Cx {
                 .fetch_add(1, Ordering::AcqRel)
                 .saturating_add(1);
             for work in
-                self.take_readback_work(None, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft)
+                self.take_readback_work(None)
             {
                 self.encode_texture_readback(work, command_buffer);
             }
@@ -6127,12 +6127,7 @@ impl Cx {
                     let result = if status != 4 { Err(ReadbackError::DeviceLost) } else {
                         let src: *const u8 = msg_send![staging.as_id(), contents];
                         if src.is_null() { Err(ReadbackError::Failed) } else {
-                            let mut bytes = Arc::<[u8]>::new_uninit_slice(work.width * work.height * 4);
-                            let dst = Arc::get_mut(&mut bytes).unwrap().as_mut_ptr().cast::<u8>();
-                            for y in 0..work.height {
-                                std::ptr::copy_nonoverlapping(src.add(y * stride), dst.add(y * work.width * 4), work.width * 4);
-                            }
-                            Ok(bytes.assume_init())
+                            Ok(crate::texture::copy_readback_rows(src as usize, stride, work.width, work.height, true, false))
                         }
                     };
                     work.completion.finish(result);
@@ -6198,12 +6193,7 @@ impl Cx {
     ) {
         self.readback_pass_submitted(draw_pass_id, metal_cx.current_cb_seq);
         if !self.textures.1.readbacks.slots.is_empty() {
-            use crate::texture::{ReadbackChannelOrder, ReadbackOrigin};
-            for work in self.take_readback_work(
-                Some(draw_pass_id),
-                ReadbackChannelOrder::Bgra,
-                ReadbackOrigin::TopLeft,
-            ) {
+            for work in self.take_readback_work(Some(draw_pass_id)) {
                 self.encode_texture_readback(work, command_buffer);
             }
         }

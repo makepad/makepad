@@ -117,14 +117,19 @@ impl std::fmt::Display for ReadbackError {
 }
 impl std::error::Error for ReadbackError {}
 
+/// How a backend's raw pixels are laid out (window grabs hand them on
+/// unconverted; a texture readback is normalised, see [`TextureReadback`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadbackChannelOrder { Bgra, Rgba }
+#[allow(dead_code)] // which ones a build makes depends on its backends
+pub(crate) enum ReadbackChannelOrder { Bgra, Rgba }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ReadbackOrigin { TopLeft, BottomLeft }
+pub(crate) enum ReadbackOrigin { TopLeft, BottomLeft }
 
-/// Raw, unmodified UNORM8 attachment bytes, including the attachment's alpha
-/// convention. An error is a terminal result for the ticket, with no payload.
+/// The attachment's UNORM8 pixels as RGBA, rows top to bottom, packed
+/// (`width * 4` bytes a row) on every backend; the alpha convention is the
+/// attachment's. An error is a terminal result for the ticket, with no
+/// payload.
 #[derive(Debug)]
 pub struct TextureReadback {
     pub ticket: ReadbackTicket,
@@ -133,9 +138,6 @@ pub struct TextureReadback {
     pub producer_serial: u64,
     pub width: usize,
     pub height: usize,
-    pub stride: usize,
-    pub channel_order: ReadbackChannelOrder,
-    pub origin: ReadbackOrigin,
     pub data: Result<Arc<[u8]>, ReadbackError>,
 }
 
@@ -198,6 +200,10 @@ pub(crate) struct ReadbackWork {
     pub width: usize,
     pub height: usize,
     pub reserved_bytes: usize,
+    /// The backend renders this texture bottom row first (OpenGL without a
+    /// top-left origin): its copy flips the rows.
+    #[allow(dead_code)] // set and read by the OpenGL backend only
+    pub bottom_up: bool,
     pub completion: ReadbackCompletion,
 }
 
@@ -236,7 +242,7 @@ impl Cx {
     }
 
     #[cfg(any(gpusim, not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))))]
-    pub(crate) fn take_readback_work(&mut self, pass: Option<crate::draw_pass::DrawPassId>, order: ReadbackChannelOrder, origin: ReadbackOrigin) -> Vec<ReadbackWork> {
+    pub(crate) fn take_readback_work(&mut self, pass: Option<crate::draw_pass::DrawPassId>) -> Vec<ReadbackWork> {
         let mut work = Vec::new();
         for index in 0..self.textures.1.readbacks.slots.len() {
             let slot = &self.textures.1.readbacks.slots[index];
@@ -258,12 +264,10 @@ impl Cx {
                 continue;
             }
             slot.result.producer_serial = serial;
-            slot.result.channel_order = order;
-            slot.result.origin = origin;
             let (send, receive) = crate::makepad_network::mpsc::sync_channel(1);
             slot.receive = Some(receive);
             work.push(ReadbackWork { ticket: slot.result.ticket, texture_id: id, width: slot.result.width, height: slot.result.height,
-                reserved_bytes: slot.reserved_bytes, completion: ReadbackCompletion(send) });
+                reserved_bytes: slot.reserved_bytes, bottom_up: false, completion: ReadbackCompletion(send) });
         }
         work
     }
@@ -344,13 +348,24 @@ impl ReadbackWorker {
     }
 }
 
-/// Only called by a copy worker while its backend retains the mapped resource.
-#[cfg(all(not(gpusim), not(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux")))), any(target_os = "linux", target_os = "android", target_os = "windows")))]
-pub(crate) unsafe fn copy_readback_rows(address: usize, pitch: usize, width: usize, height: usize) -> Arc<[u8]> {
+/// A readback's pixels as [`TextureReadback`] holds them (RGBA, rows top to
+/// bottom, packed) from a backend's mapped rows: `pitch` bytes a row, BGRA
+/// when `bgra`, bottom row first when `bottom_up`. The one place a backend's
+/// layout is undone. Only called while the backend retains the mapping.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) unsafe fn copy_readback_rows(address: usize, pitch: usize, width: usize, height: usize, bgra: bool, bottom_up: bool) -> Arc<[u8]> {
     let mut bytes = Arc::<[u8]>::new_uninit_slice(width * height * 4);
     let dst = Arc::get_mut(&mut bytes).unwrap().as_mut_ptr().cast::<u8>();
     for y in 0..height {
-        std::ptr::copy_nonoverlapping((address as *const u8).add(y * pitch), dst.add(y * width * 4), width * 4);
+        let src_row = if bottom_up { height - 1 - y } else { y };
+        let src = (address as *const u8).add(src_row * pitch);
+        let out = dst.add(y * width * 4);
+        std::ptr::copy_nonoverlapping(src, out, width * 4);
+        if bgra {
+            for x in 0..width {
+                std::ptr::swap(out.add(x * 4), out.add(x * 4 + 2));
+            }
+        }
     }
     bytes.assume_init()
 }
@@ -448,7 +463,6 @@ impl Texture {
             reserved_bytes, receive: None,
             result: TextureReadback {
                 ticket, allocation_generation: generation, producer_serial, width, height,
-                stride: row, channel_order: ReadbackChannelOrder::Bgra, origin: ReadbackOrigin::TopLeft,
                 data: Err(ReadbackError::NotRendered),
             },
         });

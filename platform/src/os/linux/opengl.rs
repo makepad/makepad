@@ -4211,7 +4211,7 @@ impl Cx {
     }
 
     fn gl_capture_texture_readbacks(&mut self, pass: Option<DrawPassId>) {
-        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackWorker};
+        use crate::texture::{ReadbackError, ReadbackWorker};
         if self.textures.1.gl_readbacks.jobs.is_empty()
             && !self
                 .textures
@@ -4256,19 +4256,9 @@ impl Cx {
         };
         // A pass has a uniform row orientation. Current-allocation requests
         // may refer to different passes; set each result from its native owner.
-        let work =
-            self.take_readback_work(pass, ReadbackChannelOrder::Rgba, ReadbackOrigin::TopLeft);
-        for work in work {
-            let origin = if self.textures[work.texture_id].os.rendered_top_left {
-                ReadbackOrigin::TopLeft
-            } else {
-                ReadbackOrigin::BottomLeft
-            };
-            for slot in &mut self.textures.1.readbacks.slots {
-                if slot.result.ticket == work.ticket {
-                    slot.result.origin = origin;
-                }
-            }
+        let work = self.take_readback_work(pass);
+        for mut work in work {
+            work.bottom_up = !self.textures[work.texture_id].os.rendered_top_left;
             let Some(source) = self.textures[work.texture_id].os.gl_texture else {
                 work.completion.finish(Err(ReadbackError::NotRendered));
                 continue;
@@ -4395,6 +4385,7 @@ impl Cx {
                             } else {
                                 let width = job.work.width;
                                 let height = job.work.height;
+                                let bottom_up = job.work.bottom_up;
                                 let (send, receive) = crate::makepad_network::mpsc::sync_channel(1);
                                 job.receive = Some(receive);
                                 // The renderer retains the mapped PBO and does
@@ -4405,6 +4396,8 @@ impl Cx {
                                         width * 4,
                                         width,
                                         height,
+                                        false,
+                                        bottom_up,
                                     );
                                     let _ = send.try_send(bytes);
                                 }));

@@ -52,11 +52,11 @@ impl Cx {
     }
 
     pub(crate) fn web_capture_texture_readbacks(&mut self, pass: Option<crate::DrawPassId>) {
-        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
+        use crate::texture::ReadbackError;
         if self.os.readback_device_lost {
             self.fail_pending_readbacks(ReadbackError::DeviceLost); return;
         }
-        let work = self.take_readback_work(pass, ReadbackChannelOrder::Rgba, ReadbackOrigin::TopLeft);
+        let work = self.take_readback_work(pass);
         for work in work {
             if work.width * work.height * 4 > work.reserved_bytes {
                 work.completion.finish(Err(ReadbackError::Backpressure)); continue;

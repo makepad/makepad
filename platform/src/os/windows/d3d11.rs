@@ -1537,7 +1537,7 @@ impl Cx {
     }
 
     fn d3d_capture_texture_readbacks(&mut self, pass: Option<DrawPassId>) {
-        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackWorker};
+        use crate::texture::{ReadbackError, ReadbackWorker};
         if self.textures.1.d3d_readbacks.jobs.is_empty()
             && !self
                 .textures
@@ -1569,7 +1569,7 @@ impl Cx {
             }
         }
         let work =
-            self.take_readback_work(pass, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft);
+            self.take_readback_work(pass);
         for work in work {
             debug_assert_ne!(work.ticket.0, 0);
             let Some(source) = self.textures[work.texture_id].os.texture.clone() else {
@@ -1692,7 +1692,7 @@ impl Cx {
                                         // The lease owns a COM reference even
                                         // if Cx is destroyed while copying.
                                         let bytes = crate::texture::copy_readback_rows(
-                                            address, pitch, width, height,
+                                            address, pitch, width, height, true, false,
                                         );
                                         drop(owner);
                                         let _ = send.try_send(bytes);

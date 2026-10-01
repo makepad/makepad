@@ -2,7 +2,7 @@ use super::*;
 use crate::mobile::{self, PhoneHit, PhoneScreen};
 use crate::mobile_tiles::{Face, HomeMetrics};
 use makepad_widgets::makepad_platform::event::{DigitDevice, DigitId, FingerCancelEvent, TouchPoint, TouchState, TouchUpdateEvent};
-use makepad_widgets::makepad_platform::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackRequest, ReadbackTicket, TextureReadback};
+use makepad_widgets::makepad_platform::{ReadbackError, ReadbackRequest, ReadbackTicket, TextureReadback};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -319,20 +319,20 @@ fn srgb(c: f32) -> f32 {
 /// readback: the band rows.
 fn band_sample(r: &TextureReadback, inset: usize, rows: usize) -> Option<(BandRows, BandRows)> {
     let data = r.data.as_ref().ok()?;
-    if r.width == 0 || rows == 0 || r.height < (inset + rows) * 2 || r.stride < r.width * 4 { return None; }
-    let (ri, bi) = match r.channel_order { ReadbackChannelOrder::Bgra => (2, 0), ReadbackChannelOrder::Rgba => (0, 2) };
+    if r.width == 0 || rows == 0 || r.height < (inset + rows) * 2 { return None; }
+    let stride = r.width * 4;
     let mean = |from: usize| {
         let mut sum = [0.0f32; 3];
         let mut edges = 0usize;
         for y in from..from + rows {
-            let row = &data[y * r.stride..y * r.stride + r.width * 4];
+            let row = &data[y * stride..(y + 1) * stride];
             let mut last: Option<f32> = None;
             for px in row.chunks_exact(4) {
-                let (red, green, blue) = (linear(px[ri]), linear(px[1]), linear(px[bi]));
+                let (red, green, blue) = (linear(px[0]), linear(px[1]), linear(px[2]));
                 sum[0] += red;
                 sum[1] += green;
                 sum[2] += blue;
-                let seen = (0.2126 * px[ri] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[bi] as f32) / 255.0;
+                let seen = (0.2126 * px[0] as f32 + 0.7152 * px[1] as f32 + 0.0722 * px[2] as f32) / 255.0;
                 if let Some(last) = last { edges += usize::from((seen - last).abs() > BAND_EDGE); }
                 last = Some(seen);
             }
@@ -345,12 +345,7 @@ fn band_sample(r: &TextureReadback, inset: usize, rows: usize) -> Option<(BandRo
             plain: edges as f32 / (rows * (r.width - 1).max(1)) as f32 <= BAND_PLAIN,
         }
     };
-    // Rows count from the top of the texture unless it says otherwise.
-    let (top, bottom) = (mean(inset), mean(r.height - inset - rows));
-    Some(match r.origin {
-        ReadbackOrigin::TopLeft => (top, bottom),
-        ReadbackOrigin::BottomLeft => (bottom, top),
-    })
+    Some((mean(inset), mean(r.height - inset - rows)))
 }
 
 impl WmDesk {
@@ -1163,7 +1158,7 @@ mod tests {
         }
         TextureReadback {
             ticket: ReadbackTicket(1), allocation_generation: 0, producer_serial: 0,
-            width, height, stride: width * 4, channel_order: ReadbackChannelOrder::Rgba, origin: ReadbackOrigin::TopLeft,
+            width, height,
             data: Ok::<Arc<[u8]>, ReadbackError>(data.into()),
         }
     }

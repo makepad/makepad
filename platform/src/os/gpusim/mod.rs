@@ -5,7 +5,7 @@ mod shader;
 mod virtual_gpu;
 
 pub use crate::texture::{
-    ReadbackChannelOrder, ReadbackError, ReadbackOrigin, ReadbackRequest, ReadbackTicket,
+    ReadbackError, ReadbackRequest, ReadbackTicket,
     TextureReadback, TextureReadbackUsage, TEXTURE_READBACK_MAX_BYTES, TEXTURE_READBACK_MAX_REQUESTS,
 };
 
@@ -195,12 +195,13 @@ impl Cx {
     }
 
     pub(crate) fn gpusim_capture_texture_readbacks(&mut self, pass: Option<crate::DrawPassId>) {
-        use crate::texture::{ReadbackChannelOrder, ReadbackError, ReadbackOrigin};
+        use crate::texture::ReadbackError;
         if self.textures.1.readbacks.slots.is_empty() { return; }
-        for work in self.take_readback_work(pass, ReadbackChannelOrder::Bgra, ReadbackOrigin::TopLeft) {
+        for work in self.take_readback_work(pass) {
             debug_assert_ne!(work.ticket.0, 0);
             let bytes = self.os.render_targets.read_color_raw_bgra8(work.texture_id)
                 .filter(|bytes| bytes.len() == work.width * work.height * 4 && bytes.len() <= work.reserved_bytes)
+                .map(|bgra| unsafe { crate::texture::copy_readback_rows(bgra.as_ptr() as usize, work.width * 4, work.width, work.height, true, false) })
                 .ok_or(ReadbackError::NotRendered);
             work.completion.finish(bytes);
         }

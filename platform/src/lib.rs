@@ -340,7 +340,7 @@ pub use {
             StorageEstimate, StorageResponse, StorageResult, StorageStat, DEFAULT_STORAGE_VALUE_CAP,
             MAX_STORAGE_KEY_BYTES, MAX_STORAGE_LIST_LIMIT, MAX_STORAGE_NAMESPACE_BYTES,
         },
-        texture::{ReadbackTicket, ReadbackRequest, ReadbackChannelOrder, ReadbackOrigin, ReadbackError, TextureReadback, TEXTURE_READBACK_MAX_BYTES,
+        texture::{ReadbackTicket, ReadbackRequest, ReadbackError, TextureReadback, TEXTURE_READBACK_MAX_BYTES,
             image_cache_use_mipmaps, Texture, TextureAnimation, TextureFormat, TextureId,
             TextureSize, TextureUpdated, TextureWrap, CompressedTextureFormat,
         },

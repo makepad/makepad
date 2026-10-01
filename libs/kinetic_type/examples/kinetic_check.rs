@@ -334,20 +334,16 @@ impl KineticHost {
         for result in cx.try_take_texture_readbacks_for(&[ticket]) {
             let data = result.data.unwrap_or_else(|e| finish(Err(format!("readback: {e}"))));
             let job = self.job.as_ref().unwrap();
-            let bgra = result.channel_order == ReadbackChannelOrder::Bgra;
-            let flip = result.origin == ReadbackOrigin::BottomLeft;
             let cols = job.cols.min(job.count).max(1);
             let (w, h) = (job.size.0 as usize, job.size.1 as usize);
             let (cx0, cy0) = ((self.frame % cols) * w, (self.frame / cols) * h);
             let sheet_w = w * cols;
             for y in 0..h.min(result.height) {
-                let row = if flip { result.height - 1 - y } else { y };
                 for x in 0..w.min(result.width) {
-                    let s = row * result.stride + x * 4;
-                    let px = &data[s..s + 4];
+                    let s = (y * result.width + x) * 4;
                     let d = ((cy0 + y) * sheet_w + cx0 + x) * 4;
-                    let rgba = if bgra { [px[2], px[1], px[0], 255] } else { [px[0], px[1], px[2], 255] };
-                    self.sheet[d..d + 4].copy_from_slice(&rgba);
+                    self.sheet[d..d + 3].copy_from_slice(&data[s..s + 3]);
+                    self.sheet[d + 3] = 255;
                 }
             }
             self.frame += 1;

@@ -273,7 +273,7 @@ impl Accumulator {
                 Ok(bytes) => {
                     let mut m = 0u8;
                     for row in 0..r.height {
-                        let line = &bytes[row * r.stride..row * r.stride + r.width * 4];
+                        let line = &bytes[row * r.width * 4..(row + 1) * r.width * 4];
                         m = m.max(line.iter().enumerate().filter(|(i, _)| i % 4 != 3).map(|(_, b)| *b).max().unwrap_or(0));
                     }
                     m as f32 / 4.0

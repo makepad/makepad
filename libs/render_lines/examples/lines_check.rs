@@ -484,20 +484,7 @@ impl LinesHost {
         let Some(State::Reading(ticket)) = self.state else { return };
         for result in cx.try_take_texture_readbacks_for(&[ticket]) {
             let data = result.data.unwrap_or_else(|e| finish(Err(format!("readback: {e}"))));
-            let bgra = result.channel_order == ReadbackChannelOrder::Bgra;
-            let flip = result.origin == ReadbackOrigin::BottomLeft;
-            let mut rgba = Vec::with_capacity(result.width * result.height * 4);
-            for y in 0..result.height {
-                let row = if flip { result.height - 1 - y } else { y };
-                for px in data[row * result.stride..row * result.stride + result.width * 4].chunks_exact(4) {
-                    if bgra {
-                        rgba.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
-                    } else {
-                        rgba.extend_from_slice(px);
-                    }
-                }
-            }
-            self.pics.push(Picture { width: result.width, height: result.height, rgba });
+            self.pics.push(Picture { width: result.width, height: result.height, rgba: data.to_vec() });
             self.jobs.pop_front();
             self.state = Some(State::Idle);
             if self.jobs.is_empty() {
