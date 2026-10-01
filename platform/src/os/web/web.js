@@ -2056,6 +2056,15 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.audio_context = audio_context;
         this.audio_callback_started = false;
+        // iOS: Web Audio is an "ambient" session by default, which the ring/silent switch
+        // mutes; a film or app that plays sound is "playback". And the context must be
+        // resumed while the gesture that created it is still on the stack.
+        if (navigator.audioSession) {
+            try { navigator.audioSession.type = "playback"; } catch (_e) {}
+        }
+        if (audio_context.state === "suspended") {
+            audio_context.resume().catch(() => {});
+        }
 
         const start_worklet = async () => {
             let cancel_startup;
