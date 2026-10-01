@@ -540,8 +540,12 @@ impl ScriptHeap {
             }
         }
 
-        // Mark ScriptBody scope and me objects
+        // Mark ScriptBody scope and me objects (a transient body's only
+        // while it is alive: `mark_transient_bodies`)
         for body in code.bodies.borrow().iter() {
+            if body.transient {
+                continue;
+            }
             if let ScriptSource::Mod(script_mod) = &body.source {
                 for v in script_mod.values.iter() {
                     self.mark_value(*v);
@@ -568,11 +572,110 @@ impl ScriptHeap {
         }
 
         // Process the work list - use while loop since mark_inner adds to mark_vec
+        self.drain_mark_vec();
+        self.mark_transient_bodies(threads, code);
+    }
+
+    fn drain_mark_vec(&mut self) {
         let mut i = 0;
         while i < self.mark_vec.len() {
             let mark = self.mark_vec[i];
             self.mark_inner(mark);
             i += 1;
+        }
+        self.mark_vec.clear();
+    }
+
+    /// Transient bodies ([`crate::vm::ScriptVm::eval_transient`]) live while
+    /// a thread runs in them, a live fn is defined in them or a live object
+    /// was built by them; a live body keeps its scope, `me`, values and
+    /// string literals, which can make more bodies live (to a fixpoint).
+    /// The rest are freed here: their objects are unmarked, and the sweep
+    /// that follows takes them.
+    fn mark_transient_bodies(&mut self, threads: &ScriptThreads, code: &ScriptCode) {
+        let transient: Vec<bool> = code.bodies.borrow().iter().map(|b| b.transient).collect();
+        if !transient.contains(&true) {
+            return;
+        }
+        let mut live = vec![false; transient.len()];
+        let mut newly = Vec::new();
+        let note = |ip: ScriptIp, live: &mut Vec<bool>, newly: &mut Vec<usize>| {
+            let b = ip.body as usize;
+            if !ip.is_unknown() && transient.get(b) == Some(&true) && !live[b] {
+                live[b] = true;
+                newly.push(b);
+            }
+        };
+        for thread_idx in 0..threads.len() {
+            if let Some(thread) = threads.get(thread_idx) {
+                note(thread.trap.ip, &mut live, &mut newly);
+                for call in thread.calls.iter() {
+                    if let Some(ip) = call.return_ip {
+                        note(ip, &mut live, &mut newly);
+                    }
+                }
+            }
+        }
+        loop {
+            for i in 1..self.objects.len() {
+                let obj = self.objects.get_at(i);
+                if !obj.tag.is_alloced() || !(obj.tag.is_marked() || obj.tag.is_static()) {
+                    continue;
+                }
+                if let Some(ScriptFnPtr::Script(ip)) = obj.tag.as_fn() {
+                    note(ip, &mut live, &mut newly);
+                }
+                note(obj.made_at, &mut live, &mut newly);
+            }
+            if newly.is_empty() {
+                break;
+            }
+            {
+                let bodies = code.bodies.borrow();
+                for b in newly.drain(..) {
+                    let body = &bodies[b];
+                    self.mark_vec.push(ScriptGcMark::Object(body.scope.as_object()));
+                    self.mark_vec.push(ScriptGcMark::Object(body.me.as_object()));
+                    if let Some(end) = &body.end_scope {
+                        self.mark_vec.push(ScriptGcMark::Object(end.as_object()));
+                    }
+                    if let ScriptSource::Mod(script_mod) = &body.source {
+                        for v in script_mod.values.iter() {
+                            self.mark_value(*v);
+                        }
+                    }
+                    for str_val in body.tokenizer.iter_strings() {
+                        if let Some(ptr) = str_val.as_string() {
+                            if let Some(str_data) = self.strings[ptr].as_mut() {
+                                if !str_data.tag.is_static() {
+                                    str_data.tag.set_mark();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            self.drain_mark_vec();
+        }
+        let mut bodies = code.bodies.borrow_mut();
+        let mut free = code.free_bodies.borrow_mut();
+        for (b, body) in bodies.iter_mut().enumerate() {
+            if body.transient && !live[b] {
+                *body = ScriptBody {
+                    source: ScriptSource::Free,
+                    effective_code: String::new(),
+                    tokenizer: Default::default(),
+                    parser: Default::default(),
+                    scope: Default::default(),
+                    me: Default::default(),
+                    end_scope: None,
+                    checkpoint: None,
+                    source_len: 0,
+                    content_hash: 0,
+                    transient: false,
+                };
+                free.push(b as u16);
+            }
         }
     }
 

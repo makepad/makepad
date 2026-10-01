@@ -182,12 +182,6 @@ impl From<DrawSceneCustom> for CustomMaterial {
 
 /// Build one program object on the lane and instance a draw struct from it.
 fn instance_custom(vm: &mut ScriptVm, obj: ScriptObject) -> Result<DrawSceneCustom, MaterialError> {
-    // Source edits reuse a ScriptIp (body + opcode offset), while the draw
-    // function cache hashes only those locations: forget this object's
-    // shortcut so a new body is compiled. Generated-code caching still
-    // shares identical shaders.
-    let hash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, obj);
-    vm.host.cx_mut().draw_shaders.cache_functions_to_shader.remove(&hash);
     // #[deref] construction applies DrawScenePbr's defaults and can already
     // have compiled its stock shader: clear it before testing this candidate.
     let mut draw = DrawSceneCustom::script_new(vm);
@@ -315,8 +309,6 @@ impl DrawSceneCustom {
             }
         }
         let obj = material::build_program(vm, &material::ProgramRequest { base, kind: BaseKind::Pbr, hooks: &caster_hooks, mask: HookMask::ALL, overrides: &overrides })?;
-        let hash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, obj);
-        vm.host.cx_mut().draw_shaders.cache_functions_to_shader.remove(&hash);
         let mut draw = DrawMaterialShadow::script_new(vm);
         draw.draw_vars.draw_shader_id = None;
         draw.draw_vars.geometry_id = None;

@@ -4017,7 +4017,7 @@ impl DrawVars {
             }
 
             // Cache 2: Compute function hash and check if we've seen these functions before
-            let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, &vm.bx.code, io_self);
             let pipe = DrawVars::pipeline_state_hash(&vm.bx.heap, io_self);
             {
                 let cx = vm.host.cx();

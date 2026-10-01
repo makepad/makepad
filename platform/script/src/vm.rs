@@ -55,6 +55,9 @@ pub struct ScriptMod {
 pub enum ScriptSource {
     Mod(ScriptMod),
     Streaming { code: String },
+    /// A transient body the GC reclaimed (see [`ScriptVm::eval_transient`]):
+    /// its slot is reused by the next module added.
+    Free,
 }
 
 pub struct ScriptBody {
@@ -69,6 +72,25 @@ pub struct ScriptBody {
     pub end_scope: Option<ScriptObjectRef>,
     pub checkpoint: Option<ParserCheckpoint>,
     pub source_len: usize,
+    /// The text this body was last parsed from (and its injected values),
+    /// hashed: equal content compiles to equal opcodes, so a fn is
+    /// identified by this and its opcode index, whatever body slot or file
+    /// name holds it (see [`ScriptCode::fn_content_key`]).
+    pub content_hash: u64,
+    /// Evaluated with [`ScriptVm::eval_transient`]: its scope is not a GC
+    /// root, and the body is freed once nothing made from it is alive (no
+    /// fn defined in it, no object built by it, no thread running it).
+    pub transient: bool,
+}
+
+impl ScriptBody {
+    fn content_hash_of(code: &str, values: &[ScriptValue]) -> u64 {
+        let mut id = LiveId::from_str(code);
+        for v in values {
+            id = id.bytes_append(&v.raw().to_le_bytes());
+        }
+        id.0
+    }
 }
 
 #[derive(Default)]
@@ -125,6 +147,9 @@ pub struct ScriptCode {
     pub builtins: ScriptBuiltins,
     pub native: RefCell<ScriptNative>,
     pub bodies: ScriptBodies,
+    /// Slots of reclaimed transient bodies, reused before the body list
+    /// grows (a body id is part of every ip, so the list is finite).
+    pub free_bodies: RefCell<Vec<u16>>,
     pub crate_manifests: Rc<RefCell<HashMap<String, String>>>,
     pub script_mod_overrides: Rc<RefCell<HashMap<ScriptModKey, String>>>,
 }
@@ -148,6 +173,15 @@ impl std::fmt::Display for ScriptLoc {
 }
 
 impl ScriptCode {
+    /// What a fn's code is, for caches keyed by it (the draw shader cache):
+    /// the content of its body and its opcode index. Unlike the ip itself
+    /// it changes when a body is re-evaluated with new text, and two bodies
+    /// with the same text give the same key.
+    pub fn fn_content_key(&self, ip: ScriptIp) -> u64 {
+        let content = self.bodies.borrow().get(ip.body as usize).map_or(ip.body as u64, |b| b.content_hash);
+        LiveId(content).bytes_append(&ip.index.to_le_bytes()).0
+    }
+
     /// The source text of the fn whose body starts at `ip` — the `fn` token's
     /// line through the matching closing brace — plus where it lives. What
     /// the design tweaker shows under a material well: the pixel/vertex
@@ -1330,7 +1364,9 @@ impl<'a> ScriptVm<'a> {
         self.drain_stale_errors();
         let value = self.run_core();
         if let Some(end) = self.bx.threads.cur().root_end_scope.take() {
-            self.bx.code.bodies.borrow_mut()[body_id as usize].end_scope = Some(end);
+            let mut bodies = self.bx.code.bodies.borrow_mut();
+            let body = &mut bodies[body_id as usize];
+            body.end_scope = Some(if body.transient { ScriptObjectRef::unrooted(end.as_object()) } else { end });
         }
         value
     }
@@ -1634,6 +1670,10 @@ impl<'a> ScriptVm<'a> {
     }
 
     pub fn add_script_mod(&mut self, new_mod: ScriptMod) -> u16 {
+        self.add_script_mod_with(new_mod, false)
+    }
+
+    fn add_script_mod_with(&mut self, new_mod: ScriptMod, transient: bool) -> u16 {
         // Register this crate's manifest path for crate path resolution
         let crate_name = new_mod.module_path.split("::").next().unwrap_or("");
         if !crate_name.is_empty() {
@@ -1649,9 +1689,16 @@ impl<'a> ScriptVm<'a> {
             .heap
             .set_value_def(scope_obj, id!(mod).into(), self.bx.heap.modules.into());
         self.apply_injected_globals_to_scope(scope_obj);
-        let scope = self.bx.heap.new_object_ref(scope_obj);
         let me_obj = self.bx.heap.new_with_proto(id!(root_me).into());
-        let me = self.bx.heap.new_object_ref(me_obj);
+        // A transient body's scope and `me` are kept by the body only while
+        // it is alive (see `ScriptHeap::mark_transient_bodies`), not as roots.
+        let (scope, me) = if transient {
+            self.bx.heap.set_reffed(scope_obj);
+            self.bx.heap.set_reffed(me_obj);
+            (ScriptObjectRef::unrooted(scope_obj), ScriptObjectRef::unrooted(me_obj))
+        } else {
+            (self.bx.heap.new_object_ref(scope_obj), self.bx.heap.new_object_ref(me_obj))
+        };
         let key = ScriptModKey::from_script_mod(&new_mod);
         let override_code = self
             .bx
@@ -1674,6 +1721,8 @@ impl<'a> ScriptVm<'a> {
             end_scope: None,
             checkpoint: None,
             source_len: 0,
+            content_hash: 0,
+            transient,
         };
         let mut bodies = self.bx.code.bodies.borrow_mut();
         for (i, body) in bodies.iter_mut().enumerate() {
@@ -1687,6 +1736,7 @@ impl<'a> ScriptVm<'a> {
                         body.source = new_body.source;
                         body.scope = new_body.scope;
                         body.me = new_body.me;
+                        body.transient = transient;
                         if body.effective_code != new_body.effective_code || values_changed {
                             body.effective_code = new_body.effective_code;
                             body.tokenizer = ScriptTokenizer::default();
@@ -1698,6 +1748,10 @@ impl<'a> ScriptVm<'a> {
                     }
                 }
             }
+        }
+        if let Some(i) = self.bx.code.free_bodies.borrow_mut().pop() {
+            bodies[i as usize] = new_body;
+            return i;
         }
         let i = bodies.len();
         // A body id past the packing would alias another body's functions
@@ -1711,8 +1765,23 @@ impl<'a> ScriptVm<'a> {
         self.eval_with_source(script_mod, ScriptObject::ZERO)
     }
 
+    /// [`Self::eval`] for source made at runtime (a generated shader, a
+    /// document, a UI built from data): the body is reclaimed by the GC once
+    /// nothing made from it is alive, and its slot reused, so a host can
+    /// evaluate new source for as long as it runs. Name the module after its
+    /// content (`file`): the same text then reuses its body, and a body is
+    /// never re-evaluated with other text while what it made still lives.
+    pub fn eval_transient(&mut self, script_mod: ScriptMod) -> ScriptValue {
+        let body_id = self.add_script_mod_with(script_mod, true);
+        self.eval_body(body_id, ScriptObject::ZERO)
+    }
+
     pub fn eval_with_source(&mut self, script_mod: ScriptMod, source: ScriptObject) -> ScriptValue {
         let body_id = self.add_script_mod(script_mod);
+        self.eval_body(body_id, source)
+    }
+
+    fn eval_body(&mut self, body_id: u16, source: ScriptObject) -> ScriptValue {
 
         // Set __script_source__ on the scope if source is provided
         // If source has FROM_EVAL flag, use its prototype instead
@@ -1750,6 +1819,7 @@ impl<'a> ScriptVm<'a> {
                     &script_mod.values,
                 );
                 body.source_len = body.effective_code.len();
+                body.content_hash = ScriptBody::content_hash_of(&body.effective_code, &script_mod.values);
             }
             // Parse errors never enter the trap queue (the parser recovers);
             // surface them to a captured-diagnostics sink here or a validating
@@ -1876,6 +1946,7 @@ impl<'a> ScriptVm<'a> {
             );
 
             body.checkpoint = Some(cp);
+            body.content_hash = ScriptBody::content_hash_of(code, &existing_mod.values);
 
             // A host that installed a captured-error sink is running a GAME
             // eval and needs structural parse errors to FAIL it — the
@@ -2004,6 +2075,7 @@ impl ScriptVmBase {
                 builtins,
                 native: RefCell::new(native),
                 bodies: Default::default(),
+                free_bodies: Default::default(),
                 crate_manifests: Default::default(),
                 script_mod_overrides: Default::default(),
             },

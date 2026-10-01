@@ -25,6 +25,12 @@ pub struct ScriptObjectRef {
 }
 
 impl ScriptObjectRef {
+    /// A ref that is not a GC root: whoever holds it marks the object
+    /// itself (a transient script body's scope).
+    pub(crate) fn unrooted(obj: ScriptObject) -> Self {
+        Self { roots: None, obj }
+    }
+
     pub fn is_zero(&self) -> bool {
         self.obj == ScriptObject::ZERO
     }

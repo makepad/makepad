@@ -1145,7 +1145,7 @@ impl DrawVars {
                 }
             }
 
-            let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, io_self);
+            let fnhash = DrawVars::compute_shader_functions_hash(&vm.bx.heap, &vm.bx.code, io_self);
             let pipe = DrawVars::pipeline_state_hash(&vm.bx.heap, io_self);
             {
                 let cx = vm.host.cx();
@@ -1409,10 +1409,13 @@ impl DrawVars {
         hash
     }
 
-    /// Compute a hash of all function IDs on an object by iterating through
-    /// the prototype chain and hashing each function's ScriptIp, and its
-    /// pipeline state ([`DrawVars::pipeline_state_hash`]).
-    pub fn compute_shader_functions_hash(heap: &ScriptHeap, obj: ScriptObject) -> LiveId {
+    /// Compute a hash of all functions on an object by iterating through
+    /// the prototype chain and hashing each function's code (its body's
+    /// content and opcode index, [`ScriptCode::fn_content_key`]), and its
+    /// pipeline state ([`DrawVars::pipeline_state_hash`]). Content, not the
+    /// ip: a body re-evaluated with new text keeps its ips, and the same
+    /// text in another body is the same shader.
+    pub fn compute_shader_functions_hash(heap: &ScriptHeap, code: &ScriptCode, obj: ScriptObject) -> LiveId {
         let mut hash = Self::pipeline_state_hash(heap, obj);
 
         // Walk the prototype chain to collect all functions
@@ -1430,9 +1433,7 @@ impl DrawVars {
                         // Hash the function pointer
                         match fn_ptr {
                             ScriptFnPtr::Script(ip) => {
-                                // Hash the ScriptIp as bytes
-                                let ip_bytes = ip.to_u40().to_be_bytes();
-                                hash = hash.bytes_append(&ip_bytes);
+                                hash = hash.bytes_append(&code.fn_content_key(ip).to_le_bytes());
                             }
                             _ => (),
                         }
