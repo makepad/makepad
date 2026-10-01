@@ -234,6 +234,15 @@ pub fn linear_to_srgb(c: f64) -> f64 {
     }
 }
 
+/// An sRGB-encoded straight RGBA colour to linear light (alpha unchanged).
+/// An emissive colour (a component over 1) is its colour times a light
+/// multiple: decoded at the colour, then multiplied, so its hue stays.
+pub fn color_srgb_to_linear(c: [f64; 4]) -> [f64; 4] {
+    let k = c[0].max(c[1]).max(c[2]).max(1.0);
+    let f = |c: f64| k * srgb_to_linear((c / k).clamp(0.0, 1.0));
+    [f(c[0]), f(c[1]), f(c[2]), c[3]]
+}
+
 /// sRGB-encoded `[r, g, b]` to `[h, s, v]` with the hue in degrees `[0, 360)`
 /// (0 for greys).
 pub fn rgb_to_hsv(rgb: [f64; 3]) -> [f64; 3] {

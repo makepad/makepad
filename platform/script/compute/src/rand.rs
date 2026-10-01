@@ -66,6 +66,15 @@ mod tests {
     }
 
     #[test]
+    fn hashn_is_the_fnv_murmur_hash() {
+        // Values of the JS reference (x|0 of floor(x * 1000003), Math.imul).
+        assert_eq!(hashn(&[]), 2166136261.0 / 4294967296.0);
+        for (xs, want) in [(vec![3.0, 1.0], 0.08475184044800699), (vec![1.0, 3.0], 0.9324939236976206), (vec![0.5, 7.0], 0.4266202412545681), (vec![17.3, -2.1, 5.0], 0.6753230004105717), (vec![123456.0, 31.0], 0.5473707553464919)] {
+            assert_eq!(hashn(&xs), want, "{xs:?}");
+        }
+    }
+
+    #[test]
     fn draws_are_the_counter_generators_outputs_in_order() {
         // The generator stepped by hand (the 1st, 2nd, 3rd and 1001st outputs).
         let cases: [(f64, [f64; 4]); 4] = [
