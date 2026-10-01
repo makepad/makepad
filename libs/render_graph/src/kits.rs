@@ -22,7 +22,7 @@ pub struct KitDef {
 }
 
 pub const KITS: &[KitDef] = &[
-    KitDef { name: "Glow", kind: "glow", params: &["strength", "radius", "threshold", "tint", "source"] },
+    KitDef { name: "Glow", kind: "glow", params: &["strength", "radius", "threshold", "tint", "source", "gate"] },
     KitDef { name: "Halation", kind: "halation", params: &["strength", "threshold", "tint"] },
     KitDef { name: "Bloom", kind: "bloom", params: &["strength", "threshold", "knee", "radius", "halation", "halation_tint", "compress"] },
     KitDef { name: "Shoulder", kind: "shoulder", params: &["knee", "white_from", "white_to", "white"] },
@@ -118,8 +118,10 @@ const SOURCES: &[(&str, &str)] = &[
 // @glow where the renderer has an emission attachment: then only emissive
 // things glow, whatever their brightness), a dual-filter pyramid down to
 // 1/32 and back, added to the frame. `radius` 0..1 weights the wide
-// levels; `strength` is how much is added.
-$M.Glow = $M.Glow{strength: 0.6 radius: 0.6 threshold: 1.0 tint: #ffffff source: @color}
+// levels; `strength` is how much is added. `gate` 1 thresholds luma
+// instead, soft from `threshold` to `threshold` + 0.35 (a saturated dark
+// colour does not glow, anything over 1 glows by what it has).
+$M.Glow = $M.Glow{strength: 0.6 radius: 0.6 threshold: 1.0 tint: #ffffff source: @color gate: 0}
 $M.kit_glow = fn(p) {
     let down = fn() -> vec4 {
         let t = self.texel() * 0.5
@@ -133,29 +135,43 @@ $M.kit_glow = fn(p) {
         let r = clamp(self.radius, 0.0, 1.0)
         return vec4(self.same.sample(self.uv()).xyz + c.xyz / 12.0 * (0.35 + 0.65 * r), 1.0)
     }
+    // The threshold: on luma (`gate` 1) or on the brightest channel.
+    let pre_luma = fn() -> vec4 {
+        let t = self.texel() * 0.5
+        var c = vec3(0.0, 0.0, 0.0)
+        for k in 0..4 {
+            let o = vec2((float(k % 2) * 2.0 - 1.0) * t.x, (float(k / 2) * 2.0 - 1.0) * t.y)
+            let s = max(self.source.sample(self.uv() + o).xyz, vec3(0.0, 0.0, 0.0))
+            let lum = dot(s, vec3(0.299, 0.587, 0.114))
+            let gate = smoothstep(self.threshold, self.threshold + 0.35, lum)
+            c = c + s * gate
+        }
+        return vec4(c * 0.25, 1.0)
+    }
+    let pre_channel = fn() -> vec4 {
+        let t = self.texel() * 0.5
+        var c = vec3(0.0, 0.0, 0.0)
+        var w = 0.0
+        for k in 0..4 {
+            let o = vec2((float(k % 2) * 2.0 - 1.0) * t.x, (float(k / 2) * 2.0 - 1.0) * t.y)
+            let s = max(self.source.sample(self.uv() + o).xyz, vec3(0.0, 0.0, 0.0))
+            let l = self.luma(s)
+            // a soft knee on the brightest channel, from the
+            // threshold to 1.5x it (nothing at or below the
+            // threshold glows, a saturated emissive colour does);
+            // Karis weight so one hot texel cannot flicker as a blob
+            let knee = max(self.threshold, 0.0001)
+            let m = max(s.x, max(s.y, s.z))
+            let over = clamp((m - knee) / (knee * 0.5), 0.0, 1.0)
+            let kw = 1.0 / (1.0 + l)
+            c = c + s * over * over * kw
+            w = w + kw
+        }
+        return vec4(c / max(w, 0.0001), 1.0)
+    }
     return [
         {at: @hdr name: "pre" reads: [p.source] slots: ["source"] scale: 0.5 uniforms: {threshold: p.threshold}
-            pixel: fn() -> vec4 {
-                let t = self.texel() * 0.5
-                var c = vec3(0.0, 0.0, 0.0)
-                var w = 0.0
-                for k in 0..4 {
-                    let o = vec2((float(k % 2) * 2.0 - 1.0) * t.x, (float(k / 2) * 2.0 - 1.0) * t.y)
-                    let s = max(self.source.sample(self.uv() + o).xyz, vec3(0.0, 0.0, 0.0))
-                    let l = self.luma(s)
-                    // a soft knee on the brightest channel, from the
-                    // threshold to 1.5x it (nothing at or below the
-                    // threshold glows, a saturated emissive colour does);
-                    // Karis weight so one hot texel cannot flicker as a blob
-                    let knee = max(self.threshold, 0.0001)
-                    let m = max(s.x, max(s.y, s.z))
-                    let over = clamp((m - knee) / (knee * 0.5), 0.0, 1.0)
-                    let kw = 1.0 / (1.0 + l)
-                    c = c + s * over * over * kw
-                    w = w + kw
-                }
-                return vec4(c / max(w, 0.0001), 1.0)
-            }}
+            pixel: if p.gate == 1 { pre_luma } else { pre_channel }}
         {at: @hdr name: "d1" reads: ["pre"] slots: ["src"] scale: 0.25 pixel: down}
         {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125 pixel: down}
         {at: @hdr name: "d3" reads: ["d2"] slots: ["src"] scale: 0.0625 pixel: down}

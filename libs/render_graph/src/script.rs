@@ -206,6 +206,76 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
     Ok(PassRead { decl, uniforms })
 }
 
+/// The tag a post type carries (`__post: glow` on the `Glow` a document
+/// derives from): what [`post_kind`] reads.
+pub const POST_TAG: &str = "__post";
+
+/// Put the post types `types` (Splash name, kind) in `module`, each an
+/// object tagged with its kind; [`install_kits`] then gives the graph's
+/// kits among them their defaults and templates.
+pub fn register_post_types(vm: &mut ScriptVm, module: ScriptObject, types: &[(&str, &str)]) {
+    for (name, kind) in types {
+        let proto = vm.bx.heap.new_object();
+        let tag = LiveId::from_str_with_lut(kind).unwrap_or(LiveId::from_str(kind));
+        vm.bx.heap.set_value_def(proto, LiveId::from_str(POST_TAG).into(), tag.into());
+        vm.bx.heap.set_value_def(module, LiveId::from_str(name).into(), proto.into());
+    }
+}
+
+/// The post kind of a document's entry (its type's [`POST_TAG`]).
+pub fn post_kind(vm: &ScriptVm, v: ScriptValue) -> Option<String> {
+    let o = v.as_object()?;
+    get(vm, o, POST_TAG).as_id().map(|k| k.to_string())
+}
+
+/// The entries of a `post:` list (an array or an object's vector part).
+pub fn post_items(vm: &ScriptVm, v: ScriptValue) -> Vec<ScriptValue> {
+    list(vm, v)
+}
+
+/// One entry of a document's `post:`, read the same way by every host.
+pub enum PostEntry {
+    /// A `Pass{}` (as written), or the passes a kit's template built (their
+    /// names prefixed, so two kits never collide).
+    Passes(Vec<PassRead>),
+    /// One of the host's own post types, which the host reads.
+    Host(ScriptObject),
+}
+
+/// Read the post entry `item` of kind `kind` (`"pass"`, a kit whose template
+/// `kit_<kind>` is in `module`, or else the host's own). `label` names it in
+/// errors; a kit's pass names get `prefix`.
+pub fn read_post_entry(vm: &mut ScriptVm, module: ScriptObject, kind: &str, item: ScriptValue, label: &str, prefix: &str) -> Result<PostEntry, String> {
+    let Some(o) = item.as_object() else { return Err(format!("{label} is not a post effect (Glow{{..}}, Pass{{..}}, ...)")) };
+    if kind == "pass" {
+        return Ok(PostEntry::Passes(vec![read_pass(vm, item, &format!("{label} Pass"))?]));
+    }
+    let template = get(vm, module, &format!("kit_{kind}"));
+    if template.is_nil() {
+        return Ok(PostEntry::Host(o));
+    }
+    vm.bx.captured_errors = Some(Vec::new());
+    let built = vm.call(template, &[item]);
+    let errors = vm.take_errors();
+    if !errors.is_empty() || built.is_err() {
+        return Err(format!("{label}: the {kind} kit did not build: {}", if errors.is_empty() { "it did not evaluate".to_string() } else { errors.join("; ") }));
+    }
+    let objs = list(vm, built);
+    if objs.is_empty() {
+        return Err(format!("{label}: the {kind} kit built no passes"));
+    }
+    let mut passes = Vec::new();
+    for (j, v) in objs.into_iter().enumerate() {
+        passes.push(read_pass(vm, v, &format!("{label} {kind}[{j}]"))?);
+    }
+    let mut decls: Vec<PassDecl> = passes.iter().map(|p| p.decl.clone()).collect();
+    crate::pass::namespace(&mut decls, prefix);
+    for (p, d) in passes.iter_mut().zip(decls) {
+        p.decl = d;
+    }
+    Ok(PostEntry::Passes(passes))
+}
+
 /// Install the kits into module `module` (whose kit types the host has
 /// registered, see [`crate::kits::KITS`]): all, or the kinds in `only`.
 /// Returns the evaluation errors.

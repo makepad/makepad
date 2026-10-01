@@ -198,13 +198,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     let m = vm.new_module(LiveId::from_str(KIT_MODULE));
     let proto = vm.bx.heap.new_object();
     vm.bx.heap.set_value_def(m, LiveId::from_str("Kinetic").into(), proto.into());
-    for k in makepad_render_graph::kits::KITS {
-        let proto = vm.bx.heap.new_object();
-        vm.bx.heap.set_value_def(proto, LiveId::from_str("__kind").into(), LiveId::from_str(k.kind).into());
-        vm.bx.heap.set_value_def(m, LiveId::from_str(k.name).into(), proto.into());
-    }
-    let pass = vm.bx.heap.new_object();
-    vm.bx.heap.set_value_def(m, LiveId::from_str("Pass").into(), pass.into());
+    let types: Vec<(&str, &str)> = makepad_render_graph::kits::KITS.iter().map(|k| (k.name, k.kind)).chain([("Pass", "pass")]).collect();
+    makepad_render_graph::script::register_post_types(vm, m, &types);
     for e in makepad_render_graph::script::install_kits(vm, &format!("mod.{KIT_MODULE}"), None) {
         log!("kinetic: graph kits: {e}");
     }
@@ -390,37 +385,16 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
     let mut passes = Vec::new();
     let mut pass_values = Vec::new();
     let post = field(vm, o, "post");
-    let items: Vec<ScriptValue> = match post.as_array() {
-        Some(a) => (0..vm.bx.heap.array_len(a)).map(|i| vm.bx.heap.array_index(a, i, NoTrap)).collect(),
-        None => Vec::new(),
-    };
-    let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(KIT_MODULE).into(), NoTrap).as_object();
+    let items = makepad_render_graph::script::post_items(vm, post);
+    let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(KIT_MODULE).into(), NoTrap).as_object().ok_or("the kit module is not registered")?;
     for (k, item) in items.into_iter().enumerate() {
-        let Some(io) = item.as_object() else { return Err(format!("post[{k}] is a kit (Glow{{..}}) or a Pass{{..}}")) };
-        let kind = {
-            let v = field(vm, io, "__kind");
-            text_of(vm, v)
+        let label = format!("post[{k}]");
+        let kind = makepad_render_graph::script::post_kind(vm, item).ok_or_else(|| format!("{label} is a kit (Glow{{..}}) or a Pass{{..}}"))?;
+        let reads = match makepad_render_graph::script::read_post_entry(vm, module, &kind, item, &label, &format!("p{k}_"))? {
+            makepad_render_graph::script::PostEntry::Passes(reads) => reads,
+            makepad_render_graph::script::PostEntry::Host(_) => return Err(format!("{label} is a kit (Glow{{..}}) or a Pass{{..}}")),
         };
-        let objs: Vec<ScriptValue> = match (kind, module) {
-            (Some(kind), Some(m)) => {
-                let template = vm.bx.heap.value(m, LiveId::from_str(&format!("kit_{kind}")).into(), NoTrap);
-                vm.bx.captured_errors = Some(Vec::new());
-                let built = vm.call(template, &[item]);
-                let errors = vm.take_errors();
-                if !errors.is_empty() {
-                    return Err(format!("post[{k}] ({kind}): {}", errors.join("; ")));
-                }
-                match built.as_array() {
-                    Some(a) => (0..vm.bx.heap.array_len(a)).map(|i| vm.bx.heap.array_index(a, i, NoTrap)).collect(),
-                    None => return Err(format!("post[{k}] ({kind}) built no passes")),
-                }
-            }
-            _ => vec![item],
-        };
-        let mut decls = Vec::new();
-        let mut vals = Vec::new();
-        for (j, po) in objs.into_iter().enumerate() {
-            let read = makepad_render_graph::script::read_pass(vm, po, &format!("post[{k}][{j}]"))?;
+        for read in reads {
             let mut decl = read.decl;
             let mut v = Vec::new();
             for (name, val) in read.uniforms {
@@ -429,18 +403,15 @@ fn read_values(vm: &mut ScriptVm, o: ScriptObject) -> Result<KitValues, String> 
                 } else if let Some(c) = color(val) {
                     (4, [c.x, c.y, c.z, c.w])
                 } else {
-                    return Err(format!("post[{k}][{j}]: uniform `{name}` is a number or a colour"));
+                    return Err(format!("{}: uniform `{name}` is a number or a colour", decl.label));
                 };
                 decl.uniforms.push(makepad_render_graph::UniformDecl { name, width });
                 v.push(value);
             }
-            decl.validate().map_err(|e| format!("post[{k}][{j}]: {e}"))?;
-            decls.push(decl);
-            vals.push(v);
+            decl.validate().map_err(|e| format!("{}: {e}", decl.label))?;
+            passes.push(decl);
+            pass_values.push(v);
         }
-        makepad_render_graph::pass::namespace(&mut decls, &format!("p{k}_"));
-        passes.extend(decls);
-        pass_values.extend(vals);
     }
     Ok(KitValues {
         name: s(vm, "name").unwrap_or_default(),
