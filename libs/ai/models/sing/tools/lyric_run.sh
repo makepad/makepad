@@ -36,7 +36,7 @@ clean() { awk -F'\t' '{s+=$5} END {printf "%d", s}' prep/lyrics/harvest.tsv 2>/d
 ( while ! stopped && [ "$(clean)" -lt "$MIN_CLEAN" ]; do sleep 120; done
   stopped && exit 0
   log "training starts with $(clean) s of clean sung lyrics"
-  if [ ! -f runs/lyric/ac.mksing ]; then cp runs/a2/ac.mksing runs/a2/ac.opt.mksing runs/a2/ac.ema.mksing runs/lyric/; fi
+  if [ ! -f runs/lyric/ac.mksing ]; then cp runs/a1/ac.mksing runs/a1/ac.opt.mksing runs/a1/ac.ema.mksing runs/lyric/; fi  # A1: the vowel-only A2 lost articulation
   r=0
   while ! stopped; do
     $B/sing_train ac --data prep/vocalset --data prep/libritts --data prep/lyrics --config base --resume \
