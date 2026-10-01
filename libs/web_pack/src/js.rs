@@ -14,6 +14,8 @@ use std::path::Path;
 /// source root).
 pub const RUNTIME_JS: [&str; 3] = ["libs/wasm_bridge/src/wasm_bridge.js", "platform/src/os/web/web.js", "platform/src/os/web/web_gl.js"];
 pub const AUDIO_WORKLET_JS: &str = "platform/src/os/web/audio_worklet.js";
+/// The worker a threaded build's threads run in (a module without imports).
+pub const WEB_WORKER_JS: &str = "platform/src/os/web/web_worker.js";
 
 /// Every marked section of the runtime, by what it serves (the manifest's
 /// list).
@@ -105,6 +107,9 @@ pub fn runtime_js(source_root: &Path, stripped: &[&str], wasm_name: &str) -> Res
     let worklet = read(AUDIO_WORKLET_JS)?;
     js.push_str("\n// ---- the audio worklet, loaded from a blob (one file)\n");
     js.push_str(&format!("const MAKEPAD_AUDIO_WORKLET_SOURCE = {};\n", js_string(&worklet)));
+    let worker = read(WEB_WORKER_JS)?;
+    js.push_str("\n// ---- the threads' worker, loaded from a blob (threaded builds)\n");
+    js.push_str(&format!("const MAKEPAD_WEB_WORKER_SOURCE = {};\n", js_string(&worker)));
     js.push_str(&START_JS.replace("__WASM__", wasm_name));
     Ok(js)
 }
@@ -135,6 +140,7 @@ const START_JS: &str = r#"
 // ---- the app's start
 const pack_audio_worklet_url = URL.createObjectURL(new Blob([MAKEPAD_AUDIO_WORKLET_SOURCE], { type: "text/javascript" }));
 globalThis.makepad_audio_worklet_url = pack_audio_worklet_url;
+globalThis.makepad_web_worker_url = URL.createObjectURL(new Blob([MAKEPAD_WEB_WORKER_SOURCE], { type: "text/javascript" }));
 
 function pack_is_wasm(bytes) {
     return bytes.length >= 4 && bytes[0] === 0 && bytes[1] === 0x61 && bytes[2] === 0x73 && bytes[3] === 0x6d;

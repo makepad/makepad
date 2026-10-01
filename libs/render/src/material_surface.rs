@@ -203,12 +203,25 @@ pub enum TextureWork {
 pub static TEXTURE_WORK: [[std::sync::atomic::AtomicUsize; 2]; 3] = [const { [const { std::sync::atomic::AtomicUsize::new(0) }; 2] }; 3];
 /// Run `f`, charging its time to `stage`.
 pub fn texture_work<R>(stage: TextureWork, f: impl FnOnce() -> R) -> R {
-    let started = std::time::Instant::now();
+    let started = work_clock();
     let result = f();
     let slot = &TEXTURE_WORK[stage as usize];
     slot[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    slot[1].fetch_add(started.elapsed().as_micros() as usize, std::sync::atomic::Ordering::Relaxed);
+    slot[1].fetch_add(work_micros(started), std::sync::atomic::Ordering::Relaxed);
     result
+}
+/// The work counters' clock: `Instant` natively; none in the browser,
+/// where std has no clock (the counters count work there, not time).
+#[cfg(not(target_arch = "wasm32"))]
+fn work_clock() -> Option<std::time::Instant> {
+    Some(std::time::Instant::now())
+}
+#[cfg(target_arch = "wasm32")]
+fn work_clock() -> Option<std::time::Instant> {
+    None
+}
+fn work_micros(started: Option<std::time::Instant>) -> usize {
+    started.map_or(0, |started| started.elapsed().as_micros() as usize)
 }
 /// Images already prepared this load, by content: every terrain tile of a
 /// level uses the same material images (flight: 552 uses in 64 tiles, 32
@@ -406,10 +419,9 @@ impl PreparedTexture {
     /// Replace the RGBA chain with `target` blocks transcoded from `uastc`
     /// (a Basis/UASTC KTX2 of this image).
     pub fn from_basis(ktx2:&[u8],target:CompressedTextureFormat,hash:u64)->Option<Self>{
-        let started=std::time::Instant::now();
-        struct Timed(std::time::Instant);
-        impl Drop for Timed { fn drop(&mut self){ TRANSCODE_MICROS.fetch_add(self.0.elapsed().as_micros() as usize,std::sync::atomic::Ordering::Relaxed); } }
-        let _timed=Timed(started);
+        struct Timed(Option<std::time::Instant>);
+        impl Drop for Timed { fn drop(&mut self){ TRANSCODE_MICROS.fetch_add(work_micros(self.0),std::sync::atomic::Ordering::Relaxed); } }
+        let _timed=Timed(work_clock());
         Self::from_uastc_view(&makepad_texcomp::basis::UastcView::parse(ktx2).ok()?,target,hash)
     }
     /// UASTC levels (borrowed from their KTX2) remapped block by block

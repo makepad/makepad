@@ -2247,7 +2247,8 @@ export class WasmWebBrowser extends WasmBridge {
                 numberOfInputs: 0,
                 numberOfOutputs: 1,
                 outputChannelCount: [2],
-                processorOptions: { thread_info }
+                // The worklet's monotonic clock is the page's (performance.now()).
+                processorOptions: { thread_info, time_origin: performance.timeOrigin }
             });
 
             audio_worklet.port.onmessage = (e) => {
@@ -2538,7 +2539,7 @@ export class WasmWebBrowser extends WasmBridge {
             }
             allocated_thread_info = thread_info;
             let worker = new Worker(
-                './makepad_platform/web_worker.js',
+                globalThis.makepad_web_worker_url || './makepad_platform/web_worker.js',
                 { type: 'module', name: args.name || `makepad-worker-${args.request_id}` }
             );
             const record = { worker, thread_info, started: false, closed: false };
@@ -4028,6 +4029,8 @@ export class WasmWebBrowser extends WasmBridge {
         }
 
         this.handlers.on_touch_end_cancel_leave = e => {
+            // WebKit lets audio start in a touchend, not in a touchstart.
+            this.resume_audio_from_gesture();
             e.preventDefault();
             this.to_wasm.ToWasmTouchUpdate({
                 time: e.timeStamp / 1000.0,

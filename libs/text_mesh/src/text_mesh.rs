@@ -1364,11 +1364,14 @@ fn stored_shape(font: &Rc<makepad_draw::text::font::Font>, id: u16, detail: f32)
     if let Some(shape) = stored {
         return shape;
     }
+    // Natively timed; the browser's std has no clock.
+    #[cfg(not(target_arch = "wasm32"))]
     let perf_t0 = std::time::Instant::now();
     let built = font
         .glyph_outline_rc(id)
         .and_then(|outline| GlyphShape::build(outline.commands(), font.units_per_em(), detail))
         .map(Rc::new);
+    #[cfg(not(target_arch = "wasm32"))]
     PERF_SHAPE_NS.fetch_add(perf_t0.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     PERF_SHAPES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     SHAPE_STORE.with(|s| {

@@ -80,8 +80,13 @@ class AudioWorklet extends AudioWorkletProcessor {
         for (const imp of WebAssembly.Module.imports(thread_info.module)) {
             if (imp.module !== "env" || imp.kind !== "function" || env[imp.name] !== undefined) continue;
             const name = imp.name;
-            if (name === "js_time_now" || name === "js_monotonic_now") {
+            if (name === "js_time_now") {
                 env[name] = () => Date.now() / 1000.0;
+            } else if (name === "js_monotonic_now") {
+                // The UI thread's clock (performance.now(), from the page's time
+                // origin): a worklet has no performance clock of its own.
+                const origin = options.processorOptions.time_origin || 0;
+                env[name] = () => (Date.now() - origin) / 1000.0;
             } else if (name === "js_wake_ui") {
                 env[name] = () => this.port.postMessage({ message_type: "wake_ui" });
             } else {
