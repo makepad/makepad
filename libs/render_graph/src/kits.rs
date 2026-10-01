@@ -24,7 +24,7 @@ pub struct KitDef {
 pub const KITS: &[KitDef] = &[
     KitDef { name: "Glow", kind: "glow", params: &["strength", "radius", "threshold", "tint", "source"] },
     KitDef { name: "Halation", kind: "halation", params: &["strength", "threshold", "tint"] },
-    KitDef { name: "Bloom", kind: "bloom", params: &["strength", "threshold", "knee", "radius", "halation", "halation_tint"] },
+    KitDef { name: "Bloom", kind: "bloom", params: &["strength", "threshold", "knee", "radius", "halation", "halation_tint", "compress"] },
     KitDef { name: "Shoulder", kind: "shoulder", params: &["knee", "white_from", "white_to", "white"] },
     KitDef { name: "Aberration", kind: "aberration", params: &["amount", "falloff"] },
     KitDef { name: "Grain", kind: "grain", params: &["amount", "size"] },
@@ -131,7 +131,10 @@ $M.kit_glow = fn(p) {
 // 0.5 + `radius` texels, each level added. The sum goes onto the frame by
 // `strength` / 3. `halation`: film halation from the same pyramid (the
 // 1/16 level's luma, tinted by `halation_tint`: linear 1, 0.18, 0.04), added too.
-$M.Bloom = $M.Bloom{strength: 0.7 threshold: 0.85 knee: 0.5 radius: 0.75 halation: 0 halation_tint: #ff7638}
+// `compress` (0..1): very bright light spreads less (what passes the
+// threshold is divided by 1 + its brightness): a small hot core glows
+// instead of flooding the frame.
+$M.Bloom = $M.Bloom{strength: 0.7 threshold: 0.85 knee: 0.5 radius: 0.75 halation: 0 halation_tint: #ff7638 compress: 0}
 $M.kit_bloom = fn(p) {
     let down = fn() -> vec4 {
         let t = self.texel() * 0.5
@@ -161,7 +164,7 @@ $M.kit_bloom = fn(p) {
         return vec4(self.same.sample(uv).xyz + c / 16.0, 1.0)
     }
     return [
-        {at: @hdr name: "d0" reads: [@color] slots: ["source"] scale: 0.5 uniforms: {threshold: p.threshold knee: p.knee}
+        {at: @hdr name: "d0" reads: [@color] slots: ["source"] scale: 0.5 uniforms: {threshold: p.threshold knee: p.knee compress: p.compress}
             pixel: fn() -> vec4 {
                 let t = self.texel() * 0.25
                 let uv = self.uv()
@@ -172,7 +175,7 @@ $M.kit_bloom = fn(p) {
                 var rq = clamp(l - self.threshold + kn, 0.0, 2.0 * kn)
                 rq = rq * rq / (4.0 * kn)
                 let w = max(rq, l - self.threshold) / max(l, 0.0001)
-                return vec4(s * w, 1.0)
+                return vec4(s * w / (1.0 + l * w * self.compress), 1.0)
             }}
         {at: @hdr name: "d1" reads: ["d0"] slots: ["src"] scale: 0.25 pixel: down}
         {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125 pixel: down}
@@ -397,38 +400,42 @@ $M.kit_lut = fn(p) {
 // ---------------------------------------------------------------- DepthOfField
 // A thin lens: circle of confusion from the view distance against `focus`
 // (metres), `aperture` its size (pixels at 1080p for something at
-// infinity), capped at `max_blur`; a gathered disc at half resolution.
+// infinity), capped at `max_blur` (pixels at 1080p). A full-resolution
+// gather of 24 taps on a disc, each tap counted where its own blur reaches
+// this pixel and never beyond this pixel's own (a blurred background does
+// not bleed over a sharp foreground, and what is in focus stays sharp).
 $M.DepthOfField = $M.DepthOfField{focus: 5 aperture: 8 max_blur: 16}
 $M.kit_dof = fn(p) {
     return [
-        {at: @hdr name: "coc" reads: [@color, @depth] scale: 0.5 uniforms: {focus: p.focus aperture: p.aperture max_blur: p.max_blur}
+        {at: @hdr reads: [@color, @depth] uniforms: {focus: p.focus aperture: p.aperture max_blur: p.max_blur}
             pixel: fn() -> vec4 {
-                let z = self.view_depth(self.depth.sample_nearest(self.uv()).x)
-                let coc = min(abs(1.0 - self.focus / max(z, 0.001)) * self.aperture, self.max_blur) * self.size().y / 540.0
-                return vec4(self.color.sample(self.uv()).xyz, coc)
-            }}
-        {at: @hdr name: "blur" reads: ["coc"] scale: 0.5
-            pixel: fn() -> vec4 {
-                let centre = self.coc.sample(self.uv())
-                var sum = centre.xyz
-                var w = 1.0
-                for k in 0..24 {
-                    let a = float(k) * 2.39996
-                    let r = sqrt((float(k) + 0.5) / 24.0)
-                    let o = vec2(cos(a), sin(a)) * r * centre.w * self.texel()
-                    let s = self.coc.sample(self.uv() + o)
-                    // a sample only spreads as far as its own blur
-                    let sw = clamp(s.w / max(centre.w * r, 0.001), 0.0, 1.0)
-                    sum = sum + s.xyz * sw
-                    w = w + sw
+                let px = self.size().y / 1080.0
+                let f = max(self.focus, 0.001)
+                let maxb = self.max_blur * px
+                var z0 = 100000.0
+                let d0 = self.depth.sample_nearest(self.uv()).x
+                if d0 < 0.99999 {
+                    z0 = self.view_depth(d0)
                 }
-                return vec4(sum / w, centre.w)
-            }}
-        {map: true at: @hdr reads: [@color, "blur"]
-            pixel: fn() -> vec4 {
-                let c = self.color.sample(self.uv())
-                let b = self.blur.sample(self.uv())
-                return vec4(mix(c.xyz, b.xyz, clamp(b.w / 2.0, 0.0, 1.0)), c.w)
+                let c0 = min(abs(1.0 - f / max(z0, 0.001)) * self.aperture * px, maxb)
+                var sum = self.color.sample_nearest(self.uv())
+                var wsum = 1.0
+                for k in 0..24 {
+                    let a = float(k) * 2.3999632
+                    let r = sqrt((float(k) + 0.5) / 24.0) * maxb
+                    let suv = self.uv() + vec2(cos(a), sin(a)) * r * self.texel()
+                    var z = 100000.0
+                    let d = self.depth.sample_nearest(suv).x
+                    if d < 0.99999 {
+                        z = self.view_depth(d)
+                    }
+                    let sc = min(abs(1.0 - f / max(z, 0.001)) * self.aperture * px, maxb)
+                    let reach = min(sc, c0 + 0.25)
+                    let w = clamp(reach - r + 0.5, 0.0, 1.0)
+                    sum = sum + self.color.sample_nearest(suv) * w
+                    wsum = wsum + w
+                }
+                return sum / wsum
             }}
     ]
 }
