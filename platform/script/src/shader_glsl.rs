@@ -3,7 +3,6 @@ use crate::shader::{ShaderIoKind, ShaderOutput, TextureType};
 use crate::value::ScriptPodType;
 use crate::vm::ScriptVm;
 use makepad_live_id::{id, LiveId};
-use std::collections::BTreeSet;
 use std::fmt::Write;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -511,77 +510,34 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
     }
 
     fn glsl_write_functions_for_entries(&self, out: &mut String, entries: &[&str]) {
-        let reachable = self.glsl_collect_reachable_functions(entries);
+        let mut reachable = vec![false; self.functions.len()];
+        let mut work = Vec::new();
         for (index, fns) in self.functions.iter().enumerate() {
-            if !reachable.contains(&index) {
+            let name = fns
+                .call_sig
+                .split_once('(')
+                .and_then(|(head, _)| head.split_whitespace().next_back());
+            if name.is_some_and(|name| entries.contains(&name)) {
+                reachable[index] = true;
+                work.push(index);
+            }
+        }
+        while let Some(current) = work.pop() {
+            for &callee in &self.functions[current].callees {
+                if !reachable[callee] {
+                    reachable[callee] = true;
+                    work.push(callee);
+                }
+            }
+        }
+        for (index, fns) in self.functions.iter().enumerate() {
+            if !reachable[index] {
                 continue;
             }
             writeln!(out, "{}{{", fns.call_sig).ok();
             writeln!(out, "{}", fns.out).ok();
             writeln!(out, "}}\n").ok();
         }
-    }
-
-    fn glsl_collect_reachable_functions(&self, entries: &[&str]) -> BTreeSet<usize> {
-        let mut reachable = BTreeSet::new();
-        let mut work = Vec::new();
-        let function_names: Vec<String> = self
-            .functions
-            .iter()
-            .filter_map(|func| Self::glsl_function_name_from_sig(&func.call_sig))
-            .collect();
-
-        if function_names.len() != self.functions.len() {
-            // If we failed to parse any signature, fall back to including everything.
-            return (0..self.functions.len()).collect();
-        }
-
-        for entry in entries {
-            for (index, name) in function_names.iter().enumerate() {
-                if name == entry && reachable.insert(index) {
-                    work.push(index);
-                }
-            }
-        }
-
-        while let Some(current) = work.pop() {
-            let body = &self.functions[current].out;
-            for (index, name) in function_names.iter().enumerate() {
-                if reachable.contains(&index) {
-                    continue;
-                }
-                if Self::glsl_body_calls_function(body, name) {
-                    reachable.insert(index);
-                    work.push(index);
-                }
-            }
-        }
-
-        reachable
-    }
-
-    fn glsl_function_name_from_sig(call_sig: &str) -> Option<String> {
-        let open_paren = call_sig.find('(')?;
-        let head = call_sig[..open_paren].trim_end();
-        let name = head.split_whitespace().next_back()?;
-        Some(name.to_string())
-    }
-
-    fn glsl_body_calls_function(body: &str, function_name: &str) -> bool {
-        let pattern = format!("{}(", function_name);
-        let mut search_start = 0;
-        while let Some(pos) = body[search_start..].find(&pattern) {
-            let abs = search_start + pos;
-            let prev = body[..abs].chars().next_back();
-            let prev_is_ident = prev
-                .map(|c| c.is_ascii_alphanumeric() || c == '_')
-                .unwrap_or(false);
-            if !prev_is_ident {
-                return true;
-            }
-            search_start = abs + pattern.len();
-        }
-        false
     }
 
     fn glsl_assign_typed_vertex_inputs(&self, vm: &ScriptVm, out: &mut String) {

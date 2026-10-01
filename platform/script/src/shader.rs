@@ -208,6 +208,7 @@ pub struct ShaderScope {
 #[derive(Default)]
 pub struct ShaderFnCompiler {
     pub out: String,
+    pub callees: Vec<usize>,
     pub stack: ShaderStack,
     pub script_scope: ScriptObject,
     pub shader_scope: ShaderScope,
