@@ -122,6 +122,17 @@ fn front_end_to_end() {
     assert_eq!(get("/jobs", &lan.replace(".lan.", ".node.")).0, 401);
     assert_eq!(get("/jobs", &other_fleet).0, 401);
 
+    // Old plain-HTTP clients are not credential guesses: no ban.
+    for _ in 0..8 {
+        let mut plain = TcpStream::connect(listen).unwrap();
+        let _ = plain.write_all(b"GET /health HTTP/1.1\r\n\r\n");
+        let mut sink = Vec::new();
+        let _ = plain.read_to_end(&mut sink);
+        let out = String::from_utf8_lossy(&sink);
+        assert!(out.starts_with("HTTP/1.1 400") && out.contains("https only"), "{out}");
+    }
+    assert_eq!(get("/jobs", &lan).0, 200);
+
     // Repeated failures from one address end in a ban: then even a good
     // credential gets no answer from that address for a while.
     for _ in 0..4 {
@@ -133,13 +144,6 @@ fn front_end_to_end() {
     let url = format!("https://{listen}/jobs");
     assert!(http_fetch(&HttpClientRequest::get(&url)).is_err(), "banned address still served");
 
-    // Plain HTTP to the front gets nothing useful.
-    let mut plain = TcpStream::connect(listen).unwrap();
-    plain.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    let _ = plain.write_all(b"GET /jobs HTTP/1.1\r\n\r\n");
-    let mut out = Vec::new();
-    let _ = plain.read_to_end(&mut out);
-    assert!(!String::from_utf8_lossy(&out).contains("200 OK"));
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -297,6 +297,21 @@ fn serve(config: &FrontConfig, tcp: TcpStream, peer: SocketAddr) -> Result<(), R
     // A connect-and-close probe is not a credential guess.
     let mut first = [0u8; 1];
     match tcp.peek(&mut first) {
+        // A TLS handshake.
+        Ok(1) if first[0] == 0x16 => {}
+        // Plain HTTP (an old client): told to use https, not counted as a
+        // credential guess.
+        Ok(1) if first[0].is_ascii_uppercase() => {
+            let mut tcp = tcp;
+            let body = "{\"error\":\"this node speaks https only (see tools/aihub-fleet.md)\"}";
+            let _ = write!(
+                tcp,
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = tcp.shutdown(Shutdown::Both);
+            return Err(Refusal::Other("plain HTTP refused".into()));
+        }
         Ok(1) => {}
         _ => return Err(Refusal::Quiet),
     }
