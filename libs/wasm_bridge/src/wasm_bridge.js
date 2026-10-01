@@ -347,7 +347,8 @@ export class WasmBridge {
         const declared_max = (limits && typeof limits.max === "number") ? limits.max : null;
         let mem = null;
         let used_maximum = null;
-        const candidates = this.is_phone() ? [8192, 4096] : [65536, 32768, 16384];
+        // No device guesses: ask for the most and step down only when the engine refuses.
+        const candidates = [65536, 32768, 16384, 8192, 4096];
         for (const candidate of candidates) {
             const maximum = declared_max != null ? Math.min(declared_max, candidate) : candidate;
             if (maximum < initial) {
