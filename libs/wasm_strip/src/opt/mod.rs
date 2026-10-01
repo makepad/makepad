@@ -18,6 +18,7 @@ mod merge;
 mod order;
 mod panics;
 mod peephole;
+pub mod waits;
 pub mod profile;
 pub mod units;
 
@@ -222,6 +223,11 @@ pub fn wasm_optimize_checked(
     // stale size for memory another thread grew (see `bulk`).
     run("bulk", &mut module, &mut bytes, &|module| {
         bulk::run(module);
+    });
+    // A shared memory's waits, spinning where a thread may not block (a
+    // browser's main thread: see `waits`).
+    run("waits", &mut module, &mut bytes, &|module| {
+        waits::run(module);
     });
     let sites = std::cell::RefCell::new(Vec::new());
     // What the panic sites point at in the data, cleared once they are gone.

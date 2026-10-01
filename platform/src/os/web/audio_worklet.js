@@ -98,6 +98,11 @@ class AudioWorklet extends AudioWorkletProcessor {
 
             wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
             wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
+            // A worklet may not block: its waits spin (the optimiser's
+            // `waits` pass).
+            if (wasm.exports.__makepad_cannot_block instanceof WebAssembly.Global) {
+                wasm.exports.__makepad_cannot_block.value = 1;
+            }
 
             this._context = {
                 exports: wasm.exports,

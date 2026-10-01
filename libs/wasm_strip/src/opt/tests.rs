@@ -359,3 +359,29 @@ fn panics_become_traps_with_their_sites() {
     assert_eq!(result[0].to_i32(), Some(6));
     assert!(get.call(&mut store, &[makepad_stitch::Val::I32(9)], &mut result).is_err());
 }
+
+#[test]
+fn waits_answer_at_once_where_a_thread_may_not_block() {
+    let bytes = wat(r#"(module
+        (memory 1 2 shared)
+        (func (export "w32") (param i32 i32) (result i32)
+            local.get 0 local.get 1 i64.const -1 memory.atomic.wait32 offset=8)
+        (func (export "w64") (param i32 i64) (result i32)
+            local.get 0 local.get 1 i64.const -1 memory.atomic.wait64)
+        (func (export "n") (param i32) (result i32)
+            local.get 0 i32.const 1 memory.atomic.notify))"#);
+    let module = optimize(&bytes, &only(|_| {}));
+    let waits = |m: &Module| m.funcs.iter().flat_map(|f| f.body.iter()).filter(|i| matches!(i, Instr::Atomic(1 | 2, _))).count();
+    // The two waits now sit only in the two helpers, behind the flag.
+    assert_eq!(waits(&module), 2);
+    assert_eq!(module.funcs.len(), 5);
+    for helper in &module.funcs[3..] {
+        assert!(matches!(helper.body[0], Instr::GlobalGet(_)), "{:?}", helper.body);
+    }
+    let flag = module.exports.iter().find(|e| e.name == waits::CANNOT_BLOCK_EXPORT).expect("the flag is exported");
+    assert_eq!(flag.kind, ExternKind::Global);
+    assert!(module.globals[flag.index as usize].ty.mutable);
+    // An unshared memory has nothing to guard.
+    let plain = optimize(&wat(r#"(module (memory 1) (func (result i32) i32.const 0))"#), &only(|_| {}));
+    assert!(plain.exports.is_empty() && plain.globals.is_empty());
+}

@@ -862,16 +862,28 @@ pub fn ibl_texture(env: &EnvMap, intensity: f32, rotation_deg: f32) -> IblTextur
 /// by `key` (a name for this one map's content): every scene lighting with
 /// the same map shares one CPU prefilter, which takes a large part of a
 /// second (more on a browser's UI thread). A host can run it ahead of the
-/// first draw, behind its loader.
+/// first draw, behind its loader, on a worker: the store is taken with
+/// `try_lock` and a spin (held for a map lookup), never a wait, which a
+/// browser's main thread may not do.
 pub fn prefiltered(key: u64, env: &EnvMap) -> std::sync::Arc<(EnvAtlas, [[f32; 3]; 9])> {
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
-    static KEPT: Mutex<Option<HashMap<u64, Arc<(EnvAtlas, [[f32; 3]; 9])>>>> = Mutex::new(None);
-    if let Some(kept) = KEPT.lock().unwrap().as_ref().and_then(|kept| kept.get(&key)) {
+    use std::sync::{Arc, Mutex, MutexGuard, TryLockError};
+    type Kept = Option<HashMap<u64, Arc<(EnvAtlas, [[f32; 3]; 9])>>>;
+    static KEPT: Mutex<Kept> = Mutex::new(None);
+    fn kept() -> MutexGuard<'static, Kept> {
+        loop {
+            match KEPT.try_lock() {
+                Ok(guard) => return guard,
+                Err(TryLockError::Poisoned(error)) => return error.into_inner(),
+                Err(TryLockError::WouldBlock) => std::hint::spin_loop(),
+            }
+        }
+    }
+    if let Some(kept) = kept().as_ref().and_then(|kept| kept.get(&key)) {
         return kept.clone();
     }
     let made = Arc::new((prefilter(env, 256, 6), sh9(env)));
-    KEPT.lock().unwrap().get_or_insert_with(HashMap::new).insert(key, made.clone());
+    kept().get_or_insert_with(HashMap::new).insert(key, made.clone());
     made
 }
 

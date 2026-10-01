@@ -150,6 +150,11 @@ export class WasmBridge {
         this.wasm._bridge = this;
         this.dispatch = dispatch;
         this.exports = wasm.exports;
+        // The browser's main thread may not block: its waits on the shared
+        // memory spin (the optimiser's `waits` pass reads this flag).
+        if (wasm.exports.__makepad_cannot_block instanceof WebAssembly.Global) {
+            wasm.exports.__makepad_cannot_block.value = 1;
+        }
         this.memory = wasm._memory;
         this.wasm_url = wasm._wasm_url;
         this.buffer_ref_len_check = 0;
