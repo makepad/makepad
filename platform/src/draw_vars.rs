@@ -1314,8 +1314,39 @@ impl DrawVars {
         let mut fragment = String::new();
         output.glsl_create_vertex_shader(vm, &shared_defs, &mut vertex);
         output.glsl_create_fragment_shader(vm, &shared_defs, &mut fragment);
+        Self::warn_inline_size(vm, io_self, &output);
 
         Some((output, CxDrawShaderCode::Separate { vertex, fragment }))
+    }
+
+    /// Say when a shader inlines to more source than a D3D compile handles
+    /// quickly. ANGLE on D3D (Windows browsers) and native D3D inline every
+    /// call, so a helper called at several sites is compiled once per site:
+    /// measured cold on ANGLE D3D11, about 40 KB inlined links in under a
+    /// second while 350-500 KB takes 5-13 s, which stalls the frame that
+    /// first draws it. The fix is in the shader: one call site in a loop over
+    /// its arguments instead of several (a normal from 4 offsets, two rays a
+    /// pixel), so the heaviest functions are named with their copy counts.
+    fn warn_inline_size(vm: &ScriptVm, io_self: ScriptObject, output: &crate::makepad_script::shader::ShaderOutput) {
+        const WARN_INLINED_BYTES: usize = 128 * 1024;
+        let (total, top) = output.glsl_fragment_inline_estimate();
+        if total <= WARN_INLINED_BYTES {
+            return;
+        }
+        let name = vm
+            .bx
+            .heap
+            .object_type_name_in_chain(io_self)
+            .map(|id| format!("{}", id))
+            .unwrap_or_else(|| format!("<script object {}>", io_self.index()));
+        let heaviest: Vec<String> = top.iter().map(|(f, copies, bytes)| format!("{f} inlined {copies}x ({bytes} B each)")).collect();
+        crate::warning!(
+            "shader '{}' inlines to {} KB (D3D compiles every call site: seconds on Windows browsers; keep it under {} KB): {}",
+            name,
+            total / 1024,
+            WARN_INLINED_BYTES / 1024,
+            heaviest.join(", ")
+        );
     }
 
     /// Bind a compiled (or shader pack) draw shader: reuse the shader of the

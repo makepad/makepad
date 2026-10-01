@@ -614,6 +614,103 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         }
     }
 
+    /// The source size of the fragment entry once every call is inlined, as a compiler
+    /// that inlines all calls sees it (FXC under ANGLE on D3D, and the D3D
+    /// drivers after it): a function called at k sites, each inside a caller
+    /// itself inlined m times, appears k * m times. The heaviest functions by
+    /// inlined bytes come with it: (name, copies, bytes of one copy).
+    ///
+    /// Compile time on D3D follows this size, not the emitted one: a pass
+    /// whose raymarch helpers are called from several sites (a normal from
+    /// four samples, two rays a pixel) inlines to hundreds of KB and takes
+    /// seconds to compile there, which stalls the frame that first draws it.
+    pub fn glsl_fragment_inline_estimate(&self) -> (usize, Vec<(String, usize, usize)>) {
+        let entry = self.backend.map_function_name("io_fragment");
+        let names: Vec<Option<String>> = self.functions.iter().map(|f| Self::glsl_function_name_from_sig(&f.call_sig)).collect();
+        let calls: Vec<Vec<(usize, usize)>> = self
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                names
+                    .iter()
+                    .enumerate()
+                    .filter(|(j, _)| *j != i)
+                    .filter_map(|(j, name)| {
+                        let n = Self::glsl_count_calls(&f.out, name.as_deref()?);
+                        (n > 0).then_some((j, n))
+                    })
+                    .collect()
+            })
+            .collect();
+        let Some(root) = names.iter().position(|n| n.as_deref() == Some(entry.as_str())) else {
+            return (0, Vec::new());
+        };
+        // Copies of each function, callers before callees (GLSL has no
+        // recursion, so the graph is acyclic; a back edge is ignored).
+        let n_fns = self.functions.len();
+        let mut order = Vec::with_capacity(n_fns);
+        let mut state = vec![0u8; n_fns]; // 0 new, 1 open, 2 done
+        let mut stack = vec![(root, 0usize)];
+        state[root] = 1;
+        while let Some(&mut (i, ref mut next)) = stack.last_mut() {
+            if let Some(&(j, _)) = calls[i].get(*next) {
+                *next += 1;
+                if state[j] == 0 {
+                    state[j] = 1;
+                    stack.push((j, 0));
+                }
+            } else {
+                state[i] = 2;
+                order.push(i);
+                stack.pop();
+            }
+        }
+        let mut pos = vec![usize::MAX; n_fns];
+        for (k, &i) in order.iter().enumerate() {
+            pos[i] = k;
+        }
+        let mut copies = vec![0usize; n_fns];
+        copies[root] = 1;
+        for &i in order.iter().rev() {
+            for &(j, n) in &calls[i] {
+                if pos[j] < pos[i] {
+                    copies[j] = copies[j].saturating_add(copies[i].saturating_mul(n));
+                }
+            }
+        }
+        let mut total = 0usize;
+        let mut top = Vec::new();
+        for (i, f) in self.functions.iter().enumerate() {
+            if copies[i] == 0 {
+                continue;
+            }
+            total = total.saturating_add(copies[i].saturating_mul(f.out.len()));
+            if let Some(name) = &names[i] {
+                top.push((name.clone(), copies[i], f.out.len()));
+            }
+        }
+        top.sort_by_key(|(_, c, l)| std::cmp::Reverse(c.saturating_mul(*l)));
+        top.truncate(4);
+        (total, top)
+    }
+
+    /// How many times `body` calls `function_name`.
+    fn glsl_count_calls(body: &str, function_name: &str) -> usize {
+        let pattern = format!("{}(", function_name);
+        let mut count = 0;
+        let mut search_start = 0;
+        while let Some(pos) = body[search_start..].find(&pattern) {
+            let abs = search_start + pos;
+            let prev_is_ident = body[..abs].chars().next_back().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !prev_is_ident {
+                count += 1;
+            }
+            search_start = abs + pattern.len();
+        }
+        count
+    }
+
     fn glsl_collect_reachable_functions(&self, entries: &[&str]) -> BTreeSet<usize> {
         let mut reachable = BTreeSet::new();
         let mut work = Vec::new();
