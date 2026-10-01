@@ -40,15 +40,32 @@ unknown launch layouts and active jobs rather than interrupting them.
 PowerShell, installs the node (`MakepadAiNode`, :8123) and the tunnel
 (`MakepadTunnel`, :8384) as Windows services. Both start at boot without a
 logged-on user and restart on failure. `tools/service_host` runs each of
-them. The node runs in the console user's session as that user when someone
-is logged on, because local-use admission watches that session; otherwise it
-runs as LocalSystem in session 0. The tunnel runs as LocalSystem in the
-checkout, so tunnel scripts are elevated. The firewall allows both ports
-from the local subnet only. Binaries live in `C:\ai\services`, which only
-administrators can write. Logs are in `C:\ai\services\logs`. The node keeps
-its cache directory and with it its identity (`node-key`). The updater above
-handles both layouts. For a service node it stops and starts the service
-instead of the launcher.
+them.
+
+The node runs in the console user's session as that user when someone is
+logged on, because local-use admission watches that session; otherwise it
+runs as LocalSystem in session 0. Its binary is in `C:\ai\services\node`.
+
+The tunnel is the TLS server from `tools/remote` (see
+`tools/remote/TUNNEL.md`). It runs as the virtual account
+`NT SERVICE\MakepadTunnel`, not as an administrator. That account may:
+- modify the tunnel's working directory, the cargo cache, `C:\ai\services\node`
+  and its own `C:\ai\services\tunnel`;
+- start, stop and query `MakepadAiNode`, and no other service. These are the
+  `admin node-*` actions.
+
+The installer keeps the tunnel's existing key and certificate, so client
+pins stay valid. It probes the new service end to end before removing the
+old watchdog task, and restores that task if the probe fails.
+
+The firewall allows both ports from the local subnet only. The service host
+and its configs live in `C:\ai\services`, which only administrators can
+write. Node logs are in `C:\ai\services\logs`. The node keeps its cache
+directory and with it its identity (`node-key`).
+
+The updater above handles both layouts. For a service node it reads the
+binary from `C:\ai\services\MakepadAiNode.cfg` and stops and starts the
+service instead of the launcher.
 
 After the node's normal activity quiet period, verify real generation:
 

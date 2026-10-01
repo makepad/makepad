@@ -17,21 +17,28 @@ $nodeArch = $Matches[1] + $Matches[2]
 if ([int]$Matches[1] -ge 12) { $nodeArch += 'a' }
 if ($CudaArch -ne $nodeArch) { throw "binary CUDA architecture $CudaArch does not match node $nodeArch" }
 $listen = Get-NetTCPConnection -LocalPort $Port -State Listen | Select-Object -First 1
-$old = Get-CimInstance Win32_Process -Filter "ProcessId=$($listen.OwningProcess)"
-if ($old.Name -notmatch '^makepad-(ai-hub|ai-content|asset-ai)\.exe$') { throw 'port owner is not an AIHub executable' }
-$exe = $old.ExecutablePath
-$dir = Split-Path $exe
-$parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($old.ParentProcessId)"
-# Two layouts: the Windows service from tools/aihub-node-install-services.ps1
-# (its makepad-service-host is the parent; the tunnel runs as LocalSystem and
-# may stop and start it), or a .cmd launcher started by a watchdog task.
-$service = Get-CimInstance Win32_Service | Where-Object { $_.ProcessId -eq $old.ParentProcessId -and $_.PathName -match '(?i)makepad-service-host\.exe' } | Select-Object -First 1
-$launcher = $null
-if (-not $service) {
+$oldPid = $listen.OwningProcess
+# Two layouts: the MakepadAiNode service from
+# tools/aihub-node-install-services.ps1 (the binary named in its config; the
+# tunnel's account may stop and start that service and write its node
+# folder, nothing more), or a .cmd launcher started by a watchdog task.
+$service = Get-Service MakepadAiNode -ErrorAction SilentlyContinue
+if ($service -and $service.Status -eq 'Running') {
+    $cfg = 'C:\ai\services\MakepadAiNode.cfg'
+    $exe = ((Get-Content $cfg | Where-Object { $_ -like 'exe=*' } | Select-Object -First 1) -replace '^exe=', '')
+    if (-not $exe -or -not (Test-Path $exe)) { throw "cannot read the node binary from $cfg" }
+    $launcher = $null
+} else {
+    $service = $null
+    $old = Get-CimInstance Win32_Process -Filter "ProcessId=$oldPid"
+    if ($old.Name -notmatch '^makepad-(ai-hub|ai-content|asset-ai)\.exe$') { throw 'port owner is not an AIHub executable' }
+    $exe = $old.ExecutablePath
+    $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($old.ParentProcessId)"
     if ($parent.Name -ne 'cmd.exe' -or $parent.CommandLine -notmatch '(?i)/c\s+"?([^"\r\n]+\.cmd)"?\s*$') { throw 'cannot safely identify the existing AIHub launcher' }
     $launcher = $Matches[1]
-    if (-not (Test-Path $launcher) -or (Split-Path $launcher) -ne $dir) { throw 'launcher is outside the AIHub installation directory' }
 }
+$dir = Split-Path $exe
+if ($launcher -and (-not (Test-Path $launcher) -or (Split-Path $launcher) -ne $dir)) { throw 'launcher is outside the AIHub installation directory' }
 $before = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 5
 $jobs = Invoke-RestMethod "http://127.0.0.1:$Port/jobs" -TimeoutSec 5
 if ($before.jobs_pending -ne 0 -or @($jobs.jobs).Count -ne 0) { throw 'AIHub has active jobs; wait for them to finish before updating' }
@@ -62,7 +69,7 @@ function Stop-Node {
         (Get-Service $service.Name).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
         return
     }
-    $oldProcess = Get-Process -Id $old.ProcessId
+    $oldProcess = Get-Process -Id $oldPid
     $oldProcess.Kill()
     if (-not $oldProcess.WaitForExit(10000)) { throw 'old AIHub process did not exit' }
 }
@@ -80,8 +87,10 @@ function Wait-Healthy {
         try {
             $health = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2
             $owner = Get-NetTCPConnection -LocalPort $Port -State Listen | Select-Object -First 1
-            $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($owner.OwningProcess)"
-            if ($proc.ExecutablePath -eq $exe -and $proc.ProcessId -ne $old.ProcessId -and $health.node_key -eq $before.node_key) { return $health }
+            # A service node may run as another user, whose process path this
+            # account cannot read; the service config names the binary.
+            $path = if ($service) { $exe } else { (Get-CimInstance Win32_Process -Filter "ProcessId=$($owner.OwningProcess)").ExecutablePath }
+            if ($path -eq $exe -and $owner.OwningProcess -ne $oldPid -and $health.node_key -eq $before.node_key) { return $health }
         } catch {}
     }
     throw 'replacement AIHub did not become healthy within 60 seconds'
@@ -104,7 +113,7 @@ try {
     if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $Sha256) { throw 'installed binary hash mismatch' }
     Start-Node
     $after = Wait-Healthy
-    [pscustomobject]@{host=$env:COMPUTERNAME;path=$exe;launcher=$launcher;service=$service.Name;sha256=$Sha256;cuda_arch=$CudaArch;previous_sha256=$oldHash;backup=$backup;previous_pid=$old.ProcessId;health=$after} | ConvertTo-Json -Depth 10 -Compress
+    [pscustomobject]@{host=$env:COMPUTERNAME;path=$exe;launcher=$launcher;service=$service.Name;sha256=$Sha256;cuda_arch=$CudaArch;previous_sha256=$oldHash;backup=$backup;previous_pid=$oldPid;health=$after} | ConvertTo-Json -Depth 10 -Compress
 } catch {
     $failure = $_
     if ($stopped) {
