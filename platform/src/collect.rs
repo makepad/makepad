@@ -32,23 +32,10 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
-/// How this process runs, from `MAKEPAD_RUN`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum RunMode {
-    #[default]
-    Normal,
-    /// `collect-web`: learn what the web build needs, write it to
-    /// `MAKEPAD_COLLECT`, quit.
-    CollectWeb,
-}
-
-impl RunMode {
-    pub fn from_env() -> RunMode {
-        match std::env::var("MAKEPAD_RUN").as_deref() {
-            Ok("collect-web") if cfg!(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos"))) => RunMode::CollectWeb,
-            _ => RunMode::Normal,
-        }
-    }
+/// Whether `MAKEPAD_RUN=collect-web` asks for a collect run (desktop only).
+fn collect_web_requested() -> bool {
+    cfg!(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))
+        && std::env::var("MAKEPAD_RUN").as_deref() == Ok("collect-web")
 }
 
 /// What a scan collected, shared by the [`ScanEvent`]s and the collector.
@@ -340,15 +327,6 @@ impl Collector {
 }
 
 impl Cx {
-    /// How this process runs (`MAKEPAD_RUN`).
-    pub fn run_mode(&self) -> RunMode {
-        if self.collect.is_some() {
-            RunMode::CollectWeb
-        } else {
-            RunMode::Normal
-        }
-    }
-
     /// Whether this is a collect run: recorders a library keeps for the
     /// manifest (glyphs, kernels) turn on when this is true.
     pub fn is_collecting(&self) -> bool {
@@ -372,7 +350,7 @@ impl Cx {
     /// before any script module runs, so the shader recording sees every
     /// shader.
     pub(crate) fn init_collect_from_env(&mut self) {
-        if RunMode::from_env() != RunMode::CollectWeb {
+        if !collect_web_requested() {
             return;
         }
         self.collect = Some(Box::new(Collector::new()));
