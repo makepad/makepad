@@ -459,43 +459,21 @@ impl ScriptNative {
             }
         }
 
-        for (ty, id) in types {
-            self.add_type_method(heap, ScriptValueType::REDUX_NUMBER, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_NUMBER).into()
+        // `is_fn()`: whether a value is a function (on every type).
+        for ty in types.iter().map(|t| t.0).chain([ScriptValueType::REDUX_POD, ScriptValueType::REDUX_POD_TYPE]) {
+            self.add_type_method(heap, ty, id_lut!(is_fn), &[], |vm, args| {
+                let sself = script_value!(vm, args.self);
+                sself.as_object().is_some_and(|o| vm.bx.heap.is_fn(o)).into()
             });
-            self.add_type_method(heap, ScriptValueType::REDUX_NAN, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_NAN).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_BOOL, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_BOOL).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_NIL, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_NIL).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_COLOR, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_COLOR).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_STRING, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_STRING).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_OBJECT, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_OBJECT).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_ARRAY).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_REGEX, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_REGEX).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_OPCODE, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_OPCODE).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_ERR, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_ERR).into()
-            });
-            self.add_type_method(heap, ScriptValueType::REDUX_ID, id, &[], move |_, _| {
-                (ty == ScriptValueType::REDUX_ID).into()
-            });
+        }
+
+        // The type predicates (`is_number()`, …) on every type, pods too,
+        // each true only on its own type.
+        let predicates = types.iter().copied().chain([(ScriptValueType::REDUX_POD, id_lut!(is_pod)), (ScriptValueType::REDUX_POD_TYPE, id_lut!(is_pod_type))]).collect::<Vec<_>>();
+        for (ty, id) in predicates.iter().copied() {
+            for (receiver, _) in predicates.iter().copied() {
+                self.add_type_method(heap, receiver, id, &[], move |_, _| (ty == receiver).into());
+            }
         }
     }
 }

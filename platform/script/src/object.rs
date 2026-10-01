@@ -744,7 +744,10 @@ impl ScriptObjectData {
             &[],
             |vm, args| {
                 if let Some(sself) = script_value!(vm, args.self).as_object() {
-                    return vm.bx.heap.proto(sself);
+                    // The prototype object, nil at the root of a chain (a
+                    // type's own prototype is no object).
+                    let proto = vm.bx.heap.proto(sself);
+                    return if proto.as_object().is_some() { proto } else { NIL };
                 }
                 script_err_unexpected!(
                     vm.bx.threads.cur_ref().trap,

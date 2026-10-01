@@ -146,6 +146,20 @@ impl ScriptStringData {
             },
         );
 
+        // `to_upper()` / `to_lower()`: the string in Unicode upper or
+        // lower case.
+        for (name, upper) in [(id_lut!(to_upper), true), (id_lut!(to_lower), false)] {
+            native.add_type_method(heap, ScriptValueType::REDUX_STRING, name, script_args_def!(), move |vm, args| {
+                let sself = script_value!(vm, args.self);
+                if let Some(s) = vm.bx.heap.string_mut_self_with(sself, |heap, sself| {
+                    heap.new_string_from_str(&if upper { sself.to_uppercase() } else { sself.to_lowercase() })
+                }) {
+                    return s.into();
+                }
+                script_err_unexpected!(vm.bx.threads.cur_ref().trap, "to_upper / to_lower called on non-string value")
+            });
+        }
+
         native.add_type_method(
             heap,
             ScriptValueType::REDUX_STRING,
