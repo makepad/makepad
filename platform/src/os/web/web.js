@@ -2004,24 +2004,23 @@ export class WasmWebBrowser extends WasmBridge {
             this.watch_audio_callback(audio_context);
             return;
         }
-        if (audio_context.state !== "suspended" || audio_context._makepad_resume_pending) {
+        if (audio_context.state === "closed") {
             return;
         }
-        audio_context._makepad_resume_pending = true;
+        // Every gesture asks again while the context is not running. WebKit grants
+        // activation on pointerup/touchend, not on touchstart, and a resume() asked
+        // without activation stays pending (it never settles): waiting for it skipped
+        // the touchend that could start the sound (iOS played silently). Asking again
+        // is harmless: resume() of a running context resolves at once. An iOS context
+        // "interrupted" by a call or another app also comes back this way.
         audio_context.resume().then(() => {
-            audio_context._makepad_resume_pending = false;
             if (this.audio_context !== audio_context) {
                 return;
             }
             if (audio_context.state === "running") {
                 this.watch_audio_callback(audio_context);
-            } else {
-                console.error(
-                    `web audio: context suspended after canvas gesture state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending`,
-                );
             }
         }).catch(error => {
-            audio_context._makepad_resume_pending = false;
             console.error(
                 `web audio: resume failed state=${audio_context.state} sample_rate=${audio_context.sampleRate} buffer=pending: ${error}`,
             );
