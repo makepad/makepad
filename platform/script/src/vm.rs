@@ -154,10 +154,57 @@ pub struct ScriptCode {
     pub script_mod_overrides: Rc<RefCell<HashMap<ScriptModKey, String>>>,
 }
 
+#[derive(Clone, PartialEq)]
 pub struct ScriptLoc {
     pub file: String,
     pub col: u32,
     pub line: u32,
+}
+
+/// An error a script raised (or a parse error), with where it is: its
+/// source location (zero-based line and column, like [`ScriptLoc`]) and
+/// its message apart, and the text the VM has always reported it as
+/// (`file:line:col: message (origin)`), which `Display` prints.
+#[derive(Clone)]
+pub struct ScriptErrorRecord {
+    pub loc: Option<ScriptLoc>,
+    /// The message without its location or the interpreter's origin.
+    pub message: String,
+    pub text: String,
+}
+
+impl std::fmt::Display for ScriptErrorRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+/// A host's own message, at no place in the source.
+impl From<String> for ScriptErrorRecord {
+    fn from(message: String) -> Self {
+        Self::plain(message)
+    }
+}
+
+impl std::fmt::Debug for ScriptErrorRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        std::fmt::Debug::fmt(&self.text, f)
+    }
+}
+
+impl ScriptErrorRecord {
+    /// An error a host raises itself, at no place in the source.
+    pub fn plain(message: String) -> Self {
+        Self { loc: None, text: message.clone(), message }
+    }
+
+    /// A parse error: its formatted text and, when the parser kept it, its
+    /// structured diagnostic.
+    pub fn parse(text: String, diagnostic: Option<&crate::parser::ScriptParserDiagnostic>, file: &str) -> Self {
+        let loc = diagnostic.map(|d| ScriptLoc { file: file.to_string(), line: d.line, col: d.column });
+        let message = diagnostic.map_or_else(|| text.clone(), |d| d.message.clone());
+        Self { loc, message, text }
+    }
 }
 
 impl std::fmt::Debug for ScriptLoc {
@@ -944,19 +991,20 @@ impl<'a> ScriptVm<'a> {
         self.call_with_scope(scope, me)
     }
 
-    fn format_error(&self, err: &crate::trap::ScriptError) -> String {
+    fn format_error(&self, err: &crate::trap::ScriptError) -> ScriptErrorRecord {
         let loc = err
             .value
             .as_err()
             .and_then(|ptr| self.bx.code.ip_to_loc(ptr.ip));
-        if let Some(loc) = loc {
+        let text = if let Some(loc) = &loc {
             format!(
                 "{}:{}:{}: {} ({}:{})",
                 loc.file, loc.line, loc.col, err.message, err.origin_file, err.origin_line
             )
         } else {
             format!("{}: {}", err.origin_file, err.message)
-        }
+        };
+        ScriptErrorRecord { loc, message: err.message.clone(), text }
     }
 
     /// Drain pending errors into formatted strings instead of logging them.
@@ -966,6 +1014,11 @@ impl<'a> ScriptVm<'a> {
     /// need reliable capture install a sink: `vm.bx.captured_errors =
     /// Some(Vec::new())` before running, then take it after.
     pub fn take_errors(&mut self) -> Vec<String> {
+        self.take_error_records().into_iter().map(|e| e.text).collect()
+    }
+
+    /// [`Self::take_errors`] with each error's location and message apart.
+    pub fn take_error_records(&mut self) -> Vec<ScriptErrorRecord> {
         let mut out = std::mem::take(&mut self.bx.captured_errors).unwrap_or_default();
         loop {
             let err = self.bx.threads.cur().trap.err_pop_front();
@@ -1884,9 +1937,11 @@ impl<'a> ScriptVm<'a> {
             // surface them to a captured-diagnostics sink here or a validating
             // host reports success for a script that failed to parse.
             let parse_errors = std::mem::take(&mut body.parser.parse_errors);
+            let parse_records: Vec<ScriptErrorRecord> = parse_errors.into_iter().enumerate()
+                .map(|(i, text)| ScriptErrorRecord::parse(text, body.parser.diagnostics.get(i), &body.parser.file)).collect();
             drop(bodies);
             if let Some(sink) = self.bx.captured_errors.as_mut() {
-                sink.extend(parse_errors);
+                sink.extend(parse_records);
             }
             // lets point our thread to it
             let result = self.run_root(body_id);
@@ -2013,9 +2068,9 @@ impl<'a> ScriptVm<'a> {
             // (`let loop` recovered into an infinite empty loop and burned
             // the instruction budget). Live-typing paths install no sink and
             // keep the log-only tolerance.
-            let new_parse_errors: Vec<String> =
-                body.parser.parse_errors[errors_before.min(body.parser.parse_errors.len())..]
-                    .to_vec();
+            let from = errors_before.min(body.parser.parse_errors.len());
+            let new_parse_errors: Vec<ScriptErrorRecord> = body.parser.parse_errors[from..].iter().enumerate()
+                .map(|(i, text)| ScriptErrorRecord::parse(text.clone(), body.parser.diagnostics.get(from + i), &body.parser.file)).collect();
 
             drop(bodies);
             if let Some(sink) = &mut self.bx.captured_errors {
@@ -2078,7 +2133,7 @@ pub struct ScriptVmBase {
     /// logged or dropped — even under `silence_errors`. Install before an
     /// eval/call, take after, to feed diagnostics back to a host (e.g. an AI
     /// agent editing the script live).
-    pub captured_errors: Option<Vec<String>>,
+    pub captured_errors: Option<Vec<ScriptErrorRecord>>,
     pub run_budget: Option<ScriptRunBudget>,
     /// Instructions charged by the most recent with_instruction_limit call
     /// (see ScriptVm::last_limit_consumed).

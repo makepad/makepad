@@ -401,6 +401,15 @@ pub fn format_pod_type_from_builtins(
     format!("type#{}", pod_ty.index)
 }
 
+/// The candidates nearest to `key` (by edit distance, nearest first, ties
+/// by name), at most `limit` of them, each within a third of the
+/// key's length (at least 2 edits): what a "did you mean" offers.
+pub fn nearest<'a>(key: &str, candidates: impl IntoIterator<Item = &'a str>, limit: usize) -> Vec<&'a str> {
+    let mut scored: Vec<(usize, &str)> = candidates.into_iter().map(|c| (levenshtein(key, c), c)).collect();
+    scored.sort();
+    scored.into_iter().filter(|(d, _)| *d <= 2.max(key.len() / 3)).take(limit).map(|(_, c)| c).collect()
+}
+
 /// Maximum number of items to show in "Available:" list
 const MAX_AVAILABLE_ITEMS: usize = 4;
 

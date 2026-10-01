@@ -59,7 +59,7 @@ fn eof_unbraced_lambda_let_binds() {
     let vm = &mut test_vm();
     vm.bx.captured_errors = Some(Vec::new());
     let _ = eval_str(vm, "unbraced", "\nlet hits = 0\nfn bump(){ hits += 7 hits }\nlet c = || bump()");
-    let mut errs = vm.bx.captured_errors.take().unwrap();
+    let mut errs = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| e.text).collect::<Vec<String>>();
     errs.extend(vm.take_errors());
     assert!(errs.is_empty(), "eval errors: {errs:?}");
     // Body must not have run at eval: hits still 0.
@@ -79,7 +79,7 @@ fn eof_braced_lambda_let_binds() {
     let vm = &mut test_vm();
     vm.bx.captured_errors = Some(Vec::new());
     let _ = eval_str(vm, "braced", "\nfn seven(){ 7 }\nlet c = || { seven() }");
-    let mut errs = vm.bx.captured_errors.take().unwrap();
+    let mut errs = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| e.text).collect::<Vec<String>>();
     errs.extend(vm.take_errors());
     assert!(errs.is_empty(), "eval errors: {errs:?}");
     let c = resolve(vm, "auto_close_eof_braced", live_id!(c));
@@ -110,7 +110,7 @@ fn deferred_arg_closure_calls_module_fn() {
         "deferred",
         "\nlet hits = 0\nfn refresh(){ hits += 1 hits }\nfn st(d, cb){ cb }\nst(0.05, || refresh())\n",
     );
-    let mut errs = vm.bx.captured_errors.take().unwrap();
+    let mut errs = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| e.text).collect::<Vec<String>>();
     errs.extend(vm.take_errors());
     assert!(errs.is_empty(), "eval errors: {errs:?}");
     let is_fn = c.as_object().map(|o| vm.bx.heap.is_fn(o)).unwrap_or(false);
@@ -130,7 +130,7 @@ fn nonlast_lambda_let_discriminating() {
         "nonlast",
         "\nfn echo(x){ x }\nfn seven(){ 7 }\nlet c = || seven()\nlet out = c() + 10\necho(out)",
     );
-    let mut errs = vm.bx.captured_errors.take().unwrap();
+    let mut errs = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| e.text).collect::<Vec<String>>();
     errs.extend(vm.take_errors());
     assert!(errs.is_empty(), "eval errors: {errs:?}");
     assert_eq!(v.as_number(), Some(17.0), "got {v:?}");
@@ -157,14 +157,14 @@ fn notrap_scope_probe_is_silent() {
     vm.bx.captured_errors = Some(Vec::new());
     let miss = vm.bx.heap.scope_value(scope, live_id!(on_app_resize), NoTrap);
     assert!(miss.is_err() || miss.is_nil(), "expected a miss, got {miss:?}");
-    let mut errs = vm.bx.captured_errors.take().unwrap();
+    let mut errs = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| e.text).collect::<Vec<String>>();
     errs.extend(vm.take_errors());
     assert!(errs.is_empty(), "NoTrap probe queued errors: {errs:?}");
 
     vm.bx.captured_errors = Some(Vec::new());
     let trap = vm.trap();
     let _miss = vm.bx.heap.scope_value(scope, live_id!(on_app_resize), trap);
-    let mut errs = vm.bx.captured_errors.take().unwrap();
+    let mut errs = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| e.text).collect::<Vec<String>>();
     errs.extend(vm.take_errors());
     assert!(
         !errs.is_empty(),

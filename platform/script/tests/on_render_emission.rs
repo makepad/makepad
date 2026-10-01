@@ -284,7 +284,7 @@ fn for_in_non_iterable_errors() {
         // and the script continues), so capture the error stream.
         vm.bx.captured_errors = Some(Vec::new());
         let _ = eval_str(vm, name, code);
-        let errors = vm.bx.captured_errors.take().unwrap();
+        let errors = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| e.text).collect::<Vec<String>>();
         assert!(
             errors.iter().any(|e| e.contains("not iterable")),
             "{name}: expected a not-iterable error, got {errors:?}"

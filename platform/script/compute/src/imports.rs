@@ -249,7 +249,7 @@ fn string_of(vm: &ScriptVm, v: ScriptValue) -> Option<String> {
 /// revision's exports (modules import modules through it too). Each module
 /// runs with `prefix` (the host's `use` lines) before its text, under
 /// `instructions`; a named module's exports go to `named` under its name.
-pub fn load(vm: &mut ScriptVm, module: ScriptObject, prefix: &str, loaded: &[LoadedModule], named: Option<ScriptObject>, instructions: usize) -> Vec<String> {
+pub fn load(vm: &mut ScriptVm, module: ScriptObject, prefix: &str, loaded: &[LoadedModule], named: Option<ScriptObject>, instructions: usize) -> Vec<ScriptErrorRecord> {
     let table: Rc<RefCell<Vec<(String, ScriptValue, ScriptObjectRef)>>> = Rc::new(RefCell::new(Vec::new()));
     let lookup = table.clone();
     vm.add_method(module, id_lut!(import), script_args!(a = NIL), move |vm, args| {
@@ -271,9 +271,10 @@ pub fn load(vm: &mut ScriptVm, module: ScriptObject, prefix: &str, loaded: &[Loa
     for m in loaded {
         vm.bx.captured_errors = Some(Vec::new());
         let value = vm.with_instruction_limit(instructions, |vm| vm.eval(ScriptMod { file: module_file(&m.reference), code: format!("{prefix}{}", m.source.text), ..Default::default() }));
-        errors.extend(vm.take_errors().into_iter().map(|e| e.to_string()));
+        errors.extend(vm.take_error_records());
         let Some(exports) = value.as_object() else {
-            errors.push(format!("module {}: its last expression must be an object of its exports, like {{rig: rig}}", m.reference.key()));
+            let message = format!("module {}: its last expression must be an object of its exports, like {{rig: rig}}", m.reference.key());
+            errors.push(ScriptErrorRecord::plain(message));
             continue;
         };
         match (&m.reference, named) {
