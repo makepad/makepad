@@ -135,6 +135,24 @@ impl Cx {
     pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
 
+        // A pass whose last handle was dropped lets go of its attachments
+        // and its place in the tree now, on every backend: its slot is only
+        // reset when it is reused, and until then it kept its colour and
+        // depth textures (full-frame targets) alive.
+        for draw_pass_id in self.passes.id_iter() {
+            if self.passes.0.is_free(draw_pass_id.0) {
+                let pass = &mut self.passes[draw_pass_id];
+                if !pass.color_textures.is_empty() || pass.depth_texture.is_some() {
+                    pass.color_textures.clear();
+                    pass.depth_texture = None;
+                    pass.main_draw_list_id = None;
+                    pass.parent = crate::draw_pass::CxDrawPassParent::None;
+                    pass.attached_by = None;
+                    pass.paint_dirty = false;
+                }
+            }
+        }
+
         // Resolve attachment liveness through the whole consumer chain before
         // propagating dirtiness. A descendant's own attachment can still be
         // current inside an orphaned capture; it must not revive that capture.
