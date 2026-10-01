@@ -393,6 +393,11 @@ impl Cx {
                     }
                 }
 
+                live_id!(ToWasmModuleLinked) => {
+                    let tw = ToWasmModuleLinked::read_to_wasm(&mut to_wasm);
+                    super::wasm_link::linked(tw.request_id, tw.slots, tw.error);
+                }
+
                 live_id!(ToWasmStorageResult) => {
                     let tw = ToWasmStorageResult::read_to_wasm(&mut to_wasm);
                     let request_id = StorageRequestId(
@@ -1488,6 +1493,7 @@ impl CxOsApi for Cx {
             ToWasmTextInput::to_js_code(),
             ToWasmTextCopy::to_js_code(),
             ToWasmStorageResult::to_js_code(),
+            ToWasmModuleLinked::to_js_code(),
             ToWasmRenderTextureCapture::to_js_code(),
             ToWasmGpuCompletion::to_js_code(),
             ToWasmTimerFired::to_js_code(),
@@ -1536,6 +1542,8 @@ impl CxOsApi for Cx {
             FromWasmSetMouseCursor::to_js_code(),
             FromWasmTextCopyResponse::to_js_code(),
             FromWasmStorageGet::to_js_code(),
+            FromWasmLinkModule::to_js_code(),
+            FromWasmUnlinkSlots::to_js_code(),
             FromWasmStorageSet::to_js_code(),
             FromWasmStorageDelete::to_js_code(),
             FromWasmStorageList::to_js_code(),

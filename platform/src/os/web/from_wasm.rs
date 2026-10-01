@@ -83,6 +83,20 @@ pub struct FromWasmTextCopyResponse {
     pub response: String,
 }
 
+/// A runtime-generated module to instantiate against this module's memory
+/// and link into its function table (see `wasm_link`).
+#[derive(FromWasm)]
+pub struct FromWasmLinkModule {
+    pub request_id: u32,
+    pub bytes: WasmDataU8,
+}
+
+/// Table slots of linked modules to empty.
+#[derive(FromWasm)]
+pub struct FromWasmUnlinkSlots {
+    pub slots: Vec<u32>,
+}
+
 #[derive(FromWasm)]
 pub struct FromWasmStorageGet {
     pub request_id_lo: u32,

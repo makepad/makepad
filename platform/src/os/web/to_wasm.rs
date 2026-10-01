@@ -562,6 +562,14 @@ impl Into<TextInputEvent> for ToWasmTextInput {
 #[derive(ToWasm)]
 pub struct ToWasmTextCopy {}
 
+/// A link request's answer: the table slot of each export, or an error.
+#[derive(ToWasm)]
+pub struct ToWasmModuleLinked {
+    pub request_id: u32,
+    pub slots: Vec<u32>,
+    pub error: String,
+}
+
 #[derive(ToWasm)]
 pub struct ToWasmStorageResult {
     pub request_id_lo: u32,

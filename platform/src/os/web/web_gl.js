@@ -3248,6 +3248,9 @@ export class WasmWebGL extends WasmWebBrowser {
         return;
       }
       let duration_ms = Math.round(video.duration * 1000);
+      // An audio-only source has no picture: its position is reported
+      // every frame while it plays, for a host that follows its clock.
+      player.audio_only = video.videoWidth === 0 && video.videoHeight === 0;
       this.to_wasm.ToWasmVideoPlaybackPrepared({
         video_id_lo: args.video_id_lo,
         video_id_hi: args.video_id_hi,
@@ -3456,6 +3459,16 @@ export class WasmWebGL extends WasmWebBrowser {
         height >= 0 &&
         (width === 0 || height === 0)
       ) {
+        if (player.audio_only) {
+          const ms = Math.round(video.currentTime * 1000);
+          this.to_wasm.ToWasmVideoTextureUpdated({
+            video_id_lo: player.video_id_lo,
+            video_id_hi: player.video_id_hi,
+            current_position_lo: ms & 0xFFFFFFFF,
+            current_position_hi: Math.floor(ms / 0x100000000),
+          });
+          any_updated = true;
+        }
         // Metadata can become ready before the decoder exposes dimensions.
         continue;
       }

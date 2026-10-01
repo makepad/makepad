@@ -1257,6 +1257,49 @@ export class WasmWebBrowser extends WasmBridge {
         });
     }
 
+    // Runtime-generated modules (wasm_link.rs): instantiated against our
+    // memory, their exports placed in our function table and called from
+    // wasm through call_indirect. Emptied slots are reused.
+    FromWasmLinkModule(args) {
+        const bytes = this.clone_data_u8(args.bytes);
+        this.free_data_u8(args.bytes);
+        const reply = (slots, error) => {
+            if (this.webgl_context_lost) {
+                return;
+            }
+            this.to_wasm.ToWasmModuleLinked({ request_id: args.request_id, slots, error });
+            this.do_wasm_pump();
+        };
+        const table = this.exports.__indirect_function_table;
+        if (!(table instanceof WebAssembly.Table)) {
+            reply([], "the function table is not exported (link with --export-table --growable-table)");
+            return;
+        }
+        WebAssembly.instantiate(bytes, { env: { memory: this.wasm._memory } }).then(({ instance }) => {
+            const free = this.wasm_link_free || (this.wasm_link_free = []);
+            const slots = [];
+            for (const f of Object.values(instance.exports)) {
+                if (typeof f !== "function") {
+                    continue;
+                }
+                const slot = free.length > 0 ? free.pop() : table.grow(1);
+                table.set(slot, f);
+                slots.push(slot);
+            }
+            reply(slots, "");
+        }).catch(error => reply([], String(error && error.message || error)));
+    }
+
+    FromWasmUnlinkSlots(args) {
+        const table = this.exports.__indirect_function_table;
+        const free = this.wasm_link_free || (this.wasm_link_free = []);
+        for (const slot of args.slots) {
+            table.set(slot, null);
+            free.push(slot);
+        }
+    }
+
+    // @section storage
     FromWasmStorageGet(args) {
         this.storage_database().then(db => {
             const request = db.transaction("values", "readonly")
