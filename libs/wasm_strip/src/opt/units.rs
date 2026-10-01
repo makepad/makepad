@@ -435,14 +435,31 @@ pub fn apply(module: &mut Module, plan: &Plan) {
     }
 }
 
-/// The active segments of memory 0 with constant offsets: (start, index).
+/// The data segments of memory 0 with a known address: (start, end,
+/// index). An active segment's is its constant offset; a passive one's
+/// (a threaded build's, copied in by `__wasm_init_memory`) is the constant
+/// destination of the `memory.init` that copies it.
 fn data_spans(module: &Module) -> Vec<(u32, u32, usize)> {
     let mut out = Vec::new();
-    for (i, data) in module.datas.iter().enumerate() {
-        if let DataMode::Active { memory: 0, offset } = &data.mode {
-            if let [Instr::I32Const(at), Instr::End] = offset.as_slice() {
-                out.push((*at as u32, *at as u32 + data.bytes.len() as u32, i));
+    let mut passive: HashMap<usize, u32> = HashMap::new();
+    for func in &module.funcs {
+        for w in func.body.windows(4) {
+            if let [Instr::I32Const(dst), Instr::I32Const(src), Instr::I32Const(_), Instr::MemoryInit { data, memory: 0 }] = w {
+                passive.entry(*data as usize).or_insert((*dst as u32).wrapping_sub(*src as u32));
             }
+        }
+    }
+    for (i, data) in module.datas.iter().enumerate() {
+        let start = match &data.mode {
+            DataMode::Active { memory: 0, offset } => match offset.as_slice() {
+                [Instr::I32Const(at), Instr::End] => Some(*at as u32),
+                _ => None,
+            },
+            DataMode::Passive => passive.get(&i).copied(),
+            _ => None,
+        };
+        if let Some(start) = start {
+            out.push((start, start + data.bytes.len() as u32, i));
         }
     }
     out
@@ -501,68 +518,83 @@ pub fn code_anchors(module: &Module, skip: &HashSet<u32>) -> BTreeSet<u32> {
     out
 }
 
-/// Clears the data only stripped code pointed at. `before`: the anchors of
-/// the module before the strip. A region runs from an anchor to the next
-/// one (of any kind: code before or after, or a pointer-sized word in the
-/// data); it stays when live code points at it or a live region holds a
-/// word that does. Cleared runs of 64 bytes and more are cut out of their
-/// segment (memory starts zeroed). Returns the bytes cleared.
-pub fn zero_dead_data(module: &mut Module, before: &BTreeSet<u32>) -> usize {
-    let spans = data_spans(module);
-    if spans.is_empty() {
-        return 0;
-    }
-    let after = code_anchors(module, &HashSet::new());
-    let word_at = |addr: u32| -> Option<u32> {
-        let (s, _, i) = spans.iter().find(|(s, e, _)| addr >= *s && addr + 4 <= *e)?;
-        let at = (addr - s) as usize;
-        let b = &module.datas[*i].bytes[at..at + 4];
-        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
-    };
-    let inside = |a: u32| spans.iter().any(|(s, e, _)| a >= *s && a < *e);
-    // Every pointer-shaped word in the data.
-    let mut words: BTreeMap<u32, u32> = BTreeMap::new();
-    for (s, e, _) in &spans {
-        let mut a = (s + 3) & !3;
-        while a + 4 <= *e {
-            if let Some(w) = word_at(a) {
+/// The data's regions and which of them live code reaches. A region runs
+/// from an anchor to the next one (of any kind: `extra` anchors, the
+/// code's, or a pointer-shaped word in the data); it is live when live code
+/// points at it or a live region holds a word that does.
+struct DataLive {
+    spans: Vec<(u32, u32, usize)>,
+    anchors: BTreeSet<u32>,
+    code: BTreeSet<u32>,
+    live: BTreeSet<u32>,
+}
+
+impl DataLive {
+    fn new(module: &Module, extra: &BTreeSet<u32>) -> DataLive {
+        let spans = data_spans(module);
+        let code = code_anchors(module, &HashSet::new());
+        let inside = |a: u32| spans.iter().any(|(s, e, _)| a >= *s && a < *e);
+        let mut words: BTreeMap<u32, u32> = BTreeMap::new();
+        for (s, e, i) in &spans {
+            let bytes = &module.datas[*i].bytes;
+            let mut a = (s + 3) & !3;
+            while a + 4 <= *e {
+                let at = (a - s) as usize;
+                let w = u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]);
                 if inside(w) {
                     words.insert(a, w);
                 }
+                a += 4;
             }
-            a += 4;
         }
+        let mut anchors: BTreeSet<u32> = extra.union(&code).copied().collect();
+        anchors.extend(words.values().copied());
+        let mut out = DataLive { spans, anchors, code, live: BTreeSet::new() };
+        let mut work: Vec<u32> = out.code.iter().copied().collect();
+        while let Some(a) = work.pop() {
+            let (start, end) = out.region(a);
+            if !out.live.insert(start) {
+                continue;
+            }
+            for (_, w) in words.range(start..end) {
+                work.push(*w);
+            }
+        }
+        out
     }
-    let mut anchors: BTreeSet<u32> = before.union(&after).copied().collect();
-    anchors.extend(words.values().copied());
-    let region = |a: u32, anchors: &BTreeSet<u32>| -> (u32, u32) {
-        let start = anchors.range(..=a).next_back().copied().unwrap_or(a);
-        let end = anchors.range(a + 1..).next().copied().unwrap_or(u32::MAX);
+
+    fn region(&self, a: u32) -> (u32, u32) {
+        let start = self.anchors.range(..=a).next_back().copied().unwrap_or(a);
+        let end = self.anchors.range(a.saturating_add(1)..).next().copied().unwrap_or(u32::MAX);
         (start, end)
-    };
-    // Live regions: from the live code's anchors, through the words they hold.
-    let mut live: BTreeSet<u32> = BTreeSet::new();
-    let mut work: Vec<u32> = after.iter().copied().collect();
-    while let Some(a) = work.pop() {
-        let (start, end) = region(a, &anchors);
-        if !live.insert(start) {
-            continue;
-        }
-        for (_, w) in words.range(start..end) {
-            work.push(*w);
-        }
     }
-    // Dead: regions only the stripped code pointed at.
+}
+
+/// Clears the text only stripped code pointed at (see [`is_text`]).
+/// `before`: the anchors of the module before the strip. Cleared runs of 64 bytes and more are cut
+/// out of their segment (memory starts zeroed). Returns the bytes cleared.
+pub fn zero_dead_data(module: &mut Module, before: &BTreeSet<u32>) -> usize {
+    if data_spans(module).is_empty() {
+        return 0;
+    }
+    let data = DataLive::new(module, before);
     let mut cleared = 0;
-    for a in before.difference(&after) {
-        let (start, end) = region(*a, &anchors);
-        if live.contains(&start) {
+    for a in before.difference(&data.code) {
+        let (start, end) = data.region(*a);
+        if data.live.contains(&start) {
             continue;
         }
-        for (s, e, i) in &spans {
+        for (s, e, i) in &data.spans {
             let (lo, hi) = (start.max(*s), end.min(*e));
             if lo < hi {
                 let bytes = &mut module.datas[*i].bytes[(lo - s) as usize..(hi - s) as usize];
+                // Text only (Splash sources, SVG, theme files): where a
+                // region ends is a guess, and binary data (a vtable, a
+                // table) cut short breaks live code; a text's start is
+                // exact and nothing points into its middle.
+                if !is_text(bytes) {
+                    continue;
+                }
                 cleared += bytes.iter().filter(|b| **b != 0).count();
                 bytes.fill(0);
             }
@@ -570,6 +602,127 @@ pub fn zero_dead_data(module: &mut Module, before: &BTreeSet<u32>) -> usize {
     }
     split_zero_runs(module, 64);
     cleared
+}
+
+/// Table entries nothing can name: a function pointer is a table index,
+/// written in live code (`i32.const`) or held in the data (a vtable, a
+/// stored callback) that is left once what only dead code pointed at is
+/// cleared. An entry whose index neither holds points at a
+/// trapping stub of its type, and dead-code elimination drops the function
+/// when nothing else uses it; repeated until nothing changes (a dropped
+/// function's constants and the data only it reached go with it). Left
+/// alone when the table is imported or exported (the host can name any
+/// entry). `boundaries`: data anchors of the code before the strip, which
+/// keep the regions of what it pointed at apart. Returns the entries
+/// stubbed.
+pub fn prune_table(module: &mut Module, boundaries: &BTreeSet<u32>) -> usize {
+    if module.imports.iter().any(|i| matches!(i.desc, ImportDesc::Table(_))) || module.exports.iter().any(|e| e.kind == ExternKind::Table) {
+        return 0;
+    }
+    let mut total = 0;
+    loop {
+        // The trapping stubs there are (any function that only traps).
+        let imported = module.num_imported_funcs();
+        let mut stubs: HashMap<u32, u32> = HashMap::new();
+        for (i, func) in module.funcs.iter().enumerate() {
+            if func.locals.is_empty() && func.body == [Instr::Unreachable, Instr::End] {
+                stubs.entry(func.ty).or_insert(imported + i as u32);
+            }
+        }
+        let mut named: HashSet<u32> = HashSet::new();
+        // A constant names an entry unless it is plainly a number: an
+        // operand of arithmetic or a comparison, or an address loaded from.
+        let mut consts = |instrs: &[Instr]| {
+            for (i, instr) in instrs.iter().enumerate() {
+                if let Instr::I32Const(v) = instr {
+                    if !matches!(instrs.get(i + 1), Some(Instr::Num(_) | Instr::Load(..) | Instr::SimdMem(..) | Instr::BrTable(..) | Instr::If(_) | Instr::BrIf(_))) {
+                        named.insert(*v as u32);
+                    }
+                }
+            }
+        };
+        for func in &module.funcs {
+            consts(&func.body);
+        }
+        for global in &module.globals {
+            consts(&global.init);
+        }
+        // Every aligned word of the data live code reaches (a region per
+        // anchor, through the pointers the live regions hold).
+        // Region bounds from the code before the strip as well: a dead
+        // vtable keeps its own region instead of joining its neighbour's.
+        let data = DataLive::new(module, boundaries);
+        for start in &data.live {
+            let (start, end) = data.region(*start);
+            for (s, e, i) in &data.spans {
+                let (lo, hi) = (start.max(*s), end.min(*e));
+                let bytes = &module.datas[*i].bytes;
+                let mut a = (lo + 3) & !3;
+                // A word that starts in the region counts, wherever the
+                // next anchor falls.
+                while a < hi && a + 4 <= *e {
+                    let at = (a - s) as usize;
+                    named.insert(u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]));
+                    a += 4;
+                }
+            }
+        }
+        // Data no anchor reaches before its first anchor stays named too.
+        for (s, e, i) in &data.spans {
+            let first = data.anchors.range(*s..*e).next().copied().unwrap_or(*e);
+            let bytes = &module.datas[*i].bytes;
+            let mut a = (s + 3) & !3;
+            while a + 4 <= first {
+                let at = (a - s) as usize;
+                named.insert(u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]));
+                a += 4;
+            }
+        }
+        let func_types = module.func_type_indices();
+        let stub_set: HashSet<u32> = stubs.values().copied().collect();
+        let mut changed = 0;
+        for e in 0..module.elems.len() {
+            let ElemMode::Active { table: 0, offset } = &module.elems[e].mode else { continue };
+            let [Instr::I32Const(base), Instr::End] = offset.as_slice() else { continue };
+            let base = *base as u32;
+            let ElemItems::Funcs(funcs) = &module.elems[e].items else { continue };
+            let mut funcs = funcs.clone();
+            for (k, f) in funcs.iter_mut().enumerate() {
+                if stub_set.contains(f) || named.contains(&(base + k as u32)) {
+                    continue;
+                }
+                let ty = func_types[*f as usize];
+                let stub = *stubs.entry(ty).or_insert_with(|| {
+                    module.funcs.push(Func { ty, locals: Vec::new(), body: vec![Instr::Unreachable, Instr::End] });
+                    let index = imported + module.funcs.len() as u32 - 1;
+                    if let Some(names) = &mut module.names {
+                        names.funcs.push((index, format!("__unnamed_entry_stub_{ty}")));
+                    }
+                    index
+                });
+                *f = stub;
+                changed += 1;
+            }
+            module.elems[e].items = ElemItems::Funcs(funcs);
+        }
+        if changed == 0 {
+            break;
+        }
+        total += changed;
+        let before = code_anchors(module, &HashSet::new());
+        super::dce::run(module);
+        zero_dead_data(module, &before);
+    }
+    total
+}
+
+/// A run of at least 64 bytes of which at least 98% is printable text.
+fn is_text(bytes: &[u8]) -> bool {
+    if bytes.len() < 64 {
+        return false;
+    }
+    let text = bytes.iter().filter(|b| matches!(b, b'\t' | b'\n' | b'\r' | 0x20..=0x7e) || **b >= 0x80).count();
+    text * 100 >= bytes.len() * 98
 }
 
 /// Cuts runs of at least `min` zero bytes out of active constant-offset
@@ -627,5 +780,7 @@ pub fn strip(module: &mut Module, plan: &Plan) -> usize {
     let before = code_anchors(module, &HashSet::new());
     apply(module, plan);
     super::dce::run(module);
-    zero_dead_data(module, &before)
+    let cleared = zero_dead_data(module, &before);
+    prune_table(module, &before);
+    cleared
 }
