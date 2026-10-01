@@ -43,7 +43,8 @@ pub(crate) struct Info {
     pub(crate) jump: HashSet<Id>,
     /// Statements containing a masked break/continue that leaves them.
     pub(crate) escapes: HashSet<Id>,
-    /// The element loop's `i >= n` condition (uniform: n % 4 == 0).
+    /// The element loop's `i >= n` condition (taken on lane 0's element:
+    /// a backend masks off the lanes past n in a partial iteration).
     pub(crate) uniform_by_shape: HashSet<u32>,
 }
 

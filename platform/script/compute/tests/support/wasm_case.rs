@@ -127,6 +127,14 @@ pub fn source_case(name: &str, src: &str, layouts: &[Layout], params: &[(&str, f
 
 /// [`source_case`] with input buffer `k`'s words then given by `fill`.
 pub fn source_case_with(name: &str, src: &str, layouts: &[Layout], params: &[(&str, f32)], time: f32, n: u32, fill: &dyn Fn(usize, &mut Vec<u32>)) -> Case {
+    source_case_spare(name, src, layouts, params, time, n, 0, fill)
+}
+
+/// [`source_case_with`] with every buffer sized for `spare` elements more
+/// than run (as a call over part of a larger run sees them: the words past
+/// the n elements must keep their contents).
+#[allow(clippy::too_many_arguments)]
+pub fn source_case_spare(name: &str, src: &str, layouts: &[Layout], params: &[(&str, f32)], time: f32, n: u32, spare: u32, fill: &dyn Fn(usize, &mut Vec<u32>)) -> Case {
     let k = compile_with(src, layouts, Backend::Interp).unwrap_or_else(|e| panic!("{}: {:?}", name, e));
     let mut ctx = vec![0u32; k.ctx_words()];
     for (i, p) in k.params().iter().enumerate() {
@@ -140,7 +148,7 @@ pub fn source_case_with(name: &str, src: &str, layouts: &[Layout], params: &[(&s
     }
     ctx[K_TIME as usize] = time.to_bits();
     ctx[K_COUNT as usize] = n;
-    let count = n as usize;
+    let count = (n + spare) as usize;
     let bufs: Vec<(Vec<u32>, bool)> = k
         .buffers()
         .iter()
@@ -166,7 +174,8 @@ pub fn source_case_with(name: &str, src: &str, layouts: &[Layout], params: &[(&s
             (v, i > 0 && b.access != Access::Read)
         })
         .collect();
-    layout(format!("{} n={}", name, n), k.program().clone(), k.parallel_safe, &ctx, k.shared_table(), &bufs, n)
+    let name = if spare > 0 { format!("{} n={} spare {}", name, n, spare) } else { format!("{} n={}", name, n) };
+    layout(name, k.program().clone(), k.parallel_safe, &ctx, k.shared_table(), &bufs, n)
 }
 
 /// Kernels from source the backends are checked on (the NEON tests'

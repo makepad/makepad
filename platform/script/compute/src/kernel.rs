@@ -95,8 +95,8 @@ pub struct Kernel {
     /// how many threads a call is worth.
     speed: AtomicU32,
     /// Function table slots of this kernel's generated wasm (scalar, four
-    /// wide; 0: none), once the host linked its document's module (see
-    /// [`wasm_module`]).
+    /// wide; 0: none; a host links one of the two), once the host linked
+    /// its document's module (see [`wasm_module`]).
     wasm_slots: [AtomicU32; 2],
 }
 
@@ -312,8 +312,8 @@ pub fn program_key(p: &Program) -> u64 {
 }
 
 /// One kernel compiled ahead of time and linked into the host's function
-/// table: its [`program_key`] and the table slots of its scalar and four
-/// wide entries (0: no four wide form).
+/// table: its [`program_key`] and the table slot of its entry, as `simd`
+/// when it is four wide, else as `scalar` (the other 0).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Precompiled {
     pub key: u64,
@@ -561,8 +561,9 @@ impl Kernel {
     }
 
     /// Records where the host linked this kernel's generated wasm: the
-    /// function table slots of its scalar and four-wide entries (0: that
-    /// form is absent). From then on its runs call that code.
+    /// function table slot of its scalar or of its four-wide entry (0: that
+    /// form is absent; [`wasm_module`] makes one of them). From then on its
+    /// runs call that code.
     pub fn set_wasm_slots(&self, scalar: u32, simd: u32) {
         self.wasm_slots[1].store(simd, Ordering::Relaxed);
         self.wasm_slots[0].store(scalar, Ordering::Relaxed);
@@ -570,19 +571,21 @@ impl Kernel {
 
     /// The generated wasm is linked (runs do not use the interpreter).
     pub fn wasm_linked(&self) -> bool {
-        self.wasm_slots[0].load(Ordering::Relaxed) != 0
+        self.wasm_slots.iter().any(|s| s.load(Ordering::Relaxed) != 0)
     }
 
     /// Runs `n` elements on linked wasm code (true), or false when none is
     /// linked. The table becomes the wasm form: (byte address, length) i32
-    /// pairs.
+    /// pairs. A four-wide entry runs all n elements (its last group of
+    /// four masked); a scalar-mode run on it (outputs that may not hold
+    /// every record) calls it once per element, in order.
     #[cfg(target_arch = "wasm32")]
     fn run_wasm(&self, ctx: &mut [u32], table: &[u64], n: usize, mode: Mode) -> bool {
         let scalar = self.wasm_slots[0].load(Ordering::Relaxed);
-        if scalar == 0 {
+        let simd = self.wasm_slots[1].load(Ordering::Relaxed);
+        if scalar == 0 && simd == 0 {
             return false;
         }
-        let simd = self.wasm_slots[1].load(Ordering::Relaxed);
         thread_local! {
             static FRAME: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
         }
@@ -611,14 +614,16 @@ impl Kernel {
                 let f: Entry = unsafe { std::mem::transmute::<usize, Entry>(slot as usize) };
                 f(a.0, a.1, a.2, a.3, a.4, a.5);
             };
-            let n4 = if simd != 0 && mode == Mode::Vector { n & !3 } else { 0 };
-            if n4 > 0 {
-                call(simd, args(n4, frame, ctx));
-            }
-            if n4 < n {
+            if simd != 0 && mode == Mode::Vector {
+                call(simd, args(n, frame, ctx));
+            } else if scalar != 0 {
+                call(scalar, args(n, frame, ctx));
+            } else {
                 let base = ctx[K_BASE as usize];
-                ctx[K_BASE as usize] = base.wrapping_add(n4 as u32);
-                call(scalar, args(n - n4, frame, ctx));
+                for e in 0..n {
+                    ctx[K_BASE as usize] = base.wrapping_add(e as u32);
+                    call(simd, args(1, frame, ctx));
+                }
                 ctx[K_BASE as usize] = base;
             }
         });
@@ -1117,23 +1122,13 @@ pub fn compact(data: &[f32], counts: &[u32], width: usize, capacity: usize) -> V
 
 /// One wasm module holding the code of several kernels (a document's), for
 /// a host that links generated wasm (a browser: the platform's
-/// `wasm_link`), and per kernel the export indices of its scalar and
-/// four-wide entries (the order in which the link returns their table
-/// slots; four-wide is None where the kernel has no such form). After
-/// linking, the host calls [`Kernel::set_wasm_slots`] on each.
-pub fn wasm_module(kernels: &[&Kernel], target: crate::wasm::Target) -> Option<(Vec<u8>, Vec<(usize, Option<usize>)>)> {
-    let mut entries = Vec::new();
-    let mut index = Vec::new();
-    for k in kernels {
-        let scalar = entries.len();
-        entries.push(crate::wasm::Entry { program: &k.program, simd: false });
-        let simd = if k.parallel_safe && crate::wasm::simd_supported(&k.program) {
-            entries.push(crate::wasm::Entry { program: &k.program, simd: true });
-            Some(entries.len() - 1)
-        } else {
-            None
-        };
-        index.push((scalar, simd));
-    }
-    crate::wasm::module(&entries, target).map(|m| (m, index))
+/// `wasm_link`): one entry per kernel, export `k` (the order in which the
+/// link returns their table slots) kernel k's, and per kernel whether that
+/// entry is four wide (element-local kernels the backend vectorizes) or
+/// scalar. After linking, the host calls [`Kernel::set_wasm_slots`] on
+/// each (`(0, slot)` for a four-wide entry, `(slot, 0)` for a scalar one).
+pub fn wasm_module(kernels: &[&Kernel], target: crate::wasm::Target) -> Option<(Vec<u8>, Vec<bool>)> {
+    let simd: Vec<bool> = kernels.iter().map(|k| k.parallel_safe && crate::wasm::simd_supported(&k.program)).collect();
+    let entries: Vec<crate::wasm::Entry> = kernels.iter().zip(&simd).map(|(k, s)| crate::wasm::Entry { program: &k.program, simd: *s }).collect();
+    crate::wasm::module(&entries, target).map(|m| (m, simd))
 }

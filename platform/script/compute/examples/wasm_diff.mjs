@@ -1,7 +1,8 @@
 // The V8 side of examples/wasm_diff.rs: runs every case of a batch file on
-// the generated modules (scalar `run0`; four-wide `run1` for n & ~3
-// elements, then `run0` for the rest with ctx's element base advanced, as
-// the runtime does) and compares memory with the interpreter's image (all
+// the generated modules (scalar `run0`; four-wide `run1` on all n
+// elements, as the runtime runs it, and once per element with ctx's
+// element base advanced, as it runs calls whose outputs may not hold every
+// record) and compares memory with the interpreter's image (all
 // of it but the frame, which is scratch: guard words after it included).
 // Usage: node [--no-liftoff | --liftoff-only] wasm_diff.mjs <batch file>
 // Prints `PROBE fused|unfused|none`, one `FAIL <case> <mode> <what>` per
@@ -54,7 +55,7 @@ for (let c = 0; c < count; c++) {
       continue;
     }
     const X = inst.exports;
-    for (const mode of (flags & 2) ? ['scalar', 'simd'] : ['scalar']) {
+    for (const mode of (flags & 2) ? ['scalar', 'simd', 'simd1'] : ['scalar']) {
       const I = new Uint32Array(mem.buffer);
       I.fill(0);
       I.set(image);
@@ -62,15 +63,15 @@ for (let c = 0; c < count; c++) {
       try {
         if (mode === 'scalar') {
           X.run0(ctx, state, shared, table, n, frame);
+        } else if (mode === 'simd') {
+          X.run1(ctx, state, shared, table, n, frame);
         } else {
-          const n4 = n & ~3;
-          if (n4) X.run1(ctx, state, shared, table, n4, frame);
-          if (n4 < n) {
-            const base = I[kbase >> 2];
-            I[kbase >> 2] = base + n4;
-            X.run0(ctx, state, shared, table, n - n4, frame);
-            I[kbase >> 2] = base;
+          const base = I[kbase >> 2];
+          for (let e = 0; e < n; e++) {
+            I[kbase >> 2] = base + e;
+            X.run1(ctx, state, shared, table, 1, frame);
           }
+          I[kbase >> 2] = base;
         }
       } catch (e) {
         console.log(`FAIL ${c} ${mode}${tag} trap ${e.message} (${name})`);

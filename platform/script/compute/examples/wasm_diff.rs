@@ -1,15 +1,18 @@
 //! Differential check of the wasm backend in V8 (the engine of Chrome and
 //! node), where its SIMD128 form runs: every case is run by the AIR
 //! interpreter here, then by the generated modules in node (scalar `run0`,
-//! four-wide `run1` with the scalar tail, each with exact and, when the
+//! four-wide `run1` on any n and one element per call, each with exact
+//! and, when the
 //! engine's `relaxed_madd` is fused, relaxed multiply-adds), every word of
 //! memory compared with guard words around every buffer.
 //!
 //! Cases: random kernel-shaped programs (the NEON fuzz generator: divergent
 //! and uniform branches, loops with breaks and continues at every depth,
 //! per-lane frames, hostile loads, integer division, shifts, selects) and
-//! their optimized fused-multiply-add forms; the kernels-from-source corpus
-//! at sizes around multiples of 4; multiply-adds at double-rounding
+//! their optimized fused-multiply-add forms (n from 0 to 31); the
+//! kernels-from-source corpus at sizes 0 to 3 and around multiples of 4,
+//! and with buffers larger than the run (the words past it must stay);
+//! multiply-adds at double-rounding
 //! midpoints; and the plate kernels when `--plates <dir>` names them.
 //!
 //! ```text
@@ -269,7 +272,7 @@ fn main() {
             }
         }
         for (form, p) in forms {
-            let s = Setup { n: [1u32, 3, 4, 5, 8, 13, 16, 31][r.below(8) as usize], ctx: params(&mut r), seed: r.next() };
+            let s = Setup { n: [0u32, 1, 2, 3, 4, 5, 8, 13, 16, 31][r.below(10) as usize], ctx: params(&mut r), seed: r.next() };
             cases.push(random_case(p, &s, format!("round {} {}", round, form)));
             setups.push(Some(s));
         }
@@ -277,8 +280,13 @@ fn main() {
     let random = cases.len();
     // Kernels from source.
     for (name, src) in CORPUS {
-        for n in [4u32, 7, 37, 1029] {
+        for n in [0u32, 1, 2, 3, 4, 7, 37, 1029] {
             cases.push(source_case(name, src, &[], &[("amp", 3.0)], 1.25, n));
+            setups.push(None);
+        }
+        // Outputs past the run's elements (a chunk of a larger run).
+        for n in [1u32, 6, 39] {
+            cases.push(source_case_spare(name, src, &[], &[("amp", 3.0)], 1.25, n, 5, &|_, _| {}));
             setups.push(None);
         }
     }
@@ -300,7 +308,7 @@ fn main() {
             };
             let (params, time) = plate_params(name);
             let params: Vec<(&str, f32)> = params.iter().map(|(n, v)| (n.as_str(), *v)).collect();
-            for n in [1027u32, 2050] {
+            for n in [3u32, 1027, 2050] {
                 cases.push(source_case(name, &src, &[segment()], &params, time, n));
                 setups.push(None);
             }

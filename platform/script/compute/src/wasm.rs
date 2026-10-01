@@ -6,7 +6,9 @@
 //! # Module ABI
 //!
 //! One module per document's kernels ([`module`]: one [`Entry`] per
-//! program, each scalar or four wide).
+//! program, each scalar or four wide). A host gives a kernel one entry:
+//! four wide when it has that form ([`simd_supported`] and the kernel is
+//! element-local with outputs holding every record), else scalar.
 //!
 //! - Import: `env.memory`, the host's linear memory (min 1 page; shared
 //!   with a maximum when [`Target::shared`], as a threaded host's memory
@@ -21,10 +23,12 @@
 //!   - `table`: per host buffer an i32 pair (byte address, length in
 //!     words), buffer 0 the control word; lengths at least 1 and below
 //!     2^31, each buffer inside the memory.
-//!   - `n`: elements to run from ctx's element base. A four-wide entry
-//!     takes a multiple of 4 (its `i >= n` exit is uniform by that); the
-//!     host runs the remainder on the scalar entry with the element base
-//!     advanced by `n & !3`, then restores it.
+//!   - `n`: elements to run from ctx's element base, any count (0
+//!     included) in either form: a four-wide entry runs its last partial
+//!     group of four masked (the lanes past n store nothing). One element
+//!     per call (n = 1, the element base advanced) runs elements strictly
+//!     in order on a four-wide entry, as the scalar entry does: the form
+//!     for calls whose outputs may not hold every record.
 //!   - `frame`: per-call scratch, owned by the call (one per thread):
 //!     `frame_words * 4` bytes for a scalar entry; `frame_words * 16 + 64`
 //!     bytes for a four-wide one (64 bytes of operands for the exact
@@ -71,7 +75,8 @@ pub struct Target {
     pub relaxed_fma: bool,
 }
 
-/// One program of a module, and the form it is compiled in.
+/// One program of a module, and the form it is compiled in (a host builds
+/// one entry per kernel; a test may build both forms of a program).
 pub struct Entry<'a> {
     pub program: &'a Program,
     /// Four elements per iteration (only element-local kernels whose
@@ -338,6 +343,7 @@ pub(crate) mod op {
     pub const F32X4_FLOOR: u32 = 0x68;
     pub const F32X4_TRUNC: u32 = 0x69;
     pub const I32X4_NEG: u32 = 0xA1;
+    pub const I32X4_ALL_TRUE: u32 = 0xA3;
     pub const I32X4_SHL: u32 = 0xAB;
     pub const I32X4_SHR_S: u32 = 0xAC;
     pub const I32X4_SHR_U: u32 = 0xAD;

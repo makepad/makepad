@@ -39,15 +39,22 @@
 //!   lane loads/stores). Each lane has its own frame: word w of lane l at
 //!   `frame + 16 w + 4 l` (so a uniform frame access is one `v128` access).
 //!
-//! The entry runs `n` elements, `n` a multiple of 4 (the element loop's
-//! `i >= n` exit is uniform by that); the host runs the remainder on the
-//! scalar entry with ctx's element base advanced. Only element-local
-//! kernels whose outputs hold every record may run four wide (the caller
-//! checks `parallel_safe`). [`body`] declines what [`crate::spmd::supported`]
+//! The entry runs any `n` elements. The element loop's `i >= n` exit is
+//! taken on lane 0's element; an iteration with fewer than four elements
+//! left (the last one, or the only one when n < 4) starts with the
+//! execution mask of the lanes below n, so the lanes past n make no store
+//! (they compute, on loads clamped as always, and are thrown away: they
+//! never run again, so their variables need no blending). The store fast
+//! paths, which write all four lanes' words, are off in that iteration
+//! (the words past n may be another call's elements). Every iteration sets
+//! the mask (`i < n` per lane, and whether all lanes run) without a branch:
+//! a branch that touches vectors in the loop slowed V8's code around it.
+//! Only element-local kernels whose outputs hold every record may run four
+//! wide (the caller checks `parallel_safe`). [`body`] declines what [`crate::spmd::supported`]
 //! declines (f64, state, host calls, audio I/O, reductions, large frames)
 //! and any program without the element loop's shape.
 
-use super::{div_s, fma_tail, op, rem_s, wrap_rem, Body, Label, Sc, Target, P_FRAME};
+use super::{div_s, fma_tail, op, rem_s, wrap_rem, Body, Label, Sc, Target, P_FRAME, P_N};
 use crate::ir::{self, Bin, Block, Cmp, Fma, Op, Program, Region, Stmt, Ty, Un, Val, Var};
 use crate::spmd::{self, id, Info};
 
@@ -108,6 +115,10 @@ fn emitter<'a>(p: &'a Program, info: Info, i: Var, target: Target, fix: u32, cal
         addr_terms: Vec::new(),
         dummy: NONE,
         pre: Body::new(),
+        entry: !function,
+        element: None,
+        full_iter: NONE,
+        n_splat: NONE,
         info,
     };
     let want = w.want_splats();
@@ -129,6 +140,13 @@ fn emitter<'a>(p: &'a Program, info: Info, i: Var, target: Target, fix: u32, cal
     // Where the start code goes: after the buffers' pointers are read.
     let pre_at = w.sc.f.code.len();
     w.load_tables();
+    if !function {
+        w.full_iter = w.sc.f.local(op::I32);
+        w.n_splat = w.sc.f.local(op::V128);
+        w.pre.get(P_N);
+        w.pre.fd(op::I32X4_SPLAT);
+        w.pre.set(w.n_splat);
+    }
     (w, pre_at)
 }
 
@@ -159,7 +177,8 @@ pub(super) fn body(p: &Program, target: Target, fix: u32, calls: &[u32]) -> Opti
     }
     let (sh, info) = analysis(p)?;
     let (mut w, pre_at) = emitter(p, info, sh.i, target, fix, calls, false);
-    // Every lane runs.
+    w.element = Some(id(sh.element));
+    // Every lane runs (a partial last iteration masks its own).
     w.vconst([u32::MAX; 4]);
     w.sc.f.set(w.m);
     for s in sh.prelude {
@@ -263,6 +282,16 @@ struct W<'a> {
     dummy: u32,
     /// Code run once at the start, after the buffers' pointers are read.
     pre: Body,
+    /// A kernel's entry: its element loop may end in a partial iteration
+    /// whose lanes past n are off in `m` while `full` holds (a function
+    /// runs under its caller's mask, never `full`).
+    entry: bool,
+    /// The element loop (an entry's).
+    element: Option<spmd::Id>,
+    /// An entry's: 1 when every lane of this iteration has an element (the
+    /// store fast paths need it); splat(n).
+    full_iter: u32,
+    n_splat: u32,
 }
 
 impl W<'_> {
@@ -678,6 +707,9 @@ impl W<'_> {
                 self.sc.f.i32c(1);
                 self.sc.f.b(op::I32_ADD);
                 self.set(cnt);
+                if self.element == Some(id(s)) {
+                    self.partial_iteration();
+                }
                 if masked {
                     self.vconst([0; 4]);
                     self.set(cont);
@@ -789,6 +821,28 @@ impl W<'_> {
         self.set(self.vv[k]);
     }
 
+    /// At the top of an entry's element iteration: only the lanes below n
+    /// run (all but in a last partial iteration; the `i >= n` exit leaves
+    /// when lane 0 has none), and whether all of them do.
+    fn partial_iteration(&mut self) {
+        let i = self.vv[self.i.0 as usize];
+        self.get(i);
+        self.get(self.n_splat);
+        self.fd(op::I32X4_LT_S);
+        self.sc.f.tee(self.m);
+        self.fd(op::I32X4_ALL_TRUE);
+        self.set(self.full_iter);
+    }
+
+    /// Pushes `inside` and-ed with the iteration being full for a store
+    /// fast path of an entry (the bounds check `inside` on the stack).
+    fn fast_ok(&mut self, store: bool) {
+        if store && self.full_iter != NONE {
+            self.get(self.full_iter);
+            self.sc.f.b(op::I32_AND);
+        }
+    }
+
     /// Runs `body` when any lane runs.
     fn guard_any(&mut self, body: impl FnOnce(&mut Self)) {
         if self.full {
@@ -850,6 +904,7 @@ impl W<'_> {
         self.get(last);
         self.sc.f.b(op::I64_EXTEND_I32_U);
         self.sc.f.b(op::I64_LE_U);
+        self.fast_ok(store);
         self.open_if(op::VOID);
         // a = ptr + 4 o0
         self.get(a);
@@ -1021,9 +1076,10 @@ impl W<'_> {
     }
 
     /// The addresses on the stack with the lanes that do not run sent to a
-    /// scratch word (the frame head's last), so stores need no branch.
-    fn mask_addr(&mut self) {
-        if self.full {
+    /// scratch word (the frame head's last), so stores need no branch. An
+    /// entry's lanes past n write their own frame words harmlessly.
+    fn mask_addr(&mut self, region: Region) {
+        if self.full && (!self.entry || region == Region::Frame) {
             return;
         }
         if self.dummy == NONE {
@@ -1053,8 +1109,8 @@ impl W<'_> {
 
     /// Pushes 1 when every lane's word of a buffer access lies inside the
     /// buffer, for lanes `o0 + l` (consecutive): base + o0 + 3 at most the
-    /// last word (64 bits); o0 into `tl[1]`.
-    fn lanes_inside(&mut self, k: u8, base: u32, o: Val) {
+    /// last word (64 bits; a store's also [`W::fast_ok`]); o0 into `tl[1]`.
+    fn lanes_inside(&mut self, k: u8, base: u32, o: Val, store: bool) {
         let (_, last) = self.sc.buf[k as usize].expect("used buffer");
         let t = self.tl[1];
         self.vget(o);
@@ -1067,6 +1123,7 @@ impl W<'_> {
         self.get(last);
         self.sc.f.b(op::I64_EXTEND_I32_U);
         self.sc.f.b(op::I64_LE_U);
+        self.fast_ok(store);
     }
 
     /// Pushes the byte address of lane 0's word (after `lanes_inside`).
@@ -1101,7 +1158,7 @@ impl W<'_> {
         match region {
             Region::Buf(k) if self.step[o.0 as usize] == Some(1) => {
                 // Four consecutive words inside: one vector load.
-                self.lanes_inside(k, base, o);
+                self.lanes_inside(k, base, o, false);
                 self.open_if(op::V128);
                 self.lane0_addr(k, base);
                 self.vmem(op::V128_LOAD, 2, 0);
@@ -1162,18 +1219,18 @@ impl W<'_> {
             // The running lanes in lane order: the last one's word stays.
             self.sc.address(region, base, extent, off);
             self.fd(op::I32X4_SPLAT);
-            self.mask_addr();
+            self.mask_addr(region);
             self.set(a);
             self.vget_word(val, true);
             self.set(v);
-            let lanes = if self.full { 3..4 } else { 0..4 };
+            let lanes = if self.full && (!self.entry || region == Region::Frame) { 3..4 } else { 0..4 };
             self.lane_stores(a, v, lanes);
             return;
         }
         let o = off.expect("varying offset");
         if let (Region::Buf(k), Some(1)) = (region, self.step[o.0 as usize]) {
             // Four consecutive words inside: one vector store.
-            self.lanes_inside(k, base, o);
+            self.lanes_inside(k, base, o, true);
             self.open_if(op::VOID);
             let at = self.tl[2];
             self.lane0_addr(k, base);
@@ -1200,7 +1257,7 @@ impl W<'_> {
     fn store_lanes(&mut self, region: Region, base: u32, extent: u32, o: Val, val: Val) {
         let (a, v) = (self.tv[6], self.tv[7]);
         self.vaddr(region, base, extent, o);
-        self.mask_addr();
+        self.mask_addr(region);
         self.set(a);
         self.vget_word(val, true);
         self.set(v);
@@ -1651,10 +1708,10 @@ impl W<'_> {
         // s rounded to f32 is the fused result unless s lands on an f32
         // midpoint or in the f32 subnormal range (the scalar code's test).
         // Those rare lanes are fixed through the scalar sequence ([`fma_fix`],
-        // out of line); the operands and the result pass through the
-        // frame's head (V8 keeps the loop fast around a rare branch only
-        // when that branch's code touches no vector). Round to odd without
-        // a branch (TwoSum's error nudging the last bit) measured slower.
+        // out of line); only then do the operands and the result pass
+        // through the frame's head (storing them every time measured 20-25%
+        // slower on heavy kernels in V8). Round to odd without a branch
+        // (TwoSum's error nudging the last bit) measured slower.
         let [ta, tb, tc, plo, phi, slo, shi, _] = self.tv;
         self.vget(a);
         if k == Fma::SubFrom {
@@ -1668,11 +1725,6 @@ impl W<'_> {
             self.fd(op::F32X4_NEG);
         }
         self.set(tc);
-        for (t, at) in [(ta, 16), (tb, 32), (tc, 48)] {
-            self.get(P_FRAME);
-            self.get(t);
-            self.vmem(op::V128_STORE, 4, at);
-        }
         const HI: [u8; 16] = [8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15];
         for (hi, p, s) in [(false, plo, slo), (true, phi, shi)] {
             for t in [ta, tb] {
@@ -1695,14 +1747,13 @@ impl W<'_> {
             self.fd(op::F64X2_ADD);
             self.set(s);
         }
-        // The rounded result, at the frame's head.
-        self.get(P_FRAME);
+        // The rounded result (in plo, free now).
         self.get(slo);
         self.fd(op::F32X4_DEMOTE_F64X2_ZERO);
         self.get(shi);
         self.fd(op::F32X4_DEMOTE_F64X2_ZERO);
         self.shuffle([0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23]);
-        self.vmem(op::V128_STORE, 4, 0);
+        self.set(plo);
         // Any lane on a midpoint (low 29 bits 1 << 28) or 0 < |s| < 2^-125
         // (the high word below 0x3820_0000 without its sign)? The four
         // sums' low words, then their high words, as one i32x4 each.
@@ -1729,12 +1780,19 @@ impl W<'_> {
         self.fd(op::V128_OR);
         self.fd(op::V128_ANY_TRUE);
         self.open_if(op::VOID);
+        for (t, at) in [(ta, 16), (tb, 32), (tc, 48)] {
+            self.get(P_FRAME);
+            self.get(t);
+            self.vmem(op::V128_STORE, 4, at);
+        }
         self.get(P_FRAME);
         self.sc.f.b(op::CALL);
         self.sc.f.u(self.fix);
-        self.end();
         self.get(P_FRAME);
         self.vmem(op::V128_LOAD, 4, 0);
+        self.set(plo);
+        self.end();
+        self.get(plo);
     }
 }
 
