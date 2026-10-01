@@ -1045,9 +1045,25 @@ export class WasmWebGL extends WasmWebBrowser {
       }
       gl.bindBuffer(target, buffer.gl_buf);
       bound = true;
+      // Storage grows to the next power of two and shrinks below a quarter
+      // (web_gl.rs charges the upload budget the same way): data that changes
+      // size every frame (kernel geometry, animated instances) updates in place
+      // instead of re-specifying the buffer each frame. Draws read the data's
+      // own length (buffer.byte_length), never the storage's.
       const previous_byte_length = buffer.gl_buf._buffer_byte_length;
-      const allocation_changed = previous_byte_length !== array.byteLength;
-      this.upload_buffer_data(gl, target, buffer.gl_buf, array, gl.STATIC_DRAW);
+      const needed = array.byteLength;
+      let capacity = 256;
+      while (capacity < needed) capacity *= 2;
+      const allocation_changed = previous_byte_length === undefined
+        || needed > previous_byte_length
+        || needed * 4 < previous_byte_length && capacity !== previous_byte_length;
+      if (allocation_changed) {
+        gl.bufferData(target, capacity, gl.DYNAMIC_DRAW);
+        buffer.gl_buf._buffer_byte_length = capacity;
+      }
+      if (needed !== 0) {
+        gl.bufferSubData(target, 0, array);
+      }
       if (allocation_changed && typeof gl.getError === "function") {
         const error = gl.getError();
         if (error !== gl.NO_ERROR) {

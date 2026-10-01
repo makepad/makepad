@@ -257,8 +257,20 @@ impl Cx {
                                 .filter(|_| draw_item.os.inst_capacity != 0)
                                 .map(|previous| publication.upload_plan(previous))
                         });
-                    let replaces = draw_item.retained_instances.is_none()
-                        || draw_item.os.inst_vb_id.is_none()
+                    // Plain instances update their buffer in place (the page
+                    // grows its storage to the next power of two and shrinks
+                    // it below a quarter, see upload_numeric_buffer): a new
+                    // charge only when that storage is re-specified, so an
+                    // animated item re-uploading every frame holds one
+                    // allocation, not one per frame until the GPU catches up.
+                    let plain_capacity = bytes.next_power_of_two().max(256);
+                    let replaces = if draw_item.retained_instances.is_none() {
+                        draw_item.os.inst_vb_id.is_none()
+                            || draw_item.os.inst_charge.is_none()
+                            || plain_capacity != draw_item.os.inst_capacity
+                                && (bytes > draw_item.os.inst_capacity || bytes.saturating_mul(4) < draw_item.os.inst_capacity)
+                    } else {
+                        draw_item.os.inst_vb_id.is_none()
                         || bytes > draw_item.os.inst_capacity
                         || plan.as_ref().is_none_or(|plan| {
                             !plan.can_update_in_place()
@@ -271,13 +283,10 @@ impl Cx {
                                             .unwrap()
                                             .float_len()
                                 })
-                        });
+                        })
+                    };
                     if replaces {
-                        let capacity = if draw_item.retained_instances.is_some() {
-                            bytes.next_power_of_two().max(256)
-                        } else {
-                            bytes
-                        };
+                        let capacity = plain_capacity;
                         let Some(charge) = upload_budget.allocations.reserve(capacity) else {
                             // Said once: a draw that cannot upload is not
                             // drawn, and a budget that stays full draws

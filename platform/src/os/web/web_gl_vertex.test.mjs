@@ -399,21 +399,24 @@ test("u32 and i32 storage can feed float shader attributes", () => {
   }
 });
 
-test("same-size buffer updates avoid GL error queries while allocation errors invalidate", () => {
+test("updates within the buffer's storage avoid GL error queries while allocation errors invalidate", () => {
   const s = subject();
-  new Uint8Array(s.memory.buffer, 64, 16).fill(1);
+  new Uint8Array(s.memory.buffer, 64, 512).fill(1);
   s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 8));
   assert.equal(s.gl.calls.get_errors, 1);
 
+  // Same size and other sizes within the storage (256 bytes) write in place.
   for (let i = 0; i < 8; i++) {
-    s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 8));
+    s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 8 + 8 * i));
   }
-  assert.equal(s.gl.calls.buffer_sub_data.length, 8);
+  assert.equal(s.gl.calls.buffer_sub_data.length, 9);
   assert.equal(s.gl.calls.get_errors, 1);
   assert.equal(s.array_buffers[1].valid, true);
+  assert.equal(s.array_buffers[1].byte_length, 64);
 
+  // Growing past the storage re-specifies it (and checks for errors).
   s.gl.next_error = s.gl.OUT_OF_MEMORY;
-  s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 12));
+  s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 300));
   assert.equal(s.gl.calls.get_errors, 2);
   assert.equal(s.array_buffers[1].valid, false);
   assert.equal(s.array_buffers[1].gl_buf._buffer_byte_length, undefined);
