@@ -423,8 +423,10 @@ impl X11Cx {
             // nothing to draw, so skip the eglMakeCurrent + full pass-list scan below.
             // demo_time_repaint forces a redraw of time-animated passes (see
             // compute_pass_repaint_order), so it must keep us rendering.
-            let cx = self.cx.borrow();
+            let mut cx = self.cx.borrow_mut();
             if !cx.any_passes_dirty() && !cx.demo_time_repaint {
+                // This still binds our context while retirement work is pending.
+                cx.maintain_instance_retirements();
                 return;
             }
         }
@@ -472,6 +474,11 @@ impl X11Cx {
                     cx.draw_pass_to_texture(*draw_pass_id, None);
                 }
             }
+        }
+        // If no render ran the retirement step under this beat's repaint_id, run it here.
+        let mut cx = self.cx.borrow_mut();
+        if cx.draw_lists.1.retirement_frame != Some(cx.repaint_id) {
+            cx.maintain_instance_retirements();
         }
     }
 

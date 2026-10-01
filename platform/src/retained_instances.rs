@@ -377,9 +377,9 @@ impl RetainedAllocationBudget {
     /// Extra bounded sweeps while released records are queued. Every upload of
     /// a draw item's instances leaves one released record behind and a pan
     /// re-uploads hundreds of items per frame, so one 64-record sweep per
-    /// frame lets the backlog (and the retirement repaints it asks for) outlast
-    /// the interaction by tens of seconds. Each call stays within `collect`'s
-    /// bound; `max_calls` caps the frame's total.
+    /// frame lets the backlog, and the retirement work it keeps waking up for,
+    /// outlast the interaction by tens of seconds. Each call stays within
+    /// `collect`'s bound; `max_calls` caps the frame's total.
     pub fn collect_backlog(&mut self, frame: u64, completed: u64, max_calls: usize) {
         if self.collected_backlog_frame == Some(frame) {
             return;

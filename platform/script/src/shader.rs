@@ -208,6 +208,7 @@ pub struct ShaderScope {
 #[derive(Default)]
 pub struct ShaderFnCompiler {
     pub out: String,
+    pub callees: Vec<usize>,
     pub stack: ShaderStack,
     pub script_scope: ScriptObject,
     pub shader_scope: ShaderScope,
@@ -414,7 +415,6 @@ impl ShaderFnCompiler {
         fnip: ScriptIp,
     ) -> ScriptPodType {
         //output.backend = ShaderBackend::Wgsl;
-        output.backend.register_ids();
 
         // Each call site inlines a fresh copy of the callee, so a branching
         // call graph expands exponentially with depth. `recur_block` stops
@@ -582,19 +582,18 @@ impl ShaderFnCompiler {
                         // `self` is a ScopeObject - return it for field access handling
                         return (ShaderType::ScopeObject(*obj), s2);
                     }
-                    let scoped_name = match sc {
-                        ShaderScopeItem::Param { .. } => output.backend.map_param_name(id, shadow),
+                    match sc {
+                        ShaderScopeItem::Param { .. } => {
+                            output.backend.write_param_name(&mut s2, id, shadow)
+                        }
                         ShaderScopeItem::Let { .. } | ShaderScopeItem::Var { .. } => {
-                            output.backend.map_local_name(id, shadow)
+                            output.backend.write_local_name(&mut s2, id, shadow)
                         }
                         ShaderScopeItem::PodType { .. } => {
-                            output.backend.map_local_name(id, shadow)
+                            output.backend.write_local_name(&mut s2, id, shadow)
                         }
-                        ShaderScopeItem::IoSelf(_) | ShaderScopeItem::ScopeObject(_) => {
-                            String::new()
-                        }
-                    };
-                    write!(s2, "{}", scoped_name).ok();
+                        ShaderScopeItem::IoSelf(_) | ShaderScopeItem::ScopeObject(_) => {}
+                    }
                     self.stack.free_string(s);
                     return (ShaderType::Pod(sc.ty()), s2);
                 }
@@ -689,14 +688,9 @@ impl ShaderFnCompiler {
                                 let (_, prefix) = output
                                     .backend
                                     .get_shader_io_kind_and_prefix(output.mode, io_type);
-                                match prefix {
-                                    ShaderIoPrefix::Prefix(prefix) => {
-                                        let mapped_name = output.backend.map_io_name(shader_name);
-                                        write!(s2, "{}{}", prefix, mapped_name).ok()
-                                    }
-                                    ShaderIoPrefix::Full(full) => write!(s2, "{}", full).ok(),
-                                    ShaderIoPrefix::FullOwned(full) => write!(s2, "{}", full).ok(),
-                                };
+                                output
+                                    .backend
+                                    .write_prefixed_io_name(&mut s2, &prefix, shader_name);
 
                                 self.stack.free_string(s);
                                 return (
@@ -769,14 +763,7 @@ impl ShaderFnCompiler {
                         let (_, prefix) = output
                             .backend
                             .get_shader_io_kind_and_prefix(output.mode, SHADER_IO_SCOPE_UNIFORM);
-                        match prefix {
-                            ShaderIoPrefix::Prefix(prefix) => {
-                                let mapped_name = output.backend.map_io_name(shader_name);
-                                write!(s2, "{}{}", prefix, mapped_name).ok()
-                            }
-                            ShaderIoPrefix::Full(full) => write!(s2, "{}", full).ok(),
-                            ShaderIoPrefix::FullOwned(full) => write!(s2, "{}", full).ok(),
-                        };
+                        output.backend.write_prefixed_io_name(&mut s2, &prefix, shader_name);
                         self.stack.free_string(s);
                         return (ShaderType::Pod(pod_ty), s2);
                     }
@@ -1172,14 +1159,7 @@ impl ShaderFnCompiler {
         let (_, prefix) = output
             .backend
             .get_shader_io_kind_and_prefix(output.mode, SHADER_IO_SCOPE_UNIFORM);
-        match prefix {
-            ShaderIoPrefix::Prefix(prefix) => {
-                let io_name = output.backend.map_io_name(shader_name);
-                write!(s, "{}{}", prefix, io_name).ok()
-            }
-            ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
-            ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
-        };
+        output.backend.write_prefixed_io_name(&mut s, &prefix, shader_name);
         s
     }
 
@@ -1203,16 +1183,17 @@ impl ShaderFnCompiler {
         if let Some(id) = value.as_id() {
             let mut s = self.stack.new_string();
             if let Some((sc, shadow)) = self.shader_scope.find_var(id) {
-                let mapped = match sc {
-                    ShaderScopeItem::Param { .. } => backend.map_param_name(id, shadow),
+                match sc {
+                    ShaderScopeItem::Param { .. } => backend.write_param_name(&mut s, id, shadow),
                     ShaderScopeItem::Let { .. }
                     | ShaderScopeItem::Var { .. }
-                    | ShaderScopeItem::PodType { .. } => backend.map_local_name(id, shadow),
-                    ShaderScopeItem::IoSelf(_) | ShaderScopeItem::ScopeObject(_) => {
-                        format!("{}", id)
+                    | ShaderScopeItem::PodType { .. } => {
+                        backend.write_local_name(&mut s, id, shadow)
                     }
-                };
-                write!(s, "{}", mapped).ok();
+                    ShaderScopeItem::IoSelf(_) | ShaderScopeItem::ScopeObject(_) => {
+                        write!(s, "{}", id).ok();
+                    }
+                }
             } else {
                 write!(s, "{}", id).ok();
             }

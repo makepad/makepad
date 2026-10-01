@@ -1801,6 +1801,7 @@ const DXGI_STATUS_OCCLUDED: windows_core::HRESULT = windows_core::HRESULT(0x087A
 const DXGI_ERROR_DEVICE_REMOVED: windows_core::HRESULT =
     windows_core::HRESULT(0x887A0005u32 as i32);
 const DXGI_ERROR_DEVICE_RESET: windows_core::HRESULT = windows_core::HRESULT(0x887A0007u32 as i32);
+const E_OUTOFMEMORY: windows_core::HRESULT = windows_core::HRESULT(0x8007000Eu32 as i32);
 
 /// A frame-latency wait that timed out: skip presenting (the old
 /// code fired a `Present(1)` + DO_NOT_WAIT into a 33 ms churn instead), but
@@ -2478,7 +2479,7 @@ impl Cx {
     /// rect consumed by `take_updated`, so each gate has to be re-armed or the empty slot is
     /// simply never refilled. The CPU-side sources all survive a device loss: texture pixels
     /// live in `TextureFormat::Vec*`, geometry in `CxGeometry`, and shaders keep their compiled
-    /// DXBC blobs plus the on-disk cache, so nothing here needs recompiling.
+    /// DXBC in the on-disk cache, so nothing here needs recompiling.
     pub(crate) fn d3d11_forget_gpu_resources(&mut self) {
         for item in &mut self.textures.0.pool {
             let texture = &mut item.item;
@@ -2522,7 +2523,7 @@ impl Cx {
         }
         // Shader objects die with the device, but their DXBC does not: dropping the os_shaders
         // and re-queueing every shader makes `hlsl_compile_shaders` recreate the D3D objects
-        // from the retained blobs and the on-disk cache, with no HLSL compilation.
+        // from the on-disk cache.
         self.draw_shaders.os_shaders.clear();
         for (index, shader) in self.draw_shaders.shaders.iter_mut().enumerate() {
             if shader.os_shader_id.take().is_some() {
@@ -4007,6 +4008,7 @@ impl DrawVars {
 
             // Don't proceed if shader compilation had errors
             if output.has_errors {
+                DrawVars::log_shader_compile_failure(vm, io_self, &output);
                 return;
             }
 
@@ -4240,6 +4242,10 @@ fn publish_shader_cache_entry(path: &std::path::Path, bytes: &[u8]) {
     }
 }
 
+fn shader_cache_path(dir: &std::path::Path, cache_key: u64, suffix: &str) -> std::path::PathBuf {
+    dir.join(format!("{:016x}{}.dxbc", cache_key, suffix))
+}
+
 // Read the DXBC blob from the on-disk cache if present, otherwise compile and
 // write it. Disk I/O and D3DCompile are both thread-safe so this can run on a
 // worker thread.
@@ -4252,7 +4258,7 @@ fn get_or_compile_shader_bytes(
     hlsl: &str,
 ) -> Result<Vec<u8>, String> {
     if let Some(dir) = cache_dir {
-        let path = dir.join(format!("{:016x}{}.dxbc", cache_key, suffix));
+        let path = shader_cache_path(dir, cache_key, suffix);
         match std::fs::read(&path) {
             // A short read is not an error: the entry can be mid-write by another process, or
             // left over from one that died. Recompiling costs a few milliseconds and replaces it.
@@ -4323,8 +4329,6 @@ pub struct CxOsDrawShader {
     pub scope_uniforms_gen: u64,
     pub pixel_shader: ID3D11PixelShader,
     pub vertex_shader: ID3D11VertexShader,
-    pub pixel_shader_blob: Vec<u8>,
-    pub vertex_shader_blob: Vec<u8>,
     pub input_layout: ID3D11InputLayout,
     // Dynamic buffer indices looked up from shader output
     pub draw_call_uniform_buffer_id: Option<u32>,
@@ -4481,16 +4485,28 @@ impl CxOsDrawShader {
         };
 
         let mut vs = None;
-        if let Err(e) = unsafe { device.CreateVertexShader(&vs_bytes, None, Some(&mut vs)) } {
-            // The DXBC is valid — it just came from the compiler or the on-disk cache — so a
-            // failure here is the device, not the shader. Returning `None` puts this shader
-            // back in the compile queue for a later frame.
-            return Err(D3dShaderError::Device(e));
-        }
-
         let mut ps = None;
-        if let Err(e) = unsafe { device.CreatePixelShader(&ps_bytes, None, Some(&mut ps)) } {
-            return Err(D3dShaderError::Device(e));
+        let created = unsafe {
+            device
+                .CreateVertexShader(&vs_bytes, None, Some(&mut vs))
+                .and_then(|_| device.CreatePixelShader(&ps_bytes, None, Some(&mut ps)))
+        };
+        if let Err(e) = created {
+            // A removed device or running out of memory isn't the bytecode's fault,
+            // so this shader goes back in the queue.
+            if unsafe { device_removed_reason(device) }.is_err() || e.code() == E_OUTOFMEMORY {
+                return Err(D3dShaderError::Device(e));
+            }
+            // A live device rejected the bytecode itself, so we drop that cache entry
+            // and compile once more without the cache.
+            let Some(dir) = cache_dir else {
+                crate::error!("D3D11 rejected freshly compiled shader bytecode: {}", e);
+                return Err(D3dShaderError::Compile);
+            };
+            crate::warning!("D3D11 rejected shader bytecode, recompiling without the cache: {}", e);
+            let suffix = if vs.is_none() { "_vs" } else { "_ps" };
+            let _ = std::fs::remove_file(shader_cache_path(dir, cache_key, suffix));
+            return Self::new(device, hlsl, None, mapping, bindings);
         }
 
         let mut layout_desc = Vec::new();
@@ -4676,8 +4692,6 @@ impl CxOsDrawShader {
             scope_uniforms_gen: 0,
             pixel_shader: ps.unwrap(),
             vertex_shader: vs.unwrap(),
-            pixel_shader_blob: ps_bytes,
-            vertex_shader_blob: vs_bytes,
             input_layout: input_layout.unwrap(),
             draw_call_uniform_buffer_id,
             pass_uniform_buffer_id,

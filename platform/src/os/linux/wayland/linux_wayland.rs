@@ -1379,6 +1379,8 @@ impl WaylandCx {
         // demo_time_repaint forces a redraw of time-animated passes (see
         // compute_pass_repaint_order), so it must keep us rendering.
         if !cx.any_passes_dirty() && !cx.demo_time_repaint {
+            // This still binds our context while retirement work is pending.
+            cx.maintain_instance_retirements();
             return;
         }
         if let Some(opengl_cx) = cx.os.opengl_cx.as_ref() {
@@ -1575,6 +1577,10 @@ impl WaylandCx {
                     }
                 }
             }
+        }
+        // If no render ran the retirement step under this beat's repaint_id, run it here.
+        if cx.draw_lists.1.retirement_frame != Some(cx.repaint_id) {
+            cx.maintain_instance_retirements();
         }
     }
 }

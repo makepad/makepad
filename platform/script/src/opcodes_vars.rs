@@ -124,10 +124,7 @@ impl<'a> ScriptVm<'a> {
             object
         };
         let proto = if let Some(obj) = object.as_object() {
-            let value = self
-                .bx
-                .heap
-                .value(obj, field, self.bx.threads.cur().trap.pass());
+            let value = self.bx.heap.value(obj, field, NoTrap);
             if value.is_nil() || value.is_err() {
                 self.bx.threads.cur().trap.err_take();
                 NIL
@@ -170,10 +167,7 @@ impl<'a> ScriptVm<'a> {
             object
         };
         let proto = if let Some(obj) = object.as_object() {
-            let value = self
-                .bx
-                .heap
-                .value(obj, index, self.bx.threads.cur().trap.pass());
+            let value = self.bx.heap.value(obj, index, NoTrap);
             if value.is_nil() || value.is_err() {
                 self.bx.threads.cur().trap.err_take();
                 NIL
@@ -552,16 +546,18 @@ impl<'a> ScriptVm<'a> {
         let object = self.bx.threads.cur().pop_stack_resolved(&self.bx.heap);
 
         if let Some(obj) = object.as_object() {
-            let value = self
-                .bx
-                .heap
-                .value(obj, index, self.bx.threads.cur().trap.pass());
+            let nil_on_miss = index.is_string_like() || index.is_object() || index.is_color();
+            let value = if nil_on_miss {
+                self.bx.heap.value(obj, index, NoTrap)
+            } else {
+                self.bx
+                    .heap
+                    .value(obj, index, self.bx.threads.cur().trap.pass())
+            };
             // A map lookup with a missing string/object key yields nil (not an error),
             // matching dynamic-map semantics (e.g. `map[key] != nil` membership checks).
             // Integer indexing keeps erroring so index-based iteration still terminates.
-            let value = if value.is_err()
-                && (index.is_string_like() || index.is_object() || index.is_color())
-            {
+            let value = if value.is_err() && nil_on_miss {
                 self.bx.threads.cur().trap.err_take();
                 NIL
             } else {
@@ -918,10 +914,7 @@ impl<'a> ScriptVm<'a> {
 
         // Extract value from source object using id as key (nil-safe)
         let value = if let Some(obj) = source.as_object() {
-            let result = self
-                .bx
-                .heap
-                .value(obj, id, self.bx.threads.cur().trap.pass());
+            let result = self.bx.heap.value(obj, id, NoTrap);
             if result.is_err() {
                 self.bx.threads.cur().trap.err_take();
                 NIL
