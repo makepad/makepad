@@ -315,8 +315,6 @@ pub struct AndroidParams {
     pub android_version: String,
     #[live]
     pub build_number: String,
-    #[live]
-    pub kernel_version: String,
 }
 
 #[derive(Clone, Debug, Default, Script, ScriptHook)]

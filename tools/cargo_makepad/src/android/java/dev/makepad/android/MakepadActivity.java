@@ -75,9 +75,6 @@ import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 
-import java.io.BufferedReader;
-import java.io.IOException;
-import java.io.InputStreamReader;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -1349,10 +1346,10 @@ public class MakepadActivity
         boolean isEmulator = this.isEmulator();
         String androidVersion = Build.VERSION.RELEASE;
         String buildNumber = Build.DISPLAY;
-        String kernelVersion = this.getKernelVersion();
         int sdkVersion = Build.VERSION.SDK_INT;
 
-        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, kernelVersion);
+        // Makepad ignores the kernel version, but the slot stays so the native signature doesn't change.
+        MakepadNative.onAndroidParams(cache_path, data_path, density, isEmulator, androidVersion, buildNumber, "");
 
         // Set volume keys to control music stream, we might want make this flexible for app devs
         setVolumeControlStream(AudioManager.STREAM_MUSIC);
@@ -3122,21 +3119,6 @@ public class MakepadActivity
             || Build.PRODUCT == "sdk"
             || Build.PRODUCT == "google_sdk"
             || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"));
-    }
-
-    private String getKernelVersion() {
-        try {
-            Process process = Runtime.getRuntime().exec("uname -r");
-            BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
-            StringBuilder stringBuilder = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                stringBuilder.append(line);
-            }
-            return stringBuilder.toString();
-        } catch (IOException e) {
-            return "Unknown";
-        }
     }
     
     

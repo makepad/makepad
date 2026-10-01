@@ -1723,6 +1723,32 @@ impl GlShader {
         })
     }
 
+    #[cfg(not(ohos_sim))]
+    fn program_cache_path(
+        gl: &LibGl,
+        cache_dir: &str,
+        vertex: &str,
+        pixel: &str,
+        os_type: &OsType,
+    ) -> String {
+        let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
+        let OsType::Android(params) = os_type else {
+            return format!("{}/shader_{:08x}.bin", cache_dir, shader_hash.0);
+        };
+        // Android keys on the OS build and GL driver too, so an update doesn't load stale binaries.
+        let suffix = gl.android_cache_suffix.get_or_init(|| {
+            let driver_hash = live_id!(gl_driver)
+                .str_append(&get_gl_string(gl, gl_sys::VENDOR))
+                .str_append(&get_gl_string(gl, gl_sys::RENDERER))
+                .str_append(&get_gl_string(gl, gl_sys::VERSION));
+            format!(
+                "_av{}_bn{}_gl{:08x}.bin",
+                params.android_version, params.build_number, driver_hash.0
+            )
+        });
+        format!("{}/shader_{:08x}{}", cache_dir, shader_hash.0, suffix)
+    }
+
     #[cfg(ohos_sim)]
     fn read_program_cache(
         _gl: &LibGl,
@@ -1736,20 +1762,7 @@ impl GlShader {
     #[cfg(not(ohos_sim))]
     fn read_program_cache(gl: &LibGl, vertex: &str, pixel: &str, os_type: &OsType) -> Option<u32> {
         if let Some(cache_dir) = os_type.get_cache_dir() {
-            let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
-            let mut base_filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
-
-            if let OsType::Android(params) = os_type {
-                base_filename = format!(
-                    "{}_av{}_bn{}_kv{}",
-                    base_filename,
-                    params.android_version,
-                    params.build_number,
-                    params.kernel_version
-                );
-            }
-
-            let filename = format!("{}.bin", base_filename);
+            let filename = Self::program_cache_path(gl, &cache_dir, vertex, pixel, os_type);
 
             if let Ok(mut cache_file) = File::open(&filename) {
                 let mut binary = Vec::new();
@@ -1937,21 +1950,8 @@ impl GlShader {
                         binary.as_mut_ptr() as *mut _,
                     );
                     if return_size != 0 {
-                        let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
-                        let mut filename = format!("{}/shader_{:08x}", cache_dir, shader_hash.0);
-
-                        if let OsType::Android(params) = os_type {
-                            filename = format!(
-                                "{}_av{}_bn{}_kv{}",
-                                filename,
-                                params.android_version,
-                                params.build_number,
-                                params.kernel_version
-                            );
-                        }
-
-                        filename = format!("{}.bin", filename);
-
+                        let filename =
+                            Self::program_cache_path(gl, &cache_dir, vertex, pixel, os_type);
                         binary.resize(return_size as usize, 0u8);
                         match File::create(&filename) {
                             Ok(mut cache) => {
@@ -1968,6 +1968,25 @@ impl GlShader {
                                     "Failed to write shader cache to {filename}, error: {e}"
                                 );
                             }
+                        }
+                        // On Android, the first write in a context deletes the binaries an
+                        // older OS build or GL driver left behind.
+                        if let Some(suffix) = gl.android_cache_suffix.get() {
+                            gl.stale_cache_sweep.call_once(|| {
+                                let Ok(entries) = std::fs::read_dir(&cache_dir) else {
+                                    return;
+                                };
+                                for entry in entries.flatten() {
+                                    let name = entry.file_name();
+                                    let name = name.to_string_lossy();
+                                    if name.starts_with("shader_")
+                                        && name.ends_with(".bin")
+                                        && !name.ends_with(suffix.as_str())
+                                    {
+                                        let _ = remove_file(entry.path());
+                                    }
+                                }
+                            });
                         }
                     }
                 }

@@ -511,6 +511,11 @@ pub struct LibGl {
     // Extension checks we only need to run once per context.
     pub(crate) parallel_compile: std::sync::OnceLock<bool>,
     pub(crate) oes_external_listed: std::sync::OnceLock<bool>,
+    // The OS build and GL driver tag at the end of Android's program cache filenames.
+    #[cfg(not(ohos_sim))]
+    pub(crate) android_cache_suffix: std::sync::OnceLock<String>,
+    #[cfg(not(ohos_sim))]
+    pub(crate) stale_cache_sweep: std::sync::Once,
 }
 
 macro_rules! load {
@@ -857,6 +862,10 @@ impl LibGl {
             .ok(),
             parallel_compile: Default::default(),
             oes_external_listed: Default::default(),
+            #[cfg(not(ohos_sim))]
+            android_cache_suffix: Default::default(),
+            #[cfg(not(ohos_sim))]
+            stale_cache_sweep: std::sync::Once::new(),
         })
     }
 }
