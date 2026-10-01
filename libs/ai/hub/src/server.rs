@@ -205,9 +205,15 @@ pub struct ServiceShared {
     /// Idle-card VRAM ceiling measured before any service model loaded and
     /// refreshed whenever an eviction pass leaves no resident behind.
     pub vram_usable: residency::UsableVram,
-    /// Optional bearer secret protecting the service HTTP surface. Deliberately
-    /// omitted from all logs and Debug output.
-    fabric_secret: Option<String>,
+    /// Non-loopback nodes: the per-process secret the TLS front stamps on
+    /// every request it authenticated ([`crate::front`]). None on a
+    /// loopback-only node, whose callers are all machine-local.
+    front_secret: Option<String>,
+    /// Transition only (`MAKEPAD_AI_HUB_LEGACY_PLAIN=1`): the old plaintext
+    /// port stays open next to the TLS front until every client has moved.
+    legacy_open: bool,
+    /// Which client submitted each job (cancel and leases are owner-only).
+    job_owners: Mutex<HashMap<String, String>>,
     /// Random per-start id shared by /health and the discovery beacon.
     pub node_id: u64,
     /// Durable node identity (cache-dir `node-key` file, 32 hex chars):
@@ -269,7 +275,6 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     // machine, independent of cache dir, plus an advisory cache-dir lock on
     // every platform. Acquire both before binding or mutating cache state.
     let singleton = acquire_service_lock(&config.cache_dir)?;
-    let fabric_secret = resolve_fabric_secret(&config.cache_dir);
 
     // start_http_server does not report its bound address, so port 0 is
     // resolved by probing for a free port first (bind/drop; tiny race,
@@ -320,6 +325,26 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
 
     let node_id = crate::discovery::mint_node_id();
     let node_key = load_or_create_node_key(&config.cache_dir);
+
+    // A node reachable from the network serves only through its TLS front,
+    // with fleet credentials, and refuses to start without them (no open
+    // mode). A loopback-only node is machine-local and needs none.
+    let fleet_mode = if addr.ip().is_loopback() {
+        None
+    } else {
+        Some(FleetMode::load(&config.cache_dir, &node_key, &crate::discovery::normalize_fleet(&config.fleet), addr)?)
+    };
+    let inner_addr = match &fleet_mode {
+        None => addr,
+        Some(mode) if mode.legacy => addr,
+        Some(_) => {
+            let probe = TcpListener::bind(("127.0.0.1", 0))
+                .map_err(|e| AssetAiError::Http(format!("inner bind: {e}")))?;
+            let inner = probe.local_addr().map_err(|e| AssetAiError::Http(format!("inner addr: {e}")))?;
+            drop(probe);
+            inner
+        }
+    };
     let activity = crate::activity::ActivityGate::new(crate::activity::Config::from_env());
     let jobs = SharedJobs::new();
     jobs.with(|store|store.set_activity(activity.clone()));
@@ -350,7 +375,9 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
         artifacts: Mutex::new(HashMap::new()),
         gpu: GpuCache::new(),
         vram_usable: residency::UsableVram::new(startup_usable_mb),
-        fabric_secret,
+        front_secret: fleet_mode.as_ref().map(|m| m.front_secret.clone()),
+        legacy_open: fleet_mode.as_ref().is_some_and(|m| m.legacy),
+        job_owners: Mutex::new(HashMap::new()),
         node_id,
         node_key,
         started_ms: crate::jobs::now_ms(),
@@ -364,23 +391,32 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     });
     // LAN autodiscovery: announce this node so clients pick it up without a
     // fleet-file edit. Frontends keep only beacons whose fleet matches.
-    crate::discovery::start_beacon(node_id, port, shared.fleet.clone());
+    // The legacy beacon only while the old plaintext port is open.
+    if fleet_mode.as_ref().is_none_or(|m| m.legacy) {
+        crate::discovery::start_beacon(node_id, port, shared.fleet.clone());
+    }
 
     let (request_tx, request_rx) = mpsc::channel::<HttpServerRequest>();
     // Character chains relay self-contained GLBs between mesh, rig, and
     // motion nodes. Keep their existing bound; only job submission accepts
     // the larger stems envelope.
     let http_thread = start_http_server(HttpServer {
-        listen_address: addr,
+        listen_address: inner_addr,
         request: request_tx,
         post_max_size: POST_MAX_SIZE,
         post_max_size_overrides: job_body_size_overrides(),
         pre_admit_posts: false,
-        client_ip_resolver: None,
-        trusted_proxy: None,
+        // Behind the front every connection comes from loopback; the
+        // per-address limits key on the client the front names.
+        client_ip_resolver: fleet_mode.as_ref().map(|_| crate::front::peer_from_headers as fn(&_) -> _),
+        trusted_proxy: fleet_mode.as_ref().map(|_| crate::front::is_loopback as fn(_) -> _),
         allowed_methods: None,
     })
-    .ok_or_else(|| AssetAiError::Http(format!("cannot bind http server at {addr}")))?;
+    .ok_or_else(|| AssetAiError::Http(format!("cannot bind http server at {inner_addr}")))?;
+    let addr = match fleet_mode {
+        None => addr,
+        Some(mode) => mode.start(node_id, inner_addr, &shared)?,
+    };
 
     let activity_monitor = crate::activity::Monitor::start(activity, shared.jobs.clone())
         .map_err(|e| AssetAiError::Io(format!("start activity monitor: {e}")))?;
@@ -433,31 +469,117 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     })
 }
 
-const FABRIC_SECRET_MIN_BYTES: usize = 16;
-
-/// Resolve the service bearer secret in deployment order: environment first,
-/// then the cache-dir file. An explicitly configured but short value is
-/// ignored rather than falling through to a different credential source.
-fn resolve_fabric_secret(cache_dir: &Path) -> Option<String> {
-    if let Ok(text) = std::env::var("MAKEPAD_AI_HUB_SECRET") {
-        return checked_fabric_secret(&text, "MAKEPAD_AI_HUB_SECRET");
-    }
-    let path = cache_dir.join("fabric-secret");
-    match fs::read_to_string(path) {
-        Ok(text) => checked_fabric_secret(&text, "fabric-secret file"),
-        Err(_) => None,
-    }
+/// Fleet operation of a network-reachable node: its TLS identity, its
+/// endorsement and the authority it trusts (all under `<cache>/fleet`).
+struct FleetMode {
+    trust: Arc<crate::fleet_auth::Trust>,
+    identity: makepad_network::tls::TlsIdentity,
+    endorsement: String,
+    fleet: String,
+    listen: SocketAddr,
+    edge: Option<SocketAddr>,
+    legacy: bool,
+    front_secret: String,
+    node_token: Option<String>,
 }
 
-fn checked_fabric_secret(text: &str, origin: &str) -> Option<String> {
-    let secret = text.trim();
-    if secret.as_bytes().len() < FABRIC_SECRET_MIN_BYTES {
-        eprintln!(
-            "hub auth: {origin} is shorter than {FABRIC_SECRET_MIN_BYTES} bytes — ignored"
-        );
-        return None;
+/// The node's TLS identity (created on first use) and node key, for
+/// endorsement by the fleet authority (`ai-fleet endorse`).
+pub fn fleet_identity(cache_dir: &Path) -> Result<(String, String), AssetAiError> {
+    fs::create_dir_all(cache_dir).map_err(|e| AssetAiError::Io(format!("{}: {e}", cache_dir.display())))?;
+    let node_key = load_or_create_node_key(cache_dir);
+    let identity = makepad_network::tls::TlsIdentity::load_or_create(
+        &cache_dir.join("fleet").join("tls"),
+        &format!("makepad ai node {node_key}"),
+    )
+    .map_err(|e| AssetAiError::Io(format!("fleet TLS identity: {e}")))?;
+    Ok((node_key, identity.fingerprint_hex()))
+}
+
+impl FleetMode {
+    fn load(cache_dir: &Path, node_key: &str, fleet: &str, addr: SocketAddr) -> Result<Self, AssetAiError> {
+        let dir = cache_dir.join("fleet");
+        let refuse = |why: String| {
+            AssetAiError::Io(format!(
+                "this node listens on {addr} but {why}; a network-reachable node serves only with fleet credentials \
+                 (see tools/aihub-fleet.md; `makepad-app-ai-hub --fleet-identity` prints what to endorse)"
+            ))
+        };
+        let trust = crate::fleet_auth::Trust::load(&dir).map_err(|e| refuse(format!("has no fleet trust ({e})")))?;
+        let identity = makepad_network::tls::TlsIdentity::load_or_create(&dir.join("tls"), &format!("makepad ai node {node_key}"))
+            .map_err(|e| refuse(format!("cannot load its TLS identity ({e})")))?;
+        let endorsement = fs::read_to_string(dir.join(crate::fleet_auth::NODE_ENDORSEMENT))
+            .map_err(|e| refuse(format!("has no endorsement ({e})")))?
+            .trim()
+            .to_string();
+        let e = trust
+            .verify_endorsement(&endorsement, crate::fleet_auth::now_secs())
+            .map_err(|e| refuse(format!("its endorsement is not valid ({e})")))?;
+        if e.node_key != node_key || e.tls_fingerprint != identity.fingerprint || e.fleet != fleet {
+            return Err(refuse(format!(
+                "its endorsement names another node, certificate or fleet (node key {node_key}, certificate {}, fleet {fleet})",
+                identity.fingerprint_hex()
+            )));
+        }
+        let legacy = std::env::var("MAKEPAD_AI_HUB_LEGACY_PLAIN").is_ok_and(|v| v == "1");
+        let listen = if legacy { SocketAddr::new(addr.ip(), addr.port() + 1) } else { addr };
+        let edge = match std::env::var("MAKEPAD_AI_HUB_EDGE") {
+            Ok(text) => Some(text.parse().map_err(|_| refuse(format!("MAKEPAD_AI_HUB_EDGE {text:?} is not an address:port")))?),
+            Err(_) => None,
+        };
+        let mut secret = [0u8; 32];
+        makepad_network::tls::os_random(&mut secret).map_err(|e| AssetAiError::Io(format!("random: {e}")))?;
+        let node_token = fs::read_to_string(dir.join(crate::fleet_auth::NODE_TOKEN)).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty());
+        Ok(Self {
+            node_token,
+            trust: Arc::new(trust),
+            identity,
+            endorsement,
+            fleet: fleet.to_string(),
+            listen,
+            edge,
+            legacy,
+            front_secret: makepad_network::tls::to_hex(&secret),
+        })
     }
-    Some(secret.to_string())
+
+    /// Starts the TLS front (and the edge, when configured) and the signed
+    /// beacon; returns the public address.
+    fn start(self, node_id: u64, inner: SocketAddr, shared: &Arc<ServiceShared>) -> Result<SocketAddr, AssetAiError> {
+        let cert = self.identity.cert_der.clone();
+        let key = self.identity.key;
+        let server = |identity: makepad_network::tls::TlsIdentity| {
+            makepad_network::tls::TlsServer::new(identity).map_err(|e| AssetAiError::Http(format!("TLS server: {e}")))
+        };
+        let fp = self.identity.fingerprint_hex();
+        if let Some(edge) = self.edge {
+            let identity = makepad_network::tls::TlsIdentity { key, cert_der: cert.clone(), fingerprint: self.identity.fingerprint, dir: self.identity.dir.clone() };
+            crate::front::start_front(crate::front::FrontConfig {
+                listen: edge,
+                inner,
+                tls: server(identity)?,
+                trust: self.trust.clone(),
+                front_secret: self.front_secret.clone(),
+                edge: true,
+            })
+            .map_err(|e| AssetAiError::Http(format!("edge bind {edge}: {e}")))?;
+            eprintln!("fleet: edge (device routes only) on {edge}");
+        }
+        crate::front::start_front(crate::front::FrontConfig {
+            listen: self.listen,
+            inner,
+            tls: server(self.identity)?,
+            trust: self.trust.clone(),
+            front_secret: self.front_secret.clone(),
+            edge: false,
+        })
+        .map_err(|e| AssetAiError::Http(format!("TLS front bind {}: {e}", self.listen)))?;
+        eprintln!("fleet: TLS front on {} (certificate {fp}){}", self.listen, if self.legacy { "; legacy plaintext port still open" } else { "" });
+        crate::discovery::start_signed_beacon(node_id, self.listen.port(), self.fleet.clone(), shared.node_key.clone(), self.endorsement);
+        crate::fleet_auth::set_node_trust(self.trust);
+        crate::fleet_auth::set_node_token(self.node_token);
+        Ok(self.listen)
+    }
 }
 
 /// Durable worker identity: 32 lowercase hex chars persisted as `node-key`
@@ -507,6 +629,10 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 // Blob chunks go through their own bounded worker pool so a
                 // 32 MiB read never stalls /health, job polling or submits.
                 if headers.path.starts_with(crate::peer_serve::BLOB_PATH_PREFIX) {
+                    if caller_of(&shared, &headers).is_none() {
+                        let _ = response_sender.send(unauthorized_response());
+                        continue;
+                    }
                     crate::peer_serve::route_blob(&shared, &headers, response_sender);
                 } else {
                     let response = route_get_request(&shared, &headers);
@@ -534,7 +660,7 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 headers,
                 response_sender,
             } => {
-                if !request_is_authorized(&shared, &headers) {
+                if caller_of(&shared, &headers).is_none() {
                     let _ = response_sender.send(Vec::new());
                     continue;
                 }
@@ -591,45 +717,16 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
     }
 }
 
-/// Constant-time byte equality (apart from the unavoidable length leak).
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (left, right) in a.iter().zip(b.iter()) {
-        diff |= left ^ right;
-    }
-    diff == 0
-}
 
-fn header_value<'a>(headers: &'a HttpServerHeaders, name: &str) -> Option<&'a str> {
-    headers.lines.iter().find_map(|line| {
-        let (header_name, value) = line.trim_end().split_once(':')?;
-        header_name
-            .eq_ignore_ascii_case(name)
-            .then(|| value.trim())
+
+/// Who sent a request, or None when it is not allowed in at all.
+fn caller_of(shared: &ServiceShared, headers: &HttpServerHeaders) -> Option<crate::front::Caller> {
+    let Some(secret) = shared.front_secret.as_deref() else {
+        return Some(crate::front::Caller::local());
+    };
+    crate::front::caller_from_headers(&headers.lines, secret).or_else(|| {
+        shared.legacy_open.then(|| crate::front::Caller { client_id: "legacy".into(), role: crate::fleet_auth::Role::Lan })
     })
-}
-
-fn request_is_authorized(shared: &ServiceShared, headers: &HttpServerHeaders) -> bool {
-    if headers.verb == "GET"
-        && (headers.path == "/health"
-            || headers
-                .path
-                .starts_with(crate::peer_serve::BLOB_PATH_PREFIX))
-    {
-        return true;
-    }
-    let Some(expected) = shared.fabric_secret.as_deref() else {
-        return true;
-    };
-    let Some(actual) = header_value(headers, "authorization")
-        .and_then(|value| value.strip_prefix("Bearer "))
-    else {
-        return false;
-    };
-    constant_time_eq(actual.as_bytes(), expected.as_bytes())
 }
 
 fn unauthorized_response() -> HttpServerResponse {
@@ -640,7 +737,7 @@ fn route_get_request(
     shared: &Arc<ServiceShared>,
     headers: &HttpServerHeaders,
 ) -> HttpServerResponse {
-    if !request_is_authorized(shared, headers) {
+    if caller_of(shared, headers).is_none() {
         return unauthorized_response();
     }
     route_get(shared, &headers.path)
@@ -651,10 +748,10 @@ fn route_post_request(
     headers: &HttpServerHeaders,
     body: &[u8],
 ) -> HttpServerResponse {
-    if !request_is_authorized(shared, headers) {
+    let Some(caller) = caller_of(shared, headers) else {
         return unauthorized_response();
-    }
-    route_post(shared, &headers.path, body)
+    };
+    route_post_by(shared, &caller, &headers.path, body)
 }
 
 /// Looks up the live session a connected websocket belongs to.
@@ -759,7 +856,23 @@ pub(crate) fn reap_lapsed_leases(shared: &Arc<ServiceShared>) -> usize {
     lapsed.len()
 }
 
+#[cfg(test)]
 fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServerResponse {
+    route_post_by(shared, &crate::front::Caller::local(), path, body)
+}
+
+/// A lease key scoped to the authenticated client: an origin key is only
+/// meaningful within the client that holds it, so one client can neither
+/// renew nor say goodbye for another's jobs.
+fn scoped_origin(caller: &crate::front::Caller, key: &str) -> String {
+    if caller.client_id == "local" {
+        key.to_string()
+    } else {
+        format!("{}/{key}", caller.client_id)
+    }
+}
+
+fn route_post_by(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, path: &str, body: &[u8]) -> HttpServerResponse {
     if matches!(path, "/generate" | "/jobs" | "/realtime") {
         if let Some(reason) = shared.activity.refusal() {
             return generate_refused(&AssetAiError::Unavailable(reason));
@@ -779,7 +892,7 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
             return error_json(400, "malformed keepalive body".to_string());
         };
         let origin = crate::lease::Origin {
-            node_key: req.origin_key,
+            node_key: scoped_origin(caller, &req.origin_key),
             epoch: req.origin_epoch,
         };
         // A known key under a new epoch is the restart signal: the previous
@@ -813,7 +926,7 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         let Ok(req) = ByeRequestJson::deserialize_json(text) else {
             return error_json(400, "malformed bye body".to_string());
         };
-        let lapsed = shared.leases.lock().unwrap().bye(&req.origin_key);
+        let lapsed = shared.leases.lock().unwrap().bye(&scoped_origin(caller, &req.origin_key));
         for (job_id, _) in &lapsed {
             let _ = cancel_job_with_teardown(shared, job_id);
         }
@@ -833,6 +946,10 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         .and_then(|rest| rest.strip_suffix("/cancel"))
     {
         use crate::jobs::CancelOutcome;
+        let owner = shared.job_owners.lock().unwrap().get(job_id).cloned();
+        if owner.is_some_and(|owner| owner != caller.client_id) && caller.client_id != "local" {
+            return error_json(403, format!("job {job_id} belongs to another client"));
+        }
         let outcome = cancel_job_with_teardown(shared, job_id);
         return match outcome {
             CancelOutcome::Cancelled | CancelOutcome::Cancelling => {
@@ -850,9 +967,14 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
     if path == "/realtime" {
         return route_realtime_post(shared, body);
     }
-    if path != "/generate" {
-        return error_json(404, format!("no such endpoint: POST {path}"));
+    if path == "/generate" {
+        let response = route_generate(shared, caller, body);
+        return response;
     }
+    error_json(404, format!("no such endpoint: POST {path}"))
+}
+
+fn route_generate(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, body: &[u8]) -> HttpServerResponse {
     let text = match std::str::from_utf8(body) {
         Ok(text) => text,
         Err(_) => return error_json(400, "request body is not utf-8".to_string()),
@@ -930,7 +1052,7 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         crate::jobs::JobClass::Heavy
     };
     let origin = request.origin_key.clone().map(|node_key| crate::lease::Origin {
-        node_key,
+        node_key: scoped_origin(caller, &node_key),
         epoch: request.origin_epoch.unwrap_or(0),
     });
     match shared
@@ -938,6 +1060,13 @@ fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServe
         .submit_as(JobParams::Generate(params), policy, class)
     {
         Ok(job_id) => {
+            {
+                let mut owners = shared.job_owners.lock().unwrap();
+                if owners.len() > 100_000 {
+                    owners.clear();
+                }
+                owners.insert(job_id.clone(), caller.client_id.clone());
+            }
             if let Some(origin) = origin {
                 let _ = shared.leases.lock().unwrap().register(
                     &job_id,
@@ -1126,7 +1255,7 @@ fn health_json_wire(shared: &Arc<ServiceShared>) -> String {
     let mut json = health_json(shared).serialize_json();
     if json.pop() == Some('}') {
         json.push_str(",\"auth_required\":");
-        json.push_str(if shared.fabric_secret.is_some() {
+        json.push_str(if shared.front_secret.is_some() {
             "true"
         } else {
             "false"
@@ -1631,7 +1760,14 @@ fn execute_job(
         crate::peer::PeerPlan::for_job(
             &params.peer_sources,
             &params.peer_tickets,
-            &shared.peer.env_sources,
+            &crate::peer::roster_sources(
+                &shared.peer.env_sources,
+                &crate::discovery::start_listener()
+                    .nodes()
+                    .into_iter()
+                    .map(|n| n.base_url)
+                    .collect::<Vec<_>>(),
+            ),
             &shared.node_key,
             shared.peer.secret.clone(),
         ),
@@ -2859,7 +2995,7 @@ mod lifecycle_tests {
 
     fn fixture_shared_with_secret(
         pins: &[&str],
-        fabric_secret: Option<&str>,
+        front_secret: Option<&str>,
     ) -> Arc<ServiceShared> {
         let mut residency = ResidencyConfig::default();
         residency.pins = pins.iter().map(|s| s.to_string()).collect();
@@ -2878,7 +3014,9 @@ mod lifecycle_tests {
             artifacts: Mutex::new(HashMap::new()),
             gpu: GpuCache::new(),
             vram_usable: residency::UsableVram::new(None),
-            fabric_secret: fabric_secret.map(str::to_string),
+            front_secret: front_secret.map(str::to_string),
+            legacy_open: false,
+            job_owners: Mutex::new(HashMap::new()),
             node_id: 1,
             node_key: "f".repeat(32),
             started_ms: 0,
@@ -2898,13 +3036,16 @@ mod lifecycle_tests {
         })
     }
 
-    fn request_headers(verb: &str, path: &str, bearer: Option<&str>) -> HttpServerHeaders {
+    /// `front`: (secret, client id) as the TLS front would stamp them.
+    fn request_headers(verb: &str, path: &str, front: Option<(&str, &str)>) -> HttpServerHeaders {
         let mut lines = vec![
             format!("{verb} {path} HTTP/1.1\r\n"),
             "Host: 127.0.0.1\r\n".to_string(),
         ];
-        if let Some(bearer) = bearer {
-            lines.push(format!("Authorization: Bearer {bearer}\r\n"));
+        if let Some((secret, client)) = front {
+            lines.push(format!("X-Makepad-Front: {secret}\r\n"));
+            lines.push(format!("X-Makepad-Client: {client}\r\n"));
+            lines.push("X-Makepad-Role: lan\r\n".to_string());
         }
         HttpServerHeaders {
             addr: "127.0.0.1:1".parse().unwrap(),
@@ -2921,7 +3062,7 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn absent_fabric_secret_keeps_the_http_surface_open() {
+    fn loopback_node_serves_its_machine_without_credentials() {
         let shared = fixture_shared(&[]);
         let jobs = route_get_request(&shared, &request_headers("GET", "/jobs", None));
         assert!(jobs.header.starts_with("HTTP/1.1 200"));
@@ -2997,54 +3138,45 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn fabric_secret_gates_jobs_but_not_health_or_peer_blobs() {
-        const SECRET: &str = "correct-fabric-secret";
+    fn behind_the_front_only_stamped_requests_get_in() {
+        const SECRET: &str = "front-secret";
         let shared = fixture_shared_with_secret(&[], Some(SECRET));
+        // Nothing is open: health and blobs included.
+        for path in ["/health", "/jobs"] {
+            let r = route_get_request(&shared, &request_headers("GET", path, None));
+            assert!(r.header.starts_with("HTTP/1.1 401 Unauthorized"), "{path}");
+        }
+        let blob = request_headers("GET", &format!("{}{}", crate::peer_serve::BLOB_PATH_PREFIX, "a".repeat(64)), None);
+        assert!(caller_of(&shared, &blob).is_none());
+        // A guessed front secret is not the front.
+        let forged = route_get_request(&shared, &request_headers("GET", "/jobs", Some(("guess", "rik"))));
+        assert!(forged.header.starts_with("HTTP/1.1 401 Unauthorized"));
+        let ok = route_get_request(&shared, &request_headers("GET", "/jobs", Some((SECRET, "rik"))));
+        assert!(ok.header.starts_with("HTTP/1.1 200 OK"));
+        let health = route_get_request(&shared, &request_headers("GET", "/health", Some((SECRET, "rik"))));
+        assert!(String::from_utf8(health.body).unwrap().contains("\"auth_required\":true"));
+        let post = route_post_request(&shared, &request_headers("POST", "/not-an-endpoint", None), b"{}");
+        assert!(post.header.starts_with("HTTP/1.1 401 Unauthorized"));
+    }
 
-        let health = route_get_request(&shared, &request_headers("GET", "/health", None));
-        assert!(health.header.starts_with("HTTP/1.1 200"));
-        assert!(String::from_utf8(health.body)
-            .unwrap()
-            .contains("\"auth_required\":true"));
-
-        let missing = route_get_request(&shared, &request_headers("GET", "/jobs", None));
-        assert!(missing.header.starts_with("HTTP/1.1 401 Unauthorized"));
-        assert!(missing.body.len() < 128);
-
-        let wrong = route_get_request(
-            &shared,
-            &request_headers("GET", "/jobs", Some("wrong-fabric-secret")),
-        );
-        assert!(wrong.header.starts_with("HTTP/1.1 401 Unauthorized"));
-        let wrong_body = String::from_utf8(wrong.body).unwrap();
-        assert!(!wrong_body.contains(SECRET));
-        assert!(!wrong_body.contains("wrong-fabric-secret"));
-
-        let authorized = route_get_request(
-            &shared,
-            &request_headers("GET", "/jobs", Some(SECRET)),
-        );
-        assert!(authorized.header.starts_with("HTTP/1.1 200 OK"));
-
-        let post_missing = route_post_request(
-            &shared,
-            &request_headers("POST", "/not-an-endpoint", None),
-            b"{}",
-        );
-        assert!(post_missing.header.starts_with("HTTP/1.1 401 Unauthorized"));
-        let post_authorized = route_post_request(
-            &shared,
-            &request_headers("POST", "/not-an-endpoint", Some(SECRET)),
-            b"{}",
-        );
-        assert!(post_authorized.header.starts_with("HTTP/1.1 404 Not Found"));
-
-        let blob = request_headers(
-            "GET",
-            &format!("{}{}", crate::peer_serve::BLOB_PATH_PREFIX, "a".repeat(64)),
-            None,
-        );
-        assert!(request_is_authorized(&shared, &blob));
+    #[test]
+    fn leases_and_cancel_belong_to_their_client() {
+        let shared = fixture_shared(&[]);
+        let alice = crate::front::Caller { client_id: "alice".into(), role: crate::fleet_auth::Role::Lan };
+        let mallory = crate::front::Caller { client_id: "mallory".into(), role: crate::fleet_auth::Role::Lan };
+        let origin = crate::lease::Origin { node_key: scoped_origin(&alice, "origin-a"), epoch: 1 };
+        shared.leases.lock().unwrap().register("job-1", origin, crate::jobs::now_ms());
+        shared.job_owners.lock().unwrap().insert("job-1".into(), "alice".into());
+        // Mallory names Alice's origin key (it is public): nothing happens.
+        let bye = route_post_by(&shared, &mallory, "/bye", br#"{"origin_key":"origin-a"}"#);
+        assert!(String::from_utf8(bye.body).unwrap().contains("\"cancelled\":0"));
+        let renew = route_post_by(&shared, &mallory, "/job/job-1/keepalive", br#"{"origin_key":"origin-a","origin_epoch":1}"#);
+        assert!(String::from_utf8(renew.body).unwrap().contains("wrong-owner"));
+        let cancel = route_post_by(&shared, &mallory, "/job/job-1/cancel", b"");
+        assert!(cancel.header.starts_with("HTTP/1.1 403"));
+        // Alice's own renewal still works.
+        let renew = route_post_by(&shared, &alice, "/job/job-1/keepalive", br#"{"origin_key":"origin-a","origin_epoch":1}"#);
+        assert!(String::from_utf8(renew.body).unwrap().contains("\"renewed\":true"));
     }
 
     fn fixture(resident: bool) -> Box<dyn ContentBackend> {

@@ -50,6 +50,11 @@ mod disk_volume;
 pub mod error;
 pub mod fabric;
 pub mod fleet;
+// Fleet authority, credentials, pins, and the TLS front (native only).
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fleet_auth;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod front;
 pub mod job;
 pub mod gpu;
 pub mod home;

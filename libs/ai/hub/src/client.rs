@@ -113,15 +113,16 @@ const MAX_ARTIFACT_BODY: usize = 1024 * 1024 * 1024;
 impl LocalService {
     pub fn new(base_url: &str) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
-        let secret = std::env::var("MAKEPAD_AI_HUB_SECRET").ok();
+        // Fleet nodes (https, pinned from a signed beacon) get this
+        // process's fleet credential from the HTTP client itself.
         Self {
             base_url,
-            auth_headers: Self::auth_headers(secret.as_deref()),
+            auth_headers: Vec::new(),
             lease_origin: Mutex::new(None),
         }
     }
 
-    /// Override the environment-provided fabric secret for this service.
+    /// An explicit bearer for this service (tests; fleet nodes need none).
     pub fn with_secret(mut self, secret: impl Into<String>) -> Self {
         let secret = secret.into();
         self.auth_headers = Self::auth_headers(Some(&secret));

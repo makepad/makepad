@@ -143,7 +143,7 @@ fn blob_get(
     let url = format!("{base}/v1/model_blob/{digest_path}");
     let mut headers: Vec<(String, String)> = Vec::new();
     if let Some(ticket) = ticket {
-        headers.push(("Authorization".to_string(), format!("Bearer {ticket}")));
+        headers.push(("X-Peer-Ticket".to_string(), ticket.to_string()));
     }
     if let Some(receiver) = receiver {
         headers.push(("X-Peer-Receiver".to_string(), receiver.to_string()));
@@ -900,118 +900,20 @@ fn broken_and_dead_peers_are_skipped_fast() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn pull_job_uses_coordinator_peer_source_and_registers_inventory() {
-    let bytes = test_bytes(250_000);
-    let digest = makepad_ai_hub::sha256::sha256_hex(&bytes);
-    let registry = Registry::parse(&registry_json(&digest, bytes.len() as u64, None)).unwrap();
-    let spec = registry.find("peer-model").unwrap().files[0].clone();
-
-    let source = start_box("e2e-src", &registry, 64 * 1024, 4, None, Vec::new());
-    seed_verified(&source.cache, &spec, &bytes);
-    let receiver = start_box("e2e-dst", &registry, 64 * 1024, 4, None, Vec::new());
-
-    // Coordinator-shaped request: pull the model, naming the source box and
-    // carrying a ticket minted for this exact receiver/source/digest tuple.
-    let provider = LocalService::new(&receiver.base);
-    let ticket = PeerTicket::mint(
-        &secret(),
-        &source.node_key,
-        &receiver.node_key,
-        &digest,
-        now_unix() + 120,
-    );
-    let job = provider
-        .request(
-            Domain::Image,
-            &GenerateRequestJson {
-                model: "peer-model".to_string(),
-                pull_only: Some(true),
-                peer_sources: Some(vec![source.base.clone()]),
-                peer_tickets: Some(vec![ticket]),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let status = provider.poll(&job).unwrap();
-        match status.state.as_str() {
-            "done" => break,
-            "error" => panic!("pull failed: {:?}", status.error),
-            _ => {
-                assert!(Instant::now() < deadline, "pull did not finish");
-                std::thread::sleep(Duration::from_millis(25));
-            }
-        }
-    }
-    // Bytes landed at the canonical path, receipt-verified.
-    let dest = spec.dest_path(&receiver.cache);
-    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
-    assert!(source_file_is_verified(&spec, &receiver.cache));
-    // The receiver's inventory now advertises the digest: the coordinator
-    // can select THIS box as a source for the rest of the fleet.
-    let inventory = fetch_inventory(&receiver.base);
-    assert!(inventory.peer_serving);
-    assert!(inventory.artifacts.iter().any(|a| a.digest == digest));
-
-    // Full circle: a third party can now pull the blob FROM the receiver.
-    let ticket = PeerTicket::mint(
-        &secret(),
-        &inventory.node_key,
-        &receiver_key(),
-        &digest,
-        now_unix() + 60,
-    );
-    let reply = blob_get(&receiver.base, &digest, Some(&ticket), Some(&receiver_key()), None, &[]);
-    assert_eq!(reply.status, 206);
-    assert_eq!(reply.body, &bytes[..64 * 1024]);
-}
-
-#[test]
-fn coordinator_tickets_work_without_a_receiver_secret() {
-    // Coordinator mode: the receiver holds NO transfer secret; it can only
-    // use explicitly minted tickets (and cannot serve).
+fn request_named_peer_sources_outside_the_fleet_roster_are_ignored() {
+    // A generate request may name peers, but a node only dials verified
+    // (endorsed, pinned) fleet endpoints: a plain URL in the request (here a
+    // real, ticketed source) must not make it connect anywhere.
     let bytes = test_bytes(80_000);
     let digest = makepad_ai_hub::sha256::sha256_hex(&bytes);
     let registry = Registry::parse(&registry_json(&digest, bytes.len() as u64, None)).unwrap();
     let spec = registry.find("peer-model").unwrap().files[0].clone();
-
-    let source = start_box("tickets-src", &registry, 64 * 1024, 4, None, Vec::new());
+    let source = start_box("roster-src", &registry, 64 * 1024, 4, None, Vec::new());
     seed_verified(&source.cache, &spec, &bytes);
-
     let receiver = receiver_key();
     let ticket = PeerTicket::mint(&secret(), &source.node_key, &receiver, &digest, now_unix() + 120);
-    let plan = PeerPlan::for_job(
-        &[source.base.clone()],
-        &[ticket],
-        &[],
-        &receiver,
-        None, // no secret on the receiver
-    )
-    .unwrap();
-    let receiver_cache = test_dir("tickets-dst");
-    let out = Downloader::new(DEAD_HF, None)
-        .unwrap()
-        .with_peer_plan(Some(plan))
-        .ensure_file(&spec, &receiver_cache, &mut |_| {}, &CancelToken::new())
-        .unwrap();
-    assert_eq!(std::fs::read(out).unwrap(), bytes);
-
-    // Without a ticket AND without a secret the peer lane is unusable and
-    // the dead HF base surfaces as the error — never a silent success.
-    let no_auth_plan = PeerPlan::for_job(&[source.base.clone()], &[], &[], &receiver, None).unwrap();
-    let bare_cache = test_dir("tickets-none");
-    let err = Downloader::new(DEAD_HF, None)
-        .unwrap()
-        .with_peer_plan(Some(no_auth_plan))
-        .ensure_file(&spec, &bare_cache, &mut |_| {}, &CancelToken::new())
-        .unwrap_err();
-    assert!(err.to_string().contains("http"), "{err}");
+    assert!(PeerPlan::for_job(&[source.base.clone()], &[ticket], &[], &receiver, None).is_none());
 }
-
-// ---------------------------------------------------------------------------
-// Concurrency bound
-// ---------------------------------------------------------------------------
 
 #[test]
 fn concurrent_serves_beyond_the_bound_get_503() {

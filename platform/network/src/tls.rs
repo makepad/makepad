@@ -100,6 +100,95 @@ pub fn os_random(buf: &mut [u8]) -> io::Result<()> {
     }
 }
 
+/// Verified endpoints (`host:port` → certificate SHA-256) that clients in
+/// this process may reach over pinned TLS, e.g. fleet nodes learned from
+/// endorsed discovery beacons. Websocket and HTTP clients consult it for
+/// `wss://` / `https://` URLs.
+fn pins() -> &'static std::sync::RwLock<std::collections::HashMap<String, [u8; 32]>> {
+    static PINS: std::sync::OnceLock<std::sync::RwLock<std::collections::HashMap<String, [u8; 32]>>> =
+        std::sync::OnceLock::new();
+    PINS.get_or_init(Default::default)
+}
+
+pub fn pin_endpoint(host_port: &str, fingerprint: [u8; 32]) {
+    pins().write().unwrap().insert(host_port.to_ascii_lowercase(), fingerprint);
+}
+
+pub fn pin_for(host_port: &str) -> Option<[u8; 32]> {
+    pins().read().unwrap().get(&host_port.to_ascii_lowercase()).copied()
+}
+
+static CREDENTIAL: std::sync::OnceLock<fn() -> Option<String>> = std::sync::OnceLock::new();
+
+/// The credential (bearer token) this process presents to pinned endpoints,
+/// supplied by whoever owns it (the AI hub's fleet credential).
+pub fn set_pinned_credential_provider(provider: fn() -> Option<String>) {
+    let _ = CREDENTIAL.set(provider);
+}
+
+pub fn pinned_credential() -> Option<String> {
+    CREDENTIAL.get().and_then(|f| f())
+}
+
+/// A fresh P-256 key (X9.63) from the OS.
+pub fn generate_p256() -> io::Result<[u8; X963_KEY_LEN]> {
+    platform::generate_p256()
+}
+
+/// DER ECDSA-SHA256 signature by an X9.63 P-256 key, made by the OS.
+pub fn sign_p256_sha256(key: &[u8; X963_KEY_LEN], msg: &[u8]) -> io::Result<Vec<u8>> {
+    platform::sign_p256_sha256(key, msg)
+}
+
+/// Checks a DER ECDSA-SHA256 signature against an uncompressed P-256
+/// public point (65 bytes, 0x04 || X || Y), using the OS.
+pub fn verify_p256_sha256(point: &[u8], msg: &[u8], sig_der: &[u8]) -> bool {
+    if point.len() != 65 || point[0] != 0x04 {
+        return false;
+    }
+    platform::verify_p256_sha256(point, msg, sig_der)
+}
+
+/// r||s (32 bytes each) out of a DER ECDSA-Sig-Value.
+pub fn ecdsa_raw_from_der(der: &[u8]) -> Option<[u8; 64]> {
+    fn read_tlv(buf: &[u8], tag: u8) -> Option<(&[u8], &[u8])> {
+        if buf.len() < 2 || buf[0] != tag {
+            return None;
+        }
+        let (len, head) = if buf[1] < 0x80 {
+            (buf[1] as usize, 2)
+        } else if buf[1] == 0x81 && buf.len() >= 3 {
+            (buf[2] as usize, 3)
+        } else {
+            return None;
+        };
+        let body = buf.get(head..head + len)?;
+        Some((body, &buf[head + len..]))
+    }
+    let (seq, rest) = read_tlv(der, 0x30)?;
+    if !rest.is_empty() {
+        return None;
+    }
+    let (r, after) = read_tlv(seq, 0x02)?;
+    let (s, tail) = read_tlv(after, 0x02)?;
+    if !tail.is_empty() {
+        return None;
+    }
+    let mut out = [0u8; 64];
+    let (lo, hi) = out.split_at_mut(32);
+    for (src, dst) in [(r, lo), (s, hi)] {
+        let src = match src.iter().position(|b| *b != 0) {
+            Some(i) => &src[i..],
+            None => &[][..],
+        };
+        if src.len() > 32 {
+            return None;
+        }
+        dst[32 - src.len()..].copy_from_slice(src);
+    }
+    Some(out)
+}
+
 /// Minimal DER writer for one self-signed ECDSA P-256 certificate.
 pub mod x509 {
     const OID_EC_PUBLIC_KEY: &[u8] = &[0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
@@ -413,7 +502,7 @@ mod platform;
 
 #[cfg(target_os = "windows")]
 #[path = "backend/windows/tls_server.rs"]
-mod platform;
+pub(crate) mod platform;
 
 #[cfg(not(any(
     target_os = "macos",
@@ -434,6 +523,9 @@ mod platform {
     }
     pub fn sign_p256_sha256(_key: &[u8; 97], _msg: &[u8]) -> io::Result<Vec<u8>> {
         Err(unsupported())
+    }
+    pub fn verify_p256_sha256(_point: &[u8], _msg: &[u8], _sig: &[u8]) -> bool {
+        false
     }
     pub struct ServerConfig;
     impl ServerConfig {
@@ -528,6 +620,23 @@ mod server_tests {
             assert_eq!(mode & 0o077, 0);
         }
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sign_and_verify_round_trip() {
+        let key = generate_p256().unwrap();
+        let sig = sign_p256_sha256(&key, b"statement").unwrap();
+        assert!(verify_p256_sha256(&key[..65], b"statement", &sig));
+        assert!(!verify_p256_sha256(&key[..65], b"statemenT", &sig));
+        let other = generate_p256().unwrap();
+        assert!(!verify_p256_sha256(&other[..65], b"statement", &sig));
+        let mut bad = sig.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(!verify_p256_sha256(&key[..65], b"statement", &bad));
+        assert!(!verify_p256_sha256(&key[..65], b"statement", b"junk"));
+        let raw = ecdsa_raw_from_der(&sig).unwrap();
+        assert_eq!(x509::ecdsa_sig_from_raw(&raw), sig);
     }
 
     /// The OS server stack against the OS client stack, with the pin.

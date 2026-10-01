@@ -43,8 +43,9 @@ impl From<String> for RequestError {
     fn from(s: String) -> Self { Self::Other(s) }
 }
 
-/// `POST`/`GET` a JSON document. An explicit `bearer` wins; otherwise the
-/// fabric secret environment variable authenticates service-node requests.
+/// `POST`/`GET` a JSON document. `http://` is the machine-local plain path
+/// (an explicit `bearer` rides along); `https://` fleet nodes go through the
+/// pinned TLS client with the process's fleet credential.
 pub fn request_json(
     method: &str,
     url: &str,
@@ -64,12 +65,11 @@ pub fn request_json_detailed(
     body: Option<&Value>,
     bearer: Option<&str>,
 ) -> Result<(u16, Value), RequestError> {
-    let env_bearer = if bearer.is_none() {
-        std::env::var("MAKEPAD_AI_HUB_SECRET").ok()
-    } else {
-        None
-    };
-    let bearer = bearer.or_else(|| env_bearer.as_deref().map(str::trim));
+    // Fleet nodes speak TLS behind their front: the shared HTTP client pins
+    // them and attaches this process's fleet credential.
+    if url.starts_with("https://") {
+        return request_json_tls(method, url, body);
+    }
     let (host_port, path) = split_url(url)?;
     let addr = host_port
         .to_socket_addrs()
@@ -153,6 +153,23 @@ pub(super) fn read_json_response(stream: &mut impl Read) -> Result<(u16, Value),
         None => buf.len(),
     };
     finish(status, &buf[body_start..end]).map_err(Into::into)
+}
+
+fn request_json_tls(method: &str, url: &str, body: Option<&Value>) -> Result<(u16, Value), RequestError> {
+    use crate::http_client::{http_fetch_no_redirect, HttpClientRequest};
+    let text = body.map(|b| b.to_json());
+    let request = match &text {
+        Some(t) => HttpClientRequest::post(url, "application/json", t.as_bytes()),
+        None => HttpClientRequest { method, ..HttpClientRequest::get(url) },
+    };
+    let request = HttpClientRequest { method, ..request };
+    let response = http_fetch_no_redirect(&request).map_err(|e| RequestError::Connection(e.to_string()))?;
+    let status = response.status;
+    let bytes = response.read_body_to_vec(MAX_BODY_BYTES).map_err(|e| RequestError::Other(e.to_string()))?;
+    if status == 503 && bytes.is_empty() {
+        return Err(RequestError::Empty503);
+    }
+    finish(status, &bytes).map_err(RequestError::Other)
 }
 
 fn finish(status: u16, body: &[u8]) -> Result<(u16, Value), String> {

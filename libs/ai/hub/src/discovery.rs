@@ -103,6 +103,75 @@ pub fn start_beacon(node_id: u64, http_port: u16, fleet: String) {
     });
 }
 
+/// The fleet beacon of a node serving behind its TLS front: carries the
+/// node's endorsement (fleet, node key, certificate fingerprint, signed by
+/// the fleet authority). A listener that cannot verify it ignores it.
+#[derive(Clone, Debug, SerJson, DeJson)]
+pub struct SignedBeaconJson {
+    /// Constant "makepad-ai-hub-tls".
+    pub service: String,
+    pub node_id: u64,
+    /// The TLS front's port on the sender's address.
+    pub port: u16,
+    pub node_key: String,
+    pub endorsement: String,
+}
+
+pub const SIGNED_SERVICE: &str = "makepad-ai-hub-tls";
+
+pub fn start_signed_beacon(node_id: u64, tls_port: u16, _fleet: String, node_key: String, endorsement: String) {
+    if std::env::var_os("MAKEPAD_AI_NO_BEACON").is_some_and(|v| v == "1") {
+        return;
+    }
+    std::thread::spawn(move || {
+        let Ok(socket) = UdpSocket::bind(("0.0.0.0", 0)) else {
+            eprintln!("discovery: signed beacon socket bind failed — no LAN announce");
+            return;
+        };
+        if socket.set_broadcast(true).is_err() {
+            return;
+        }
+        let beacon = SignedBeaconJson {
+            service: SIGNED_SERVICE.to_string(),
+            node_id,
+            port: tls_port,
+            node_key,
+            endorsement,
+        }
+        .serialize_json();
+        loop {
+            let _ = socket.send_to(beacon.as_bytes(), ("255.255.255.255", DISCOVERY_PORT));
+            std::thread::sleep(BEACON_INTERVAL);
+        }
+    });
+}
+
+/// Checks a signed beacon from `from`: the endorsement verifies under the
+/// fleet authority, names this beacon's node key and the wanted fleet. The
+/// endpoint is then pinned to the endorsed certificate; returns its URL.
+pub fn accept_signed_beacon(
+    trust: &crate::fleet_auth::Trust,
+    beacon: &SignedBeaconJson,
+    from: std::net::IpAddr,
+    wanted_fleet: &str,
+    now: u64,
+) -> Option<(String, String)> {
+    if beacon.service != SIGNED_SERVICE {
+        return None;
+    }
+    let e = trust.verify_endorsement(&beacon.endorsement, now).ok()?;
+    if e.node_key != beacon.node_key || e.fleet != wanted_fleet {
+        return None;
+    }
+    let host = match from {
+        std::net::IpAddr::V6(v6) => format!("[{v6}]"),
+        v4 => v4.to_string(),
+    };
+    let host_port = format!("{host}:{}", beacon.port);
+    crate::fleet_auth::pin_endpoint(&host_port, e.tls_fingerprint);
+    Some((format!("https://{host_port}"), e.node_key))
+}
+
 /// One discovered node: url is derived from the beacon's SOURCE address +
 /// advertised port.
 #[derive(Clone, Debug)]
@@ -180,7 +249,7 @@ fn spawn_listener() -> Discovered {
                 return;
             }
         };
-        let mut buffer = [0u8; 512];
+        let mut buffer = [0u8; 2048];
         loop {
             let Ok((len, from)) = socket.recv_from(&mut buffer) else {
                 continue;
@@ -188,17 +257,19 @@ fn spawn_listener() -> Discovered {
             let Ok(text) = std::str::from_utf8(&buffer[..len]) else {
                 continue;
             };
-            let Ok(beacon) = BeaconJson::deserialize_json(text) else {
+            // Only endorsed nodes join the fleet: an unsigned beacon (or one
+            // this process cannot verify) could point anywhere.
+            let Ok(beacon) = SignedBeaconJson::deserialize_json(text) else {
                 continue;
             };
-            if beacon.service != "makepad-asset-ai" {
+            let Some(trust) = crate::fleet_auth::verifier() else {
                 continue;
-            }
-            let fleet = normalize_fleet(beacon.fleet.as_deref().unwrap_or(""));
-            if fleet != wanted_fleet() {
+            };
+            let Some((base_url, _node_key)) =
+                accept_signed_beacon(trust, &beacon, from.ip(), &wanted_fleet(), crate::fleet_auth::now_secs())
+            else {
                 continue;
-            }
-            let base_url = format!("http://{}:{}", from.ip(), beacon.port);
+            };
             nodes
                 .lock()
                 .unwrap()
@@ -226,6 +297,38 @@ mod tests {
         assert_eq!(back.port, 8767);
         assert_eq!(back.service, "makepad-asset-ai");
         assert_eq!(back.fleet.as_deref(), Some("game"));
+    }
+
+    #[test]
+    fn signed_beacons_pin_endorsed_nodes_only() {
+        use crate::fleet_auth::{Authority, Trust};
+        let dir = std::env::temp_dir().join(format!("mk-beacon-{}", mint_node_id()));
+        let authority = Authority::create(&dir).unwrap();
+        let point = makepad_network::tls::from_hex::<65>(&authority.public_hex()).unwrap();
+        let trust = Trust::new(point, Default::default());
+        let key = "00112233445566778899aabbccddeeff";
+        let fp = [5u8; 32];
+        let beacon = SignedBeaconJson {
+            service: SIGNED_SERVICE.into(),
+            node_id: 1,
+            port: 8123,
+            node_key: key.into(),
+            endorsement: authority.endorse("gen", key, &fp, u64::MAX / 2).unwrap(),
+        };
+        let from: std::net::IpAddr = "10.9.9.9".parse().unwrap();
+        let (url, _) = accept_signed_beacon(&trust, &beacon, from, "gen", 1).unwrap();
+        assert_eq!(url, "https://10.9.9.9:8123");
+        assert_eq!(crate::fleet_auth::pin_for("10.9.9.9:8123"), Some(fp));
+        // Another fleet, another node key, a forged endorsement: ignored.
+        assert!(accept_signed_beacon(&trust, &beacon, from, "game", 1).is_none());
+        let mut other = beacon.clone();
+        other.node_key = "ffffffffffffffffffffffffffffffff".into();
+        assert!(accept_signed_beacon(&trust, &other, from, "gen", 1).is_none());
+        let mut forged = beacon.clone();
+        forged.endorsement = forged.endorsement.replace(&makepad_network::tls::to_hex(&fp), &makepad_network::tls::to_hex(&[6u8; 32]));
+        assert!(accept_signed_beacon(&trust, &forged, "10.9.9.8".parse().unwrap(), "gen", 1).is_none());
+        assert_eq!(crate::fleet_auth::pin_for("10.9.9.8:8123"), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -29,6 +29,8 @@ pub(crate) struct SocketStream {
     socket: Option<StreamSocket>,
     reader: Option<DataReader>,
     writer: Option<DataWriter>,
+    /// Pinned connections run on Schannel directly.
+    schannel: Option<crate::tls::platform::ServerStream>,
 }
 
 impl SocketStream {
@@ -99,49 +101,31 @@ impl SocketStream {
             socket: Some(socket),
             reader: Some(reader),
             writer: Some(writer),
+            schannel: None,
         })
     }
 
-    /// TLS without chain validation (self-signed server), then the server
-    /// certificate's SHA-256 must equal `pin` before the stream is used.
+    /// TLS on Schannel without chain validation (self-signed server); the
+    /// server certificate's SHA-256 must equal `pin` before the stream is
+    /// handed out. Synchronous Schannel rather than WinRT: a WinRT socket
+    /// cannot safely issue a second blocking operation on the same thread.
     pub fn connect_pinned(host: &str, port: &str, pin: &[u8; 32]) -> io::Result<Self> {
-        let mut stream = Self::connect(host, port, true, true)?;
-        let check = (|| -> io::Result<()> {
-            let socket = stream
-                .socket
-                .as_ref()
-                .ok_or_else(|| io_other("socket closed"))?;
-            let blob = socket
-                .Information()
-                .and_then(|info| info.ServerCertificate())
-                .and_then(|cert| cert.GetCertificateBlob())
-                .map_err(|err| io_other(format!("cannot read server certificate: {err}")))?;
-            let len = blob
-                .Length()
-                .map_err(|err| io_other(format!("certificate buffer: {err}")))?;
-            let reader = DataReader::FromBuffer(&blob)
-                .map_err(|err| io_other(format!("certificate reader: {err}")))?;
-            let mut der = vec![0u8; len as usize];
-            reader
-                .ReadBytes(&mut der)
-                .map_err(|err| io_other(format!("certificate read: {err}")))?;
-            let got = crate::digest::sha256_hash(&der);
-            if !crate::tls::constant_time_eq(&got, pin) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    format!(
-                        "server certificate fingerprint {} does not match the pin",
-                        crate::tls::to_hex(&got)
-                    ),
-                ));
+        use std::net::ToSocketAddrs;
+        let port: u16 = port.parse().map_err(|_| io_other("bad port"))?;
+        let mut last = None;
+        for addr in (host, port).to_socket_addrs()? {
+            match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(5)) {
+                Ok(tcp) => {
+                    let _ = tcp.set_nodelay(true);
+                    tcp.set_read_timeout(Some(Duration::from_secs(20)))?;
+                    let stream = crate::tls::platform::connect_pinned(tcp, host, pin)?;
+                    stream.tcp().set_read_timeout(None)?;
+                    return Ok(Self { socket: None, reader: None, writer: None, schannel: Some(stream) });
+                }
+                Err(e) => last = Some(e),
             }
-            Ok(())
-        })();
-        if let Err(err) = check {
-            stream.shutdown();
-            return Err(err);
         }
-        Ok(stream)
+        Err(last.unwrap_or_else(|| io_other("no address")))
     }
 
     pub fn into_tls(self, _host: &str, _ignore_ssl_cert: bool) -> io::Result<Self> {
@@ -151,15 +135,24 @@ impl SocketStream {
         ))
     }
 
-    pub fn set_read_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
-        Ok(())
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match &self.schannel {
+            Some(s) => s.tcp().set_read_timeout(timeout),
+            None => Ok(()),
+        }
     }
 
-    pub fn set_write_timeout(&self, _timeout: Option<Duration>) -> io::Result<()> {
-        Ok(())
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
+        match &self.schannel {
+            Some(s) => s.tcp().set_write_timeout(timeout),
+            None => Ok(()),
+        }
     }
 
     pub fn shutdown(&mut self) {
+        if let Some(s) = self.schannel.as_mut() {
+            s.shutdown();
+        }
         if let Some(writer) = self.writer.take() {
             close_if_possible(&writer);
         }
@@ -180,6 +173,9 @@ impl Drop for SocketStream {
 
 impl Read for SocketStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if let Some(s) = self.schannel.as_mut() {
+            return s.read(buf);
+        }
         if buf.is_empty() {
             return Ok(0);
         }
@@ -210,6 +206,9 @@ impl Read for SocketStream {
 
 impl Write for SocketStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(s) = self.schannel.as_mut() {
+            return s.write(buf);
+        }
         if buf.is_empty() {
             return Ok(0);
         }
@@ -233,6 +232,9 @@ impl Write for SocketStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
+        if let Some(s) = self.schannel.as_mut() {
+            return s.flush();
+        }
         let Some(writer) = self.writer.as_ref() else {
             return Ok(());
         };

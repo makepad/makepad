@@ -42,6 +42,8 @@ extern "C" {
     fn BN_bn2binpad(bn: *const c_void, to: *mut u8, len: c_int) -> c_int;
     fn d2i_ECPrivateKey(key: *mut *mut c_void, data: *mut *const u8, len: c_long) -> *mut c_void;
     fn ECDSA_size(key: *const c_void) -> c_int;
+    fn EC_KEY_oct2key(key: *mut c_void, buf: *const u8, len: usize, ctx: *mut c_void) -> c_int;
+    fn ECDSA_verify(kind: c_int, dgst: *const u8, dgst_len: c_int, sig: *const u8, sig_len: c_int, key: *mut c_void) -> c_int;
     fn ECDSA_sign(
         kind: c_int,
         dgst: *const u8,
@@ -126,6 +128,21 @@ pub fn sign_p256_sha256(key: &[u8; 97], msg: &[u8]) -> io::Result<Vec<u8>> {
         }
         sig.truncate(len as usize);
         Ok(sig)
+    }
+}
+
+pub fn verify_p256_sha256(point: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    let digest = crate::digest::sha256_hash(msg);
+    unsafe {
+        let key = EC_KEY_new_by_curve_name(NID_X9_62_PRIME256V1);
+        if key.is_null() {
+            return false;
+        }
+        let ok = EC_KEY_oct2key(key, point.as_ptr(), point.len(), ptr::null_mut()) == 1
+            && ECDSA_verify(0, digest.as_ptr(), 32, sig.as_ptr(), sig.len() as c_int, key) == 1;
+        EC_KEY_free(key);
+        crate::backend::linux::socket_stream::ERR_clear_error();
+        ok
     }
 }
 

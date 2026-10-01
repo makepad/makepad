@@ -179,3 +179,7 @@ path = "src/bin/speech_roundtrip.rs"
 name = "hub-install"
 path = "src/bin/hub_install.rs"
 required-features = ["local"]
+
+[[bin]]
+name = "ai-fleet"
+path = "src/bin/ai_fleet.rs"

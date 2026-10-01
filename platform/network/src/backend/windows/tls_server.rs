@@ -142,6 +142,20 @@ extern "system" {
         context_attr: *mut u32,
         expiry: *mut i64,
     ) -> SecurityStatus;
+    fn InitializeSecurityContextW(
+        credential: *mut SecHandle,
+        context: *mut SecHandle,
+        target: *const u16,
+        context_req: u32,
+        reserved1: u32,
+        data_rep: u32,
+        input: *mut SecBufferDesc,
+        reserved2: u32,
+        new_context: *mut SecHandle,
+        output: *mut SecBufferDesc,
+        context_attr: *mut u32,
+        expiry: *mut i64,
+    ) -> SecurityStatus;
     fn DeleteSecurityContext(context: *mut SecHandle) -> SecurityStatus;
     fn FreeContextBuffer(buffer: *mut c_void) -> SecurityStatus;
     fn QueryContextAttributesW(context: *mut SecHandle, attribute: u32, buffer: *mut c_void) -> SecurityStatus;
@@ -207,9 +221,24 @@ extern "system" {
         flags: u32,
     ) -> i32;
     fn BCryptDestroyKey(key: *mut c_void) -> i32;
+    fn BCryptVerifySignature(
+        key: *mut c_void,
+        padding: *mut c_void,
+        hash: *const u8,
+        hash_len: u32,
+        sig: *const u8,
+        sig_len: u32,
+        flags: u32,
+    ) -> i32;
 }
 
 const SECPKG_CRED_INBOUND: u32 = 1;
+const SECPKG_CRED_OUTBOUND: u32 = 2;
+const SCH_CRED_MANUAL_CRED_VALIDATION: u32 = 0x0000_0008;
+const SCH_CRED_NO_DEFAULT_CREDS: u32 = 0x0000_0010;
+const SP_PROT_TLS1_2_CLIENT: u32 = 0x0000_0800;
+const ISC_FLAGS: u32 = 0x4 | 0x8 | 0x10 | 0x100 | 0x4000 | 0x8000;
+const SECPKG_ATTR_REMOTE_CERT_CONTEXT: u32 = 0x53;
 const SCH_CREDENTIALS_VERSION: u32 = 5;
 const SCHANNEL_CRED_VERSION: u32 = 4;
 const SCH_USE_STRONG_CRYPTO: u32 = 0x0040_0000;
@@ -335,6 +364,25 @@ pub fn sign_p256_sha256(key: &[u8; 97], msg: &[u8]) -> io::Result<Vec<u8>> {
         return Err(status_error("BCryptSignHash", st));
     }
     Ok(crate::tls::x509::ecdsa_sig_from_raw(&raw))
+}
+
+pub fn verify_p256_sha256(point: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    let Some(raw) = crate::tls::ecdsa_raw_from_der(sig) else { return false };
+    let Ok(alg) = open_ecdsa() else { return false };
+    let mut blob = Vec::with_capacity(8 + 64);
+    blob.extend_from_slice(&0x3153_4345u32.to_le_bytes()); // ECDSA_PUBLIC_P256
+    blob.extend_from_slice(&32u32.to_le_bytes());
+    blob.extend_from_slice(&point[1..65]);
+    let mut handle = null_mut();
+    let st = unsafe {
+        BCryptImportKeyPair(alg.0, null_mut(), wide("ECCPUBLICBLOB").as_ptr(), &mut handle, blob.as_ptr(), blob.len() as u32, 0)
+    };
+    if st != 0 {
+        return false;
+    }
+    let handle = BKey(handle);
+    let digest = crate::digest::sha256_hash(msg);
+    unsafe { BCryptVerifySignature(handle.0, null_mut(), digest.as_ptr(), 32, raw.as_ptr(), 64, 0) == 0 }
 }
 
 pub struct ServerConfig {
@@ -561,7 +609,7 @@ impl ServerConfig {
             unsafe { DeleteSecurityContext(&mut ctx) };
             return Err(status_error("QueryContextAttributes(STREAM_SIZES)", st));
         }
-        Ok(ServerStream { tcp, cred, ctx, sizes, incoming, plain: Vec::new(), plain_pos: 0, closed: false })
+        Ok(ServerStream { tcp, cred, ctx, client: None, sizes, incoming, plain: Vec::new(), plain_pos: 0, closed: false })
     }
 }
 
@@ -578,6 +626,9 @@ pub struct ServerStream {
     tcp: TcpStream,
     cred: SecHandle,
     ctx: SecHandle,
+    /// Client side (pinned connect): owns its credential handle and runs
+    /// post-handshake messages through InitializeSecurityContext.
+    client: Option<Vec<u16>>,
     sizes: StreamSizes,
     incoming: Vec<u8>,
     plain: Vec<u8>,
@@ -650,17 +701,33 @@ impl ServerStream {
         let mut out_desc = SecBufferDesc { version: 0, count: 1, buffers: out_bufs.as_mut_ptr() };
         let mut attrs = 0u32;
         let st = unsafe {
-            AcceptSecurityContext(
-                &mut self.cred,
-                &mut self.ctx,
-                &mut in_desc,
-                ASC_FLAGS,
-                SECURITY_NATIVE_DREP,
-                null_mut(),
-                &mut out_desc,
-                &mut attrs,
-                null_mut(),
-            )
+            match &self.client {
+                Some(target) => InitializeSecurityContextW(
+                    &mut self.cred,
+                    &mut self.ctx,
+                    target.as_ptr(),
+                    ISC_FLAGS,
+                    0,
+                    0,
+                    &mut in_desc,
+                    0,
+                    null_mut(),
+                    &mut out_desc,
+                    &mut attrs,
+                    null_mut(),
+                ),
+                None => AcceptSecurityContext(
+                    &mut self.cred,
+                    &mut self.ctx,
+                    &mut in_desc,
+                    ASC_FLAGS,
+                    SECURITY_NATIVE_DREP,
+                    null_mut(),
+                    &mut out_desc,
+                    &mut attrs,
+                    null_mut(),
+                ),
+            }
         };
         if out_bufs[0].cb > 0 && !out_bufs[0].pv.is_null() {
             let token = unsafe { std::slice::from_raw_parts(out_bufs[0].pv as *const u8, out_bufs[0].cb as usize) };
@@ -684,8 +751,192 @@ impl ServerStream {
 
 impl Drop for ServerStream {
     fn drop(&mut self) {
-        unsafe { DeleteSecurityContext(&mut self.ctx) };
+        unsafe {
+            DeleteSecurityContext(&mut self.ctx);
+            if self.client.is_some() {
+                FreeCredentialsHandle(&mut self.cred);
+            }
+        }
     }
+}
+
+fn client_credentials() -> io::Result<SecHandle> {
+    let package = wide("Microsoft Unified Security Protocol Provider");
+    let mut cred = SecHandle::default();
+    let mut expiry = 0i64;
+    let flags = SCH_CRED_MANUAL_CRED_VALIDATION | SCH_CRED_NO_DEFAULT_CREDS | SCH_USE_STRONG_CRYPTO;
+    let mut tls = TlsParameters {
+        alpn_count: 0,
+        alpn_ids: null_mut(),
+        disabled_protocols: !(SP_PROT_TLS1_2 | SP_PROT_TLS1_3),
+        disabled_crypto_count: 0,
+        disabled_crypto: null_mut(),
+        flags: 0,
+    };
+    let mut creds = SchCredentials {
+        version: SCH_CREDENTIALS_VERSION,
+        cred_format: 0,
+        cert_count: 0,
+        certs: null(),
+        root_store: null_mut(),
+        mapper_count: 0,
+        mappers: null_mut(),
+        session_lifespan: 0,
+        flags,
+        tls_parameter_count: 1,
+        tls_parameters: &mut tls,
+    };
+    let mut st = unsafe {
+        AcquireCredentialsHandleW(null(), package.as_ptr(), SECPKG_CRED_OUTBOUND, null_mut(), &mut creds as *mut _ as *mut c_void, null_mut(), null_mut(), &mut cred, &mut expiry)
+    };
+    if st != SEC_E_OK {
+        let mut legacy = SchannelCred {
+            version: SCHANNEL_CRED_VERSION,
+            cert_count: 0,
+            certs: null(),
+            root_store: null_mut(),
+            mapper_count: 0,
+            mappers: null_mut(),
+            alg_count: 0,
+            algs: null_mut(),
+            enabled_protocols: SP_PROT_TLS1_2_CLIENT,
+            min_cipher_strength: 0,
+            max_cipher_strength: 0,
+            session_lifespan: 0,
+            flags,
+            cred_format: 0,
+        };
+        st = unsafe {
+            AcquireCredentialsHandleW(null(), package.as_ptr(), SECPKG_CRED_OUTBOUND, null_mut(), &mut legacy as *mut _ as *mut c_void, null_mut(), null_mut(), &mut cred, &mut expiry)
+        };
+    }
+    if st != SEC_E_OK {
+        return Err(status_error("AcquireCredentialsHandle (client)", st));
+    }
+    Ok(cred)
+}
+
+#[repr(C)]
+struct CertContext {
+    encoding: u32,
+    encoded: *const u8,
+    encoded_len: u32,
+    info: *mut c_void,
+    store: *mut c_void,
+}
+
+/// Client handshake on Schannel without chain validation; the server's
+/// certificate must hash to `pin` before the stream is returned (nothing
+/// has been sent but the handshake at that point).
+pub fn connect_pinned(mut tcp: TcpStream, host: &str, pin: &[u8; 32]) -> io::Result<ServerStream> {
+    let cred = client_credentials()?;
+    let target = wide(host);
+    // The stream owns cred and ctx from here; its Drop frees them.
+    let mut stream = ServerStream {
+        tcp: tcp.try_clone()?,
+        cred,
+        ctx: SecHandle::default(),
+        client: Some(target.clone()),
+        sizes: StreamSizes::default(),
+        incoming: Vec::new(),
+        plain: Vec::new(),
+        plain_pos: 0,
+        closed: false,
+    };
+    let mut have_ctx = false;
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut need_read = false;
+    loop {
+        if need_read {
+            let n = tcp.read(&mut buf)?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "server closed during TLS handshake"));
+            }
+            stream.incoming.extend_from_slice(&buf[..n]);
+        }
+        let mut in_bufs = [
+            SecBuffer { cb: stream.incoming.len() as u32, kind: SECBUFFER_TOKEN, pv: stream.incoming.as_mut_ptr() as *mut c_void },
+            SecBuffer { cb: 0, kind: SECBUFFER_EMPTY, pv: null_mut() },
+        ];
+        let mut out_bufs = [SecBuffer { cb: 0, kind: SECBUFFER_TOKEN, pv: null_mut() }];
+        let mut in_desc = SecBufferDesc { version: 0, count: 2, buffers: in_bufs.as_mut_ptr() };
+        let mut out_desc = SecBufferDesc { version: 0, count: 1, buffers: out_bufs.as_mut_ptr() };
+        let mut attrs = 0u32;
+        let mut new_ctx = SecHandle::default();
+        let st = unsafe {
+            InitializeSecurityContextW(
+                &mut stream.cred,
+                if have_ctx { &mut stream.ctx } else { null_mut() },
+                target.as_ptr(),
+                ISC_FLAGS,
+                0,
+                0,
+                if have_ctx { &mut in_desc } else { null_mut() },
+                0,
+                if have_ctx { null_mut() } else { &mut new_ctx },
+                &mut out_desc,
+                &mut attrs,
+                null_mut(),
+            )
+        };
+        if !have_ctx && (st == SEC_E_OK || st == SEC_I_CONTINUE_NEEDED) {
+            stream.ctx = new_ctx;
+            have_ctx = true;
+        }
+        if out_bufs[0].cb > 0 && !out_bufs[0].pv.is_null() {
+            let token = unsafe { std::slice::from_raw_parts(out_bufs[0].pv as *const u8, out_bufs[0].cb as usize) };
+            let sent = tcp.write_all(token);
+            unsafe { FreeContextBuffer(out_bufs[0].pv) };
+            sent?;
+        }
+        match st {
+            SEC_E_INCOMPLETE_MESSAGE => need_read = true,
+            SEC_E_OK | SEC_I_CONTINUE_NEEDED => {
+                if have_ctx && in_bufs[1].kind == SECBUFFER_EXTRA && in_bufs[1].cb > 0 {
+                    let keep = in_bufs[1].cb as usize;
+                    let len = stream.incoming.len();
+                    stream.incoming.drain(..len - keep);
+                } else if have_ctx {
+                    stream.incoming.clear();
+                }
+                if st == SEC_E_OK {
+                    break;
+                }
+                need_read = stream.incoming.is_empty();
+            }
+            _ => {
+                if !have_ctx {
+                    // Nothing to delete yet; keep Drop from touching ctx.
+                    stream.ctx = SecHandle::default();
+                }
+                return Err(status_error("TLS handshake (InitializeSecurityContext)", st));
+            }
+        }
+    }
+    // The pin, before any application data.
+    let mut cert: *const c_void = null();
+    let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_REMOTE_CERT_CONTEXT, &mut cert as *mut _ as *mut c_void) };
+    if st != SEC_E_OK || cert.is_null() {
+        return Err(status_error("server certificate", st));
+    }
+    let der = unsafe {
+        let c = &*(cert as *const CertContext);
+        std::slice::from_raw_parts(c.encoded, c.encoded_len as usize).to_vec()
+    };
+    unsafe { CertFreeCertificateContext(cert) };
+    let got = crate::digest::sha256_hash(&der);
+    if !crate::tls::constant_time_eq(&got, pin) {
+        let _ = tcp.shutdown(Shutdown::Both);
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("server certificate fingerprint {} does not match the pin", crate::tls::to_hex(&got)),
+        ));
+    }
+    let st = unsafe { QueryContextAttributesW(&mut stream.ctx, SECPKG_ATTR_STREAM_SIZES, &mut stream.sizes as *mut _ as *mut c_void) };
+    if st != SEC_E_OK {
+        return Err(status_error("QueryContextAttributes(STREAM_SIZES)", st));
+    }
+    Ok(stream)
 }
 
 impl Read for ServerStream {

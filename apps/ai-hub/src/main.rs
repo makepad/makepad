@@ -37,6 +37,7 @@ fn run() -> Result<(), AssetAiError> {
     let mut registry_path: Option<PathBuf> = None;
     let mut machine = false;
     let mut activity_probe = None;
+    let mut fleet_identity = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -80,9 +81,14 @@ fn run() -> Result<(), AssetAiError> {
             "--machine" => {
                 machine = true;
             }
+            // Prints (creating on first use) what the fleet authority
+            // endorses: this node's key and TLS certificate fingerprint.
+            "--fleet-identity" => {
+                fleet_identity = true;
+            }
             "--help" | "-h" => {
                 println!(
-                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--fleet NAME] [--cache-dir PATH] [--registry PATH] [--machine] [--activity-probe SECONDS]"
+                    "{SERVICE_NAME} {SERVICE_VERSION}\nusage: {SERVICE_NAME} [--port N] [--host ADDR] [--fleet NAME] [--cache-dir PATH] [--registry PATH] [--machine] [--fleet-identity] [--activity-probe SECONDS]"
                 );
                 return Ok(());
             }
@@ -94,6 +100,12 @@ fn run() -> Result<(), AssetAiError> {
 
     if let Some(seconds) = activity_probe {
         return makepad_ai_hub::activity::run_probe(seconds);
+    }
+    if fleet_identity {
+        let dir = cache_dir.clone().unwrap_or_else(default_cache_dir);
+        let (node_key, fingerprint) = makepad_ai_hub::server::fleet_identity(&dir)?;
+        println!("node_key={node_key}\ntls_sha256={fingerprint}");
+        return Ok(());
     }
 
     let port = match port {

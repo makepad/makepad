@@ -3,8 +3,10 @@
 //! listener).
 //!
 //! `GET /v1/model_blob/<sha256>` with headers:
-//! - `Authorization: Bearer <ticket>` — a [`crate::peer::PeerTicket`] scoped
+//! - `X-Peer-Ticket: <ticket>` — a [`crate::peer::PeerTicket`] scoped
 //!   to (this source node, the claimed receiver node, this exact digest).
+//!   (`Authorization` carries the receiver's fleet credential, role `node`,
+//!   checked by the TLS front first.)
 //! - `X-Peer-Receiver: <receiver node_key>` — must equal the ticket scope.
 //! - `Range: bytes=<from>-[<to>]` — optional resume offset.
 //!
@@ -325,14 +327,13 @@ pub fn route_blob(
     };
 
     // -- authentication before any existence disclosure --
-    let Some(bearer) = header_value(headers, "authorization")
-        .and_then(|v| v.strip_prefix("Bearer "))
-        .map(str::trim)
-    else {
+    // The ticket rides its own header: Authorization carries the node's
+    // fleet credential, checked by the TLS front before this runs.
+    let Some(bearer) = header_value(headers, "x-peer-ticket").map(str::trim) else {
         return respond(error_response(
             401,
             "Unauthorized",
-            "missing Authorization: Bearer <transfer ticket>".to_string(),
+            "missing X-Peer-Ticket: <transfer ticket>".to_string(),
         ));
     };
     let Some(receiver) = header_value(headers, "x-peer-receiver") else {

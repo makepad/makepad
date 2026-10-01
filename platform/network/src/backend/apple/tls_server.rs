@@ -24,6 +24,14 @@ extern "C" {
     static kSecKeyAlgorithmECDSASignatureMessageX962SHA256: CFStringRef;
     fn SecKeyCreateRandomKey(parameters: *const c_void, error: *mut CFErrorRef) -> SecKeyRef;
     fn SecKeyCopyExternalRepresentation(key: SecKeyRef, error: *mut CFErrorRef) -> *const c_void;
+    static kSecAttrKeyClassPublic: CFStringRef;
+    fn SecKeyVerifySignature(
+        key: SecKeyRef,
+        algorithm: CFStringRef,
+        data: *const c_void,
+        signature: *const c_void,
+        error: *mut CFErrorRef,
+    ) -> u8;
     fn SecKeyCreateSignature(
         key: SecKeyRef,
         algorithm: CFStringRef,
@@ -52,15 +60,19 @@ fn release_error(error: CFErrorRef) {
 /// A CF dictionary {kSecAttrKeyType: EC, kSecAttrKeySizeInBits: 256}
 /// (+ private class when `private`).
 unsafe fn ec_attributes(private: bool) -> *const c_void {
+    ec_attributes_class(if private { Some(kSecAttrKeyClassPrivate) } else { None })
+}
+
+unsafe fn ec_attributes_class(class: Option<CFStringRef>) -> *const c_void {
     let bits: i32 = 256;
     let number = CFNumberCreate(ptr::null(), 3, &bits as *const i32 as *const c_void);
     let mut keys: Vec<*const c_void> =
         vec![kSecAttrKeyType as *const c_void, kSecAttrKeySizeInBits as *const c_void];
     let mut values: Vec<*const c_void> =
         vec![kSecAttrKeyTypeECSECPrimeRandom as *const c_void, number];
-    if private {
+    if let Some(class) = class {
         keys.push(kSecAttrKeyClass as *const c_void);
-        values.push(kSecAttrKeyClassPrivate as *const c_void);
+        values.push(class as *const c_void);
     }
     let dict = CFDictionaryCreate(
         ptr::null(),
@@ -147,6 +159,30 @@ pub fn sign_p256_sha256(key: &[u8; 97], msg: &[u8]) -> io::Result<Vec<u8>> {
         let bytes = cf_data_bytes(sig);
         CFRelease(sig);
         Ok(bytes)
+    }
+}
+
+pub fn verify_p256_sha256(point: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+    unsafe {
+        let data = CFDataCreate(ptr::null(), point.as_ptr(), point.len() as isize);
+        let attrs = ec_attributes_class(Some(kSecAttrKeyClassPublic));
+        let mut error: CFErrorRef = ptr::null();
+        let key = SecKeyCreateWithData(data, attrs, &mut error);
+        CFRelease(data);
+        CFRelease(attrs);
+        release_error(error);
+        if key.is_null() {
+            return false;
+        }
+        let key = Key(key);
+        let msg = CFDataCreate(ptr::null(), msg.as_ptr(), msg.len() as isize);
+        let sig = CFDataCreate(ptr::null(), sig.as_ptr(), sig.len() as isize);
+        let mut error: CFErrorRef = ptr::null();
+        let ok = SecKeyVerifySignature(key.0, kSecKeyAlgorithmECDSASignatureMessageX962SHA256, msg, sig, &mut error);
+        CFRelease(msg);
+        CFRelease(sig);
+        release_error(error);
+        ok != 0
     }
 }
 

@@ -247,7 +247,7 @@ fn fetch_one_chunk(
         .saturating_add(MAX_RECEIVE_CHUNK - 1)
         .min(total.saturating_sub(1));
     let extra_headers = [
-        ("Authorization".to_string(), format!("Bearer {ticket}")),
+        ("X-Peer-Ticket".to_string(), ticket.to_string()),
         ("X-Peer-Receiver".to_string(), plan.receiver_key.clone()),
     ];
     let request = HttpClientRequest {

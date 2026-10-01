@@ -383,7 +383,8 @@ impl Drop for SecureTransportStream {
 
 impl Read for SecureTransportStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
+        // shutdown() released the context: nothing may touch it again.
+        if buf.is_empty() || self.is_closed {
             return Ok(0);
         }
         let mut processed = 0usize;
@@ -416,6 +417,9 @@ impl Read for SecureTransportStream {
 
 impl Write for SecureTransportStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if self.is_closed {
+            return Err(io::Error::new(io::ErrorKind::NotConnected, "TLS stream is closed"));
+        }
         if buf.is_empty() {
             return Ok(0);
         }
