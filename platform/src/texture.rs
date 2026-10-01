@@ -1807,6 +1807,21 @@ impl Cx {
         texture.os.allocated_bytes(self)
     }
 
+    /// Metal: a texture slot reused for a new texture parked the old
+    /// texture's allocation in `previous_platform_resource`, where nothing
+    /// released it until the new texture was explicitly released; it goes to
+    /// the retired list now (freed when the GPU is past the frames that
+    /// used it). Every repaint (`compute_pass_repaint_order`).
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+    pub(crate) fn retire_replaced_texture_allocations(&mut self) {
+        let serial = self.frame_submission_serial().max(self.textures.1.serials.encoded.load(Ordering::Acquire));
+        for slot in 0..self.textures.0.pool.len() {
+            let Some(os) = self.textures.0.pool[slot].item.previous_platform_resource.take() else { continue };
+            let bytes = os.allocated_bytes(self).unwrap_or(0);
+            self.textures.1.retired.push(RetiredTexture { serial, bytes, os });
+        }
+    }
+
     pub(crate) fn release_texture_allocation(&mut self, id: TextureId) {
         // Vulkan retires texture resources on its own frame path.
         #[cfg(target_os = "linux")]

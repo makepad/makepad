@@ -135,6 +135,9 @@ impl Cx {
     pub(crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<DrawPassId>) {
         passes_todo.clear();
 
+        #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
+        self.retire_replaced_texture_allocations();
+
         // A pass whose last handle was dropped lets go of its attachments
         // and its place in the tree now, on every backend: its slot is only
         // reset when it is reused, and until then it kept its colour and
