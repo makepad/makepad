@@ -61,6 +61,7 @@ pub mod draw_shader_layout;
 mod draw_vars;
 pub mod shader_pack;
 pub mod collect;
+pub mod splash_blank;
 
 // Native Linux display inventory (direct DRM/KMS outputs). Lives at the crate
 // root so headless logic builds of the WM see the same types and API; only the

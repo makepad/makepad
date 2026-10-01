@@ -416,6 +416,8 @@ pub fn new_cx_with_font_set(
 ) -> Cx {
     let mut cx = Cx::new(event_handler);
     cx.init_collect_from_env();
+    #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+    cx.init_splash_blank_from_env();
     let font_set = if cx.is_collecting() { web_font_set } else { font_set };
     assert!(cx.set_font_set(font_set));
     cx.freeze_font_set();
