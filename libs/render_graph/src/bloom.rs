@@ -34,7 +34,8 @@ script_mod! {
     // One level down: the 13-tap filter (four overlapping 2x2 boxes around
     // the centre plus the centre box), weighted 0.5 / 0.125 x4.
     mod.draw.DrawBloomDown = mod.std.set_type_default() do #(DrawBloomDown::script_shader(vm)){
-        ..mod.draw.DrawQuad
+        ..mod.draw.DrawQuad,
+        ..mod.draw.BloomDown13,
         color_format: @Rgba16F
         src: texture_2d(float)
         // xy = one SOURCE texel in uv, z = 1 on the first level (Karis
@@ -48,7 +49,7 @@ script_mod! {
             self.vertex_pos = vec4(self.geom.pos.x * 2.0 - 1.0, 1.0 - self.geom.pos.y * 2.0, 0.0, 1.0)
         }
 
-        tap: fn(uv: vec2) -> vec3 {
+        bloom_tap: fn(uv: vec2) -> vec3 {
             let c = max(self.src.sample(uv).xyz, vec3(0.0, 0.0, 0.0))
             if self.u_src.z > 0.5 {
                 return c / (1.0 + dot(c, vec3(0.2126, 0.7152, 0.0722)))
@@ -58,21 +59,7 @@ script_mod! {
 
         pixel: fn() -> vec4f {
             let uv = self.pos
-            let t = self.u_src.xy
-            let a = self.tap(uv + vec2(0.0 - 2.0 * t.x, 0.0 - 2.0 * t.y))
-            let b = self.tap(uv + vec2(0.0, 0.0 - 2.0 * t.y))
-            let c = self.tap(uv + vec2(2.0 * t.x, 0.0 - 2.0 * t.y))
-            let d = self.tap(uv + vec2(0.0 - 2.0 * t.x, 0.0))
-            let e = self.tap(uv)
-            let f = self.tap(uv + vec2(2.0 * t.x, 0.0))
-            let g = self.tap(uv + vec2(0.0 - 2.0 * t.x, 2.0 * t.y))
-            let h = self.tap(uv + vec2(0.0, 2.0 * t.y))
-            let i = self.tap(uv + vec2(2.0 * t.x, 2.0 * t.y))
-            let j = self.tap(uv + vec2(0.0 - t.x, 0.0 - t.y))
-            let k = self.tap(uv + vec2(t.x, 0.0 - t.y))
-            let l = self.tap(uv + vec2(0.0 - t.x, t.y))
-            let m = self.tap(uv + vec2(t.x, t.y))
-            var o = e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125
+            var o = self.bloom_down13(uv, self.u_src.xy)
             if self.u_src.z > 0.5 {
                 // Undo the Karis weight on the (now averaged) result.
                 o = o / max(1.0 - dot(o, vec3(0.2126, 0.7152, 0.0722)), 0.05)
@@ -84,7 +71,8 @@ script_mod! {
     // One level up: 3x3 tent over the smaller level, added to this level's
     // own downsample.
     mod.draw.DrawBloomUp = mod.std.set_type_default() do #(DrawBloomUp::script_shader(vm)){
-        ..mod.draw.DrawQuad
+        ..mod.draw.DrawQuad,
+        ..mod.draw.BloomTent,
         color_format: @Rgba16F
         small: texture_2d(float)
         same: texture_2d(float)
@@ -100,13 +88,7 @@ script_mod! {
 
         pixel: fn() -> vec4f {
             let uv = self.pos
-            let t = self.u_small.xy
-            var s = self.small.sample(uv).xyz * 4.0
-            s = s + (self.small.sample(uv + vec2(t.x, 0.0)).xyz + self.small.sample(uv - vec2(t.x, 0.0)).xyz
-                + self.small.sample(uv + vec2(0.0, t.y)).xyz + self.small.sample(uv - vec2(0.0, t.y)).xyz) * 2.0
-            s = s + self.small.sample(uv + t).xyz + self.small.sample(uv - t).xyz
-                + self.small.sample(uv + vec2(t.x, 0.0 - t.y)).xyz + self.small.sample(uv + vec2(0.0 - t.x, t.y)).xyz
-            return vec4(self.same.sample(uv).xyz + s * 0.0625, 1.0)
+            return vec4(self.same.sample(uv).xyz + self.bloom_tent(uv, self.u_small.xy), 1.0)
         }
     }
 

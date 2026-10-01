@@ -47,6 +47,7 @@ pub fn kit(kind: &str) -> Option<&'static KitDef> {
 /// that has its own node of the same name leaves that kit out).
 pub fn kit_source(module: &str, only: Option<&[&str]>) -> String {
     let mut s = String::from("use mod.std.*\nuse mod.math.*\nuse mod.pod.*\n");
+    s.push_str(&FILTERS.replace("$M", module));
     for (kind, src) in SOURCES {
         if only.is_none_or(|o| o.contains(kind)) {
             s.push_str(&src.replace("$M", module));
@@ -55,6 +56,57 @@ pub fn kit_source(module: &str, only: Option<&[&str]>) -> String {
     }
     s.push_str("true\n");
     s
+}
+
+/// The filters kits and hosts share (`$M` is the module they go in): every
+/// kit module gets them, and [`install_filters`] puts them in `mod.draw` for
+/// the draw shaders that spread them (the Sandbox lane's BloomPass).
+const FILTERS: &str = r##"
+// The bloom pyramid's filters, one copy for every bloom (the graph's
+// Bloom kit, the Sandbox lane's BloomPass, see `install_filters`): the 13-tap downsample (four
+// overlapping 2x2 boxes round the centre plus the centre box, weighted
+// 0.5 / 0.125 x4) of the host's `bloom_tap`, `t` one source texel.
+$M.BloomDown13 = {
+    bloom_down13: fn(uv: vec2, t: vec2) -> vec3 {
+        let a = self.bloom_tap(uv + vec2(0.0 - 2.0 * t.x, 2.0 * t.y))
+        let b = self.bloom_tap(uv + vec2(0.0, 2.0 * t.y))
+        let c = self.bloom_tap(uv + vec2(2.0 * t.x, 2.0 * t.y))
+        let d = self.bloom_tap(uv + vec2(0.0 - 2.0 * t.x, 0.0))
+        let e = self.bloom_tap(uv)
+        let f = self.bloom_tap(uv + vec2(2.0 * t.x, 0.0))
+        let g = self.bloom_tap(uv + vec2(0.0 - 2.0 * t.x, 0.0 - 2.0 * t.y))
+        let h = self.bloom_tap(uv + vec2(0.0, 0.0 - 2.0 * t.y))
+        let i = self.bloom_tap(uv + vec2(2.0 * t.x, 0.0 - 2.0 * t.y))
+        let j = self.bloom_tap(uv + vec2(0.0 - t.x, t.y))
+        let k = self.bloom_tap(uv + vec2(t.x, t.y))
+        let l = self.bloom_tap(uv + vec2(0.0 - t.x, 0.0 - t.y))
+        let m = self.bloom_tap(uv + vec2(t.x, 0.0 - t.y))
+        return e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125
+    }
+}
+// The 3x3 tent upsample of the host's `small` level, `t` its offset.
+$M.BloomTent = {
+    bloom_tent: fn(uv: vec2, t: vec2) -> vec3 {
+        var c = self.small.sample(uv).xyz * 4.0
+        c = c + (self.small.sample(uv + vec2(t.x, 0.0)).xyz + self.small.sample(uv - vec2(t.x, 0.0)).xyz + self.small.sample(uv + vec2(0.0, t.y)).xyz + self.small.sample(uv - vec2(0.0, t.y)).xyz) * 2.0
+        c = c + self.small.sample(uv + vec2(t.x, t.y)).xyz + self.small.sample(uv - vec2(t.x, t.y)).xyz + self.small.sample(uv + vec2(t.x, 0.0 - t.y)).xyz + self.small.sample(uv - vec2(t.x, 0.0 - t.y)).xyz
+        return c / 16.0
+    }
+}
+"##;
+
+/// Put the shared filters ([`FILTERS`]) in `mod.draw` (once per VM, before
+/// the draw shaders that spread them). Returns the evaluation errors.
+pub fn install_filters(vm: &mut makepad_draw::ScriptVm) -> Vec<String> {
+    use makepad_draw::*;
+    vm.bx.captured_errors = Some(Vec::new());
+    let code = format!("use mod.std.*\nuse mod.math.*\nuse mod.pod.*\n{}true\n", FILTERS.replace("$M", "mod.draw"));
+    let v = vm.eval(ScriptMod { file: "graph://filters".into(), code, ..Default::default() });
+    let mut errors = vm.take_errors();
+    if v.is_err() && errors.is_empty() {
+        errors.push("the graph's filters did not evaluate".into());
+    }
+    errors
 }
 
 /// Each kit's Splash source (`$M` is the host module).
@@ -136,32 +188,13 @@ $M.kit_glow = fn(p) {
 // instead of flooding the frame.
 $M.Bloom = $M.Bloom{strength: 0.7 threshold: 0.85 knee: 0.5 radius: 0.75 halation: 0 halation_tint: #ff7638 compress: 0}
 $M.kit_bloom = fn(p) {
+    // The pyramid's filters are the render graph's BloomDown13 and BloomTent.
     let down = fn() -> vec4 {
-        let t = self.texel() * 0.5
-        let uv = self.uv()
-        let a = self.src.sample(uv + vec2(0.0 - 2.0 * t.x, 2.0 * t.y)).xyz
-        let b = self.src.sample(uv + vec2(0.0, 2.0 * t.y)).xyz
-        let c = self.src.sample(uv + vec2(2.0 * t.x, 2.0 * t.y)).xyz
-        let d = self.src.sample(uv + vec2(0.0 - 2.0 * t.x, 0.0)).xyz
-        let e = self.src.sample(uv).xyz
-        let f = self.src.sample(uv + vec2(2.0 * t.x, 0.0)).xyz
-        let g = self.src.sample(uv + vec2(0.0 - 2.0 * t.x, 0.0 - 2.0 * t.y)).xyz
-        let h = self.src.sample(uv + vec2(0.0, 0.0 - 2.0 * t.y)).xyz
-        let i = self.src.sample(uv + vec2(2.0 * t.x, 0.0 - 2.0 * t.y)).xyz
-        let j = self.src.sample(uv + vec2(0.0 - t.x, t.y)).xyz
-        let k = self.src.sample(uv + vec2(t.x, t.y)).xyz
-        let l = self.src.sample(uv + vec2(0.0 - t.x, 0.0 - t.y)).xyz
-        let m = self.src.sample(uv + vec2(t.x, 0.0 - t.y)).xyz
-        let o = e * 0.125 + (a + c + g + i) * 0.03125 + (b + d + f + h) * 0.0625 + (j + k + l + m) * 0.125
-        return vec4(o, 1.0)
+        return vec4(self.bloom_down13(self.uv(), self.texel() * 0.5), 1.0)
     }
+    let down_taps = $M.BloomDown13{bloom_tap: fn(uv: vec2) -> vec3 { return self.src.sample(uv).xyz }}
     let up = fn() -> vec4 {
-        let t = self.texel() * 0.5 * (0.5 + self.radius)
-        let uv = self.uv()
-        var c = self.small.sample(uv).xyz * 4.0
-        c = c + (self.small.sample(uv + vec2(t.x, 0.0)).xyz + self.small.sample(uv - vec2(t.x, 0.0)).xyz + self.small.sample(uv + vec2(0.0, t.y)).xyz + self.small.sample(uv - vec2(0.0, t.y)).xyz) * 2.0
-        c = c + self.small.sample(uv + vec2(t.x, t.y)).xyz + self.small.sample(uv - vec2(t.x, t.y)).xyz + self.small.sample(uv + vec2(t.x, 0.0 - t.y)).xyz + self.small.sample(uv - vec2(t.x, 0.0 - t.y)).xyz
-        return vec4(self.same.sample(uv).xyz + c / 16.0, 1.0)
+        return vec4(self.same.sample(self.uv()).xyz + self.bloom_tent(self.uv(), self.texel() * 0.5 * (0.5 + self.radius)), 1.0)
     }
     return [
         {at: @hdr name: "d0" reads: [@color] slots: ["source"] scale: 0.5 uniforms: {threshold: p.threshold knee: p.knee compress: p.compress}
@@ -177,18 +210,18 @@ $M.kit_bloom = fn(p) {
                 let w = max(rq, l - self.threshold) / max(l, 0.0001)
                 return vec4(s * w / (1.0 + l * w * self.compress), 1.0)
             }}
-        {at: @hdr name: "d1" reads: ["d0"] slots: ["src"] scale: 0.25 pixel: down}
-        {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125 pixel: down}
-        {at: @hdr name: "d3" reads: ["d2"] slots: ["src"] scale: 0.0625 pixel: down}
-        {at: @hdr name: "d4" reads: ["d3"] slots: ["src"] scale: 0.03125 pixel: down}
-        {at: @hdr name: "d5" reads: ["d4"] slots: ["src"] scale: 0.015625 pixel: down}
-        {at: @hdr name: "d6" reads: ["d5"] slots: ["src"] scale: 0.0078125 pixel: down}
-        {at: @hdr name: "u5" reads: ["d6", "d5"] slots: ["small", "same"] scale: 0.015625 uniforms: {radius: p.radius} pixel: up}
-        {at: @hdr name: "u4" reads: ["u5", "d4"] slots: ["small", "same"] scale: 0.03125 uniforms: {radius: p.radius} pixel: up}
-        {at: @hdr name: "u3" reads: ["u4", "d3"] slots: ["small", "same"] scale: 0.0625 uniforms: {radius: p.radius} pixel: up}
-        {at: @hdr name: "u2" reads: ["u3", "d2"] slots: ["small", "same"] scale: 0.125 uniforms: {radius: p.radius} pixel: up}
-        {at: @hdr name: "u1" reads: ["u2", "d1"] slots: ["small", "same"] scale: 0.25 uniforms: {radius: p.radius} pixel: up}
-        {at: @hdr name: "u0" reads: ["u1", "d0"] slots: ["small", "same"] scale: 0.5 uniforms: {radius: p.radius} pixel: up}
+        {at: @hdr name: "d1" reads: ["d0"] slots: ["src"] scale: 0.25 helpers: down_taps pixel: down}
+        {at: @hdr name: "d2" reads: ["d1"] slots: ["src"] scale: 0.125 helpers: down_taps pixel: down}
+        {at: @hdr name: "d3" reads: ["d2"] slots: ["src"] scale: 0.0625 helpers: down_taps pixel: down}
+        {at: @hdr name: "d4" reads: ["d3"] slots: ["src"] scale: 0.03125 helpers: down_taps pixel: down}
+        {at: @hdr name: "d5" reads: ["d4"] slots: ["src"] scale: 0.015625 helpers: down_taps pixel: down}
+        {at: @hdr name: "d6" reads: ["d5"] slots: ["src"] scale: 0.0078125 helpers: down_taps pixel: down}
+        {at: @hdr name: "u5" reads: ["d6", "d5"] slots: ["small", "same"] scale: 0.015625 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u4" reads: ["u5", "d4"] slots: ["small", "same"] scale: 0.03125 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u3" reads: ["u4", "d3"] slots: ["small", "same"] scale: 0.0625 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u2" reads: ["u3", "d2"] slots: ["small", "same"] scale: 0.125 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u1" reads: ["u2", "d1"] slots: ["small", "same"] scale: 0.25 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
+        {at: @hdr name: "u0" reads: ["u1", "d0"] slots: ["small", "same"] scale: 0.5 uniforms: {radius: p.radius} helpers: $M.BloomTent pixel: up}
         {map: true at: @hdr reads: [@color, "u0", "u3"] slots: ["color", "bloom", "wide"] uniforms: {strength: p.strength halation: p.halation tint: p.halation_tint}
             pixel: fn() -> vec4 {
                 let c = self.color.sample(self.uv())

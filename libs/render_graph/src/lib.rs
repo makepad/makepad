@@ -66,8 +66,10 @@ pub type PassValues = Vec<[f32; 4]>;
 /// Register the graph's draw shaders. Call after `makepad_widgets::script_mod`
 /// (the composite uses the widgets prelude).
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
-    bloom::script_mod(vm);
+    // The passes first: the bloom chain and the composite use their
+    // filters and tone curves.
     script_mod_passes(vm);
+    bloom::script_mod(vm);
     composite::script_mod(vm)
 }
 
@@ -90,6 +92,9 @@ pub fn script_mod_passes(vm: &mut ScriptVm) {
         !v.is_nil() && !v.is_err()
     });
     if !have {
+        for e in kits::install_filters(vm) {
+            log!("render_graph: {e}");
+        }
         program::script_mod(vm);
         accum::script_mod(vm);
         tonemap::script_mod(vm);
