@@ -8,11 +8,13 @@
 
 pub mod curve;
 pub mod draw;
+pub mod host;
 pub mod kernel;
 pub mod kit;
 pub mod records;
 pub mod shapes;
 pub mod view;
+pub use host::KineticHost;
 pub use view::{script_mod, FrameStats, KineticFrame, KineticView};
 pub use records::Karaoke;
 /// Where a kit's letters' font comes from ([`KineticView::set_font`]).
