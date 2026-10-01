@@ -662,7 +662,7 @@ fn route_loop(shared: Arc<ServiceShared>, request_rx: mpsc::Receiver<HttpServerR
                 headers,
                 response_sender,
             } => {
-                if caller_of(&shared, &headers).is_none() {
+                if !caller_of(&shared, &headers).is_some_and(|caller| may_read(&shared, &caller, &headers.path)) {
                     let _ = response_sender.send(Vec::new());
                     continue;
                 }
@@ -737,8 +737,11 @@ fn route_get_request(
     shared: &Arc<ServiceShared>,
     headers: &HttpServerHeaders,
 ) -> HttpServerResponse {
-    if caller_of(shared, headers).is_none() {
+    let Some(caller) = caller_of(shared, headers) else {
         return unauthorized_response();
+    };
+    if !may_read(shared, &caller, &headers.path) {
+        return error_json(404, "no such job".to_string());
     }
     route_get(shared, &headers.path)
 }
@@ -859,6 +862,24 @@ pub(crate) fn reap_lapsed_leases(shared: &Arc<ServiceShared>) -> usize {
 #[cfg(test)]
 fn route_post(shared: &Arc<ServiceShared>, path: &str, body: &[u8]) -> HttpServerResponse {
     route_post_by(shared, &crate::front::Caller::local(), path, body)
+}
+
+/// A device credential reads only its own jobs and their artifacts (job
+/// and artifact ids are not secrets); other roles read everything.
+fn may_read(shared: &ServiceShared, caller: &crate::front::Caller, path: &str) -> bool {
+    if caller.role != crate::fleet_auth::Role::Device {
+        return true;
+    }
+    let job = if let Some(rest) = path.strip_prefix("/job/") {
+        rest.split('/').next().unwrap_or("")
+    } else if let Some(id) = path.strip_prefix("/artifact/") {
+        id.rsplit_once('-').map(|(job, _)| job).unwrap_or("")
+    } else if let Some(id) = path.strip_prefix("/realtime/") {
+        id
+    } else {
+        return true;
+    };
+    shared.job_owners.lock().unwrap().get(job).is_some_and(|owner| *owner == caller.client_id)
 }
 
 /// A lease key scoped to the authenticated client: an origin key is only
@@ -3156,6 +3177,22 @@ mod lifecycle_tests {
         assert!(String::from_utf8(health.body).unwrap().contains("\"auth_required\":true"));
         let post = route_post_request(&shared, &request_headers("POST", "/not-an-endpoint", None), b"{}");
         assert!(post.header.starts_with("HTTP/1.1 401 Unauthorized"));
+    }
+
+    #[test]
+    fn devices_read_only_their_own_jobs() {
+        let shared = fixture_shared(&[]);
+        shared.job_owners.lock().unwrap().insert("job-7".into(), "phone".into());
+        let phone = crate::front::Caller { client_id: "phone".into(), role: crate::fleet_auth::Role::Device };
+        let other = crate::front::Caller { client_id: "tablet".into(), role: crate::fleet_auth::Role::Device };
+        let lan = crate::front::Caller { client_id: "rik".into(), role: crate::fleet_auth::Role::Lan };
+        for path in ["/job/job-7", "/artifact/job-7-0", "/realtime/job-7"] {
+            assert!(may_read(&shared, &phone, path), "{path}");
+            assert!(!may_read(&shared, &other, path), "{path}");
+            assert!(may_read(&shared, &lan, path), "{path}");
+        }
+        assert!(!may_read(&shared, &phone, "/job/job-8"));
+        assert!(may_read(&shared, &other, "/health"));
     }
 
     #[test]
