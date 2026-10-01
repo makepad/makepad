@@ -897,12 +897,24 @@ export class WasmWebBrowser extends WasmBridge {
                 makepad_crash_reporter.suppress_followup();
                 return;
             }
-            const flags = this.exports.wasm_check_signal();
-            if (flags !== 0) {
-                this.to_wasm.ToWasmSignal({ flags });
-                this.do_wasm_pump();
-            }
+            this.deliver_signals();
         });
+    }
+
+    // Signals from other threads (finished jobs, loads, the audio thread)
+    // go to the app at once only while no animation frame is coming; with
+    // one requested they wait for it and travel in its message batch, so
+    // the app runs once per frame (a wake right after a frame's callback
+    // was a second full pump in the same task).
+    deliver_signals() {
+        if (this.req_anim_frame_id) {
+            return;
+        }
+        const flags = this.exports.wasm_check_signal();
+        if (flags !== 0) {
+            this.to_wasm.ToWasmSignal({ flags });
+            this.do_wasm_pump();
+        }
     }
 
     js_spawn_thread(request_id, context_ptr, stack_size, name_ptr, name_len) {
@@ -1494,6 +1506,12 @@ export class WasmWebBrowser extends WasmBridge {
             // the frame it was a 15-60 ms stall behind the frame's own work).
             if (this.pending_webgl_shader_count > 0 && this.poll_pending_webgl_shaders() != 0) {
                 this.to_wasm.ToWasmRedrawAll();
+            }
+            // The signals that waited for this frame (deliver_signals),
+            // before it: what finished is there for its draw.
+            const flags = this.exports.wasm_check_signal();
+            if (flags !== 0) {
+                this.to_wasm.ToWasmSignal({ flags });
             }
             this.gpu_timer_poll();
             const gpu_query = this.gpu_timer_begin();
@@ -2656,11 +2674,7 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.webgl_context_lost || makepad_crash_reporter.is_wasm_dead()) {
                 return;
             }
-            let flags = this.exports.wasm_check_signal();
-            if (flags != 0) {
-                this.to_wasm.ToWasmSignal({ flags });
-                this.do_wasm_pump();
-            }
+            this.deliver_signals();
         }, 0.016 * 1000.0);
     }
 
