@@ -555,7 +555,7 @@ impl KineticView {
         let bpm = if frame.bpm > 0.0 { frame.bpm } else { 120.0 };
         let beat = frame.beat;
         let phase = beat - beat.floor();
-        let pulse = (-phase * 5.0).exp();
+        let pulse = beat_pulse(phase);
         let bar = (beat / 4.0).fract();
         let grow = if self.values.cycle_beats > 0.0 {
             let u = (beat / self.values.cycle_beats).fract();
@@ -845,4 +845,10 @@ impl KineticView {
         self.stats.record_us = ((Cx::monotonic_now() - tr) * 1e6) as f32;
         Some(out)
     }
+}
+
+/// The beat envelope every beat-driven look shares: 1 on the beat, falling
+/// off as `exp(-5 phase)` (`phase` 0..1 through the beat).
+pub fn beat_pulse(phase: f32) -> f32 {
+    (-phase * 5.0).exp()
 }

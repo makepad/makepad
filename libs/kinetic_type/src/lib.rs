@@ -15,7 +15,7 @@ pub mod records;
 pub mod shapes;
 pub mod view;
 pub use host::KineticHost;
-pub use view::{script_mod, FrameStats, KineticFrame, KineticView};
+pub use view::{beat_pulse, script_mod, FrameStats, KineticFrame, KineticView};
 pub use records::Karaoke;
 /// Where a kit's letters' font comes from ([`KineticView::set_font`]).
 pub use makepad_text_mesh::letters::FontSource;
