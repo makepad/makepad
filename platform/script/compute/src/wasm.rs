@@ -18,7 +18,8 @@
 //!   byte addresses in that memory:
 //!   - `ctx`: the kernel's ctx words (element base, count, time, seed,
 //!     cancel, overflow, ..., params; [`crate::kernel::Kernel::ctx_words`]).
-//!   - `state`: one word (kernels have no state; audio programs would).
+//!   - `state`: one word (kernels have no state); an audio program's
+//!     voice or effect state (below).
 //!   - `shared`: the shared tables ([`crate::kernel::Kernel::shared_table`]).
 //!   - `table`: per host buffer an i32 pair (byte address, length in
 //!     words), buffer 0 the control word; lengths at least 1 and below
@@ -35,6 +36,22 @@
 //!     multiply-add's fix-up, then word w of lane l at `64 + 16 w + 4 l`).
 //!     16-byte alignment is best (not required). `frame_words * 4 + 16`
 //!     words serve both.
+//! - Audio programs (instruments and effects: AIR with `In`/`Out`, made
+//!   by the audio front end) are compiled scalar, same type and order:
+//!   - `ctx`: the shader's ctx words (rate, frame of the first sample,
+//!     ..., params; `AudioShader::ctx_words`), `state` one voice's (or the
+//!     effect's) state words, `shared` its init()-built tables (read only).
+//!   - `table`: four i32 byte addresses: input channels 0 and 1, output
+//!     channels 0 and 1, each `n` f32 frames (16 bytes; an instrument's
+//!     inputs may be one zero buffer, its outputs anything to mix into).
+//!     The program ADDS into the outputs; `In`/`Out` clamp the frame index
+//!     into `0..n` exactly as the interpreter does.
+//!   - `n`: frames, 1..=MAX_FRAMES (0 returns at once), `frame` the
+//!     scalar scratch (`frame_words * 4` bytes).
+//!   One call per voice: a host runs every active voice's state through
+//!   the same entry. The math is the program's: AIR's ops as written, no
+//!   fusion (the audio front end makes no float multiply-add), so the
+//!   output is bit-identical to the interpreter and the native backend.
 //! - Calls are linked by the host (e.g. into its function table and called
 //!   indirectly); a call returns normally on any input: no trap, no access
 //!   outside the regions above (every access clamps, see below).
@@ -51,7 +68,7 @@
 //! sandbox bounds the module to the host's memory besides.
 //!
 //! Two forms: scalar ([`scalar`]: one element per iteration, any program
-//! but audio I/O and host calls) and four-wide ([`simd`]: SIMD128, the
+//! but host calls) and four-wide ([`simd`]: SIMD128, the
 //! NEON ×4 backend's masked SPMD over element-local kernels; see
 //! [`crate::spmd`]).
 
@@ -86,8 +103,9 @@ pub struct Entry<'a> {
 }
 
 /// A module exporting `run0..` for `entries`; None when a program uses
-/// what the backend does not compile (audio I/O, host calls, or the four
-/// wide form for a program without the element loop's shape).
+/// what the backend does not compile (host calls, or the four wide form
+/// for a program without the element loop's shape: audio programs are
+/// scalar).
 pub fn module(entries: &[Entry], target: Target) -> Option<Vec<u8>> {
     // Function indices: the entries; the four-wide exact multiply-add's
     // rare fix-up (when some four-wide code has a fused multiply-add);
@@ -204,6 +222,7 @@ pub(crate) mod op {
     pub const END: u8 = 0x0B;
     pub const BR: u8 = 0x0C;
     pub const BR_IF: u8 = 0x0D;
+    pub const RETURN: u8 = 0x0F;
     pub const CALL: u8 = 0x10;
     pub const SELECT: u8 = 0x1B;
     pub const LOCAL_GET: u8 = 0x20;
@@ -619,6 +638,9 @@ struct Sc<'a> {
     var: Vec<u32>,
     /// Per host buffer used: (byte address local, last word index local).
     buf: Vec<Option<(u32, u32)>>,
+    /// Audio I/O: per channel used (in 0, in 1, out 0, out 1) the local
+    /// holding its byte address, loaded from `table` once.
+    io: [u32; 4],
     labels: Vec<Label>,
     bounds: Vec<Option<u32>>,
     consts: Vec<Option<i32>>,
@@ -632,28 +654,65 @@ struct Sc<'a> {
     calls: Vec<u32>,
 }
 
-/// The scalar body of `p` (None: audio I/O or host calls).
+/// The scalar body of `p` (None: host calls).
 pub(crate) fn scalar(p: &Program, target: Target, calls: &[u32]) -> Option<Body> {
     if !scalar_ok(p) {
         return None;
     }
     let mut sc = Sc::new(p, target, Body::new(), &|_| true, &|_| true);
     sc.calls = calls.to_vec();
+    if uses_io(p) {
+        // An audio call of no frames does nothing (the interpreter returns
+        // before running the program; `n - 1` clamps every I/O index).
+        sc.f.get(P_N);
+        sc.f.b(op::I32_EQZ);
+        sc.f.b(op::IF);
+        sc.f.b(op::VOID);
+        sc.f.b(op::RETURN);
+        sc.f.b(op::END);
+    }
     sc.block(&p.body);
     Some(sc.f)
 }
 
-/// Audio I/O and host calls are not compiled (anywhere in `p`).
+/// Host calls are not compiled (anywhere in `p`), nor audio I/O in a
+/// program that also uses host buffers (both would take the `table`
+/// parameter; validation keeps them apart: audio programs have no buffers).
 fn scalar_ok(p: &Program) -> bool {
     fn ok(b: &Block) -> bool {
         b.iter().all(|s| match s {
-            Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Def(_, Op::In { .. }) => false,
+            Stmt::CallHost { .. } => false,
             Stmt::If(_, t, e) => ok(t) && ok(e),
             Stmt::Loop { body, .. } => ok(body),
             _ => true,
         })
     }
-    ok(&p.body) && p.funcs.iter().all(|g| ok(&g.body))
+    let all = || std::iter::once(p).chain(p.funcs.iter());
+    let bufs = all().any(|g| {
+        let mut used = Vec::new();
+        used_bufs(&g.body, &mut used);
+        !used.is_empty()
+    });
+    all().all(|g| ok(&g.body)) && !(bufs && uses_io(p))
+}
+
+/// The audio I/O channels `b` reads (`In`, bits 0-1) and adds to (`Out`,
+/// bits 2-3).
+fn io_channels(b: &Block) -> u8 {
+    b.iter()
+        .map(|s| match s {
+            Stmt::Def(_, Op::In { ch, .. }) => 1 << (*ch & 1),
+            Stmt::Out { ch, .. } => 4 << (*ch & 1),
+            Stmt::If(_, t, e) => io_channels(t) | io_channels(e),
+            Stmt::Loop { body, .. } => io_channels(body),
+            _ => 0,
+        })
+        .fold(0, |a, b| a | b)
+}
+
+/// Any audio I/O in `p` or its functions.
+fn uses_io(p: &Program) -> bool {
+    io_channels(&p.body) != 0 || p.funcs.iter().any(|g| io_channels(&g.body) != 0)
 }
 
 /// The scalar code of function `g`: the six entry parameters, then its
@@ -905,7 +964,17 @@ impl<'a> Sc<'a> {
         let tf32 = f.local(op::F32);
         let mut consts = vec![None; p.vals.len()];
         collect_consts(&p.body, &mut consts);
-        let mut sc = Sc { p, f, val, var, buf: Vec::new(), labels: Vec::new(), bounds: ir::bounds(p), consts, ti, tf64, ti64, tf32, relaxed: target.relaxed_fma, calls: Vec::new() };
+        let mut sc = Sc { p, f, val, var, buf: Vec::new(), io: [u32::MAX; 4], labels: Vec::new(), bounds: ir::bounds(p), consts, ti, tf64, ti64, tf32, relaxed: target.relaxed_fma, calls: Vec::new() };
+        let chans = io_channels(&p.body);
+        for k in 0..4 {
+            if chans & (1 << k) != 0 {
+                let l = sc.f.local(op::I32);
+                sc.f.get(P_TABLE);
+                sc.f.mem(op::I32_LOAD, 4 * k);
+                sc.f.set(l);
+                sc.io[k as usize] = l;
+            }
+        }
         let mut used = Vec::new();
         used_bufs(&p.body, &mut used);
         sc.buf = vec![None; used.iter().copied().max().map_or(0, |m| m as usize + 1)];
@@ -1044,8 +1113,34 @@ impl<'a> Sc<'a> {
                     self.f.set(l);
                 }
             }
-            Stmt::Out { .. } | Stmt::CallHost { .. } => unreachable!("declined"),
+            Stmt::Out { ch, idx, val } => {
+                // out[clamp(idx, 0, n - 1)] += val (f32, as the interpreter).
+                let t = self.ti[2];
+                self.io_address(2 + (*ch & 1), *idx);
+                self.f.tee(t);
+                self.f.get(t);
+                self.f.mem(op::F32_LOAD, 0);
+                self.v(*val);
+                self.f.b(op::F32_ADD);
+                self.f.mem(op::F32_STORE, 0);
+            }
+            Stmt::CallHost { .. } => unreachable!("declined"),
         }
+    }
+
+    /// Pushes the byte address of frame `clamp(idx, 0, n - 1)` of audio
+    /// channel `k` (0, 1 in; 2, 3 out). n >= 1 here (the entry returns on 0).
+    fn io_address(&mut self, k: u8, idx: Val) {
+        let [t0, t1, _] = self.ti;
+        self.v(idx);
+        self.f.get(P_N);
+        self.f.i32c(1);
+        self.f.b(op::I32_SUB);
+        self.f.min_u(t0, t1);
+        self.f.i32c(2);
+        self.f.b(op::I32_SHL);
+        self.f.get(self.io[k as usize]);
+        self.f.b(op::I32_ADD);
     }
 
     /// Pushes the byte address of an access (clamped as the interpreter
@@ -1247,7 +1342,10 @@ impl<'a> Sc<'a> {
                 self.f.set(self.tf64[1]);
                 self.fma_tail();
             }
-            Op::In { .. } => unreachable!("declined"),
+            Op::In { ch, idx } => {
+                self.io_address(ch & 1, idx);
+                self.f.mem(op::F32_LOAD, 0);
+            }
         }
         let _ = (t1, t2);
     }

@@ -8,6 +8,7 @@
 //! shader source --[parse]--> AST --[lower: types, inlining, math]--> AIR
 //!     AIR --> ir::run (the reference interpreter, and the no-JIT path)
 //!     AIR --> arm64 (native code: MAP_JIT, W^X)
+//!     AIR --> wasm (generated WebAssembly, linked by a browser host: [`wasm`])
 //! ```
 //!
 //! Every backend is bit-identical to [`ir::run`]: AIR's ops are total and
@@ -17,6 +18,7 @@
 
 pub mod fuse;
 mod guide;
+pub mod wasm;
 
 // The language, IR, interpreter and native backends are the Splash compute
 // core's; audio is one of its front ends.
@@ -42,6 +44,8 @@ pub struct AudioShader {
     render: ir::Program,
     #[cfg(target_arch = "aarch64")]
     native: Option<arm64::Code>,
+    /// [`AudioShader::program_key`], computed on first use.
+    key: std::sync::OnceLock<u64>,
 }
 
 /// Compiles with the fastest backend available on this host.
@@ -123,7 +127,7 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
     }
     #[cfg(target_arch = "aarch64")]
     let native = if native_ok { arm64::compile(&lowered.render) } else { None };
-    Ok(Arc::new(AudioShader {
+    let shader = Arc::new(AudioShader {
         kind: lowered.kind,
         params: lowered.params,
         state_init: lowered.state_init.into_boxed_slice(),
@@ -132,7 +136,14 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
         render: lowered.render,
         #[cfg(target_arch = "aarch64")]
         native,
-    }))
+        key: std::sync::OnceLock::new(),
+    });
+    // The key is what a browser host's audio thread looks the generated
+    // code up by: computed here, never first on the audio thread.
+    #[cfg(target_arch = "wasm32")]
+    shader.program_key();
+    wasm::note_compiled(&shader);
+    Ok(shader)
 }
 
 fn run_init_interp(init: &ir::Program, ctx: &mut [u32], state: &mut [u32], shared: &mut [u32]) {
@@ -187,6 +198,19 @@ impl AudioShader {
     /// The AIR render program (for tests and tools).
     pub fn program(&self) -> &ir::Program {
         &self.render
+    }
+
+    /// The render program's identity across hosts (the compute core's
+    /// `kernel::program_key`): a build tool compiles a document's shaders
+    /// to wasm ahead of time under these keys, and the browser host links
+    /// them by key ([`wasm::link`]).
+    pub fn program_key(&self) -> u64 {
+        *self.key.get_or_init(|| makepad_script_compute::kernel::program_key(&self.render))
+    }
+
+    /// The shared tables (built by `init()`; the render program reads them).
+    pub fn shared_table(&self) -> &[u32] {
+        &self.shared
     }
 
     /// Bytes of native code, if any.
@@ -309,6 +333,12 @@ impl AudioShader {
             // (validated), so handing native code a pointer derived from
             // the immutable table only ever reads it.
             unsafe { code.run(ctx, state, self.shared.as_ptr() as *mut u32, ins, outs, n as u32) };
+            return;
+        }
+        #[cfg(target_arch = "wasm32")]
+        if let Some(slot) = wasm::slot(self.program_key()) {
+            assert!(scratch.len() >= wasm::frame_words(self));
+            wasm::run_slot(self, slot, ctx, state, scratch, ins, outs, n);
             return;
         }
         self.run_interp(ctx, state, scratch, ins, outs, n);

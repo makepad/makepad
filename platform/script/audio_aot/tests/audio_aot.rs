@@ -85,9 +85,23 @@ fn test_input(n: usize) -> (Vec<f32>, Vec<f32>) {
 /// Renders a scripted performance: two notes, a param change, releases.
 /// `slices` gives the host's call sizes (cycled).
 fn perform(shader: &Arc<AudioShader>, interp: bool, slices: &[usize], total: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut scratch = shader.new_scratch();
+    perform_with(shader, slices, total, &mut |ctx, state, ins, outs, n| {
+        if interp {
+            shader.run_interp(ctx, state, &mut scratch, ins, outs, n);
+        } else {
+            shader.run(ctx, state, &mut scratch, ins, outs, n);
+        }
+    })
+}
+
+/// One host call: (ctx, state, ins, outs, n).
+type Run<'a> = dyn FnMut(&mut [u32], &mut [u32], [&[f32]; 2], [&mut [f32]; 2], usize) + 'a;
+
+/// [`perform`] through any runner of the shader's calls.
+fn perform_with(shader: &Arc<AudioShader>, slices: &[usize], total: usize, run: &mut Run) -> (Vec<f32>, Vec<f32>) {
     let mut ctx = shader.new_ctx(RATE);
     let mut state = shader.new_state();
-    let mut scratch = shader.new_scratch();
     let mut out_l = vec![0.0f32; total];
     let mut out_r = vec![0.0f32; total];
     let (in_l, in_r) = test_input(total);
@@ -123,11 +137,7 @@ fn perform(shader: &Arc<AudioShader>, interp: bool, slices: &[usize], total: usi
             (&zeros[frame..frame + n], &zeros[frame..frame + n])
         };
         let (ol, or) = (&mut out_l[frame..frame + n], &mut out_r[frame..frame + n]);
-        if interp {
-            shader.run_interp(&mut ctx, &mut state, &mut scratch, [ins_l, ins_r], [ol, or], n);
-        } else {
-            shader.run(&mut ctx, &mut state, &mut scratch, [ins_l, ins_r], [ol, or], n);
-        }
+        run(&mut ctx, &mut state, [ins_l, ins_r], [ol, or], n);
         frame += n;
     }
     (out_l, out_r)
@@ -671,9 +681,8 @@ fn fnv(bits: impl Iterator<Item = u32>) -> u64 {
 
 /// Every example and shipped library shader, rendered through the scripted
 /// performance on both backends, hashed.
-fn golden_hashes() -> Vec<(String, u64)> {
-    let mut out = Vec::new();
-    let lib_dir = format!("{}/../../../apps/commercial/stage/libs/score_player/shaders", env!("CARGO_MANIFEST_DIR"));
+fn golden_sources() -> Vec<(String, String)> {
+    let lib_dir = format!("{}/../../../apps/commercial/engine/score_player/shaders", env!("CARGO_MANIFEST_DIR"));
     let mut sources: Vec<(String, String)> = INSTRUMENTS.iter().chain(EFFECTS).map(|n| (n.to_string(), shader_src(n))).collect();
     if let Ok(dir) = std::fs::read_dir(&lib_dir) {
         let mut names: Vec<_> = dir.filter_map(|e| e.ok()).map(|e| e.path()).collect();
@@ -682,7 +691,12 @@ fn golden_hashes() -> Vec<(String, u64)> {
             sources.push((format!("lib/{}", p.file_stem().unwrap().to_string_lossy()), std::fs::read_to_string(&p).unwrap()));
         }
     }
-    for (name, src) in sources {
+    sources
+}
+
+fn golden_hashes() -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    for (name, src) in golden_sources() {
         for interp in [false, true] {
             let s = build(&src, Backend::Native);
             let (l, r) = perform(&s, interp, &[128], 30000);
@@ -770,5 +784,132 @@ fn constant_loops_render_as_written_out() {
         let a = perform(&build(&src, backend), backend == Backend::Interp, &[128], total);
         let b = perform(&build(&unrolled, backend), backend == Backend::Interp, &[128], total);
         assert!(bits(&a.0) == bits(&b.0) && bits(&a.1) == bits(&b.1), "{backend:?}: the loop and its written-out form differ at {:?}", first_diff(&a.0, &b.0));
+    }
+}
+
+// -- the generated WebAssembly ----------------------------------------------------
+
+/// Runs a shader's generated wasm entry (the compute core's wasm backend,
+/// audio ABI) on stitch, a wasm interpreter: one instance on a memory laid
+/// out as ctx, state, shared tables, the I/O address table, two input and
+/// two output channels of MAX_FRAMES, and the frame scratch. Each call
+/// copies the host's ctx, state, inputs and the outputs it mixes into in,
+/// and ctx, state and outputs back.
+struct WasmRunner {
+    store: makepad_stitch::Store,
+    mem: makepad_stitch::Mem,
+    func: makepad_stitch::Func,
+    ctx: usize,
+    state: usize,
+    io: usize,
+    chans: [usize; 4],
+    frame: usize,
+    shared: usize,
+}
+
+impl WasmRunner {
+    fn new(shader: &AudioShader) -> WasmRunner {
+        use makepad_stitch as stitch;
+        let module = makepad_script_audio_aot::wasm::module(&[shader], Default::default()).expect("audio shader compiles to wasm");
+        let engine = stitch::Engine::new();
+        let m = stitch::Module::new(&engine, &module).unwrap_or_else(|e| panic!("decode: {:?}", e));
+        let mut store = stitch::Store::new(engine);
+        let max = makepad_script_audio_aot::MAX_FRAMES as usize;
+        // Byte addresses, 16-byte aligned, a guard word gap between regions.
+        let mut at = 64usize;
+        let mut alloc = |words: usize| {
+            let a = at;
+            at += (words.max(1) * 4 + 16 + 15) & !15;
+            a
+        };
+        let ctx = alloc(shader.ctx_words());
+        let state = alloc(shader.state_words());
+        let shared = alloc(shader.shared_table().len());
+        let io = alloc(4);
+        let chans = [alloc(max), alloc(max), alloc(max), alloc(max)];
+        let frame = alloc(makepad_script_audio_aot::wasm::frame_words(shader));
+        let pages = at.div_ceil(65536) as u32;
+        let mem = stitch::Mem::new(&mut store, stitch::MemType { limits: stitch::Limits { min: pages, max: None } });
+        let mut linker = stitch::Linker::new();
+        linker.define("env", "memory", mem);
+        let inst = linker.instantiate(&mut store, &m).unwrap_or_else(|e| panic!("instantiate: {:?}", e));
+        let func = inst.exported_func("run0").expect("run0");
+        let bytes = mem.bytes_mut(&mut store);
+        for (k, w) in shader.shared_table().iter().enumerate() {
+            bytes[shared + 4 * k..shared + 4 * k + 4].copy_from_slice(&w.to_le_bytes());
+        }
+        for (k, c) in chans.iter().enumerate() {
+            bytes[io + 4 * k..io + 4 * k + 4].copy_from_slice(&(*c as u32).to_le_bytes());
+        }
+        WasmRunner { store, mem, func, ctx, state, io, chans, frame, shared }
+    }
+
+    fn put(bytes: &mut [u8], at: usize, words: impl Iterator<Item = u32>) {
+        for (k, w) in words.enumerate() {
+            bytes[at + 4 * k..at + 4 * k + 4].copy_from_slice(&w.to_le_bytes());
+        }
+    }
+
+    fn get(bytes: &[u8], at: usize, out: &mut [u32]) {
+        for (k, w) in out.iter_mut().enumerate() {
+            *w = u32::from_le_bytes(bytes[at + 4 * k..at + 4 * k + 4].try_into().unwrap());
+        }
+    }
+
+    fn run(&mut self, ctx: &mut [u32], state: &mut [u32], ins: [&[f32]; 2], outs: [&mut [f32]; 2], n: usize) {
+        use makepad_stitch::Val;
+        let bytes = self.mem.bytes_mut(&mut self.store);
+        Self::put(bytes, self.ctx, ctx.iter().copied());
+        Self::put(bytes, self.state, state.iter().copied());
+        Self::put(bytes, self.chans[0], ins[0][..n].iter().map(|x| x.to_bits()));
+        Self::put(bytes, self.chans[1], ins[1][..n].iter().map(|x| x.to_bits()));
+        Self::put(bytes, self.chans[2], outs[0][..n].iter().map(|x| x.to_bits()));
+        Self::put(bytes, self.chans[3], outs[1][..n].iter().map(|x| x.to_bits()));
+        let args = [self.ctx, self.state, self.shared, self.io, n, self.frame].map(|x| Val::I32(x as i32));
+        self.func.call(&mut self.store, &args, &mut []).unwrap_or_else(|e| panic!("trap: {:?}", e));
+        let bytes = self.mem.bytes(&self.store);
+        Self::get(bytes, self.ctx, ctx);
+        Self::get(bytes, self.state, state);
+        for (c, out) in outs.into_iter().enumerate() {
+            let mut w = vec![0u32; n];
+            Self::get(bytes, self.chans[2 + c], &mut w);
+            for (o, x) in out.iter_mut().zip(w) {
+                *o = f32::from_bits(x);
+            }
+        }
+    }
+}
+
+fn perform_wasm(shader: &Arc<AudioShader>, slices: &[usize], total: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut w = WasmRunner::new(shader);
+    perform_with(shader, slices, total, &mut |ctx, state, ins, outs, n| w.run(ctx, state, ins, outs, n))
+}
+
+/// The generated wasm of every example and shipped library shader renders
+/// the scripted performance to the golden hashes (the native backend's and
+/// the interpreter's).
+#[test]
+fn wasm_renders_match_the_golden_hashes() {
+    for (name, src) in golden_sources() {
+        let s = build(&src, Backend::Interp);
+        let (l, r) = perform_wasm(&s, &[128], 30000);
+        let got = fnv(bits(&l).into_iter().chain(bits(&r)));
+        let want = GOLDEN.iter().find(|(g, _)| *g == name).map(|(_, h)| *h);
+        if want != Some(got) {
+            let (il, _) = perform(&s, true, &[128], 30000);
+            panic!("{}: wasm render 0x{:016x}, golden {:?}; first difference from the interpreter {:?}", name, got, want.map(|h| format!("0x{:016x}", h)), first_diff(&l, &il));
+        }
+    }
+}
+
+/// Host slicing (odd sizes, single frames) through the generated wasm gives
+/// the interpreter's bits.
+#[test]
+fn wasm_host_slicing_matches_the_interpreter() {
+    for name in INSTRUMENTS.iter().chain(EFFECTS) {
+        let s = build(&shader_src(name), Backend::Interp);
+        let want = perform(&s, true, &[128], 6000);
+        let got = perform_wasm(&s, &[1, 7, 128, 33, 64, 3], 6000);
+        assert!(bits(&want.0) == bits(&got.0) && bits(&want.1) == bits(&got.1), "{}: first difference {:?}", name, first_diff(&want.0, &got.0));
     }
 }

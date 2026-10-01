@@ -10,3 +10,7 @@ repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
 makepad-script-compute = { path = "../compute", version = "1.0.0" }
+
+[dev-dependencies]
+# tests/audio_aot.rs runs the generated wasm natively (a wasm interpreter).
+makepad-stitch = { path = "../../../libs/stitch" }
