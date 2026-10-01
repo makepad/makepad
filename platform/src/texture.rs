@@ -1808,17 +1808,25 @@ impl Cx {
     }
 
     /// Metal: a texture slot reused for a new texture parked the old
-    /// texture's allocation in `previous_platform_resource`, where nothing
-    /// released it until the new texture was explicitly released; it goes to
-    /// the retired list now (freed when the GPU is past the frames that
-    /// used it). Every repaint (`compute_pass_repaint_order`).
+    /// texture's allocation in `previous_platform_resource`, and a slot whose
+    /// last handle was dropped kept its allocation, until something released
+    /// them explicitly; both go to the retired list now (freed when the GPU
+    /// is past the frames that used them). Every repaint
+    /// (`compute_pass_repaint_order`).
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     pub(crate) fn retire_replaced_texture_allocations(&mut self) {
         let serial = self.frame_submission_serial().max(self.textures.1.serials.encoded.load(Ordering::Acquire));
         for slot in 0..self.textures.0.pool.len() {
-            let Some(os) = self.textures.0.pool[slot].item.previous_platform_resource.take() else { continue };
-            let bytes = os.allocated_bytes(self).unwrap_or(0);
-            self.textures.1.retired.push(RetiredTexture { serial, bytes, os });
+            if let Some(os) = self.textures.0.pool[slot].item.previous_platform_resource.take() {
+                let bytes = os.allocated_bytes(self).unwrap_or(0);
+                self.textures.1.retired.push(RetiredTexture { serial, bytes, os });
+            }
+            // A texture whose last handle was dropped gives its storage back
+            // now, not when its slot is next reused.
+            if self.textures.0.is_free(slot) && self.textures.0.pool[slot].item.alloc.is_some() {
+                let generation = self.textures.0.pool[slot].generation;
+                self.release_texture_allocation(TextureId(slot, generation));
+            }
         }
     }
 
