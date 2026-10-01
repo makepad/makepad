@@ -1827,21 +1827,6 @@ impl GlShader {
         pixel: &str,
         _os_type: &OsType,
     ) -> PendingGlShader {
-        static GL_INFO_ONCE: std::sync::Once = std::sync::Once::new();
-        GL_INFO_ONCE.call_once(|| {
-            crate::system_info::note_gpu_adapter(&get_gl_string(gl, gl_sys::RENDERER));
-            crate::log!(
-                "Makepad GL: vendor={:?} renderer={:?} version={:?} glsl={:?} sampler_objects={}",
-                get_gl_string(gl, gl_sys::VENDOR),
-                get_gl_string(gl, gl_sys::RENDERER),
-                get_gl_string(gl, gl_sys::VERSION),
-                get_gl_string(gl, gl_sys::SHADING_LANGUAGE_VERSION),
-                gl.glGenSamplers.is_some()
-                    && gl.glBindSampler.is_some()
-                    && gl.glSamplerParameteri.is_some(),
-            );
-        });
-
         let vertex_len = Self::shader_source_len(vertex);
         let pixel_len = Self::shader_source_len(pixel);
 
@@ -2098,6 +2083,21 @@ impl GlShader {
         mapping: &CxDrawShaderMapping,
         os_type: &OsType,
     ) -> GlShaderState {
+        static GL_INFO_ONCE: std::sync::Once = std::sync::Once::new();
+        GL_INFO_ONCE.call_once(|| {
+            crate::system_info::note_gpu_adapter(&get_gl_string(gl, gl_sys::RENDERER));
+            crate::log!(
+                "Makepad GL: vendor={:?} renderer={:?} version={:?} glsl={:?} sampler_objects={}",
+                get_gl_string(gl, gl_sys::VENDOR),
+                get_gl_string(gl, gl_sys::RENDERER),
+                get_gl_string(gl, gl_sys::VERSION),
+                get_gl_string(gl, gl_sys::SHADING_LANGUAGE_VERSION),
+                gl.glGenSamplers.is_some()
+                    && gl.glBindSampler.is_some()
+                    && gl.glSamplerParameteri.is_some(),
+            );
+        });
+
         if let Some(program) = Self::read_program_cache(gl, vertex, pixel, os_type) {
             return GlShaderState::Ready(Self::build_from_program(gl, program, mapping));
         }
