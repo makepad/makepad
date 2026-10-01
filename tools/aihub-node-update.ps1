@@ -39,9 +39,57 @@ if ($service -and $service.Status -eq 'Running') {
 }
 $dir = Split-Path $exe
 if ($launcher -and (-not (Test-Path $launcher) -or (Split-Path $launcher) -ne $dir)) { throw 'launcher is outside the AIHub installation directory' }
-$before = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 5
-$jobs = Invoke-RestMethod "http://127.0.0.1:$Port/jobs" -TimeoutSec 5
-if ($before.jobs_pending -ne 0 -or @($jobs.jobs).Count -ne 0) { throw 'AIHub has active jobs; wait for them to finish before updating' }
+# The node serves only TLS: query /health pinned to the node's own
+# certificate, proving its own node credential (the node role may read
+# /health). jobs_pending counts queued and running jobs.
+if ($service) {
+    $cfgArgs = @(Get-Content $cfg | Where-Object { $_ -like 'arg=*' } | ForEach-Object { $_ -replace '^arg=', '' })
+    $cacheDir = $cfgArgs[[array]::IndexOf($cfgArgs, '--cache-dir') + 1]
+} else {
+    $cacheDir = [regex]::Match($old.CommandLine, '--cache-dir\s+("([^"]+)"|(\S+))').Groups | Where-Object { $_.Success } | Select-Object -Last 1 -ExpandProperty Value
+}
+$fleetDir = Join-Path $cacheDir 'fleet'
+$credential = (Get-Content (Join-Path $fleetDir 'node.credential') -ErrorAction Stop | Select-Object -First 1).Trim()
+$parts = $credential.Split('.')
+if ($parts.Count -ne 5 -or $parts[0] -ne 'mkc2') { throw 'node.credential is not an mkc2 credential' }
+$secret = [byte[]]::new($parts[4].Length / 2)
+for ($i = 0; $i -lt $secret.Length; $i++) { $secret[$i] = [Convert]::ToByte($parts[4].Substring(2 * $i, 2), 16) }
+if (-not ('FleetPin' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System.Net;
+using System.Net.Security;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
+public static class FleetPin {
+    public static string Expected;
+    static bool Check(object sender, X509Certificate cert, X509Chain chain, SslPolicyErrors errors) {
+        if (cert == null || Expected == null) return false;
+        using (var sha = SHA256.Create()) {
+            var hex = System.BitConverter.ToString(sha.ComputeHash(cert.GetRawCertData())).Replace("-", "").ToLowerInvariant();
+            return hex == Expected;
+        }
+    }
+    public static void Install(string expected) {
+        Expected = expected;
+        ServicePointManager.ServerCertificateValidationCallback = Check;
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | (SecurityProtocolType)12288;
+    }
+}
+'@
+}
+# The certificate is read on every call: a node may make a new one when it
+# starts. The proof is HMAC-SHA256 under the credential's secret over
+# "mkfleet2 proof|<certificate fingerprint>".
+function Get-Health([int]$timeout) {
+    $pin = (Get-Content (Join-Path $fleetDir 'tls\tls-fingerprint.txt') -ErrorAction Stop | Select-Object -First 1).Trim().ToLowerInvariant()
+    [FleetPin]::Install($pin)
+    $hmac = [System.Security.Cryptography.HMACSHA256]::new($secret)
+    $proof = -join ($hmac.ComputeHash([Text.Encoding]::ASCII.GetBytes("mkfleet2 proof|$pin")) | ForEach-Object { $_.ToString('x2') })
+    $authorization = "MKC2 $($parts[1]).$($parts[2]).$($parts[3]).$proof"
+    Invoke-RestMethod "https://127.0.0.1:$Port/health" -Headers @{ Authorization = $authorization } -TimeoutSec $timeout
+}
+$before = Get-Health 5
+if ($before.jobs_pending -ne 0) { throw 'AIHub has active jobs; wait for them to finish before updating' }
 $stamp = [DateTime]::UtcNow.ToString('yyyyMMdd-HHmmss')
 $backup = "$exe.rollback-$stamp"
 Copy-Item $exe $backup
@@ -85,7 +133,7 @@ function Wait-Healthy {
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 500
         try {
-            $health = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 2
+            $health = Get-Health 2
             $owner = Get-NetTCPConnection -LocalPort $Port -State Listen | Select-Object -First 1
             # A service node may run as another user, whose process path this
             # account cannot read; the service config names the binary.
@@ -103,8 +151,7 @@ try {
         }
     }
     # Recheck after suspending the watchdog; never deliberately interrupt work.
-    $jobs = Invoke-RestMethod "http://127.0.0.1:$Port/jobs" -TimeoutSec 5
-    if (@($jobs.jobs).Count -ne 0) { throw 'a job arrived while preparing the update; retry when idle' }
+    if ((Get-Health 5).jobs_pending -ne 0) { throw 'a job arrived while preparing the update; retry when idle' }
     $stopped = $true
     Stop-Node
     # Even a partially failed copy must be restored from the complete backup.
