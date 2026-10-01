@@ -4639,6 +4639,9 @@ impl Cx {
         let Some(get_proc) = display.libegl.eglGetProcAddress else {
             return;
         };
+        // An explicit poll may have no swap coming to flush our fence, and glFlush
+        // alone isn't guaranteed to, so the check itself flushes it.
+        let wait_flags = if waiting { 0x1 } else { 0 }; // SYNC_FLUSH_COMMANDS_BIT
         // Waiters the paint path can see: released retained-instance
         // allocations awaiting collection, shared blocks awaiting retirement,
         // and (checked below) retired textures.
@@ -4692,7 +4695,7 @@ impl Cx {
                 (display.libgl.glDeleteFramebuffers)(1, &framebuffer);
             }
             if let Some((serial, fence)) = state.gl.pending {
-                if matches!((functions.poll)(fence, 0, 0), 0x911a | 0x911c) {
+                if matches!((functions.poll)(fence, wait_flags, 0), 0x911a | 0x911c) {
                     (functions.delete)(fence);
                     state.gl.pending = None;
                     state.serials.complete(serial);
