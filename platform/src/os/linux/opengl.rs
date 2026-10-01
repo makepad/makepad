@@ -2638,10 +2638,8 @@ impl CxOsDrawShader {
             vec4 depth_clip(vec4 w, vec4 c, float clip);
             vec4 sample2d(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
             vec4 sample2d_lod(sampler2D sampler, vec2 pos, float lod){return textureLod(sampler, vec2(pos.x, pos.y), lod);}
-            vec4 sample2d_bgra(sampler2D sampler, vec2 pos){return texture(sampler, vec2(pos.x, pos.y));}
             vec4 samplecube(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
             vec4 samplecube_lod(samplerCube sampler, vec3 dir, float lod){return textureLod(sampler, dir, lod);}
-            vec4 samplecube_bgra(samplerCube sampler, vec3 dir){return texture(sampler, dir);}
             ";
         // GLSL ES 3.00 does not give samplers a default precision. Desktop GL and
         // some lenient GLES drivers accept bare `uniform sampler2DArray ...`, but
@@ -3559,7 +3557,7 @@ impl CxTexture {
             unsafe { (gl.glBindTexture)(texture_target, self.os.gl_texture.unwrap()) };
             match &alloc.pixel {
                 TexturePixel::BGRAu8 | TexturePixel::RGBAf16 | TexturePixel::RGBAf32 => unsafe {
-                    // LINEAR: render targets are sampled with sample/sample_as_bgra (Linear), e.g. the
+                    // LINEAR: render targets are sampled with sample (Linear), e.g. the
                     // Gaussian blur and CachedView. Since we no longer bind sampler objects, the texture
                     // object must carry that filter (it was previously supplied by the sampler object).
                     (gl.glTexParameteri)(

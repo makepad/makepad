@@ -1669,25 +1669,17 @@ impl ShaderFnCompiler {
                 );
             }
             id!(sample)
-            | id!(sample_as_bgra)
-            | id!(sample_as_bgra_nearest)
             | id!(sample_lod)
             | id!(sample_nearest)
-            | id!(sample_repeat)
-            | id!(sample_as_bgra_repeat) => {
+            | id!(sample_repeat) => {
                 // sample(coord) samples the texture at normalized coordinates.
-                // sample_as_bgra(coord) is identical except on WebGL GLSL, where it
-                // applies a BGRA->RGBA swizzle in the sampler helper.
+                // Channel order is the backend's: every backend declares a BGRA
+                // texture to the GPU as BGRA, so a sample is RGBA everywhere.
                 // There is deliberately NO render-target variant: every
                 // backend stores offscreen targets in top-left row order
                 // (GL renders them through a Y-inverted projection), so a
                 // render texture samples exactly like any other.
-                let method_name = if method_id == id!(sample_as_bgra)
-                    || method_id == id!(sample_as_bgra_nearest)
-                    || method_id == id!(sample_as_bgra_repeat)
-                {
-                    "sample_as_bgra"
-                } else if method_id == id!(sample_nearest) {
+                let method_name = if method_id == id!(sample_nearest) {
                     "sample_nearest"
                 } else if method_id == id!(sample_lod) {
                     "sample_lod"
@@ -1730,16 +1722,12 @@ impl ShaderFnCompiler {
                     let lod = args.get(1);
                     let mut s = self.stack.new_string();
 
-                    let sampler = if method_id == id!(sample_nearest)
-                        || method_id == id!(sample_as_bgra_nearest)
-                    {
+                    let sampler = if method_id == id!(sample_nearest) {
                         ShaderSampler {
                             filter: SamplerFilter::Nearest,
                             ..ShaderSampler::default()
                         }
-                    } else if method_id == id!(sample_repeat)
-                        || method_id == id!(sample_as_bgra_repeat)
-                    {
+                    } else if method_id == id!(sample_repeat) {
                         ShaderSampler {
                             address: SamplerAddress::Repeat,
                             ..ShaderSampler::default()
@@ -1843,8 +1831,7 @@ impl ShaderFnCompiler {
                         }
                         ShaderBackend::Hlsl => {
                             // D3D11 uses DXGI_FORMAT_B8G8R8A8_UNORM, so the GPU already
-                            // interprets BGRA data as RGBA when sampling. No swizzle needed
-                            // for sample_as_bgra (same as Metal).
+                            // interprets BGRA data as RGBA when sampling (as Metal does).
                             // Texture2DArray.SampleLevel expects float3(uv, array_index).
                             let lod_expr = lod.map_or("0.0", |lod| lod.as_str());
                             write!(
@@ -1868,12 +1855,6 @@ impl ShaderFnCompiler {
                                             texture_expr, coord, lod
                                         )
                                         .ok();
-                                    } else if method_id == id!(sample_as_bgra)
-                                        || method_id == id!(sample_as_bgra_nearest)
-                                        || method_id == id!(sample_as_bgra_repeat)
-                                    {
-                                        write!(s, "samplecube_bgra({}, {})", texture_expr, coord)
-                                            .ok();
                                     } else {
                                         write!(s, "samplecube({}, {})", texture_expr, coord).ok();
                                     }
@@ -1901,12 +1882,6 @@ impl ShaderFnCompiler {
                                             texture_expr, coord, lod
                                         )
                                         .ok();
-                                    } else if method_id == id!(sample_as_bgra)
-                                        || method_id == id!(sample_as_bgra_nearest)
-                                        || method_id == id!(sample_as_bgra_repeat)
-                                    {
-                                        write!(s, "sample2d_bgra({}, {})", texture_expr, coord)
-                                            .ok();
                                     } else {
                                         write!(s, "sample2d({}, {})", texture_expr, coord).ok();
                                     }
@@ -1914,19 +1889,14 @@ impl ShaderFnCompiler {
                             }
                         }
                         ShaderBackend::Rust => {
-                            // Rust gpusim backend keeps texture data in logical RGBA,
-                            // so sample_as_bgra is a no-op alias of sample. The
-                            // sampler STATE is not: `sample_nearest` means an exact
+                            // Rust gpusim backend keeps texture data in logical RGBA.
+                            // The sampler STATE matters: `sample_nearest` means an exact
                             // texel fetch (every data pass depends on it) and only
                             // the *_repeat forms wrap, so each maps to its own
                             // runtime method rather than collapsing to `sample`.
-                            if method_id == id!(sample_nearest)
-                                || method_id == id!(sample_as_bgra_nearest)
-                            {
+                            if method_id == id!(sample_nearest) {
                                 write!(s, "{}.sample_nearest({})", texture_expr, coord).ok();
-                            } else if method_id == id!(sample_repeat)
-                                || method_id == id!(sample_as_bgra_repeat)
-                            {
+                            } else if method_id == id!(sample_repeat) {
                                 write!(s, "{}.sample_repeat({})", texture_expr, coord).ok();
                             } else if let Some(lod) = lod {
                                 write!(s, "{}.sample_lod({}, {})", texture_expr, coord, lod).ok();
@@ -2052,10 +2022,8 @@ impl ShaderFnCompiler {
                         method_id,
                         &[
                             id!(sample),
-                            id!(sample_as_bgra),
-                            id!(sample_as_bgra_nearest),
+                            id!(sample_nearest),
                             id!(sample_repeat),
-                            id!(sample_as_bgra_repeat),
                             id!(sample_lod),
                             id!(sample_grad),
                             id!(sample_video),

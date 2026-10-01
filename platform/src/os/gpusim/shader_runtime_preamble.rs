@@ -930,7 +930,7 @@ impl Texture2D {
             return vec4(0.0, 0.0, 0.0, 0.0);
         };
         // Makepad's default sampler is clamp-to-edge on every GPU backend;
-        // only `sample_repeat` / `sample_as_bgra_repeat` ask for wrapping.
+        // only `sample_repeat` asks for wrapping.
         let coord = match mode.address {
             SampleAddress::Repeat => vec2(coord.x.rem_euclid(1.0), coord.y.rem_euclid(1.0)),
             SampleAddress::ClampToEdge => coord,
@@ -1000,7 +1000,7 @@ impl Texture2D {
         coord.sample_texture(self, SampleMode::NEAREST)
     }
 
-    /// Filtered with wrapping (`sample_repeat` / `sample_as_bgra_repeat`).
+    /// Filtered with wrapping (`sample_repeat`).
     pub fn sample_repeat<C: TextureSampleCoord>(&self, coord: C) -> Vec4f {
         coord.sample_texture(self, SampleMode::REPEAT)
     }
