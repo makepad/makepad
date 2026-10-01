@@ -31,6 +31,8 @@
 use crate::dsp::*;
 
 pub const MAX_LAYERS: usize = 6;
+/// The voice's DC blocker pole (10 Hz at 48 kHz).
+const DC_POLE: f32 = 0.9987;
 /// Longest pluck period the one string buffer holds (≈ 21 Hz at 44.1 kHz).
 pub const PLUCK_LEN: usize = 2048;
 
@@ -453,6 +455,10 @@ pub struct RecipeVoice {
     rng: Rng,
     /// Last absolute sample value (for stealing decisions).
     pub level: f32,
+    /// The DC blocker's last input and output: a pulse narrower than half
+    /// its period, a driven or swept layer sit off centre; a 10 Hz high-pass
+    /// takes the offset out (a 40 Hz kick loses 0.3 dB).
+    dc: [f32; 2],
 }
 
 impl RecipeVoice {
@@ -483,6 +489,7 @@ impl RecipeVoice {
             held,
             rng,
             level: 0.0,
+            dc: [0.0; 2],
         }
     }
 
@@ -620,7 +627,9 @@ impl RecipeVoice {
                 st.t += dt;
             }
             self.t += dt;
-            let v = acc * vol;
+            let x = acc * vol;
+            let v = x - self.dc[0] + DC_POLE * self.dc[1];
+            self.dc = [x, v];
             peak = peak.max(v.abs());
             *sample += v;
         }
