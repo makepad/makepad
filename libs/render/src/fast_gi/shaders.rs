@@ -74,13 +74,15 @@ script_mod! {
             var n=6.0
             if region>0.5 {n=8.0}
             let p=self.gi_tile(k,slot,region)+vec2(1.0,1.0)+self.gi_oct(d)*n
-            return self.gi_field.sample(p/self.gi_atlas.xy)
+            // Level zero: no gradients, so the probe loop stays a loop.
+            return self.gi_field.sample_lod(p/self.gi_atlas.xy,0.0)
         }
         // (relocation offset in cells, state): state > 0 valid (ramps in
         // over the first updates), < 0 inside geometry, 0 not traced.
         gi_info: fn(k:float,cell:vec3)->vec4 {
             let p=self.gi_tile(k,self.gi_slot(cell),2.0)+vec2(0.5,0.5)
-            return self.gi_field.sample_nearest(p/self.gi_atlas.xy)
+            // At the texel's centre, level zero: its exact value.
+            return self.gi_field.sample_lod(p/self.gi_atlas.xy,0.0)
         }
         // One probe's contribution: vec4(irradiance*weight, weight).
         gi_probe: fn(k:float,cell:vec3,info:vec4,wp:vec3,n:vec3,w:float)->vec4 {
@@ -120,31 +122,23 @@ script_mod! {
             if edge<=0.0 {return vec4(0.0,0.0,0.0,0.0)}
             let base=floor(local)
             let f=local-base
-            let t=vec3(1.0,1.0,1.0)-f
             let b0=c.xyz+base
-            let p0=self.gi_info(k,b0)
-            let p1=self.gi_info(k,b0+vec3(1.0,0.0,0.0))
-            let p2=self.gi_info(k,b0+vec3(0.0,1.0,0.0))
-            let p3=self.gi_info(k,b0+vec3(1.0,1.0,0.0))
-            let p4=self.gi_info(k,b0+vec3(0.0,0.0,1.0))
-            let p5=self.gi_info(k,b0+vec3(1.0,0.0,1.0))
-            let p6=self.gi_info(k,b0+vec3(0.0,1.0,1.0))
-            let p7=self.gi_info(k,b0+vec3(1.0,1.0,1.0))
-            // Trilinear weight x maturity (a new probe fades in).
-            let w0=t.x*t.y*t.z*max(p0.w,0.0)
-            let w1=f.x*t.y*t.z*max(p1.w,0.0)
-            let w2=t.x*f.y*t.z*max(p2.w,0.0)
-            let w3=f.x*f.y*t.z*max(p3.w,0.0)
-            let w4=t.x*t.y*f.z*max(p4.w,0.0)
-            let w5=f.x*t.y*f.z*max(p5.w,0.0)
-            let w6=t.x*f.y*f.z*max(p6.w,0.0)
-            let w7=f.x*f.y*f.z*max(p7.w,0.0)
-            let available=w0+w1+w2+w3+w4+w5+w6+w7
+            // The eight corners in one loop (one call site each: a D3D
+            // compile inlines every site). Trilinear weight x maturity (a
+            // new probe fades in).
+            var available=0.0
+            var sum=vec4(0.0,0.0,0.0,0.0)
+            for corner in 0..8 {
+                let q=float(corner)
+                let o=vec3(fract(q*0.5)*2.0,fract(floor(q*0.5)*0.5)*2.0,floor(q*0.25))
+                let tw=mix(vec3(1.0,1.0,1.0)-f,f,o)
+                let cell=b0+o
+                let info=self.gi_info(k,cell)
+                let w=tw.x*tw.y*tw.z*max(info.w,0.0)
+                available=available+w
+                sum=sum+self.gi_probe(k,cell,info,wp,n,w)
+            }
             if available<=0.000001 {return vec4(0.0,0.0,0.0,0.0)}
-            let sum=self.gi_probe(k,b0,p0,wp,n,w0)+self.gi_probe(k,b0+vec3(1.0,0.0,0.0),p1,wp,n,w1)
-                +self.gi_probe(k,b0+vec3(0.0,1.0,0.0),p2,wp,n,w2)+self.gi_probe(k,b0+vec3(1.0,1.0,0.0),p3,wp,n,w3)
-                +self.gi_probe(k,b0+vec3(0.0,0.0,1.0),p4,wp,n,w4)+self.gi_probe(k,b0+vec3(1.0,0.0,1.0),p5,wp,n,w5)
-                +self.gi_probe(k,b0+vec3(0.0,1.0,1.0),p6,wp,n,w6)+self.gi_probe(k,b0+vec3(1.0,1.0,1.0),p7,wp,n,w7)
             if sum.w<=0.00000001 {return vec4(0.0,0.0,0.0,0.0)}
             // Coverage (enough traced, valid probes) times visibility (the
             // receiver is not hidden from all of them); both fade to the
@@ -152,33 +146,33 @@ script_mod! {
             let confidence=smoothstep(0.05,0.4,available)*smoothstep(0.0,0.05,sum.w/available)
             return vec4(sum.xyz/sum.w,confidence*clamp(edge,0.0,1.0))
         }
-        gi_ambient_weights: fn(wp:vec3,n:vec3)->vec3 {
-            let s0=self.gi_cascade_sample(0.0,wp,n).w
-            let s1=self.gi_cascade_sample(1.0,wp,n).w
-            let s2=self.gi_cascade_sample(2.0,wp,n).w
-            return vec3(s0,s1*(1.0-s0),s2*(1.0-s0)*(1.0-s1))
-        }
         // Finest confident cascade first, then coarser, then the ordinary
         // ambient: an untraced, occluded or out-of-volume receiver keeps
-        // the look it has with GI off.
-        gi_ambient: fn(wp:vec3,normal:vec3,fallback:vec3)->vec3 {
-            if self.gi_on<=0.0 {return fallback}
-            let n=normalize(normal)
-            let s0=self.gi_cascade_sample(0.0,wp,n)
-            var acc=s0.xyz*s0.w
-            var remain=1.0-s0.w
-            if remain>0.002 && self.gi_home.w>1.5 {
-                let s1=self.gi_cascade_sample(1.0,wp,n)
-                acc=acc+s1.xyz*(s1.w*remain)
-                remain=remain*(1.0-s1.w)
-                if remain>0.002 && self.gi_home.w>2.5 {
-                    let s2=self.gi_cascade_sample(2.0,wp,n)
-                    acc=acc+s2.xyz*(s2.w*remain)
-                    remain=remain*(1.0-s2.w)
+        // the look it has with GI off. `weights` 1 returns each cascade's
+        // share instead (the debug views): one cascade sample, in a loop,
+        // serves both.
+        gi_gather: fn(wp:vec3,n:vec3,fallback:vec3,weights:float)->vec3 {
+            var acc=vec3(0.0,0.0,0.0)
+            var w=vec3(0.0,0.0,0.0)
+            var remain=1.0
+            for k in 0..3 {
+                let kf=float(k)
+                // Cascade 0 always; a coarser one while weight remains and
+                // the volume has it.
+                if kf<0.5 || (remain>0.002 && self.gi_home.w>kf+0.5) || weights>0.5 {
+                    let sc=self.gi_cascade_sample(kf,wp,n)
+                    acc=acc+sc.xyz*(sc.w*remain)
+                    w=w+vec3(1.0-step(0.5,kf),step(0.5,kf)-step(1.5,kf),step(1.5,kf))*(sc.w*remain)
+                    remain=remain*(1.0-sc.w)
                 }
             }
+            if weights>0.5 {return w}
             let gi=acc+fallback*(self.gi_fallback_floor*remain)
             return mix(fallback,gi,min(self.gi_on,1.0))
+        }
+        gi_ambient: fn(wp:vec3,normal:vec3,fallback:vec3)->vec3 {
+            if self.gi_on<=0.0 {return fallback}
+            return self.gi_gather(wp,normalize(normal),fallback,0.0)
         }
         // Last operation before writing DISPLAY colour into an 8-bit scene
         // target. One quantization step of zero-mean world-space noise
@@ -187,10 +181,13 @@ script_mod! {
             if self.gi_on<=0.0 || color.w<0.999 {return color}
             if self.gi_debug>0.5 {
                 let nn=normalize(n)
-                if self.gi_debug<1.5 {
+                // Each cascade's share (views 1, 2) or the GI alone (3, 4).
+                let g=self.gi_gather(wp,nn,vec3(0.0,0.0,0.0),1.0-step(2.5,self.gi_debug))
+                if self.gi_debug<2.5 {
+                    let w=g
+                    if self.gi_debug>1.5 {return vec4(w,1.0)}
                     // Cells of the finest cascade that covers the pixel,
                     // tinted per cascade (red fine, green mid, blue coarse).
-                    let w=self.gi_ambient_weights(wp,nn)
                     var k=0.0
                     if w.x<0.001 {k=1.0}
                     if w.x<0.001 && w.y<0.001 {k=2.0}
@@ -199,7 +196,6 @@ script_mod! {
                     let tint=vec3(step(k,0.5),step(abs(k-1.0),0.5),step(1.5,k))
                     return vec4(mix(fract(cell*vec3(0.37,0.57,0.73)),tint,0.5),1.0)
                 }
-                if self.gi_debug<2.5 {return vec4(self.gi_ambient_weights(wp,nn),1.0)}
                 if self.gi_debug>4.5 {
                     // Nearest probe of cascade 0: orange = inside geometry,
                     // grey = not traced, green = valid (dim while fading in).
@@ -211,7 +207,7 @@ script_mod! {
                     if self.gi_debug>5.5 {return vec4(max(self.gi_tile_sample(0.0,self.gi_slot(cell),0.0,nn).xyz,vec3(0.0,0.0,0.0)),1.0)}
                     return vec4(0.0,0.8*info.w,0.1,1.0)
                 }
-                return vec4(self.gi_ambient(wp,nn,vec3(0.0,0.0,0.0)),1.0)
+                return vec4(g,1.0)
             }
             let noise=fract(sin(dot(wp,vec3(127.1,311.7,74.7)))*43758.5453)-0.5
             return vec4(max(color.xyz+vec3(noise,noise,noise)*(1.0/255.0),vec3(0.0,0.0,0.0)),color.w)

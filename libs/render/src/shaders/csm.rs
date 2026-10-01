@@ -94,6 +94,24 @@ script_mod! {
             return self.csm_map.sample_compare(uv, depth)
         }
 
+        // The kernel's taps on the unit disk (the centre, the four rim taps,
+        // then the eight inner ones), in the rotated disk's (cs, sn) frame.
+        csm_disk: fn(k: float) -> vec2 {
+            if k < 0.5 { return vec2(0.0, 0.0) }
+            if k < 1.5 { return vec2(-0.840, -0.074) }
+            if k < 2.5 { return vec2(0.962, -0.195) }
+            if k < 3.5 { return vec2(0.519, 0.767) }
+            if k < 4.5 { return vec2(-0.322, -0.933) }
+            if k < 5.5 { return vec2(-0.326, -0.406) }
+            if k < 6.5 { return vec2(-0.696, 0.457) }
+            if k < 7.5 { return vec2(-0.203, 0.621) }
+            if k < 8.5 { return vec2(0.473, -0.480) }
+            if k < 9.5 { return vec2(0.185, -0.893) }
+            if k < 10.5 { return vec2(0.507, 0.064) }
+            if k < 11.5 { return vec2(0.896, 0.412) }
+            return vec2(-0.792, -0.598)
+        }
+
         // Filtered visibility of wp in cascade ci: 12 Poisson taps plus the
         // centre, each a hardware 2x2 compare, on a disk rotated per quarter
         // shadow texel (stable on the surface, no temporal crawl) so the
@@ -126,22 +144,17 @@ script_mod! {
             // The centre and the four taps on the disk's rim first: where
             // all five agree fully (open ground in sun, the inside of a
             // shadow; most pixels) the other eight would agree too and are
-            // skipped. A penumbra pixel takes the whole kernel.
-            var s = self.csm_tap(u, v, ci, depth)
-            s = s + self.csm_tap(u - 0.840 * cs.x - 0.074 * sn.x, v - 0.840 * cs.y - 0.074 * sn.y, ci, depth)
-            s = s + self.csm_tap(u + 0.962 * cs.x - 0.195 * sn.x, v + 0.962 * cs.y - 0.195 * sn.y, ci, depth)
-            s = s + self.csm_tap(u + 0.519 * cs.x + 0.767 * sn.x, v + 0.519 * cs.y + 0.767 * sn.y, ci, depth)
-            s = s + self.csm_tap(u - 0.322 * cs.x - 0.933 * sn.x, v - 0.322 * cs.y - 0.933 * sn.y, ci, depth)
-            if s > 4.999 { return 1.0 }
-            if s < 0.001 { return 0.0 }
-            s = s + self.csm_tap(u - 0.326 * cs.x - 0.406 * sn.x, v - 0.326 * cs.y - 0.406 * sn.y, ci, depth)
-            s = s + self.csm_tap(u - 0.696 * cs.x + 0.457 * sn.x, v - 0.696 * cs.y + 0.457 * sn.y, ci, depth)
-            s = s + self.csm_tap(u - 0.203 * cs.x + 0.621 * sn.x, v - 0.203 * cs.y + 0.621 * sn.y, ci, depth)
-            s = s + self.csm_tap(u + 0.473 * cs.x - 0.480 * sn.x, v + 0.473 * cs.y - 0.480 * sn.y, ci, depth)
-            s = s + self.csm_tap(u + 0.185 * cs.x - 0.893 * sn.x, v + 0.185 * cs.y - 0.893 * sn.y, ci, depth)
-            s = s + self.csm_tap(u + 0.507 * cs.x + 0.064 * sn.x, v + 0.507 * cs.y + 0.064 * sn.y, ci, depth)
-            s = s + self.csm_tap(u + 0.896 * cs.x + 0.412 * sn.x, v + 0.896 * cs.y + 0.412 * sn.y, ci, depth)
-            s = s + self.csm_tap(u - 0.792 * cs.x - 0.598 * sn.x, v - 0.792 * cs.y - 0.598 * sn.y, ci, depth)
+            // skipped. A penumbra pixel takes the whole kernel. One tap call
+            // site in a loop (a D3D compile inlines every site).
+            var s = 0.0
+            for k in 0..13 {
+                if k == 5 {
+                    if s > 4.999 { return 1.0 }
+                    if s < 0.001 { return 0.0 }
+                }
+                let d = self.csm_disk(float(k))
+                s = s + self.csm_tap(u + d.x * cs.x + d.y * sn.x, v + d.x * cs.y + d.y * sn.y, ci, depth)
+            }
             return s * 0.07692308
         }
 
@@ -154,21 +167,34 @@ script_mod! {
             if self.csm_p.x < 0.5 {
                 return 1.0
             }
-            var ci = 0.0
-            var q = self.csm_proj(0.0, wp)
-            while ci < 3.5 && self.csm_inside(q, 0.99) < 0.5 {
-                ci = ci + 1.0
-                q = self.csm_proj(min(ci, 3.0), wp)
+            // The tightest cascade holding the point (one projection call
+            // site in a loop).
+            var ci = 4.0
+            var q = vec3(0.0, 0.0, 0.0)
+            for c in 0..4 {
+                if ci > 3.5 {
+                    let qc = self.csm_proj(float(c), wp)
+                    if self.csm_inside(qc, 0.99) > 0.5 {
+                        ci = float(c)
+                        q = qc
+                    }
+                }
             }
             if ci > 3.5 {
                 return 1.0
             }
-            var s = self.csm_sample(ci, wp, n, ndl)
+            // This cascade, and in its outer band the next one too (one
+            // sample call site in a loop of at most two).
             let edge = max(abs(q.x), abs(q.y))
-            if ci < 2.5 && edge > 0.93 {
-                let q2 = self.csm_proj(ci + 1.0, wp)
-                if self.csm_inside(q2, 0.99) > 0.5 {
-                    s = mix(s, self.csm_sample(ci + 1.0, wp, n, ndl), smoothstep(0.93, 0.99, edge))
+            var blend = 0.0
+            if ci < 2.5 && edge > 0.93 && self.csm_inside(self.csm_proj(ci + 1.0, wp), 0.99) > 0.5 {
+                blend = smoothstep(0.93, 0.99, edge)
+            }
+            var s = 0.0
+            for j in 0..2 {
+                let jf = float(j)
+                if jf < 0.5 || blend > 0.0 {
+                    s = s + self.csm_sample(ci + jf, wp, n, ndl) * mix(1.0 - blend, blend, jf)
                 }
             }
             if ci > 2.5 {
@@ -187,20 +213,32 @@ script_mod! {
             if self.csm_p.x < 0.5 {
                 return 1.0
             }
-            var ci = 0.0
-            var q = self.csm_proj(0.0, wp)
-            while ci < 3.5 && self.csm_inside(q, 0.99) < 0.5 {
-                ci = ci + 1.0
-                q = self.csm_proj(min(ci, 3.0), wp)
+            // The tightest cascade holding the point (one projection call
+            // site in a loop).
+            var ci = 4.0
+            var q = vec3(0.0, 0.0, 0.0)
+            for c in 0..4 {
+                if ci > 3.5 {
+                    let qc = self.csm_proj(float(c), wp)
+                    if self.csm_inside(qc, 0.99) > 0.5 {
+                        ci = float(c)
+                        q = qc
+                    }
+                }
             }
             if ci > 3.5 {
                 return 1.0
             }
-            var s = self.csm_tap1(ci, wp, n, ndl)
             let edge = max(abs(q.x), abs(q.y))
-            if ci < 2.5 && edge > 0.9 {
-                if self.csm_inside(self.csm_proj(ci + 1.0, wp), 0.99) > 0.5 {
-                    s = mix(s, self.csm_tap1(ci + 1.0, wp, n, ndl), smoothstep(0.9, 0.99, edge))
+            var blend = 0.0
+            if ci < 2.5 && edge > 0.9 && self.csm_inside(self.csm_proj(ci + 1.0, wp), 0.99) > 0.5 {
+                blend = smoothstep(0.9, 0.99, edge)
+            }
+            var s = 0.0
+            for j in 0..2 {
+                let jf = float(j)
+                if jf < 0.5 || blend > 0.0 {
+                    s = s + self.csm_tap1(ci + jf, wp, n, ndl) * mix(1.0 - blend, blend, jf)
                 }
             }
             if ci > 2.5 {
@@ -219,11 +257,17 @@ script_mod! {
 
         csm_debug_view: fn(color: vec4, wp: vec3, n: vec3) -> vec4 {
             if self.csm_debug < 0.5 || self.csm_p.x < 0.5 { return color }
+            // The tightest cascade's tint (red, green, blue, yellow).
             var tint = vec3(0.55, 0.55, 0.55)
-            if self.csm_inside(self.csm_proj(3.0, wp), 0.99) > 0.5 { tint = vec3(1.0, 0.85, 0.3) }
-            if self.csm_inside(self.csm_proj(2.0, wp), 0.99) > 0.5 { tint = vec3(0.35, 0.45, 1.0) }
-            if self.csm_inside(self.csm_proj(1.0, wp), 0.99) > 0.5 { tint = vec3(0.35, 1.0, 0.4) }
-            if self.csm_inside(self.csm_proj(0.0, wp), 0.99) > 0.5 { tint = vec3(1.0, 0.4, 0.35) }
+            for c in 0..4 {
+                let cf = 3.0 - float(c)
+                if self.csm_inside(self.csm_proj(cf, wp), 0.99) > 0.5 {
+                    tint = vec3(1.0, 0.4, 0.35)
+                    if cf > 0.5 { tint = vec3(0.35, 1.0, 0.4) }
+                    if cf > 1.5 { tint = vec3(0.35, 0.45, 1.0) }
+                    if cf > 2.5 { tint = vec3(1.0, 0.85, 0.3) }
+                }
+            }
             let nn = normalize(n)
             let vis = self.csm_vis(wp, nn, max(dot(nn, normalize(self.light_dir)), 0.0))
             return vec4(tint * (0.2 + 0.8 * vis), 1.0)

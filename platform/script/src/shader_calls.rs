@@ -1613,7 +1613,11 @@ impl ShaderFnCompiler {
                         }
                         ShaderBackend::Glsl => {
                             output.bind_texture_sampler(&texture_expr, sampler);
-                            write!(s, "texture({}, vec3({}, {}))", texture_expr, uv, depth).ok();
+                            // Level zero, as every other backend compares:
+                            // no gradients, so a compare inside a loop stays
+                            // a loop (ANGLE's D3D compile otherwise unrolls
+                            // it, or refuses it with a data-dependent exit).
+                            write!(s, "textureLod({}, vec3({}, {}), 0.0)", texture_expr, uv, depth).ok();
                         }
                         ShaderBackend::Rust => {
                             write!(s, "{}.sample_compare({}, {})", texture_expr, uv, depth).ok();
