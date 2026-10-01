@@ -611,6 +611,16 @@ pub fn register_shared_std(vm: &mut makepad_script::ScriptVm) {
             }
             out.into()
         });
+        // `hashn(a, b, c, d)`: a stateless hash of 1-4 numbers to 0..1;
+        // `vnoise(x, y, seed)`: value noise in -1..1 over its lattice.
+        vm.add_method(shared, id_lut!(hashn), script_args!(a = NIL, b = NIL, c = NIL, d = NIL), |vm, args| {
+            let xs: Vec<f64> = [id!(a), id!(b), id!(c), id!(d)].into_iter().filter_map(|k| vm.bx.heap.value(args, k.into(), NoTrap).as_number()).collect();
+            crate::rand::hashn(&xs).into()
+        });
+        vm.add_method(shared, id_lut!(vnoise), script_args!(x = 0.0, y = 0.0, seed = 0.0), |vm, args| {
+            let num = |k: LiveId| vm.bx.heap.value(args, k.into(), NoTrap).as_number().unwrap_or(0.0);
+            crate::rand::vnoise(num(id!(x)), num(id!(y)), num(id!(seed))).into()
+        });
         vm.bx.heap.set_value(modules, id!(shared).into(), value, NoTrap);
     }
 }
@@ -635,6 +645,7 @@ mod vm_tests {
         assert!(!draw.is_nil(), "mod.shared.rand_seq");
         let eval = |vm: &mut ScriptVm, code: &str| vm.eval(ScriptMod { file: "t".into(), code: format!("use mod.math.*\nuse mod.pod.*\nuse mod.shared.*\n{code}"), ..Default::default() }).as_number();
         assert_eq!(eval(&mut vm, "rand_seq(42, 1)"), Some(crate::rand::rand_seq(42.0, 1.0)));
+        assert_eq!(eval(&mut vm, "hashn(3, 7) + vnoise(0.3, 0.7, 1)"), Some(crate::rand::hashn(&[3.0, 7.0]) + crate::rand::vnoise(0.3, 0.7, 1.0)));
         assert_eq!(eval(&mut vm, "let t = rand_seq(42, 0, 3)\nt[2]"), Some(crate::rand::rand_seq(42.0, 2.0)), "a table of draws");
         // The colour and noise helpers in the interpreter: round trips and ranges.
         let back = eval(&mut vm, "let c = vec3(0.02, 0.5, 0.93)\nlength(linear_to_srgb(srgb_to_linear(c)) - c)").unwrap();

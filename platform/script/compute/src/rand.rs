@@ -21,9 +21,49 @@ pub fn rand_seq(seed: f64, i: f64) -> f64 {
     (t ^ (t >> 14)) as f64 / 4_294_967_296.0
 }
 
+/// A stateless hash of 1-4 numbers to 0..1: FNV-1a over `floor(x * 1000003)`
+/// with murmur finalisers (integers and fractions alike), the same in
+/// documents, scenes and the reference films' JavaScript `hash(...xs)`.
+pub fn hashn(xs: &[f64]) -> f64 {
+    let mut h: u32 = 2166136261;
+    for &x in xs {
+        h ^= ((x * 1000003.0).floor() as i64) as i32 as u32;
+        h = h.wrapping_mul(16777619);
+        h ^= h >> 13;
+        h = h.wrapping_mul(0x5bd1e995);
+        h ^= h >> 15;
+    }
+    h as f64 / 4294967296.0
+}
+
+/// Value noise of the plane in -1..1: `hashn(ix, iy, seed)` at the integer
+/// lattice, blended by the quintic fade, in the order
+/// `lerp(lerp(a, b, fx), lerp(c, d, fx), fy) * 2 - 1`.
+pub fn vnoise(x: f64, y: f64, seed: f64) -> f64 {
+    let (ix, iy) = (x.floor(), y.floor());
+    let fade = |t: f64| t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+    let lerp = |a: f64, b: f64, t: f64| a + (b - a) * t;
+    let (fx, fy) = (fade(x - ix), fade(y - iy));
+    let a = hashn(&[ix, iy, seed]);
+    let b = hashn(&[ix + 1.0, iy, seed]);
+    let c = hashn(&[ix, iy + 1.0, seed]);
+    let d = hashn(&[ix + 1.0, iy + 1.0, seed]);
+    lerp(lerp(a, b, fx), lerp(c, d, fx), fy) * 2.0 - 1.0
+}
+
 #[cfg(test)]
 mod tests {
-    use super::rand_seq;
+    use super::{hashn, rand_seq, vnoise};
+
+    #[test]
+    fn hashn_and_vnoise_are_the_reference_hash_and_noise() {
+        assert_eq!(hashn(&[3.0, 7.0]), 0.04503778298385441);
+        assert_eq!(hashn(&[0.5]), 0.0866293553262949);
+        assert_eq!(hashn(&[12.0, 1.0, 2.0, 3.0]), 0.1231098179705441);
+        assert_eq!(hashn(&[-4.25, 9.0]), 0.1556121150497347);
+        assert_eq!(vnoise(0.3, 0.7, 1.0), 0.36239171777528245);
+        assert_eq!(vnoise(12.25, -3.5, 2.0), 0.004047073656238354);
+    }
 
     #[test]
     fn draws_are_the_counter_generators_outputs_in_order() {
