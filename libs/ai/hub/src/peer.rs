@@ -625,7 +625,12 @@ impl PeerPlan {
 
 fn is_fleet_endpoint(base: &str) -> bool {
     let Ok(url) = crate::http_client::parse_url(base) else { return false };
-    url.https && crate::fleet_auth::pin_for(&format!("{}:{}", url.host, url.port)).is_some()
+    if url.https {
+        return crate::fleet_auth::pin_for(&format!("{}:{}", url.host, url.port)).is_some();
+    }
+    // Open-fleet transition: a legacy node this node has itself discovered.
+    crate::fleet_auth::legacy_fleet_allowed()
+        && crate::discovery::start_listener().nodes().iter().any(|n| n.base_url == base)
 }
 
 /// The operator's peer list (`MAKEPAD_AI_PEER_SOURCES`, any scheme and

@@ -332,7 +332,18 @@ pub fn start_service(config: ServiceConfig) -> Result<ServiceHandle, AssetAiErro
     let fleet_mode = if addr.ip().is_loopback() {
         None
     } else {
-        Some(FleetMode::load(&config.cache_dir, &node_key, &crate::discovery::normalize_fleet(&config.fleet), addr)?)
+        match FleetMode::load(&config.cache_dir, &node_key, &crate::discovery::normalize_fleet(&config.fleet), addr) {
+            Ok(mode) => Some(mode),
+            Err(e) if crate::fleet_auth::legacy_fleet_allowed() => {
+                eprintln!(
+                    "fleet: LEGACY OPEN NODE: {e}. Serving plaintext without authentication, as before, \
+                     until the open-fleet transition ends on {}.",
+                    crate::fleet_auth::LEGACY_FLEET_UNTIL_TEXT
+                );
+                None
+            }
+            Err(e) => return Err(e),
+        }
     };
     let inner_addr = match &fleet_mode {
         None => addr,
@@ -521,7 +532,8 @@ impl FleetMode {
                 identity.fingerprint_hex()
             )));
         }
-        let legacy = std::env::var("MAKEPAD_AI_HUB_LEGACY_PLAIN").is_ok_and(|v| v == "1");
+        let legacy = std::env::var("MAKEPAD_AI_HUB_LEGACY_PLAIN").is_ok_and(|v| v == "1")
+            && crate::fleet_auth::legacy_fleet_allowed();
         let listen = if legacy { SocketAddr::new(addr.ip(), addr.port() + 1) } else { addr };
         let edge = match std::env::var("MAKEPAD_AI_HUB_EDGE") {
             Ok(text) => Some(text.parse().map_err(|_| refuse(format!("MAKEPAD_AI_HUB_EDGE {text:?} is not an address:port")))?),

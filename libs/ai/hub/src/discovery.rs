@@ -250,6 +250,9 @@ fn spawn_listener() -> Discovered {
             }
         };
         let mut buffer = [0u8; 2048];
+        let mut signed = std::collections::HashSet::new();
+        let mut legacy_logged = std::collections::HashSet::new();
+        let mut warned_no_credential = false;
         loop {
             let Ok((len, from)) = socket.recv_from(&mut buffer) else {
                 continue;
@@ -257,19 +260,57 @@ fn spawn_listener() -> Discovered {
             let Ok(text) = std::str::from_utf8(&buffer[..len]) else {
                 continue;
             };
-            // Only endorsed nodes join the fleet: an unsigned beacon (or one
-            // this process cannot verify) could point anywhere.
-            let Ok(beacon) = SignedBeaconJson::deserialize_json(text) else {
+            // Endorsed nodes join the fleet over pinned TLS, for a process
+            // that holds a fleet credential (without one they would only
+            // answer 401; during the transition it keeps the legacy path).
+            let credentialed = crate::fleet_auth::own_token().is_some();
+            if let Ok(beacon) = SignedBeaconJson::deserialize_json(text) {
+                if !credentialed {
+                    if !warned_no_credential && crate::fleet_auth::legacy_fleet_allowed() {
+                        warned_no_credential = true;
+                        eprintln!("discovery: signed fleet nodes seen but this process has no fleet credential (~/.makepad/ai-hub/client.token); using legacy nodes during the transition");
+                    }
+                    continue;
+                }
+                let Some(trust) = crate::fleet_auth::verifier() else {
+                    continue;
+                };
+                let Some((base_url, _node_key)) =
+                    accept_signed_beacon(trust, &beacon, from.ip(), &wanted_fleet(), crate::fleet_auth::now_secs())
+                else {
+                    continue;
+                };
+                signed.insert(beacon.node_id);
+                nodes
+                    .lock()
+                    .unwrap()
+                    .insert(beacon.node_id, (base_url, Instant::now()));
+                continue;
+            }
+            // Open-fleet transition: an unsigned node is still used (no
+            // credential is ever sent to it: it is not pinned), logged, and
+            // only until the transition ends. A node that also sends a
+            // signed beacon is always reached through that.
+            if !crate::fleet_auth::legacy_fleet_allowed() {
+                continue;
+            }
+            let Ok(beacon) = BeaconJson::deserialize_json(text) else {
                 continue;
             };
-            let Some(trust) = crate::fleet_auth::verifier() else {
+            if beacon.service != "makepad-asset-ai" || signed.contains(&beacon.node_id) {
                 continue;
-            };
-            let Some((base_url, _node_key)) =
-                accept_signed_beacon(trust, &beacon, from.ip(), &wanted_fleet(), crate::fleet_auth::now_secs())
-            else {
+            }
+            let fleet = normalize_fleet(beacon.fleet.as_deref().unwrap_or(""));
+            if fleet != wanted_fleet() {
                 continue;
-            };
+            }
+            let base_url = format!("http://{}:{}", from.ip(), beacon.port);
+            if legacy_logged.insert(base_url.clone()) {
+                eprintln!(
+                    "discovery: LEGACY unsigned node {base_url} accepted (open-fleet transition until {}; no credential is sent to it)",
+                    crate::fleet_auth::LEGACY_FLEET_UNTIL_TEXT
+                );
+            }
             nodes
                 .lock()
                 .unwrap()

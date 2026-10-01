@@ -11,6 +11,9 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Both tests set the process-wide credential variable: one at a time.
+static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn temp(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("mk-front-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -50,6 +53,7 @@ fn start_inner() -> SocketAddr {
 
 #[test]
 fn front_end_to_end() {
+    let _env = ENV.lock().unwrap_or_else(|p| p.into_inner());
     let dir = temp("e2e");
     let authority = Authority::create(&dir.join("authority")).unwrap();
     let point = makepad_network::tls::from_hex::<65>(&authority.public_hex()).unwrap();
@@ -141,6 +145,7 @@ fn front_end_to_end() {
 /// real HTTP server, both directions.
 #[test]
 fn websocket_through_the_front() {
+    let _env = ENV.lock().unwrap_or_else(|p| p.into_inner());
     use makepad_network::{start_http_server, HttpServer, HttpServerRequest, WebSocketMessage};
     use std::sync::mpsc;
 

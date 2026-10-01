@@ -69,6 +69,18 @@ impl Role {
     }
 }
 
+/// End of the open-fleet transition (2026-10-15 00:00 UTC). Until then a
+/// network node without fleet credentials still serves plaintext as before,
+/// and clients also accept unsigned (legacy) beacons; both are logged. From
+/// then on both refuse. The legacy paths are deleted once every box is
+/// enrolled and every client has switched (tools/aihub-fleet.md).
+pub const LEGACY_FLEET_UNTIL: u64 = 1_792_022_400;
+pub const LEGACY_FLEET_UNTIL_TEXT: &str = "2026-10-15";
+
+pub fn legacy_fleet_allowed() -> bool {
+    now_secs() < LEGACY_FLEET_UNTIL
+}
+
 pub fn now_secs() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }

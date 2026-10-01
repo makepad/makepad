@@ -87,17 +87,25 @@ node's account, and restart it.
 nodes. To rotate a credential, issue a new one and revoke the old id.
 Credentials and endorsements expire after `--days` (default 365).
 
-## The switch from the open fleet
+## The switch from the open fleet (until 2026-10-15)
 
-1. **Old and new side by side.** Nodes run with
-   `MAKEPAD_AI_HUB_LEGACY_PLAIN=1`:
-   - the old plaintext port (8123) stays open to old clients, with the
-     unsigned beacon;
-   - the TLS front listens on port + 1 (8124) with the signed beacon.
-   Clients built from this code see only the TLS fleet.
-2. **Switch window.** Once every client (NV1's pipeline, Stage, Sandbox) has
-   its credential and talks to the TLS fleet, remove the variable from each
-   node's launcher. The front then takes the node's port (8123) and the
-   plaintext server moves to loopback.
-3. **Remove the transition.** After the window, the `LEGACY_PLAIN` code path
-   is deleted.
+The transition is explicit and dated (`fleet_auth::LEGACY_FLEET_UNTIL`):
+
+- A network node **without** credentials still starts, serves plaintext
+  without authentication as before, and logs `LEGACY OPEN NODE`.
+- A node **with** credentials and `MAKEPAD_AI_HUB_LEGACY_PLAIN=1` serves
+  both ways:
+  - the TLS front on port + 1 (8124), with the signed beacon;
+  - the old plaintext port (8123), with the unsigned beacon.
+- A client **with** a fleet credential uses signed nodes over pinned TLS. It
+  also accepts unsigned nodes not seen signed, logged as `LEGACY unsigned
+  node`. They are never sent a credential, because they are not pinned.
+- A client **without** a credential keeps using the legacy nodes.
+- Peers named in a request may be pinned nodes, or legacy nodes this node
+  has itself discovered.
+
+From the date on, every legacy path refuses. Before then, once every box is
+enrolled and every client has switched:
+1. Remove `MAKEPAD_AI_HUB_LEGACY_PLAIN` from the launchers. The front then
+   takes the node's port and the plaintext server moves to loopback.
+2. Delete the legacy code paths.
