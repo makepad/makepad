@@ -59,6 +59,7 @@ mod draw_shader;
 pub mod draw_shader_layout;
 mod draw_vars;
 pub mod shader_pack;
+pub mod collect;
 
 // Native Linux display inventory (direct DRM/KMS outputs). Lives at the crate
 // root so headless logic builds of the WM see the same types and API; only the
@@ -388,3 +389,4 @@ pub use {
 /// The compiled-shader handle the const-table API is keyed by
 /// (`Cx::shader_const_table`, `shader_const_patch`, `shader_const_reset`).
 pub use crate::draw_shader::DrawShaderId;
+pub use crate::collect::{RunMode, ScanEvent, Scanner};

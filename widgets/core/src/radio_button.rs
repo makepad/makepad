@@ -415,6 +415,11 @@ impl RadioButton {
 }
 
 impl Widget for RadioButton {
+    /// Its text, laid out (hidden radio buttons draw nothing).
+    fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
+        self.draw_text.scan_text(cx, self.text.as_ref());
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,

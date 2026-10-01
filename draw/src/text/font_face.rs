@@ -199,6 +199,11 @@ impl FontFace {
         &self.parsed.data
     }
 
+    /// The variation axis values this face is read at (`(tag, value)`).
+    pub fn variation_coords(&self) -> Vec<(u32, f32)> {
+        self.variations.iter().map(|v| (v.tag.0, v.value)).collect()
+    }
+
     pub fn set_variations(&mut self, variations: &[(u32, f32)]) {
         self.variations.clear();
         self.variations

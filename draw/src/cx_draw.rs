@@ -103,6 +103,7 @@ impl<'a> CxDraw<'a> {
             return false;
         }
         let mut fonts = Fonts::new(cx, layouter::Settings::default());
+        crate::text::scan::start(cx, &mut fonts);
         fonts.define_font_family(
             0.into(),
             FontFamilyDefinition {

@@ -292,6 +292,12 @@ pub enum Event {
     /// Location updates cannot be delivered (permission denied / no service).
     LocationError(LocationErrorEvent),
 
+    /// A collect run's scan (`MAKEPAD_RUN=collect-web`, see
+    /// [`crate::collect`]): sent once. Every widget forwards it to its
+    /// children and emits what it needs on the web through it; widgets that
+    /// create children from data spawn their variants and forward into them.
+    Scan(crate::collect::ScanEvent),
+
     #[cfg(target_arch = "wasm32")]
     ToWasmMsg(ToWasmMsgEvent),
 }
@@ -391,6 +397,7 @@ impl Event {
             66 => "ScriptReapply",
             69 => "LocationUpdate",
             70 => "LocationError",
+            77 => "Scan",
             _ => panic!(),
         }
     }
@@ -478,6 +485,7 @@ impl Event {
             Self::PermissionResult(_) => 54,
             Self::LocationUpdate(_) => 69,
             Self::LocationError(_) => 70,
+            Self::Scan(_) => 77,
 
             #[cfg(target_arch = "wasm32")]
             Self::ToWasmMsg(_) => 55,

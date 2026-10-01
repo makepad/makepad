@@ -64,6 +64,28 @@ pub struct Layouter {
     cache_generation: u64,
     cached_results: FxHashMap<OwnedLayoutParams, CachedLayout>,
     cache_lru_order: BTreeMap<u64, OwnedLayoutParams>,
+    /// While recording ([`Self::record_glyphs`]): every glyph a layout
+    /// returned, by font.
+    recorded_glyphs: Option<FxHashMap<FontId, RecordedFont>>,
+    /// (font, character) pairs already reported as missing.
+    missing_reported: std::collections::HashSet<(FontId, char)>,
+    missing_count: usize,
+}
+
+/// What a font laid out while recording ([`Layouter::record_glyphs`]):
+/// its glyphs, and the text of every row it appeared in.
+#[derive(Clone, Debug)]
+pub struct RecordedFont {
+    pub font: Rc<Font>,
+    pub glyphs: std::collections::BTreeSet<GlyphId>,
+    pub texts: std::collections::BTreeSet<String>,
+}
+
+impl RecordedFont {
+    /// The variation axis values the font is read at.
+    pub fn variation_coords(&self) -> Vec<(u32, f32)> {
+        self.font.variation_coords()
+    }
 }
 
 impl Layouter {
@@ -79,6 +101,75 @@ impl Layouter {
                 Default::default(),
             ),
             cache_lru_order: BTreeMap::new(),
+            recorded_glyphs: None,
+            missing_reported: Default::default(),
+            missing_count: 0,
+        }
+    }
+
+    /// Starts (or stops) keeping every glyph that layouts return, cached
+    /// or not, so a build tool learns exactly which glyphs of which fonts
+    /// a program draws (for instance to ship only those). Stopping drops
+    /// what was kept.
+    pub fn record_glyphs(&mut self, on: bool) {
+        self.recorded_glyphs = on.then(FxHashMap::default);
+    }
+
+    /// The glyphs recorded since recording started or the last call, by
+    /// font (the font gives its data and id).
+    pub fn take_recorded_glyphs(&mut self) -> Vec<RecordedFont> {
+        match &mut self.recorded_glyphs {
+            Some(map) => map.drain().map(|(_, v)| v).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    fn note_glyphs(&mut self, text: &LaidoutText) {
+        let Some(map) = &mut self.recorded_glyphs else { return };
+        for row in &text.rows {
+            let mut last: Option<FontId> = None;
+            for glyph in &row.glyphs {
+                let entry = map.entry(glyph.font.id()).or_insert_with(|| RecordedFont {
+                    font: glyph.font.clone(),
+                    glyphs: Default::default(),
+                    texts: Default::default(),
+                });
+                entry.glyphs.insert(glyph.id);
+                if last != Some(glyph.font.id()) {
+                    last = Some(glyph.font.id());
+                    if !entry.texts.contains(row.text.as_str()) {
+                        entry.texts.insert(row.text.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Glyphs no font of their family had (shaped to `.notdef`) since
+    /// start: each (font, character) is logged once, with the character's
+    /// code point, so a font shipped without a glyph it needs shows up.
+    pub fn missing_glyphs(&self) -> usize {
+        self.missing_count
+    }
+
+    fn check_missing(&mut self, text: &LaidoutText) {
+        for row in &text.rows {
+            for glyph in &row.glyphs {
+                if glyph.id != 0 {
+                    continue;
+                }
+                let Some(c) = row.text.get(glyph.cluster..).and_then(|s| s.chars().next()) else { continue };
+                if c.is_whitespace() || c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{feff}') {
+                    continue;
+                }
+                self.missing_count += 1;
+                if self.missing_reported.insert((glyph.font.id(), c)) {
+                    let face = glyph.font.with_ttf_parser_face(|f| {
+                        f.names().into_iter().filter(|n| n.name_id == 4 && n.is_unicode()).find_map(|n| n.to_string())
+                    });
+                    makepad_platform::log!("text: no glyph for U+{:04X} '{}' in {}", c as u32, c, face.unwrap_or_else(|| format!("font {:?}", glyph.font.id())));
+                }
+            }
         }
     }
 
@@ -134,8 +225,18 @@ impl Layouter {
     }
 
     pub fn get_or_layout(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
+        let result = self.get_or_layout_uncounted(params);
+        if self.recorded_glyphs.is_some() {
+            self.note_glyphs(&result);
+        }
+        result
+    }
+
+    fn get_or_layout_uncounted(&mut self, params: impl LayoutParams) -> Rc<LaidoutText> {
         if self.cache_size == 0 {
-            return Rc::new(self.layout(params.to_owned()));
+            let result = Rc::new(self.layout(params.to_owned()));
+            self.check_missing(&result);
+            return result;
         }
         if let Some(entry) = self.cached_results.get_mut(&params as &dyn LayoutParams) {
             // Refresh recency so texts that are drawn every frame (e.g. all the
@@ -151,6 +252,7 @@ impl Layouter {
         let params = params.to_owned();
         let cache_key = params.clone();
         let result = Rc::new(self.layout(params));
+        self.check_missing(&result);
         self.insert_cached_result(cache_key, result.clone());
         result
     }

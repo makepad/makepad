@@ -272,15 +272,47 @@ impl Text3d {
 /// 100 lpx reference size, in points (as vj_fx lays text out).
 const REF_PTS: f32 = 100.0 * 72.0 / 96.0;
 
+static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+type GlyphRecord = (u64, std::collections::BTreeSet<u16>);
+
+fn recorded() -> &'static (std::sync::mpsc::Sender<GlyphRecord>, std::sync::Mutex<std::sync::mpsc::Receiver<GlyphRecord>>) {
+    static Q: std::sync::OnceLock<(std::sync::mpsc::Sender<GlyphRecord>, std::sync::Mutex<std::sync::mpsc::Receiver<GlyphRecord>>)> = std::sync::OnceLock::new();
+    Q.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (tx, std::sync::Mutex::new(rx))
+    })
+}
+
+/// Keeps (or stops keeping) the glyphs every [`build_text3d`] from now on
+/// lays out, on any thread: how a build tool learns which glyphs of which
+/// font files 3D type uses (for instance to ship only those).
+pub fn record_glyphs(on: bool) {
+    RECORDING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The glyphs recorded since the last call: per build, the font file's
+/// content hash (FNV-1a 64 over its bytes) and the glyph ids laid out.
+pub fn take_recorded_glyphs() -> Vec<(u64, std::collections::BTreeSet<u16>)> {
+    let Ok(rx) = recorded().1.lock() else { return Vec::new() };
+    rx.try_iter().collect()
+}
+
+fn fnv64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
+}
+
 /// Lay out and extrude `params.text`.
 pub fn build_text3d(params: &Text3dParams) -> Result<Text3d, String> {
     let bytes = params.font.load()?;
+    let recording = RECORDING.load(std::sync::atomic::Ordering::Relaxed).then(|| fnv64(&bytes));
     // Only shaping and metrics are needed: keep the rasterizer's atlas tiny
     // (the default allocates a 2048² atlas per layouter).
     let mut settings = Settings::default();
     settings.loader.rasterizer.atlas_size = Size::new(16, 16);
     settings.cache_size = 8;
     let mut layouter = Layouter::new(settings);
+    layouter.record_glyphs(recording.is_some());
     let font_id: FontId = 0x4D33_4400_0001_u64.into();
     let family: FontFamilyId = 0x4D33_4400_0101_u64.into();
     layouter.define_font(
@@ -318,6 +350,10 @@ pub fn build_text3d(params: &Text3dParams) -> Result<Text3d, String> {
         // a row within the max width, which defaults to the row's own).
         let widest = laidout.rows.iter().map(|r| r.width_in_lpxs).fold(0.0f32, f32::max);
         laidout = layout(Some(widest), false);
+    }
+    if let Some(hash) = recording {
+        let glyphs = layouter.take_recorded_glyphs().into_iter().flat_map(|r| r.glyphs).collect();
+        recorded().0.send((hash, glyphs)).ok();
     }
     let mut fx = FxMesh::default();
     let report = build_text_mesh(

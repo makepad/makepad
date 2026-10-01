@@ -109,6 +109,11 @@ impl Font {
         self.face.data()
     }
 
+    /// The variation axis values this font is read at (`(tag, value)`).
+    pub fn variation_coords(&self) -> Vec<(u32, f32)> {
+        self.face.variation_coords()
+    }
+
     pub(super) fn with_ttf_parser_face<R>(&self, f: impl FnOnce(&ttf_parser::Face<'_>) -> R) -> R {
         self.face.with_ttf_parser_face(f)
     }

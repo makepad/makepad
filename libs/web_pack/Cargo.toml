@@ -1,0 +1,15 @@
+[package]
+name = "makepad-web-pack"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Packing a Makepad wasm app for static hosting: the platform's web runtime stripped to the sections the app uses, the output folder (brotli, content-named files, the loader's fallbacks), font coverage classification and a small static server"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-network = { path = "../../platform/network" }
+brotli = "8.0"
+# The collect manifest: what a collect run says the app needs.
+makepad-web-manifest = { path = "../web_manifest" }

@@ -16,6 +16,7 @@ pub mod loader;
 pub mod msdfer;
 pub mod num;
 pub mod rasterizer;
+pub mod scan;
 pub mod sdfer;
 pub mod selection;
 pub mod shaper;

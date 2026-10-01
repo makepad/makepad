@@ -35,6 +35,7 @@ pub mod splash_host;
 pub mod splash_storage;
 pub mod widget_match_event;
 pub mod widget_tree;
+pub mod scan;
 pub mod widget_hooks;
 pub mod family_api;
 pub mod test_cx;

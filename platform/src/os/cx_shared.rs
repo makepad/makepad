@@ -1256,6 +1256,11 @@ impl Cx {
             }
         }
 
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+        if self.collect.is_some() {
+            self.collect_after_draw();
+        }
+
         if Cx::has_studio_web_socket() {
             self.try_send_studio_widget_tree_dump_responses();
             self.try_send_studio_widget_snapshot_responses();

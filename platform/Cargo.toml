@@ -63,6 +63,8 @@ bitflags = { version = "2.10", path = "../libs/bitflags" }
 # does not exist on these targets.
 [target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))'.dependencies]
 makepad-remote-core = { path = "./remote_core", version = "1.0.0" }
+# The collect-web run mode writes its manifest in this format.
+makepad-web-manifest = { path = "../libs/web_manifest", version = "0.1.0" }
 
 [target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "1.0.0" }

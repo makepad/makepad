@@ -360,6 +360,21 @@ impl Fonts {
         self.layouter.get_or_layout(params)
     }
 
+    /// See [`layouter::Layouter::record_glyphs`].
+    pub fn record_glyphs(&mut self, on: bool) {
+        self.layouter.record_glyphs(on)
+    }
+
+    /// See [`layouter::Layouter::take_recorded_glyphs`].
+    pub fn take_recorded_glyphs(&mut self) -> Vec<layouter::RecordedFont> {
+        self.layouter.take_recorded_glyphs()
+    }
+
+    /// See [`layouter::Layouter::missing_glyphs`].
+    pub fn missing_glyphs(&self) -> usize {
+        self.layouter.missing_glyphs()
+    }
+
     pub fn prepare_textures(&mut self, cx: &mut Cx) -> bool {
         assert!(!self.needs_prepare_atlases);
         // Frame boundary for the layout cache's working-set protection.

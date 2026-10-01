@@ -257,6 +257,11 @@ impl ScriptHook for Modal {
 }
 
 impl Widget for Modal {
+    /// Opened, so the run draws its content.
+    fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
+        self.open(cx);
+    }
+
     fn visit_cancel(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
         self.is_open && self.cancel_children_impl(visit)
     }

@@ -405,14 +405,55 @@ macro_rules! _app_main_event_closure {
 /// goes through this function before it can dispatch `Event::Startup` and
 /// therefore before `AppMain::script_mod` can run.
 #[doc(hidden)]
+///
+/// `web_font_set` is the set the app's web build selects: a collect run
+/// (`MAKEPAD_RUN=collect-web`, see [`crate::collect`]) lays text out in
+/// it, and records every shader from here on, before any script module.
 pub fn new_cx_with_font_set(
     event_handler: Box<dyn FnMut(&mut Cx, &Event)>,
     font_set: FontSet,
+    web_font_set: FontSet,
 ) -> Cx {
     let mut cx = Cx::new(event_handler);
+    cx.init_collect_from_env();
+    let font_set = if cx.is_collecting() { web_font_set } else { font_set };
     assert!(cx.set_font_set(font_set));
     cx.freeze_font_set();
     cx
+}
+
+/// The shader pack a web build was linked with: `--cfg makepad_shader_pack`
+/// and `MAKEPAD_SHADER_PACK=<file>` (what `cargo makepad wasm --pack`
+/// sets) embed the file; otherwise there is none. Expanded in the app's
+/// crate, so a new pack rebuilds only the app.
+#[cfg(makepad_shader_pack)]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! embedded_shader_pack {
+    () => {
+        Some(&include_bytes!(env!("MAKEPAD_SHADER_PACK"))[..])
+    };
+}
+
+#[cfg(not(makepad_shader_pack))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! embedded_shader_pack {
+    () => {
+        None::<&'static [u8]>
+    };
+}
+
+/// Installs the embedded shader pack (see [`embedded_shader_pack`]) before
+/// the first shader is applied.
+#[doc(hidden)]
+pub fn install_embedded_shader_pack(cx: &mut Cx, pack: Option<&'static [u8]>) {
+    if let Some(pack) = pack {
+        match cx.install_shader_pack(pack) {
+            Ok(n) => crate::log!("shader pack: {n} shaders"),
+            Err(e) => crate::error!("shader pack refused: {e}"),
+        }
+    }
 }
 
 /// Pins the type of an `app_main!` `configure:` closure so a bare
@@ -437,44 +478,44 @@ macro_rules! app_main {
     };
     ( $app:ident, configure: $configure:expr ) => {
         #[cfg(target_arch = "wasm32")]
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [], $configure);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [], $configure);
         #[cfg(not(target_arch = "wasm32"))]
-        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::FontSet::Latin, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
     };
     ( $app:ident, font_assets: [$($asset:expr),* $(,)?] ) => {
         $crate::app_main!($app, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
     };
     ( $app:ident, font_assets: [$($asset:expr),* $(,)?], configure: $configure:expr ) => {
         #[cfg(target_arch = "wasm32")]
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
         #[cfg(not(target_arch = "wasm32"))]
-        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::FontSet::Latin, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
     };
     ( $app:ident, font_set: Latin ) => {
         $crate::app_main!($app, font_set: Latin, configure: |_cx: &mut Cx| {});
     };
     ( $app:ident, font_set: Latin, configure: $configure:expr ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [], $configure);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [], $configure);
     };
     ( $app:ident, font_set: International ) => {
         $crate::app_main!($app, font_set: International, configure: |_cx: &mut Cx| {});
     };
     ( $app:ident, font_set: International, configure: $configure:expr ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [], $configure);
     };
     ( $app:ident, font_set: Latin, font_assets: [$($asset:expr),* $(,)?] ) => {
         $crate::app_main!($app, font_set: Latin, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
     };
     ( $app:ident, font_set: Latin, font_assets: [$($asset:expr),* $(,)?], configure: $configure:expr ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
+        $crate::app_main!(@impl $app, $crate::FontSet::Latin, $crate::FontSet::Latin, $crate::LATIN_FONT_ASSET_PACKAGE_MANIFEST, [$($asset),*], $configure);
     };
     ( $app:ident, font_set: International, font_assets: [$($asset:expr),* $(,)?] ) => {
         $crate::app_main!($app, font_set: International, font_assets: [$($asset),*], configure: |_cx: &mut Cx| {});
     };
     ( $app:ident, font_set: International, font_assets: [$($asset:expr),* $(,)?], configure: $configure:expr ) => {
-        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
+        $crate::app_main!(@impl $app, $crate::FontSet::International, $crate::FontSet::International, $crate::INTERNATIONAL_FONT_ASSET_MANIFEST, [$($asset),*], $configure);
     };
-    (@impl $app:ident, $font_set:expr, $manifest:expr, [$($asset:expr),*], $configure:expr) => {
+    (@impl $app:ident, $font_set:expr, $web_font_set:expr, $manifest:expr, [$($asset:expr),*], $configure:expr) => {
         // The payload is line-oriented UTF-8. Lane B reads this section from
         // freshly linked wasm before any optional custom-section stripping.
         const MAKEPAD_EXTRA_FONT_ASSETS: &[&str] = &[$($asset),*];
@@ -550,6 +591,7 @@ macro_rules! app_main {
                 $crate::new_cx_with_font_set(
                 $crate::_app_main_event_closure!($app, $configure),
                 $font_set,
+                $web_font_set,
             )));
             $crate::startup_trace("Cx::new (vm + std script)");
             let studio_http = $crate::resolve_studio_http();
@@ -610,6 +652,7 @@ macro_rules! app_main {
                 let mut cx = Box::new($crate::new_cx_with_font_set(
                     $crate::_app_main_event_closure!($app, $configure),
                     $font_set,
+                    $web_font_set,
                 ));
                 cx.init_websockets(&studio_http);
                 cx.init_cx_os();
@@ -630,6 +673,7 @@ macro_rules! app_main {
             let mut cx = Box::new($crate::new_cx_with_font_set(
                 $crate::_app_main_event_closure!($app, $configure),
                 $font_set,
+                $web_font_set,
             ));
             cx.init_websockets(&studio_http);
             cx.init_cx_os();
@@ -646,6 +690,7 @@ macro_rules! app_main {
                 let mut cx = Box::new($crate::new_cx_with_font_set(
                     $crate::_app_main_event_closure!($app, $configure),
                     $font_set,
+                    $web_font_set,
                 ));
                 let studio_http = $crate::resolve_studio_http();
                 cx.init_websockets(&studio_http);
@@ -665,7 +710,9 @@ macro_rules! app_main {
             let mut cx = Box::new($crate::new_cx_with_font_set(
                 $crate::_app_main_event_closure!($app, $configure),
                 $font_set,
+                $web_font_set,
             ));
+            $crate::install_embedded_shader_pack(&mut cx, $crate::embedded_shader_pack!());
             let studio_http = $crate::resolve_studio_http();
             cx.init_websockets(&studio_http);
             cx.init_cx_os();
@@ -736,7 +783,7 @@ mod font_set_macro_compile_test {
     #[test]
     fn every_entry_point_uses_a_pre_frozen_font_selection() {
         for set in [FontSet::Latin, FontSet::International] {
-            let cx = new_cx_with_font_set(Box::new(|_, _| {}), set);
+            let cx = new_cx_with_font_set(Box::new(|_, _| {}), set, set);
             assert_eq!(cx.font_set(), set);
             assert!(cx.is_font_set_frozen());
         }

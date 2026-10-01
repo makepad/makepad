@@ -1,3 +1,4 @@
+use crate::scan::ScanSpawned;
 use {
     crate::{
         animator::AnimatorImpl,
@@ -737,6 +738,10 @@ pub struct PortalList {
     // Templates stored as rooted ScriptObjectRef - populated in on_after_apply
     #[rust]
     templates: HashMap<LiveId, ScriptObjectRef>,
+    /// A collect run's variants of this list (its `scan:` list, else every
+    /// template), drawn with it until the run ends (see `crate::scan`).
+    #[rust]
+    scan_spawned: ScanSpawned,
     #[rust]
     items: ComponentMap<usize, WidgetItem>,
     #[rust]
@@ -2713,6 +2718,14 @@ impl WidgetNode for PortalList {
 }
 
 impl Widget for PortalList {
+    /// Spawns the rows it can show: its `scan:` list, else every template.
+    fn scan(&mut self, cx: &mut Cx, scan: &ScanEvent, scope: &mut Scope) {
+        let mut templates: Vec<(LiveId, ScriptObject)> = self.templates.iter().map(|(id, t)| (*id, t.as_object())).collect();
+        templates.sort_by_key(|(id, _)| id.0);
+        let source = self.source.as_object();
+        self.scan_spawned.spawn(cx, scan, scope, source, &templates);
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         let uid = self.widget_uid();
 
@@ -3974,12 +3987,13 @@ impl Widget for PortalList {
         }
     }
 
-    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+    fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         if self.draw_state.begin(cx, ListDrawState::Begin) {
             self.begin(cx, walk);
             return DrawStep::make_step();
         }
         if self.draw_state.get().is_some() {
+            self.scan_spawned.draw(cx, scope);
             self.end(cx);
             self.draw_state.end();
         }

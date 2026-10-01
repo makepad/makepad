@@ -76,6 +76,8 @@ workspace.members = [
     "libs/geom3d",
     "libs/text_mesh",
     "libs/typography",
+    "libs/web_pack",
+    "libs/web_manifest",
     "libs/font_subset",
     "libs/kinetic_type",
     "libs/raytrace",

@@ -946,6 +946,11 @@ pub enum VideoAction {
 }
 
 impl Widget for Video {
+    /// Video plays through the web runtime's media element.
+    fn scan(&mut self, _cx: &mut Cx, scan: &ScanEvent, _scope: &mut Scope) {
+        scan.need_js_feature("video-playback");
+    }
+
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         if let Some(texture) = &self.thumbnail_texture {
             self.draw_bg.draw_vars.set_texture(1, texture);

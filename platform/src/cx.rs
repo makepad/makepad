@@ -231,6 +231,9 @@ pub struct Cx {
     /// the draw buffers in place (the tweaker's theme pulse) and must
     /// re-apply after widgets rewrite them.
     pub post_draw_hook: Option<Box<dyn FnMut(&mut Cx)>>,
+    /// The collect run's driver (`MAKEPAD_RUN=collect-web`, see
+    /// [`crate::collect`]); `None` in a normal run.
+    pub(crate) collect: Option<Box<crate::collect::Collector>>,
     #[allow(unused)]
     pub(crate) screenshot_requests: Vec<ScreenshotRequest>,
     /// Frames to copy for transitions (`window_snapshot.rs`).
@@ -1023,6 +1026,7 @@ impl Cx {
             new_next_frames: Default::default(),
 
             post_draw_hook: None,
+            collect: None,
             screenshot_requests: Default::default(),
             window_snapshots: Vec::new(),
             pipeline_skips: 0,

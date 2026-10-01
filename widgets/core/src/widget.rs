@@ -354,6 +354,16 @@ pub trait Widget: WidgetNode {
     }
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 
+    /// A collect run's scan (`Event::Scan`, see `makepad_platform::collect`)
+    /// reached this widget: emit what it can need on the web that the run
+    /// does not show by drawing it (text it can show while hidden, open
+    /// text, JS sections, assets). Called once per widget, before its
+    /// `handle_event` gets the same event; the event then reaches every
+    /// child through `children()` whether or not `handle_event` forwards
+    /// it. Widgets that create children from data spawn their variants here
+    /// (see `crate::scan`). Default: nothing.
+    fn scan(&mut self, _cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {}
+
     fn script_call(
         &mut self,
         _vm: &mut ScriptVm,
@@ -900,12 +910,27 @@ impl WidgetRef {
         scope: &mut Scope,
         sweep_area: Area,
     ) {
+        if let Event::Scan(scan) = event {
+            return crate::scan::scan_widget(self, cx, scan, event, scope);
+        }
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.handle_event_with(cx, event, scope, sweep_area)
         }
     }
 
+    /// The widget's own [`Widget::scan`] and `handle_event` for a scan
+    /// (see `crate::scan::scan_widget`).
+    pub(crate) fn scan_inner(&self, cx: &mut Cx, scan: &ScanEvent, event: &Event, scope: &mut Scope) {
+        if let Some(inner) = self.0.borrow_mut().as_mut() {
+            inner.widget.scan(cx, scan, scope);
+            inner.widget.handle_event(cx, event, scope);
+        }
+    }
+
     pub fn handle_event(&self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Event::Scan(scan) = event {
+            return crate::scan::scan_widget(self, cx, scan, event, scope);
+        }
         if let Some(inner) = self.0.borrow_mut().as_mut() {
             inner.widget.handle_event(cx, event, scope);
         }

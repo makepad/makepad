@@ -105,6 +105,18 @@ fn show_help() {
     println!(
         "       --no-threads                              Build single-threaded wasm (no COOP/COEP needed)"
     );
+    println!(
+        "       --pack=<film|app|full>                    Collect the app's needs natively (collect-web run), then pack: shader pack, cut fonts, stripped JS"
+    );
+    println!(
+        "       --strict                                  With --pack: only what the run collected (no shader compiler, cut fonts)"
+    );
+    println!(
+        "       --link-table                              Export a growable function table (runtime-linked wasm modules)"
+    );
+    println!(
+        "       --opt-speed=<crate,..>                    Build these crates at opt-level 3 (the rest for size)"
+    );
     println!();
     println!("Apple iOS/TVOs Commands:");
     println!();

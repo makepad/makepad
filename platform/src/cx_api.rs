@@ -1046,7 +1046,15 @@ impl Cx {
 
     /// Get loaded resource data by the handle's owning heap and value
     /// (`ScriptHandleRef::heap_key` / `as_handle`).
+    #[track_caller]
     pub fn get_resource(&self, heap_key: usize, handle: ScriptHandle) -> Option<Rc<Vec<u8>>> {
+        // A collect run records every resource the app reads (its assets).
+        if let Some(scan) = self.collect_scan() {
+            let resources = self.script_data.resources.resources.borrow();
+            if let Some(res) = resources.iter().find(|res| res.has_handle(heap_key, handle)) {
+                scan.need_asset(res.dependency_path.as_deref().unwrap_or(&res.abs_path));
+            }
+        }
         if let Some(data) = self.script_data.resources.get_data(heap_key, handle) {
             return Some(data);
         }

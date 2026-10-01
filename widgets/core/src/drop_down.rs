@@ -957,6 +957,18 @@ impl WidgetNode for DropDown {
 }
 
 impl Widget for DropDown {
+    /// Every item's label, and the list opened so the run draws it.
+    fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
+        for label in &self.labels {
+            self.draw_text.scan_text(cx, label);
+        }
+        let global = cx.global::<PopupMenuGlobal>().clone();
+        let has_menu = global.map.borrow().contains_key(&self.popup_menu_key());
+        if has_menu {
+            self.set_active(cx);
+        }
+    }
+
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) {
         self.animator_toggle(
             cx,

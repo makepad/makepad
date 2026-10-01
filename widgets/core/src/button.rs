@@ -1541,6 +1541,11 @@ impl ScriptHook for Button {
 }
 
 impl Widget for Button {
+    /// Its text, laid out (hidden buttons draw nothing).
+    fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
+        self.draw_text.scan_text(cx, self.text.as_ref());
+    }
+
     /// What this button would be worth on a row, with `over` in force.
     ///
     /// Measured, not drawn: `DrawText::layout` touches no turtle and comes out

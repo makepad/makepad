@@ -1387,6 +1387,13 @@ impl CheckBox {
 }
 
 impl Widget for CheckBox {
+    /// Its texts, laid out (hidden or switched ones draw nothing).
+    fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
+        self.draw_text.scan_text(cx, self.text.as_ref());
+        self.draw_text.scan_text(cx, &self.text_on);
+        self.draw_text.scan_text(cx, &self.text_off);
+    }
+
     /// What this would be worth on a row, with `over` in force: the mark box,
     /// the label beside it, and the gap the label's own margin keeps between
     /// them.

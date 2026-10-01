@@ -2757,6 +2757,15 @@ impl TextInput {
 }
 
 impl Widget for TextInput {
+    /// What a person types cannot be bounded: its faces ship whole, with
+    /// the web runtime's text input and clipboard.
+    fn scan(&mut self, cx: &mut Cx, scan: &ScanEvent, _scope: &mut Scope) {
+        self.draw_text.scan_open_text(cx, scan);
+        self.draw_text.scan_text(cx, &self.empty_text);
+        scan.need_js_feature("text-input");
+        scan.need_js_feature("clipboard");
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
