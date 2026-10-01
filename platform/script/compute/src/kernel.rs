@@ -218,6 +218,22 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
 /// linked by the host (whichever crate compiled them): the host's UI
 /// thread takes them with [`take_unlinked`], builds one module
 /// ([`wasm_module`]), links it and sets each kernel's slots.
+/// The thread whose function table holds the linked kernel code: the host
+/// thread that links (register_precompiled, or [`mark_wasm_link_thread`]
+/// where a host links kernels itself).
+#[cfg(target_arch = "wasm32")]
+mod wasm_link_thread {
+    thread_local! {
+        static HERE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    pub fn mark() {
+        HERE.with(|h| h.set(true));
+    }
+    pub fn is_here() -> bool {
+        HERE.with(|h| h.get())
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 mod wasm_queue {
     use super::Kernel;
@@ -329,7 +345,16 @@ static PRECOMPILED_MISSES: AtomicU32 = AtomicU32::new(0);
 /// kernel compiles (a later call is ignored: false). A kernel whose program
 /// is among them runs that code from its compile on; any other is linked
 /// at run time as before ([`take_unlinked`]).
+/// This thread links kernel modules into its function table (wasm32): only
+/// here do kernels run their linked code; other threads interpret.
+#[cfg(target_arch = "wasm32")]
+pub fn mark_wasm_link_thread() {
+    wasm_link_thread::mark();
+}
+
 pub fn register_precompiled(entries: &[Precompiled]) -> bool {
+    #[cfg(target_arch = "wasm32")]
+    wasm_link_thread::mark();
     PRECOMPILED.set(entries.iter().map(|e| (e.key, (e.scalar, e.simd))).collect()).is_ok()
 }
 
@@ -581,6 +606,12 @@ impl Kernel {
     /// every record) calls it once per element, in order.
     #[cfg(target_arch = "wasm32")]
     fn run_wasm(&self, ctx: &mut [u32], table: &[u64], n: usize, mode: Mode) -> bool {
+        // A table slot names a function in the linking thread's instance
+        // only (wasm tables are per thread); elsewhere (a worker in a
+        // threaded build) the kernel interprets.
+        if !wasm_link_thread::is_here() {
+            return false;
+        }
         let scalar = self.wasm_slots[0].load(Ordering::Relaxed);
         let simd = self.wasm_slots[1].load(Ordering::Relaxed);
         if scalar == 0 && simd == 0 {
