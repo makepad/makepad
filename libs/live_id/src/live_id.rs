@@ -28,7 +28,7 @@ impl LiveIdInterner {
         ONCE.call_once(|| {
             let mut map = LiveIdInterner {
                 //alloc: 0,
-                id_to_string: HashMap::new(),
+                id_to_string: LiveIdMap::default(),
             };
             // pre-seed list for debugging purposes
             let fill = [
@@ -295,7 +295,7 @@ impl fmt::LowerHex for LiveId {
 
 pub struct LiveIdInterner {
     //alloc: u64,
-    id_to_string: HashMap<LiveId, String>,
+    id_to_string: LiveIdMap<LiveId, String>,
 }
 
 // ----------------------------------------------------------------------------
