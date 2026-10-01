@@ -66,7 +66,7 @@ script_mod! {
         u_proj: uniform(vec4(0.5773, 0.5773, 0.0, 0.0))
         // x = radius (m), y = bias floor (m), z = bias slope per metre of
         // view distance, w unused
-        u_ao: uniform(vec4(0.3, 0.015, 0.002, 0.0))
+        u_ao: uniform(vec4(0.6, 0.03, 0.002, 0.0))
         // x = 1: `depth_tex` is a HARDWARE depth buffer (it holds ndc z on
         // every backend); y, z = the projection's m[2][2] and m[3][2],
         // which turn it back into view distance.
@@ -259,7 +259,7 @@ script_mod! {
             // question, not a screen one; the blur never averages across a
             // silhouette or a step, which is what keeps the noise from
             // bleeding a halo off every edge.
-            let sigma = 0.03 * d + 0.02
+            let sigma = 0.03 * d + 0.04
             var sum = 0.0
             var wsum = 0.0
             var k = 0.0 - 4.0
@@ -318,10 +318,14 @@ pub struct SsaoParams {
 }
 
 impl Default for SsaoParams {
+    /// 0.6 m and 3 cm: what Sandbox's look was tuned with (the pass then
+    /// read hardware depth at half its distance, so its 0.3 m and 1.5 cm
+    /// were these in metres; the bilateral blur's depth sigma is doubled
+    /// to match).
     fn default() -> Self {
         Self {
-            radius: 0.3,
-            bias: 0.015,
+            radius: 0.6,
+            bias: 0.03,
             bias_slope: 0.002,
             strength: 0.7,
         }
@@ -624,13 +628,14 @@ mod tests {
         assert!(occ > 0.95, "a 10 cm ledge at 3 m reads {occ}");
     }
 
-    /// Law 4: an occluder far in front of the surface is a different
-    /// object, and contributes nothing.
+    /// Law 4: an occluder far in front of the surface (past twice the
+    /// radius) is a different object, and contributes nothing.
     #[test]
     fn distant_occluders_contribute_nothing() {
         let p = SsaoParams::default();
-        let occ = tap_occlusion(1.0, 1.0, &p, 10.0);
-        assert_eq!(occ, 0.0, "an occluder a metre in front must not shade");
+        let far = p.radius * 2.0 + 0.05;
+        let occ = tap_occlusion(far, far, &p, 10.0);
+        assert_eq!(occ, 0.0, "an occluder {far} m in front must not shade");
     }
 
     /// The defaults ARE the law: the bias floor stays above coplanar gaps

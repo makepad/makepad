@@ -15,10 +15,12 @@ impl Renderer {
     /// (`TextureFormat::DepthD32Sampled`); it still holds the previous
     /// frame, so the occlusion trails the image by one frame. It is bound
     /// through `set_ssao`: the model lanes apply it to their ambient term
-    /// only (never sun or lamps). `strength` 0 turns it off. Cost: three
-    /// half-resolution passes.
-    pub fn run_screen_ao(&mut self, cx: &mut Cx2d, scene_pass: &DrawPass, depth: &Texture, size: DVec2, strength: f32) {
-        let out = if strength > 0.0 { self.gi.run_screen_ao(cx, scene_pass.draw_pass_id(), depth, size) } else { None };
+    /// only (never sun or lamps), as dark as `params.strength` (0 turns
+    /// it off) over `params.radius` metres. Cost: three half-resolution
+    /// passes.
+    pub fn run_screen_ao(&mut self, cx: &mut Cx2d, scene_pass: &DrawPass, depth: &Texture, size: DVec2, params: crate::ssao::SsaoParams) {
+        let strength = params.strength;
+        let out = if strength > 0.0 { self.gi.run_screen_ao(cx, scene_pass.draw_pass_id(), depth, size, params) } else { None };
         self.set_ssao(out.map(|t| (t, strength.min(1.0))));
     }
 

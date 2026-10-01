@@ -521,13 +521,13 @@ impl FastGi {
     /// PREVIOUS frame) as child passes of `scene_pass`, at half resolution;
     /// returns the (ao, view distance) target. The scene pass's camera
     /// uniforms still hold the matrices that depth was drawn with.
-    pub fn run_screen_ao(&mut self,cx:&mut Cx2d,scene_pass:DrawPassId,depth:&Texture,size:DVec2)->Option<Texture> {
+    pub fn run_screen_ao(&mut self,cx:&mut Cx2d,scene_pass:DrawPassId,depth:&Texture,size:DVec2,params:crate::ssao::SsaoParams)->Option<Texture> {
         let p=cx.passes[scene_pass].pass_uniforms.camera_projection;
         // Perspective only (w = -z); nothing is drawn before the first frame.
         if p.v[11]!=-1.0||p.v[0]==0.0||p.v[5]==0.0||size.x<2.0||size.y<2.0 {return None;}
         self.ao.pass.hardware_depth=Some((p.v[10],p.v[14]));
         let proj=crate::ssao::SsaoProjection{ortho:false,half_x:1.0/p.v[0],half_y:1.0/p.v[5]};
-        self.ao.pass.run(cx,size*0.5,depth,proj,crate::ssao::SsaoParams::default(),scene_pass);
+        self.ao.pass.run(cx,size*0.5,depth,proj,params,scene_pass);
         self.stats.ao_gpu_ms=self.ao.pass.gpu_min_ms();
         self.ao.pass.output().cloned()
     }
