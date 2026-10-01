@@ -68,6 +68,9 @@ struct FuncGen<'a> {
     /// Open labels, innermost last: their result type, or `Loop` (never a
     /// branch target outside the counter's own, so loops stay bounded).
     labels: Vec<Label>,
+    /// A function that never returns (`(i32, i32) -> ()`, it traps), called
+    /// the way a panic is: `call; unreachable` under a condition.
+    panic: Option<u32>,
 }
 
 impl<'a> FuncGen<'a> {
@@ -272,6 +275,22 @@ impl<'a> FuncGen<'a> {
     }
 
     fn stmt(&mut self) {
+        if let Some(panic) = self.panic {
+            if self.depth < 4 && self.rng.chance(15) {
+                self.depth += 1;
+                self.expr(ValType::I32);
+                self.body.push(Instr::If(BlockType::Empty));
+                self.labels.push(Label::Empty);
+                self.expr(ValType::I32);
+                self.expr(ValType::I32);
+                self.body.push(Instr::Call(panic));
+                self.body.push(Instr::Unreachable);
+                self.labels.pop();
+                self.body.push(Instr::End);
+                self.depth -= 1;
+                return;
+            }
+        }
         self.depth += 1;
         match self.rng.below(10) {
             0 | 1 => {
@@ -385,6 +404,12 @@ impl<'a> FuncGen<'a> {
 }
 
 fn gen_module(seed: u64) -> Module {
+    gen_module_with(seed, false)
+}
+
+/// With `panics`, the functions call a never-returning function under
+/// conditions, as panics are called.
+fn gen_module_with(seed: u64, panics: bool) -> Module {
     let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
     let mut module = Module::default();
     for _ in 0..3 + rng.below(5) {
@@ -420,6 +445,10 @@ fn gen_module(seed: u64) -> Module {
         });
     }
     let num_funcs = 4 + rng.below(12);
+    let panic = panics.then(|| {
+        module.types.push(FuncType { params: vec![ValType::I32, ValType::I32], results: vec![] });
+        num_funcs as u32
+    });
     for f in 0..num_funcs {
         let ty = rng.below(module.types.len()) as u32;
         // Duplicate an earlier function of the same type now and then.
@@ -443,6 +472,7 @@ fn gen_module(seed: u64) -> Module {
             body: Vec::new(),
             depth: 0,
             labels: Vec::new(),
+            panic,
         };
         gen.stmts(5);
         if let Some(result) = fty.results.first() {
@@ -452,6 +482,10 @@ fn gen_module(seed: u64) -> Module {
         let body = gen.body;
         let locals = gen.locals[fty.params.len()..].to_vec();
         module.funcs.push(Func { ty, locals, body });
+    }
+    if panic.is_some() {
+        let ty = module.types.len() as u32 - 1;
+        module.funcs.push(Func { ty, locals: vec![], body: vec![Instr::Unreachable, Instr::End] });
     }
     module.tables.push(TableType {
         elem: ValType::FuncRef,
@@ -736,6 +770,7 @@ fn configs() -> Vec<(&'static str, OptimizeOptions)> {
         ("merge", alone(&|o| o.merge = true)),
         ("compact", alone(&|o| o.compact = true)),
         ("order", alone(&|o| o.order = true)),
+        ("panics", OptimizeOptions { panic_trap: true, symbols: true, ..OptimizeOptions::default() }),
     ]
 }
 
@@ -745,6 +780,7 @@ fn work(test: &str) -> Vec<(u64, usize)> {
     let (range, cfgs): (std::ops::Range<u64>, std::ops::Range<usize>) = match test {
         "all" => (1..401, 0..1),
         "strip" => (2000..2200, STRIP..STRIP + 1),
+        "panics" => (3000..3200, PANICS..PANICS + 1),
         _ => (1000..1150, 1..7),
     };
     let range = one.map_or(range, |seed| seed..seed + 1);
@@ -752,7 +788,10 @@ fn work(test: &str) -> Vec<(u64, usize)> {
 }
 
 /// The config index of the strip test (past the pass configs).
-const STRIP: usize = 7;
+const STRIP: usize = 8;
+
+/// The config index of the panic-trap test.
+const PANICS: usize = 7;
 
 /// One check: the generated module, its bytes, the optimised bytes, how
 /// many functions went, and the calls to compare (all exports when `None`).
@@ -768,7 +807,7 @@ fn optimise(seed: u64, cfg: usize) -> Check {
     if cfg == STRIP {
         return strip(seed);
     }
-    let module = gen_module(seed);
+    let module = gen_module_with(seed, cfg == PANICS);
     let bytes = encode(&module);
     if let Err(msg) = wasm_validate(&bytes) {
         panic!("seed {seed}: generator made an invalid module: {msg}");
@@ -1069,5 +1108,16 @@ fn stripped_modules_replay_the_same() {
     let removed = fuzz("strip");
     if std::env::var("FUZZ_SEED").is_err() {
         assert!(removed > 100, "only {removed} functions stripped");
+    }
+}
+
+/// Panic sites become traps: whatever traps still traps at the same call,
+/// and everything else behaves the same.
+#[test]
+fn panic_traps_behave_the_same() {
+    let removed = fuzz("panics");
+    if std::env::var("FUZZ_SEED").is_err() {
+        // Every module loses its panic function.
+        assert!(removed >= 200, "only {removed} functions removed");
     }
 }
