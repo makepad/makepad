@@ -206,7 +206,7 @@ script_mod! {
             // xz — walls would smear it vertically. Dynamics sample it too,
             // deliberately: a crate rolling through a house's shadow should
             // darken, and this is the only shadow-receiving dynamics get.
-            let lm = self.light_map.sample_as_bgra(self.v_lm_uv)
+            let lm = self.light_map.sample(self.v_lm_uv)
             let has_lm = step(0.000001, self.lm_rect.z)
                 * clamp(self.v_up * 4.0, 0.0, 1.0) * self.v_lm_in
             // Shadow-top comparison: the A channel says what reaches the

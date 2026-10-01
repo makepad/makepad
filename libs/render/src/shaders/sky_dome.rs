@@ -284,7 +284,7 @@ script_mod! {
                 let u = atan2(dir.x, dir.z) * 0.15915494 * self.sky_p.y + self.sky_p.z
                 let pitch = asin(clamp(dir.y, 0.0 - 1.0, 1.0))
                 let v = clamp(0.5 - pitch * 0.31830989 / max(self.sky_q.x, 0.001), 0.0, 1.0)
-                let c = self.sky0.sample_as_bgra_repeat(vec2(u, v))
+                let c = self.sky0.sample_repeat(vec2(u, v))
                 return self.sky_out(c.xyz)
             }
             if self.sky_p.x < 2.5 {
@@ -297,8 +297,8 @@ script_mod! {
                 let l = 378.0 / max(length(d), 0.0001)
                 let back = vec2(self.sky_p.z + d.x * l, self.sky_p.z + d.z * l) * 0.0078125
                 let front = vec2(self.sky_p.w + d.x * l, self.sky_p.w + d.z * l) * 0.0078125
-                let b = self.sky0.sample_as_bgra_repeat(back)
-                let f = self.sky1.sample_as_bgra_repeat(front)
+                let b = self.sky0.sample_repeat(back)
+                let f = self.sky1.sample_repeat(front)
                 let c = mix(b.xyz, f.xyz, f.w * self.sky_q.y)
                 return self.sky_out(c)
             }
@@ -307,7 +307,7 @@ script_mod! {
             // would otherwise fetch the opposite pole's row in the last texel.
             let u = atan2(dir.x, dir.z) * 0.15915494 + 0.5 + self.sky_p.z
             let v = clamp(acos(clamp(dir.y, 0.0 - 1.0, 1.0)) * 0.31830989, 0.001, 0.999)
-            let c = self.sky0.sample_as_bgra_repeat(vec2(u, v))
+            let c = self.sky0.sample_repeat(vec2(u, v))
             return self.sky_out(c.xyz)
         }
 

@@ -117,9 +117,9 @@ script_mod! {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
                 let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 // Keep it fairly sharp so the magnified green reads as glass, not frost.
-                return self.scene_texture.sample_as_bgra(safe_uv) * 0.55
-                    + self.mip0_texture.sample_as_bgra(safe_uv) * 0.30
-                    + self.mip1_texture.sample_as_bgra(safe_uv) * 0.15
+                return self.scene_texture.sample(safe_uv) * 0.55
+                    + self.mip0_texture.sample(safe_uv) * 0.30
+                    + self.mip1_texture.sample(safe_uv) * 0.15
             }
 
             // Re-create the switch underneath (track capsule + sliding knob) so the lens can refract
@@ -387,9 +387,9 @@ script_mod! {
             sample_blur: fn(uv: vec2) -> vec4 {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
                 let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
-                return self.mip1_texture.sample_as_bgra(safe_uv) * 0.46
-                    + self.mip2_texture.sample_as_bgra(safe_uv) * 0.34
-                    + self.mip0_texture.sample_as_bgra(safe_uv) * 0.20
+                return self.mip1_texture.sample(safe_uv) * 0.46
+                    + self.mip2_texture.sample(safe_uv) * 0.34
+                    + self.mip0_texture.sample(safe_uv) * 0.20
             }
 
             pixel: fn() {
@@ -502,18 +502,18 @@ script_mod! {
                 let source_uv = vec2(uv.x, mix(uv.y, 1.0 - uv.y, self.source_y_flip))
                 let safe_uv = clamp(source_uv, vec2(0.0, 0.0), vec2(1.0, 1.0))
                 if level < 0.5 {
-                    return self.scene_texture.sample_as_bgra(safe_uv)
+                    return self.scene_texture.sample(safe_uv)
                 }
                 if level < 1.5 {
-                    return self.mip0_texture.sample_as_bgra(safe_uv)
+                    return self.mip0_texture.sample(safe_uv)
                 }
                 if level < 2.5 {
-                    return self.mip1_texture.sample_as_bgra(safe_uv)
+                    return self.mip1_texture.sample(safe_uv)
                 }
                 if level < 3.5 {
-                    return self.mip2_texture.sample_as_bgra(safe_uv)
+                    return self.mip2_texture.sample(safe_uv)
                 }
-                return self.mip3_texture.sample_as_bgra(safe_uv)
+                return self.mip3_texture.sample(safe_uv)
             }
 
             sample_blur: fn(level: float, uv: vec2) -> vec4 {

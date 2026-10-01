@@ -292,7 +292,7 @@ script_mod! {
         surface_display: fn(v:vec3)->vec3 {return mix(v*12.92,1.055*pow(max(v,vec3(0.0,0.0,0.0)),vec3(0.4166667,0.4166667,0.4166667))-vec3(0.055,0.055,0.055),step(vec3(0.0031308,0.0031308,0.0031308),v))}
         pixel: fn() {
             if self.fur_mask() < 0.5 { discard() }
-            let tex = self.tex.sample_as_bgra_repeat(self.v_uv)
+            let tex = self.tex.sample_repeat(self.v_uv)
             let alpha=tex.w*self.v_color.w*self.material_alpha
             if self.surface_on>0.5 && self.alpha_mode>0.5 && self.alpha_mode<1.5 && alpha<self.alpha_cutoff{discard()}
             let albedo = self.color_adjust(self.to_lin(tex.xyz)*self.to_lin(self.v_color.xyz), self.tint, self.color_adjust_ctl)
@@ -316,7 +316,7 @@ script_mod! {
             // every pole). The shadow-top plane rejects the ground's shadow
             // for vertices ABOVE the blocker along the sun ray: a fence
             // rail shades the shins, never the head over it.
-            let lmg = self.light_map.sample_as_bgra(self.v_lmg.xy)
+            let lmg = self.light_map.sample(self.v_lmg.xy)
             let top_g = self.lm_top_decode.x
                 + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
             let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
@@ -354,11 +354,11 @@ script_mod! {
                     let tangent=normalize(dp1*du2.y-dp2*du1.y)*orientation
                     let bitangent=normalize(dp2*du1.x-dp1*du2.x)*orientation
                     // Tangent-space X and Y; Z is rebuilt (BC5 normal maps store only XY).
-                    let xy=self.normal_map.sample_as_bgra_repeat(self.v_uv).xy*2.0-vec2(1.0,1.0)
+                    let xy=self.normal_map.sample_repeat(self.v_uv).xy*2.0-vec2(1.0,1.0)
                     let mapped=vec3(xy.x,xy.y,sqrt(max(1.0-dot(xy,xy),0.0)))
                     n=normalize(tangent*(mapped.x*self.normal_scale)+bitangent*(mapped.y*self.normal_scale)+n*mapped.z)
                 }
-                let orm=self.orm_map.sample_as_bgra_repeat(self.v_uv)
+                let orm=self.orm_map.sample_repeat(self.v_uv)
                 let rough=clamp(self.roughness*orm.y,0.045,1.0)
                 let metal=clamp(self.metallic*orm.z,0.0,1.0)
                 let light=normalize(self.light_dir)
@@ -383,8 +383,8 @@ script_mod! {
                 let environment=mix(self.sun_ground,self.sun_sky,clamp(reflection.y*0.5+0.5,0.0,1.0))
                 let fresnel=f0+(max(vec3(1.0-rough,1.0-rough,1.0-rough),f0)-f0)*pow(1.0-ndv,5.0)
                 let ambient=(base*(1.0-metal)*self.gi_ambient(self.v_csm.xyz,n,mix(self.sun_ground,self.sun_sky,clamp(n.y*0.5+0.5,0.0,1.0)))+environment*fresnel)*ao
-                let occlusion=mix(1.0,self.occlusion_map.sample_as_bgra_repeat(self.v_uv).x,self.occlusion_strength)
-                let emission=self.surface_linear(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz)*self.emissive
+                let occlusion=mix(1.0,self.occlusion_map.sample_repeat(self.v_uv).x,self.occlusion_strength)
+                let emission=self.surface_linear(self.emissive_map.sample_repeat(self.v_uv).xyz)*self.emissive
                 let punctual=self.cluster_pbr(self.v_csm.xyz,n,self.eye,base,rough,metal)
                 var result=self.fur_shade(direct+ambient*occlusion+punctual*ao_direct,n,self.eye-self.v_csm.xyz)+emission
                 if self.fur_layer.y>0.5{result=self.toy_coat(result,n,view,light,self.sun_color*(ndl*sun_vis*ao_direct*mix(1.0,3.14159265,self.lin_ctl.x)),ao)}

@@ -554,7 +554,7 @@ script_mod! {
             if abs(self.v_clip.x) > 1.001 || abs(self.v_clip.y) > 1.001 {
                 discard()
             }
-            if self.tex.sample_as_bgra_repeat(self.v_uv).w < 0.5 {
+            if self.tex.sample_repeat(self.v_uv).w < 0.5 {
                 discard()
             }
             return vec4(self.v_d, 0.0, 0.0, 1.0)

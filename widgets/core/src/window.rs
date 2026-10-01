@@ -40,7 +40,7 @@ script_mod! {
         source_texture: texture_2d(float)
 
         sample_source: fn(uv: vec2) -> vec4 {
-            return self.source_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return self.source_texture.sample(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
 
         pixel: fn() {
@@ -78,7 +78,7 @@ script_mod! {
         source_texture: texture_2d(float)
 
         sample_source: fn(uv: vec2) -> vec4 {
-            return self.source_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return self.source_texture.sample(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
 
         pixel: fn() {
@@ -119,7 +119,7 @@ script_mod! {
         pixel: fn() {
             let p = self.source_offset + self.pos * self.source_scale
             let uv = vec2(p.x, mix(p.y, 1.0 - p.y, self.source_y_flip))
-            return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return self.scene_texture.sample(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
     }
 
@@ -131,7 +131,7 @@ script_mod! {
         snapshot_alpha: uniform(1.0)
 
         pixel: fn() {
-            let c = self.snapshot.sample_as_bgra(clamp(self.pos, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            let c = self.snapshot.sample(clamp(self.pos, vec2(0.0, 0.0), vec2(1.0, 1.0)))
             return vec4(c.xyz, 1.0) * self.snapshot_alpha
         }
     }
@@ -144,7 +144,7 @@ script_mod! {
         // Downscale-resolve into the window: one bilinear tap = a 2x2 box average at supersample 2.
         pixel: fn() {
             let uv = vec2(self.pos.x, mix(self.pos.y, 1.0 - self.pos.y, self.source_y_flip))
-            return self.scene_texture.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return self.scene_texture.sample(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
     }
 

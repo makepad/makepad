@@ -322,7 +322,7 @@ impl ImageBuffer {
     }
 
     /// Same as [`into_new_mip_texture`], with REPEAT wrap so UVs outside 0..1
-    /// tile. Pair with `sample_as_bgra_repeat` (not `fract(uv)`) so mip LOD
+    /// tile. Pair with `sample_repeat` (not `fract(uv)`) so mip LOD
     /// stays valid across wrap seams.
     pub fn into_new_mip_repeat_texture(self, cx: &mut Cx) -> Texture {
         self.into_new_mip_texture_wrap(cx, TextureWrap::Repeat)

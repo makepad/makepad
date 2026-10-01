@@ -160,7 +160,7 @@ script_mod! {
                 // used when walk size is not specified or non-fixed.
                 if self.target_size.x <= 0.0 || self.target_size.y <= 0.0 {
                     if self.show_thumbnail > 0.0 {
-                        return self.thumbnail_texture.sample_as_bgra(self.pos).xyzw
+                        return self.thumbnail_texture.sample(self.pos).xyzw
                     } else if self.yuv_enabled > 0.5 {
                         return self.sample_yuv(self.pos)
                     } else if self.video_rgba_2d > 0.5 {
@@ -197,7 +197,7 @@ script_mod! {
                 let adjusted_pos = self.pos * scale + adjusted_pan
 
                 if self.show_thumbnail > 0.5 {
-                    return self.thumbnail_texture.sample_as_bgra(adjusted_pos).xyzw
+                    return self.thumbnail_texture.sample(adjusted_pos).xyzw
                 } else if self.yuv_enabled > 0.5 {
                     return self.sample_yuv(adjusted_pos)
                 } else if self.video_rgba_2d > 0.5 {

@@ -441,7 +441,7 @@ script_mod! {
                     let digit = floor(n / pow(10.0, 2.0 - k)) - floor(n / pow(10.0, 3.0 - k)) * 10.0
                     suv = vec2((1.5 + 6.0 * digit + 6.0 * fract(cell)) / 63.0, 0.5 + pv * 0.5)
                 }
-                return self.tex.sample_as_bgra(suv)
+                return self.tex.sample(suv)
             }
             if self.tex_mag.x > 0.5 {
                 let tsz = self.tex.size()
@@ -451,7 +451,7 @@ script_mod! {
                     suv = (floor(tuv) + vec2(0.5, 0.5)) / tsz
                 }
             }
-            return self.tex.sample_as_bgra_repeat(suv)
+            return self.tex.sample_repeat(suv)
         }
 
         pixel: fn() {
@@ -508,7 +508,7 @@ script_mod! {
             // Detail: blendFunc GL_DST_COLOR GL_SRC_COLOR = 2 * dest * src.
             // Mean-127 overlay is identity; far mips go gray and drop out.
             if self.detail_st.x > 0.001 {
-                let det = self.detail_map.sample_as_bgra_repeat(self.v_uv * self.detail_st)
+                let det = self.detail_map.sample_repeat(self.v_uv * self.detail_st)
                 albedo = vec3(albedo.x * det.x * 2.0, albedo.y * det.y * 2.0, albedo.z * det.z * 2.0)
             }
             // AO scales AMBIENT only. Ambient is light arriving from
@@ -564,13 +564,13 @@ script_mod! {
             var lm = vec4(0.0, 0.0, 0.0, 0.0)
             var sun_vis_g = 1.0
             if self.csm_p.x < 0.5 || self.cluster_on < 0.5 {
-                lm = self.light_map.sample_as_bgra(self.v_lm_uv)
+                lm = self.light_map.sample(self.v_lm_uv)
                 // Dynamics gate their sun through the GROUND region instead
                 // (statics have v_lmg.z = 0, dynamics have lm_rect = 0, so the
                 // two gates never both engage). The shadow-top plane rejects
                 // the ground's shadow for vertices ABOVE the blocker along the
                 // sun ray: a fence rail shades shins, never the head over it.
-                let lmg = self.light_map.sample_as_bgra(self.v_lmg.xy)
+                let lmg = self.light_map.sample(self.v_lmg.xy)
                 let top_g = self.lm_top_decode.x
                     + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
                 let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)

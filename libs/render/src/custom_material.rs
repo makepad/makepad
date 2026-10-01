@@ -103,7 +103,7 @@ script_mod! {
         // mat_shadow_alpha_mask, the surface hook's alpha of the texel.
         mat_shadow_alpha: fn() -> float { return 1.0 }
         mat_shadow_alpha_mask: fn() -> float {
-            let texel = self.tex.sample_as_bgra_repeat(self.v_uv)
+            let texel = self.tex.sample_repeat(self.v_uv)
             return self.surface(texel).w
         }
         pixel: fn() {

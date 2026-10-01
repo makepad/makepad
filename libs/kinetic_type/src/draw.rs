@@ -181,7 +181,7 @@ script_mod! {
             if self.k_misc.y < 0.5 {
                 return self.col_bg
             }
-            return self.content_tex.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return self.content_tex.sample(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
         // The frame uv of this pixel (0,0 top left).
         screen_uv: fn() -> vec2 {
@@ -376,7 +376,7 @@ script_mod! {
             if self.k_misc.y < 0.5 {
                 return self.col_bg
             }
-            return self.content_tex.sample_as_bgra(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
+            return self.content_tex.sample(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)))
         }
         // The picture at uv (0,0 top left); `fract` a coordinate to tile it.
         // The picture at uv (0,0 top left), filtered over this pixel's

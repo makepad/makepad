@@ -82,7 +82,7 @@ script_mod! {
                 vec3(0.0, 0.0, 0.0),
                 vec3(1.0, 1.0, 1.0)
             )
-            let direct = self.tex_y.sample_as_bgra(uv)
+            let direct = self.tex_y.sample(uv)
             let lit = rgb.mix(direct.xyz, self.rgba)
             return vec4(lit * self.alpha_v, self.alpha_v)
         }

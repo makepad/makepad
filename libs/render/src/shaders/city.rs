@@ -87,7 +87,7 @@ script_mod! {
             if tex.w < 0.5 { self.clip() }
             let kind = self.metallic
             let night = self.city.x
-            var orm = self.orm_map.sample_as_bgra_repeat(self.v_uv)
+            var orm = self.orm_map.sample_repeat(self.v_uv)
             let pos = self.v_csm.xyz
             let to_eye = self.eye.xyz - pos
             let dist = length(to_eye)
@@ -106,8 +106,8 @@ script_mod! {
                 let into = max(dot(rd, ng * (0.0 - 1.0)), 0.08)
                 let k = 0.22 / 14.4 / into * (1.0 - smoothstep(90.0, 140.0, dist))
                 let uv2 = self.v_uv + vec2(dot(rd, tx) * k, (0.0 - rd.y) * k)
-                let orm2 = self.orm_map.sample_as_bgra_repeat(uv2)
-                let tex2 = self.tex.sample_as_bgra_repeat(uv2)
+                let orm2 = self.orm_map.sample_repeat(uv2)
+                let tex2 = self.tex.sample_repeat(uv2)
                 reveal = 1.0 - orm2.x
                 orm = vec4(orm2.x, mix(orm2.y, 0.8, reveal), mix(orm2.z, 0.0, reveal), orm2.w)
                 tex = vec4(tex2.xyz, mix(tex2.w, 1.0, reveal))
@@ -120,7 +120,7 @@ script_mod! {
             var albedo = self.to_scene(tex.xyz) * self.to_lin(self.v_tint.xyz) * tintc
             var n = ng
             if self.detail_st.x > 0.001 {
-                let det = self.detail_map.sample_as_bgra_repeat(self.v_uv * self.detail_st)
+                let det = self.detail_map.sample_repeat(self.v_uv * self.detail_st)
                 albedo = albedo * det.xyz * 2.0
                 // Bump from the grain (surface-gradient bump mapping on the
                 // screen derivatives): masonry reads as relief under a low

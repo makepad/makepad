@@ -24,7 +24,7 @@ script_mod! {
         draw_tex +: {
             tex: texture_2d(float)
             pixel: fn() {
-                return self.tex.sample_as_bgra(self.pos)
+                return self.tex.sample(self.pos)
             }
         }
     }

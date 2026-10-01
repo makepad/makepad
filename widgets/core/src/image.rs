@@ -46,7 +46,7 @@ script_mod! {
         // Whole texels are had by snapping to the texel's centre and reading
         // with the ordinary filter: at the magnification where it matters
         // every tap then lands on that one texel. Snapping rather than asking
-        // the sampler for nearest keeps the read on `sample_as_bgra`, the one
+        // the sampler for nearest keeps the read on `sample`, the one
         // form whose channel order the web backend corrects; a nearest read
         // there comes back with red and blue swapped. `scale` is the share of
         // the texture the quad spans, so a cropped picture measures its texels
@@ -55,7 +55,7 @@ script_mod! {
             // Nobody asked: the filtered read, and none of the arithmetic
             // below is reached to arrive at it.
             if self.sample_mode == 0.0 {
-                return self.image_texture.sample_as_bgra(uv)
+                return self.image_texture.sample(uv)
             }
             let size = self.image_texture.size()
             let texels_x = max(size.x, 1.0)
@@ -66,9 +66,9 @@ script_mod! {
                     (floor(uv.x * texels_x) + 0.5) / texels_x,
                     (floor(uv.y * texels_y) + 0.5) / texels_y
                 )
-                return self.image_texture.sample_as_bgra(snapped)
+                return self.image_texture.sample(snapped)
             }
-            return self.image_texture.sample_as_bgra(uv)
+            return self.image_texture.sample(uv)
         }
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {

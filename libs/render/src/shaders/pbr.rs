@@ -206,15 +206,15 @@ script_mod! {
                 var bw = gn * gn
                 bw = bw * bw
                 bw = bw / max(bw.x + bw.y + bw.z, 0.0001)
-                let ty = self.tex.sample_as_bgra_repeat(vec2(wp.x, wp.z))
+                let ty = self.tex.sample_repeat(vec2(wp.x, wp.z))
                 if self.triplanar < 0.0 {
                     // An up-facing part (negative scale, terrain_mesh
                     // FLAT_Y): the side projections weigh ~1% at most.
                     // A per-draw branch, so implicit mip selection holds.
                     tex = ty
                 } else {
-                    let tx = self.tex.sample_as_bgra_repeat(vec2(wp.z, 0.0 - wp.y))
-                    let tz = self.tex.sample_as_bgra_repeat(vec2(wp.x, 0.0 - wp.y))
+                    let tx = self.tex.sample_repeat(vec2(wp.z, 0.0 - wp.y))
+                    let tz = self.tex.sample_repeat(vec2(wp.x, 0.0 - wp.y))
                     tex = tx * bw.x + ty * bw.y + tz * bw.z
                 }
                 // Anti-tiling: a texture that repeats every few metres reads
@@ -224,7 +224,7 @@ script_mod! {
                 let dist = length(self.eye.xyz - self.v_csm.xyz)
                 let far = smoothstep(25.0, 140.0, dist)
                 if far > 0.001 {
-                    let t2 = self.tex.sample_as_bgra_repeat(vec2(wp.x * 0.173 + 0.31, wp.z * 0.173 - 0.47))
+                    let t2 = self.tex.sample_repeat(vec2(wp.x * 0.173 + 0.31, wp.z * 0.173 - 0.47))
                     tex = vec4(mix(tex.xyz, t2.xyz, 0.5 * far * bw.y), tex.w)
                 }
                 let drift = self.tn_noise(self.v_csm.xz * 0.017) * 0.65 + self.tn_noise(self.v_csm.xz * 0.061) * 0.35
@@ -298,8 +298,8 @@ script_mod! {
             var lm = vec4(0.0, 0.0, 0.0, 0.0)
             var sun_vis_g = 1.0
             if self.csm_p.x < 0.5 || self.cluster_on < 0.5 {
-                lm = self.light_map.sample_as_bgra(self.v_lm_uv)
-                let lmg = self.light_map.sample_as_bgra(self.v_lmg.xy)
+                lm = self.light_map.sample(self.v_lm_uv)
+                let lmg = self.light_map.sample(self.v_lmg.xy)
                 let top_g = self.lm_top_decode.x
                     + self.top_map.sample(self.v_lmg.xy).x * self.lm_top_decode.y
                 let occ_g = 1.0 - smoothstep(top_g - 0.15, top_g + 0.15, self.v_lmg.w)
@@ -328,7 +328,7 @@ script_mod! {
             // a factors-only material so the sample folds out to 1.
             // Factors only (orm_on 0): the map would fold out, so it is not read.
             var orm = vec4(1.0, 1.0, 1.0, 1.0)
-            if self.orm_on > 0.0 { orm = self.orm_map.sample_as_bgra_repeat(self.v_uv) }
+            if self.orm_on > 0.0 { orm = self.orm_map.sample_repeat(self.v_uv) }
             // Roughness floored at 0.045: a2 goes to zero below that and the
             // GGX denominator collapses to a single blown-out pixel that
             // aliases into a crawling white dot as the camera moves.
@@ -353,7 +353,7 @@ script_mod! {
                     let tangent=normalize(dp1*du2.y-dp2*du1.y)*orientation
                     let bitangent=normalize(dp2*du1.x-dp1*du2.x)*orientation
                     // Tangent-space X and Y; Z is rebuilt (BC5 normal maps store only XY).
-                    let xy=self.normal_map.sample_as_bgra_repeat(self.v_uv).xy*2.0-vec2(1.0,1.0)
+                    let xy=self.normal_map.sample_repeat(self.v_uv).xy*2.0-vec2(1.0,1.0)
                     let mapped=vec3(xy.x,xy.y,sqrt(max(1.0-dot(xy,xy),0.0)))
                     n=normalize(tangent*(mapped.x*self.normal_scale)+bitangent*(mapped.y*self.normal_scale)+n*mapped.z)
                 }
@@ -412,9 +412,9 @@ script_mod! {
             let local_pbr = self.cluster_pbr(self.v_csm.xyz, n, self.eye.xyz, albedo, rough, metal)
             // Per-draw factors of zero fold these maps out: skip the reads.
             var occlusion=1.0
-            if self.occlusion_strength*self.surface_on>0.0 {occlusion=mix(1.0,self.occlusion_map.sample_as_bgra_repeat(self.v_uv).x,self.occlusion_strength*self.surface_on)}
+            if self.occlusion_strength*self.surface_on>0.0 {occlusion=mix(1.0,self.occlusion_map.sample_repeat(self.v_uv).x,self.occlusion_strength*self.surface_on)}
             var emission=vec3(0.0,0.0,0.0)
-            if max(self.emissive.x,max(self.emissive.y,self.emissive.z))>0.0 {emission=self.to_scene(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz)*self.emissive}
+            if max(self.emissive.x,max(self.emissive.y,self.emissive.z))>0.0 {emission=self.to_scene(self.emissive_map.sample_repeat(self.v_uv).xyz)*self.emissive}
             emission = self.mat_emission(emission)
             // The sun as the light hook sees it: its radiance (colour and
             // shadow, before N.L) and its specular lobe per unit N.L.
@@ -524,7 +524,7 @@ script_mod! {
         pixel: fn() {
             // Repeat, like the world shaders: a material `tile` pattern
             // (wood grain, knurling, camo) runs its UVs past 1.
-            let tex = self.tex.sample_as_bgra_repeat(self.v_uv)
+            let tex = self.tex.sample_repeat(self.v_uv)
             // Masked decals (stencilled markings, vents, serrations) cut out.
             if self.alpha_mode > 0.5 && tex.w < self.alpha_cutoff { discard() }
             let albedo = self.lin3(tex.xyz) * self.lin3(self.v_vc.xyz)
@@ -540,12 +540,12 @@ script_mod! {
                     let o = sign(det)
                     let t = normalize(dp1 * du2.y - dp2 * du1.y) * o
                     let b = normalize(dp2 * du1.x - dp1 * du2.x) * o
-                    let xy = self.normal_map.sample_as_bgra_repeat(self.v_uv).xy * 2.0 - vec2(1.0, 1.0)
+                    let xy = self.normal_map.sample_repeat(self.v_uv).xy * 2.0 - vec2(1.0, 1.0)
                     let m = vec3(xy.x, xy.y, sqrt(max(1.0 - dot(xy, xy), 0.0)))
                     n = normalize(t * (m.x * self.normal_scale) + b * (m.y * self.normal_scale) + n * m.z)
                 }
             }
-            let orm = self.orm_map.sample_as_bgra_repeat(self.v_uv)
+            let orm = self.orm_map.sample_repeat(self.v_uv)
             let rough = clamp(self.roughness * mix(1.0, orm.y, self.orm_on), 0.04, 1.0)
             let metal = clamp(self.metallic * mix(1.0, orm.z, self.orm_on), 0.0, 1.0)
             let l = normalize(self.light_dir)
@@ -570,7 +570,7 @@ script_mod! {
             let smooth3 = 1.0 - rough
             let fr = max(vec3(smooth3, smooth3, smooth3), f0)
             let f_env = f0 + (fr - f0) * self.pow5(1.0 - ndv)
-            let emission = self.lin3(self.emissive_map.sample_as_bgra_repeat(self.v_uv).xyz) * self.emissive
+            let emission = self.lin3(self.emissive_map.sample_repeat(self.v_uv).xyz) * self.emissive
             let lit = albedo * ((1.0 - metal) * (ambient * ao + direct * mix(1.0, ao, 0.35)))
                 + sun_spec * f + env * f_env * ao + emission
             return vec4(lit, 1.0)

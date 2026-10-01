@@ -51,7 +51,7 @@ script_mod! {
 
         sample_env: fn(dir: vec3f) -> vec3f {
             if self.u_has_env_texture > 0.5 {
-                return self.env_texture.sample_as_bgra(dir).xyz
+                return self.env_texture.sample(dir).xyz
             }
             let t = clamp(dir.y * 0.5 + 0.5, 0.0, 1.0);
             return mix(vec3(0.05, 0.055, 0.065), vec3(0.42, 0.48, 0.56), t)

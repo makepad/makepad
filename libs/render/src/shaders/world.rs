@@ -398,7 +398,7 @@ script_mod! {
         }
 
         pixel: fn() {
-            let lm = self.light_map.sample_as_bgra(self.v_lm_uv)
+            let lm = self.light_map.sample(self.v_lm_uv)
             let has_lm = step(0.000001, self.lm_rect.z) * self.v_lm_in
             // Realtime: the cascades replace the baked A channel.
             let ndl_t = max(dot(normalize(self.v_dl_nrm), normalize(self.light_dir)), 0.0)

@@ -135,7 +135,7 @@ script_mod! {
 
         // One texel of a curve: (slope code, value), each from two bytes.
         kd_tap: fn(i: float, v: float) -> vec2 {
-            let t = self.knob_data.sample_as_bgra_nearest(vec2((i + 0.5) / 256.0, v))
+            let t = self.knob_data.sample_nearest(vec2((i + 0.5) / 256.0, v))
             return vec2(t.x * 255.0 * 256.0 + t.z * 255.0, t.y * 255.0 * 256.0 + t.w * 255.0) / 65535.0
         }
 

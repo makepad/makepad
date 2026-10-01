@@ -2576,7 +2576,7 @@ script_mod! {
         }
 
         pixel: fn() {
-            let color = self.tex.sample_as_bgra(self.uv)
+            let color = self.tex.sample(self.uv)
             let a = min(color.w * self.opacity_boost, 1.0)
             return vec4(color.xyz * a, a)
         }
@@ -2613,7 +2613,7 @@ script_mod! {
             // The texture stores the CONTINUOUS interpolated radar value
             // (0..255 in .x, coverage in .w); band the field HERE so the
             // isolines are screen-resolution crisp at any zoom.
-            let sampled = self.tex.sample_as_bgra(self.uv)
+            let sampled = self.tex.sample(self.uv)
             if sampled.w < 0.5 {
                 return vec4(0.0, 0.0, 0.0, 0.0)
             }

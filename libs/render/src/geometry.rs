@@ -268,7 +268,7 @@ mod shape_tests {
         // magnified texel to its centre (glTF NEAREST) but still hands the
         // raw, unwrapped uv to the repeat sampler.
         assert!(
-            decl.contains("var suv = self.v_uv") && decl.contains("self.tex.sample_as_bgra_repeat(suv)"),
+            decl.contains("var suv = self.v_uv") && decl.contains("self.tex.sample_repeat(suv)"),
             "world albedo must REPEAT-sample raw UVs"
         );
         assert!(

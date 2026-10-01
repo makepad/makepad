@@ -488,7 +488,7 @@ script_mod! {
             // source texel. Explicit level zero also keeps a generic decoded
             // image's optional mip chain out of this path. The same shader is
             // shared with smooth video, so that lane leaves `pixelated` off.
-            var color = self.tex.sample_as_bgra(self.v_uv)
+            var color = self.tex.sample(self.v_uv)
             if self.pixelated > 0.5 {
                 color = self.tex.sample_nearest(self.v_uv, 0.0)
             }

@@ -93,7 +93,7 @@ script_mod! {
 
         pixel: fn() {
             if self.post.x < 0.5 {
-                let color = self.scene_texture.sample_as_bgra(self.pos)
+                let color = self.scene_texture.sample(self.pos)
                 return Pal.premul(color)
             }
             let uv = self.pos

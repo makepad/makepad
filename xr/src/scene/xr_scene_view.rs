@@ -19,7 +19,7 @@ script_mod! {
         tint: vec4(1.0, 1.0, 1.0, 1.0)
 
         pixel: fn() {
-            let color = self.scene_texture.sample_as_bgra(self.pos)
+            let color = self.scene_texture.sample(self.pos)
             return Pal.premul(color * self.tint)
         }
     }

@@ -270,7 +270,7 @@ script_mod! {
             // Realtime and the Rendered fallback show the renderer's sky;
             // CAD modes keep Fab's flat viewport gradient.
             if self.u_mode.x > 2.5 && self.u_mode.x < 4.5 {
-                bg = self.lit.sample_as_bgra(uv).xyz
+                bg = self.lit.sample(uv).xyz
             }
             if g.w == 0.0 {
                 return vec4(bg, 1.0)
@@ -347,7 +347,7 @@ script_mod! {
             // light. The lit pass already carries the material tint, so
             // Solid pulls the saturation back out rather than running a
             // second shading pipeline.
-            var col = self.lit.sample_as_bgra(uv).xyz
+            var col = self.lit.sample(uv).xyz
             if self.u_mode.x < 1.5 && self.u_mode.x > 0.5 {
                 let luma = dot(col, vec3(0.2126, 0.7152, 0.0722))
                 col = col.mix(vec3(luma, luma, luma), 0.85)
@@ -672,7 +672,7 @@ script_mod! {
         ..mod.draw.DrawQuad
         scene_texture: texture_2d(float)
         pixel: fn() {
-            let color = self.scene_texture.sample_as_bgra(self.pos)
+            let color = self.scene_texture.sample(self.pos)
             return Pal.premul(color)
         }
     }

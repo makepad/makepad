@@ -253,66 +253,66 @@ script_mod! {
 
                 sample_at: fn(uv: vec2, idx: float) -> vec4 {
                     if idx < 0.5 {
-                        return self.scene_texture.sample_as_bgra(uv)
+                        return self.scene_texture.sample(uv)
                     }
                     if idx < 1.5 {
                         let size = max(self.mip0_texture.size(), vec2(1.0, 1.0))
                         let h = self.bicubic_h(uv, size)
                         let g0 = self.bicubic_g0(uv, size)
                         let g1 = 1.0 - g0
-                        return self.mip0_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                            + self.mip0_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                            + self.mip0_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                            + self.mip0_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                        return self.mip0_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                            + self.mip0_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                            + self.mip0_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                            + self.mip0_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                     }
                     if idx < 2.5 {
                         let size = max(self.mip1_texture.size(), vec2(1.0, 1.0))
                         let h = self.bicubic_h(uv, size)
                         let g0 = self.bicubic_g0(uv, size)
                         let g1 = 1.0 - g0
-                        return self.mip1_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                            + self.mip1_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                            + self.mip1_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                            + self.mip1_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                        return self.mip1_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                            + self.mip1_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                            + self.mip1_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                            + self.mip1_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                     }
                     if idx < 3.5 {
                         let size = max(self.mip2_texture.size(), vec2(1.0, 1.0))
                         let h = self.bicubic_h(uv, size)
                         let g0 = self.bicubic_g0(uv, size)
                         let g1 = 1.0 - g0
-                        return self.mip2_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                            + self.mip2_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                            + self.mip2_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                            + self.mip2_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                        return self.mip2_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                            + self.mip2_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                            + self.mip2_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                            + self.mip2_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                     }
                     if idx < 4.5 {
                         let size = max(self.mip3_texture.size(), vec2(1.0, 1.0))
                         let h = self.bicubic_h(uv, size)
                         let g0 = self.bicubic_g0(uv, size)
                         let g1 = 1.0 - g0
-                        return self.mip3_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                            + self.mip3_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                            + self.mip3_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                            + self.mip3_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                        return self.mip3_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                            + self.mip3_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                            + self.mip3_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                            + self.mip3_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                     }
                     if idx < 5.5 {
                         let size = max(self.mip4_texture.size(), vec2(1.0, 1.0))
                         let h = self.bicubic_h(uv, size)
                         let g0 = self.bicubic_g0(uv, size)
                         let g1 = 1.0 - g0
-                        return self.mip4_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                            + self.mip4_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                            + self.mip4_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                            + self.mip4_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                        return self.mip4_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                            + self.mip4_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                            + self.mip4_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                            + self.mip4_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                     }
                     let size = max(self.mip5_texture.size(), vec2(1.0, 1.0))
                     let h = self.bicubic_h(uv, size)
                     let g0 = self.bicubic_g0(uv, size)
                     let g1 = 1.0 - g0
-                    return self.mip5_texture.sample_as_bgra(vec2(h.x, h.y)) * (g0.x * g0.y)
-                        + self.mip5_texture.sample_as_bgra(vec2(h.z, h.y)) * (g1.x * g0.y)
-                        + self.mip5_texture.sample_as_bgra(vec2(h.x, h.w)) * (g0.x * g1.y)
-                        + self.mip5_texture.sample_as_bgra(vec2(h.z, h.w)) * (g1.x * g1.y)
+                    return self.mip5_texture.sample(vec2(h.x, h.y)) * (g0.x * g0.y)
+                        + self.mip5_texture.sample(vec2(h.z, h.y)) * (g1.x * g0.y)
+                        + self.mip5_texture.sample(vec2(h.x, h.w)) * (g0.x * g1.y)
+                        + self.mip5_texture.sample(vec2(h.z, h.w)) * (g1.x * g1.y)
                 }
 
                 pixel: fn() {

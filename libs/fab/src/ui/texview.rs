@@ -23,7 +23,7 @@ script_mod! {
             let cell = floor(self.pos * self.rect_size / 6.0)
             let check = modf(cell.x + cell.y, 2.0)
             let bg = vec4(0.16, 0.16, 0.16, 1.0).mix(vec4(0.22, 0.22, 0.22, 1.0), check)
-            let img = self.tex.sample_as_bgra(self.pos)
+            let img = self.tex.sample(self.pos)
             let color = bg.mix(vec4(img.xyz, 1.0), img.w * self.has_tex)
             sdf.fill_keep(color)
             sdf.stroke(fab.color_border, 1.0)
