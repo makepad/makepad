@@ -21,5 +21,6 @@ makepad-audio-reactive = { path = "../audio_reactive" }
 makepad-render-graph = { path = "../render_graph" }
 
 [dev-dependencies]
+makepad-text-mesh = { path = "../text_mesh", features = ["dev-fonts"] }
 # The check tool's window, readback and PNG writer.
 makepad-widgets = { path = "../../widgets", default-features = false }

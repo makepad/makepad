@@ -93,6 +93,11 @@ fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, ScriptValue
 /// and `makepad_render_graph::script_mod_passes`).
 pub fn script_mod(vm: &mut ScriptVm) {
     makepad_script_compute::module::register_shared_std(vm);
+    // The bundled fonts the 3D letters name (`FontSource::Bundled`) are in
+    // the widget library's resources, wherever this VM's widgets put them.
+    if let Some(dir) = vm.bx.code.crate_manifests.borrow().get("makepad_widgets") {
+        makepad_text_mesh::letters::set_fonts_dir(std::path::Path::new(dir).join("resources"));
+    }
     // Once per VM, however many hosts ask.
     let draw = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("draw").into(), NoTrap).as_object();
     let have = draw.is_some_and(|d| {

@@ -168,6 +168,7 @@ fn window_families(vm: &mut ScriptVm) -> WindowFamilies {
 ///
 /// `isolate` is the list a Splash isolate registers: the families that
 /// reach past the host service bridge (the browser and the map) stay out.
+#[allow(unused_variables)]
 fn families(isolate: bool) -> Vec<fn(&mut ScriptVm)> {
     #[allow(unused_mut)]
     let mut families: Vec<fn(&mut ScriptVm)> = Vec::new();

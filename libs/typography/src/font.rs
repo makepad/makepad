@@ -153,14 +153,10 @@ impl OutlineFont {
     }
 }
 
-/// Makepad's bundled fonts directory (`widgets/resources`).
-pub fn bundled_fonts_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../widgets/resources")
-}
-
 #[cfg(test)]
 pub(crate) fn test_font(file: &str) -> OutlineFont {
-    OutlineFont::from_file(&bundled_fonts_dir().join(file)).unwrap()
+    let dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../widgets/resources");
+    OutlineFont::from_file(&dir.join(file)).unwrap()
 }
 
 #[cfg(test)]

@@ -42,13 +42,28 @@ impl Default for FontSource {
     }
 }
 
-/// Makepad's bundled font directory (`widgets/resources`), or
-/// `MOTION3D_FONTS_DIR` when set.
+static FONTS_DIR: std::sync::RwLock<Option<PathBuf>> = std::sync::RwLock::new(None);
+
+/// Say where Makepad's bundled fonts are (the widget library's
+/// `resources`): a host calls it once, before building text.
+pub fn set_fonts_dir(dir: impl Into<PathBuf>) {
+    *FONTS_DIR.write().unwrap_or_else(|e| e.into_inner()) = Some(dir.into());
+}
+
+/// Makepad's bundled font directory, as the host said ([`set_fonts_dir`]),
+/// or `MOTION3D_FONTS_DIR` when set. Without either there is no directory
+/// (the path is empty and a read of a bundled name says so).
 pub fn fonts_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("MOTION3D_FONTS_DIR") {
         return PathBuf::from(dir);
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../widgets/resources")
+    if let Some(dir) = FONTS_DIR.read().unwrap_or_else(|e| e.into_inner()).clone() {
+        return dir;
+    }
+    #[cfg(any(test, feature = "dev-fonts"))]
+    return PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../widgets/resources");
+    #[cfg(not(any(test, feature = "dev-fonts")))]
+    PathBuf::new()
 }
 
 /// The file behind a bundled font name, `None` for an unknown name.
@@ -75,7 +90,11 @@ impl FontSource {
         match self {
             FontSource::Bundled(name) => {
                 let file = bundled_font_file(name).ok_or_else(|| format!("no bundled font `{name}`; bundled fonts: {}", BUNDLED_FONTS.join(", ")))?;
-                let path = fonts_dir().join(file);
+                let dir = fonts_dir();
+                if dir.as_os_str().is_empty() {
+                    return Err(format!("bundled font `{name}`: the host has not said where the fonts are (letters::set_fonts_dir)"));
+                }
+                let path = dir.join(file);
                 std::fs::read(&path).map_err(|e| format!("bundled font `{name}` ({}): {e}", path.display()))
             }
             FontSource::Path(path) => std::fs::read(path).map_err(|e| format!("font {}: {e}", path.display())),

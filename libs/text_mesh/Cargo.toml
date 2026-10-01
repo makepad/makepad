@@ -8,6 +8,11 @@ license = "MIT OR Apache-2.0"
 homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
+[features]
+# The bundled fonts at their place in this source tree, for tests of crates
+# built on this one (a host says where they are: `letters::set_fonts_dir`).
+dev-fonts = []
+
 [dependencies]
 makepad-draw = { path = "../../draw", version = "2.0.0" }
 makepad-geom3d = { path = "../geom3d" }
