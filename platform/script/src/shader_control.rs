@@ -630,8 +630,28 @@ impl ShaderFnCompiler {
         let (ty, s) = if no_value {
             (vm.bx.code.builtins.pod.pod_void, self.stack.new_string())
         } else {
-            let (ty, s) = self.pop_resolved(vm, output);
-            let ty = ty
+            let (raw_ty, s) = self.pop_resolved(vm, output);
+            // A literal returned from a function whose earlier return was
+            // a uint is a uint: `return 0` next to `return x` (u32).
+            let known_ret = self.mes.iter().rev().find_map(|me| match me {
+                ShaderMe::FnBody { ret, .. } => *ret,
+                _ => None,
+            });
+            let pods = &vm.bx.code.builtins.pod;
+            let (raw_ty, s) = match known_ret {
+                Some(r) if matches!(raw_ty, ShaderType::AbstractInt) && r == pods.pod_u32 => {
+                    let s2 = crate::shader_ops::unsigned_literal(
+                        &output.backend,
+                        &raw_ty,
+                        &s,
+                        &ShaderType::Pod(r),
+                        pods,
+                    );
+                    (ShaderType::Pod(r), s2)
+                }
+                _ => (raw_ty, s),
+            };
+            let ty = raw_ty
                 .make_concrete(&vm.bx.code.builtins.pod)
                 .unwrap_or(vm.bx.code.builtins.pod.pod_void);
             (ty, s)

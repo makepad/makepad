@@ -288,9 +288,15 @@ impl ShaderFnCompiler {
                         .heap
                         .pod_field_type(pod_ty, field_id, &vm.bx.code.builtins.pod)
                 {
-                    let val_ty = value_ty
+                    let val_ty = if matches!(value_ty, ShaderType::AbstractInt)
+                        && ret_ty == vm.bx.code.builtins.pod.pod_u32
+                    {
+                        ret_ty
+                    } else {
+                        value_ty
                         .make_concrete(&vm.bx.code.builtins.pod)
-                        .unwrap_or(vm.bx.code.builtins.pod.pod_void);
+                        .unwrap_or(vm.bx.code.builtins.pod.pod_void)
+                    };
                     if val_ty != ret_ty {
                         script_err_pod!(
                             self.trap,
@@ -310,6 +316,13 @@ impl ShaderFnCompiler {
                             crate::pod::ScriptPodTy::Struct { .. }
                         );
                     let field_name = output.backend.map_field_name_typed(field_id, is_vec);
+                    let value_s = crate::shader_ops::unsigned_literal(
+                        &output.backend,
+                        &value_ty,
+                        &value_s,
+                        &ShaderType::Pod(ret_ty),
+                        &vm.bx.code.builtins.pod,
+                    );
                     write!(s, "{}.{} = {}", instance_s, field_name, value_s).ok();
                     self.stack.push(
                         self.trap.pass(),
@@ -581,9 +594,15 @@ impl ShaderFnCompiler {
                     }
                 }
 
-                let val_ty = value_ty
-                    .make_concrete(builtins)
-                    .unwrap_or(builtins.pod_void);
+                let val_ty = if matches!(value_ty, ShaderType::AbstractInt)
+                    && ret_ty == builtins.pod_u32
+                {
+                    ret_ty
+                } else {
+                    value_ty
+                        .make_concrete(builtins)
+                        .unwrap_or(builtins.pod_void)
+                };
                 if val_ty != ret_ty {
                     script_err_pod!(
                         self.trap,
@@ -594,6 +613,13 @@ impl ShaderFnCompiler {
                 }
 
                 let index_s2 = self.bounded_index_expr(vm, output, pod_ty, &index_ty, &index_s);
+                let value_s = crate::shader_ops::unsigned_literal(
+                    &output.backend,
+                    &value_ty,
+                    &value_s,
+                    &ShaderType::Pod(ret_ty),
+                    &vm.bx.code.builtins.pod,
+                );
                 let mut s = self.stack.new_string();
                 write!(s, "{}[{}] = {}", instance_s, index_s2, value_s).ok();
                 self.stack

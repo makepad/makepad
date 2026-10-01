@@ -192,3 +192,21 @@ fn uint_operands_take_unsigned_literals_in_glsl_and_wgsl() {
     let src = ok("glsl", "", "var i = int(self.u_n)\nif i == 5 { i = 6 }\nself.pixel = vec4(float(i))");
     assert!(src.contains("== 5)") && !src.contains("5u"), "{src}");
 }
+
+#[test]
+fn uint_literals_in_returns_and_index_assignments() {
+    let extra = "pick: fn(a: u32) -> u32 { if a > 3 { return a }\nreturn 0 }";
+    let body = "var u = u32(self.u_n)\n\
+                var v = vec2u(1u, 2u)\n\
+                v[1] = 7\n\
+                var arr = array(1u, 2u)\n\
+                arr[0] = 4\n\
+                u = self.pick(u)\n\
+                self.pixel = vec4(float(u), float(v.y), float(arr[0]), 1.0)";
+    for backend in ["glsl", "wgsl"] {
+        let src = ok(backend, extra, body);
+        for needle in ["return 0u", "[1] = 7u", "[0] = 4u"] {
+            assert!(src.contains(needle) || src.contains(&needle.replace("[1]", "[1u]")), "{backend}: missing {needle:?} in\n{src}");
+        }
+    }
+}
