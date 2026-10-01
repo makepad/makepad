@@ -117,19 +117,19 @@ script_mod! {
         toolbar_pane := InsetPanelView{
             width: Fill
             height: Fit
-            margin: Inset{left: 2. right: 2. top: 2. bottom: 2.}
+            margin: Inset{left: 6. right: 6. top: 6. bottom: 4.}
             toolbar := mod.storybook.CatalogueToolbar{}
         }
 
         split := Splitter{
             axis: SplitterAxis.Horizontal
             align: SplitterAlign.FromA(260.)
-            size: 4.
+            size: 6.
             a: InsetPanelView{
                 width: Fill
                 height: Fill
                 flow: Down
-                margin: Inset{left: 2. right: 0. top: 2. bottom: 2.}
+                margin: Inset{left: 6. right: 2. top: 4. bottom: 6.}
                 // Star the story on the canvas; list the starred ones only.
                 star_row := View{
                     width: Fill
@@ -155,12 +155,12 @@ script_mod! {
             b: Splitter{
                 axis: SplitterAxis.Horizontal
                 align: SplitterAlign.FromB(380.)
-                size: 4.
+                size: 6.
                 a: InsetPanelView{
                     width: Fill
                     height: Fill
                     padding: theme.mspace_2
-                    margin: Inset{left: 0. right: 0. top: 2. bottom: 2.}
+                    margin: Inset{left: 2. right: 2. top: 4. bottom: 6.}
                     canvas := mod.storybook.StoryCanvas{}
                 }
                 b: InsetPanelView{
@@ -169,7 +169,7 @@ script_mod! {
                     flow: Down
                     spacing: theme.space_2
                     padding: theme.mspace_2
-                    margin: Inset{left: 0. right: 2. top: 2. bottom: 2.}
+                    margin: Inset{left: 2. right: 6. top: 4. bottom: 6.}
                     tabs := View{
                         width: Fill
                         height: Fit
