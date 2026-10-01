@@ -268,6 +268,14 @@ impl PlainWebSocket {
     /// `wss://` to an endpoint registered with [`crate::tls::pin_endpoint`]:
     /// TLS pinned to its certificate, with this process's pinned-endpoint
     /// credential. Unpinned TLS endpoints are refused (no CA validation here).
+    #[cfg(target_arch = "wasm32")]
+    fn open_pinned(_request: HttpRequest, rx_sender: Sender<WebSocketMessage>) -> PlainWebSocket {
+        // Pinned TLS uses the OS's TLS stack: native hosts only.
+        let _ = rx_sender.send(WebSocketMessage::Error("pinned TLS websockets need a native host".into()));
+        PlainWebSocket { sender: None, stream: None }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     fn open_pinned(request: HttpRequest, rx_sender: Sender<WebSocketMessage>) -> PlainWebSocket {
         let failed = |rx: &Sender<WebSocketMessage>, msg: String| {
             let _ = rx.send(WebSocketMessage::Error(msg));
