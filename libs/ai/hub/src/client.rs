@@ -106,6 +106,15 @@ pub struct LocalService {
     lease_origin: Mutex<Option<(String, u64)>>,
 }
 
+/// `https://host:port` given for a hub service is a fleet node.
+pub fn mark_if_fleet(base_url: &str) {
+    if let Ok(url) = crate::http_client::parse_url(base_url) {
+        if url.https {
+            crate::fleet_auth::mark_fleet_endpoint(&format!("{}:{}", url.host, url.port));
+        }
+    }
+}
+
 const MAX_JSON_BODY: usize = 4 * 1024 * 1024;
 /// Generated artifacts (video!) can be large.
 const MAX_ARTIFACT_BODY: usize = 1024 * 1024 * 1024;
@@ -113,8 +122,10 @@ const MAX_ARTIFACT_BODY: usize = 1024 * 1024 * 1024;
 impl LocalService {
     pub fn new(base_url: &str) -> Self {
         let base_url = base_url.trim_end_matches('/').to_string();
-        // Fleet nodes (https endpoints from discovery) get this process's
-        // credential proof from the HTTP client itself.
+        // An https service is a fleet node (discovered, or configured by
+        // URL): reached over self-signed TLS recorded in known_nodes, with
+        // this process's credential proof added by the HTTP client.
+        mark_if_fleet(&base_url);
         Self {
             base_url,
             auth_headers: Vec::new(),

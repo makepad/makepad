@@ -157,6 +157,7 @@ pub(super) fn read_json_response(stream: &mut impl Read) -> Result<(u16, Value),
 
 fn request_json_tls(method: &str, url: &str, body: Option<&Value>) -> Result<(u16, Value), RequestError> {
     use crate::http_client::{http_fetch_no_redirect, HttpClientRequest};
+    crate::client::mark_if_fleet(url.split('/').take(3).collect::<Vec<_>>().join("/").as_str());
     let text = body.map(|b| b.to_json());
     let request = match &text {
         Some(t) => HttpClientRequest::post(url, "application/json", t.as_bytes()),
