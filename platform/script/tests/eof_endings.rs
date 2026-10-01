@@ -129,3 +129,30 @@ fn no_streamed_prefix_loops_forever() {
         }
     }
 }
+
+/// A field or index assignment as the source's last statement is stored
+/// (it was dropped: the end of source closed the pending assignment
+/// without emitting it).
+#[test]
+fn a_last_field_or_index_assignment_is_stored() {
+    for (name, code) in [
+        ("field", "let o = {a: 1}\no.b = 5\nnil\nlet p = o\np.c = 7"),
+        ("index", "let o = {a: 1}\nlet arr = [0, 0]\no.arr = arr\narr[1] = 7"),
+        ("field_newline", "let o = {a: 1}\no.c = 7\n"),
+    ] {
+        let mut vm = test_vm();
+        vm.bx.captured_errors = Some(Vec::new());
+        let code = format!("let keep = {{}}\nmod.std.keep = keep\n{}", code.replace("let o = {a: 1}", "let o = keep"));
+        vm.eval(script_mod(name, &code));
+        assert!(errors(&mut vm).is_empty(), "{name}");
+        let std = vm.bx.heap.value(vm.bx.heap.modules, id!(std).into(), NoTrap).as_object().unwrap();
+        let o = vm.bx.heap.value(std, id!(keep).into(), NoTrap).as_object().unwrap();
+        let got = if name == "index" {
+            let a = vm.bx.heap.value(o, id!(arr).into(), NoTrap).as_array().unwrap();
+            vm.bx.heap.array_index(a, 1, NoTrap).as_number()
+        } else {
+            vm.bx.heap.value(o, id!(c).into(), NoTrap).as_number()
+        };
+        assert_eq!(got, Some(7.0), "{name}");
+    }
+}

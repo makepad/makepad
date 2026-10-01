@@ -5222,6 +5222,13 @@ impl ScriptParser {
                 State::EmitUnary { what_op, index } => {
                     self.push_code(State::operator_to_unary(what_op), index);
                 }
+                // `a.b = v` / `a[i] = v` as the source's last statement.
+                State::EmitFieldAssign { what_op, index } => {
+                    self.push_code(State::operator_to_field_assign(what_op), index);
+                }
+                State::EmitIndexAssign { what_op, index } => {
+                    self.push_code(State::operator_to_index_assign(what_op), index);
+                }
                 State::CallMaybeDo { is_method, index } => {
                     // A call as the final tokens of the source: no next token
                     // arrived to rule out a trailing `do` block, so resolve it
@@ -5540,6 +5547,13 @@ impl ScriptParser {
                 }
                 State::EmitUnary { what_op, index } => {
                     self.push_code(State::operator_to_unary(what_op), index);
+                }
+                // `a.b = v` / `a[i] = v` as the source's last statement.
+                State::EmitFieldAssign { what_op, index } => {
+                    self.push_code(State::operator_to_field_assign(what_op), index);
+                }
+                State::EmitIndexAssign { what_op, index } => {
+                    self.push_code(State::operator_to_index_assign(what_op), index);
                 }
                 State::CallMaybeDo { is_method, index } => {
                     // A call as the final tokens of the source: no next token
