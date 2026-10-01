@@ -24,9 +24,11 @@
 param(
     [string]$StageDir = $PSScriptRoot,
     [string]$InstallDir = 'C:\ai\services',
-    [string]$CacheDir = 'C:\ai\makepad-ai-content-cache',
-    [string]$Launcher = 'C:\ai\makepad-ai-content\run-node.cmd',
-    [string]$Repo = 'C:\Users\playe\makepad',
+    # Default: taken from the node now serving -Port (its --cache-dir and
+    # its .cmd launcher), else the usual C:\ai layout.
+    [string]$CacheDir,
+    [string]$Launcher,
+    [string]$Repo = (Join-Path $env:USERPROFILE 'makepad'),
     [string]$Fleet = 'gen',
     [string]$RemoteAddress = 'LocalSubnet',
     [int]$Port = 8123,
@@ -47,6 +49,19 @@ $hostExe = Join-Path $InstallDir 'makepad-service-host.exe'
 $nodeExe = Join-Path $InstallDir 'makepad-ai-hub.exe'
 $tunnelExe = Join-Path $InstallDir 'makepad-remote.exe'
 $logDir = Join-Path $InstallDir 'logs'
+
+# The running node's cache and launcher, found the way aihub-node-update.ps1
+# finds them, so one command line fits every box layout.
+$running = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($running) {
+    $runningNode = Get-CimInstance Win32_Process -Filter "ProcessId=$($running.OwningProcess)"
+    if (-not $CacheDir -and $runningNode.CommandLine -match '--cache-dir\s+("([^"]+)"|(\S+))') { $CacheDir = if ($Matches[2]) { $Matches[2] } else { $Matches[3] } }
+    $runningParent = Get-CimInstance Win32_Process -Filter "ProcessId=$($runningNode.ParentProcessId)"
+    if (-not $Launcher -and $runningParent -and $runningParent.Name -eq 'cmd.exe' -and $runningParent.CommandLine -match '(?i)/c\s+"?([^"\r\n]+\.cmd)"?\s*$') { $Launcher = $Matches[1] }
+}
+if (-not $CacheDir) { $CacheDir = 'C:\ai\makepad-ai-content-cache' }
+if (-not $Launcher) { $Launcher = 'C:\ai\makepad-ai-content\run-node.cmd' }
+Write-Host "== node cache $CacheDir, launcher settings from $Launcher"
 
 $needed = @('makepad-service-host.exe')
 if ($doNode) { $needed += 'makepad-ai-hub.exe' }
@@ -168,16 +183,22 @@ function Wait-Port([int]$port, [string]$exe) {
 }
 
 # --- preflight: never interrupt node work -----------------------------------
+# A busy fleet node has short gaps between jobs; wait up to 15 minutes for one.
 $before = $null
 if ($doNode -and (Get-Listener $Port)) {
-    try {
-        $before = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 5
-        $jobs = Invoke-RestMethod "http://127.0.0.1:$Port/jobs" -TimeoutSec 5
-        if ((@($jobs.jobs).Count -ne 0 -or $before.jobs_pending -ne 0) -and -not $Force) {
-            throw 'the node has active jobs; rerun when it is idle (or with -Force)'
+    $deadline = [DateTime]::UtcNow.AddMinutes(15)
+    while ($true) {
+        try {
+            $before = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 5
+            $jobs = Invoke-RestMethod "http://127.0.0.1:$Port/jobs" -TimeoutSec 5
+        } catch {
+            Write-Step "node on :$Port does not answer; replacing it"
+            break
         }
-    } catch [System.Net.WebException] {
-        Write-Step "node on :$Port does not answer; replacing it"
+        if ((@($jobs.jobs).Count -eq 0 -and $before.jobs_pending -eq 0) -or $Force) { break }
+        if ([DateTime]::UtcNow -gt $deadline) { throw 'the node stayed busy for 15 minutes; rerun later (or with -Force)' }
+        Write-Host -NoNewline '.'
+        Start-Sleep -Seconds 2
     }
 }
 
