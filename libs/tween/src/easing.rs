@@ -183,6 +183,31 @@ pub enum Easing {
     SmoothStep,
     /// Smootherstep `t³(t(6t - 15) + 10)` on `t` clamped to 0..1, result clamped.
     SmootherStep,
+    // --- document family: Motion's named eases (`@ease_out_expo`, `@hold`,
+    // `spring(k, d)`), shared by Motion, its 3D scenes and the kinetic kits ---
+    /// `2^(10(p-1))` rescaled to run exactly from 0 to 1 (no snap, no blend):
+    /// `@ease_*_expo` in Motion documents. `out` and `inOut` are made from
+    /// `in` (`1 - in(1 - p)`, the halves of `in(2p)`).
+    ExpoExact {
+        /// Which end the ease acts on.
+        dir: EaseDir,
+    },
+    /// The start value until the end, then the end value (`@hold`).
+    Hold,
+    /// A unit-mass damped spring released from rest at 0 towards 1:
+    /// `stiffness` k (per s²) and `damping` d (per s) over a segment
+    /// `seconds` long (`spring(170, 26)` is snappy without wobble,
+    /// `spring(100, 10)` wobbles). It ends on 1 at p = 1 whatever the spring
+    /// has done by then, so the segment should leave it time to settle
+    /// (about `8 / d` seconds).
+    Spring {
+        /// Stiffness k.
+        stiffness: f64,
+        /// Damping d.
+        damping: f64,
+        /// The segment's length in seconds.
+        seconds: f64,
+    },
     /// A Rust function (GSAP custom ease function). Compared by address.
     Custom(CustomEase),
 }
@@ -575,6 +600,36 @@ impl Easing {
                 (t * t * t * (t * (t * 6.0 - 15.0) + 10.0)).clamp(0.0, 1.0)
             }
             Self::Custom(f) => (f.0)(t),
+            Self::ExpoExact { dir } => {
+                let p = t.clamp(0.0, 1.0);
+                match dir {
+                    EaseDir::In => expo_exact_in(p),
+                    EaseDir::Out => 1.0 - expo_exact_in(1.0 - p),
+                    EaseDir::InOut => {
+                        if p < 0.5 {
+                            0.5 * expo_exact_in(2.0 * p)
+                        } else {
+                            1.0 - 0.5 * expo_exact_in(2.0 - 2.0 * p)
+                        }
+                    }
+                }
+            }
+            Self::Hold => {
+                if t >= 1.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            Self::Spring { stiffness, damping, seconds } => {
+                if !(t > 0.0) {
+                    0.0
+                } else if t >= 1.0 {
+                    1.0
+                } else {
+                    spring(stiffness, damping, t * seconds.max(0.0))
+                }
+            }
         }
     }
 
@@ -864,6 +919,38 @@ fn from_out(dir: EaseDir, p: f64, out: impl Fn(f64) -> f64) -> f64 {
 #[inline]
 fn expo_in(p: f64) -> f64 {
     2.0f64.powf(10.0 * (p - 1.0)) * p + p * p * p * p * p * p * (1.0 - p)
+}
+
+/// `2^(10(p-1))` rescaled so it starts at exactly 0 and ends at exactly 1.
+#[inline]
+fn expo_exact_in(p: f64) -> f64 {
+    if p <= 0.0 {
+        0.0
+    } else {
+        (2.0f64.powf(10.0 * p - 10.0) - 2.0f64.powf(-10.0)) / (1.0 - 2.0f64.powf(-10.0))
+    }
+}
+
+/// Position (0 → 1) of a unit-mass damped spring released from rest at 0
+/// towards 1, `t` seconds in: underdamped, critical or overdamped.
+fn spring(k: f64, d: f64, t: f64) -> f64 {
+    let k = k.max(1e-6);
+    let d = d.max(0.0);
+    let w0 = k.sqrt();
+    let zeta = d / (2.0 * w0);
+    if zeta < 1.0 - 1e-9 {
+        let wd = w0 * (1.0 - zeta * zeta).sqrt();
+        1.0 - (-zeta * w0 * t).exp() * ((wd * t).cos() + zeta * w0 / wd * (wd * t).sin())
+    } else if zeta <= 1.0 + 1e-9 {
+        1.0 - (-w0 * t).exp() * (1.0 + w0 * t)
+    } else {
+        let s = (zeta * zeta - 1.0).sqrt();
+        let (r1, r2) = (-w0 * (zeta - s), -w0 * (zeta + s));
+        // x = 1 + a e^{r1 t} + b e^{r2 t}, x(0) = 0, x'(0) = 0.
+        let a = r2 / (r1 - r2);
+        let b = -r1 / (r1 - r2);
+        1.0 + a * (r1 * t).exp() + b * (r2 * t).exp()
+    }
 }
 
 /// CSS `steps(n, jump)`. `n` below 1 counts as 1; `jump-none` with a single

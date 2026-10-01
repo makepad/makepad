@@ -1,4 +1,5 @@
-// Easing curves with Motion's exact formulas (motion/src/ease.rs): u in
+// Easing curves with the documents' exact formulas (libs/tween named.rs, the curves of
+// its Easing; what Motion's `@ease_*` names mean): u in
 // 0..1, evaluated in f64 and rounded once. The polynomial, circ, back and
 // bounce curves give Motion's bits; sine, expo, elastic and spring use the
 // portable transcendental kernels (equal within an ulp of the host's).

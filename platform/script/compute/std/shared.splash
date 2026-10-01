@@ -130,7 +130,7 @@ fn bayer4(p) {
     return (a * 4.0 + b + 0.5) / 16.0
 }
 
-// ---- Eases (Motion's formulas from motion/src/ease.rs; 0..1 in, 0..1 out) ----
+// ---- Eases (the documents' formulas, libs/tween named.rs; 0..1 in, 0..1 out) ----
 // `out` is 1 - in(1 - u); `in_out` joins the two halves. Values outside 0..1
 // clamp, as in Motion.
 

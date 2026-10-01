@@ -134,6 +134,7 @@ pub mod easing;
 mod engine;
 pub mod event;
 pub mod ids;
+pub mod named;
 mod inspect;
 mod overwrite;
 pub mod path;
