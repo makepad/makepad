@@ -31,7 +31,6 @@ use {
         fs::{remove_file, File},
         io::prelude::*,
         mem, ptr,
-        sync::Once,
     },
 };
 
@@ -1703,21 +1702,21 @@ impl GlShader {
     }
 
     fn supports_parallel_compile(gl: &LibGl) -> bool {
-        let supported = get_gl_string(gl, gl_sys::EXTENSIONS)
-            .split_whitespace()
-            .any(|ext| {
-                ext == "GL_KHR_parallel_shader_compile" || ext == "GL_ARB_parallel_shader_compile"
-            });
-        if supported {
-            static CONFIGURE_PARALLEL_COMPILE: Once = Once::new();
-            CONFIGURE_PARALLEL_COMPILE.call_once(|| unsafe {
+        *gl.parallel_compile.get_or_init(|| {
+            let supported = get_gl_string(gl, gl_sys::EXTENSIONS)
+                .split_whitespace()
+                .any(|ext| {
+                    ext == "GL_KHR_parallel_shader_compile"
+                        || ext == "GL_ARB_parallel_shader_compile"
+                });
+            if supported {
                 if let Some(set_threads) = gl.glMaxShaderCompilerThreadsKHR {
                     // Ask the driver to use as many background compiler threads as it supports.
-                    set_threads(u32::MAX);
+                    unsafe { set_threads(u32::MAX) };
                 }
-            });
-        }
-        supported
+            }
+            supported
+        })
     }
 
     #[cfg(ohos_sim)]
@@ -1755,53 +1754,35 @@ impl GlShader {
                     Ok(_bytes_read) => {
                         let binary_format = u32::from_be_bytes(format_bytes);
                         match cache_file.read_to_end(&mut binary) {
-                            Ok(_full_bytes) => {
-                                let mut version_consistency_conflict = false;
-                                if let OsType::Android(params) = os_type {
-                                    let current_filename = format!(
-                                        "{}/shader_{:08x}_av{}_bn{}_kv{}.bin",
-                                        cache_dir,
-                                        shader_hash.0,
-                                        params.android_version,
-                                        params.build_number,
-                                        params.kernel_version
+                            Ok(_full_bytes) => unsafe {
+                                let program = (gl.glCreateProgram)();
+                                (gl.glProgramBinary)(
+                                    program,
+                                    binary_format,
+                                    binary.as_ptr() as *const _,
+                                    binary.len() as i32,
+                                );
+                                if let Some(error) = GlShader::opengl_has_shader_error(
+                                    gl,
+                                    false,
+                                    program as usize,
+                                    "",
+                                ) {
+                                    // A cached program binary that no longer loads is
+                                    // expected and recoverable (e.g. after a GPU driver
+                                    // update changes the binary format). The caller falls
+                                    // back to compiling from source and overwrites this
+                                    // stale entry, so warn rather than error.
+                                    crate::warning!(
+                                        "Ignoring stale shader cache entry (will recompile): SHADER::CACHE::PROGRAM_BINARY_FAILED\n{}",
+                                        error
                                     );
-                                    version_consistency_conflict = filename != current_filename;
-                                }
-
-                                if !version_consistency_conflict {
-                                    unsafe {
-                                        let program = (gl.glCreateProgram)();
-                                        (gl.glProgramBinary)(
-                                            program,
-                                            binary_format,
-                                            binary.as_ptr() as *const _,
-                                            binary.len() as i32,
-                                        );
-                                        if let Some(error) = GlShader::opengl_has_shader_error(
-                                            gl,
-                                            false,
-                                            program as usize,
-                                            "",
-                                        ) {
-                                            // A cached program binary that no longer loads is
-                                            // expected and recoverable (e.g. after a GPU driver
-                                            // update changes the binary format). The caller falls
-                                            // back to compiling from source and overwrites this
-                                            // stale entry, so warn rather than error.
-                                            crate::warning!(
-                                                "Ignoring stale shader cache entry (will recompile): SHADER::CACHE::PROGRAM_BINARY_FAILED\n{}",
-                                                error
-                                            );
-                                            (gl.glDeleteProgram)(program);
-                                            return None;
-                                        }
-                                        return Some(program);
-                                    }
-                                } else {
+                                    (gl.glDeleteProgram)(program);
                                     let _ = remove_file(&filename);
+                                    return None;
                                 }
-                            }
+                                return Some(program);
+                            },
                             Err(e) => {
                                 crate::warning!(
                                     "Failed to read the full shader cache file {filename}, error: {e}"
@@ -2089,29 +2070,19 @@ impl GlShader {
         mapping: &CxDrawShaderMapping,
         os_type: &OsType,
     ) -> GlShaderState {
+        if let Some(program) = Self::read_program_cache(gl, vertex, pixel, os_type) {
+            return GlShaderState::Ready(Self::build_from_program(gl, program, mapping));
+        }
+
         if Self::supports_parallel_compile(gl) {
             return GlShaderState::Pending(Self::start_pending_program_compile(
                 gl, vertex, pixel, os_type,
             ));
         }
 
-        GlShaderState::Ready(Self::new(gl, vertex, pixel, mapping, os_type))
-    }
-
-    pub fn new(
-        gl: &LibGl,
-        vertex: &str,
-        pixel: &str,
-        mapping: &CxDrawShaderMapping,
-        os_type: &OsType,
-    ) -> Self {
-        if let Some(program) = Self::read_program_cache(gl, vertex, pixel, os_type) {
-            return Self::build_from_program(gl, program, mapping);
-        }
-
         let pending = Self::start_pending_program_compile(gl, vertex, pixel, os_type);
         let program = Self::finish_pending_program_compile(gl, pending, vertex, pixel, os_type);
-        Self::build_from_program(gl, program, mapping)
+        GlShaderState::Ready(Self::build_from_program(gl, program, mapping))
     }
 
     pub fn set_uniform_array(gl: &LibGl, loc: &OpenglUniform, array: &[f32]) {
@@ -2499,11 +2470,13 @@ impl CxOsDrawShader {
         // rely on that query alone. VideoExternal shaders always declare samplerExternalOES;
         // without `#extension GL_OES_EGL_image_external_essl3` they panic on Adreno ES 3.2.
         // Real Android devices expose OES external textures for SurfaceTexture/MediaCodec.
-        let listed_external = get_gl_string(gl, gl_sys::EXTENSIONS)
-            .split_whitespace()
-            .any(|ext| {
-                ext == "GL_OES_EGL_image_external" || ext == "GL_OES_EGL_image_external_essl3"
-            });
+        let listed_external = *gl.oes_external_listed.get_or_init(|| {
+            get_gl_string(gl, gl_sys::EXTENSIONS)
+                .split_whitespace()
+                .any(|ext| {
+                    ext == "GL_OES_EGL_image_external" || ext == "GL_OES_EGL_image_external_essl3"
+                })
+        });
         let is_external_texture_supported = listed_external
             || matches!(os_type, OsType::Android(params) if !params.is_emulator)
             || matches!(os_type, OsType::LinuxWindow(_) | OsType::LinuxDirect);

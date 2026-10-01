@@ -508,6 +508,9 @@ pub struct LibGl {
     pub glFramebufferTextureMultiviewOVR: Option<TglFramebufferTextureMultiviewOVR>,
     pub glFramebufferTextureMultisampleMultiviewOVR:
         Option<TglFramebufferTextureMultisampleMultiviewOVR>,
+    // Extension checks we only need to run once per context.
+    pub(crate) parallel_compile: std::sync::OnceLock<bool>,
+    pub(crate) oes_external_listed: std::sync::OnceLock<bool>,
 }
 
 macro_rules! load {
@@ -852,6 +855,8 @@ impl LibGl {
                 "glFramebufferTextureMultisampleMultiviewOVR"
             )
             .ok(),
+            parallel_compile: Default::default(),
+            oes_external_listed: Default::default(),
         })
     }
 }
