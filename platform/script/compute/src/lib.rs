@@ -39,6 +39,8 @@ pub mod pipeline;
 pub mod rand;
 pub mod sched;
 mod spmd;
+#[cfg(feature = "vm")]
+pub mod vm_kernel;
 pub mod wasm;
 
 #[cfg(target_arch = "aarch64")]
