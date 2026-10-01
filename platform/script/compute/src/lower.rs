@@ -4478,7 +4478,7 @@ const BUILTIN_FNS: &[&str] = &[
 ];
 
 const INPUT_NAMES: &[&str] = &["sample_rate", "SR", "note", "freq", "gate", "velocity", "trigger"];
-const BUILTIN_NAMES: &[&str] = &[
+pub(crate) const BUILTIN_NAMES: &[&str] = &[
     "sample_rate", "SR", "note", "freq", "gate", "velocity", "trigger", "PI", "TAU", "E", "voice", "effect", "block", "init",
 ];
 

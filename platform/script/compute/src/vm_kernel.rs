@@ -16,6 +16,8 @@
 //!     entry: Entry::Element,
 //!     entry_fn: element_fn_object,
 //!     math: MathMode::Fast,
+//!     uses: vec![],
+//!     bind: vec![],
 //! }, &layouts, Backend::Native, &[])?;
 //! ```
 //!
@@ -102,6 +104,12 @@ pub struct VmKernel {
     /// The entry: a script fn of one parameter (the element index).
     pub entry_fn: ScriptObject,
     pub math: MathMode,
+    /// Compiler modules (passed to [`compile`]) the program imports
+    /// unqualified (`use path.*`).
+    pub uses: Vec<String>,
+    /// Script fns the host binds by name: compiled in under that name, for
+    /// an entry (a host's own) that calls a fn the document supplies.
+    pub bind: Vec<(String, ScriptObject)>,
 }
 
 /// The program the compiler reads, and where each part of it came from.
@@ -196,8 +204,16 @@ pub fn kernel_source(vm: &ScriptVm, k: &VmKernel) -> Result<KernelSource, Shader
     if k.math == MathMode::Portable {
         text.push_str("let math = portable\n");
     }
+    for m in &k.uses {
+        let _ = writeln!(text, "use {m}.*");
+    }
     let mut known: HashSet<String> = k.decls.iter().map(|d| d.name().to_string()).collect();
     known.insert(k.entry.name().to_string());
+    // Every kernel's own inputs, and the compiler's constants (PI, TAU, E).
+    for name in ["time", "seed", "count"].iter().chain(crate::lower::BUILTIN_NAMES) {
+        known.insert(name.to_string());
+    }
+    known.extend(k.bind.iter().map(|(name, _)| name.clone()));
     for d in &k.decls {
         let opt = |s: &mut String, v: &Option<u32>| {
             if let Some(v) = v {
@@ -238,6 +254,12 @@ pub fn kernel_source(vm: &ScriptVm, k: &VmKernel) -> Result<KernelSource, Shader
         return Err(ShaderError::new(0, 1, format!("the {} entry is not a script fn", k.entry.name())));
     };
     let mut todo = vec![(k.entry_fn, k.entry.name().to_string(), loc, src)];
+    for (name, f) in k.bind.iter().rev() {
+        let Some((loc, src)) = fn_source(vm, *f) else {
+            return Err(ShaderError::new(0, 1, format!("`{name}` is not a script fn")));
+        };
+        todo.push((*f, name.clone(), loc, src));
+    }
     let mut emitted: HashSet<String> = HashSet::new();
     let mut consts = String::new();
     while let Some((f, name, loc, src)) = todo.pop() {
@@ -437,5 +459,5 @@ pub fn from_object(vm: &ScriptVm, obj: ScriptObject) -> Result<VmKernel, String>
         });
     }
     let (entry, entry_fn) = entry.ok_or("missing kernel entry: element, vertex, instance, primitive or reduce_sum / reduce_min / reduce_max")?;
-    Ok(VmKernel { decls, entry, entry_fn, math })
+    Ok(VmKernel { decls, entry, entry_fn, math, uses: Vec::new(), bind: Vec::new() })
 }

@@ -38,6 +38,8 @@ fn entry_reaches_document_fns_and_constants_through_the_vm() {
         entry: Entry::Element,
         entry_fn: field(&vm, k, id!(element)),
         math: MathMode::Portable,
+        uses: Vec::new(),
+        bind: Vec::new(),
     };
     let (compiled, source) = vm_kernel::compile(&vm, &kernel, &[], Backend::Interp, &[]).unwrap_or_else(|e| panic!("{e:?}"));
     assert!(source.text.contains("fn bump") && source.text.contains("fn scale") && source.text.contains("let R = 3.5"), "{}", source.text);
@@ -61,6 +63,8 @@ fn errors_name_the_document_line() {
         entry: Entry::Element,
         entry_fn: field(&vm, k, id!(element)),
         math: MathMode::Fast,
+        uses: Vec::new(),
+        bind: Vec::new(),
     };
     let errors = vm_kernel::compile(&vm, &kernel, &[], Backend::Interp, &[]).err().expect("an error");
     assert!(errors.iter().any(|e| e.message.contains("doc.splash:2:")), "{errors:?}");
