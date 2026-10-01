@@ -2532,7 +2532,7 @@ impl CapMotion {
     }
 
     /// One step: true while anything still moves.
-    fn step(&mut self, dt: f64, value: f64, radius: f64, dragging: bool, viscosity: f64) -> bool {
+    fn step(&mut self, dt: f64, value: f64, dragging: bool, viscosity: f64) -> bool {
         let (k, c, kp, cp) = Self::constants(viscosity);
         let target = value * self.travel_px;
         if self.travel {
@@ -2572,7 +2572,6 @@ impl CapMotion {
             || self.hover_v.abs() > 1e-3
             || (self.hover - self.hover_target).abs() > 1e-3
             || self.field() > 0.001
-            || radius <= 0.0
     }
 
     /// The field's strength: most of the hover plus the press, never below
@@ -2978,10 +2977,12 @@ impl Slider {
         if rect.size.x <= 0.0 || rect.size.y <= 0.0 {
             return;
         }
+        // Along runs from the track's start, which on a horizontal control
+        // is past the label.
         let (extent, along, across) = match self.axis {
             DragAxis::Horizontal => (
                 rect.size.x - self.draw_bg.label_size as f64,
-                abs.x - rect.pos.x,
+                abs.x - rect.pos.x - self.draw_bg.label_size as f64,
                 abs.y - (rect.pos.y + rect.size.y * 0.5),
             ),
             DragAxis::Vertical => (
@@ -3025,13 +3026,7 @@ impl Slider {
         };
         self.cap_motion.last_time = Some(ne.time);
         let dragging = self.dragging.is_some();
-        let active = self.cap_motion.step(
-            dt,
-            self.relative_value,
-            self.cap_size * 0.5,
-            dragging,
-            self.cap_viscosity,
-        );
+        let active = self.cap_motion.step(dt, self.relative_value, dragging, self.cap_viscosity);
         self.draw_bg.redraw(cx);
         if active {
             self.cap_motion.next_frame = Some(cx.new_next_frame());
