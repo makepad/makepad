@@ -234,4 +234,40 @@ mod tests {
         assert!(stripped.len() < all.len());
         assert!(stripped.contains("export async function start_app") && stripped.contains("\"app.wasm.br\""));
     }
+
+    /// A top-level function or constant a section defines is used only
+    /// inside that section: stripping the section must not leave a call to
+    /// it (a helper added inside a section by mistake).
+    #[test]
+    fn section_definitions_stay_inside_their_section() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../platform/src/os/web");
+        for file in ["web.js", "web_gl.js"] {
+            let src = std::fs::read_to_string(root.join(file)).unwrap();
+            for section in SECTIONS {
+                let begin = format!("// @section {section}");
+                let end = format!("// @end {section}");
+                let mut inside = String::new();
+                let mut rest = src.as_str();
+                while let Some(b) = rest.find(&begin) {
+                    let after = &rest[b..];
+                    let e = after.find(&end).expect("balanced");
+                    inside.push_str(&after[..e]);
+                    rest = &after[e..];
+                }
+                let outside = strip_sections(&src, &[section], file).unwrap();
+                // Top-level definitions only (column 0): locals of a method
+                // are the method's own.
+                for line in inside.lines() {
+                    let name = line
+                        .strip_prefix("function ")
+                        .or_else(|| line.strip_prefix("const "))
+                        .and_then(|r| r.split(|c: char| !(c.is_alphanumeric() || c == '_')).next())
+                        .filter(|n| n.len() > 3);
+                    if let Some(name) = name {
+                        assert!(!outside.contains(name), "{file}: `{name}` is defined in section {section} but used outside it");
+                    }
+                }
+            }
+        }
+    }
 }

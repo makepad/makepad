@@ -14,6 +14,7 @@ const MAKEPAD_WEBGL_FALLBACK_VERTEX_ATTRIBS = 16;
 const MAKEPAD_WEBGL_MAX_SUBMISSION_REPORTS = 64;
 // @section video-playback
 const MAKEPAD_WEBGL_VIDEO_UPLOAD_FORMAT = "video-rgba8";
+// @end video-playback
 // With checks on (see gl_checks), an allocation's GL error is read at the
 // latest this long after it: getError waits for the GPU process, so it runs
 // when no earlier frame is still on the GPU, else at most this often.
@@ -30,7 +31,6 @@ const MAKEPAD_WEBGL_ALLOCATION_CHECK_MS = 2000;
 function makepad_gl_checks_on() {
   return typeof window !== "undefined" && window.makepad_gl_checks === true;
 }
-// @end video-playback
 
 function makepad_webgl_limit(value) {
   const number = Number(value);

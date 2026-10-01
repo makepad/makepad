@@ -4,7 +4,8 @@
 //! web runtime stripped to the sections the app uses ([`js`]), the output
 //! folder ([`output`]), font coverage classification ([`coverage`]),
 //! the crunch knobs ([`pack`]), the collect manifest ([`manifest`]),
-//! brotli, and a small static server ([`serve`]). Stage's web export and
+//! brotli, a small static server ([`serve`]), and the blanking of unused
+//! embedded Splash ([`splash_blank`]). Stage's web export and
 //! `cargo makepad wasm --pack` use them.
 
 pub mod coverage;
@@ -12,6 +13,7 @@ pub mod js;
 pub mod output;
 pub mod pack;
 pub mod serve;
+pub mod splash_blank;
 
 /// The collect manifest a packer reads (written by a collect run).
 pub use makepad_web_manifest as manifest;
