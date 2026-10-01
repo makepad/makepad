@@ -41,57 +41,129 @@ script_mod! {
             return sdf.result
         }
 
-        arrow: fn() -> vec4 {
+        // The filled silhouettes as point lists (each closes back to its
+        // first point), walked by one loop with one path_edge call site: a
+        // D3D compile inlines every call site (fifty here took a second).
+        // kind: 0 arrow, 1 pointing hand, 2 open hand, 3 closed hand, 4 wait.
+        path_count: fn(kind: float) -> float {
+            if kind < 0.5 { return 7.0 }
+            if kind < 1.5 { return 14.0 }
+            if kind < 3.5 { return 17.0 }
+            return 10.0
+        }
+        path_point: fn(kind: float, i: float) -> vec2 {
+            if kind < 0.5 {
+                if i < 0.5 { return vec2(3.0, 2.0) }
+                if i < 1.5 { return vec2(3.0, 19.0) }
+                if i < 2.5 { return vec2(7.5, 15.0) }
+                if i < 3.5 { return vec2(11.0, 22.0) }
+                if i < 4.5 { return vec2(14.0, 20.5) }
+                if i < 5.5 { return vec2(10.5, 13.5) }
+                if i < 6.5 { return vec2(17.0, 13.5) }
+            }
+            if kind < 1.5 {
+                if i < 0.5 { return vec2(8.0, 12.0) }
+                if i < 1.5 { return vec2(8.0, 4.0) }
+                if i < 2.5 { return vec2(9.0, 2.0) }
+                if i < 3.5 { return vec2(11.0, 2.0) }
+                if i < 4.5 { return vec2(12.0, 4.0) }
+                if i < 5.5 { return vec2(12.0, 10.0) }
+                if i < 6.5 { return vec2(15.0, 9.0) }
+                if i < 7.5 { return vec2(20.0, 12.0) }
+                if i < 8.5 { return vec2(20.0, 16.0) }
+                if i < 9.5 { return vec2(17.0, 22.0) }
+                if i < 10.5 { return vec2(9.0, 22.0) }
+                if i < 11.5 { return vec2(3.0, 14.0) }
+                if i < 12.5 { return vec2(3.0, 12.0) }
+                if i < 13.5 { return vec2(5.0, 11.0) }
+            }
+            if kind < 3.5 {
+                // The open hand's fingers rise as it closes.
+                let top = 4.0 + ((kind - 1.0) - 1.0) * 5.0
+                if i < 0.5 { return vec2(6.0, 13.0) }
+                if i < 1.5 { return vec2(5.0, top + 1.0) }
+                if i < 2.5 { return vec2(8.0, top) }
+                if i < 3.5 { return vec2(9.0, 11.0) }
+                if i < 4.5 { return vec2(9.0, top - 1.0) }
+                if i < 5.5 { return vec2(12.0, top - 1.0) }
+                if i < 6.5 { return vec2(12.0, 11.0) }
+                if i < 7.5 { return vec2(13.0, top) }
+                if i < 8.5 { return vec2(16.0, top) }
+                if i < 9.5 { return vec2(16.0, 12.0) }
+                if i < 10.5 { return vec2(17.0, top + 2.0) }
+                if i < 11.5 { return vec2(20.0, top + 2.0) }
+                if i < 12.5 { return vec2(20.0, 16.0) }
+                if i < 13.5 { return vec2(17.0, 22.0) }
+                if i < 14.5 { return vec2(8.0, 22.0) }
+                if i < 15.5 { return vec2(2.0, 15.0) }
+                if i < 16.5 { return vec2(3.0, 12.0) }
+            }
+                if i < 0.5 { return vec2(6.0, 3.0) }
+                if i < 1.5 { return vec2(18.0, 3.0) }
+                if i < 2.5 { return vec2(18.0, 6.0) }
+                if i < 3.5 { return vec2(13.0, 12.0) }
+                if i < 4.5 { return vec2(18.0, 18.0) }
+                if i < 5.5 { return vec2(18.0, 21.0) }
+                if i < 6.5 { return vec2(6.0, 21.0) }
+                if i < 7.5 { return vec2(6.0, 18.0) }
+                if i < 8.5 { return vec2(11.0, 12.0) }
+                if i < 9.5 { return vec2(6.0, 6.0) }
+            return vec2(0.0, 0.0)
+        }
+        path_fill: fn(kind: float) -> vec4 {
+            let n = self.path_count(kind)
             var path = vec2(1e20, 0.0)
-            path = self.path_edge(path, vec2(3.0, 2.0), vec2(3.0, 19.0))
-            path = self.path_edge(path, vec2(3.0, 19.0), vec2(7.5, 15.0))
-            path = self.path_edge(path, vec2(7.5, 15.0), vec2(11.0, 22.0))
-            path = self.path_edge(path, vec2(11.0, 22.0), vec2(14.0, 20.5))
-            path = self.path_edge(path, vec2(14.0, 20.5), vec2(10.5, 13.5))
-            path = self.path_edge(path, vec2(10.5, 13.5), vec2(17.0, 13.5))
-            path = self.path_edge(path, vec2(17.0, 13.5), vec2(3.0, 2.0))
+            var a = vec2(0.0, 0.0)
+            var i = 0.0
+            while i < n + 0.5 {
+                // Point i, and the first again to close the path.
+                let b = self.path_point(kind, i - n * step(n - 0.5, i))
+                if i > 0.5 {
+                    path = self.path_edge(path, a, b)
+                }
+                a = b
+                i = i + 1.0
+            }
             return self.path_pixel(path)
         }
 
-        hand: fn(kind: float) -> vec4 {
-            var path = vec2(1e20, 0.0)
+        // The stroked shapes as pen moves (z 0: move to, 1: line to).
+        // kind: 0 text, 1 crosshair, 2 not allowed, 3 help.
+        stroke_count: fn(kind: float) -> float {
+            if kind < 0.5 { return 6.0 }
+            if kind < 1.5 { return 4.0 }
+            if kind < 2.5 { return 2.0 }
+            return 9.0
+        }
+        stroke_point: fn(kind: float, i: float) -> vec3 {
             if kind < 0.5 {
-                // Pointing finger: hotspot at its tip.
-                path = self.path_edge(path, vec2(8.0, 12.0), vec2(8.0, 4.0))
-                path = self.path_edge(path, vec2(8.0, 4.0), vec2(9.0, 2.0))
-                path = self.path_edge(path, vec2(9.0, 2.0), vec2(11.0, 2.0))
-                path = self.path_edge(path, vec2(11.0, 2.0), vec2(12.0, 4.0))
-                path = self.path_edge(path, vec2(12.0, 4.0), vec2(12.0, 10.0))
-                path = self.path_edge(path, vec2(12.0, 10.0), vec2(15.0, 9.0))
-                path = self.path_edge(path, vec2(15.0, 9.0), vec2(20.0, 12.0))
-                path = self.path_edge(path, vec2(20.0, 12.0), vec2(20.0, 16.0))
-                path = self.path_edge(path, vec2(20.0, 16.0), vec2(17.0, 22.0))
-                path = self.path_edge(path, vec2(17.0, 22.0), vec2(9.0, 22.0))
-                path = self.path_edge(path, vec2(9.0, 22.0), vec2(3.0, 14.0))
-                path = self.path_edge(path, vec2(3.0, 14.0), vec2(3.0, 12.0))
-                path = self.path_edge(path, vec2(3.0, 12.0), vec2(5.0, 11.0))
-                path = self.path_edge(path, vec2(5.0, 11.0), vec2(8.0, 12.0))
-            } else {
-                let top = 4.0 + (kind - 1.0) * 5.0
-                path = self.path_edge(path, vec2(6.0, 13.0), vec2(5.0, top + 1.0))
-                path = self.path_edge(path, vec2(5.0, top + 1.0), vec2(8.0, top))
-                path = self.path_edge(path, vec2(8.0, top), vec2(9.0, 11.0))
-                path = self.path_edge(path, vec2(9.0, 11.0), vec2(9.0, top - 1.0))
-                path = self.path_edge(path, vec2(9.0, top - 1.0), vec2(12.0, top - 1.0))
-                path = self.path_edge(path, vec2(12.0, top - 1.0), vec2(12.0, 11.0))
-                path = self.path_edge(path, vec2(12.0, 11.0), vec2(13.0, top))
-                path = self.path_edge(path, vec2(13.0, top), vec2(16.0, top))
-                path = self.path_edge(path, vec2(16.0, top), vec2(16.0, 12.0))
-                path = self.path_edge(path, vec2(16.0, 12.0), vec2(17.0, top + 2.0))
-                path = self.path_edge(path, vec2(17.0, top + 2.0), vec2(20.0, top + 2.0))
-                path = self.path_edge(path, vec2(20.0, top + 2.0), vec2(20.0, 16.0))
-                path = self.path_edge(path, vec2(20.0, 16.0), vec2(17.0, 22.0))
-                path = self.path_edge(path, vec2(17.0, 22.0), vec2(8.0, 22.0))
-                path = self.path_edge(path, vec2(8.0, 22.0), vec2(2.0, 15.0))
-                path = self.path_edge(path, vec2(2.0, 15.0), vec2(3.0, 12.0))
-                path = self.path_edge(path, vec2(3.0, 12.0), vec2(6.0, 13.0))
+                if i < 0.5 { return vec3(8.0, 3.0, 0.0) }
+                if i < 1.5 { return vec3(16.0, 3.0, 1.0) }
+                if i < 2.5 { return vec3(12.0, 3.0, 0.0) }
+                if i < 3.5 { return vec3(12.0, 21.0, 1.0) }
+                if i < 4.5 { return vec3(8.0, 21.0, 0.0) }
+                if i < 5.5 { return vec3(16.0, 21.0, 1.0) }
             }
-            return self.path_pixel(path)
+            if kind < 1.5 {
+                if i < 0.5 { return vec3(12.0, 2.0, 0.0) }
+                if i < 1.5 { return vec3(12.0, 22.0, 1.0) }
+                if i < 2.5 { return vec3(2.0, 12.0, 0.0) }
+                if i < 3.5 { return vec3(22.0, 12.0, 1.0) }
+            }
+            if kind < 2.5 {
+                if i < 0.5 { return vec3(6.5, 6.5, 0.0) }
+                if i < 1.5 { return vec3(17.5, 17.5, 1.0) }
+            }
+                if i < 0.5 { return vec3(15.0, 13.0, 0.0) }
+                if i < 1.5 { return vec3(16.0, 11.0, 1.0) }
+                if i < 2.5 { return vec3(20.0, 11.0, 1.0) }
+                if i < 3.5 { return vec3(22.0, 13.0, 1.0) }
+                if i < 4.5 { return vec3(21.0, 15.0, 1.0) }
+                if i < 5.5 { return vec3(18.0, 17.0, 1.0) }
+                if i < 6.5 { return vec3(18.0, 18.0, 1.0) }
+                if i < 7.5 { return vec3(18.0, 20.5, 0.0) }
+                if i < 8.5 { return vec3(18.0, 21.0, 1.0) }
+            return vec3(0.0, 0.0, 0.0)
         }
 
         resize: fn(axis: vec2, double_head: float, divider: float) -> vec4 {
@@ -121,84 +193,137 @@ script_mod! {
 
         pixel: fn() -> vec4 {
             let sdf = Sdf2d.viewport(self.pos * 24.0)
+            // Each shape is a filled path, a set of strokes, or resize
+            // arrows; each kind is drawn from one call site below.
+            var fill = -1.0
+            var stroke = -1.0
+            var resizes = 0.0
+            var axis = vec2(0.0, 0.0)
+            var heads = 0.0
+            var divider = 0.0
             match self.shape {
                 CursorShape.Hidden => { return vec4(0.0) }
-                CursorShape.Default => { return self.arrow() }
-                CursorShape.Arrow => { return self.arrow() }
-                CursorShape.Hand => { return self.hand(0.0) }
-                CursorShape.Grab => { return self.hand(1.0) }
-                CursorShape.Grabbing => { return self.hand(2.0) }
-                CursorShape.Text => {
-                    sdf.move_to(8.0, 3.0)
-                    sdf.line_to(16.0, 3.0)
-                    sdf.move_to(12.0, 3.0)
-                    sdf.line_to(12.0, 21.0)
-                    sdf.move_to(8.0, 21.0)
-                    sdf.line_to(16.0, 21.0)
-                }
-                CursorShape.Crosshair => {
-                    sdf.move_to(12.0, 2.0)
-                    sdf.line_to(12.0, 22.0)
-                    sdf.move_to(2.0, 12.0)
-                    sdf.line_to(22.0, 12.0)
-                }
-                CursorShape.Move => {
-                    return self.resize(vec2(1.0, 0.0), 1.0, 0.0)
-                        + self.resize(vec2(0.0, 1.0), 1.0, 0.0)
-                            * (1.0 - self.resize(vec2(1.0, 0.0), 1.0, 0.0).w)
-                }
-                CursorShape.Wait => {
-                    var path = vec2(1e20, 0.0)
-                    path = self.path_edge(path, vec2(6.0, 3.0), vec2(18.0, 3.0))
-                    path = self.path_edge(path, vec2(18.0, 3.0), vec2(18.0, 6.0))
-                    path = self.path_edge(path, vec2(18.0, 6.0), vec2(13.0, 12.0))
-                    path = self.path_edge(path, vec2(13.0, 12.0), vec2(18.0, 18.0))
-                    path = self.path_edge(path, vec2(18.0, 18.0), vec2(18.0, 21.0))
-                    path = self.path_edge(path, vec2(18.0, 21.0), vec2(6.0, 21.0))
-                    path = self.path_edge(path, vec2(6.0, 21.0), vec2(6.0, 18.0))
-                    path = self.path_edge(path, vec2(6.0, 18.0), vec2(11.0, 12.0))
-                    path = self.path_edge(path, vec2(11.0, 12.0), vec2(6.0, 6.0))
-                    path = self.path_edge(path, vec2(6.0, 6.0), vec2(6.0, 3.0))
-                    return self.path_pixel(path)
-                }
-                CursorShape.NotAllowed => {
-                    sdf.circle(12.0, 12.0, 8.0)
-                    sdf.move_to(6.5, 6.5)
-                    sdf.line_to(17.5, 17.5)
-                }
+                CursorShape.Default => { fill = 0.0 }
+                CursorShape.Arrow => { fill = 0.0 }
+                CursorShape.Hand => { fill = 1.0 }
+                CursorShape.Grab => { fill = 2.0 }
+                CursorShape.Grabbing => { fill = 3.0 }
+                CursorShape.Wait => { fill = 4.0 }
+                CursorShape.Text => { stroke = 0.0 }
+                CursorShape.Crosshair => { stroke = 1.0 }
+                CursorShape.NotAllowed => { stroke = 2.0 }
+                // The question mark over the arrow.
                 CursorShape.Help => {
-                    sdf.move_to(15.0, 13.0)
-                    sdf.line_to(16.0, 11.0)
-                    sdf.line_to(20.0, 11.0)
-                    sdf.line_to(22.0, 13.0)
-                    sdf.line_to(21.0, 15.0)
-                    sdf.line_to(18.0, 17.0)
-                    sdf.line_to(18.0, 18.0)
-                    sdf.move_to(18.0, 20.5)
-                    sdf.line_to(18.0, 21.0)
-                    sdf.stroke_keep(self.border_color, 3.5)
-                    sdf.stroke(self.color, 1.75)
-                    return sdf.result + self.arrow() * (1.0 - sdf.result.w)
+                    stroke = 3.0
+                    fill = 0.0
                 }
-                CursorShape.NResize => { return self.resize(vec2(0.0, -1.0), 0.0, 0.0) }
-                CursorShape.NeResize => { return self.resize(vec2(0.707107, -0.707107), 0.0, 0.0) }
-                CursorShape.EResize => { return self.resize(vec2(1.0, 0.0), 0.0, 0.0) }
-                CursorShape.SeResize => { return self.resize(vec2(0.707107, 0.707107), 0.0, 0.0) }
-                CursorShape.SResize => { return self.resize(vec2(0.0, 1.0), 0.0, 0.0) }
-                CursorShape.SwResize => { return self.resize(vec2(-0.707107, 0.707107), 0.0, 0.0) }
-                CursorShape.WResize => { return self.resize(vec2(-1.0, 0.0), 0.0, 0.0) }
-                CursorShape.NwResize => { return self.resize(vec2(-0.707107, -0.707107), 0.0, 0.0) }
-                CursorShape.NsResize => { return self.resize(vec2(0.0, 1.0), 1.0, 0.0) }
-                CursorShape.NeswResize => { return self.resize(vec2(0.707107, -0.707107), 1.0, 0.0) }
-                CursorShape.EwResize => { return self.resize(vec2(1.0, 0.0), 1.0, 0.0) }
-                CursorShape.NwseResize => { return self.resize(vec2(0.707107, 0.707107), 1.0, 0.0) }
-                CursorShape.ColResize => { return self.resize(vec2(1.0, 0.0), 1.0, 1.0) }
-                CursorShape.RowResize => { return self.resize(vec2(0.0, 1.0), 1.0, 1.0) }
-                _ => { return self.arrow() }
+                // Both double arrows, the horizontal one over the vertical.
+                CursorShape.Move => {
+                    resizes = 2.0
+                    axis = vec2(1.0, 0.0)
+                    heads = 1.0
+                }
+                CursorShape.NResize => {
+                    resizes = 1.0
+                    axis = vec2(0.0, -1.0)
+                }
+                CursorShape.NeResize => {
+                    resizes = 1.0
+                    axis = vec2(0.707107, -0.707107)
+                }
+                CursorShape.EResize => {
+                    resizes = 1.0
+                    axis = vec2(1.0, 0.0)
+                }
+                CursorShape.SeResize => {
+                    resizes = 1.0
+                    axis = vec2(0.707107, 0.707107)
+                }
+                CursorShape.SResize => {
+                    resizes = 1.0
+                    axis = vec2(0.0, 1.0)
+                }
+                CursorShape.SwResize => {
+                    resizes = 1.0
+                    axis = vec2(-0.707107, 0.707107)
+                }
+                CursorShape.WResize => {
+                    resizes = 1.0
+                    axis = vec2(-1.0, 0.0)
+                }
+                CursorShape.NwResize => {
+                    resizes = 1.0
+                    axis = vec2(-0.707107, -0.707107)
+                }
+                CursorShape.NsResize => {
+                    resizes = 1.0
+                    axis = vec2(0.0, 1.0)
+                    heads = 1.0
+                }
+                CursorShape.NeswResize => {
+                    resizes = 1.0
+                    axis = vec2(0.707107, -0.707107)
+                    heads = 1.0
+                }
+                CursorShape.EwResize => {
+                    resizes = 1.0
+                    axis = vec2(1.0, 0.0)
+                    heads = 1.0
+                }
+                CursorShape.NwseResize => {
+                    resizes = 1.0
+                    axis = vec2(0.707107, 0.707107)
+                    heads = 1.0
+                }
+                CursorShape.ColResize => {
+                    resizes = 1.0
+                    axis = vec2(1.0, 0.0)
+                    heads = 1.0
+                    divider = 1.0
+                }
+                CursorShape.RowResize => {
+                    resizes = 1.0
+                    axis = vec2(0.0, 1.0)
+                    heads = 1.0
+                    divider = 1.0
+                }
+                _ => { fill = 0.0 }
             }
-            sdf.stroke_keep(self.border_color, 3.5)
-            sdf.stroke(self.color, 1.75)
-            return sdf.result
+            if resizes > 0.5 {
+                var out = vec4(0.0, 0.0, 0.0, 0.0)
+                var r = 0.0
+                while r < resizes - 0.5 {
+                    // The second (Move's vertical) under the first.
+                    let c = self.resize(mix(axis, vec2(0.0, 1.0), r), heads, divider)
+                    out = out + c * (1.0 - out.w)
+                    r = r + 1.0
+                }
+                return out
+            }
+            var over = vec4(0.0, 0.0, 0.0, 0.0)
+            if stroke > -0.5 {
+                if stroke > 1.5 && stroke < 2.5 {
+                    sdf.circle(12.0, 12.0, 8.0)
+                }
+                let n = self.stroke_count(stroke)
+                var i = 0.0
+                while i < n - 0.5 {
+                    let q = self.stroke_point(stroke, i)
+                    if q.z < 0.5 {
+                        sdf.move_to(q.x, q.y)
+                    } else {
+                        sdf.line_to(q.x, q.y)
+                    }
+                    i = i + 1.0
+                }
+                sdf.stroke_keep(self.border_color, 3.5)
+                sdf.stroke(self.color, 1.75)
+                if fill < -0.5 {
+                    return sdf.result
+                }
+                over = sdf.result
+            }
+            return over + self.path_fill(fill) * (1.0 - over.w)
         }
     }
 }

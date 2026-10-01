@@ -2,7 +2,9 @@
 //! built for what this frame actually uses, never the uber-shader.
 //!
 //! A model lane's shader (DrawSceneSkinned, DrawScenePbr, DrawSceneCity,
-//! DrawSceneFoliageLit) carries every optional feature of the renderer:
+//! DrawSceneFoliageLit), and the host's level draws (DrawSceneCube,
+//! DrawSceneAlpha, DrawSceneTerrain, while the host keeps their stock
+//! programs), carry every optional feature of the renderer:
 //! fast GI sampling and its debug views, the sun cascades and their debug
 //! view, the clustered lights, the `clip` hook. Each is gated by a uniform
 //! at run time, so a scene without GI still compiled (and a driver still
@@ -13,7 +15,9 @@
 //! functions of every feature that is off this frame replaced by what the
 //! stock function returns when its uniform switches it off (`gi_ambient`
 //! returns its fallback, `csm_vis` 1, `cluster_lights` nothing, a debug view
-//! its input colour, `clip` nothing for a draw that cuts no pixel). The
+//! its input colour, `clip` nothing for a draw that cuts no pixel; with the
+//! clustered lights on, the per-draw light slots sum nothing and a lamp
+//! pool fills no shadow, as their `cluster_on` branches do). The
 //! pixels are the stock shader's by construction; its instance, uniform and
 //! texture layout is the stock one (checked once per variant), so the lane
 //! writes its uniforms as before and only the shader id differs. Variants
@@ -37,6 +41,12 @@ pub(super) enum ModelLane {
     City = 2,
     /// Swaying trees and bushes (shaders/foliage.rs).
     Foliage = 3,
+    /// The host's level draws (SceneDraws): slabs, blended slabs, terrain.
+    /// They draw through a variant only while the host keeps the stock
+    /// program (a themed one keeps its own shader).
+    Cube = 4,
+    Alpha = 5,
+    Terrain = 6,
 }
 
 /// The optional features a lane's shader keeps.
@@ -95,6 +105,10 @@ script_mod! {
         csm_debug_view: fn(color: vec4, wp: vec3, n: vec3) -> vec4 { return color }
         cluster_lights: fn(wp: vec3, normal: vec3, eye: vec3, albedo: vec3, roughness: float, metallic: float, pbr: float) -> vec3 { return vec3(0.0, 0.0, 0.0) }
         local_shadow_visibility: fn(index: float, wp: vec3, normal: vec3, light_pos: vec3, radius: float) -> float { return 1.0 }
+        // Clustered lights on: the per-draw light slots are not summed and a
+        // lamp pool does not fill the sun's shadow (their cluster_on branch).
+        dl_sum: fn(wp: vec3, n: vec3) -> vec3 { return vec3(0.0, 0.0, 0.0) }
+        sun_filled: fn(sun_vis: float, local: vec3) -> float { return sun_vis }
     }
 }
 
@@ -125,6 +139,21 @@ impl Renderer {
         };
         let stock = self.lane_variants.stock.get(&lane).copied().or(stock);
         (full.or(stock), opaque)
+    }
+
+    /// A level draw's shader (SceneDraws: slabs, blended slabs, terrain)
+    /// for this frame's features, when the host draws it through the stock
+    /// program or one of its variants; `None` keeps the host's shader.
+    pub(super) fn level_shader(&mut self, cx: &mut Cx, lane: ModelLane, current: Option<DrawShaderId>) -> Option<DrawShaderId> {
+        let current = current?;
+        if std::env::var_os("MAKEPAD_SHADER_VARIANTS").is_some_and(|v| v == "0") {
+            return None;
+        }
+        let full = self.variant(cx, lane, self.lane_features());
+        let stock = *self.lane_variants.stock.get(&lane)?;
+        let ours = current == stock
+            || self.lane_variants.shaders.iter().any(|((l, _), v)| *l == lane && matches!(v, VariantShader::Built(id) if *id == current));
+        ours.then(|| full.unwrap_or(stock))
     }
 
     fn variant(&mut self, cx: &mut Cx, lane: ModelLane, features: Features) -> Option<DrawShaderId> {
@@ -168,7 +197,7 @@ pub(crate) fn variant_object(vm: &mut ScriptVm, base: ScriptObject, features: Fe
     let stubs = vm.bx.heap.value(draw, id!(scene_variant).into(), NoTrap).as_object()?;
     let obj = vm.bx.heap.new_with_proto_no_vec(base.into());
     // (switched off, the function it replaces, the stub it becomes)
-    let replace: [(bool, LiveId, LiveId); 9] = [
+    let replace: [(bool, LiveId, LiveId); 13] = [
         (!features.clip, id!(clip), id!(clip)),
         (!features.gi || !lit, id!(gi_ambient), id!(gi_ambient)),
         (!features.gi, id!(gi_display), id!(gi_display)),
@@ -179,6 +208,11 @@ pub(crate) fn variant_object(vm: &mut ScriptVm, base: ScriptObject, features: Fe
         (!features.csm_debug, id!(csm_debug_view), id!(csm_debug_view)),
         (!features.cluster || !lit, id!(cluster_lights), id!(cluster_lights)),
         (!features.local_shadows || !lit, id!(local_shadow_visibility), id!(local_shadow_visibility)),
+        (features.cluster, id!(dl_sum), id!(dl_sum)),
+        (features.cluster, id!(dl_sum_gated), id!(dl_sum)),
+        (features.cluster, id!(sun_filled), id!(sun_filled)),
+        // The program's own unlit shading (shaders/pbr.rs).
+        (!lit, id!(shade), id!(shade_unlit)),
     ];
     let mut replaced = false;
     for (off, method, stub) in replace {
@@ -191,8 +225,12 @@ pub(crate) fn variant_object(vm: &mut ScriptVm, base: ScriptObject, features: Fe
         if !own.as_object().is_some_and(|f| vm.bx.heap.is_fn(f)) {
             continue;
         }
-        let f = vm.bx.heap.value(stubs, stub.into(), NoTrap);
-        let f = f.as_object().filter(|f| vm.bx.heap.is_fn(*f))?;
+        // A stub of scene_variant's, or else the program's own.
+        let f = match vm.bx.heap.value(stubs, stub.into(), NoTrap).as_object() {
+            Some(f) => Some(f),
+            None => vm.bx.heap.object_method(base, stub.into(), NoTrap).as_object(),
+        };
+        let f = f.filter(|f| vm.bx.heap.is_fn(*f))?;
         if !vm.bx.heap.set_value(obj, method.into(), f.into(), NoTrap).is_nil() {
             return None;
         }
@@ -212,54 +250,62 @@ pub(crate) fn same_layout(cx: &Cx, stock: DrawShaderId, variant: DrawShaderId) -
         && a.textures.iter().map(|t| t.id).eq(b.textures.iter().map(|t| t.id))
 }
 
+/// A draw struct's shader: the type default's (`obj` None) or `obj`'s.
+fn shader_of<T: ScriptNew + ScriptApply>(vm: &mut ScriptVm, obj: Option<ScriptObject>, vars: fn(&mut T) -> &mut DrawVars) -> Option<DrawShaderId> {
+    match obj {
+        None => vars(&mut T::script_new_with_default(vm)).draw_shader_id,
+        Some(obj) => {
+            // As DrawSceneCustom::from_surface: construction applies the
+            // stock defaults (and may compile the stock shader); clear it,
+            // then apply the variant object.
+            let mut draw = T::script_new(vm);
+            vars(&mut draw).draw_shader_id = None;
+            draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
+            vars(&mut draw).draw_shader_id
+        }
+    }
+}
+
+impl ModelLane {
+    fn name(self) -> &'static str {
+        ["diffuse", "PBR", "city", "foliage", "cube", "alpha", "terrain"][self as usize]
+    }
+
+    fn type_id(self) -> ScriptTypeId {
+        match self {
+            ModelLane::Diffuse => DrawSceneSkinned::script_type_id_static(),
+            ModelLane::Pbr => DrawScenePbr::script_type_id_static(),
+            ModelLane::City => crate::shaders::DrawSceneCity::script_type_id_static(),
+            ModelLane::Foliage => crate::shaders::DrawSceneFoliageLit::script_type_id_static(),
+            ModelLane::Cube => DrawSceneCube::script_type_id_static(),
+            ModelLane::Alpha => DrawSceneAlpha::script_type_id_static(),
+            ModelLane::Terrain => DrawSceneTerrain::script_type_id_static(),
+        }
+    }
+
+    /// The lane's shader for `obj` (None: its type default).
+    fn shader(self, vm: &mut ScriptVm, obj: Option<ScriptObject>) -> Option<DrawShaderId> {
+        match self {
+            ModelLane::Pbr => shader_of::<DrawScenePbr>(vm, obj, |d| &mut d.skinned.draw_vars),
+            ModelLane::Diffuse => shader_of::<DrawSceneSkinned>(vm, obj, |d| &mut d.draw_vars),
+            ModelLane::City => shader_of::<crate::shaders::DrawSceneCity>(vm, obj, |d| &mut d.pbr.skinned.draw_vars),
+            ModelLane::Foliage => shader_of::<crate::shaders::DrawSceneFoliageLit>(vm, obj, |d| &mut d.pbr.skinned.draw_vars),
+            ModelLane::Cube => shader_of::<DrawSceneCube>(vm, obj, |d| &mut d.cube.draw_vars),
+            ModelLane::Alpha => shader_of::<DrawSceneAlpha>(vm, obj, |d| &mut d.cube.cube.draw_vars),
+            ModelLane::Terrain => shader_of::<DrawSceneTerrain>(vm, obj, |d| &mut d.draw_vars),
+        }
+    }
+}
+
 /// Build the variant of `lane` with `features`: (stock shader, variant).
 fn build(vm: &mut ScriptVm, lane: ModelLane, features: Features) -> Option<(DrawShaderId, DrawShaderId)> {
-    let type_id = match lane {
-        ModelLane::Diffuse => DrawSceneSkinned::script_type_id_static(),
-        ModelLane::Pbr => DrawScenePbr::script_type_id_static(),
-        ModelLane::City => crate::shaders::DrawSceneCity::script_type_id_static(),
-        ModelLane::Foliage => crate::shaders::DrawSceneFoliageLit::script_type_id_static(),
-    };
-    let base = vm.bx.heap.type_default_for_id(type_id)?;
-    let stock = match lane {
-        ModelLane::Pbr => DrawScenePbr::script_new_with_default(vm).skinned.draw_vars.draw_shader_id,
-        ModelLane::Diffuse => DrawSceneSkinned::script_new_with_default(vm).draw_vars.draw_shader_id,
-        ModelLane::City => crate::shaders::DrawSceneCity::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id,
-        ModelLane::Foliage => crate::shaders::DrawSceneFoliageLit::script_new_with_default(vm).pbr.skinned.draw_vars.draw_shader_id,
-    }?;
+    let base = vm.bx.heap.type_default_for_id(lane.type_id())?;
+    let stock = lane.shader(vm, None)?;
     // Every feature on and `clip` kept: the stock shader itself.
     let Some(obj) = variant_object(vm, base, features, true) else { return Some((stock, stock)) };
-    // As DrawSceneCustom::from_surface: construction applies the stock
-    // defaults (and may compile the stock shader); clear it, then apply the
-    // variant object.
-    let variant = match lane {
-        ModelLane::Pbr => {
-            let mut draw = DrawScenePbr::script_new(vm);
-            draw.skinned.draw_vars.draw_shader_id = None;
-            draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
-            draw.skinned.draw_vars.draw_shader_id
-        }
-        ModelLane::Diffuse => {
-            let mut draw = DrawSceneSkinned::script_new(vm);
-            draw.draw_vars.draw_shader_id = None;
-            draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
-            draw.draw_vars.draw_shader_id
-        }
-        ModelLane::City => {
-            let mut draw = crate::shaders::DrawSceneCity::script_new(vm);
-            draw.pbr.skinned.draw_vars.draw_shader_id = None;
-            draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
-            draw.pbr.skinned.draw_vars.draw_shader_id
-        }
-        ModelLane::Foliage => {
-            let mut draw = crate::shaders::DrawSceneFoliageLit::script_new(vm);
-            draw.pbr.skinned.draw_vars.draw_shader_id = None;
-            draw.script_apply(vm, &Apply::New, &mut Scope::empty(), obj.into());
-            draw.pbr.skinned.draw_vars.draw_shader_id
-        }
-    }?;
+    let variant = lane.shader(vm, Some(obj))?;
     if !same_layout(vm.cx(), stock, variant) {
-        log!("render: the {} lane's variant {features:?} has another layout than the stock shader; drawing through the stock one", ["diffuse", "PBR", "city", "foliage"][lane as usize]);
+        log!("render: the {} lane's variant {features:?} has another layout than the stock shader; drawing through the stock one", lane.name());
         return None;
     }
     Some((stock, variant))
@@ -330,16 +376,10 @@ mod tests {
                 Features { csm: true, cluster: true, ..Default::default() },
                 Features { gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true, clip: false },
             ] {
-                for lane in [ModelLane::Diffuse, ModelLane::Pbr, ModelLane::City, ModelLane::Foliage] {
-                    let name = ["diffuse", "PBR", "city", "foliage"][lane as usize];
+                for lane in [ModelLane::Diffuse, ModelLane::Pbr, ModelLane::City, ModelLane::Foliage, ModelLane::Cube, ModelLane::Alpha, ModelLane::Terrain] {
+                    let name = lane.name();
                     assert!(build(vm, lane, features).is_some(), "{name} variant {features:?}");
-                    let type_id = match lane {
-                        ModelLane::Diffuse => DrawSceneSkinned::script_type_id_static(),
-                        ModelLane::Pbr => DrawScenePbr::script_type_id_static(),
-                        ModelLane::City => crate::shaders::DrawSceneCity::script_type_id_static(),
-                        ModelLane::Foliage => crate::shaders::DrawSceneFoliageLit::script_type_id_static(),
-                    };
-                    let base = vm.bx.heap.type_default_for_id(type_id).unwrap();
+                    let base = vm.bx.heap.type_default_for_id(lane.type_id()).unwrap();
                     for lit in [true, false] {
                         let Some(obj) = variant_object(vm, base, features, lit) else { continue };
                         vm.bx.heap.set_value(draw, id!(variant_under_test).into(), obj.into(), NoTrap);

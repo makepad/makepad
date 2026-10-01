@@ -442,6 +442,17 @@ impl Renderer {
             self.clustered.bind(cx.cx, dv, self.clustered_enabled);
             self.gi.bind(cx.cx, dv);
         }
+        // The level draws go through the shader variant for this frame's
+        // features while the host keeps their stock programs (variants.rs).
+        for (lane, dv) in [
+            (super::variants::ModelLane::Cube, &mut draws.cube.cube.draw_vars),
+            (super::variants::ModelLane::Alpha, &mut draws.alpha.cube.cube.draw_vars),
+            (super::variants::ModelLane::Terrain, &mut draws.terrain.draw_vars),
+        ] {
+            if let Some(id) = self.level_shader(cx.cx, lane, dv.draw_shader_id) {
+                dv.draw_shader_id = Some(id);
+            }
+        }
 
         // 1. Sky dome around the camera (depth-tested at radius, drawn
         // first). Default-sky worlds and worlds on a running clock draw

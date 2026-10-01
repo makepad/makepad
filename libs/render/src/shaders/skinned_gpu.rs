@@ -127,14 +127,43 @@ script_mod! {
         dl_sum: fn(wp: vec3, n: vec3) -> vec3 {
             if self.cluster_on > 0.5 { return vec3(0.0, 0.0, 0.0) }
             var dl = vec3(0.0, 0.0, 0.0)
-            dl = dl + self.dl_term(wp, n, self.dl_pos0, self.dl_col0)
-            dl = dl + self.dl_term(wp, n, self.dl_pos1, self.dl_col1)
-            dl = dl + self.dl_term(wp, n, self.dl_pos2, self.dl_col2)
-            dl = dl + self.dl_term(wp, n, self.dl_pos3, self.dl_col3)
-            dl = dl + self.dl_term(wp, n, self.dl_pos4, self.dl_col4)
-            dl = dl + self.dl_term(wp, n, self.dl_pos5, self.dl_col5)
-            dl = dl + self.dl_term(wp, n, self.dl_pos6, self.dl_col6)
-            dl = dl + self.dl_term(wp, n, self.dl_pos7, self.dl_col7)
+            // The eight slots in one loop: one dl_term call site (a D3D
+            // compile inlines every site).
+            var k = 0.0
+            while k < 7.5 {
+                var lp = self.dl_pos0
+                var lc = self.dl_col0
+                if k > 0.5 {
+                    lp = self.dl_pos1
+                    lc = self.dl_col1
+                }
+                if k > 1.5 {
+                    lp = self.dl_pos2
+                    lc = self.dl_col2
+                }
+                if k > 2.5 {
+                    lp = self.dl_pos3
+                    lc = self.dl_col3
+                }
+                if k > 3.5 {
+                    lp = self.dl_pos4
+                    lc = self.dl_col4
+                }
+                if k > 4.5 {
+                    lp = self.dl_pos5
+                    lc = self.dl_col5
+                }
+                if k > 5.5 {
+                    lp = self.dl_pos6
+                    lc = self.dl_col6
+                }
+                if k > 6.5 {
+                    lp = self.dl_pos7
+                    lc = self.dl_col7
+                }
+                dl = dl + self.dl_term(wp, n, lp, lc)
+                k = k + 1.0
+            }
             return dl
         }
 

@@ -268,6 +268,14 @@ script_mod! {
             // stock hook returns the alpha tested above).
             if self.alpha_mode>0.5 && self.alpha_mode<1.5 && surf.w<self.alpha_cutoff {self.clip()}
             let albedo = surf.xyz
+            return self.shade(albedo, surf.w)
+        }
+
+        // The lit surface: occlusion, sun, lamps, GI and the material's
+        // composition of them, then emission, the finish, fog and the
+        // debug views. Its own function so an unlit program's variant can
+        // replace it with shade_unlit (renderer/variants.rs).
+        shade: fn(albedo: vec3, surf_w: float) -> vec4 {
             // Occlusion, sun visibility and lamps: verbatim from
             // DrawSceneSkinned, so a PBR prop sits in the same light as the
             // wall behind it.
@@ -424,7 +432,42 @@ script_mod! {
             if self.tex_mag.y > 0.5 {
                 lit = self.clear_coat(lit, n, v, l, albedo, surface_direct * (sun_lit * ao_direct), ao * sao)
             }
-            let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf.w,step(1.5,self.alpha_mode))))
+            let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf_w,step(1.5,self.alpha_mode))))
+            let coverage=fin.w
+            return self.csm_debug_view(self.gi_display(vec4(mix(fin.xyz, self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
+        }
+
+        // shade for a program whose composition reads no light (Unlit,
+        // Flat, the error material): the same normal, emission, finish, fog
+        // and debug views, without computing the light it would ignore (nor
+        // a clear coat: an unlit surface reflects nothing).
+        shade_unlit: fn(albedo: vec3, surf_w: float) -> vec4 {
+            var n=normalize(self.v_csm_n)
+            if self.double_sided>0.5 && dot(n,self.eye.xyz-self.v_csm.xyz)<0.0 {n=n*(-1.0)}
+            if self.surface_on>0.5 && abs(self.normal_scale)>0.00001 {
+                let dp1=dFdx(self.v_csm.xyz)
+                let dp2=dFdy(self.v_csm.xyz)
+                let du1=dFdx(self.v_uv)
+                let du2=dFdy(self.v_uv)
+                let determinant=du1.x*du2.y-du1.y*du2.x
+                if abs(determinant)>0.00000001 {
+                    let orientation=sign(determinant)
+                    let tangent=normalize(dp1*du2.y-dp2*du1.y)*orientation
+                    let bitangent=normalize(dp2*du1.x-dp1*du2.x)*orientation
+                    let xy=self.normal_map.sample_repeat(self.v_uv).xy*2.0-vec2(1.0,1.0)
+                    let mapped=vec3(xy.x,xy.y,sqrt(max(1.0-dot(xy,xy),0.0)))
+                    n=normalize(tangent*(mapped.x*self.normal_scale)+bitangent*(mapped.y*self.normal_scale)+n*mapped.z)
+                }
+            }
+            n = self.mat_normal(n)
+            let l = normalize(self.light_dir)
+            let v = normalize(self.eye.xyz - self.v_csm.xyz)
+            var emission=vec3(0.0,0.0,0.0)
+            if max(self.emissive.x,max(self.emissive.y,self.emissive.z))>0.0 {emission=self.to_scene(self.emissive_map.sample_repeat(self.v_uv).xyz)*self.emissive}
+            emission = self.mat_emission(emission)
+            let none = vec3(0.0,0.0,0.0)
+            let lit = self.fur_shade(self.mat_compose(albedo, 0.0, none, none, none, none, none, none, n, l, v, none, none, 0.0), n, self.eye.xyz-self.v_csm.xyz) + emission
+            let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf_w,step(1.5,self.alpha_mode))))
             let coverage=fin.w
             return self.csm_debug_view(self.gi_display(vec4(mix(fin.xyz, self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
         }
