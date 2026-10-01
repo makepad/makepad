@@ -271,11 +271,7 @@ impl Renderer {
         // blob (see model.rs real_asset_tests). Primitive curation only as
         // the degenerate-mesh fallback — and always as the OCCLUDER set,
         // where few clean boxes beat many exact ones.
-        let occluder_parts = model.collider_parts();
-        let collider_parts = {
-            let v = model.voxel_collider_boxes();
-            if v.is_empty() { occluder_parts.clone() } else { v }
-        };
+        let occluder_parts = std::sync::Arc::new(model.collider_parts());
         let stride = crate::model::MODEL_VERTEX_FLOATS;
         // The light baker's raycaster triangles, captured BEFORE the GPU
         // upload consumes the packed stream. Only `lm_source` holders use
@@ -709,6 +705,7 @@ impl Renderer {
             std::rc::Rc::new(g)
         });
 
+        let (mesh_positions, mesh_indices) = (std::sync::Arc::new(lm_positions), std::sync::Arc::new(lm_indices));
         self.static_models.push((
             id.to_string(),
             LoadedModel {
@@ -728,13 +725,13 @@ impl Renderer {
                 min,
                 max,
                 authored_collisions: Default::default(),
-                collider_parts: std::sync::Arc::new(collider_parts),
-                occluder_parts: std::sync::Arc::new(occluder_parts),
+                collider_parts: super::prepared::Colliders::from_mesh(mesh_positions.clone(), mesh_indices.clone(), min, max, occluder_parts.clone()),
+                occluder_parts,
                 anim_parts,
                 driven_parts,
                 sky,
-                mesh_positions: std::sync::Arc::new(lm_positions),
-                mesh_indices: std::sync::Arc::new(lm_indices),
+                mesh_positions,
+                mesh_indices,
                 lm_source,
                 bake_geometry,
             },

@@ -642,6 +642,28 @@ pub(crate) fn voxel_boxes(
     min: Vec3f,
     max: Vec3f,
 ) -> Vec<(Vec3f, Vec3f)> {
+    voxel_boxes_of(
+        |i| {
+            let o = i as usize * MODEL_VERTEX_FLOATS;
+            Vec3f {
+                x: vertices[o],
+                y: vertices[o + 1],
+                z: vertices[o + 2],
+            }
+        },
+        indices,
+        min,
+        max,
+    )
+}
+
+/// [`voxel_boxes`] over vertex positions given by `vp` (by index).
+pub(crate) fn voxel_boxes_of(
+    vp: impl Fn(u32) -> Vec3f,
+    indices: &[u32],
+    min: Vec3f,
+    max: Vec3f,
+) -> Vec<(Vec3f, Vec3f)> {
     {
         let size = max - min;
         let span = size.x.max(size.y).max(size.z);
@@ -669,14 +691,6 @@ pub(crate) fn voxel_boxes(
         let mut filled: Vec<Option<(Vec3f, Vec3f)>> =
             vec![None; dims[0] * dims[1] * dims[2]];
         let at = |x: usize, y: usize, z: usize| x + dims[0] * (y + dims[1] * z);
-        let vp = |i: u32| {
-            let o = i as usize * MODEL_VERTEX_FLOATS;
-            Vec3f {
-                x: vertices[o],
-                y: vertices[o + 1],
-                z: vertices[o + 2],
-            }
-        };
         for tri in indices.chunks_exact(3) {
             let (a, b, c) = (vp(tri[0]), vp(tri[1]), vp(tri[2]));
             let tlo = vec3f(

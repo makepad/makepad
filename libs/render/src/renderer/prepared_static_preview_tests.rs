@@ -46,7 +46,7 @@ fn preparation_retains_geometry_and_derives_collision_off_ui() {
     assert_eq!(prepared.main.indices, [0, 1, 2]);
     assert_eq!(prepared.mesh_indices.as_ref(), &prepared.main.indices);
     assert_eq!(prepared.positions.len(), 3);
-    assert!(!prepared.collider_parts.is_empty());
+    assert!(!prepared.collider_parts.boxes().is_empty());
     assert_eq!(prepared.upload_bytes(), (3 * crate::model::MODEL_VERTEX_FLOATS + 3) * 4 + 12);
     let other_pane = prepared.clone();
     assert_eq!(other_pane.main.indices, prepared.main.indices);

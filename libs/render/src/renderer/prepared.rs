@@ -68,6 +68,40 @@ pub fn upload_generated_texture(cx: &mut Cx, image: ImageBuffer) -> Texture {
     })
 }
 
+/// A model's physics collider boxes (model space): the triangle-derived
+/// voxel boxes ([`crate::model::voxel_boxes`]), or its curated parts for a
+/// degenerate mesh. Worked out on the first ask, from the mesh the model
+/// keeps anyway: only a host with physics asks (a game's props), and a
+/// scene's items (a film's meshes) never do; voxelizing each item at load
+/// was most of a large scene's first draw on a browser's UI thread.
+#[derive(Clone, Default)]
+pub(super) struct Colliders {
+    boxes: std::sync::Arc<std::sync::OnceLock<Vec<(Vec3f, Vec3f)>>>,
+    mesh: Option<std::sync::Arc<ColliderMesh>>,
+}
+
+struct ColliderMesh {
+    positions: std::sync::Arc<Vec<Vec3f>>,
+    indices: std::sync::Arc<Vec<u32>>,
+    min: Vec3f,
+    max: Vec3f,
+    fallback: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
+}
+
+impl Colliders {
+    pub(super) fn from_mesh(positions: std::sync::Arc<Vec<Vec3f>>, indices: std::sync::Arc<Vec<u32>>, min: Vec3f, max: Vec3f, fallback: std::sync::Arc<Vec<(Vec3f, Vec3f)>>) -> Self {
+        Self { boxes: Default::default(), mesh: Some(std::sync::Arc::new(ColliderMesh { positions, indices, min, max, fallback })) }
+    }
+
+    pub(super) fn boxes(&self) -> &[(Vec3f, Vec3f)] {
+        self.boxes.get_or_init(|| {
+            let Some(m) = &self.mesh else { return Vec::new() };
+            let boxes = crate::model::voxel_boxes_of(|i| m.positions[i as usize], &m.indices, m.min, m.max);
+            if boxes.is_empty() { m.fallback.to_vec() } else { boxes }
+        })
+    }
+}
+
 /// Worker-prepared generated mesh, decoded material layers and rigid animated
 /// parts. All fields are private so upload receives only validated products.
 /// Clone on a worker when separate transient views need independent buffers.
@@ -85,7 +119,7 @@ pub struct PreparedStaticPreview {
     pub(super) positions: std::sync::Arc<Vec<Vec3f>>,
     pub(super) mesh_indices: std::sync::Arc<Vec<u32>>,
     pub(super) authored_collisions: std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>,
-    pub(super) collider_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
+    pub(super) collider_parts: Colliders,
     pub(super) occluder_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
     pub(super) anim_parts: Vec<PreparedAnimPreview>,
     pub(super) driven_parts: Vec<PreparedDrivenPreview>,
@@ -141,7 +175,6 @@ impl PreparedStaticPreview {
             }(indices,vertices)
         });
         let occluder_parts = model.collider_parts();
-        let collider_parts = { let boxes=model.voxel_collider_boxes(); if boxes.is_empty(){occluder_parts.clone()}else{boxes} };
         let remaining = std::cell::Cell::new(128usize*1024*1024);
         // Many layers of one model share an image (a map's 28 meshes use
         // ONE atlas): decode, mip and charge each distinct image once, and
@@ -227,8 +260,10 @@ impl PreparedStaticPreview {
             let vertices=std::mem::take(&mut part.vertices);let indices=std::mem::take(&mut part.indices);part.images.clear();
             Some(PreparedSky{part:std::sync::Arc::new(part),vertices,indices,positions,mesh_indices,tex0,tex1})
         }else{None};
-        Ok(Self{lods:Vec::new(),morph:None,ao,lm_source,bake_stream,sdf,emitters:Default::default(),main,extra,positions:std::sync::Arc::new(positions),mesh_indices,
-            authored_collisions:Default::default(),collider_parts:std::sync::Arc::new(collider_parts),occluder_parts:std::sync::Arc::new(occluder_parts),anim_parts,driven_parts,sky,
+        let positions=std::sync::Arc::new(positions);let occluder_parts=std::sync::Arc::new(occluder_parts);
+        let collider_parts=Colliders::from_mesh(positions.clone(),mesh_indices.clone(),model.min,model.max,occluder_parts.clone());
+        Ok(Self{lods:Vec::new(),morph:None,ao,lm_source,bake_stream,sdf,emitters:Default::default(),main,extra,positions,mesh_indices,
+            authored_collisions:Default::default(),collider_parts,occluder_parts,anim_parts,driven_parts,sky,
             min:model.min,max:model.max,prelit:model.prelit})
     }
     /// The GPU textures this asset uploads, as (content hash, bytes), each
@@ -298,7 +333,7 @@ pub struct UploadedStaticPreview {
     pub(super) min: Vec3f,
     pub(super) max: Vec3f,
     pub(super) authored_collisions: std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>,
-    pub(super) collider_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
+    pub(super) collider_parts: Colliders,
     pub(super) occluder_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
     pub(super) positions: std::sync::Arc<Vec<Vec3f>>,
     pub(super) indices: std::sync::Arc<Vec<u32>>,
@@ -386,7 +421,7 @@ pub(super) struct LoadedModel {
     /// Physics collider boxes in model space — triangle-derived voxel boxes
     /// (model.rs voxel_collider_boxes): legs, decks, braces, openings.
     pub(super) authored_collisions: std::sync::Arc<Vec<crate::asset_metadata::PreparedAssetCollision>>,
-    pub(super) collider_parts: std::sync::Arc<Vec<(Vec3f, Vec3f)>>,
+    pub(super) collider_parts: Colliders,
     /// Light-bake occluder boxes — the OLD curated primitive parts: few and
     /// face-aligned. Voxel boxes as occluders smeared streaks over every
     /// sloped roof (a stepped AABB pokes through the surface) and tripled
