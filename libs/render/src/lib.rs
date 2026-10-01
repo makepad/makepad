@@ -98,6 +98,8 @@ use makepad_draw::*;
 /// `makepad_widgets::script_mod` (the shader block uses the widgets prelude)
 /// and before any widget that declares these draw types.
 pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
+    // The shared Splash stdlib (`mod.shared`: sRGB, hashes) the shaders use.
+    makepad_render_graph::pass_stdlib(vm);
     local_shadows::sampling::script_mod(vm);
     if local_shadows::hardware_shadow_maps() {
         local_shadows::hardware_sampling::script_mod(vm);

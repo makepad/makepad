@@ -16,6 +16,7 @@
 use makepad_draw::*;
 script_mod! {
     use mod.prelude.widgets_internal.*
+    use mod.shared.*
     // Cascade windows; shared by producers and receivers.
     let GiCascades = {
         // x,y,z probes per cascade, w = probes per cascade
@@ -435,9 +436,6 @@ script_mod! {
         gi_light_ids0: uniform(vec4(-1.0,-1.0,-1.0,-1.0))
         gi_light_ids1: uniform(vec4(-1.0,-1.0,-1.0,-1.0))
         hit_at: fn(ray:float,row:float)->vec4 {return self.gi_hits.sample_nearest(vec2((ray+0.5)/65.0,(row+0.5)/self.gi_pass.y))}
-        decode_srgb: fn(c:vec3)->vec3 {
-            return mix(c/12.92,pow((c+vec3(0.055,0.055,0.055))/1.055,vec3(2.4,2.4,2.4)),step(vec3(0.04045,0.04045,0.04045),c))
-        }
         local_bounce: fn(p:vec3,n:vec3,index:float)->vec3 {
             if index<0.0 {return vec3(0.0,0.0,0.0)}
             let pos=self.cluster_fetch(self.cluster_z.w+index*3.0)
@@ -475,7 +473,7 @@ script_mod! {
             if hit.y<(-0.5) {return vec4(mix(self.gi_ground,self.gi_sky,clamp(rd.y*0.5+0.5,0.0,1.0)),hit.x)}
             if hit.z<0.0 {return vec4(0.0,0.0,0.0,-1.0)}
             var albedo=min(self.gi_unpack(hit.y),vec3(0.9,0.9,0.9))
-            if self.gi_relight.y>0.5 {albedo=self.decode_srgb(albedo)}
+            if self.gi_relight.y>0.5 {albedo=srgb_to_linear(albedo)}
             let n=normalize(self.gi_unpack(hit.z)*2.0-vec3(1.0,1.0,1.0))
             // Emission: 5-bit hue per channel + 8-bit intensity m/(1+m).
             // The linear lane decodes the hue like an albedo and applies the
@@ -483,7 +481,7 @@ script_mod! {
             let level=floor(hit.w/32768.0)
             let rest=hit.w-level*32768.0
             var hue=vec3(rest-floor(rest/32.0)*32.0,floor(rest/32.0)-floor(rest/1024.0)*32.0,floor(rest/1024.0))/31.0
-            if self.gi_relight.y>0.5 {hue=self.decode_srgb(hue)}
+            if self.gi_relight.y>0.5 {hue=srgb_to_linear(hue)}
             let glow=min(level/255.0,0.996)
             let emission=hue*(glow/(1.0-glow))*self.gi_relight.z
             let p=probe.xyz+rd*hit.x

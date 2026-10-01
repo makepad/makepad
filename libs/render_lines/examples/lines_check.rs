@@ -281,7 +281,7 @@ fn world_job() -> Job {
     let mut world = LineBatch::new(LineStyle { width_unit: WidthUnit::World, ..LineStyle::default() });
     world.push_path(&[[0.5, -0.5, 2.0], [0.5, -0.5, -40.0]], 0.1, [0.0, 1.0, 0.0, 1.0], false);
     let mut pts = PointBatch::new(PointStyle { shape: SpriteShape::Disc, blend: Blend::Over, ..PointStyle::default() });
-    pts.push([1.5, 0.5, 0.0], 12.0, [0.0, 0.0, 1.0, 1.0], 0.0, f32::MIN);
+    pts.push(Sprite::new([1.5, 0.5, 0.0], 12.0, [0.0, 0.0, 1.0, 1.0]));
     Job { name: "world".into(), size: (256, 128), view: v, lines: vec![through, world], points: vec![pts], scale: 1.0, frames: 0 }
 }
 

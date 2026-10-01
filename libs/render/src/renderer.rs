@@ -633,7 +633,7 @@ mod grass_draw;
 mod vfx_draw;
 mod ibl;
 mod items;
-pub use items::{splash_material_name, GeometryData, LAYOUT_TRANSFORM_TINT, TRANSFORM_TINT_FLOATS};
+pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSFORM_TINT};
 
 pub use draw_items::*;
 pub use prepared::*;

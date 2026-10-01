@@ -6,6 +6,7 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.*
     use mod.geom
+    use mod.shared.*
 
     // GPU-skinned character mesh: the REST mesh (geom.GameMeshVertexSkin,
     // uploaded once per rig) blended in the VERTEX stage against a joint
@@ -288,8 +289,6 @@ script_mod! {
             let edge = (self.sun_color * (back * mix(1.0, 3.14159265, self.lin_ctl.x) * 0.45) + self.sun_sky * 0.8) * (e * e * e * amb_occ * rim / 255.0)
             return base * (1.0 - fc) + env * (fc * amb_occ) + sun * (glint * fc) + edge
         }
-        surface_linear: fn(v:vec3)->vec3 {return mix(v/12.92,pow((v+vec3(0.055,0.055,0.055))/1.055,vec3(2.4,2.4,2.4)),step(vec3(0.04045,0.04045,0.04045),v))}
-        surface_display: fn(v:vec3)->vec3 {return mix(v*12.92,1.055*pow(max(v,vec3(0.0,0.0,0.0)),vec3(0.4166667,0.4166667,0.4166667))-vec3(0.055,0.055,0.055),step(vec3(0.0031308,0.0031308,0.0031308),v))}
         pixel: fn() {
             if self.fur_mask() < 0.5 { discard() }
             let tex = self.tex.sample_repeat(self.v_uv)
@@ -340,7 +339,7 @@ script_mod! {
                         * ao_direct
             )
             if self.surface_on>0.5 {
-                let base=self.color_adjust(self.surface_linear(tex.xyz)*self.v_color.xyz,self.tint,self.color_adjust_ctl)
+                let base=self.color_adjust(srgb_to_linear(tex.xyz)*self.v_color.xyz,self.tint,self.color_adjust_ctl)
                 var n=normalize(self.v_csm_n)
                 let view=normalize(self.eye-self.v_csm.xyz)
                 if self.double_sided>0.5 && dot(n,view)<0.0{n=n*(-1.0)}
@@ -384,12 +383,12 @@ script_mod! {
                 let fresnel=f0+(max(vec3(1.0-rough,1.0-rough,1.0-rough),f0)-f0)*pow(1.0-ndv,5.0)
                 let ambient=(base*(1.0-metal)*self.gi_ambient(self.v_csm.xyz,n,mix(self.sun_ground,self.sun_sky,clamp(n.y*0.5+0.5,0.0,1.0)))+environment*fresnel)*ao
                 let occlusion=mix(1.0,self.occlusion_map.sample_repeat(self.v_uv).x,self.occlusion_strength)
-                let emission=self.surface_linear(self.emissive_map.sample_repeat(self.v_uv).xyz)*self.emissive
+                let emission=srgb_to_linear(self.emissive_map.sample_repeat(self.v_uv).xyz)*self.emissive
                 let punctual=self.cluster_pbr(self.v_csm.xyz,n,self.eye,base,rough,metal)
                 var result=self.fur_shade(direct+ambient*occlusion+punctual*ao_direct,n,self.eye-self.v_csm.xyz)+emission
                 if self.fur_layer.y>0.5{result=self.toy_coat(result,n,view,light,self.sun_color*(ndl*sun_vis*ao_direct*mix(1.0,3.14159265,self.lin_ctl.x)),ao)}
                 let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
-                return self.csm_debug_view(self.gi_display(vec4(mix(mix(self.surface_display(result),result,self.lin_ctl.x),self.fog_color,self.scene_fog(self.v_fog,self.v_csm.xyz,self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
+                return self.csm_debug_view(self.gi_display(vec4(mix(mix(linear_to_srgb(result),result,self.lin_ctl.x),self.fog_color,self.scene_fog(self.v_fog,self.v_csm.xyz,self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
             }
             return self.csm_debug_view(self.gi_display(vec4(mix(lit, self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density)), 1.0),self.v_csm.xyz,self.v_csm_n),self.v_csm.xyz,self.v_csm_n)
         }

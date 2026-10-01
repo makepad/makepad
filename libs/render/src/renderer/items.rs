@@ -24,10 +24,33 @@ use crate::material_surface::{PixelSemantic, PreparedTexture};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Packed instance records: a column-major model matrix (16 floats) then a
-/// linear RGBA tint (4), per instance.
+/// Packed instance records of [`TransformTint`] (`InstanceSource::Packed`
+/// with this layout).
 pub const LAYOUT_TRANSFORM_TINT: LayoutId = LayoutId(1);
-pub const TRANSFORM_TINT_FLOATS: usize = 20;
+
+/// One instance of `LAYOUT_TRANSFORM_TINT`: a column-major model matrix and
+/// a linear RGBA tint (alpha is the instance's opacity).
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+pub struct TransformTint {
+    pub transform: Mat4f,
+    pub tint: Vec4f,
+}
+
+impl TransformTint {
+    /// The records as the packed floats an `InstanceSource::Packed` holds.
+    pub fn floats(records: &[TransformTint]) -> &[f32] {
+        // repr(C) of 20 f32s with f32 alignment: no padding.
+        const _: () = assert!(std::mem::size_of::<TransformTint>() == 20 * 4 && std::mem::align_of::<TransformTint>() == 4);
+        unsafe { std::slice::from_raw_parts(records.as_ptr() as *const f32, records.len() * 20) }
+    }
+
+    /// Packed floats read back as records (a trailing partial record is
+    /// left out).
+    pub fn records(floats: &[f32]) -> &[TransformTint] {
+        unsafe { std::slice::from_raw_parts(floats.as_ptr() as *const TransformTint, floats.len() / 20) }
+    }
+}
 
 /// The custom-material name a host installs a Splash program under.
 pub fn splash_material_name(program: makepad_scene::MaterialProgramId) -> String {
@@ -415,11 +438,7 @@ impl Renderer {
             let (geometry, material, instances): (GeometryRef, _, Vec<(Mat4f, Vec4f)>) = match &item.kind {
                 ItemKind::Mesh { geometry, material, transform } => (*geometry, *material, vec![(*transform, vec4(1.0, 1.0, 1.0, 1.0))]),
                 ItemKind::Instances { geometry, material, source: InstanceSource::Packed { data, layout }, count } if *layout == LAYOUT_TRANSFORM_TINT => {
-                    let list = data.chunks_exact(TRANSFORM_TINT_FLOATS).take(*count as usize).map(|r| {
-                        let mut m = Mat4f::identity();
-                        m.v.copy_from_slice(&r[..16]);
-                        (m, vec4(r[16], r[17], r[18], r[19]))
-                    }).collect();
+                    let list = TransformTint::records(data).iter().take(*count as usize).map(|r| (r.transform, r.tint)).collect();
                     (*geometry, *material, list)
                 }
                 _ => {

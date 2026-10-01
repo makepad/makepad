@@ -332,6 +332,28 @@ impl Default for PointStyle {
     }
 }
 
+/// One point sprite (see [`POINT_FLOATS`]): `size` is a diameter, `color`
+/// straight linear RGBA, `birth` the time it appears (`f32::MIN`: always).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sprite {
+    pub pos: [f32; 3],
+    pub size: f32,
+    pub color: [f32; 4],
+    pub rotation: f32,
+    pub birth: f32,
+}
+
+impl Sprite {
+    pub fn new(pos: [f32; 3], size: f32, color: [f32; 4]) -> Self {
+        Self { pos, size, color, rotation: 0.0, birth: f32::MIN }
+    }
+
+    pub fn pack(&self, out: &mut Vec<f32>) {
+        let (p, c) = (self.pos, self.color);
+        out.extend_from_slice(&[p[0], p[1], p[2], self.size, c[0], c[1], c[2], c[3], self.rotation, self.birth, 0.0, 0.0]);
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct PointBatch {
     pub style: PointStyle,
@@ -356,9 +378,8 @@ impl PointBatch {
         self.data.clear();
     }
 
-    /// One sprite: `size` is a diameter, `color` straight linear RGBA.
-    pub fn push(&mut self, pos: [f32; 3], size: f32, color: [f32; 4], rotation: f32, birth: f32) {
-        self.data.extend_from_slice(&[pos[0], pos[1], pos[2], size, color[0], color[1], color[2], color[3], rotation, birth, 0.0, 0.0]);
+    pub fn push(&mut self, s: Sprite) {
+        s.pack(&mut self.data);
     }
 
     /// Sprites written by a kernel as `Sprite` records (pos, size, colour:
@@ -366,7 +387,7 @@ impl PointBatch {
     pub fn push_sprite_records(&mut self, words: &[f32]) {
         for r in words.chunks_exact(8) {
             if r[..4].iter().all(|x| x.is_finite()) {
-                self.push([r[0], r[1], r[2]], r[3], [r[4], r[5], r[6], r[7]], 0.0, f32::MIN);
+                self.push(Sprite::new([r[0], r[1], r[2]], r[3], [r[4], r[5], r[6], r[7]]));
             }
         }
     }
