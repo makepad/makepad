@@ -175,13 +175,6 @@ script_mod! {
                         LevelMeterColumn{height: 100. level: 0.62}
                         Rotary{width: 80. height: 105. text: "Dial" default: 0.35}
                     }
-                    // A big knob and a small one beside the dial, so a sheet's
-                    // knob is seen at the sizes a panel gives it.
-                    Line{
-                        align: Align{x: 0. y: 1.}
-                        Rotary{width: 140. height: 165. text: "Big" default: 0.6}
-                        Rotary{width: 44. height: 69. text: "Small" default: 0.4}
-                    }
                 }
                 Group{
                     GroupCaption{text: "Choice"}
@@ -338,6 +331,16 @@ script_mod! {
                         SliderFaderY{height: 110. default: 0.45}
                         SliderFaderY{height: 110. default: 0.6}
                         SliderFaderY{height: 110. default: 0.3}
+                    }
+                }
+                // A big knob and a small one, so a sheet's knob is seen at
+                // the sizes a panel gives it.
+                Group{
+                    GroupCaption{text: "Knobs"}
+                    Line{
+                        align: Align{x: 0. y: 1.}
+                        Rotary{width: 140. height: 165. text: "Gain" default: 0.6}
+                        Rotary{width: 44. height: 69. text: "Pan" default: 0.4}
                     }
                 }
             }
@@ -583,7 +586,7 @@ pub const STORIES: &[Story] = &[
         dsl: "KitchenSinkInstruments",
         added: "2026-09-28",
         tags: &["style sheet review", "displays and meters"],
-        doc: "# Instruments\n\nThe displays, lamps, meters and hardware controls on one screen, each under its stock name and dressed by nothing but the style sheet: readouts of a time, a level and a frequency, a screen holding a readout and a level ladder, lamps lit, half lit and out in every intent, a needle meter, rocker and slide switches on and off, a bank of four faders, a range slider, a number field, a segmented group, a list with a selected row, and three surfaces standing on the window's ground.",
+        doc: "# Instruments\n\nThe displays, lamps, meters and hardware controls on one screen, each under its stock name and dressed by nothing but the style sheet: readouts of a time, a level and a frequency, a screen holding a readout and a level ladder, lamps lit, half lit and out in every intent, a needle meter, rocker and slide switches on and off, a bank of four faders, a big knob and a small one, a range slider, a number field, a segmented group, a list with a selected row, and three surfaces standing on the window's ground.",
         subject: "",
         feature: None,
         controls: &[],
