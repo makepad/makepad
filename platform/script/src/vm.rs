@@ -1859,7 +1859,7 @@ impl<'a> ScriptVm<'a> {
             source: ScriptSource::Mod(new_mod),
             effective_code,
             tokenizer: ScriptTokenizer::default(),
-            parser: ScriptParser::default(),
+            parser: ScriptParser::keeping_numbers(self.bx.keep_numbers),
             scope,
             me,
             end_scope: None,
@@ -1884,7 +1884,7 @@ impl<'a> ScriptVm<'a> {
                         if body.effective_code != new_body.effective_code || values_changed {
                             body.effective_code = new_body.effective_code;
                             body.tokenizer = ScriptTokenizer::default();
-                            body.parser = ScriptParser::default();
+                            body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
                             body.checkpoint = None;
                             body.source_len = 0;
                         }
@@ -1952,7 +1952,7 @@ impl<'a> ScriptVm<'a> {
         if let ScriptSource::Mod(script_mod) = &body.source {
             if body.source_len == 0 {
                 body.tokenizer.clear();
-                body.parser = ScriptParser::default();
+                body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
                 body.tokenizer
                     .tokenize(&body.effective_code, &mut self.bx.heap);
                 body.tokenizer.finish(&mut self.bx.heap);
@@ -2060,7 +2060,7 @@ impl<'a> ScriptVm<'a> {
             if content_changed {
                 // Content changed entirely — reset and re-tokenize from scratch
                 body.tokenizer.clear();
-                body.parser = ScriptParser::default();
+                body.parser = ScriptParser::keeping_numbers(self.bx.keep_numbers);
                 body.checkpoint = None;
                 body.source_len = code.len();
                 body.tokenizer.tokenize(code, &mut self.bx.heap);
@@ -2185,6 +2185,9 @@ pub struct ScriptVmBase {
     pub object_op_hook: Option<ScriptObjectOpHook>,
     /// What `let`s bind, told to the host (none by default).
     pub let_hook: Option<ScriptLetHook>,
+    /// Code parsed from now on keeps its number literals as values of their
+    /// own ([`ScriptParser::keep_numbers`]).
+    pub keep_numbers: bool,
 }
 
 impl ScriptVmBase {
@@ -2206,6 +2209,7 @@ impl ScriptVmBase {
             last_limit_exit_remaining: 0,
             object_op_hook: None,
             let_hook: None,
+            keep_numbers: false,
         }
     }
 
@@ -2247,6 +2251,7 @@ impl ScriptVmBase {
             last_limit_exit_remaining: 0,
             object_op_hook: None,
             let_hook: None,
+            keep_numbers: false,
         }
     }
 }

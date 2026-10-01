@@ -789,6 +789,26 @@ impl ScriptHeap {
         )
     }
 
+    /// Replace the value an existing binding holds, found as
+    /// [`Self::set_scope_value`] finds it, even in a frozen object: a host
+    /// editing the running code's values in place (an editor dragging a
+    /// constant). Whether the binding was found.
+    pub fn poke_scope_value(&mut self, ptr: ScriptObject, key: LiveId, value: ScriptValue) -> bool {
+        self.escape_value(value);
+        let mut ptr = ptr;
+        loop {
+            let object = &mut self.objects[ptr];
+            if let Some(set) = object.map.get_mut(&key.into()) {
+                set.value = value;
+                return true;
+            }
+            match object.proto.as_object() {
+                Some(next) => ptr = next,
+                None => return false,
+            }
+        }
+    }
+
     pub fn scope_value(&self, ptr: ScriptObject, key: LiveId, trap: ScriptTrap) -> ScriptValue {
         let root_ptr = ptr;
         let mut ptr = ptr;

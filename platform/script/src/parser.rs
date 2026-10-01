@@ -828,6 +828,10 @@ pub(crate) struct SlotCtx {
 }
 
 pub struct ScriptParser {
+    /// Keep every number literal a pushed value of its own (no folding into
+    /// an operator's argument): a host can then set one in place while the
+    /// code runs (an editor dragging a value).
+    pub keep_numbers: bool,
     pub index: u32,
     pub opcodes: Vec<ScriptValue>,
     pub source_map: Vec<Option<u32>>,
@@ -895,6 +899,7 @@ pub struct ScriptParser {
 impl Default for ScriptParser {
     fn default() -> Self {
         Self {
+            keep_numbers: false,
             index: 0,
             opcodes: Default::default(),
             source_map: Default::default(),
@@ -943,6 +948,11 @@ pub struct ParserCheckpoint {
 }
 
 impl ScriptParser {
+    /// A parser that keeps number literals as values of their own, or not
+    /// ([`Self::keep_numbers`]).
+    pub fn keeping_numbers(keep: bool) -> Self {
+        Self { keep_numbers: keep, ..Self::default() }
+    }
     /// Controls whether parser errors are forwarded to Makepad's global log.
     /// Diagnostics remain available through [`Self::diagnostics`] and
     /// `parse_errors` either way.
@@ -3534,6 +3544,7 @@ impl ScriptParser {
                 // jumps land after it (`z * (if c { x } else { 2.0 })`), and
                 // popping it moved those targets.
                 if State::operator_supports_inline_number(what_op)
+                    && !self.keep_numbers
                     && self.code_len() == rhs_start + 1
                 {
                     if let Some(code) = self.code_last() {
