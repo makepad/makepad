@@ -468,6 +468,20 @@ impl ScriptCode {
         true
     }
 
+    /// The text of the line `ip` is on, as the code was evaluated (a host
+    /// whose source was rewritten before evaluation finds the same line in
+    /// what was written).
+    pub fn ip_line_text(&self, ip: ScriptIp) -> Option<String> {
+        let loc = self.ip_to_loc(ip)?;
+        let bodies = self.bodies.borrow();
+        let body = bodies.get(ip.body as usize)?;
+        let base = match &body.source {
+            ScriptSource::Mod(script_mod) => script_mod.line as u32,
+            _ => 0,
+        };
+        body.effective_code.lines().nth(loc.line.checked_sub(base)? as usize).map(str::to_string)
+    }
+
     pub fn ip_to_loc(&self, ip: ScriptIp) -> Option<ScriptLoc> {
         if let Some(body) = self.bodies.borrow().get(ip.body as usize) {
             let source_map = &body.parser.source_map;
@@ -594,6 +608,24 @@ enum ScriptRunBudgetHit {
 }
 
 impl<'a> ScriptVm<'a> {
+    /// Where the running code is: the current instruction, then the return
+    /// sites of the calls it is inside, innermost first, at most `max`. A
+    /// native reads where it was called from, and through which calls (a
+    /// host that records what code drew what).
+    pub fn call_sites(&self, out: &mut Vec<ScriptIp>, max: usize) {
+        out.clear();
+        let thread = self.bx.threads.cur_ref();
+        out.push(thread.trap.ip);
+        for frame in thread.calls.iter().rev() {
+            if out.len() >= max {
+                break;
+            }
+            if let Some(ip) = frame.return_ip {
+                out.push(ip);
+            }
+        }
+    }
+
     /// Bail out of the interpreter with a script error.
     /// Use this when a stack (mes, scopes, loops, calls) is unexpectedly empty,
     /// indicating corrupted bytecode (e.g. from incomplete streaming input).
