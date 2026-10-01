@@ -16,6 +16,7 @@ mod merge;
 mod order;
 mod peephole;
 pub mod profile;
+pub mod units;
 
 #[cfg(test)]
 mod tests;
@@ -43,6 +44,16 @@ pub struct OptimizeOptions {
     /// The encoded result is always decoded and validated again; when it
     /// does not validate, optimising fails.
     pub validate_each_pass: bool,
+    /// The module-wise strip (`units`): with a coverage run of this module,
+    /// every unit the run never used is cut, before dead-code elimination.
+    pub coverage: Option<units::Coverage>,
+    /// The registration strip (`units::plan_modules`): with the script
+    /// modules a collect run saw registered and used, the registration of
+    /// every unused one is dropped, before dead-code elimination.
+    pub modules: Option<units::ModuleUse>,
+    /// Units kept whatever the coverage says (`crate::module`, `crate`, or
+    /// a `prefix*`).
+    pub keep_units: Vec<String>,
 }
 
 impl Default for OptimizeOptions {
@@ -58,6 +69,9 @@ impl Default for OptimizeOptions {
             compact: true,
             order: true,
             validate_each_pass: true,
+            coverage: None,
+            modules: None,
+            keep_units: Vec::new(),
         }
     }
 }
@@ -78,6 +92,8 @@ pub struct OptimizeReport {
     pub functions_before: usize,
     pub functions_after: usize,
     pub passes: Vec<OptimizePassReport>,
+    /// The module-wise strip's units, when it ran.
+    pub units: Option<String>,
 }
 
 impl OptimizeReport {
@@ -165,6 +181,17 @@ pub fn wasm_optimize_checked(
         *bytes = after;
     };
 
+    // Before the names go: the units are named by them.
+    let plan = match (&opts.coverage, &opts.modules) {
+        (Some(coverage), _) => Some(units::plan(&module, coverage, &opts.keep_units)),
+        (None, Some(modules)) => Some(units::plan_modules(&module, modules, &opts.keep_units)),
+        (None, None) => None,
+    };
+    if let Some(plan) = plan {
+        let cleared = std::cell::Cell::new(0);
+        run("units", &mut module, &mut bytes, &|module| cleared.set(units::strip(module, &plan)));
+        report.units = Some(format!("{}data cleared: {} bytes\n", plan.to_text(), cleared.get()));
+    }
     if opts.strip {
         run("strip", &mut module, &mut bytes, &|module| {
             strip(module, opts)
@@ -203,6 +230,22 @@ pub fn wasm_optimize_checked(
     report.functions_after = module.funcs.len() + module.num_imported_funcs() as usize;
     report.output_bytes = bytes.len();
     Ok((bytes, report))
+}
+
+/// The module with a coverage probe at every function entry (see
+/// `units`): an exported memory, `units::COVERAGE_EXPORT`, holding a phase
+/// byte per function index. Names are kept.
+pub fn wasm_instrument_coverage(buf: &[u8], phase_marks: &[String]) -> Result<Vec<u8>, String> {
+    let mut module = ir::decode(buf)?;
+    units::instrument(&mut module, phase_marks)?;
+    ir::validate_module(&module).map_err(|msg| format!("instrumented module does not validate: {msg}"))?;
+    Ok(encode::encode(&module))
+}
+
+/// The functions an instrumented module's run entered, from the bytes of
+/// its coverage memory.
+pub fn wasm_coverage(instrumented: &[u8], memory: &[u8]) -> Result<units::Coverage, String> {
+    Ok(units::Coverage::from_memory(&ir::decode(instrumented)?, memory))
 }
 
 /// Optimises a linked wasm module for size. Fails only when the input cannot

@@ -251,3 +251,53 @@ fn invalid_pass_output_is_reverted() {
     assert!(report.passes.iter().all(|pass| pass.reverted.is_none()));
     assert!(report.output_bytes < report.input_bytes);
 }
+
+#[test]
+fn units_never_used_are_cut_with_their_data() {
+    // app::widget registers (script_mod, param i32) and draws; only its
+    // registration ran. app::main and app::kept ran after.
+    let bytes = wat(r#"(module
+        (memory (export "memory") 1)
+        (table 2 funcref)
+        (elem (i32.const 0) func $_RNvNtCs1_3app6widget4draw $_RNvNtCs1_3app4kept4used)
+        (func $_RNvNtCs1_3app6widget10script_mod (param i32)
+            i32.const 1024 i32.const 12 call $_RNvNtCs1_3app6widget4draw drop)
+        (func $_RNvNtCs1_3app6widget4draw (param i32 i32) (result i32)
+            local.get 0 i32.load8_u)
+        (func $_RNvNtCs1_3app4kept4used (param i32 i32) (result i32)
+            i32.const 2048 i32.load8_u)
+        (func $_RNvNtCs1_3app4main3run (export "run") (param i32) (result i32)
+            local.get 0 call $_RNvNtCs1_3app6widget10script_mod
+            local.get 0
+            if (result i32)
+                i32.const 1 i32.const 2 call $_RNvNtCs1_3app6widget4draw
+            else
+                i32.const 1 i32.const 2 call $_RNvNtCs1_3app4kept4used
+            end)
+        (data (i32.const 1024) "SPLASHSOURCE...........................................................................")
+        (data (i32.const 2048) "KEEP"))"#);
+    let coverage = units::Coverage::parse(
+        "2\t_RNvNtCs1_3app4main3run\n2\t_RNvNtCs1_3app4kept4used\n1\t_RNvNtCs1_3app6widget10script_mod\n",
+    );
+    let opts = OptimizeOptions { coverage: Some(coverage), keep_names: true, ..OptimizeOptions::default() };
+    let (out, report) = wasm_optimize_checked(&bytes, &opts).unwrap();
+    assert!(report.passes.iter().all(|p| p.reverted.is_none()), "{}", report.to_text());
+    assert!(report.units.as_ref().unwrap().contains("CUT"), "{:?}", report.units);
+    let module = ir::decode(&out).unwrap();
+    ir::validate_module(&module).unwrap();
+    let names: Vec<&str> = module.names.as_ref().unwrap().funcs.iter().map(|(_, n)| n.as_str()).collect();
+    assert!(!names.iter().any(|n| n.contains("6widget")), "{names:?}");
+    let data: Vec<u8> = module.datas.iter().flat_map(|d| d.bytes.clone()).collect();
+    assert!(!data.windows(6).any(|w| w == b"SPLASH"), "the stripped unit's text stays");
+    assert!(data.windows(4).any(|w| w == b"KEEP"));
+    // The registration call is gone (its argument dropped); the draw call
+    // traps; the kept call stays.
+    let run = module.funcs.iter().find(|f| f.body.iter().any(|i| matches!(i, Instr::If(_)))).unwrap();
+    assert!(run.body.contains(&Instr::Unreachable));
+    assert_eq!(run.body.iter().filter(|i| matches!(i, Instr::Call(_))).count(), 1);
+
+    // The instrumented module validates and marks entries in its own memory.
+    let instrumented = wasm_instrument_coverage(&bytes, &["main::run".to_string()]).unwrap();
+    let module = ir::decode(&instrumented).unwrap();
+    assert!(module.exports.iter().any(|e| e.name == units::COVERAGE_EXPORT && e.kind == ExternKind::Memory));
+}
