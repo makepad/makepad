@@ -19,3 +19,5 @@ makepad-script = { path = "..", optional = true }
 
 [dev-dependencies]
 makepad-csg-math = { path = "../../../libs/csg/csg_math" }
+# tests/wasm.rs runs the generated scalar wasm natively (a wasm interpreter).
+makepad-stitch = { path = "../../../libs/stitch" }

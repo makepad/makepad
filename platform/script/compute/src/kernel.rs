@@ -91,6 +91,10 @@ pub struct Kernel {
     /// Measured ns per element (f32 bits, a moving average; 0: none yet):
     /// how many threads a call is worth.
     speed: AtomicU32,
+    /// Function table slots of this kernel's generated wasm (scalar, four
+    /// wide; 0: none), once the host linked its document's module (see
+    /// [`wasm_module`]).
+    wasm_slots: [AtomicU32; 2],
 }
 
 impl std::fmt::Debug for Kernel {
@@ -174,7 +178,7 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
     let neon = if native.is_some() && lowered.parallel_safe { crate::neon::compile(&lowered.program) } else { None };
     #[cfg(not(target_arch = "aarch64"))]
     let _ = backend;
-    Ok(Arc::new(Kernel {
+    let kernel = Arc::new(Kernel {
         kind: lowered.kind,
         math: lowered.math,
         entry: lowered.entry,
@@ -190,7 +194,158 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
         neon,
         admission: std::sync::OnceLock::new(),
         speed: AtomicU32::new(0),
-    }))
+        wasm_slots: [AtomicU32::new(0), AtomicU32::new(0)],
+    });
+    #[cfg(target_arch = "wasm32")]
+    match precompiled(&kernel.program) {
+        Some((scalar, simd)) => kernel.set_wasm_slots(scalar, simd),
+        None => wasm_queue::push(&kernel),
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if RECORDING.load(Ordering::Relaxed) {
+        let modules = modules.iter().map(|m| (m.path.to_string(), m.source.to_string())).collect();
+        recorded().0.send(Recorded { kernel: kernel.clone(), source: src.to_string(), layouts: layouts.to_vec(), modules }).ok();
+    }
+    Ok(kernel)
+}
+
+/// Kernels compiled on wasm32 that wait for their generated code to be
+/// linked by the host (whichever crate compiled them): the host's UI
+/// thread takes them with [`take_unlinked`], builds one module
+/// ([`wasm_module`]), links it and sets each kernel's slots.
+#[cfg(target_arch = "wasm32")]
+mod wasm_queue {
+    use super::Kernel;
+    use std::sync::mpsc::{channel, Receiver, Sender};
+    use std::sync::{Arc, Mutex, OnceLock, Weak};
+
+    fn queue() -> &'static (Sender<Weak<Kernel>>, Mutex<Receiver<Weak<Kernel>>>) {
+        static Q: OnceLock<(Sender<Weak<Kernel>>, Mutex<Receiver<Weak<Kernel>>>)> = OnceLock::new();
+        Q.get_or_init(|| {
+            let (tx, rx) = channel();
+            (tx, Mutex::new(rx))
+        })
+    }
+
+    pub fn push(k: &Arc<Kernel>) {
+        let _ = queue().0.send(Arc::downgrade(k));
+    }
+
+    pub fn take() -> Vec<Arc<Kernel>> {
+        // Only the host's UI thread receives: the lock is never contended.
+        let Ok(rx) = queue().1.try_lock() else { return Vec::new() };
+        rx.try_iter().filter_map(|w| w.upgrade()).collect()
+    }
+}
+
+/// Kernels compiled since the last call whose wasm code is not linked yet
+/// (wasm32 hosts; empty elsewhere). Kernels already dropped are skipped.
+pub fn take_unlinked() -> Vec<Arc<Kernel>> {
+    #[cfg(target_arch = "wasm32")]
+    return wasm_queue::take();
+    #[cfg(not(target_arch = "wasm32"))]
+    Vec::new()
+}
+
+static RECORDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A kernel compiled while recording, with what it was compiled from (so
+/// a tool can compile it again elsewhere: its source, host layouts and the
+/// modules its `use` items named).
+pub struct Recorded {
+    pub kernel: Arc<Kernel>,
+    pub source: String,
+    pub layouts: Vec<Layout>,
+    /// (path, source) of each module.
+    pub modules: Vec<(String, String)>,
+}
+
+fn recorded() -> &'static (std::sync::mpsc::Sender<Recorded>, std::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>) {
+    static Q: std::sync::OnceLock<(std::sync::mpsc::Sender<Recorded>, std::sync::Mutex<std::sync::mpsc::Receiver<Recorded>>)> = std::sync::OnceLock::new();
+    Q.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel();
+        (tx, std::sync::Mutex::new(rx))
+    })
+}
+
+/// Keeps every kernel compiled from now on (any thread, any compile site)
+/// for [`take_recorded`], or stops keeping them: how a build tool learns
+/// which kernels a document compiles while it evaluates it (desktop hosts;
+/// a wasm host links its kernels instead).
+pub fn record_compiled(on: bool) {
+    RECORDING.store(on, Ordering::Relaxed);
+}
+
+/// The kernels compiled while recording, since the last call (a build
+/// tool's thread; sending never waits).
+pub fn take_recorded() -> Vec<Recorded> {
+    let Ok(rx) = recorded().1.lock() else { return Vec::new() };
+    rx.try_iter().collect()
+}
+
+/// A kernel program's identity across hosts: the same program has the
+/// same key on every target, so a build tool on the desktop can compile a
+/// film's kernels to wasm ahead of time and the wasm host find their code
+/// by the program it lowered ([`register_precompiled`]). The generated
+/// code depends on the program alone (a film build fixes
+/// `wasm::Target::relaxed_fma` off: the probe answers per machine).
+/// FNV-1a over the program's debug text, for now.
+pub fn program_key(p: &Program) -> u64 {
+    use std::fmt::Write;
+    struct Fnv(u64);
+    impl Write for Fnv {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for b in s.bytes() {
+                self.0 = (self.0 ^ b as u64).wrapping_mul(0x100_0000_01b3);
+            }
+            Ok(())
+        }
+    }
+    let mut h = Fnv(0xcbf2_9ce4_8422_2325);
+    let _ = write!(h, "{:?}", p);
+    h.0
+}
+
+/// One kernel compiled ahead of time and linked into the host's function
+/// table: its [`program_key`] and the table slots of its scalar and four
+/// wide entries (0: no four wide form).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Precompiled {
+    pub key: u64,
+    pub scalar: u32,
+    pub simd: u32,
+}
+
+static PRECOMPILED: std::sync::OnceLock<std::collections::HashMap<u64, (u32, u32)>> = std::sync::OnceLock::new();
+static PRECOMPILED_HITS: AtomicU32 = AtomicU32::new(0);
+static PRECOMPILED_MISSES: AtomicU32 = AtomicU32::new(0);
+
+/// Installs the kernels a host linked ahead of time, once, before any
+/// kernel compiles (a later call is ignored: false). A kernel whose program
+/// is among them runs that code from its compile on; any other is linked
+/// at run time as before ([`take_unlinked`]).
+pub fn register_precompiled(entries: &[Precompiled]) -> bool {
+    PRECOMPILED.set(entries.iter().map(|e| (e.key, (e.scalar, e.simd))).collect()).is_ok()
+}
+
+/// The linked slots of a precompiled program, counting hits and misses
+/// ([`precompiled_stats`]); None when nothing was registered or the program
+/// is not among them.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+fn precompiled(p: &Program) -> Option<(u32, u32)> {
+    let table = PRECOMPILED.get()?;
+    let found = table.get(&program_key(p)).copied();
+    let (count, what) = if found.is_some() { (&PRECOMPILED_HITS, "found") } else { (&PRECOMPILED_MISSES, "not found, linking at run time") };
+    if count.fetch_add(1, Ordering::Relaxed) == 0 {
+        eprintln!("kernel: precompiled code {what} (first such kernel)");
+    }
+    found
+}
+
+/// Compiles that found their precompiled code, and compiles that did not
+/// (and were linked at run time), since start.
+pub fn precompiled_stats() -> (u32, u32) {
+    (PRECOMPILED_HITS.load(Ordering::Relaxed), PRECOMPILED_MISSES.load(Ordering::Relaxed))
 }
 
 /// Why a call could not run.
@@ -268,6 +423,9 @@ impl Kernel {
         if self.native.is_some() {
             return Backend::Native;
         }
+        if self.wasm_linked() {
+            return Backend::Native;
+        }
         Backend::Interp
     }
 
@@ -280,7 +438,9 @@ impl Kernel {
     pub fn simd(&self) -> bool {
         #[cfg(target_arch = "aarch64")]
         return self.neon.is_some();
-        #[cfg(not(target_arch = "aarch64"))]
+        #[cfg(target_arch = "wasm32")]
+        return self.wasm_slots[1].load(Ordering::Relaxed) != 0;
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "wasm32")))]
         false
     }
 
@@ -325,6 +485,12 @@ impl Kernel {
     /// Words of the read-only shared tables.
     pub fn shared_words(&self) -> usize {
         self.shared.len()
+    }
+
+    /// The read-only shared tables (what a backend outside this crate,
+    /// such as generated wasm, reads as its shared region).
+    pub fn shared_table(&self) -> &[u32] {
+        &self.shared
     }
 
     /// Ctx words: base, count, time, seed, cancel, overflow, reduce lanes,
@@ -389,7 +555,76 @@ impl Kernel {
         Ok(())
     }
 
+    /// Records where the host linked this kernel's generated wasm: the
+    /// function table slots of its scalar and four-wide entries (0: that
+    /// form is absent). From then on its runs call that code.
+    pub fn set_wasm_slots(&self, scalar: u32, simd: u32) {
+        self.wasm_slots[1].store(simd, Ordering::Relaxed);
+        self.wasm_slots[0].store(scalar, Ordering::Relaxed);
+    }
+
+    /// The generated wasm is linked (runs do not use the interpreter).
+    pub fn wasm_linked(&self) -> bool {
+        self.wasm_slots[0].load(Ordering::Relaxed) != 0
+    }
+
+    /// Runs `n` elements on linked wasm code (true), or false when none is
+    /// linked. The table becomes the wasm form: (byte address, length) i32
+    /// pairs.
+    #[cfg(target_arch = "wasm32")]
+    fn run_wasm(&self, ctx: &mut [u32], table: &[u64], n: usize, mode: Mode) -> bool {
+        let scalar = self.wasm_slots[0].load(Ordering::Relaxed);
+        if scalar == 0 {
+            return false;
+        }
+        let simd = self.wasm_slots[1].load(Ordering::Relaxed);
+        thread_local! {
+            static FRAME: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+        }
+        let mut t32 = [0u32; 2 * kl::MAX_BUFFERS];
+        for (k, w) in table.iter().take(2 * kl::MAX_BUFFERS).enumerate() {
+            t32[k] = *w as u32;
+        }
+        type Entry = extern "C" fn(u32, u32, u32, u32, u32, u32);
+        FRAME.with(|frame| {
+            let mut frame = frame.borrow_mut();
+            let need = crate::wasm::frame_words(&self.program, true).max(crate::wasm::frame_words(&self.program, false)).max(1);
+            if frame.len() < need + 3 {
+                frame.resize(need + 3, 0);
+            }
+            // 16-byte aligned (lane word w of lane l at 16 w + 4 l).
+            let skip = (4 - (frame.as_ptr() as usize / 4) % 4) % 4;
+            let frame = &mut frame[skip..];
+            let mut state = [0u32; 1];
+            let sp = state.as_mut_ptr() as u32;
+            let args = |n: usize, frame: &mut [u32], ctx: &mut [u32]| (ctx.as_mut_ptr() as u32, sp, self.shared.as_ptr() as u32, t32.as_ptr() as u32, n as u32, frame.as_mut_ptr() as u32);
+            let call = |slot: u32, a: (u32, u32, u32, u32, u32, u32)| {
+                // SAFETY: `slot` is a function table index the host linked
+                // for this kernel's entry of type (i32 x 6) -> () (the
+                // engine checks the type at the call); the code clamps
+                // every access into the regions and buffers passed.
+                let f: Entry = unsafe { std::mem::transmute::<usize, Entry>(slot as usize) };
+                f(a.0, a.1, a.2, a.3, a.4, a.5);
+            };
+            let n4 = if simd != 0 && mode == Mode::Vector { n & !3 } else { 0 };
+            if n4 > 0 {
+                call(simd, args(n4, frame, ctx));
+            }
+            if n4 < n {
+                let base = ctx[K_BASE as usize];
+                ctx[K_BASE as usize] = base.wrapping_add(n4 as u32);
+                call(scalar, args(n - n4, frame, ctx));
+                ctx[K_BASE as usize] = base;
+            }
+        });
+        true
+    }
+
     fn run_raw(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], n: usize, mode: Mode) {
+        #[cfg(target_arch = "wasm32")]
+        if mode != Mode::Interp && self.run_wasm(ctx, table, n, mode) {
+            return;
+        }
         #[cfg(target_arch = "aarch64")]
         if mode == Mode::Vector && n >= 4 {
             if let (Some(code), Some(_)) = (&self.neon, &self.native) {
@@ -486,6 +721,29 @@ impl Drop for FpEnv {
             // SAFETY: restores the value read in `pin`.
             unsafe { std::arch::asm!("msr fpcr, {0}", in(reg) self.saved, options(nomem, nostack, preserves_flags)) };
         }
+    }
+}
+
+/// Elapsed time of a run (wasm32 has no clock in std: 0 there, and the
+/// host times its calls itself).
+struct Clock {
+    #[cfg(not(target_arch = "wasm32"))]
+    t0: std::time::Instant,
+}
+
+impl Clock {
+    fn now() -> Clock {
+        Clock {
+            #[cfg(not(target_arch = "wasm32"))]
+            t0: std::time::Instant::now(),
+        }
+    }
+
+    fn nanos(&self) -> u64 {
+        #[cfg(not(target_arch = "wasm32"))]
+        return self.t0.elapsed().as_nanos() as u64;
+        #[cfg(target_arch = "wasm32")]
+        0
     }
 }
 
@@ -790,7 +1048,7 @@ impl<'a> Call<'a> {
     }
 
     fn run_on(&mut self, count: usize, interp: bool, exec: &dyn crate::sched::Executor, threads: usize) -> Result<RunStats, KernelError> {
-        let t0 = std::time::Instant::now();
+        let t0 = Clock::now();
         let (table, lens) = self.table()?;
         let split = splits(self.kernel, threads, count);
         self.admit(count, split)?;
@@ -798,11 +1056,11 @@ impl<'a> Call<'a> {
         self.ctx[K_COUNT as usize] = count as u32;
         let cells: Vec<ChunkCell> = (0..count.div_ceil(CHUNK)).map(|_| ChunkCell::default()).collect();
         let t = split_threads(self.kernel, threads, count, mode);
-        let t1 = std::time::Instant::now();
+        let t1 = Clock::now();
         let (overflowed, host_error, reduced) = run_chunks(self.kernel, &self.ctx, &table, &lens, count, mode, &self.cancel, &cells, exec, t)?;
-        self.kernel.observe(count, t, t1.elapsed().as_nanos() as u64, mode);
+        self.kernel.observe(count, t, t1.nanos(), mode);
         let lanes = self.kernel.reduce_init().1;
-        Ok(RunStats { elements: count, overflowed, host_error, reduced: reduced[..lanes].to_vec(), nanos: t0.elapsed().as_nanos() as u64 })
+        Ok(RunStats { elements: count, overflowed, host_error, reduced: reduced[..lanes].to_vec(), nanos: t0.nanos() })
     }
 
     /// Runs `count` elements split across up to `threads` workers of the
@@ -850,4 +1108,27 @@ pub fn compact(data: &[f32], counts: &[u32], width: usize, capacity: usize) -> V
         out.extend_from_slice(&data[at..at + n * width]);
     }
     out
+}
+
+/// One wasm module holding the code of several kernels (a document's), for
+/// a host that links generated wasm (a browser: the platform's
+/// `wasm_link`), and per kernel the export indices of its scalar and
+/// four-wide entries (the order in which the link returns their table
+/// slots; four-wide is None where the kernel has no such form). After
+/// linking, the host calls [`Kernel::set_wasm_slots`] on each.
+pub fn wasm_module(kernels: &[&Kernel], target: crate::wasm::Target) -> Option<(Vec<u8>, Vec<(usize, Option<usize>)>)> {
+    let mut entries = Vec::new();
+    let mut index = Vec::new();
+    for k in kernels {
+        let scalar = entries.len();
+        entries.push(crate::wasm::Entry { program: &k.program, simd: false });
+        let simd = if k.parallel_safe && crate::wasm::simd_supported(&k.program) {
+            entries.push(crate::wasm::Entry { program: &k.program, simd: true });
+            Some(entries.len() - 1)
+        } else {
+            None
+        };
+        index.push((scalar, simd));
+    }
+    crate::wasm::module(&entries, target).map(|m| (m, index))
 }

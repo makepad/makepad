@@ -12,6 +12,8 @@
 //!     AIR --> ir::run          (the reference; also the no-JIT path)
 //!     AIR --> arm64            (native scalar code: audio shaders, kernels)
 //!     AIR --> neon             (kernels: 4 elements per iteration)
+//!     AIR --> wasm             (browsers: scalar, and SIMD128 x4 for kernels)
+//!     AIR --> js               (browsers without wasm compilation)
 //! ```
 //!
 //! Front ends decide what a program's entry is and what it can read and
@@ -27,6 +29,7 @@ pub mod host;
 #[cfg(feature = "vm")]
 pub mod imports;
 pub mod ir;
+pub mod js;
 pub mod kernel;
 pub mod lower;
 pub mod module;
@@ -35,6 +38,8 @@ pub mod parse;
 pub mod pipeline;
 pub mod rand;
 pub mod sched;
+mod spmd;
+pub mod wasm;
 
 #[cfg(target_arch = "aarch64")]
 pub mod arm64;

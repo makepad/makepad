@@ -57,8 +57,16 @@ pub const MAX_FRAMES: u32 = 4096;
 /// Iteration cap of `while`/`loop` and of `for` loops with runtime bounds.
 pub const LOOP_CAP: u32 = 1024;
 /// `for` loops over constant ranges up to this many iterations (with no
-/// break/continue of their own) are unrolled.
-pub const UNROLL_MAX: u32 = 16;
+/// break/continue of their own) are unrolled, when the unrolled code fits
+/// [`UNROLL_BYTES`].
+pub const UNROLL_MAX: u32 = 8;
+/// Most code a fully unrolled loop may emit (estimated, every backend):
+/// beyond a few hundred instructions unrolling stops paying (the loop's
+/// own overhead is a few instructions an iteration) and costs instruction
+/// cache, on phones' 32-64 KiB L1i above all; nested loops multiply.
+pub const UNROLL_BYTES: u64 = 2048;
+/// Estimated bytes of emitted code per AIR operation.
+const BYTES_PER_OP: u64 = 4;
 pub const MAX_STATE_WORDS: u32 = 1 << 20;
 pub const MAX_SHARED_WORDS: u32 = 1 << 22;
 pub const MAX_FRAME_WORDS: u32 = 1 << 14;
@@ -2274,15 +2282,85 @@ impl Lowerer {
         self.b.push(IS::Loop { cap: LOOP_CAP + 1, body: outer });
     }
 
+    /// A rough count of the AIR operations `body` lowers to (helpers
+    /// inlined, constant loops at their trip count, a builtin call a few
+    /// ops): what unrolling it costs.
+    fn ast_cost(&self, body: &[Stmt]) -> u64 {
+        fn trip(l: &Lowerer, e: &Expr) -> Option<f64> {
+            match &e.kind {
+                ExprKind::Num(x, _) => Some(*x),
+                ExprKind::Ident(n) => match l.globals.get(n) {
+                    Some(Bind::Const(V::Lit(x))) => Some(*x),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        fn expr(l: &Lowerer, e: &Expr, memo: &mut HashMap<String, u64>, stack: &mut Vec<String>) -> u64 {
+            1 + match &e.kind {
+                ExprKind::Num(..) | ExprKind::Bool(_) | ExprKind::Ident(_) => 0,
+                ExprKind::Field(a, _) | ExprKind::Neg(a) | ExprKind::Not(a) => expr(l, a, memo, stack),
+                ExprKind::Index(a, b) | ExprKind::Bin(_, a, b) | ExprKind::ArrayRepeat(a, b) => expr(l, a, memo, stack) + expr(l, b, memo, stack),
+                ExprKind::ArrayList(xs) => xs.iter().map(|x| expr(l, x, memo, stack)).sum(),
+                ExprKind::StructLit(_, fs) => fs.iter().map(|(_, x)| expr(l, x, memo, stack)).sum(),
+                ExprKind::Block(b) => stmts(l, b, memo, stack),
+                ExprKind::If(arms, else_) => arms.iter().map(|(c, b)| expr(l, c, memo, stack) + stmts(l, b, memo, stack)).sum::<u64>() + else_.as_ref().map_or(0, |b| stmts(l, b, memo, stack)),
+                ExprKind::Match(x, arms) => expr(l, x, memo, stack) + arms.iter().map(|(_, b)| 2 + stmts(l, b, memo, stack)).sum::<u64>(),
+                ExprKind::Call(name, args) => {
+                    let a: u64 = args.iter().map(|x| expr(l, x, memo, stack)).sum();
+                    a + match l.fns.get(name) {
+                        Some(f) if !stack.contains(name) => match memo.get(name) {
+                            Some(c) => *c,
+                            None => {
+                                stack.push(name.clone());
+                                let c = stmts(l, &f.body, memo, stack);
+                                stack.pop();
+                                memo.insert(name.clone(), c);
+                                c
+                            }
+                        },
+                        _ if name == "emit" => 3 * args.len() as u64 + 8,
+                        _ => 6,
+                    }
+                }
+            }
+        }
+        fn stmts(l: &Lowerer, b: &[Stmt], memo: &mut HashMap<String, u64>, stack: &mut Vec<String>) -> u64 {
+            b.iter()
+                .map(|s| match s {
+                    Stmt::Let { value, .. } | Stmt::Expr(value) => expr(l, value, memo, stack),
+                    Stmt::Assign { target, value, .. } => expr(l, target, memo, stack) + expr(l, value, memo, stack),
+                    Stmt::Return(e, _) => e.as_ref().map_or(1, |e| expr(l, e, memo, stack)),
+                    Stmt::For { from, to, body, .. } => {
+                        let n = match (trip(l, from), trip(l, to)) {
+                            (Some(a), Some(z)) => (z.floor() - a.floor()).clamp(1.0, 1e6) as u64,
+                            _ => 1,
+                        };
+                        let inner = stmts(l, body, memo, stack);
+                        // A loop it would not unroll costs its body once.
+                        if n <= UNROLL_MAX as u64 && n.saturating_mul(inner).saturating_mul(BYTES_PER_OP) <= UNROLL_BYTES {
+                            n * inner
+                        } else {
+                            inner + 6
+                        }
+                    }
+                    Stmt::While { cond, body, .. } => expr(l, cond, memo, stack) + stmts(l, body, memo, stack) + 6,
+                    Stmt::Loop { body, .. } => stmts(l, body, memo, stack) + 6,
+                    Stmt::Break(_) | Stmt::Continue(_) => 1,
+                })
+                .sum()
+        }
+        stmts(self, body, &mut HashMap::new(), &mut Vec::new())
+    }
+
     fn for_loop(&mut self, var: &str, from: &Expr, to: &Expr, body: &[Stmt], span: Span) -> LResult<()> {
         let a = self.expr(from)?;
         let z = self.expr(to)?;
         if let (V::Lit(a), V::Lit(z)) = (&a, &z) {
             let (a, z) = (a.floor() as i64, z.floor() as i64);
             let count = (z - a).max(0) as u64;
-            // Small loops unroll; so do up to 64 iterations of a one-line
-            // body (FIR taps, sums), where the loop overhead would dominate.
-            let unroll = count <= UNROLL_MAX as u64 || (count <= 64 && body.len() == 1);
+            // Small loops unroll while the unrolled code stays small.
+            let unroll = count <= UNROLL_MAX as u64 && count.saturating_mul(self.ast_cost(body)).saturating_mul(BYTES_PER_OP) <= UNROLL_BYTES;
             if unroll && !has_own_break(body) {
                 for k in a..z {
                     self.scoped(|l| {
