@@ -1527,6 +1527,12 @@ export class WasmWebGL extends WasmWebBrowser {
       if (this.wasm == null || this.webgl_context_lost) {
         return;
       }
+      // An animation frame is coming: it takes the programs up at its start
+      // (see FromWasmRequestAnimationFrame), before its own GL work.
+      if (this.req_anim_frame_id) {
+        this.schedule_webgl_shader_poll();
+        return;
+      }
       if (this.poll_pending_webgl_shaders() != 0) {
         this.to_wasm.ToWasmRedrawAll();
         this.FromWasmRequestAnimationFrame();

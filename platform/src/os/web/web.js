@@ -1492,6 +1492,13 @@ export class WasmWebBrowser extends WasmBridge {
                 this.FromWasmRequestAnimationFrame();
                 return
             }
+            // Programs whose compile finished are taken up before this
+            // frame's GL work is queued: reading their status and locations
+            // waits for the GPU process, which has least to do now (later in
+            // the frame it was a 15-60 ms stall behind the frame's own work).
+            if (this.pending_webgl_shader_count > 0 && this.poll_pending_webgl_shaders() != 0) {
+                this.to_wasm.ToWasmRedrawAll();
+            }
             this.gpu_timer_poll();
             const gpu_query = this.gpu_timer_begin();
             this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0 });
