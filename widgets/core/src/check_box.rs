@@ -8,6 +8,7 @@ use crate::{
 };
 
 use crate::makepad_draw::DrawSvg;
+use crate::slider::CapMotion;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -1088,6 +1089,19 @@ pub struct CheckBox {
 
     #[rust]
     drag: Option<KnobDrag>,
+
+    /// Above zero, the toggle's knob moves like a liquid: its tail follows
+    /// the head on a spring this viscous (0 stiff, 1 slow), a press spreads
+    /// it on a spring, and a flip sends the knob travelling to its new
+    /// side. The face reads the motion from the `cap_stretch`, `cap_dir`,
+    /// `cap_press`, `cap_squash_along` and `cap_squash_across` uniforms and
+    /// draws the knob at `knob_t` while `knob_follow` is one; a face that
+    /// declares none of them draws as before. Zero, the default, draws
+    /// every frame at rest and never asks for another.
+    #[live]
+    pub cap_viscosity: f64,
+    #[rust]
+    cap_motion: CapMotion,
 }
 
 /// A drag in progress on the toggle's knob.
@@ -1150,6 +1164,26 @@ impl CheckBox {
         };
         self.draw_bg.set_uniform(cx, live_id!(drag), &[drag]);
         self.draw_bg.set_uniform(cx, live_id!(drag_pos), &[drag_pos]);
+        // The knob's liquid motion, read for the face: the five values of
+        // the cap's motion, and the knob's position while the motion or a
+        // drag drives it. The springs work in points of the knob's travel.
+        if self.cap_viscosity > 0.0 {
+            let travel = self.knob_travel(cx);
+            self.cap_motion.resize(travel);
+            let mut size = [0.0f32];
+            self.draw_bg.get_uniform(cx, live_id!(size), &mut size);
+            let (value, dragging) = self.knob_motion_value(cx);
+            let (stretch, dir, press, sqa, sqx, drawn) =
+                self.cap_motion.read(value, (size[0] as f64 * 0.5).max(1.0), dragging);
+            self.draw_bg.set_uniform(cx, live_id!(cap_stretch), &[stretch]);
+            self.draw_bg.set_uniform(cx, live_id!(cap_dir), &[dir]);
+            self.draw_bg.set_uniform(cx, live_id!(cap_press), &[press]);
+            self.draw_bg.set_uniform(cx, live_id!(cap_squash_along), &[sqa]);
+            self.draw_bg.set_uniform(cx, live_id!(cap_squash_across), &[sqx]);
+            let follow = if self.cap_motion.moving() || dragging { 1.0 } else { 0.0 };
+            self.draw_bg.set_uniform(cx, live_id!(knob_t), &[drawn as f32]);
+            self.draw_bg.set_uniform(cx, live_id!(knob_follow), &[follow]);
+        }
         self.draw_bg.begin(cx, walk, self.layout);
 
         let on = self.animator_in_state(cx, ids!(active.on));
@@ -1287,6 +1321,35 @@ impl CheckBox {
     }
 
     /// How far the knob travels between off and on, in layout points.
+    /// The value the knob's motion heads for (the drag's position while the
+    /// knob follows the pointer, else the side it is on) and whether a
+    /// press holds it.
+    fn knob_motion_value(&self, cx: &Cx) -> (f64, bool) {
+        let on = self.animator_in_state(cx, ids!(active.on));
+        let value = match self.drag {
+            Some(d) if d.moved => d.pos as f64,
+            _ => {
+                if on {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+        };
+        (value, self.drag.is_some())
+    }
+
+    /// Starts the knob's liquid motion on the next frame, if the toggle has
+    /// a viscosity: after a press, a drag move, a release, or (`jump`) a
+    /// flip, which the knob then travels to.
+    fn knob_motion_kick(&mut self, cx: &mut Cx, jump: bool) {
+        if self.cap_viscosity <= 0.0 {
+            return;
+        }
+        let (value, _) = self.knob_motion_value(cx);
+        self.cap_motion.kick(cx, jump, value);
+    }
+
     fn knob_travel(&mut self, cx: &mut Cx) -> f64 {
         let mut aspect = [0.0f32];
         self.draw_bg.get_uniform(cx, live_id!(pill_aspect), &mut aspect);
@@ -1368,6 +1431,7 @@ impl CheckBox {
             ids!(mixed.on),
             ids!(mixed.off),
         );
+        self.knob_motion_kick(cx, true);
     }
 
     /// Whether the box shows the error intent.
@@ -1477,6 +1541,12 @@ impl Widget for CheckBox {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.draw_bg.redraw(cx);
         }
+        if self.cap_viscosity > 0.0 {
+            let (value, dragging) = self.knob_motion_value(cx);
+            if self.cap_motion.tick(cx, event, value, dragging, self.cap_viscosity) {
+                self.draw_bg.redraw(cx);
+            }
+        }
 
         match event.hits(cx, self.draw_bg.area()) {
             Hit::KeyFocus(_) => {
@@ -1534,6 +1604,7 @@ impl Widget for CheckBox {
                         moved: false,
                     });
                 }
+                self.knob_motion_kick(cx, true);
             }
             // A focused box flips on Space (and Return) the way a click does,
             // as a focused Button and RadioButton answer those keys. An app
@@ -1557,6 +1628,7 @@ impl Widget for CheckBox {
                     &[ScriptValue::from_bool(on)],
                 );
                 self.draw_bg.redraw(cx);
+                self.knob_motion_kick(cx, true);
             }
             Hit::FingerUp(fe) => {
                 self.animator_play(cx, ids!(press.off));
@@ -1585,6 +1657,7 @@ impl Widget for CheckBox {
                     }
                     self.draw_bg.redraw(cx);
                 }
+                self.knob_motion_kick(cx, true);
             }
             Hit::FingerMove(fe) => {
                 if let Some(mut drag) = self.drag {
@@ -1605,6 +1678,7 @@ impl Widget for CheckBox {
                     drag.pos = along.clamp(0.0, 1.0) as f32;
                     self.drag = Some(drag);
                     self.draw_bg.redraw(cx);
+                    self.knob_motion_kick(cx, false);
                 }
             }
             _ => (),

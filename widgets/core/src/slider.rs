@@ -2532,7 +2532,7 @@ impl CapMotion {
     }
 
     /// One step: true while anything still moves.
-    fn step(&mut self, dt: f64, value: f64, dragging: bool, viscosity: f64) -> bool {
+    pub(crate) fn step(&mut self, dt: f64, value: f64, dragging: bool, viscosity: f64) -> bool {
         let (k, c, kp, cp) = Self::constants(viscosity);
         let target = value * self.travel_px;
         if self.travel {
@@ -2576,13 +2576,13 @@ impl CapMotion {
 
     /// The field's strength: most of the hover plus the press, never below
     /// zero nor above one.
-    fn field(&self) -> f64 {
+    pub(crate) fn field(&self) -> f64 {
         (0.7 * self.hover + self.press).clamp(0.0, 1.0)
     }
 
     /// What the material reads: stretch, direction, press, squash along,
     /// squash across; and the value the cap is drawn at.
-    fn read(&self, value: f64, radius: f64, dragging: bool) -> (f32, f32, f32, f32, f32, f64) {
+    pub(crate) fn read(&self, value: f64, radius: f64, dragging: bool) -> (f32, f32, f32, f32, f32, f64) {
         let tail = self.tail.unwrap_or(self.head);
         let gap = self.head - tail;
         let dir = if self.last_dir == 0.0 { 1.0 } else { self.last_dir };
@@ -2601,6 +2601,63 @@ impl CapMotion {
             value
         };
         (stretch as f32, dir as f32, self.press as f32, sqa as f32, sqx as f32, drawn)
+    }
+
+    /// The track's travel in points at this draw: a new length scales the
+    /// positions with it rather than snapping them.
+    pub(crate) fn resize(&mut self, travel: f64) {
+        if (travel - self.travel_px).abs() > 0.5 {
+            if self.travel_px > 0.0 {
+                let k = travel / self.travel_px;
+                self.head *= k;
+                if let Some(t) = self.tail.as_mut() {
+                    *t *= k;
+                }
+            }
+            self.travel_px = travel;
+        }
+    }
+
+    /// Starts the motion on the next frame: after a press, a release, a
+    /// drag move, or (`jump`) a value that arrived without a drag, which
+    /// the cap then travels to.
+    pub(crate) fn kick(&mut self, cx: &mut Cx, jump: bool, value: f64) {
+        if jump && self.travel_px > 0.0 {
+            let target = value * self.travel_px;
+            if (self.head - target).abs() > 0.2 {
+                self.travel = true;
+            }
+        }
+        if self.next_frame.is_none() {
+            self.last_time = None;
+            self.next_frame = Some(cx.new_next_frame());
+        }
+    }
+
+    /// One step on the motion's frame, and the next frame asked for while
+    /// anything still moves. True when it stepped, so the caller redraws.
+    pub(crate) fn tick(&mut self, cx: &mut Cx, event: &Event, value: f64, dragging: bool, viscosity: f64) -> bool {
+        let Some(nf) = self.next_frame else {
+            return false;
+        };
+        let Some(ne) = nf.is_event(event) else {
+            return false;
+        };
+        self.next_frame = None;
+        let dt = match self.last_time {
+            Some(t) => (ne.time - t).clamp(0.001, 0.05),
+            None => 1.0 / 60.0,
+        };
+        self.last_time = Some(ne.time);
+        if self.step(dt, value, dragging, viscosity) {
+            self.next_frame = Some(cx.new_next_frame());
+        }
+        true
+    }
+
+    /// Whether the motion drives the cap right now: a frame is pending.
+    pub(crate) fn moving(&self) -> bool {
+        self.next_frame.is_some()
     }
 }
 
@@ -2902,17 +2959,7 @@ impl Slider {
                 DragAxis::Vertical => size.y,
             };
             let travel = self.cap_travel(extent).max(1.0);
-            if (travel - self.cap_motion.travel_px).abs() > 0.5 {
-                // A new length: positions scale with it rather than snap.
-                if self.cap_motion.travel_px > 0.0 {
-                    let k = travel / self.cap_motion.travel_px;
-                    self.cap_motion.head *= k;
-                    if let Some(t) = self.cap_motion.tail.as_mut() {
-                        *t *= k;
-                    }
-                }
-                self.cap_motion.travel_px = travel;
-            }
+            self.cap_motion.resize(travel);
         }
     }
 
@@ -2953,16 +3000,7 @@ impl Slider {
         if self.cap_viscosity <= 0.0 && self.cap_field_reach <= 0.0 {
             return;
         }
-        if jump && self.cap_motion.travel_px > 0.0 {
-            let target = self.relative_value * self.cap_motion.travel_px;
-            if (self.cap_motion.head - target).abs() > 0.2 {
-                self.cap_motion.travel = true;
-            }
-        }
-        if self.cap_motion.next_frame.is_none() {
-            self.cap_motion.last_time = None;
-            self.cap_motion.next_frame = Some(cx.new_next_frame());
-        }
+        self.cap_motion.kick(cx, jump, self.relative_value);
     }
 
     /// The pointer, wherever it is on the window, read against the cap:
@@ -3013,23 +3051,9 @@ impl Slider {
     /// One step of the cap's motion on its frame, and the next frame asked
     /// for while anything still moves.
     fn cap_motion_tick(&mut self, cx: &mut Cx, event: &Event) {
-        let Some(nf) = self.cap_motion.next_frame else {
-            return;
-        };
-        let Some(ne) = nf.is_event(event) else {
-            return;
-        };
-        self.cap_motion.next_frame = None;
-        let dt = match self.cap_motion.last_time {
-            Some(t) => (ne.time - t).clamp(0.001, 0.05),
-            None => 1.0 / 60.0,
-        };
-        self.cap_motion.last_time = Some(ne.time);
         let dragging = self.dragging.is_some();
-        let active = self.cap_motion.step(dt, self.relative_value, dragging, self.cap_viscosity);
-        self.draw_bg.redraw(cx);
-        if active {
-            self.cap_motion.next_frame = Some(cx.new_next_frame());
+        if self.cap_motion.tick(cx, event, self.relative_value, dragging, self.cap_viscosity) {
+            self.draw_bg.redraw(cx);
         }
     }
 }
