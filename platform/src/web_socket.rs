@@ -63,6 +63,13 @@ pub(crate) fn is_studio_socket_response(response: &NetworkResponse) -> bool {
 pub(crate) fn consume_studio_socket_response(
     response: &NetworkResponse,
 ) -> Option<Vec<StudioToApp>> {
+    // A build without the studio connection (`--cfg makepad_no_studio`, a
+    // published web build) never opens the socket.
+    #[cfg(makepad_no_studio)]
+    if true {
+        let _ = response;
+        return None;
+    }
     match response {
         NetworkResponse::WsOpened { socket_id } if socket_id.0 == STUDIO_SOCKET_ID => {
             STUDIO_WEB_SOCKET_CONNECTED.store(true, Ordering::SeqCst);
@@ -189,7 +196,7 @@ fn studio_ws_send_binary(data: Vec<u8>) -> Result<(), ()> {
 
 impl Cx {
     pub fn has_studio_web_socket() -> bool {
-        HAS_STUDIO_WEB_SOCKET.load(Ordering::SeqCst)
+        !cfg!(makepad_no_studio) && HAS_STUDIO_WEB_SOCKET.load(Ordering::SeqCst)
     }
 
     pub fn has_studio_web_socket_connected() -> bool {
@@ -330,7 +337,7 @@ impl Cx {
     fn run_studio_websocket_thread(&mut self) {}
 
     fn start_studio_websocket(&mut self, studio_http: &str) {
-        if studio_http.is_empty() {
+        if studio_http.is_empty() || cfg!(makepad_no_studio) {
             return;
         }
         self.studio_http = studio_http.into();
@@ -381,7 +388,7 @@ impl Cx {
 
     #[cfg(any(target_os = "tvos", target_os = "ios"))]
     pub fn start_studio_websocket_delayed(&mut self) {
-        if self.studio_http.is_empty() {
+        if self.studio_http.is_empty() || cfg!(makepad_no_studio) {
             return;
         }
         HAS_STUDIO_WEB_SOCKET.store(true, Ordering::SeqCst);
