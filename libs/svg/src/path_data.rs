@@ -441,9 +441,9 @@ impl<'a> PathDataParser<'a> {
     }
 }
 
-/// Convert an SVG arc to cubic bezier curves.
+/// Convert an SVG arc to cubic bezier curves, from the current point `(x1, y1)`.
 /// Implements the endpoint-to-center parameterization from SVG spec Appendix F.6.
-fn arc_to_beziers(
+pub fn arc_to_beziers(
     path: &mut VectorPath,
     x1: f32,
     y1: f32,
@@ -538,23 +538,22 @@ fn arc_to_beziers_inner(
     let cx = cos_phi * cxp - sin_phi * cyp + mx;
     let cy = sin_phi * cxp + cos_phi * cyp + my;
 
-    // Step 4: Compute theta1 and dtheta
-    let theta1 = angle_between(1.0, 0.0, (x1p - cxp) / rx, (y1p - cyp) / ry);
-    let mut dtheta = angle_between(
-        (x1p - cxp) / rx,
-        (y1p - cyp) / ry,
-        (-x1p - cxp) / rx,
-        (-y1p - cyp) / ry,
-    );
-
-    if !sweep && dtheta > 0.0 {
-        dtheta -= 2.0 * PI;
-    } else if sweep && dtheta < 0.0 {
-        dtheta += 2.0 * PI;
-    }
+    // Step 4: Compute theta1 and dtheta. The size of the sweep comes from
+    // the unsigned angle between the two radius vectors (atan2 keeps it
+    // exact when they nearly coincide, where acos and the sign of a tiny
+    // cross product do not) and the two flags: the arc is that angle, or
+    // the rest of the turn when `large_arc`, running the way `sweep` says.
+    // A circle's arc that ends a hair before it starts is the whole turn
+    // less a hair, never a zero-length curve.
+    let (ux, uy) = ((x1p - cxp) / rx, (y1p - cyp) / ry);
+    let (vx, vy) = ((-x1p - cxp) / rx, (-y1p - cyp) / ry);
+    let theta1 = uy.atan2(ux);
+    let between = (ux * vy - uy * vx).abs().atan2(ux * vx + uy * vy);
+    let size = if large_arc { 2.0 * PI - between } else { between };
+    let dtheta = if sweep { size } else { -size };
 
     // Split into segments of at most PI/2
-    let n_segs = ((dtheta.abs() / (PI * 0.5)).ceil() as usize).max(1);
+    let n_segs = ((dtheta.abs() / (PI * 0.5) - 1e-4).ceil() as usize).max(1);
     let d_per_seg = dtheta / n_segs as f32;
     let k = (4.0 / 3.0) * (d_per_seg / 4.0).tan();
 
@@ -585,16 +584,58 @@ fn arc_to_beziers_inner(
         let ex = cos_phi * e2x - sin_phi * e2y + cx;
         let ey = sin_phi * e2x + cos_phi * e2y + cy;
 
+        // The last curve ends exactly where the arc was asked to.
+        let (ex, ey) = if i + 1 == n_segs { (x2, y2) } else { (ex, ey) };
         path.bezier_to(q1x, q1y, q2x, q2y, ex, ey);
     }
 }
 
-fn angle_between(ux: f32, uy: f32, vx: f32, vy: f32) -> f32 {
-    let n = (ux * ux + uy * uy).sqrt() * (vx * vx + vy * vy).sqrt();
-    if n < 1e-10 {
-        return 0.0;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::path::PathCmd;
+
+    fn bounds(path: &VectorPath) -> [f32; 4] {
+        // The control polygons' bounds: close enough for a circle's arcs.
+        let mut b = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        let mut at = |x: f32, y: f32| b = [b[0].min(x), b[1].min(y), b[2].max(x), b[3].max(y)];
+        for cmd in &path.cmds {
+            match *cmd {
+                PathCmd::MoveTo(x, y) | PathCmd::LineTo(x, y) => at(x, y),
+                PathCmd::BezierTo(a, b, c, d, e, f) => {
+                    at(a, b);
+                    at(c, d);
+                    at(e, f);
+                }
+                _ => {}
+            }
+        }
+        b
     }
-    let cos_a = ((ux * vx + uy * vy) / n).clamp(-1.0, 1.0);
-    let sign = if ux * vy - uy * vx < 0.0 { -1.0 } else { 1.0 };
-    sign * cos_a.acos()
+
+    fn parsed(d: &str) -> VectorPath {
+        let mut path = VectorPath::new();
+        parse_path_data(d, &mut path);
+        path
+    }
+
+    #[test]
+    fn an_arc_ending_a_hair_before_its_start_is_nearly_the_whole_circle() {
+        for end in ["-0.01 -160", "-0.0001 -160", "-0.000001 -160"] {
+            let b = bounds(&parsed(&format!("M 0 -160 A 160 160 0 1 1 {end}")));
+            assert!((b[0] + 160.0).abs() < 1.0 && (b[2] - 160.0).abs() < 1.0 && (b[3] - 160.0).abs() < 1.0, "{end}: {b:?}");
+        }
+        // The other way round, and a large arc on the small side of the chord.
+        let b = bounds(&parsed("M 0 -160 A 160 160 0 1 0 0.01 -160"));
+        assert!((b[0] + 160.0).abs() < 1.0 && (b[2] - 160.0).abs() < 1.0 && (b[3] - 160.0).abs() < 1.0, "{b:?}");
+        let b = bounds(&parsed("M 0 -160 A 160 160 0 0 1 -0.01 -160"));
+        assert!(b[3] - b[1] < 1.0, "a small arc over a hair stays a hair: {b:?}");
+    }
+
+    #[test]
+    fn four_quarter_arcs_close_exactly_on_their_start() {
+        let path = parsed("M 50 0 A 50 40 0 0 1 100 40 A 50 40 0 0 1 50 80 A 50 40 0 0 1 0 40 A 50 40 0 0 1 50 0 Z");
+        let curves: Vec<_> = path.cmds.iter().filter_map(|c| if let PathCmd::BezierTo(.., x, y) = c { Some((*x, *y)) } else { None }).collect();
+        assert_eq!(curves, vec![(100.0, 40.0), (50.0, 80.0), (0.0, 40.0), (50.0, 0.0)]);
+    }
 }
