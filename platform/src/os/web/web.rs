@@ -1857,7 +1857,7 @@ pub unsafe extern "C" fn init_panic_hook() {
 pub static mut BASE_ADDR: usize = 10;
 
 /// The inventory as the page's `makepad_gpu_inventory()` resolves it:
-/// `{textures: [{texture_id, kind, format, w, h, bytes, owner}], retired_texture_bytes,
+/// `{textures: [{texture_id, kind, format, w, h, bytes, owner, dropped}], retired_texture_bytes,
 /// retained_allocation_bytes, geometry_bytes}`; `texture_id` is the page's
 /// texture slot, so its GL ledger joins on it.
 fn gpu_inventory_json(inv: &crate::gpu_inventory::GpuInventory) -> String {
@@ -1880,8 +1880,8 @@ fn gpu_inventory_json(inv: &crate::gpu_inventory::GpuInventory) -> String {
         }
         let kind = if t.depth { "depth" } else if t.render_target { "target" } else { "data" };
         out.push_str(&format!(
-            "{{\"texture_id\":{},\"kind\":\"{}\",\"format\":\"{}\",\"w\":{},\"h\":{},\"bytes\":{},\"owner\":\"{}\"}}",
-            t.slot, kind, t.format, t.width, t.height, t.bytes(), esc(&t.name())
+            "{{\"texture_id\":{},\"kind\":\"{}\",\"format\":\"{}\",\"w\":{},\"h\":{},\"bytes\":{},\"owner\":\"{}\",\"dropped\":{}}}",
+            t.slot, kind, t.format, t.width, t.height, t.bytes(), esc(&t.name()), t.state == crate::gpu_inventory::GpuTextureState::FreeSlotHeld
         ));
     }
     out.push_str(&format!(
