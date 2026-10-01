@@ -881,6 +881,11 @@ export class ToWasmMsg {
 
     reserve_u32(u32_capacity) {
         let app = this.app;
+        // Wasm may have grown its memory since this message was started
+        // (any export call can allocate: an HTTP body handed over, a
+        // signal check): views over the old buffer are detached and drop
+        // writes silently, so the message would be read back as garbage.
+        app.update_array_buffer_refs();
 
         this.u32_needed_capacity += u32_capacity;
         let u64_needed_capacity = ((this.u32_needed_capacity & 1) + this.u32_needed_capacity) >> 1;
@@ -917,6 +922,7 @@ export class ToWasmMsg {
             throw new Error("double finalise")
         }
         let app = this.app;
+        app.update_array_buffer_refs();
         let ptr = this.ptr;
         let offset = this.u32_offset - this.u32_ptr;
 

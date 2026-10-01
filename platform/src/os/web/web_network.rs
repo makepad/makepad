@@ -102,12 +102,13 @@ impl WasmNetworkShimBackend {
                 Err(_) => return,
             };
             let Some(pending) = state.by_internal.remove(&internal_request_id) else {
+                crate::log!("wasm http: a response for unknown request {internal_request_id} was dropped");
                 return;
             };
             state.by_public.remove(&pending.public_request_id);
             pending
         };
-        let _ = pending.sink.emit(NetworkResponse::HttpResponse {
+        if let Err(e) = pending.sink.emit(NetworkResponse::HttpResponse {
             request_id: pending.public_request_id,
             response: HttpResponse::from_header_string(
                 metadata_id,
@@ -115,7 +116,9 @@ impl WasmNetworkShimBackend {
                 headers,
                 Some(body),
             ),
-        });
+        }) {
+            crate::log!("wasm http: response {} could not be delivered: {e:?}", pending.public_request_id);
+        }
     }
 
     fn emit_http_error(&self, internal_request_id: LiveId, metadata_id: LiveId, message: String) {
