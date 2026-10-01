@@ -1,0 +1,16 @@
+# makepad-app-icons — the app identity artwork every desktop style draws.
+#
+# One table, shared by widgets-core's app_icon (window chrome, launchers,
+# shelves) and Motion documents (`icon("macos/mail")`), so a binary carries
+# each theme's SVGs once. Pure data: no GPU, no UI.
+
+[package]
+name = "makepad-app-icons"
+version = "0.1.0"
+edition = "2021"
+description = "The bundled app identity icons of each desktop style, as SVG markup"
+license = "MIT OR Apache-2.0"
+
+[lib]
+name = "makepad_app_icons"
+path = "src/lib.rs"

@@ -1,6 +1,7 @@
 //! Application identities with artwork supplied by the active desktop style.
 //! App code names an identity; renderers cache parsed SVGs and share source data.
 use crate::{desktop_style::DesktopStyle, *};
+use makepad_app_icons::ICONS;
 use makepad_micro_serde::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,67 +11,6 @@ pub struct IconAsset {
     pub name: String,
     pub svg: String,
 }
-struct BundledIcon {
-    name: &'static str,
-    variants: [&'static str; 7],
-}
-macro_rules! icon {
-    ($name:literal) => {
-        BundledIcon {
-            name: $name,
-            variants: [
-                include_str!(concat!("../../themes/omarchy/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/macos/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/windows/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/windows-2000/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/nextstep/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/ios/icons/", $name, ".svg")),
-                include_str!(concat!("../../themes/android/icons/", $name, ".svg")),
-            ],
-        }
-    };
-}
-const ICONS: &[BundledIcon] = &[
-    icon!("applications"),
-    icon!("browser"),
-    icon!("files"),
-    icon!("terminal"),
-    icon!("mixer"),
-    icon!("task"),
-    icon!("sheets"),
-    icon!("photos"),
-    icon!("clock"),
-    icon!("weather"),
-    icon!("finance"),
-    icon!("mail"),
-    icon!("notes"),
-    icon!("calendar"),
-    icon!("reminders"),
-    icon!("calculator"),
-    icon!("fabric"),
-    icon!("score"),
-    icon!("video"),
-    icon!("route"),
-    icon!("vj"),
-    icon!("fab"),
-    icon!("studio"),
-    icon!("scope"),
-    icon!("image"),
-    icon!("pdf"),
-    icon!("aichat"),
-    icon!("counter"),
-    icon!("app"),
-    icon!("file-folder"),
-    icon!("file-generic"),
-    icon!("file-image"),
-    icon!("file-text"),
-    icon!("file-code"),
-    icon!("file-audio"),
-    icon!("file-video"),
-    icon!("file-archive"),
-    icon!("file-pdf"),
-
-];
 
 pub fn canonical_name(name: &str) -> &str {
     let name = name.strip_prefix("makepad-").unwrap_or(name);
