@@ -140,6 +140,9 @@ pub mod ai_slot {
 /// [`WindowFamilies`] read here. So no crate built on this one waits for
 /// the overlay, and an app's release build leaves it out by not linking it.
 fn window_families(vm: &mut ScriptVm) -> WindowFamilies {
+    // Every Splash isolate the host allocates from here on registers the
+    // families this build picked after the core's widgets.
+    vm.cx_mut().global::<makepad_widgets_core::widget_hooks::IsolateFamilies>().0 = families(true);
     #[allow(unused_mut)]
     let mut window = vm
         .cx_mut()
@@ -162,7 +165,10 @@ fn window_families(vm: &mut ScriptVm) -> WindowFamilies {
 /// family before the dock. The rarer widgets that moved out of the core
 /// (fab ... catalog) come first, nearest the core they were part of; none
 /// of them names another family's widgets.
-fn families() -> Vec<fn(&mut ScriptVm)> {
+///
+/// `isolate` is the list a Splash isolate registers: the families that
+/// reach past the host service bridge (the browser and the map) stay out.
+fn families(isolate: bool) -> Vec<fn(&mut ScriptVm)> {
     #[allow(unused_mut)]
     let mut families: Vec<fn(&mut ScriptVm)> = Vec::new();
     #[cfg(feature = "fab")]
@@ -180,7 +186,9 @@ fn families() -> Vec<fn(&mut ScriptVm)> {
     #[cfg(feature = "catalog")]
     families.push(makepad_widgets_catalog::catalog_mod);
     #[cfg(feature = "cef")]
-    families.push(makepad_widgets_cef::cef_mod);
+    if !isolate {
+        families.push(makepad_widgets_cef::cef_mod);
+    }
     #[cfg(feature = "glass")]
     families.push(makepad_widgets_extras::glass_mod);
     #[cfg(feature = "nav_menus")]
@@ -208,7 +216,9 @@ fn families() -> Vec<fn(&mut ScriptVm)> {
     #[cfg(feature = "vector")]
     families.push(makepad_widgets_extras::vector_mod);
     #[cfg(feature = "maps")]
-    families.push(makepad_widgets_maps::maps_mod);
+    if !isolate {
+        families.push(makepad_widgets_maps::maps_mod);
+    }
     families
 }
 
@@ -216,12 +226,12 @@ fn families() -> Vec<fn(&mut ScriptVm)> {
 /// in place: `theme_mod`).
 pub fn widgets_mod(vm: &mut ScriptVm) {
     let window = window_families(vm);
-    makepad_widgets_core::widgets_mod_with(vm, window, &families());
+    makepad_widgets_core::widgets_mod_with(vm, window, &families(false));
 }
 
 /// The theme, the widgets of the core and of this build's families, and the
 /// desktop style over them: what every app's `script_mod` calls first.
 pub fn script_mod(vm: &mut ScriptVm) {
     let window = window_families(vm);
-    makepad_widgets_core::script_mod_with(vm, window, &families());
+    makepad_widgets_core::script_mod_with(vm, window, &families(false));
 }

@@ -630,7 +630,8 @@ pub(crate) fn script_mod_as_registered(vm: &mut ScriptVm) {
 /// The core's widgets for a Splash isolate being built: `host_io_only` is
 /// the restriction it will run under (its std is restricted only after this).
 pub(crate) fn widgets_mod_with_host_io(vm: &mut ScriptVm, host_io_only: bool) {
-    widgets_mod_with_io(vm, WindowFamilies::default(), &[], host_io_only, false);
+    let families = vm.cx_mut().global::<widget_hooks::IsolateFamilies>().0.clone();
+    widgets_mod_with_io(vm, WindowFamilies::default(), &families, host_io_only, false);
 }
 
 /// With `host_io_only` (a guest held to the host service bridge) the modules

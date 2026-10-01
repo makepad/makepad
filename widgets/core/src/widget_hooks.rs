@@ -122,6 +122,13 @@ pub struct WindowFamilies {
     pub ai: Option<fn(&mut ScriptVm)>,
 }
 
+/// The families a Splash isolate registers after the core's widgets: the
+/// facade crate sets them (the ones this build's features picked, without
+/// the families that reach past the host service bridge), so a face or a
+/// guest's panel finds the same names the window's own scripts do.
+#[derive(Clone, Default)]
+pub struct IsolateFamilies(pub Vec<fn(&mut ScriptVm)>);
+
 /// A dock's layout, as the widget tree's dumps print it.
 #[derive(Clone, Debug, Default)]
 pub struct DockCompactDump {
