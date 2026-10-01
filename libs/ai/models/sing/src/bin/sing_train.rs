@@ -811,8 +811,11 @@ fn main() {
                     0 => (0..batch)
                         .map(|_| {
                             let a = Aligned::from_sungtext_item(&st2.item(&st2.items[lyric[rng.below(lyric.len())]]), speech_frames).unwrap();
-                            // --augment P: speed perturbation (0.9..1.1) on P of the segments.
-                            if rng.unit() < augment { a.speed(0.9 + 0.2 * rng.unit()) } else { a }
+                            // --augment P: speed perturbation on P of the segments, at one of
+                            // nine speeds k/40 (0.9..1.1): 48 kHz·k/40 shares a large factor
+                            // with 48 kHz, so the resampler runs its 40-phase table (~3 ms
+                            // per 3 s segment, against ~125 ms at an arbitrary ratio).
+                            if rng.unit() < augment { a.speed((36 + rng.below(9)) as f32 / 40.0) } else { a }
                         })
                         .collect(),
                     1 => (0..batch).map(|_| Aligned::from_speech_item(&st2.item(&st2.items[speech[rng.below(speech.len())]]), speech_frames).unwrap()).collect(),
