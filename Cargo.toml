@@ -202,6 +202,7 @@ workspace.members = [
     "tools/map_tiles",
     "tools/map_bake",
     "tools/remote",
+    "tools/service_host",
     "tools/agents",
     "tools/ci",
     "libs/system_speech",

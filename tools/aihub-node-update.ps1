@@ -22,9 +22,16 @@ if ($old.Name -notmatch '^makepad-(ai-hub|ai-content|asset-ai)\.exe$') { throw '
 $exe = $old.ExecutablePath
 $dir = Split-Path $exe
 $parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($old.ParentProcessId)"
-if ($parent.Name -ne 'cmd.exe' -or $parent.CommandLine -notmatch '(?i)/c\s+"?([^"\r\n]+\.cmd)"?\s*$') { throw 'cannot safely identify the existing AIHub launcher' }
-$launcher = $Matches[1]
-if (-not (Test-Path $launcher) -or (Split-Path $launcher) -ne $dir) { throw 'launcher is outside the AIHub installation directory' }
+# Two layouts: the Windows service from tools/aihub-node-install-services.ps1
+# (its makepad-service-host is the parent; the tunnel runs as LocalSystem and
+# may stop and start it), or a .cmd launcher started by a watchdog task.
+$service = Get-CimInstance Win32_Service | Where-Object { $_.ProcessId -eq $old.ParentProcessId -and $_.PathName -match '(?i)makepad-service-host\.exe' } | Select-Object -First 1
+$launcher = $null
+if (-not $service) {
+    if ($parent.Name -ne 'cmd.exe' -or $parent.CommandLine -notmatch '(?i)/c\s+"?([^"\r\n]+\.cmd)"?\s*$') { throw 'cannot safely identify the existing AIHub launcher' }
+    $launcher = $Matches[1]
+    if (-not (Test-Path $launcher) -or (Split-Path $launcher) -ne $dir) { throw 'launcher is outside the AIHub installation directory' }
+}
 $before = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 5
 $jobs = Invoke-RestMethod "http://127.0.0.1:$Port/jobs" -TimeoutSec 5
 if ($before.jobs_pending -ne 0 -or @($jobs.jobs).Count -ne 0) { throw 'AIHub has active jobs; wait for them to finish before updating' }
@@ -45,6 +52,20 @@ function Copy-Binary([string]$source) {
         catch { if ($attempt -eq 19) { throw }; Start-Sleep -Milliseconds 500 }
     }
 }
+function Start-Node {
+    if ($service) { Start-Service $service.Name; return }
+    Start-ExistingLauncher
+}
+function Stop-Node {
+    if ($service) {
+        Stop-Service $service.Name -Force
+        (Get-Service $service.Name).WaitForStatus('Stopped', [TimeSpan]::FromSeconds(30))
+        return
+    }
+    $oldProcess = Get-Process -Id $old.ProcessId
+    $oldProcess.Kill()
+    if (-not $oldProcess.WaitForExit(10000)) { throw 'old AIHub process did not exit' }
+}
 function Start-ExistingLauncher {
     # Hidden and detached from the tunnel job, with the original startup script.
     $startup = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}
@@ -53,7 +74,7 @@ function Start-ExistingLauncher {
     $script:launchPid = $started.ProcessId
 }
 function Wait-Healthy {
-    $deadline = [DateTime]::UtcNow.AddSeconds(30)
+    $deadline = [DateTime]::UtcNow.AddSeconds(60)
     while ([DateTime]::UtcNow -lt $deadline) {
         Start-Sleep -Milliseconds 500
         try {
@@ -63,7 +84,7 @@ function Wait-Healthy {
             if ($proc.ExecutablePath -eq $exe -and $proc.ProcessId -ne $old.ProcessId -and $health.node_key -eq $before.node_key) { return $health }
         } catch {}
     }
-    throw 'replacement AIHub did not become healthy within 30 seconds'
+    throw 'replacement AIHub did not become healthy within 60 seconds'
 }
 try {
     foreach ($task in Get-ScheduledTask) {
@@ -75,26 +96,28 @@ try {
     # Recheck after suspending the watchdog; never deliberately interrupt work.
     $jobs = Invoke-RestMethod "http://127.0.0.1:$Port/jobs" -TimeoutSec 5
     if (@($jobs.jobs).Count -ne 0) { throw 'a job arrived while preparing the update; retry when idle' }
-    $oldProcess = Get-Process -Id $old.ProcessId
-    $oldProcess.Kill()
     $stopped = $true
-    if (-not $oldProcess.WaitForExit(10000)) { throw 'old AIHub process did not exit' }
+    Stop-Node
     # Even a partially failed copy must be restored from the complete backup.
     $replaced = $true
     Copy-Binary $Payload
     if ((Get-FileHash $exe -Algorithm SHA256).Hash -ne $Sha256) { throw 'installed binary hash mismatch' }
-    Start-ExistingLauncher
+    Start-Node
     $after = Wait-Healthy
-    [pscustomobject]@{host=$env:COMPUTERNAME;path=$exe;launcher=$launcher;sha256=$Sha256;cuda_arch=$CudaArch;previous_sha256=$oldHash;backup=$backup;previous_pid=$old.ProcessId;health=$after} | ConvertTo-Json -Depth 10 -Compress
+    [pscustomobject]@{host=$env:COMPUTERNAME;path=$exe;launcher=$launcher;service=$service.Name;sha256=$Sha256;cuda_arch=$CudaArch;previous_sha256=$oldHash;backup=$backup;previous_pid=$old.ProcessId;health=$after} | ConvertTo-Json -Depth 10 -Compress
 } catch {
     $failure = $_
     if ($stopped) {
         # Only this service port or a child of our replacement launcher may
         # be stopped. Another service using the same executable stays alone.
-        $owner = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
-        Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe -and (($owner -and $_.ProcessId -eq $owner.OwningProcess) -or ($launchPid -and $_.ParentProcessId -eq $launchPid)) } | ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
+        if ($service) {
+            Stop-Service $service.Name -Force -ErrorAction SilentlyContinue
+        } else {
+            $owner = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+            Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -eq $exe -and (($owner -and $_.ProcessId -eq $owner.OwningProcess) -or ($launchPid -and $_.ParentProcessId -eq $launchPid)) } | ForEach-Object { Stop-Process -Id $_.ProcessId -ErrorAction SilentlyContinue }
+        }
         if ($replaced) { Copy-Binary $backup }
-        Start-ExistingLauncher
+        Start-Node
         try { Wait-Healthy | Out-Null } catch { Write-Error "rollback failed: $_" -ErrorAction Continue }
     }
     throw $failure

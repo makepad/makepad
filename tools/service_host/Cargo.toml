@@ -1,0 +1,11 @@
+[package]
+name = "makepad-service-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+description = "Runs one program as a Windows service: restart on exit, and in the logged-on user's session when asked"
+
+[[bin]]
+name = "makepad-service-host"
+path = "src/main.rs"
