@@ -11,6 +11,13 @@ impl ScriptHeap {
         self.arrays[array].tag.freeze()
     }
 
+    /// Frozen (`arr.freeze()`): its contents can no longer change, so a
+    /// host may keep what it derived from them.
+    #[inline]
+    pub fn array_is_frozen(&self, array: ScriptArray) -> bool {
+        self.arrays[array].tag.is_frozen()
+    }
+
     pub fn new_array(&mut self) -> ScriptArray {
         if let Some(arr) = self.arrays_free.pop() {
             // arr already has the correct generation from gc.rs sweep
