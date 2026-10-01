@@ -195,10 +195,9 @@ impl<'a> Compile<'a> {
 
     /// Preserve the local with the given index by preserving every local operand that refers to it.
     fn preserve_local(&mut self, local_idx: usize) {
+        // Each preserved operand is unlinked, so the list's head moves on.
         while let Some(opd_idx) = self.locals[local_idx].first_opd_idx {
             self.preserve_local_opd(opd_idx);
-            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
-            self.opds[opd_idx].local_idx = None;
         }
     }
 
@@ -351,8 +350,8 @@ impl<'a> Compile<'a> {
             self.dealloc_reg(self.opd(0).type_.reg_idx());
         }
         let opd_idx = self.opds.len() - 1;
-        if let Some(local_idx) = self.opds[opd_idx].local_idx {
-            self.locals[local_idx].first_opd_idx = self.opds[opd_idx].next_opd_idx;
+        if self.opds[opd_idx].local_idx.is_some() {
+            self.remove_local_opd(opd_idx);
         }
         self.opds.pop().unwrap().type_
     }
