@@ -32,7 +32,7 @@ fn run3(p: &Program, n: usize, ctx0: &[u32], seed: u64) -> Option<[(Vec<Vec<u32>
             })
             .collect();
         let mut state = [0u32; 1];
-        let shared = [0u32; 1];
+        let shared = SHARED;
         let mut scratch = vec![0u32; p.scratch_words()];
         let zeros = [0f32; 1];
         let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
@@ -41,7 +41,7 @@ fn run3(p: &Program, n: usize, ctx0: &[u32], seed: u64) -> Option<[(Vec<Vec<u32>
         ir::run(p, &mut scratch, &mut mem, &mut io, n as u32);
     }
     let mut state = [0u32; 1];
-    let shared = [0u32; 1];
+    let shared = SHARED;
     let mut sb = Bufs::new(&mut Rng(seed), n);
     let mut sctx = ctx0.to_vec();
     let t = sb.table();
@@ -133,7 +133,7 @@ fn neon_equals_scalar_and_interpreter_on_random_kernels() {
     // NEON_FUZZ_SEED / NEON_FUZZ_ROUNDS for longer runs.
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let mut r = Rng(env("NEON_FUZZ_SEED", 0xC0FF_EE12_3456_789B));
-    let regions = Regions { ctx: CTX as u32, state: 1, shared: 1, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
+    let regions = Regions { ctx: CTX as u32, state: 1, shared: SHARED.len() as u32, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
     let (mut tried, mut vectorized) = (0, 0);
     let rounds = env("NEON_FUZZ_ROUNDS", 30_000);
     for round in 0..rounds {
@@ -166,7 +166,7 @@ fn neon_equals_scalar_and_interpreter_on_random_kernels() {
                 })
                 .collect();
             let mut state = [0u32; 1];
-            let shared = [0u32; 1];
+            let shared = SHARED;
             let mut scratch = vec![0u32; p.scratch_words()];
             let zeros = [0f32; 1];
             let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
@@ -179,7 +179,7 @@ fn neon_equals_scalar_and_interpreter_on_random_kernels() {
         let mut sctx = ctx0.clone();
         let t = sb.table();
         let mut state = [0u32; 1];
-        let shared = [0u32; 1];
+        let shared = SHARED;
         unsafe { scode.run_kernel(sctx.as_mut_ptr(), state.as_mut_ptr(), shared.as_ptr() as *mut u32, t.as_ptr(), n as u32) };
         // NEON for n & !3, the rest scalar (as the runtime does).
         let mut vb = Bufs::new(&mut Rng(seed), n);
@@ -320,7 +320,7 @@ fn optimized_random_kernels_give_the_same_bits() {
     // every backend equals the original on the interpreter.
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let mut r = Rng(env("OPT_FUZZ_SEED", 0x0B7F_5EED_1234_5678));
-    let regions = Regions { ctx: CTX as u32, state: 1, shared: 1, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
+    let regions = Regions { ctx: CTX as u32, state: 1, shared: SHARED.len() as u32, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
     let rounds = env("OPT_FUZZ_ROUNDS", 10_000);
     let mut ran = 0;
     for round in 0..rounds {

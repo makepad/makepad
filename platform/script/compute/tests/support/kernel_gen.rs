@@ -6,7 +6,7 @@
 //! buffers with guard words.
 #![allow(dead_code)]
 
-use makepad_script_compute::ir::{Bin, Block, Cmp, Op, Program, Region, Stmt, Ty, Un, Val, Var};
+use makepad_script_compute::ir::{Bin, Block, Cmp, Fma, Op, Program, Region, Stmt, Ty, Un, Val, Var};
 use makepad_script_compute::kernel::{ELEMENT_CAP, K_BASE, K_OVERFLOW, K_PARAMS};
 
 pub struct Rng(pub u64);
@@ -30,6 +30,10 @@ pub const STRIDE: u32 = 3;
 // Buffers: 0 control, 1 input (hostile reads), 2 and 3 outputs (element
 // records of STRIDE words).
 pub const NPARAMS: u32 = 4;
+/// The shared tables random kernels read (16 words: resident-table reads).
+pub const SHARED: [u32; 16] = [
+    0x3F80_0000, 0xBF00_0000, 0x4040_0000, 0x7FC0_0000, 0x0000_0001, 0x8000_0000, 0x4120_0000, 0xC2C8_0000, 0x3E80_0000, 0x7F80_0000, 0x1234_5678, 0xFFFF_FFFF, 0x4000_0000, 0x3F00_0000, 0xC000_0000, 0x0080_0000,
+];
 
 struct Gen<'r> {
     r: &'r mut Rng,
@@ -88,7 +92,11 @@ impl Gen<'_> {
         let ty = [Ty::F32, Ty::I32, Ty::Bool][self.r.below(3) as usize];
         match ty {
             Ty::F32 => {
-                let op = match self.r.below(5) {
+                let op = match self.r.below(6) {
+                    5 => {
+                        let k = [Fma::Add, Fma::SubFrom, Fma::Sub][self.r.below(3) as usize];
+                        Op::Fma(k, self.pick(b, Ty::F32), self.pick(b, Ty::F32), self.pick(b, Ty::F32))
+                    }
                     0 => {
                         let u = [Un::NegF, Un::AbsF, Un::SqrtF, Un::FloorF, Un::CeilF, Un::TruncF, Un::RoundF][self.r.below(7) as usize];
                         let a = self.pick(b, Ty::F32);
@@ -114,7 +122,12 @@ impl Gen<'_> {
                 self.def(b, Ty::F32, op);
             }
             Ty::I32 => {
-                let op = match self.r.below(6) {
+                let op = match self.r.below(8) {
+                    6 => Op::Fma(Fma::MulAddI, self.pick(b, Ty::I32), self.pick(b, Ty::I32), self.pick(b, Ty::I32)),
+                    // (FrameCount is the call's element count: it depends on
+                    // how a run is split, as the counter does; kernels read
+                    // their count from ctx.)
+                    7 => Op::BufLen(self.r.below(5) as u8),
                     0 => {
                         let a = self.pick(b, Ty::F32);
                         Op::Un(if self.r.chance(50) { Un::F2I } else { Un::BitsFI }, a)
@@ -147,9 +160,13 @@ impl Gen<'_> {
             }
             _ => {
                 let cc = [Cmp::Lt, Cmp::Le, Cmp::Gt, Cmp::Ge, Cmp::Eq, Cmp::Ne][self.r.below(6) as usize];
-                let op = match self.r.below(5) {
+                let op = match self.r.below(7) {
                     0 => Op::CmpF(cc, self.pick(b, Ty::F32), self.pick(b, Ty::F32)),
                     1 => Op::CmpI(cc, self.pick(b, Ty::I32), self.pick(b, Ty::I32)),
+                    // Bools compared (ordered too: true is above false) and
+                    // selected.
+                    5 => Op::CmpI(cc, self.pick(b, Ty::Bool), self.pick(b, Ty::Bool)),
+                    6 => Op::Sel(self.pick(b, Ty::Bool), self.pick(b, Ty::Bool), self.pick(b, Ty::Bool)),
                     2 => Op::Un(Un::NotB, self.pick(b, Ty::Bool)),
                     3 => Op::Bin(if self.r.chance(50) { Bin::AndB } else { Bin::OrB }, self.pick(b, Ty::Bool), self.pick(b, Ty::Bool)),
                     // Element-dependent conditions (divergence).
@@ -225,11 +242,32 @@ impl Gen<'_> {
                     b.push(Stmt::Store { region: Region::Frame, base, extent, off, val });
                 }
             }
-            // Params (uniform) and the overflow flag (a ctx store).
-            5 => {
-                let k = self.r.below(NPARAMS as u64) as u32;
-                self.def(b, Ty::F32, Op::Load { region: Region::Ctx, base: K_PARAMS + k, extent: 1, off: None });
-            }
+            // Params (uniform, or at a varying clamped offset), and the
+            // shared table (at offsets proven inside it, or clamped).
+            5 => match self.r.below(4) {
+                0 => {
+                    let k = self.r.below(NPARAMS as u64) as u32;
+                    self.def(b, Ty::F32, Op::Load { region: Region::Ctx, base: K_PARAMS + k, extent: 1, off: None });
+                }
+                1 => {
+                    let o = self.pick(b, Ty::I32);
+                    self.def(b, Ty::F32, Op::Load { region: Region::Ctx, base: K_PARAMS, extent: NPARAMS, off: Some(o) });
+                }
+                2 => {
+                    let x = self.pick(b, Ty::I32);
+                    let len = [16u32, 8, 13][self.r.below(3) as usize];
+                    let o = self.def(b, Ty::I32, Op::Wrap(x, len));
+                    let base = self.r.below((SHARED.len() as u32 - len + 1) as u64) as u32;
+                    let ty = if self.r.chance(70) { Ty::F32 } else { Ty::I32 };
+                    self.def(b, ty, Op::Load { region: Region::Shared, base, extent: len, off: Some(o) });
+                }
+                _ => {
+                    let o = self.pick(b, Ty::I32);
+                    let base = self.r.below(SHARED.len() as u64) as u32;
+                    let extent = SHARED.len() as u32 - base;
+                    self.def(b, Ty::F32, Op::Load { region: Region::Shared, base, extent, off: Some(o) });
+                }
+            },
             _ => {
                 let one = self.konst_i(b, 1);
                 b.push(Stmt::Store { region: Region::Ctx, base: K_OVERFLOW, extent: 1, off: None, val: one });

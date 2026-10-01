@@ -44,7 +44,7 @@ struct Setup {
 fn random_case(p: Program, s: &Setup, name: String) -> Case {
     let bufs = Bufs::new(&mut Rng(s.seed), s.n as usize);
     let bufs: Vec<(Vec<u32>, bool)> = bufs.words.iter().enumerate().map(|(k, w)| (w[G..w.len() - G].to_vec(), k >= 2)).collect();
-    layout(name, p, true, &s.ctx, &[0], &bufs, s.n)
+    layout(name, p, true, &s.ctx, &SHARED, &bufs, s.n)
 }
 
 fn has_fma(b: &Block) -> bool {
@@ -250,7 +250,7 @@ fn main() {
         "liftoff" => vec![("liftoff", vec!["--liftoff-only"])],
         _ => vec![("turbofan", vec!["--no-liftoff"]), ("liftoff", vec!["--liftoff-only"])],
     };
-    let regions = Regions { ctx: CTX as u32, state: 1, shared: 1, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
+    let regions = Regions { ctx: CTX as u32, state: 1, shared: SHARED.len() as u32, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
 
     // Random programs.
     let mut r = Rng(seed);

@@ -1726,8 +1726,11 @@ impl Em {
             }
             Op::CmpF(cc, x, y) | Op::CmpI(cc, x, y) => {
                 let float = matches!(op, Op::CmpF(..));
-                // Bools compare as masks when both are, else as 0/1 words.
-                let raw = !float && self.is_bool(x) && !(self.mask[x.0 as usize] && self.mask[y.0 as usize]);
+                // Bools compare as masks when both are and the compare is an
+                // equality (true held as all ones orders below false), else
+                // as 0/1 words.
+                let both = self.mask[x.0 as usize] && self.mask[y.0 as usize] && matches!(cc, Cmp::Eq | Cmp::Ne);
+                let raw = !float && self.is_bool(x) && !both;
                 let rx = self.vsrc_word(x, VS0, raw);
                 let ry = self.vsrc_word(y, VS1, raw);
                 let (gt, ge, eq) = if float { (v::FCMGT, v::FCMGE, v::FCMEQ) } else { (v::CMGT, v::CMGE, v::CMEQ) };

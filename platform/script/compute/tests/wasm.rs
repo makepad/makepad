@@ -63,14 +63,14 @@ fn random_case(r: &mut Rng, p: makepad_script_compute::ir::Program, name: String
     let seed = r.next();
     let bufs = Bufs::new(&mut Rng(seed), n as usize);
     let bufs: Vec<(Vec<u32>, bool)> = bufs.words.iter().enumerate().map(|(k, w)| (w[G..w.len() - G].to_vec(), k >= 2)).collect();
-    layout(name, p, true, &ctx, &[0], &bufs, n)
+    layout(name, p, true, &ctx, &SHARED, &bufs, n)
 }
 
 #[test]
 fn scalar_wasm_equals_interpreter_on_random_kernels() {
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let mut r = Rng(env("WASM_FUZZ_SEED", 0x5CA1_AB1E_0DD5_EED5));
-    let regions = Regions { ctx: CTX as u32, state: 1, shared: 1, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
+    let regions = Regions { ctx: CTX as u32, state: 1, shared: SHARED.len() as u32, frame: FRAME, shared_writable: false, bufs: vec![false, false, true, true, true], io: false };
     let rounds = env("WASM_FUZZ_ROUNDS", 10_000);
     let mut ran = 0;
     for round in 0..rounds {
