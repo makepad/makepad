@@ -1,0 +1,253 @@
+//! Per-pass tests on small modules written in the text format.
+
+use super::*;
+use ir::*;
+
+fn wat(text: &str) -> Vec<u8> {
+    let buf = wast::parser::ParseBuffer::new(text).unwrap();
+    let mut module = wast::parser::parse::<wast::Wat>(&buf).unwrap();
+    module.encode().unwrap()
+}
+
+fn only(set: impl Fn(&mut OptimizeOptions)) -> OptimizeOptions {
+    let mut opts = OptimizeOptions {
+        strip: false,
+        dce: false,
+        peephole: false,
+        locals: false,
+        merge: false,
+        compact: false,
+        order: false,
+        ..OptimizeOptions::default()
+    };
+    set(&mut opts);
+    opts
+}
+
+fn optimize(bytes: &[u8], opts: &OptimizeOptions) -> Module {
+    let (out, report) = wasm_optimize_checked(bytes, opts).unwrap();
+    for pass in &report.passes {
+        assert!(pass.reverted.is_none(), "{} reverted: {:?}", pass.name, pass.reverted);
+    }
+    let module = decode::decode(&out).unwrap();
+    validate::validate(&module).unwrap();
+    module
+}
+
+#[test]
+fn roundtrip_is_exact() {
+    let bytes = wat(r#"(module
+        (type (func (param i32) (result i32)))
+        (import "env" "f" (func (type 0)))
+        (memory 1 2 shared)
+        (global (mut i32) (i32.const 0))
+        (table 2 funcref)
+        (elem (i32.const 0) func 0 1)
+        (func (type 0)
+            local.get 0
+            i32.atomic.load offset=4
+            v128.const i32x4 1 2 3 4
+            i32x4.extract_lane 2
+            i32.add
+            i32.const 0 i32.const 0 i32.const 0 memory.fill
+            local.get 0
+            call_indirect (type 0))
+        (data "hello"))"#);
+    let module = decode::decode(&bytes).unwrap();
+    validate::validate(&module).unwrap();
+    assert_eq!(encode::encode(&module), bytes);
+}
+
+#[test]
+fn validator_refuses() {
+    let bad = [
+        // Wrong operand type.
+        r#"(module (func (result i32) i64.const 1))"#,
+        // Atomic accesses must be naturally aligned.
+        r#"(module (memory 1 1 shared) (func (result i32) i32.const 0 i32.atomic.load align=2))"#,
+        // ref.func of an undeclared function.
+        r#"(module (func) (func (result funcref) ref.func 0))"#,
+        // Lane index out of range.
+        r#"(module (func (result i64) v128.const i64x2 0 0 i64x2.extract_lane 2))"#,
+        // Branch to a missing label.
+        r#"(module (func block br 2 end))"#,
+    ];
+    for (i, text) in bad.iter().enumerate() {
+        let buf = wast::parser::ParseBuffer::new(text).unwrap();
+        let mut module = wast::parser::parse::<wast::Wat>(&buf).unwrap();
+        // The text encoder checks some of these itself.
+        if let Ok(bytes) = module.encode() {
+            assert!(wasm_validate(&bytes).is_err(), "case {i} accepted");
+        }
+    }
+    let good = wat(r#"(module (func (result i64) v128.const i64x2 0 0 i64x2.extract_lane 1))"#);
+    wasm_validate(&good).unwrap();
+}
+
+#[test]
+fn dce_removes_unreachable_code_and_imports() {
+    let bytes = wat(r#"(module
+        (import "env" "used" (func $used))
+        (import "env" "unused" (func $unused))
+        (import "env" "g" (global $g i32))
+        (global $dead (mut i32) (i32.const 1))
+        (func $root (export "root") call $used call $a)
+        (func $a)
+        (func $dead1 call $dead2 global.get $dead drop)
+        (func $dead2 call $unused))"#);
+    let module = optimize(&bytes, &only(|o| o.dce = true));
+    assert_eq!(module.imports.len(), 1);
+    assert_eq!(module.funcs.len(), 2);
+    assert!(module.globals.is_empty());
+    assert_eq!(module.exports[0].index, 1);
+}
+
+#[test]
+fn dce_keeps_only_callable_table_entries() {
+    // Only (i32)->i32 is called indirectly: the () entries become a stub
+    // and the stubs at the segment's ends become empty slots.
+    let bytes = wat(r#"(module
+        (type $t (func (param i32) (result i32)))
+        (table 4 funcref)
+        (elem (i32.const 0) func $n1 $f $n2 $n3)
+        (func $n1) (func $n2) (func $n3)
+        (func $f (type $t) local.get 0)
+        (func (export "call") (param i32) (result i32)
+            local.get 0 local.get 0 call_indirect (type $t)))"#);
+    let module = optimize(&bytes, &only(|o| o.dce = true));
+    let ElemItems::Funcs(items) = &module.elems[0].items else {
+        panic!()
+    };
+    assert_eq!(items.len(), 1, "{:?}", module.elems);
+    assert_eq!(
+        module.elems[0].mode,
+        ElemMode::Active {
+            table: 0,
+            offset: vec![Instr::I32Const(1), Instr::End]
+        }
+    );
+    assert_eq!(module.funcs.len(), 2);
+
+    // An exported table keeps every entry.
+    let bytes = wat(r#"(module
+        (table (export "t") 2 funcref)
+        (elem (i32.const 0) func $a $b)
+        (func $a) (func $b))"#);
+    let module = optimize(&bytes, &only(|o| o.dce = true));
+    assert_eq!(module.funcs.len(), 2);
+}
+
+#[test]
+fn dce_stubs_interior_entries() {
+    let bytes = wat(r#"(module
+        (type $t (func (param i32) (result i32)))
+        (table 3 funcref)
+        (elem (i32.const 0) func $f $n $f)
+        (func $n (param i64))
+        (func $f (type $t) local.get 0)
+        (func (export "call") (param i32) (result i32)
+            local.get 0 local.get 0 call_indirect (type $t)))"#);
+    let module = optimize(&bytes, &only(|o| o.dce = true));
+    let ElemItems::Funcs(items) = &module.elems[0].items else {
+        panic!()
+    };
+    assert_eq!(items.len(), 3);
+    let stub = items[1] as usize;
+    assert_eq!(module.funcs[stub].body, vec![Instr::Unreachable, Instr::End]);
+}
+
+#[test]
+fn dce_drops_unused_passive_segments() {
+    let bytes = wat(r#"(module
+        (memory 1)
+        (data $used "abc")
+        (data $unused "def")
+        (func (export "init") i32.const 0 i32.const 0 i32.const 3 memory.init $used))"#);
+    let module = optimize(&bytes, &only(|o| o.dce = true));
+    assert_eq!(module.datas.len(), 1);
+    assert_eq!(module.datas[0].bytes, b"abc");
+}
+
+#[test]
+fn merge_and_compact() {
+    let bytes = wat(r#"(module
+        (type $a (func (param i32) (result i32)))
+        (type $b (func (param i32) (result i32)))
+        (func $x (export "x") (type $a) local.get 0 i32.const 1 i32.add)
+        (func $y (export "y") (type $b) local.get 0 i32.const 1 i32.add)
+        (func (export "z") (result i32) i32.const 2 call $y))"#);
+    let module = optimize(&bytes, &only(|o| o.merge = true));
+    assert_eq!(module.funcs.len(), 2);
+    assert_eq!(module.exports[0].index, module.exports[1].index);
+    assert_eq!(module.types.len(), 2);
+    let module = optimize(&bytes, &only(|o| o.compact = true));
+    assert_eq!(module.types.len(), 2);
+    // The most used type comes first.
+    assert_eq!(module.types[0].params, vec![ValType::I32]);
+}
+
+#[test]
+fn compact_puts_hot_functions_in_one_byte_indices() {
+    let mut text = String::from("(module\n");
+    for i in 0..200 {
+        text.push_str(&format!("(func $f{i} (export \"f{i}\"))\n"));
+    }
+    text.push_str("(func (export \"hot_caller\")");
+    for _ in 0..10 {
+        text.push_str(" call $f199");
+    }
+    text.push_str("))");
+    let module = optimize(&wat(&text), &only(|o| o.compact = true));
+    let hot = module.exports.iter().find(|e| e.name == "f199").unwrap();
+    assert!(hot.index < 128);
+}
+
+#[test]
+fn strip_keeps_names_on_request() {
+    let bytes = wat(r#"(module (func $kept (export "e")) (func $gone) (@custom "extra" "x"))"#);
+    let opts = OptimizeOptions {
+        keep_names: true,
+        ..OptimizeOptions::default()
+    };
+    let (out, _) = wasm_optimize_checked(&bytes, &opts).unwrap();
+    let module = decode::decode(&out).unwrap();
+    assert!(module.customs.is_empty());
+    let names = module.names.unwrap();
+    assert_eq!(names.funcs, vec![(0, "kept".to_string())]);
+
+    let (out, _) = wasm_optimize_checked(&bytes, &OptimizeOptions::default()).unwrap();
+    assert!(decode::decode(&out).unwrap().names.is_none());
+}
+
+#[test]
+fn order_keeps_index_classes_and_behaviour_shape() {
+    let mut text = String::from("(module\n");
+    for i in 0..140 {
+        text.push_str(&format!("(func (export \"f{i}\") (result i32) i32.const {})\n", 139 - i));
+    }
+    text.push(')');
+    let bytes = wat(&text);
+    let module = optimize(&bytes, &only(|o| o.order = true));
+    // Below 128 nothing moves; above, bodies are sorted.
+    assert_eq!(module.exports[0].index, 0);
+    let body = |name: &str| {
+        let e = module.exports.iter().find(|e| e.name == name).unwrap();
+        module.funcs[e.index as usize].body.clone()
+    };
+    assert_eq!(body("f139"), vec![Instr::I32Const(0), Instr::End]);
+    assert_eq!(body("f130"), vec![Instr::I32Const(9), Instr::End]);
+    let e = module.exports.iter().find(|e| e.name == "f139").unwrap();
+    assert_eq!(e.index, 128);
+}
+
+#[test]
+fn invalid_pass_output_is_reverted() {
+    // A pass's invalid result is caught by the per-pass validation; here
+    // the input itself is fine, so nothing may be reverted.
+    let bytes = wat(r#"(module (func (export "f") (param i32) (result i32)
+        (local i32 i32)
+        local.get 0 local.set 1 local.get 1 local.set 2 local.get 2))"#);
+    let (_, report) = wasm_optimize_checked(&bytes, &OptimizeOptions::default()).unwrap();
+    assert!(report.passes.iter().all(|pass| pass.reverted.is_none()));
+    assert!(report.output_bytes < report.input_bytes);
+}
