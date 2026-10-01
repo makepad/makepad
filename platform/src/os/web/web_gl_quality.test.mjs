@@ -117,6 +117,10 @@ function mock_element(tag) {
     addEventListener(name, listener) {
       this.listeners[name] = listener;
     },
+    removeChild(child) {
+      this.children = this.children.filter(other => other !== child);
+      child.parentNode = null;
+    },
   };
 }
 
@@ -621,7 +625,7 @@ test("physical DPR listener does not loop when effective DPR is lower", () => {
   assert.equal(subject.resize_count, 1);
 });
 
-test("context loss stops queued work and reloads only after an explicit click", () => {
+test("context loss pauses graphics, asks the browser to restore it and keeps the app's timers", () => {
   gl_window.devicePixelRatio = 2;
   let reloads = 0;
   gl_window.location.reload = () => { reloads += 1; };
@@ -630,29 +634,34 @@ test("context loss stops queued work and reloads only after an explicit click", 
   subject.req_anim_frame_id = 11;
   subject.webgl_shader_poll_frame_id = 12;
   subject.video_anim_frame_id = 13;
-  subject.loader_after_presented_frame_id = 14;
   subject.poll_timer = 15;
-  subject.webgl_shader_summary_timer = 16;
   subject.timers = [
     { repeats: true, sys_id: 17 },
     { repeats: false, sys_id: 18 },
   ];
   let prevent_default_calls = 0;
   const loss = canvas.listeners.webglcontextlost;
+  const cancelled_before = gl_window.cancelled.length;
   loss({ preventDefault() { prevent_default_calls += 1; } });
 
   assert.equal(subject.webgl_context_lost, true);
-  assert.equal(prevent_default_calls, 0);
+  // Without preventDefault the browser would never restore the context.
+  assert.equal(prevent_default_calls, 1);
   assert.equal(reloads, 0);
-  assert.deepEqual(gl_window.cancelled.slice(-4), [11, 12, 13, 14]);
-  assert.equal(subject.timers.length, 0);
+  assert.deepEqual(gl_window.cancelled.slice(cancelled_before), [11, 12, 13]);
+  assert.equal(subject.req_anim_frame_id, 0);
+  // The app runs on: its timers and the signal poll stay.
+  assert.equal(subject.timers.length, 2);
+  assert.equal(subject.poll_timer, 15);
+  assert.equal(gl_window.cleared_intervals.includes(15), false);
   assert.equal(parent.children.length, 1);
   assert.equal(
-    gl_messages.errors.filter(parts => String(parts[0]).includes("context lost")).length,
+    gl_messages.warnings.filter(parts => String(parts[0]).includes("context lost")).length,
     1,
   );
 
   loss({ preventDefault() { prevent_default_calls += 1; } });
+  assert.equal(prevent_default_calls, 2);
   assert.equal(parent.children.length, 1);
   assert.equal(reloads, 0);
   const reload_button = parent.children[0].children[1];
@@ -660,7 +669,101 @@ test("context loss stops queued work and reloads only after an explicit click", 
   assert.equal(reloads, 1);
 });
 
-test("a lost-context GL allocation failure is terminal, not a Wasm crash", () => {
+test("a restored context starts empty, enables its extensions again and tells the app", () => {
+  const { subject, canvas, gl, parent } = webgl_subject();
+  const extensions = [];
+  gl.getExtension = (name) => {
+    extensions.push(name);
+    return name === "KHR_parallel_shader_compile" ? { COMPLETION_STATUS_KHR: 1 } : null;
+  };
+  subject.init_webgl_context();
+  assert.ok(subject.parallel_shader_compile);
+  const to_wasm = [];
+  let pumps = 0;
+  Object.assign(subject, {
+    to_wasm: { ToWasmGpuReset(args) { to_wasm.push(["ToWasmGpuReset", args]); } },
+    do_wasm_pump() { pumps += 1; },
+    draw_shaders: [{ program: {} }, { program: {}, pending: true }],
+    array_buffers: [{ gl_buf: {} }],
+    index_buffers: [{ gl_buf: {} }],
+    vaos: [{ gl_vao: {} }],
+    textures: [{}, {}],
+    framebuffers: [{}],
+    instance_data_textures: new Map([[0, { texture: {} }]]),
+    _sampler_fallback_textures: new Map([[1, {}]]),
+    _invalid_texture_upload_ids: new Set([3]),
+    pending_webgl_shader_count: 1,
+    pending_allocation_checks: [() => {}],
+    gpu_watchdog: { in_flight: [{ sync: {} }] },
+    gpu_timer_ext: {},
+    gpu_timer_pending: [{ query: {} }],
+    video_players: {},
+  });
+  canvas.listeners.webglcontextlost({ preventDefault() {} });
+  assert.equal(parent.children.length, 1);
+  // Nothing of the lost context is touched while it is lost.
+  assert.equal(subject.draw_shaders.length, 2);
+
+  extensions.length = 0;
+  canvas.listeners.webglcontextrestored({});
+
+  assert.equal(subject.webgl_context_lost, false);
+  assert.equal(subject.render_target_rejected, false);
+  for (const table of ["draw_shaders", "array_buffers", "index_buffers", "vaos", "textures", "framebuffers"]) {
+    assert.deepEqual(subject[table], [], table);
+  }
+  assert.equal(subject.instance_data_textures.size, 0);
+  assert.equal(subject._sampler_fallback_textures.size, 0);
+  assert.equal(subject._invalid_texture_upload_ids.size, 0);
+  assert.equal(subject.pending_webgl_shader_count, 0);
+  assert.deepEqual(subject.pending_allocation_checks, []);
+  assert.deepEqual(subject.gpu_watchdog.in_flight, []);
+  assert.equal(subject.gpu_timer_ext, undefined);
+  assert.deepEqual(subject.gpu_timer_pending, []);
+  // A restored context has no extensions enabled: they are asked for again.
+  assert.ok(extensions.includes("KHR_parallel_shader_compile"));
+  assert.ok(extensions.includes("EXT_color_buffer_float"));
+  assert.ok(subject.parallel_shader_compile);
+  assert.equal(parent.children.length, 0);
+  assert.deepEqual(to_wasm, [["ToWasmGpuReset", {}]]);
+  assert.equal(pumps, 1);
+
+  // A second restore without a loss in between changes nothing.
+  canvas.listeners.webglcontextrestored({});
+  assert.equal(to_wasm.length, 1);
+});
+
+test("a restore uploads a paused video's frame again", () => {
+  const { subject, canvas } = webgl_subject();
+  subject.init_webgl_context();
+  const player = {
+    playing: false,
+    disposed: false,
+    texture_initialized: true,
+    texture_id: 4,
+    video: { readyState: 4, videoWidth: 2, videoHeight: 2, currentTime: 1 },
+  };
+  let frames = 0;
+  const previous_request = gl_window.requestAnimationFrame;
+  gl_window.requestAnimationFrame = () => { frames += 1; return 77; };
+  try {
+    Object.assign(subject, {
+      to_wasm: { ToWasmGpuReset() {} },
+      do_wasm_pump() {},
+      video_players: { video: player },
+    });
+    canvas.listeners.webglcontextlost({ preventDefault() {} });
+    canvas.listeners.webglcontextrestored({});
+  } finally {
+    gl_window.requestAnimationFrame = previous_request;
+  }
+  assert.equal(player.texture_initialized, false);
+  assert.equal(player.needs_upload, true);
+  assert.equal(frames, 1);
+  assert.equal(subject.video_anim_frame_id, 77);
+});
+
+test("a GL command that throws on a lost context marks the loss; the rest of its batch runs", () => {
   const reporter = web.makepad_crash_reporter;
   const previous = {
     is_wasm_dead: reporter.is_wasm_dead,
@@ -674,8 +777,9 @@ test("a lost-context GL allocation failure is terminal, not a Wasm crash", () =>
   reporter.report = (...args) => { reports.push(args); return Promise.resolve(true); };
   try {
     let loss_queries = 0;
-    let cleanup = 0;
     let overlays = 0;
+    let frees = 0;
+    let after = 0;
     const subject = Object.assign(Object.create(web_gl.WasmWebGL.prototype), {
       gl: {
         VERTEX_SHADER: 1,
@@ -695,28 +799,31 @@ test("a lost-context GL allocation failure is terminal, not a Wasm crash", () =>
       new_to_wasm: () => ({}),
       wasm_process_msg() {
         return {
-          dispatch_on_app: () => this.FromWasmCompileWebGLShader({
-            shader_id: 0,
-            vertex: "",
-            pixel: "",
-          }),
-          free() {},
+          dispatch_on_app: () => {
+            this.FromWasmCompileWebGLShader({ shader_id: 0, vertex: "", pixel: "" });
+            // GL commands after the loss do nothing; other commands run.
+            this.FromWasmCompileWebGLShader({ shader_id: 1, vertex: "", pixel: "" });
+            after += 1;
+          },
+          free() { frees += 1; },
         };
       },
       webgl_shader_timeline_start: undefined,
       webgl_shader_batch_program_count: 0,
       active_render_target_textures: new Set(),
-      stop_webgl_runtime() { cleanup += 1; },
       show_webgl_context_lost_message() { overlays += 1; },
     });
 
     assert.doesNotThrow(() => subject.do_wasm_pump());
-    subject.handle_webgl_context_lost({});
-    subject.do_wasm_pump();
     assert.equal(subject.webgl_context_lost, true);
     assert.equal(loss_queries, 1);
-    assert.equal(cleanup, 1);
+    assert.equal(after, 1);
+    assert.equal(frees, 1);
     assert.equal(overlays, 1);
+    // The app keeps running: the next batch is processed.
+    subject.do_wasm_pump();
+    assert.equal(after, 2);
+    assert.equal(frees, 2);
     assert.equal(marked_dead, 0);
     assert.equal(reports.length, 0);
 
@@ -740,7 +847,7 @@ test("a lost-context GL allocation failure is terminal, not a Wasm crash", () =>
   }
 });
 
-test("lost context during vertex rejection skips Wasm message free", () => {
+test("lost context during vertex rejection frees the Wasm message and keeps the runtime", () => {
   const reporter = web.makepad_crash_reporter;
   const previous = {
     is_wasm_dead: reporter.is_wasm_dead,
@@ -755,9 +862,8 @@ test("lost context during vertex rejection skips Wasm message free", () => {
   try {
     let dispatches = 0;
     let frees = 0;
-    let cleanup = 0;
     let overlays = 0;
-    let workers_terminated = false;
+    let worker_terminations = 0;
     const ordinary_rejections = () => gl_messages.errors.filter(
       parts => String(parts[0]).includes("vertex submission rejected"),
     ).length;
@@ -771,6 +877,7 @@ test("lost context during vertex rejection skips Wasm message free", () => {
       buffer_upload_serial: 0,
       to_wasm: {},
       new_to_wasm: () => ({}),
+      workers: new Map([[1, { worker: { terminate() { worker_terminations += 1; } } }]]),
       wasm_process_msg() {
         return {
           dispatch_on_app: () => {
@@ -781,28 +888,20 @@ test("lost context during vertex rejection skips Wasm message free", () => {
               {},
             );
           },
-          free() {
-            frees += 1;
-            if (workers_terminated) {
-              throw new Error("freed Wasm message after worker termination");
-            }
-          },
+          free() { frees += 1; },
         };
       },
       reset_active_render_target_textures() {},
-      stop_webgl_runtime() {
-        cleanup += 1;
-        workers_terminated = true;
-      },
       show_webgl_context_lost_message() { overlays += 1; },
     });
 
     assert.doesNotThrow(() => subject.do_wasm_pump());
     assert.equal(dispatches, 1);
     assert.equal(subject.webgl_context_lost, true);
-    assert.equal(cleanup, 1);
     assert.equal(overlays, 1);
-    assert.equal(frees, 0);
+    assert.equal(frees, 1);
+    assert.equal(worker_terminations, 0);
+    assert.equal(subject.workers.size, 1);
     assert.equal(ordinary_rejections(), rejection_count);
     assert.equal(marked_dead, 0);
     assert.equal(reports, 0);
@@ -813,7 +912,7 @@ test("lost context during vertex rejection skips Wasm message free", () => {
   }
 });
 
-test("terminal context loss abandons workers and disposes owned I/O and media once", () => {
+test("context loss keeps workers, I/O and media", () => {
   const calls = {
     wasm: 0,
     worker: 0,
@@ -859,10 +958,7 @@ test("terminal context loss abandons workers and disposes owned I/O and media on
     disconnect() { calls.audio_disconnect += 1; },
   };
   const audio_context = {
-    close() {
-      calls.audio_close += 1;
-      throw new Error("media close failed");
-    },
+    close() { calls.audio_close += 1; },
   };
   const parent = mock_element("parent");
   const subject = Object.assign(Object.create(web_gl.WasmWebGL.prototype), {
@@ -890,85 +986,60 @@ test("terminal context loss abandons workers and disposes owned I/O and media on
     geo_watch_id: 44,
     video_players: { video: player },
     pending_render_texture_captures: new Set(),
-    audio_start_args: { pending: true },
-    audio_callback_watchdog: null,
-    audio_startup_cancel: null,
     audio_worklet,
     audio_context,
     exports: new Proxy({}, { get: () => () => { calls.wasm += 1; } }),
     to_wasm: new Proxy({}, { get: () => () => { calls.wasm += 1; } }),
     reset_active_render_target_textures() {},
-    release_device_pixel_ratio_media_query() {},
   });
-  const late_video_callback = player.handlers.loadedmetadata;
-  const previous_geolocation = web_window.navigator.geolocation;
-  web_window.navigator.geolocation = {
-    clearWatch(id) {
-      assert.equal(id, 44);
-      calls.geolocation += 1;
-    },
-  };
 
   subject.handle_webgl_context_lost({});
   subject.handle_webgl_context_lost({});
-  late_video_callback();
-  web_window.navigator.geolocation = previous_geolocation;
 
   assert.deepEqual(calls, {
     wasm: 0,
-    worker: 1,
-    fetch: 1,
-    xhr: 1,
-    socket: 1,
-    video_pause: 1,
-    video_load: 1,
-    audio_disconnect: 1,
-    audio_close: 1,
-    geolocation: 1,
+    worker: 0,
+    fetch: 0,
+    xhr: 0,
+    socket: 0,
+    video_pause: 0,
+    video_load: 0,
+    audio_disconnect: 0,
+    audio_close: 0,
+    geolocation: 0,
   });
-  assert.equal(worker.onmessage, null);
-  assert.equal(subject.workers.size, 0);
-  assert.equal(subject.thread_stack_arena.length, 0);
-  assert.equal(subject.network_http_requests.size, 0);
-  assert.equal(subject.video_players.video, undefined);
-  assert.equal(subject.geo_watch_id, undefined);
+  assert.equal(subject.workers.size, 1);
+  assert.equal(worker.onmessage === null, false);
+  assert.equal(subject.network_http_requests.size, 1);
+  assert.equal(subject.video_players.video, player);
+  assert.equal(player.disposed, false);
+  assert.equal(subject.geo_watch_id, 44);
+  assert.equal(subject.audio_context, audio_context);
   assert.equal(parent.children.length, 1);
 });
 
-test("late wake, media, and awaited worker startup refuse terminal Wasm work", async () => {
+test("wake and media replies reach the app while the context is lost", async () => {
   let wasm_calls = 0;
   const wake = Object.assign(Object.create(web.WasmWebBrowser.prototype), {
-    webgl_context_lost: false,
+    webgl_context_lost: true,
     ui_wake_queued: false,
     exports: { wasm_check_signal() { wasm_calls += 1; return 1; } },
     to_wasm: { ToWasmSignal() { wasm_calls += 1; } },
     do_wasm_pump() { wasm_calls += 1; },
   });
   wake.js_wake_ui();
-  wake.webgl_context_lost = true;
   await Promise.resolve();
-
-  let resolve_secondary;
-  const secondary_ready = new Promise(resolve => { resolve_secondary = resolve; });
-  let allocations = 0;
-  const thread = Object.assign(Object.create(web.WasmWebBrowser.prototype), {
-    webgl_context_lost: false,
-    wasm: { _secondary_ready: secondary_ready, _has_thread_support: true },
-    workers: new Map(),
-    alloc_thread_stack() { allocations += 1; return {}; },
-  });
-  thread.create_thread({ request_id: 9, context_ptr: 0, stack_size: 0, name: "late" });
-  thread.webgl_context_lost = true;
-  resolve_secondary();
+  assert.equal(wasm_calls, 3);
 
   let resolve_devices;
   const devices = new Promise(resolve => { resolve_devices = resolve; });
   const previous_media_devices = web_window.navigator.mediaDevices;
   web_window.navigator.mediaDevices = { enumerateDevices: () => devices };
+  let media_calls = 0;
   const media = Object.assign(Object.create(web.WasmWebBrowser.prototype), {
     webgl_context_lost: false,
-    to_wasm: { ToWasmAudioDeviceList() { wasm_calls += 1; } },
-    do_wasm_pump() { wasm_calls += 1; },
+    to_wasm: { ToWasmAudioDeviceList() { media_calls += 1; } },
+    do_wasm_pump() { media_calls += 1; },
   });
   media.FromWasmQueryAudioDevices({});
   media.webgl_context_lost = true;
@@ -976,13 +1047,10 @@ test("late wake, media, and awaited worker startup refuse terminal Wasm work", a
   await Promise.resolve();
   await Promise.resolve();
   web_window.navigator.mediaDevices = previous_media_devices;
-
-  assert.equal(wasm_calls, 0);
-  assert.equal(allocations, 0);
-  assert.equal(thread.workers.size, 0);
+  assert.equal(media_calls, 2);
 });
 
-test("lifecycle listeners stay inert after terminal abandon", () => {
+test("lifecycle listeners keep reporting while the context is lost", () => {
   const window_listeners = {};
   const document_listeners = {};
   const previous_window_listener = web_window.addEventListener;
@@ -992,23 +1060,22 @@ test("lifecycle listeners stay inert after terminal abandon", () => {
   web_document.addEventListener = (name, listener) => { document_listeners[name] = listener; };
   web_document.hidden = false;
   try {
-    let wasm_calls = 0;
+    const lifecycle = [];
+    let pumps = 0;
     const browser = Object.assign(Object.create(web.WasmWebBrowser.prototype), {
       webgl_context_lost: false,
-      to_wasm: { ToWasmAppLifecycle() { wasm_calls += 1; } },
-      do_wasm_pump() { wasm_calls += 1; },
-      shutdown_thread_runtime() { wasm_calls += 1; },
+      to_wasm: { ToWasmAppLifecycle({ state }) { lifecycle.push(state); } },
+      do_wasm_pump() { pumps += 1; },
+      shutdown_thread_runtime() {},
     });
     browser.bind_app_lifecycle();
     browser.webgl_context_lost = true;
     web_document.hidden = true;
     document_listeners.visibilitychange();
-    window_listeners.pagehide({ persisted: false });
-    window_listeners.pageshow({ persisted: true });
 
-    assert.equal(wasm_calls, 0);
-    assert.equal(browser.lifecycle_is_visible, true);
-    assert.equal(browser.lifecycle_shutdown_sent, false);
+    assert.deepEqual(lifecycle, [2, 1]);
+    assert.equal(pumps, 1);
+    assert.equal(browser.lifecycle_is_visible, false);
   } finally {
     web_window.addEventListener = previous_window_listener;
     web_document.addEventListener = previous_document_listener;
@@ -1016,7 +1083,7 @@ test("lifecycle listeners stay inert after terminal abandon", () => {
   }
 });
 
-test("terminal cleanup cancels readback polling without touching lost GL", () => {
+test("context loss ends readback polling without touching lost GL", () => {
   let next_frame = 40;
   const callbacks = new Map();
   const previous_request = gl_window.requestAnimationFrame;
@@ -1064,26 +1131,26 @@ test("terminal cleanup cancels readback polling without touching lost GL", () =>
     gl,
     wasm: {},
     webgl_context_lost: false,
+    canvas: { width: 10, height: 10, parentNode: mock_element("parent") },
+    window_info: {},
     textures: [{ _render_target_valid: true, _width: 2, _height: 2 }],
     pending_render_texture_captures: new Set(),
     video_players: {},
     timers: [],
     to_wasm: { ToWasmRenderTextureCapture() { wasm_calls += 1; } },
     do_wasm_pump() { wasm_calls += 1; },
-    release_device_pixel_ratio_media_query() {},
-    stop_terminal_web_runtime() {},
   });
 
   subject.FromWasmRequestRenderTextureCapture({ texture_id: 0 });
   const queued_callback = callbacks.get(next_frame);
   assert.equal(subject.pending_render_texture_captures.size, 1);
-  subject.webgl_context_lost = true;
-  subject.stop_webgl_runtime();
+  subject.handle_webgl_context_lost({});
   queued_callback();
   gl_window.requestAnimationFrame = previous_request;
 
   assert.ok(gl_window.cancelled.includes(next_frame));
   assert.equal(subject.pending_render_texture_captures.size, 0);
+  assert.equal(subject.readback_reserved_bytes, 0);
   assert.deepEqual(gl_calls, { wait: 0, lost: 0, delete: 0 });
   assert.equal(wasm_calls, 0);
 });

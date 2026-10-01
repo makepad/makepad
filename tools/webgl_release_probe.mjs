@@ -491,7 +491,14 @@ function pageInstrumentation(diagnostics) {
         if (!gl) return {ok: false, error: 'No live app WebGL canvas'};
         const extension = gl.getExtension('WEBGL_lose_context');
         if (!extension) return {ok: false, error: 'WEBGL_lose_context is unavailable'};
+        window.__renderProbeLostContext = extension;
         extension.loseContext();
+        return {ok: true};
+    };
+    window.__renderProbeRestoreContext = () => {
+        const extension = window.__renderProbeLostContext;
+        if (!extension) return {ok: false, error: 'No context was lost'};
+        extension.restoreContext();
         return {ok: true};
     };
 })();
@@ -1058,44 +1065,72 @@ async function run() {
             const loss = await evaluate('window.__renderProbeLoseContext()');
             assert(loss?.ok, loss?.error || 'Failed to request WebGL context loss');
 
+            // A lost context pauses the graphics (a visible notice with a
+            // Reload button) until the browser restores it; then the app
+            // rebuilds its GPU resources and draws again, without a reload.
             const warningDeadline = Date.now() + LOSS_WARNING_TIMEOUT_MS;
-            let terminal;
+            let paused;
             while (Date.now() < warningDeadline) {
                 await sleep(100);
                 try {
-                    terminal = await snapshot();
+                    paused = await snapshot();
                 } catch {
                     continue;
                 }
-                if (terminal.stats.contextLosses === 1 && terminal.visibleReloads === 1) break;
+                if (paused.stats.contextLosses === 1 && paused.visibleReloads === 1) break;
             }
-            assert(terminal, 'App document disappeared after WebGL context loss');
-            assert.equal(terminal.documentToken, tokenAtLoss, 'App automatically reloaded after WebGL context loss');
+            assert(paused, 'App document disappeared after WebGL context loss');
+            assert.equal(paused.documentToken, tokenAtLoss, 'App automatically reloaded after WebGL context loss');
             assert.equal(mainFrameNavigations, navigationAtLoss, 'App navigated after WebGL context loss');
-            assert.equal(terminal.stats.contextLosses, 1, 'Expected exactly one WebGL context loss event');
-            assert.equal(terminal.stats.contextRestores, 0, 'WebGL context restored after terminal loss');
-            assert.equal(terminal.visibleReloads, 1, 'Expected exactly one visible terminal Reload warning');
-            assertNoRenderWorkAfterContextLoss(terminal, 'terminal warning');
+            assert.equal(paused.stats.contextLosses, 1, 'Expected exactly one WebGL context loss event');
+            assert.equal(paused.stats.contextRestores, 0, 'WebGL context restored before it was asked to');
+            assert.equal(paused.visibleReloads, 1, 'Expected exactly one visible paused-graphics notice with Reload');
+            assertNoRenderWorkAfterContextLoss(paused, 'paused graphics');
 
             await sleep(LOSS_QUIET_MS);
             const quiet = await snapshot();
             assert.equal(quiet.documentToken, tokenAtLoss, 'App automatically reloaded during the context-loss quiet interval');
             assert.equal(mainFrameNavigations, navigationAtLoss, 'App navigated during the context-loss quiet interval');
             assert.equal(quiet.stats.contextLosses, 1, 'Context-loss event repeated during the quiet interval');
-            assert.equal(quiet.stats.contextRestores, 0, 'WebGL context restored during the quiet interval');
-            assert.equal(quiet.visibleReloads, 1, 'Terminal Reload warning changed during the quiet interval');
+            assert.equal(quiet.visibleReloads, 1, 'Paused-graphics notice changed during the quiet interval');
             assertNoRenderWorkAfterContextLoss(quiet, 'quiet interval');
+            if (options.location) {
+                locationCounts = await expectLocation('context loss keeps the watch', 2, 1, 1);
+            }
+
+            const restore = await evaluate('window.__renderProbeRestoreContext()');
+            assert(restore?.ok, restore?.error || 'Failed to request WebGL context restore');
+            const restoreDeadline = Date.now() + LOSS_WARNING_TIMEOUT_MS;
+            let restored;
+            while (Date.now() < restoreDeadline) {
+                await sleep(100);
+                try {
+                    restored = await snapshot();
+                } catch {
+                    continue;
+                }
+                if (restored.stats.contextRestores === 1 && restored.visibleReloads === 0
+                    && restored.stats.draws > quiet.stats.contextLossAt.draws) break;
+            }
+            assert(restored, 'App document disappeared after WebGL context restore');
+            assert.equal(restored.documentToken, tokenAtLoss, 'App reloaded after WebGL context restore');
+            assert.equal(mainFrameNavigations, navigationAtLoss, 'App navigated after WebGL context restore');
+            assert.equal(restored.stats.contextRestores, 1, 'Expected exactly one WebGL context restore event');
+            assert.equal(restored.visibleReloads, 0, 'Paused-graphics notice stayed after the restore');
+            assert(restored.stats.draws > quiet.stats.contextLossAt.draws, 'No WebGL draw after the context was restored');
+            assert(restored.canvases.some(isLiveWebGlCanvas), 'WebGL canvas was not live after the restore');
             assert.equal(runtimeErrors.length, errorsBeforeLoss.runtime, 'Uncaught exception followed intentional context loss');
             assert.equal(rendererRejections.length, errorsBeforeLoss.renderer, 'Renderer rejection followed intentional context loss: ' + rendererRejections.slice(errorsBeforeLoss.renderer).join('\n'));
             assert.equal(fetchedErrorReports.length, errorsBeforeLoss.fetched, 'Error report followed intentional context loss');
-            assert.equal(quiet.stats.uncaught.length, errorsBeforeLoss.uncaught, 'Uncaught page error followed intentional context loss');
+            assert.equal(restored.stats.uncaught.length, errorsBeforeLoss.uncaught, 'Uncaught page error followed intentional context loss');
             if (options.location) {
-                locationCounts = await expectLocation('terminal context-loss cleanup', 2, 2, 0, {wait: true});
-                assert.deepEqual(locationCounts.clearedIds, [1, 2], 'Terminal cleanup cleared unexpected watches');
+                locationCounts = await expectLocation('context restore keeps the watch', 2, 1, 1);
             }
-            console.log(JSON.stringify(resultSummary(quiet, `${baseMode}+lose-context`, fonts, diagnostics, {
-                contextLosses: quiet.stats.contextLosses,
-                visibleReloads: quiet.visibleReloads,
+            console.log(JSON.stringify(resultSummary(restored, `${baseMode}+lose-context`, fonts, diagnostics, {
+                contextLosses: restored.stats.contextLosses,
+                contextRestores: restored.stats.contextRestores,
+                drawsAtLoss: quiet.stats.contextLossAt.draws,
+                drawsAfterRestore: restored.stats.draws,
                 quietMs: LOSS_QUIET_MS,
             })));
         }

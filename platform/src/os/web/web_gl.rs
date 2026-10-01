@@ -127,6 +127,73 @@ impl Cx {
         });
     }
 
+    /// After the browser restored a lost WebGL context: every object of the
+    /// old one is gone and the page's tables of them are empty. What the CPU
+    /// side keeps is marked to upload again on its next draw (vec textures
+    /// from their data, geometries, instance buffers, VAOs and their uniform
+    /// buffers), programs are compiled again when a pass first draws them,
+    /// render targets are allocated again by their next pass, and every pass
+    /// with a draw list repaints. The old context's frames are over, so every
+    /// submitted serial counts as complete (the upload budget frees what they
+    /// held). Buffer, VAO and texture ids keep their numbers: an upload to an
+    /// id the page no longer has creates its object anew.
+    pub(crate) fn webgl_forget_gpu_resources(&mut self) {
+        for slot in &mut self.textures.0.pool {
+            let texture = &mut slot.item;
+            if texture.format.is_vec() || texture.format.is_render() || texture.format.is_depth() {
+                texture.reset_allocation();
+            }
+            texture.os = Default::default();
+            texture.previous_platform_resource = None;
+        }
+        for slot in &mut self.geometries.0.pool {
+            let geometry = &mut slot.item;
+            geometry.dirty = true;
+            geometry.dirty_vertices = true;
+            geometry.dirty_indices = true;
+            geometry.os.vb_generation = geometry.os.vb_generation.wrapping_add(1);
+            geometry.os.ib_generation = geometry.os.ib_generation.wrapping_add(1);
+        }
+        for slot in &mut self.draw_lists.0.pool {
+            let draw_list = &mut slot.item;
+            for index in 0..draw_list.draw_items.len() {
+                let draw_item = &mut draw_list.draw_items[index];
+                if let Some(draw_call) = draw_item.kind.draw_call_mut() {
+                    draw_call.instance_dirty = true;
+                }
+                let os = &mut draw_item.os;
+                if let Some(vao) = &mut os.vao {
+                    vao.shader_id = None;
+                    vao.inst_vb_id = None;
+                    vao.geom_vb_id = None;
+                    vao.geom_ib_id = None;
+                }
+                os.uniforms_recording_gen = None;
+                os.draw_call_uniforms_gen = None;
+                os.user_uniforms_gen = None;
+                os.inst_capacity = 0;
+                os.retained_publication = None;
+                os.retained_failed = 0;
+                os.inst_charge = None;
+            }
+        }
+        for slot in &mut self.passes.0.pool {
+            let pass = &mut slot.item;
+            if pass.main_draw_list_id.is_some() {
+                pass.paint_dirty = true;
+            }
+        }
+        self.draw_shaders.os_shaders.clear();
+        for shader in &mut self.draw_shaders.shaders {
+            shader.os_shader_id = None;
+        }
+        self.os.webgl_shaders_pending = 0;
+        self.os.completion_pending = 0;
+        let submitted = self.frame_submission_serial();
+        self.textures.1.serials.complete(submitted);
+        self.textures.1.retired.clear();
+    }
+
     pub fn render_view(
         &mut self,
         draw_pass_id: DrawPassId,

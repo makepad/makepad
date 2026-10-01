@@ -569,6 +569,16 @@ impl Cx {
                     self.redraw_all();
                 }
 
+                live_id!(ToWasmGpuReset) => {
+                    // Nothing of the old context survived: every resource is
+                    // rebuilt from its CPU-side description on the next
+                    // paint, and the readbacks the loss failed may run again.
+                    self.webgl_forget_gpu_resources();
+                    self.os.readback_device_lost = false;
+                    self.call_event_handler(&Event::GpuReset);
+                    self.redraw_all();
+                }
+
                 live_id!(ToWasmRetainedUploadFailed) => {
                     let failed = ToWasmRetainedUploadFailed::read_to_wasm(&mut to_wasm);
                     let lists: Vec<_> = self.draw_lists.id_iter().collect();
@@ -1532,6 +1542,7 @@ impl CxOsApi for Cx {
             ToWasmTimerFired::to_js_code(),
             ToWasmPaintDirty::to_js_code(),
             ToWasmRedrawAll::to_js_code(),
+            ToWasmGpuReset::to_js_code(),
             ToWasmWebGLShadersDone::to_js_code(),
             ToWasmRetainedUploadFailed::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),

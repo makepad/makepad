@@ -164,6 +164,13 @@ pub enum Event {
     WindowGeomChange(WindowGeomChangeEvent),
     VirtualKeyboard(VirtualKeyboardEvent),
     ClearAtlasses,
+    /// The GPU context was lost and has been restored (a WebGL context the
+    /// browser took away and gave back). Every GPU object was recreated from
+    /// what the CPU side keeps: vec textures, geometries, instance data and
+    /// shaders are uploaded again and every pass is repainted. Contents only
+    /// the GPU held are gone (a render target drawn once and not redrawn,
+    /// results of GPU work read back later): handle this to redo that work.
+    GpuReset,
     /// Clear all hover/pressed visual state, e.g. after an overlay that
     /// swallowed the hover-outs (a context menu) has closed.
     ClearHover,
@@ -333,6 +340,7 @@ impl Event {
             17 => "WindowGeomChange",
             18 => "VirtualKeyboard",
             19 => "ClearAtlasses",
+            78 => "GpuReset",
             72 => "ClearHover",
 
             20 => "MouseDown",
@@ -428,6 +436,7 @@ impl Event {
             Self::WindowGeomChange(_) => 17,
             Self::VirtualKeyboard(_) => 18,
             Self::ClearAtlasses => 19,
+            Self::GpuReset => 78,
             Self::ClearHover => 72,
             Self::PopupDismissed(_) => 61,
 

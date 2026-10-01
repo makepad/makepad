@@ -2476,7 +2476,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmDrawCall(args) {
-    if (this.webgl_context_lost || this.render_target_rejected) {
+    if (this.render_target_rejected) {
       return;
     }
     var gl = this.gl;
@@ -2943,9 +2943,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmBeginRenderTexture(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     if (this.xr !== undefined) {
       this.xr.in_xr_pass = false;
     }
@@ -3443,9 +3440,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmBeginRenderCanvas(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     this.reset_active_render_target_textures();
     this.render_target_rejected = false;
     let gl = this.gl;
@@ -3485,9 +3479,6 @@ export class WasmWebGL extends WasmWebBrowser {
 
   // @section video-playback
   FromWasmPrepareVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let video = document.createElement("video");
     video.crossOrigin = "anonymous";
@@ -3510,7 +3501,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.video_players[key] = player;
 
     player.handlers.loadedmetadata = () => {
-      if (this.webgl_context_lost || player.disposed) {
+      if (player.disposed) {
         return;
       }
       let duration_ms = Math.round(video.duration * 1000);
@@ -3529,7 +3520,7 @@ export class WasmWebGL extends WasmWebBrowser {
     };
 
     player.handlers.ended = () => {
-      if (this.webgl_context_lost || player.disposed) {
+      if (player.disposed) {
         return;
       }
       player.playing = false;
@@ -3541,7 +3532,7 @@ export class WasmWebGL extends WasmWebBrowser {
     };
 
     player.handlers.play = () => {
-      if (this.webgl_context_lost || player.disposed) {
+      if (player.disposed) {
         return;
       }
       player.playing = true;
@@ -3559,7 +3550,7 @@ export class WasmWebGL extends WasmWebBrowser {
 
     if (args.autoplay) {
       video.play().catch(e => {
-        if (!this.webgl_context_lost && !player.disposed) {
+        if (!player.disposed) {
           console.warn("Video autoplay failed:", e);
         }
       });
@@ -3585,14 +3576,11 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmBeginVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
       player.video.play().catch(e => {
-        if (!this.webgl_context_lost && !player.disposed) {
+        if (!player.disposed) {
           console.warn("Video play failed:", e);
         }
       });
@@ -3600,9 +3588,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmPauseVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3611,14 +3596,11 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmResumeVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
       player.video.play().catch(e => {
-        if (!this.webgl_context_lost && !player.disposed) {
+        if (!player.disposed) {
           console.warn("Video resume failed:", e);
         }
       });
@@ -3626,9 +3608,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmMuteVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3637,9 +3616,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmUnmuteVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3648,9 +3624,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmSeekVideoPlayback(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3660,9 +3633,6 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   FromWasmCleanupVideoPlaybackResources(args) {
-    if (this.webgl_context_lost) {
-      return;
-    }
     let key = args.video_id_lo + "_" + args.video_id_hi;
     let player = this.video_players[key];
     if (player) {
@@ -3700,9 +3670,12 @@ export class WasmWebGL extends WasmWebBrowser {
 
     for (let key in this.video_players) {
       let player = this.video_players[key];
-      if (!player.playing) continue;
+      // A paused player uploads once after a context restore (needs_upload).
+      if (!player.playing && !player.needs_upload) continue;
 
-      any_playing = true;
+      if (player.playing) {
+        any_playing = true;
+      }
 
       let video = player.video;
       if (video.readyState < 2) continue;
@@ -3862,6 +3835,7 @@ export class WasmWebGL extends WasmWebBrowser {
           );
         }
         player.texture_initialized = true;
+        player.needs_upload = false;
         gl_tex._texture_upload_width = width;
         gl_tex._texture_upload_height = height;
         gl_tex._texture_upload_format = MAKEPAD_WEBGL_VIDEO_UPLOAD_FORMAT;
@@ -3919,10 +3893,7 @@ export class WasmWebGL extends WasmWebBrowser {
     // latter can intentionally differ forever and would make polling resize
     // continuously.
     this.physical_device_dpi = next;
-    if (
-      !this.webgl_context_lost &&
-      typeof this.handlers.on_screen_resize === "function"
-    ) {
+    if (typeof this.handlers.on_screen_resize === "function") {
       this.handlers.on_screen_resize();
     }
     return true;
@@ -3943,7 +3914,7 @@ export class WasmWebGL extends WasmWebBrowser {
   }
 
   arm_device_pixel_ratio_media_query() {
-    if (this.webgl_context_lost || typeof window.matchMedia !== "function") {
+    if (typeof window.matchMedia !== "function") {
       return false;
     }
     const mq = window.matchMedia(
@@ -3983,80 +3954,14 @@ export class WasmWebGL extends WasmWebBrowser {
     }, 1000);
   }
 
-  stop_webgl_runtime() {
-    for (const field of [
-      "req_anim_frame_id",
-      "webgl_shader_poll_frame_id",
-      "video_anim_frame_id",
-      "loader_after_presented_frame_id",
-    ]) {
-      if (this[field]) {
-        window.cancelAnimationFrame(this[field]);
-        this[field] = 0;
-      }
-    }
-    if (this.loader_fallback_timer) {
-      window.clearTimeout(this.loader_fallback_timer);
-      this.loader_fallback_timer = null;
-    }
-    if (this.webgl_shader_summary_timer !== undefined) {
-      window.clearTimeout(this.webgl_shader_summary_timer);
-      this.webgl_shader_summary_timer = undefined;
-    }
-    if (this.poll_timer !== undefined && this.poll_timer !== null) {
-      window.clearInterval(this.poll_timer);
-      this.poll_timer = null;
-    }
-    if (this._dpr_poll_timer !== undefined && this._dpr_poll_timer !== null) {
-      window.clearInterval(this._dpr_poll_timer);
-      this._dpr_poll_timer = null;
-    }
-    this.release_device_pixel_ratio_media_query();
-    for (const timer of this.timers || []) {
-      try {
-        if (timer.repeats) {
-          window.clearInterval(timer.sys_id);
-        } else {
-          window.clearTimeout(timer.sys_id);
-        }
-      } catch (error) {
-        console.error(`makepad: terminal timer cleanup failed: ${error}`);
-      }
-    }
-    if (this.timers) {
-      this.timers.length = 0;
-    }
-    for (const capture of this.pending_render_texture_captures || []) {
-      if (capture.finish) {
-        capture.finish(undefined, !this.webgl_context_lost);
-        continue;
-      }
-      capture.done = true;
-      if (capture.frame_id) {
-        window.cancelAnimationFrame(capture.frame_id);
-        capture.frame_id = 0;
-      }
-    }
-    if (this.pending_render_texture_captures) {
-      this.pending_render_texture_captures.clear();
-    }
-    // @section video-playback
-    for (const player of Object.values(this.video_players || {})) {
-      try {
-        this.dispose_video_player(player);
-      } catch (error) {
-        console.error(`makepad: terminal video cleanup failed: ${error}`);
-      }
-    }
-    this.video_players = {};
-    // @end video-playback
-    try {
-      this.stop_terminal_web_runtime();
-    } catch (error) {
-      console.error(`makepad: terminal web cleanup failed: ${error}`);
-    }
-  }
-
+  // A lost context (webglcontextlost) pauses the graphics, not the app:
+  // timers, network, audio, threads and media keep running and the app keeps
+  // handling events, while its GL commands do nothing (MAKEPAD_WEBGL_COMMANDS)
+  // and no animation frame runs. The browser is asked to give the context
+  // back (preventDefault). When it does (webglcontextrestored) every table of
+  // the old context's objects is emptied and the app is told
+  // (ToWasmGpuReset): it uploads again what it keeps on the CPU side and
+  // repaints, so the picture goes on from where the app is.
   show_webgl_context_lost_message() {
     if (this._webgl_context_lost_message || typeof document === "undefined") {
       return;
@@ -4069,7 +3974,8 @@ export class WasmWebGL extends WasmWebBrowser {
       "position:absolute;inset:0;display:flex;gap:12px;align-items:center;" +
       "justify-content:center;padding:24px;background:#181818;color:white;" +
       "font:14px sans-serif;text-align:center;z-index:2147483647";
-    text.textContent = "Graphics stopped because the WebGL context was lost.";
+    text.textContent =
+      "Graphics paused: the WebGL context was lost. They come back when the browser restores it.";
     reload.type = "button";
     reload.textContent = "Reload";
     reload.addEventListener("click", () => {
@@ -4086,60 +3992,119 @@ export class WasmWebGL extends WasmWebBrowser {
     }
   }
 
-  handle_webgl_context_lost(_event) {
+  hide_webgl_context_lost_message() {
+    const message = this._webgl_context_lost_message;
+    this._webgl_context_lost_message = null;
+    if (message && message.parentNode) {
+      message.parentNode.removeChild(message);
+    }
+  }
+
+  handle_webgl_context_lost(event) {
+    // Without preventDefault the browser never restores the context.
+    if (event && typeof event.preventDefault === "function") {
+      event.preventDefault();
+    }
     if (this.webgl_context_lost) {
       return;
     }
-    // There is deliberately no preventDefault(): Makepad cannot reconstruct
-    // all Rust-owned GPU resources yet, so claiming browser restoration would
-    // leave a subtly broken app. A reload only happens after the user asks.
     this.webgl_context_lost = true;
-    // Deliver terminal ticket errors before shutting down wasm scheduling.
-    // Bypass the normal pump's lost-context guard, and discard its outgoing
-    // messages: no GL calls or renders may run against the lost context.
-    if (this.readback_api_active && this.to_wasm && this.to_wasm.ToWasmRenderTextureCapture && this.wasm_process_msg) {
-      try {
-        this.to_wasm.ToWasmRenderTextureCapture({
-          texture_id: 0, ticket_lo: 0xffffffff, ticket_hi: 0xffffffff,
-          width: 0, height: 0, offset: 0, complete: true,
-          data: new Uint8Array(0), error: "device lost",
-        });
-        const message = this.to_wasm;
-        this.to_wasm = this.new_to_wasm();
-        this.wasm_process_msg(message).free();
-      } catch (error) {
-        console.error(`makepad: readback device-loss delivery failed: ${error}`);
+    for (const field of [
+      "req_anim_frame_id",
+      "webgl_shader_poll_frame_id",
+      "video_anim_frame_id",
+    ]) {
+      if (this[field]) {
+        window.cancelAnimationFrame(this[field]);
+        this[field] = 0;
       }
     }
-    try {
-      this.reset_active_render_target_textures();
-    } catch (error) {
-      console.error(`makepad: terminal render cleanup failed: ${error}`);
+    // Readbacks in flight read objects of the lost context: they end here
+    // (their objects went with it) and every ticket fails as device lost.
+    for (const capture of this.pending_render_texture_captures || []) {
+      if (capture.finish) {
+        capture.finish(undefined, false);
+        continue;
+      }
+      capture.done = true;
+      if (capture.frame_id) {
+        window.cancelAnimationFrame(capture.frame_id);
+        capture.frame_id = 0;
+      }
     }
+    if (this.pending_render_texture_captures) {
+      this.pending_render_texture_captures.clear();
+    }
+    if (this.readback_api_active && this.to_wasm && this.to_wasm.ToWasmRenderTextureCapture) {
+      this.to_wasm.ToWasmRenderTextureCapture({
+        texture_id: 0, ticket_lo: 0xffffffff, ticket_hi: 0xffffffff,
+        width: 0, height: 0, offset: 0, complete: true,
+        data: new Uint8Array(0), error: "device lost",
+      });
+      // The loss can be found inside a message batch (a GL command that
+      // threw): the app hears of it after that batch.
+      queueMicrotask(() => this.do_wasm_pump());
+    }
+    this.reset_active_render_target_textures();
     this.render_target_rejected = true;
-    try {
-      this.stop_webgl_runtime();
-    } catch (error) {
-      console.error(`makepad: terminal runtime cleanup failed: ${error}`);
-    }
-    const diagnostic = {
-      physical_dpr: this.physical_device_dpi,
-      effective_dpr: this.window_info && this.window_info.dpi_factor,
-      canvas_width: this.canvas.width,
-      canvas_height: this.canvas.height,
-      css_width: this.window_info && this.window_info.inner_width,
-      css_height: this.window_info && this.window_info.inner_height,
-    };
-    console.error(
-      "makepad: WebGL context lost; rendering stopped until an explicit reload",
-      diagnostic,
+    console.warn(
+      "makepad: WebGL context lost; graphics paused until the browser restores it",
+      {
+        physical_dpr: this.physical_device_dpi,
+        effective_dpr: this.window_info && this.window_info.dpi_factor,
+        canvas_width: this.canvas.width,
+        canvas_height: this.canvas.height,
+      },
     );
     this.show_webgl_context_lost_message();
   }
 
+  // Forgets every object of a lost context: the restored one starts empty.
+  reset_webgl_objects() {
+    this.draw_shaders = [];
+    this.array_buffers = [];
+    this.instance_data_textures = new Map();
+    this.index_buffers = [];
+    this.vaos = [];
+    this.textures = [];
+    this.framebuffers = [];
+    this.reset_active_render_target_textures();
+    this._missing_shader_ids = new Set();
+    this._invalid_texture_upload_ids = new Set();
+    this._sampler_fallback_textures = new Map();
+    this._sampler_fallback_texture_failures = new Set();
+    this.pending_webgl_shader_count = 0;
+    this.pending_allocation_checks = [];
+    this.forget_lost_gpu_state();
+  }
+
+  handle_webgl_context_restored() {
+    if (!this.webgl_context_lost) {
+      return;
+    }
+    this.reset_webgl_objects();
+    // Extensions are enabled per context: ask again.
+    this.setup_webgl_context();
+    this.webgl_context_lost = false;
+    this.render_target_rejected = false;
+    this.hide_webgl_context_lost_message();
+    console.warn("makepad: WebGL context restored; rebuilding the GPU resources");
+    // A paused video's frame is uploaded again too, not only playing ones.
+    for (const player of Object.values(this.video_players || {})) {
+      player.texture_initialized = false;
+      player.needs_upload = true;
+    }
+    // The app forgets its GPU state, redraws everything and asks for a frame.
+    this.to_wasm.ToWasmGpuReset({});
+    this.do_wasm_pump();
+    if (Object.keys(this.video_players || {}).length !== 0) {
+      this.ensure_video_animation_frame();
+    }
+  }
+
   init_webgl_context() {
     if (this._webgl_context_initialized) {
-      return !!this.gl && !this.webgl_context_lost;
+      return !!this.gl;
     }
     this._webgl_context_initialized = true;
     var canvas = this.canvas;
@@ -4175,17 +4140,30 @@ export class WasmWebGL extends WasmWebBrowser {
       (event) => this.handle_webgl_context_lost(event),
       false,
     );
+    canvas.addEventListener(
+      "webglcontextrestored",
+      () => this.handle_webgl_context_restored(),
+      false,
+    );
     // Live GPU bytes from the first allocation on (GPU-SAFETY.md).
     if (typeof this.install_gpu_ledger === "function") {
       this.install_gpu_ledger(gl);
     }
-    // Query immutable hardware ceilings exactly once, immediately after the
-    // context exists, then share the cached values with canvas and targets.
+    this.setup_webgl_context();
+    this.bind_device_pixel_ratio_change();
+    return true;
+  }
+
+  // What is read or enabled per context: once at start and again after a
+  // restore (a restored context has no extensions enabled).
+  setup_webgl_context() {
+    const gl = this.gl;
+    // Query immutable hardware ceilings once per context, then share the
+    // cached values with canvas and targets.
     this.webgl_limits = makepad_query_webgl_limits(gl);
     this.max_vertex_attribs = makepad_webgl_vertex_attrib_limit(
       gl.getParameter(gl.MAX_VERTEX_ATTRIBS),
     );
-    this.bind_device_pixel_ratio_change();
 
     // With this extension compileShader/linkProgram only enqueue driver work.
     // Querying COMPILE_STATUS or LINK_STATUS before completion would turn the
@@ -4232,8 +4210,47 @@ export class WasmWebGL extends WasmWebBrowser {
         );
       }
     }
-    return true;
   }
+}
+
+// The GL commands of the from-wasm protocol. While the context is lost they
+// do nothing (after the restore the app's ToWasmGpuReset redoes what they
+// would have made), and one that throws because the context went away
+// inside a batch marks the loss instead of taking the rest of the batch
+// (the app's other commands) down with it.
+const MAKEPAD_WEBGL_COMMANDS = [
+  "FromWasmCompileWebGLShader",
+  "FromWasmAllocIndexBuffer",
+  "FromWasmRetainedArrayBuffer",
+  "FromWasmRetainedArrayUpdate",
+  "FromWasmAllocArrayBuffer",
+  "FromWasmAllocVao",
+  "FromWasmFreeWebGLResources",
+  "FromWasmDrawCall",
+  "FromWasmAllocTextureImage2D_BGRAu8_32",
+  "FromWasmAllocTextureImage2D_Ru8",
+  "FromWasmAllocTextureImage2D_RGBAf32",
+  "FromWasmAllocTextureCube_BGRAu8_32",
+  "FromWasmBeginRenderTexture",
+  "FromWasmBeginRenderCanvas",
+  "FromWasmSetDefaultDepthAndBlendMode",
+];
+for (const name of MAKEPAD_WEBGL_COMMANDS) {
+  const command = WasmWebGL.prototype[name];
+  WasmWebGL.prototype[name] = function (args) {
+    if (this.webgl_context_lost) {
+      return;
+    }
+    try {
+      return command.call(this, args);
+    } catch (error) {
+      if (this.gl && typeof this.gl.isContextLost === "function" && this.gl.isContextLost()) {
+        this.handle_webgl_context_lost();
+        return;
+      }
+      throw error;
+    }
+  };
 }
 
 function add_line_numbers_to_string(code) {

@@ -156,6 +156,13 @@ pub struct ToWasmPaintDirty {}
 #[derive(ToWasm)]
 pub struct ToWasmRedrawAll {}
 
+/// The browser restored a lost WebGL context: every object of the old one
+/// (programs, buffers, VAOs, textures, framebuffers) is gone and the page's
+/// tables of them are empty. The app rebuilds them from their CPU-side
+/// descriptions (`Cx::webgl_forget_gpu_resources`) and repaints.
+#[derive(ToWasm)]
+pub struct ToWasmGpuReset {}
+
 /// `count` WebGL programs finished compiling (or failed) since the last
 /// report. Pairs with the compiles queued through `FromWasmCompileWebGLShader`
 /// so `Cx::draw_shaders_pending` can say whether draws are still being

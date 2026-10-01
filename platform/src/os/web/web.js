@@ -244,6 +244,15 @@ export function makepad_gpu_ledger_free(ledger, object) {
     ledger.objects.delete(object);
 }
 
+// A lost context took every object with it: nothing is live any more (the
+// peak stays, it is history).
+export function makepad_gpu_ledger_forget_all(ledger) {
+    ledger.objects.clear();
+    ledger.bytes.texture = 0;
+    ledger.bytes.buffer = 0;
+    ledger.bytes.renderbuffer = 0;
+}
+
 export function makepad_gpu_ledger_stats(ledger) {
     let textures = 0;
     for (const entry of ledger.objects.values()) {
@@ -799,9 +808,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers = new Proxy({}, {
             set(target, property, value) {
                 target[property] = typeof value === "function" ? (...args) => {
-                    if (browser.webgl_context_lost) {
-                        return;
-                    }
                     if (makepad_crash_reporter.is_wasm_dead()) {
                         makepad_crash_reporter.suppress_followup();
                         return;
@@ -877,9 +883,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     js_wake_ui() {
-        if (this.webgl_context_lost) {
-            return;
-        }
         if (makepad_crash_reporter.is_wasm_dead()) {
             makepad_crash_reporter.suppress_followup();
             return;
@@ -890,9 +893,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.ui_wake_queued = true;
         queueMicrotask(() => {
             this.ui_wake_queued = false;
-            if (this.webgl_context_lost) {
-                return;
-            }
             if (makepad_crash_reporter.is_wasm_dead()) {
                 makepad_crash_reporter.suppress_followup();
                 return;
@@ -918,99 +918,12 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     js_spawn_thread(request_id, context_ptr, stack_size, name_ptr, name_len) {
-        if (this.webgl_context_lost || !this.wasm._has_thread_support) {
+        if (!this.wasm._has_thread_support) {
             return 0;
         }
         const name = this.u8_to_string(name_ptr, name_len);
         this.create_thread({ request_id, context_ptr, stack_size, name });
         return 1;
-    }
-
-    stop_terminal_web_runtime() {
-        if (this._terminal_web_runtime_stopped) {
-            return;
-        }
-        this._terminal_web_runtime_stopped = true;
-        this.ui_wake_queued = false;
-        const safely = (name, cleanup) => {
-            try {
-                cleanup();
-            } catch (error) {
-                console.error(`makepad: terminal ${name} cleanup failed: ${error}`);
-            }
-        };
-
-        // Terminal context loss abandons worker heaps. Calling the ordinary
-        // shutdown path here could enter Wasm or deallocate a stack while a
-        // terminated worker still owns allocator state.
-        for (const record of this.workers || []) {
-            const worker_record = record[1];
-            worker_record.closed = true;
-            worker_record.worker.onmessage = null;
-            worker_record.worker.onerror = null;
-            worker_record.worker.onmessageerror = null;
-            safely("worker", () => worker_record.worker.terminate());
-        }
-        if (this.workers) {
-            this.workers.clear();
-        }
-        if (this.thread_stack_arena) {
-            this.thread_stack_arena.length = 0;
-        }
-
-        for (const entry of this.network_http_requests || []) {
-            const request = entry[1];
-            request.state = "terminal";
-            if (request.stall_timer !== null) {
-                window.clearTimeout(request.stall_timer);
-                request.stall_timer = null;
-            }
-            if (request.controller) {
-                safely("fetch", () => request.controller.abort("WebGL context lost"));
-            }
-        }
-        if (this.network_http_requests) {
-            this.network_http_requests.clear();
-        }
-        if (this.network_http_hosts) {
-            this.network_http_hosts.clear();
-        }
-        // @section legacy-http
-        for (const request of this.legacy_http_requests || []) {
-            safely("XHR", () => request.abort());
-        }
-        if (this.legacy_http_requests) {
-            this.legacy_http_requests.clear();
-        }
-        // @end legacy-http
-
-        // @section websocket
-        for (const socket of Object.values(this.network_web_sockets || {})) {
-            socket.onopen = null;
-            socket.onmessage = null;
-            socket.onerror = null;
-            socket.onclose = null;
-            safely("WebSocket", () => socket.close());
-        }
-        this.network_web_sockets = {};
-        // @end websocket
-
-        // @section midi
-        for (const input of this.midi_inputs || []) {
-            if (input.port) {
-                input.port.onmidimessage = null;
-            }
-        }
-        this.reload_midi_ports = null;
-        // @end midi
-        // @section geolocation
-        if (this.geo_watch_id !== undefined && navigator.geolocation) {
-            const watch_id = this.geo_watch_id;
-            this.geo_watch_id = undefined;
-            safely("geolocation", () => navigator.geolocation.clearWatch(watch_id));
-        }
-        // @end geolocation
-        safely("audio", () => this.stop_audio_output());
     }
 
     shutdown_thread_runtime() {
@@ -1037,9 +950,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     emit_app_lifecycle(state) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         this.to_wasm.ToWasmAppLifecycle({ state });
     }
 
@@ -1075,9 +985,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.lifecycle_shutdown_sent = false;
 
         document.addEventListener("visibilitychange", () => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             if (document.hidden) {
                 this.emit_app_inactive();
             } else {
@@ -1087,9 +994,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         window.addEventListener("pagehide", (event) => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             this.emit_app_inactive();
             if (!event.persisted) {
                 this.emit_app_shutdown();
@@ -1101,9 +1005,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         window.addEventListener("pageshow", (event) => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             if (event.persisted) {
                 this.emit_app_active();
                 this.do_wasm_pump();
@@ -1114,9 +1015,6 @@ export class WasmWebBrowser extends WasmBridge {
 
     // @section history
     emit_location_change() {
-        if (this.webgl_context_lost) {
-            return;
-        }
         this.to_wasm.ToWasmLocationChange({
             pathname: location.pathname + "",
             search: location.search + "",
@@ -1128,9 +1026,6 @@ export class WasmWebBrowser extends WasmBridge {
     // @section live-reload
     install_live_reload_bridge() {
         window.makepad_wasm_live_file_change = (file_name, content) => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             this.to_wasm.ToWasmLiveFileChange({file_name, content});
             this.do_wasm_pump();
         };
@@ -1152,9 +1047,6 @@ export class WasmWebBrowser extends WasmBridge {
         // @section xr
         await this.query_xr_capabilities();
         // @end xr
-        if (this.webgl_context_lost) {
-            return;
-        }
         this.update_window_info();
 
         const hardware_concurrency = Number.isFinite(navigator.hardwareConcurrency)
@@ -1334,9 +1226,6 @@ export class WasmWebBrowser extends WasmBridge {
     // @end history
 
     FromWasmStartTimer(args) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         let timer_id = args.timer_id;
         const interval_seconds = Number(args.interval);
         if (!Number.isFinite(interval_seconds) || interval_seconds < 0) {
@@ -1355,18 +1244,12 @@ export class WasmWebBrowser extends WasmBridge {
         if (args.repeats === true) {
 
             timer.sys_id = window.setInterval(e => {
-                if (this.webgl_context_lost) {
-                    return;
-                }
                 this.to_wasm.ToWasmTimerFired({ timer_id });
                 this.do_wasm_pump();
             }, Math.max(4, interval_ms));
         }
         else {
             timer.sys_id = window.setTimeout(e => {
-                if (this.webgl_context_lost) {
-                    return;
-                }
                 for (let i = 0; i < this.timers.length; i++) {
                     let timer = this.timers[i];
                     if (timer.timer_id == timer_id) {
@@ -1399,9 +1282,6 @@ export class WasmWebBrowser extends WasmBridge {
 
     // @section geolocation
     FromWasmStartLocationUpdates() {
-        if (this.webgl_context_lost) {
-            return;
-        }
         if (this.geo_watch_id !== undefined) {
             return; // already watching
         }
@@ -1412,9 +1292,6 @@ export class WasmWebBrowser extends WasmBridge {
         }
         this.geo_watch_id = navigator.geolocation.watchPosition(
             (pos) => {
-                if (this.webgl_context_lost) {
-                    return;
-                }
                 let c = pos.coords;
                 // Option<f64> encodes as undefined; browser nulls must convert
                 this.to_wasm.ToWasmLocationUpdate({
@@ -1429,9 +1306,6 @@ export class WasmWebBrowser extends WasmBridge {
                 this.do_wasm_pump();
             },
             (err) => {
-                if (this.webgl_context_lost) {
-                    return;
-                }
                 this.to_wasm.ToWasmLocationError({ code: err.code, message: err.message });
                 this.do_wasm_pump();
             },
@@ -1623,6 +1497,19 @@ export class WasmWebBrowser extends WasmBridge {
         }
     }
 
+    // A restored context starts without the old one's fences, timer queries
+    // (their extension is enabled again on first use) and objects.
+    forget_lost_gpu_state() {
+        if (this.gpu_watchdog) {
+            this.gpu_watchdog.in_flight = [];
+        }
+        this.gpu_timer_ext = undefined;
+        this.gpu_timer_pending = [];
+        if (this.gpu_ledger) {
+            makepad_gpu_ledger_forget_all(this.gpu_ledger);
+        }
+    }
+
     // What the GPU safety layer saw: for test harnesses and the export's
     // browser-safety gate (`makepad_gpu_stats()` on the page).
     gpu_safety_stats() {
@@ -1752,9 +1639,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     storage_send_result(args, op, result = {}) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         this.to_wasm.ToWasmStorageResult({
             request_id_lo: args.request_id_lo,
             request_id_hi: args.request_id_hi,
@@ -1791,9 +1675,6 @@ export class WasmWebBrowser extends WasmBridge {
         const bytes = this.clone_data_u8(args.bytes);
         this.free_data_u8(args.bytes);
         const reply = (slots, error) => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             this.to_wasm.ToWasmModuleLinked({ request_id: args.request_id, slots, error });
             this.do_wasm_pump();
         };
@@ -2084,8 +1965,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     watch_audio_callback(audio_context) {
-        if (this.webgl_context_lost
-            || !this.audio_worklet
+        if (!this.audio_worklet
             || this.audio_callback_started
             || this.audio_callback_watchdog !== null) {
             return;
@@ -2101,9 +1981,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     resume_audio_from_gesture() {
-        if (this.webgl_context_lost) {
-            return;
-        }
         this.had_user_gesture = true;
         if (!this.audio_context && this.audio_start_args) {
             const args = this.audio_start_args;
@@ -2144,7 +2021,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmStartAudioOutput(args) {
-        if (this.webgl_context_lost || this.audio_context) {
+        if (this.audio_context) {
             return
         }
         // The web's rule: an output is created inside a user gesture. The wasm asks at
@@ -2157,7 +2034,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     start_audio_output(args, attempt) {
-        if (this.webgl_context_lost || this.audio_context) {
+        if (this.audio_context) {
             return
         }
         let audio_context;
@@ -2181,7 +2058,7 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.wasm._secondary_ready) {
                 await Promise.race([this.wasm._secondary_ready, cancelled]);
             }
-            if (this.webgl_context_lost || this.audio_context !== audio_context) {
+            if (this.audio_context !== audio_context) {
                 throw new Error("audio startup cancelled");
             }
             if (!this.wasm._has_thread_support) {
@@ -2215,7 +2092,7 @@ export class WasmWebBrowser extends WasmBridge {
                     this.audio_startup_cancel = null;
                 }
             }
-            if (this.webgl_context_lost || this.audio_context !== audio_context) {
+            if (this.audio_context !== audio_context) {
                 throw new Error("audio startup cancelled");
             }
 
@@ -2228,7 +2105,7 @@ export class WasmWebBrowser extends WasmBridge {
             });
 
             audio_worklet.port.onmessage = (e) => {
-                if (this.webgl_context_lost || this.audio_context !== audio_context) {
+                if (this.audio_context !== audio_context) {
                     return;
                 }
                 let data = e.data;
@@ -2267,7 +2144,7 @@ export class WasmWebBrowser extends WasmBridge {
         };
 
         start_worklet().then(audio_worklet => {
-            if (this.webgl_context_lost || this.audio_context !== audio_context) {
+            if (this.audio_context !== audio_context) {
                 this.dispose_audio_worklet(audio_worklet);
                 return;
             }
@@ -2276,7 +2153,7 @@ export class WasmWebBrowser extends WasmBridge {
                 this.watch_audio_callback(audio_context);
             }
         }).catch(error => {
-            if (this.webgl_context_lost || this.audio_context !== audio_context) {
+            if (this.audio_context !== audio_context) {
                 return;
             }
             console.error(`web audio: start failed (attempt ${attempt}): ${error}`);
@@ -2289,13 +2166,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmQueryAudioDevices(args) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         const publish_devices = (devices_enum) => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             let devices = []
             for (let device of devices_enum) {
                 if (device.kind == "audioinput") {
@@ -2327,9 +2198,6 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         query.then(publish_devices).catch(error => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             console.warn(`web audio: device enumeration failed; using browser default: ${error}`);
             publish_devices([]);
         });
@@ -2337,17 +2205,11 @@ export class WasmWebBrowser extends WasmBridge {
 
     // @section midi
     FromWasmUseMidiInputs(args) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         outer:
         for (let input of this.midi_inputs) {
             for (let uid of args.input_uids) {
                 if (input.uid == uid) {
                     input.port.onmidimessage = (e) => {
-                        if (this.webgl_context_lost) {
-                            return;
-                        }
                         let data = e.data;
                         this.to_wasm.ToWasmMidiInputData({
                             uid,
@@ -2371,22 +2233,12 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmQueryMidiPorts() {
-        if (this.webgl_context_lost) {
-            return;
-        }
         if (this.reload_midi_ports) {
             return this.reload_midi_ports();
         }
         if (navigator.requestMIDIAccess) {
             navigator.requestMIDIAccess().then((midi) => {
-                if (this.webgl_context_lost) {
-                    midi.onstatechange = null;
-                    return;
-                }
                 this.reload_midi_ports = () => {
-                    if (this.webgl_context_lost) {
-                        return;
-                    }
                     this.midi_inputs.length = 0;
                     this.midi_outputs.length = 0;
                     let ports = [];
@@ -2495,16 +2347,10 @@ export class WasmWebBrowser extends WasmBridge {
     // example build command:
     // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
     create_thread(args) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         let allocated_thread_info = null;
         (async () => {
             if (this.wasm._secondary_ready) {
                 await this.wasm._secondary_ready;
-            }
-            if (this.webgl_context_lost) {
-                return;
             }
             if (!this.wasm._has_thread_support) {
                 throw new Error("wasm file was not compiled with threading support");
@@ -2532,7 +2378,7 @@ export class WasmWebBrowser extends WasmBridge {
                 }
             };
             worker.onmessage = event => {
-                if (record.closed || this.webgl_context_lost) {
+                if (record.closed) {
                     return;
                 }
                 const message = event.data || {};
@@ -2639,9 +2485,6 @@ export class WasmWebBrowser extends WasmBridge {
             });
             worker.postMessage(thread_info);
         })().catch(err => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             console.error(err);
             report_browser_issue("worker.error", {
                 worker_index: args.request_id,
@@ -2667,11 +2510,8 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     start_signal_poll() {
-        if (this.webgl_context_lost) {
-            return;
-        }
         this.poll_timer = window.setInterval(e => {
-            if (this.webgl_context_lost || makepad_crash_reporter.is_wasm_dead()) {
+            if (makepad_crash_reporter.is_wasm_dead()) {
                 return;
             }
             this.deliver_signals();
@@ -2733,9 +2573,6 @@ export class WasmWebBrowser extends WasmBridge {
         max_body_lo,
         max_body_hi
     ) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         let url = this.u8_to_string(url_ptr, url_len);
         let method = this.u8_to_string(method_ptr, method_len);
         let headers_raw = this.u8_to_string(headers_ptr, headers_len);
@@ -2823,9 +2660,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     network_http_pump(host_key) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         const host = this.network_http_hosts.get(host_key);
         if (!host) {
             return;
@@ -2841,9 +2675,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     network_http_dispatch(entry) {
-        if (this.webgl_context_lost || entry.state === "terminal") {
-            return;
-        }
         entry.state = "active";
         entry.controller = new AbortController();
         entry.started_at = performance.now();
@@ -2865,9 +2696,6 @@ export class WasmWebBrowser extends WasmBridge {
             }
         }
         const arm_stall_timer = () => {
-            if (this.webgl_context_lost || entry.state === "terminal") {
-                return;
-            }
             if (entry.stall_timer !== null) {
                 window.clearTimeout(entry.stall_timer);
             }
@@ -2889,9 +2717,6 @@ export class WasmWebBrowser extends WasmBridge {
             signal: entry.controller.signal,
             redirect: "manual",
         }).then(async response => {
-            if (this.webgl_context_lost || entry.state === "terminal") {
-                return;
-            }
             arm_stall_timer();
             let response_headers = "";
             response.headers.forEach((value, key) => {
@@ -2908,9 +2733,6 @@ export class WasmWebBrowser extends WasmBridge {
                 const reader = response.body.getReader();
                 for (;;) {
                     const item = await reader.read();
-                    if (this.webgl_context_lost || entry.state === "terminal") {
-                        return;
-                    }
                     if (item.done) {
                         break;
                     }
@@ -2928,9 +2750,6 @@ export class WasmWebBrowser extends WasmBridge {
             for (const chunk of chunks) {
                 response_body.set(chunk, body_at);
                 body_at += chunk.byteLength;
-            }
-            if (this.webgl_context_lost || entry.state === "terminal") {
-                return;
             }
             let headers_u8 = this.string_to_u8(response_headers);
             let body_u8 = this.array_to_u8(response_body);
@@ -2950,9 +2769,6 @@ export class WasmWebBrowser extends WasmBridge {
                 body_u8.len
             );
         }).catch(error => {
-            if (this.webgl_context_lost || entry.state === "terminal") {
-                return;
-            }
             console.error(
                 "[makepad][http][err]",
                 entry.method,
@@ -2983,9 +2799,6 @@ export class WasmWebBrowser extends WasmBridge {
             this.network_http_requests.delete(entry.request_key);
         }
         entry.state = "done";
-        if (this.webgl_context_lost) {
-            return;
-        }
         if (!entry.is_archive) {
             return;
         }
@@ -3049,25 +2862,16 @@ export class WasmWebBrowser extends WasmBridge {
 
     // @section websocket
     js_network_ws_open(socket_id_lo, socket_id_hi, url_ptr, url_len, _headers_ptr, _headers_len) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         let socket_key = this.id_to_key(socket_id_lo, socket_id_hi);
         let url = this.u8_to_string(url_ptr, url_len);
         let web_socket = new WebSocket(url);
         web_socket.binaryType = "arraybuffer";
         this.network_web_sockets[socket_key] = web_socket;
         web_socket.onclose = _e => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             this.exports.wasm_network_ws_closed(socket_id_lo, socket_id_hi);
             delete this.network_web_sockets[socket_key];
         };
         web_socket.onerror = e => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             let message = this.string_to_u8("" + e);
             this.exports.wasm_network_ws_error(
                 socket_id_lo,
@@ -3077,9 +2881,6 @@ export class WasmWebBrowser extends WasmBridge {
             );
         };
         web_socket.onmessage = e => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             if (typeof e.data == "string") {
                 let data = this.string_to_u8("" + e.data);
                 this.exports.wasm_network_ws_text(
@@ -3100,9 +2901,6 @@ export class WasmWebBrowser extends WasmBridge {
             }
         };
         web_socket.onopen = _e => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             this.exports.wasm_network_ws_opened(socket_id_lo, socket_id_hi);
         };
     }
@@ -3133,9 +2931,6 @@ export class WasmWebBrowser extends WasmBridge {
 
     // @section legacy-http
     FromWasmHTTPRequest(args) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         const req = new XMLHttpRequest();
         this.legacy_http_requests.add(req);
         req.open(args.method, args.url);
@@ -3145,9 +2940,6 @@ export class WasmWebBrowser extends WasmBridge {
         const body = this.clone_data_u8(args.body);
 
         req.addEventListener("load", event => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             let responseEvent = event.target;
             if (responseEvent.status < 200 || responseEvent.status >= 300) {
                 report_browser_issue("xhr.http_error", {
@@ -3170,9 +2962,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("error", event => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             let errorMessage = "An error occurred with the HTTP request.";
             if (!navigator.onLine) {
                 errorMessage = "The browser is offline.";
@@ -3192,9 +2981,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("timeout", event => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             report_browser_issue("xhr.timeout", {
                 method: args.method,
                 url: args.url,
@@ -3208,9 +2994,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("abort", event => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             report_browser_issue("xhr.abort", {
                 method: args.method,
                 url: args.url,
@@ -3224,9 +3007,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.addEventListener("progress", event => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             if (event.lengthComputable) {
                 this.to_wasm.ToWasmHttpResponseProgress({
                     request_id_lo: args.request_id_lo,
@@ -3239,9 +3019,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
 
         req.upload.addEventListener("progress", (event) => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             if (event.lengthComputable) {
                 this.to_wasm.ToWasmHttpUploadProgress({
                     request_id_lo: args.request_id_lo,
@@ -3315,9 +3092,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     FromWasmSelectFileDialog(args) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         const input = document.createElement('input');
         input.type = 'file';
         input.style.display = 'none';
@@ -3343,9 +3117,6 @@ export class WasmWebBrowser extends WasmBridge {
             }
             settled = true;
             cleanup();
-            if (this.webgl_context_lost) {
-                return;
-            }
             this.to_wasm.ToWasmFileDialogResult({
                 id_lo: args.id_lo,
                 id_hi: args.id_hi,
@@ -3400,17 +3171,11 @@ export class WasmWebBrowser extends WasmBridge {
 
     // @section permissions
     async FromWasmCheckPermission(args) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         try {
             if (args.permission === 'microphone' || args.permission === 'camera' || args.permission === 'geolocation') {
                 // Check if Permissions API is available
                 if (navigator.permissions && navigator.permissions.query) {
                     const result = await navigator.permissions.query({ name: args.permission });
-                    if (this.webgl_context_lost) {
-                        return;
-                    }
                     let status;
                     switch (result.state) {
                         case 'granted':
@@ -3441,9 +3206,6 @@ export class WasmWebBrowser extends WasmBridge {
                     const kind = args.permission === 'microphone' ? 'audioinput' : 'videoinput';
                     try {
                         const devices = await navigator.mediaDevices.enumerateDevices();
-                        if (this.webgl_context_lost) {
-                            return;
-                        }
                         const hasDevice = devices.some(device => device.kind === kind && device.label !== '');
                         this.to_wasm.ToWasmPermissionResult({
                             permission: args.permission,
@@ -3451,9 +3213,6 @@ export class WasmWebBrowser extends WasmBridge {
                             status: hasDevice ? 1 : 0 // Granted if we see labels, NotDetermined otherwise
                         });
                     } catch {
-                        if (this.webgl_context_lost) {
-                            return;
-                        }
                         // Can't determine, assume not determined
                         this.to_wasm.ToWasmPermissionResult({
                             permission: args.permission,
@@ -3471,9 +3230,6 @@ export class WasmWebBrowser extends WasmBridge {
                 });
             }
         } catch (error) {
-            if (this.webgl_context_lost) {
-                return;
-            }
             console.error('Permission check failed:', error);
             this.to_wasm.ToWasmPermissionResult({
                 permission: args.permission,
@@ -3485,9 +3241,6 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     async FromWasmRequestPermission(args) {
-        if (this.webgl_context_lost) {
-            return;
-        }
         try {
             if (args.permission === 'microphone' || args.permission === 'camera') {
                 try {
@@ -3496,9 +3249,6 @@ export class WasmWebBrowser extends WasmBridge {
                     const stream = await navigator.mediaDevices.getUserMedia(constraints);
                     // Successfully got permission, close the stream immediately
                     stream.getTracks().forEach(track => track.stop());
-                    if (this.webgl_context_lost) {
-                        return;
-                    }
 
                     this.to_wasm.ToWasmPermissionResult({
                         permission: args.permission,
@@ -3506,9 +3256,6 @@ export class WasmWebBrowser extends WasmBridge {
                         status: 1 // Granted
                     });
                 } catch (error) {
-                    if (this.webgl_context_lost) {
-                        return;
-                    }
                     // Permission was denied or error occurred
                     let status = 3; // DeniedPermanent (default)
 
@@ -3534,9 +3281,6 @@ export class WasmWebBrowser extends WasmBridge {
                 // callbacks pump for themselves.
                 navigator.geolocation.getCurrentPosition(
                     (_pos) => {
-                        if (this.webgl_context_lost) {
-                            return;
-                        }
                         this.to_wasm.ToWasmPermissionResult({
                             permission: args.permission,
                             request_id: args.request_id,
@@ -3545,9 +3289,6 @@ export class WasmWebBrowser extends WasmBridge {
                         this.do_wasm_pump();
                     },
                     (err) => {
-                        if (this.webgl_context_lost) {
-                            return;
-                        }
                         this.to_wasm.ToWasmPermissionResult({
                             permission: args.permission,
                             request_id: args.request_id,
@@ -3567,9 +3308,6 @@ export class WasmWebBrowser extends WasmBridge {
                 });
             }
         } catch (error) {
-            if (this.webgl_context_lost) {
-                return;
-            }
             console.error('Permission request failed:', error);
             this.to_wasm.ToWasmPermissionResult({
                 permission: args.permission,
@@ -3603,21 +3341,21 @@ export class WasmWebBrowser extends WasmBridge {
     }
 
     do_wasm_pump() {
-        if (this.webgl_context_lost) {
-            return;
-        }
         if (makepad_crash_reporter.is_wasm_dead()) {
             makepad_crash_reporter.suppress_followup();
             return;
         }
         let started = performance.now();
+        let from_wasm = null;
         try {
             this.buffer_upload_serial += 1;
             let to_wasm = this.to_wasm;
             this.to_wasm = this.new_to_wasm();
-            let from_wasm = this.wasm_process_msg(to_wasm);
+            from_wasm = this.wasm_process_msg(to_wasm);
             from_wasm.dispatch_on_app();
-            from_wasm.free();
+            const dispatched = from_wasm;
+            from_wasm = null;
+            dispatched.free();
             this.update_startup_loader(performance.now() - started);
         } catch (error) {
             let context_lost = this.webgl_context_lost;
@@ -3628,6 +3366,11 @@ export class WasmWebBrowser extends WasmBridge {
                 }
             }
             if (context_lost) {
+                // The context went away under this batch: the rest of it is
+                // dropped (the restore repaints) and the app runs on.
+                if (from_wasm) {
+                    from_wasm.free();
+                }
                 if (typeof this.handle_webgl_context_lost === "function") {
                     this.handle_webgl_context_lost();
                 }
@@ -3757,9 +3500,6 @@ export class WasmWebBrowser extends WasmBridge {
 
     bind_screen_resize() {
         this.handlers.on_screen_resize = () => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             this.update_window_info();
             if (this.to_wasm !== undefined) {
                 this.to_wasm.ToWasmResizeWindow({ window_info: this.window_info });
@@ -4076,9 +3816,6 @@ export class WasmWebBrowser extends WasmBridge {
             };
         };
         const emit_drag = (event, left) => {
-            if (this.webgl_context_lost) {
-                return;
-            }
             const pos = position(event);
             this.to_wasm.ToWasmFileDrag({
                 x: pos.x,
@@ -4107,9 +3844,6 @@ export class WasmWebBrowser extends WasmBridge {
         });
         canvas.addEventListener('drop', event => {
             event.preventDefault();
-            if (this.webgl_context_lost) {
-                return;
-            }
             const pos = position(event);
             const modifiers = pack_key_modifier(event);
             this.read_virtual_files(
@@ -4117,9 +3851,6 @@ export class WasmWebBrowser extends WasmBridge {
                 this.virtual_file_max_size,
                 this.virtual_file_max_total_size,
             ).then(files => {
-                if (this.webgl_context_lost) {
-                    return;
-                }
                 this.to_wasm.ToWasmFileDrop({
                     x: pos.x,
                     y: pos.y,
@@ -4128,9 +3859,6 @@ export class WasmWebBrowser extends WasmBridge {
                 });
                 this.do_wasm_pump();
             }).catch(error => {
-                if (this.webgl_context_lost) {
-                    return;
-                }
                 this.to_wasm.ToWasmFileDropError({error: "" + error});
                 this.do_wasm_pump();
             });
@@ -4282,7 +4010,7 @@ export class WasmWebBrowser extends WasmBridge {
             is_composing = false;
 
             // send final IME input result
-            if (!this.webgl_context_lost && e.data && e.data !== '\n') {
+            if (e.data && e.data !== '\n') {
                 this.to_wasm.ToWasmTextInput({
                     was_paste: false,
                     input: e.data,
