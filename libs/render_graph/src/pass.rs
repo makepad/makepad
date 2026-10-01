@@ -227,7 +227,9 @@ impl PassDecl {
 
     pub fn source(&self) -> String {
         let mut s = String::new();
-        s.push_str("use mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.draw\nmod.draw.DrawGraphPass{\n");
+        // The shared stdlib (`hash12`, `snoise2`, `srgb_to_linear`, `sd_*`, eases, …) is
+        // in scope, as in Shader layers, kernels and documents.
+        s.push_str("use mod.pod.*\nuse mod.math.*\nuse mod.shader.*\nuse mod.shared.*\nuse mod.draw\nmod.draw.DrawGraphPass{\n");
         s.push_str(&format!("    color_format: {}\n", self.format().shader_color_format()));
         for (i, o) in self.outputs.iter().enumerate() {
             s.push_str(&format!("    {}: fragment_output({}, vec4f)\n", o.slot, i + 1));

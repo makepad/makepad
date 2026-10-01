@@ -13,6 +13,9 @@ script_mod! {
     use mod.shader.*
     use mod.draw
 
+    // The shared stdlib every pass's code has in scope (`mod.shared`).
+    let shared_std = #(crate::pass_stdlib(vm))
+
     // The standard block of a graph pass: a fullscreen quad whose `pixel`
     // the author writes.
     mod.draw.DrawGraphPass = mod.std.set_type_default() do #(DrawGraphPass::script_shader(vm)){
@@ -176,6 +179,7 @@ impl Programs {
                 Some(Ok(obj)) => obj.as_object().into(),
                 Some(Err(e)) => return Err(e),
                 None => {
+                    crate::pass_stdlib(vm);
                     vm.bx.captured_errors = Some(Vec::new());
                     let v = vm.eval(ScriptMod { file: file.clone(), code, ..Default::default() });
                     let errors = vm.take_errors();

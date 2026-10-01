@@ -72,6 +72,14 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
 }
 
 #[cfg(feature = "gpu")]
+/// The shared Splash stdlib (`mod.shared`) every pass's code has in scope:
+/// registered once per VM, before a pass compiles.
+pub fn pass_stdlib(vm: &mut ScriptVm) -> ScriptValue {
+    makepad_script_compute::module::register_shared_std(vm);
+    NIL
+}
+
+#[cfg(feature = "gpu")]
 /// Register the pass, accumulator and tone-map shaders only (a host without
 /// the Sandbox lane's bloom and composite), once per VM however many hosts
 /// ask. Call after `makepad_widgets::script_mod`.
