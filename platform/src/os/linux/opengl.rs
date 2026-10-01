@@ -1731,9 +1731,12 @@ impl GlShader {
         pixel: &str,
         os_type: &OsType,
     ) -> String {
-        let shader_hash = live_id!(shader).str_append(&vertex).str_append(&pixel);
+        use std::hash::BuildHasher;
+        // `FixedState` has a fixed seed, so the same build always picks the same file.
+        let key_hasher = foldhash::fast::FixedState::default();
+        let shader_hash = key_hasher.hash_one((vertex, pixel));
         let OsType::Android(params) = os_type else {
-            return format!("{}/shader_{:08x}.bin", cache_dir, shader_hash.0);
+            return format!("{}/shader_{:08x}.bin", cache_dir, shader_hash);
         };
         // Android keys on the OS build and GL driver too, so an update doesn't load stale binaries.
         let suffix = gl.android_cache_suffix.get_or_init(|| {
@@ -1741,12 +1744,15 @@ impl GlShader {
                 .str_append(&get_gl_string(gl, gl_sys::VENDOR))
                 .str_append(&get_gl_string(gl, gl_sys::RENDERER))
                 .str_append(&get_gl_string(gl, gl_sys::VERSION));
+            // Changes whenever the key hasher does, so `write_program_cache` also deletes
+            // the binaries an older key left behind.
+            let key_marker = key_hasher.hash_one("shader");
             format!(
-                "_av{}_bn{}_gl{:08x}.bin",
-                params.android_version, params.build_number, driver_hash.0
+                "_av{}_bn{}_gl{:08x}_k{:08x}.bin",
+                params.android_version, params.build_number, driver_hash.0, key_marker
             )
         });
-        format!("{}/shader_{:08x}{}", cache_dir, shader_hash.0, suffix)
+        format!("{}/shader_{:08x}{}", cache_dir, shader_hash, suffix)
     }
 
     #[cfg(ohos_sim)]
@@ -1841,14 +1847,16 @@ impl GlShader {
 
         let vertex_len = Self::shader_source_len(vertex);
         let pixel_len = Self::shader_source_len(pixel);
-        #[cfg(target_os = "android")]
-        let vertex_hash = Self::shader_source_hash(vertex);
-        #[cfg(target_os = "android")]
-        let pixel_hash = Self::shader_source_hash(pixel);
 
         #[cfg(target_os = "android")]
         let log_shader_builds = matches!(_os_type, OsType::Android(_))
             && crate::makepad_error_log::trace_enabled("gl.shader_builds");
+        #[cfg(target_os = "android")]
+        let (vertex_hash, pixel_hash) = if log_shader_builds {
+            (Self::shader_source_hash(vertex), Self::shader_source_hash(pixel))
+        } else {
+            Default::default()
+        };
 
         #[cfg(target_os = "android")]
         if log_shader_builds {
@@ -1970,7 +1978,7 @@ impl GlShader {
                             }
                         }
                         // On Android, the first write in a context deletes the binaries an
-                        // older OS build or GL driver left behind.
+                        // older OS build, GL driver or key hasher left behind.
                         if let Some(suffix) = gl.android_cache_suffix.get() {
                             gl.stale_cache_sweep.call_once(|| {
                                 let Ok(entries) = std::fs::read_dir(&cache_dir) else {
