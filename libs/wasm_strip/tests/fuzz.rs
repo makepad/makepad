@@ -6,9 +6,15 @@
 //! fixed, so a failure names a reproducible module (`FUZZ_SEED=n` runs one).
 //! Where stitch panics or disagrees, node (when installed) decides: stitch
 //! mishandles some valid local reuse patterns the optimiser produces.
+//!
+//! The strip test does what a web export does with a coverage run: it plays
+//! some exported functions, records which functions they entered, strips
+//! the units that were never entered (stubbing their call sites), runs all
+//! passes, and replays the same calls: they must behave the same. Every
+//! result is validated by stitch and, with node, by `WebAssembly.validate`.
 
 use makepad_stitch::{Engine, Linker, Module as StitchModule, Store, Val};
-use makepad_wasm_strip::opt::{encode::encode, ir::*};
+use makepad_wasm_strip::opt::{encode::encode, ir::*, units};
 use makepad_wasm_strip::{wasm_optimize_checked, wasm_validate, OptimizeOptions};
 use std::{path::PathBuf, process::Command};
 
@@ -526,8 +532,9 @@ fn mem_hash(bytes: &[u8]) -> u32 {
 
 /// Runs every exported function (in name order) and returns a transcript
 /// of results, traps, globals and memory; `None` when stitch itself panics.
-fn run_stitch(bytes: &[u8], seed: u64) -> Option<Vec<String>> {
+fn run_stitch(bytes: &[u8], seed: u64, play: Option<&[String]>) -> Option<Vec<String>> {
     let bytes = bytes.to_vec();
+    let play = play.map(|play| play.to_vec());
     std::panic::catch_unwind(move || {
         let engine = Engine::new();
         let mut store = Store::new(engine.clone());
@@ -540,6 +547,9 @@ fn run_stitch(bytes: &[u8], seed: u64) -> Option<Vec<String>> {
         names.sort();
         let mut out = Vec::new();
         for name in &names {
+            if play.as_ref().is_some_and(|play| !play.contains(name)) {
+                continue;
+            }
             let Some(func) = instance.exported_func(name) else {
                 continue;
             };
@@ -584,8 +594,9 @@ fn run_stitch(bytes: &[u8], seed: u64) -> Option<Vec<String>> {
 /// The same transcript from node's engine, when node is installed.
 const NODE_RUNNER: &str = r#"
 const fs = require('fs');
-const [, , path, seed, sigs] = process.argv;
+const [, , path, seed, sigs, playArg] = process.argv;
 const types = JSON.parse(sigs);
+const play = playArg ? JSON.parse(playArg) : null;
 const inst = new WebAssembly.Instance(new WebAssembly.Module(fs.readFileSync(path)), {});
 const names = Object.keys(inst.exports).sort();
 const text = (ty, v) => {
@@ -600,6 +611,7 @@ const out = [];
 for (const n of names) {
   const e = inst.exports[n];
   if (typeof e !== 'function') continue;
+  if (play && !play.includes(n)) continue;
   const [params, results] = types[n];
   for (let k = 0; k < 3; k++) {
     const args = params.map((ty, a) => {
@@ -636,7 +648,13 @@ fn ty_name(ty: ValType) -> &'static str {
     }
 }
 
-fn run_node(module: &Module, bytes: &[u8], seed: u64, tag: &str) -> Option<Vec<String>> {
+fn run_node(
+    module: &Module,
+    bytes: &[u8],
+    seed: u64,
+    tag: &str,
+    play: Option<&[String]>,
+) -> Option<Vec<String>> {
     // One directory per test thread: the tests run in parallel.
     let thread = format!("{:?}", std::thread::current().id()).replace(|c: char| !c.is_ascii_alphanumeric(), "");
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
@@ -669,13 +687,17 @@ fn run_node(module: &Module, bytes: &[u8], seed: u64, tag: &str) -> Option<Vec<S
             _ => {}
         }
     }
-    let output = Command::new("node")
+    let mut command = Command::new("node");
+    command
         .arg(&script)
         .arg(&wasm)
         .arg(seed.to_string())
-        .arg(format!("{{{}}}", sigs.join(",")))
-        .output()
-        .ok()?;
+        .arg(format!("{{{}}}", sigs.join(",")));
+    if let Some(play) = play {
+        let list: Vec<String> = play.iter().map(|name| format!("\"{name}\"")).collect();
+        command.arg(format!("[{}]", list.join(",")));
+    }
+    let output = command.output().ok()?;
     let _ = std::fs::remove_file(&wasm);
     assert!(
         output.status.success(),
@@ -722,13 +744,30 @@ fn work(test: &str) -> Vec<(u64, usize)> {
     let one = std::env::var("FUZZ_SEED").ok().map(|seed| seed.parse::<u64>().unwrap());
     let (range, cfgs): (std::ops::Range<u64>, std::ops::Range<usize>) = match test {
         "all" => (1..401, 0..1),
+        "strip" => (2000..2200, STRIP..STRIP + 1),
         _ => (1000..1150, 1..7),
     };
     let range = one.map_or(range, |seed| seed..seed + 1);
     range.flat_map(|seed| cfgs.clone().map(move |cfg| (seed, cfg))).collect()
 }
 
-fn optimise(seed: u64, cfg: usize) -> (Module, Vec<u8>, Vec<u8>, usize) {
+/// The config index of the strip test (past the pass configs).
+const STRIP: usize = 7;
+
+/// One check: the generated module, its bytes, the optimised bytes, how
+/// many functions went, and the calls to compare (all exports when `None`).
+struct Check {
+    module: Module,
+    bytes: Vec<u8>,
+    optimized: Vec<u8>,
+    removed: usize,
+    play: Option<Vec<String>>,
+}
+
+fn optimise(seed: u64, cfg: usize) -> Check {
+    if cfg == STRIP {
+        return strip(seed);
+    }
     let module = gen_module(seed);
     let bytes = encode(&module);
     if let Err(msg) = wasm_validate(&bytes) {
@@ -743,7 +782,133 @@ fn optimise(seed: u64, cfg: usize) -> (Module, Vec<u8>, Vec<u8>, usize) {
         }
     }
     let removed = report.functions_before - report.functions_after;
-    (module, bytes, optimized, removed)
+    Check { module, bytes, optimized, removed, play: None }
+}
+
+/// The generated module with every function named into one of a few units
+/// (`app::uN`), as rustc names them.
+fn named_module(seed: u64) -> Module {
+    let mut module = gen_module(seed);
+    let mut rng = Rng(seed.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1);
+    let units = 2 + rng.below(4);
+    let funcs = (0..module.funcs.len() as u32)
+        .map(|f| {
+            let unit = format!("u{}", rng.below(units));
+            let name = format!("f{f}");
+            (f, format!("_RNvNtCs1_3app{}{unit}{}{name}", unit.len(), name.len()))
+        })
+        .collect();
+    module.names = Some(Names { funcs, ..Names::default() });
+    module
+}
+
+/// The exported functions a check plays: a seeded subset, in name order.
+fn play_of(module: &Module, seed: u64) -> Vec<String> {
+    let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x5bd1_e995);
+    let mut names: Vec<String> = module
+        .exports
+        .iter()
+        .filter(|e| e.kind == ExternKind::Func)
+        .map(|e| e.name.clone())
+        .collect();
+    names.sort();
+    let play: Vec<String> = names.iter().filter(|_| rng.chance(40)).cloned().collect();
+    if play.is_empty() {
+        names.truncate(1);
+        return names;
+    }
+    play
+}
+
+/// The functions the play entered: each function stores 1 to a global of
+/// its own on entry, read back after the play. The play runs under stitch
+/// in a child process (stitch aborts on some modules); `None` when it could
+/// not run.
+fn entered(seed: u64) -> Option<Vec<u32>> {
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "coverage_child", "--nocapture", "--test-threads=1"])
+        .env("FUZZ_COVERAGE", seed.to_string())
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().find_map(|line| line.strip_prefix("E "))?;
+    Some(line.split(',').filter(|f| !f.is_empty()).map(|f| f.parse().unwrap()).collect())
+}
+
+#[test]
+fn coverage_child() {
+    let Ok(seed) = std::env::var("FUZZ_COVERAGE") else {
+        return;
+    };
+    let seed: u64 = seed.parse().unwrap();
+    let module = named_module(seed);
+    let play = play_of(&module, seed);
+    let mut probe = module.clone();
+    let first = probe.global_types().len() as u32;
+    for (f, func) in probe.funcs.iter_mut().enumerate() {
+        let global = first + f as u32;
+        func.body.splice(0..0, [Instr::I32Const(1), Instr::GlobalSet(global)]);
+    }
+    for f in 0..module.funcs.len() {
+        probe.globals.push(Global {
+            ty: GlobalType { ty: ValType::I32, mutable: true },
+            init: vec![Instr::I32Const(0), Instr::End],
+        });
+        probe.exports.push(Export {
+            name: format!("cov{f}"),
+            kind: ExternKind::Global,
+            index: first + f as u32,
+        });
+    }
+    if let Some(transcript) = run_stitch(&encode(&probe), seed, Some(&play)) {
+        let entered: Vec<String> = (0..module.funcs.len())
+            .filter(|f| transcript.contains(&format!("cov{f} = 1")))
+            .map(|f| f.to_string())
+            .collect();
+        println!("\nE {}", entered.join(","));
+    }
+}
+
+/// The strip check: play, strip what the play never entered, optimise.
+fn strip(seed: u64) -> Check {
+    let module = named_module(seed);
+    let bytes = encode(&module);
+    if let Err(msg) = wasm_validate(&bytes) {
+        panic!("seed {seed}: generator made an invalid module: {msg}");
+    }
+    let play = play_of(&module, seed);
+    // Without a coverage run (stitch failed on the module), nothing goes.
+    let entered = entered(seed).unwrap_or_else(|| (0..module.funcs.len() as u32).collect());
+    let names = module.names.as_ref().unwrap();
+    let coverage = units::Coverage {
+        entered: names
+            .funcs
+            .iter()
+            .filter(|(f, _)| entered.contains(f))
+            .map(|(_, symbol)| (symbol.clone(), units::PHASE_USE))
+            .collect(),
+    };
+    let plan = units::plan(&module, &coverage, &[]);
+    let mut stripped = module.clone();
+    units::apply(&mut stripped, &plan);
+    let stubbed = encode(&stripped);
+    if let Err(msg) = wasm_validate(&stubbed) {
+        panic!("seed {seed}: stubbing made an invalid module: {msg}");
+    }
+    let (optimized, report) = wasm_optimize_checked(&stubbed, &OptimizeOptions::default())
+        .unwrap_or_else(|msg| panic!("seed {seed}: {msg}"));
+    for pass in &report.passes {
+        if let Some(reason) = &pass.reverted {
+            panic!("seed {seed} (strip): pass {} made an invalid module: {reason}", pass.name);
+        }
+    }
+    Check {
+        removed: plan.stripped.len(),
+        module,
+        bytes,
+        optimized,
+        play: Some(play),
+    }
 }
 
 /// The stitch side runs in a child process (this test binary again): stitch
@@ -761,9 +926,10 @@ fn stitch_child() {
     for (i, (seed, cfg)) in work(test).into_iter().enumerate().skip(from) {
         writeln!(stdout, "\nS {i}").unwrap();
         stdout.flush().unwrap();
-        let (_, bytes, optimized, _) = optimise(seed, cfg);
-        let before = run_stitch(&bytes, seed);
-        let after = run_stitch(&optimized, seed);
+        let check = optimise(seed, cfg);
+        let play = check.play.as_deref();
+        let before = run_stitch(&check.bytes, seed, play);
+        let after = run_stitch(&check.optimized, seed, play);
         let same = before.is_some() && before == after;
         writeln!(stdout, "R {i} {}", if same { "same" } else { "differ" }).unwrap();
         stdout.flush().unwrap();
@@ -814,6 +980,30 @@ fn stitch_unconfirmed(test: &str, total: usize) -> Vec<usize> {
     unconfirmed
 }
 
+/// Every output through node's `WebAssembly.validate`, in one node run.
+fn node_validate(test: &str, outputs: &[(u64, Vec<u8>)]) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join("wasm_strip_fuzz")
+        .join(format!("validate_{}_{test}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let mut paths = Vec::new();
+    for (i, (seed, bytes)) in outputs.iter().enumerate() {
+        let path = dir.join(format!("{i}_{seed}.wasm"));
+        std::fs::write(&path, bytes).unwrap();
+        paths.push(path);
+    }
+    let script = r#"
+const fs = require('fs');
+const bad = process.argv.slice(2).filter(p => !WebAssembly.validate(fs.readFileSync(p)));
+console.log(JSON.stringify(bad));
+"#;
+    let output = Command::new("node").arg("-e").arg(script).args(&paths).output().unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(output.status.success(), "node: {}", String::from_utf8_lossy(&output.stderr));
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(text.trim(), "[]", "{test}: node refused optimised modules: {text}");
+}
+
 fn node_available() -> bool {
     Command::new("node").arg("--version").output().map_or(false, |out| out.status.success())
 }
@@ -823,20 +1013,28 @@ fn fuzz(test: &str) -> usize {
     let unconfirmed = stitch_unconfirmed(test, work.len());
     let node = node_available();
     let mut removed = 0;
+    let mut outputs = Vec::new();
     for (i, (seed, cfg)) in work.iter().copied().enumerate() {
-        let (module, bytes, optimized, gone) = optimise(seed, cfg);
-        removed += gone;
+        let check = optimise(seed, cfg);
+        removed += check.removed;
+        if node {
+            outputs.push((seed, check.optimized.clone()));
+        }
         if !unconfirmed.contains(&i) {
             continue;
         }
-        let name = configs()[cfg].0;
+        let name = configs().get(cfg).map_or("strip", |c| c.0);
         assert!(
             node,
             "seed {seed} ({name}): stitch could not confirm it and node is not available"
         );
-        let before = run_node(&module, &bytes, seed, "in").unwrap();
-        let after = run_node(&module, &optimized, seed, "out").unwrap();
+        let play = check.play.as_deref();
+        let before = run_node(&check.module, &check.bytes, seed, "in", play).unwrap();
+        let after = run_node(&check.module, &check.optimized, seed, "out", play).unwrap();
         assert_eq!(before, after, "seed {seed} ({name}): behaviour changed (node)");
+    }
+    if node {
+        node_validate(test, &outputs);
     }
     eprintln!(
         "fuzz {test}: {} checks, {} confirmed by stitch, {} by node",
@@ -861,4 +1059,15 @@ fn optimised_random_modules_behave_the_same() {
 #[test]
 fn each_pass_alone_behaves_the_same() {
     fuzz("each");
+}
+
+/// Units a play never entered are stripped (their call sites stubbed) and
+/// the module optimised: the play behaves the same, and every result
+/// validates.
+#[test]
+fn stripped_modules_replay_the_same() {
+    let removed = fuzz("strip");
+    if std::env::var("FUZZ_SEED").is_err() {
+        assert!(removed > 100, "only {removed} functions stripped");
+    }
 }
