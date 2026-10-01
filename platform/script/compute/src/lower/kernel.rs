@@ -84,7 +84,7 @@ pub struct KernelCtx {
     pub buffers: Vec<BufferDecl>,
     pub(super) element: Option<Val>,
     /// (emit data region, counter var) while lowering the element body.
-    counters: Vec<(u8, Var)>,
+    pub(super) counters: Vec<(u8, Var)>,
     /// Buffer offsets that address the current element's own record.
     pub(super) local_offsets: std::collections::HashSet<Val>,
     /// Some access to a writable buffer is not to the element's own record:
@@ -635,8 +635,12 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> 
     let mut program = l.b.prog;
     program.body = l.b.blocks.into_iter().next().unwrap();
     program.frame_words = l.frame_words;
+    program.funcs = l.funcs_out.into_iter().map(|(g, _)| g).collect();
     if math == MathMode::Portable {
         canonical_nan_stores(&mut program.body, &mut program.vals);
+        for g in &mut program.funcs {
+            canonical_nan_stores(&mut g.body, &mut g.vals);
+        }
     }
     dce(&mut program);
     crate::opt::optimize(&mut program);

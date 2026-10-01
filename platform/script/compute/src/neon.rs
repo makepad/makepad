@@ -1467,6 +1467,7 @@ impl Em {
                 self.full = full;
             }
             Stmt::CallHost { .. } => unreachable!("declined"),
+            Stmt::Call { .. } => unreachable!("flattened"),
             Stmt::Break(d) | Stmt::Continue(d) => {
                 let is_break = matches!(s, Stmt::Break(_));
                 let t = self.loops.len() - 1 - *d as usize;
@@ -1989,6 +1990,9 @@ pub fn stats(p: &Program) -> Option<(usize, u32)> {
 }
 
 fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
+    // Functions are inlined: native code is one body.
+    let flat = crate::ir::flat(p);
+    let p = &*flat;
     let sh = shape(p)?;
     let Stmt::Loop { body, .. } = sh.element else { return None };
     if !supported(p, body) {

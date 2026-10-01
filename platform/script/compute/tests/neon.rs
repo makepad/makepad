@@ -141,6 +141,12 @@ fn neon_equals_scalar_and_interpreter_on_random_kernels() {
         if let Err(e) = ir::validate(&p, &regions) {
             panic!("round {}: the generator made an invalid program: {}", round, e);
         }
+        // A program with functions compiles flattened and optimized: one
+        // whose effects all prove dead loses its element loop (nothing to
+        // vectorize).
+        if !matches!(ir::flat(&p).body.last(), Some(Stmt::Loop { .. })) {
+            continue;
+        }
         tried += 1;
         let Some(vcode) = neon::compile(&p) else { continue };
         // NEON_FUZZ_TRACE: the program about to run (a crash leaves it).

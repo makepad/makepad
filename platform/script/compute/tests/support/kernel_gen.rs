@@ -45,6 +45,9 @@ struct Gen<'r> {
     /// Loop depth inside the element body.
     loops: u32,
     budget: u32,
+    /// The functions made so far: (param types, result types); the first
+    /// param of each is the element index.
+    funcs: Vec<(Vec<Ty>, Vec<Ty>)>,
 }
 
 impl Gen<'_> {
@@ -284,7 +287,20 @@ impl Gen<'_> {
                 break;
             }
             self.budget -= 1;
-            match self.r.below(12) {
+            match self.r.below(13) {
+                // A call of a function made earlier (the element index, then
+                // visible arguments; its results become visible).
+                12 if !self.funcs.is_empty() => {
+                    let f = self.r.below(self.funcs.len() as u64) as usize;
+                    let (ps, rs) = self.funcs[f].clone();
+                    let mut args = vec![self.e];
+                    for t in &ps[1..] {
+                        args.push(self.pick(&mut b, *t));
+                    }
+                    let rets: Vec<Val> = rs.iter().map(|t| self.val(*t)).collect();
+                    b.push(Stmt::Call { f: f as u16, args, rets: rets.clone() });
+                    self.scope.last_mut().unwrap().extend(rets);
+                }
                 0..=3 => self.arith(&mut b),
                 4 | 5 => self.memory(&mut b),
                 6 => {
@@ -328,6 +344,43 @@ impl Gen<'_> {
         self.scope.pop();
         b
     }
+}
+
+/// A random function of a kernel: the element index and up to three more
+/// params, variables set on entry, a random body (branches, loops with
+/// breaks, memory, calls of the earlier functions `sigs`), and up to three
+/// results from its top level.
+fn random_function(r: &mut Rng, sigs: &[(Vec<Ty>, Vec<Ty>)]) -> Program {
+    let mut p = Program::default();
+    let mut params = Vec::new();
+    for k in 0..1 + r.below(4) {
+        let ty = if k == 0 { Ty::I32 } else { [Ty::F32, Ty::I32, Ty::Bool][r.below(3) as usize] };
+        p.vals.push(ty);
+        params.push(Val(p.vals.len() as u32 - 1));
+    }
+    let e = params[0];
+    let mut vars = Vec::new();
+    for _ in 0..1 + r.below(3) {
+        p.vars.push([Ty::F32, Ty::I32, Ty::Bool][r.below(3) as usize]);
+        vars.push(Var(p.vars.len() as u32 - 1));
+    }
+    let mut g = Gen { r, p, scope: vec![params.clone()], vars: vars.clone(), e, loops: 0, budget: 25, funcs: sigs.to_vec() };
+    let mut body = Vec::new();
+    for v in &vars {
+        let ty = g.p.vars[v.0 as usize];
+        let c = g.konst(&mut body, ty);
+        body.push(Stmt::Set(*v, c));
+    }
+    body.extend(g.block(0));
+    // Results: params or values the top level defines.
+    let top: Vec<Val> = params.iter().copied().chain(body.iter().filter_map(|s| if let Stmt::Def(v, _) = s { Some(*v) } else { None })).collect();
+    let n = g.r.below(4) as usize;
+    let results: Vec<Val> = (0..n).map(|_| top[g.r.below(top.len() as u64) as usize]).collect();
+    let mut p = g.p;
+    p.body = body;
+    p.params = params;
+    p.results = results;
+    p
 }
 
 /// A random kernel in the shape `lower_kernel` emits.
@@ -374,7 +427,17 @@ pub fn random_kernel(r: &mut Rng) -> Program {
     }
     // Only the element index is visible (the counter and the call's base
     // depend on how a range is split, as in real kernels).
-    let mut g = Gen { r, p, scope: vec![vec![z, cz, e]], vars: vars.clone(), e, loops: 0, budget: 60 };
+    // Functions (each may call the ones before it).
+    let mut funcs = Vec::new();
+    let mut sigs: Vec<(Vec<Ty>, Vec<Ty>)> = Vec::new();
+    if r.chance(40) {
+        for _ in 0..1 + r.below(2) {
+            let g = random_function(r, &sigs);
+            sigs.push((g.params.iter().map(|v| g.vals[v.0 as usize]).collect(), g.results.iter().map(|v| g.vals[v.0 as usize]).collect()));
+            funcs.push(g);
+        }
+    }
+    let mut g = Gen { r, p, scope: vec![vec![z, cz, e]], vars: vars.clone(), e, loops: 0, budget: 60, funcs: sigs };
     for v in &vars {
         let ty = g.p.vars[v.0 as usize];
         let c = g.konst(&mut body, ty);
@@ -392,6 +455,7 @@ pub fn random_kernel(r: &mut Rng) -> Program {
     }
     let user = g.block(0);
     body.extend(user);
+    g.p.funcs = funcs;
     if !live.is_empty() {
         let rec = g.record(&mut body);
         for (k, v) in live.iter().enumerate() {

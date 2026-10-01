@@ -209,6 +209,11 @@ pub enum Stmt {
     /// A call of registered host function `f` ([`crate::host`]): scalar
     /// arguments, buffer slices, and results defined here (like `Def`s).
     CallHost { f: u16, args: Vec<Val>, slices: Vec<SliceArg>, rets: Vec<Val> },
+    /// A call of function `f` of the program ([`Program::funcs`]): its
+    /// params take `args`, then its body runs (sharing the regions and the
+    /// frame: functions are not recursive, so each has frame words of its
+    /// own), then `rets` are defined as its results.
+    Call { f: u16, args: Vec<Val>, rets: Vec<Val> },
 }
 
 /// A host call's buffer slice: host buffer `buf`, `len` words from word
@@ -284,6 +289,14 @@ pub struct Program {
     pub vars: Vec<Ty>,
     pub body: Block,
     pub frame_words: u32,
+    /// A function's parameters: values defined on entry (empty for an
+    /// entry program).
+    pub params: Vec<Val>,
+    /// A function's results: values of its top-level block read at its end.
+    pub results: Vec<Val>,
+    /// The functions [`Stmt::Call`] names (an entry program's; a function's
+    /// own list is empty: calls in it name the entry program's functions).
+    pub funcs: Vec<Program>,
 }
 
 impl Program {
@@ -301,26 +314,27 @@ impl Program {
 
     /// Worst-case ops of one whole run: every loop at its cap (`init()`).
     pub fn total_cost(&self) -> u64 {
-        fn walk(b: &Block, c: &std::collections::HashMap<u32, u32>) -> u64 {
+        fn walk(b: &Block, c: &std::collections::HashMap<u32, u32>, funcs: &[Program]) -> u64 {
             let mut sum = 0u64;
             for s in b {
                 sum = sum.saturating_add(match s {
-                    Stmt::If(_, t, e) => 1 + walk(t, c).max(walk(e, c)),
-                    Stmt::Loop { cap, body } => (*cap as u64).saturating_mul(walk(body, c) + 2),
+                    Stmt::If(_, t, e) => 1 + walk(t, c, funcs).max(walk(e, c, funcs)),
+                    Stmt::Loop { cap, body } => (*cap as u64).saturating_mul(walk(body, c, funcs) + 2),
                     Stmt::CallHost { f, slices, .. } => call_cost(*f, slices, c),
+                    Stmt::Call { f, args, .. } => funcs.get(*f as usize).map_or(u64::MAX / 4, |g| walk(&g.body, &const_ints(g), funcs).saturating_add(4 + args.len() as u64)),
                     _ => 1,
                 });
             }
             sum
         }
-        walk(&self.body, &const_ints(self))
+        walk(&self.body, &const_ints(self), &self.funcs)
     }
 
     /// [`Program::cost`] with every host call counted as its call overhead
     /// only: the generated code's own work (what the per-element cap
     /// bounds; host components are bounded per call at run time).
     pub fn air_cost(&self) -> u64 {
-        let mut p = Program { vals: Vec::new(), vars: Vec::new(), body: Vec::new(), frame_words: 0 };
+        let mut p = Program { funcs: self.funcs.clone(), ..Default::default() };
         std::mem::swap(&mut p.body, &mut strip_calls(&self.body));
         p.cost()
     }
@@ -328,23 +342,26 @@ impl Program {
     /// Static instruction count weighted by loop caps: a bound on the work
     /// of one call per frame of the outer sample loop.
     pub fn cost(&self) -> u64 {
-        fn walk(b: &Block, depth: u32, c: &std::collections::HashMap<u32, u32>) -> u64 {
+        fn walk(b: &Block, depth: u32, c: &std::collections::HashMap<u32, u32>, funcs: &[Program]) -> u64 {
             let mut sum = 0u64;
             for s in b {
                 sum = sum.saturating_add(match s {
-                    Stmt::If(_, t, e) => 1 + walk(t, depth, c).max(walk(e, depth, c)),
+                    Stmt::If(_, t, e) => 1 + walk(t, depth, c, funcs).max(walk(e, depth, c, funcs)),
                     Stmt::Loop { cap, body } => {
                         // The outermost loop is the per-frame loop: count one frame.
                         let reps = if depth == 0 { 1 } else { *cap as u64 };
-                        reps.saturating_mul(walk(body, depth + 1, c) + 2)
+                        reps.saturating_mul(walk(body, depth + 1, c, funcs) + 2)
                     }
                     Stmt::CallHost { f, slices, .. } => call_cost(*f, slices, c),
+                    // A call costs its function's body (its loops at their
+                    // caps), plus passing its arguments.
+                    Stmt::Call { f, args, .. } => funcs.get(*f as usize).map_or(u64::MAX / 4, |g| walk(&g.body, depth.max(1), &const_ints(g), funcs).saturating_add(4 + args.len() as u64)),
                     _ => 1,
                 });
             }
             sum
         }
-        walk(&self.body, 0, &const_ints(self))
+        walk(&self.body, 0, &const_ints(self), &self.funcs)
     }
 }
 
@@ -739,6 +756,10 @@ struct Interp<'a, 'm, 'i> {
     mem: &'a mut Mem<'m>,
     io: &'a mut Io<'i>,
     n: u32,
+    /// The entry program's functions, and a register file for each (calls
+    /// do not recurse: one at a time per function), taken while it runs.
+    funcs: &'a [Program],
+    func_regs: &'a mut Vec<(Vec<u32>, Vec<u32>)>,
 }
 
 impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
@@ -895,6 +916,33 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                 }
                 Stmt::Break(d) => return Flow::Break(*d),
                 Stmt::Continue(d) => return Flow::Continue(*d),
+                Stmt::Call { f, args, rets } => {
+                    let Some(g) = self.funcs.get(*f as usize) else { continue };
+                    let nregs = g.vals.len() + g.vars.len();
+                    let wide = g.uses_f64();
+                    let (mut regs, mut hi) = std::mem::take(&mut self.func_regs[*f as usize]);
+                    // Fresh (zero) variables and values per call.
+                    regs.clear();
+                    regs.resize(nregs, 0);
+                    hi.clear();
+                    hi.resize(if wide { nregs } else { 0 }, 0);
+                    for (pv, a) in g.params.iter().zip(args) {
+                        let x = self.r(*a);
+                        regs[pv.0 as usize] = x as u32;
+                        if wide {
+                            hi[pv.0 as usize] = (x >> 32) as u32;
+                        }
+                    }
+                    let out: Vec<u64> = {
+                        let mut callee = Interp { regs: &mut regs, hi: &mut hi, nvals: g.vals.len(), frame: &mut *self.frame, mem: &mut *self.mem, io: &mut *self.io, n: self.n, funcs: self.funcs, func_regs: &mut *self.func_regs };
+                        callee.block(&g.body);
+                        g.results.iter().map(|r| callee.r(*r)).collect()
+                    };
+                    self.func_regs[*f as usize] = (regs, hi);
+                    for (v, x) in rets.iter().zip(out) {
+                        self.set_reg(v.0 as usize, x);
+                    }
+                }
                 Stmt::CallHost { f, args, slices, rets } => {
                     let mut a = [0u32; 16];
                     for (k, v) in args.iter().enumerate().take(16) {
@@ -934,7 +982,8 @@ pub fn run(p: &Program, scratch: &mut [u32], mem: &mut Mem, io: &mut Io, n: u32)
     let (regs, rest) = scratch.split_at_mut(nregs);
     let (frame, hi) = rest.split_at_mut(p.frame_words as usize);
     let hi = if p.uses_f64() { hi } else { &mut [] };
-    let mut interp = Interp { regs, hi, nvals: p.vals.len(), frame, mem, io, n };
+    let mut func_regs = vec![(Vec::new(), Vec::new()); p.funcs.len()];
+    let mut interp = Interp { regs, hi, nvals: p.vals.len(), frame, mem, io, n, funcs: &p.funcs, func_regs: &mut func_regs };
     interp.block(&p.body);
 }
 
@@ -985,6 +1034,7 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
         visible: Vec<bool>,
         ever: Vec<bool>,
         scope: Vec<u32>,
+        funcs: &'a [Program],
     }
     impl<'a> V<'a> {
         fn ty(&self, v: Val) -> Result<Ty, String> {
@@ -1193,6 +1243,30 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
                             return Err("break/continue outside its loop".into());
                         }
                     }
+                    Stmt::Call { f, args, rets } => {
+                        let Some(g) = self.funcs.get(*f as usize) else {
+                            return Err(format!("no function {}", f));
+                        };
+                        if args.len() != g.params.len() || rets.len() != g.results.len() {
+                            return Err(format!("call of function {}: wrong arity", f));
+                        }
+                        for (a, pv) in args.iter().zip(&g.params) {
+                            let want = *g.vals.get(pv.0 as usize).ok_or("a parameter out of range")?;
+                            self.used(*a, Some(want))?;
+                        }
+                        for (v, r) in rets.iter().zip(&g.results) {
+                            let want = *g.vals.get(r.0 as usize).ok_or("a result out of range")?;
+                            if self.ty(*v)? != want {
+                                return Err(format!("call of function {}: result {:?} is not {:?}", f, v, want));
+                            }
+                            if self.ever[v.0 as usize] {
+                                return Err(format!("{:?} defined twice", v));
+                            }
+                            self.ever[v.0 as usize] = true;
+                            self.visible[v.0 as usize] = true;
+                            self.scope.push(v.0);
+                        }
+                    }
                 }
             }
             // Values defined in this block are not visible after it.
@@ -1202,7 +1276,78 @@ pub fn validate(p: &Program, regions: &Regions) -> Result<(), String> {
             Ok(())
         }
     }
-    let mut v = V { p, r: regions, visible: vec![false; p.vals.len()], ever: vec![false; p.vals.len()], scope: Vec::new() };
+    // Functions: none calls itself through any chain (calls nest finitely).
+    fn calls(b: &Block, out: &mut Vec<u16>) {
+        for s in b {
+            match s {
+                Stmt::Call { f, .. } => out.push(*f),
+                Stmt::If(_, t, e) => {
+                    calls(t, out);
+                    calls(e, out);
+                }
+                Stmt::Loop { body, .. } => calls(body, out),
+                _ => {}
+            }
+        }
+    }
+    let edges: Vec<Vec<u16>> = p
+        .funcs
+        .iter()
+        .map(|g| {
+            let mut out = Vec::new();
+            calls(&g.body, &mut out);
+            out
+        })
+        .collect();
+    // 0 unvisited, 1 on the path, 2 done.
+    fn acyclic(k: usize, edges: &[Vec<u16>], state: &mut [u8]) -> bool {
+        match state[k] {
+            1 => return false,
+            2 => return true,
+            _ => {}
+        }
+        state[k] = 1;
+        for &g in &edges[k] {
+            if (g as usize) < edges.len() && !acyclic(g as usize, edges, state) {
+                return false;
+            }
+        }
+        state[k] = 2;
+        true
+    }
+    let mut state = vec![0u8; edges.len()];
+    if !(0..edges.len()).all(|k| acyclic(k, &edges, &mut state)) {
+        return Err("functions call each other in a cycle".into());
+    }
+    for (k, g) in p.funcs.iter().enumerate() {
+        if !g.funcs.is_empty() {
+            return Err(format!("function {} has functions of its own", k));
+        }
+        let mut v = V { p: g, r: regions, visible: vec![false; g.vals.len()], ever: vec![false; g.vals.len()], scope: Vec::new(), funcs: &p.funcs };
+        for pv in &g.params {
+            if pv.0 as usize >= g.vals.len() || v.ever[pv.0 as usize] {
+                return Err(format!("function {}: bad parameter {:?}", k, pv));
+            }
+            v.ever[pv.0 as usize] = true;
+            v.visible[pv.0 as usize] = true;
+        }
+        v.block(&g.body, 0).map_err(|e| format!("function {}: {}", k, e))?;
+        // Results: parameters or values the top-level block defines.
+        let top: std::collections::HashSet<u32> = g
+            .body
+            .iter()
+            .flat_map(|s| match s {
+                Stmt::Def(d, _) => vec![d.0],
+                Stmt::Call { rets, .. } | Stmt::CallHost { rets, .. } => rets.iter().map(|r| r.0).collect(),
+                _ => vec![],
+            })
+            .chain(g.params.iter().map(|x| x.0))
+            .collect();
+        if let Some(r) = g.results.iter().find(|r| !top.contains(&r.0)) {
+            return Err(format!("function {}: result {:?} is not defined at its top level", k, r));
+        }
+    }
+    let mut v = V { p, r: regions, visible: vec![false; p.vals.len()], ever: vec![false; p.vals.len()], scope: Vec::new(), funcs: &p.funcs };
     // The top block's values stay visible to the end; nothing follows it.
     v.block(&p.body, 0)
 }
@@ -1290,5 +1435,118 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+// =========================================================================
+// Calls flattened
+// =========================================================================
+
+/// `p` flattened ([`inline_calls`]) and optimized again (every pass keeps
+/// values: the same bits as the program with its calls): what the native
+/// backends compile. Borrowed when `p` has no functions.
+pub fn flat(p: &Program) -> std::borrow::Cow<'_, Program> {
+    if p.funcs.is_empty() {
+        return std::borrow::Cow::Borrowed(p);
+    }
+    let mut q = inline_calls(p);
+    crate::opt::optimize(&mut q);
+    std::borrow::Cow::Owned(q)
+}
+
+/// `p` with every [`Stmt::Call`] replaced by its function's body (fresh
+/// values and variables, the params read as the arguments, the call's
+/// results as the function's): the same computation, for backends that
+/// compile one straight body (native code; the optimizer may then run on
+/// it, every pass keeping values).
+pub fn inline_calls(p: &Program) -> Program {
+    if p.funcs.is_empty() {
+        return p.clone();
+    }
+    let mut out = Program { vals: p.vals.clone(), vars: p.vars.clone(), frame_words: p.frame_words, ..Default::default() };
+    let mut vmap: Vec<Val> = (0..p.vals.len() as u32).map(Val).collect();
+    let rmap: Vec<Var> = (0..p.vars.len() as u32).map(Var).collect();
+    out.body = inline_block(&p.body, &mut out, &p.funcs, &mut vmap, &rmap);
+    out
+}
+
+fn inline_block(b: &Block, out: &mut Program, funcs: &[Program], vmap: &mut Vec<Val>, rmap: &[Var]) -> Block {
+    let mut res = Vec::with_capacity(b.len());
+    for s in b {
+        match s {
+            Stmt::Call { f, args, rets } => {
+                let g = &funcs[*f as usize];
+                // Fresh values and variables for this copy.
+                let mut gmap: Vec<Val> = g
+                    .vals
+                    .iter()
+                    .map(|t| {
+                        out.vals.push(*t);
+                        Val(out.vals.len() as u32 - 1)
+                    })
+                    .collect();
+                for (pv, a) in g.params.iter().zip(args) {
+                    gmap[pv.0 as usize] = vmap[a.0 as usize];
+                }
+                let gr: Vec<Var> = g
+                    .vars
+                    .iter()
+                    .map(|t| {
+                        out.vars.push(*t);
+                        Var(out.vars.len() as u32 - 1)
+                    })
+                    .collect();
+                res.extend(inline_block(&g.body, out, funcs, &mut gmap, &gr));
+                // Later reads of the call's results read the function's.
+                for (r, x) in rets.iter().zip(&g.results) {
+                    vmap[r.0 as usize] = gmap[x.0 as usize];
+                }
+            }
+            s => res.push(map_stmt(s, out, funcs, vmap, rmap)),
+        }
+    }
+    res
+}
+
+fn map_stmt(s: &Stmt, out: &mut Program, funcs: &[Program], vmap: &mut Vec<Val>, rmap: &[Var]) -> Stmt {
+    let v = |x: &Val, vmap: &Vec<Val>| vmap[x.0 as usize];
+    match s {
+        Stmt::Def(d, op) => Stmt::Def(v(d, vmap), map_op(op, vmap, rmap)),
+        Stmt::Set(r, x) => Stmt::Set(rmap[r.0 as usize], v(x, vmap)),
+        Stmt::Store { region, base, extent, off, val } => Stmt::Store { region: *region, base: *base, extent: *extent, off: off.map(|o| v(&o, vmap)), val: v(val, vmap) },
+        Stmt::Out { ch, idx, val } => Stmt::Out { ch: *ch, idx: v(idx, vmap), val: v(val, vmap) },
+        Stmt::If(c, t, e) => {
+            let c = v(c, vmap);
+            Stmt::If(c, inline_block(t, out, funcs, vmap, rmap), inline_block(e, out, funcs, vmap, rmap))
+        }
+        Stmt::Loop { cap, body } => Stmt::Loop { cap: *cap, body: inline_block(body, out, funcs, vmap, rmap) },
+        Stmt::Break(d) => Stmt::Break(*d),
+        Stmt::Continue(d) => Stmt::Continue(*d),
+        Stmt::CallHost { f, args, slices, rets } => Stmt::CallHost {
+            f: *f,
+            args: args.iter().map(|a| v(a, vmap)).collect(),
+            slices: slices.iter().map(|x| SliceArg { buf: x.buf, off: v(&x.off, vmap), len: v(&x.len, vmap) }).collect(),
+            rets: rets.iter().map(|r| v(r, vmap)).collect(),
+        },
+        Stmt::Call { .. } => unreachable!("inlined by inline_block"),
+    }
+}
+
+/// `op` with its values renamed by `vmap` and variables by `rmap`.
+pub fn map_op(op: &Op, vmap: &[Val], rmap: &[Var]) -> Op {
+    let v = |x: Val| vmap[x.0 as usize];
+    match *op {
+        Op::Get(r) => Op::Get(rmap[r.0 as usize]),
+        Op::Un(u, a) => Op::Un(u, v(a)),
+        Op::Bin(b, x, y) => Op::Bin(b, v(x), v(y)),
+        Op::CmpF(c, x, y) => Op::CmpF(c, v(x), v(y)),
+        Op::CmpI(c, x, y) => Op::CmpI(c, v(x), v(y)),
+        Op::CmpD(c, x, y) => Op::CmpD(c, v(x), v(y)),
+        Op::Sel(c, x, y) => Op::Sel(v(c), v(x), v(y)),
+        Op::Fma(k, a, b, c) => Op::Fma(k, v(a), v(b), v(c)),
+        Op::Wrap(x, n) => Op::Wrap(v(x), n),
+        Op::Load { region, base, extent, off } => Op::Load { region, base, extent, off: off.map(v) },
+        Op::In { ch, idx } => Op::In { ch, idx: v(idx) },
+        op => op,
     }
 }

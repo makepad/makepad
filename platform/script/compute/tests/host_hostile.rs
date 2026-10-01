@@ -20,7 +20,7 @@ fn call(f: u16, args: Vec<Val>, slices: Vec<SliceArg>, rets: Vec<Val>, after: Ve
     let mut body = vec![Stmt::Def(Val(0), Op::ConstI(0)), Stmt::Def(Val(1), Op::ConstI(4))];
     body.push(Stmt::CallHost { f, args, slices, rets });
     body.extend(after);
-    Program { vals: vec![Ty::I32, Ty::I32, Ty::I32, Ty::I32], vars: vec![], body, frame_words: 4 }
+    Program { vals: vec![Ty::I32, Ty::I32, Ty::I32, Ty::I32], vars: vec![], body, frame_words: 4, ..Default::default() }
 }
 
 fn fill(args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError> {

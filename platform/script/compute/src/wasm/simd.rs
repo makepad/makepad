@@ -57,9 +57,9 @@ const NONE: u32 = u32::MAX;
 /// multiply-add's operands and result).
 pub(super) const FRAME_HEAD: u32 = 64;
 
-/// Whether [`body`] compiles `p` (the analysis alone).
+/// Whether [`body`] compiles `p` (the analysis alone; its functions too).
 pub(super) fn supported(p: &Program) -> bool {
-    analysis(p).is_some()
+    analysis(p).is_some() && p.funcs.iter().all(|g| spmd::supported(g, &g.body) && spmd::analyse_fn(g).is_some())
 }
 
 fn analysis(p: &Program) -> Option<(spmd::Shape<'_>, Info)> {
@@ -72,14 +72,15 @@ fn analysis(p: &Program) -> Option<(spmd::Shape<'_>, Info)> {
     Some((sh, info))
 }
 
-/// The four-wide body of kernel `p` and whether it calls the exact
-/// multiply-add fix-up (function `fix`, [`fma_fix`]), or None (declined:
-/// run it scalar).
-pub(super) fn body(p: &Program, target: Target, fix: u32) -> Option<(Body, bool)> {
-    let (sh, info) = analysis(p)?;
+/// The emitter for program `p` (an entry or a function) with its analysis:
+/// locals for its values, its body's code still to come. `params`: a
+/// function's parameter count (its values arrive in params 6.., then the
+/// execution mask).
+fn emitter<'a>(p: &'a Program, info: Info, i: Var, target: Target, fix: u32, calls: &[u32], function: bool) -> (W<'a>, usize) {
     let (mask, var_mask) = spmd::bool_masks(p);
-    let (step, consts) = spmd::steps(p, &info, sh.i);
-    let sc = Sc::new(p, target, Body::new(), &|k| !info.vval[k], &|k| !info.vvar[k]);
+    let (step, consts) = spmd::steps(p, &info, i);
+    let np = if function { p.params.len() as u32 + 1 } else { 0 };
+    let sc = Sc::new(p, target, Body::with_params(super::N_PARAMS + np), &|k| !info.vval[k], &|k| !info.vvar[k]);
     let mut w = W {
         sc,
         p,
@@ -91,8 +92,8 @@ pub(super) fn body(p: &Program, target: Target, fix: u32) -> Option<(Body, bool)
         vv: Vec::new(),
         us: Vec::new(),
         m: 0,
-        full: true,
-        i: sh.i,
+        full: !function,
+        i,
         loops: Vec::new(),
         slots: Vec::new(),
         depth: 0,
@@ -100,7 +101,7 @@ pub(super) fn body(p: &Program, target: Target, fix: u32) -> Option<(Body, bool)
         tl: [0; 4],
         relaxed: target.relaxed_fma,
         fix,
-        uses_fix: false,
+        calls: calls.to_vec(),
         tables: Vec::new(),
         defs: defs(p),
         vconsts: Vec::new(),
@@ -115,12 +116,49 @@ pub(super) fn body(p: &Program, target: Target, fix: u32) -> Option<(Body, bool)
     w.vl = super::assign_locals(&lt, p.vals.len(), f, &|k| w.info.vval[k].then_some(op::V128));
     w.vv = (0..p.vars.len()).map(|k| if w.info.vvar[k] { f.local(op::V128) } else { NONE }).collect();
     w.us = super::assign_locals(&lt, p.vals.len(), f, &|k| want[k].then_some(op::V128));
-    w.m = f.local(op::V128);
+    if function {
+        for (k, pv) in p.params.iter().enumerate() {
+            w.vl[pv.0 as usize] = super::N_PARAMS + k as u32;
+        }
+        w.m = super::N_PARAMS + p.params.len() as u32;
+    } else {
+        w.m = f.local(op::V128);
+    }
     w.tv = std::array::from_fn(|_| f.local(op::V128));
     w.tl = std::array::from_fn(|_| f.local(op::I32));
     // Where the start code goes: after the buffers' pointers are read.
     let pre_at = w.sc.f.code.len();
     w.load_tables();
+    (w, pre_at)
+}
+
+/// The constants' locals and the address terms, set at `pre_at` (before
+/// the body).
+fn finish(mut w: W, pre_at: usize) -> Body {
+    let mut head = Body::new();
+    for (words, l) in &w.vconsts {
+        head.fd(op::V128_CONST);
+        for x in words {
+            head.code.extend_from_slice(&x.to_le_bytes());
+        }
+        head.set(*l);
+    }
+    head.code.extend_from_slice(&w.pre.code);
+    let rest = w.sc.f.code.split_off(pre_at);
+    w.sc.f.code.extend_from_slice(&head.code);
+    w.sc.f.code.extend_from_slice(&rest);
+    w.sc.f
+}
+
+/// The four-wide body of kernel `p` (`calls`: its functions' wasm indices,
+/// `fix`: the exact multiply-add fix-up's), or None (declined: run it
+/// scalar).
+pub(super) fn body(p: &Program, target: Target, fix: u32, calls: &[u32]) -> Option<Body> {
+    if !supported(p) {
+        return None;
+    }
+    let (sh, info) = analysis(p)?;
+    let (mut w, pre_at) = emitter(p, info, sh.i, target, fix, calls, false);
     // Every lane runs.
     w.vconst([u32::MAX; 4]);
     w.sc.f.set(w.m);
@@ -136,22 +174,24 @@ pub(super) fn body(p: &Program, target: Target, fix: u32) -> Option<(Body, bool)
         }
     }
     w.stmt(sh.element);
-    // The constants' locals and the address terms, set before the body.
-    let mut head = Body::new();
-    for (words, l) in &w.vconsts {
-        head.fd(op::V128_CONST);
-        for x in words {
-            head.code.extend_from_slice(&x.to_le_bytes());
-        }
-        head.set(*l);
-    }
-    head.code.extend_from_slice(&w.pre.code);
-    let rest = w.sc.f.code.split_off(pre_at);
-    w.sc.f.code.extend_from_slice(&head.code);
-    w.sc.f.code.extend_from_slice(&rest);
-    Some((w.sc.f, w.uses_fix))
+    Some(finish(w, pre_at))
 }
 
+/// The four-wide code of function `g` of a kernel: the six entry
+/// parameters, its params (each lane's values), then the caller's
+/// execution mask; its results returned (bools as 0/1 words). It runs
+/// under that mask throughout (stores of lanes that do not run go to the
+/// scratch word).
+pub(super) fn function(g: &Program, target: Target, fix: u32, calls: &[u32]) -> Option<Body> {
+    let info = spmd::analyse_fn(g)?;
+    let (mut w, pre_at) = emitter(g, info, Var(u32::MAX), target, fix, calls, true);
+    w.block(&g.body);
+    for r in &g.results {
+        let word = w.is_bool(*r);
+        w.vget_word(*r, word);
+    }
+    Some(finish(w, pre_at))
+}
 
 fn defs(p: &Program) -> Vec<Option<Op>> {
     fn walk(b: &Block, out: &mut Vec<Option<Op>>) {
@@ -207,9 +247,9 @@ struct W<'a> {
     tv: [u32; 8],
     tl: [u32; 4],
     relaxed: bool,
-    /// The fix-up function's index, and whether it is called.
+    /// The fix-up function's index; the wasm function of each function.
     fix: u32,
-    uses_fix: bool,
+    calls: Vec<u32>,
     /// Small shared tables held in `v128` locals for the call: (first
     /// word, words, the locals of its 4-word chunks).
     tables: Vec<(u32, u32, Vec<u32>)>,
@@ -430,6 +470,11 @@ impl W<'_> {
                     Stmt::Store { region, off, val, .. } => {
                         if !vary(val) && (*region == Region::Frame || off.as_ref().is_some_and(vary)) {
                             out[val.0 as usize] = true;
+                        }
+                    }
+                    Stmt::Call { args, .. } => {
+                        for a in args {
+                            out[a.0 as usize] |= !vary(a);
                         }
                     }
                     Stmt::If(_, t, e) => {
@@ -694,6 +739,23 @@ impl W<'_> {
                     self.vconst([0; 4]);
                     self.set(self.m);
                     self.full = false;
+                }
+            }
+            Stmt::Call { f, args, rets } => {
+                // Each lane's arguments (bools as 0/1 words), the mask.
+                for k in 0..super::N_PARAMS {
+                    self.get(k);
+                }
+                for a in args {
+                    let word = self.is_bool(*a);
+                    self.vget_word(*a, word);
+                }
+                self.get(self.m);
+                self.sc.f.b(op::CALL);
+                self.sc.f.u(self.calls[*f as usize]);
+                for r in rets.iter().rev() {
+                    let l = self.vl[r.0 as usize];
+                    self.set(l);
                 }
             }
             Stmt::Out { .. } | Stmt::CallHost { .. } => unreachable!("declined"),
@@ -1670,7 +1732,6 @@ impl W<'_> {
         self.get(P_FRAME);
         self.sc.f.b(op::CALL);
         self.sc.f.u(self.fix);
-        self.uses_fix = true;
         self.end();
         self.get(P_FRAME);
         self.vmem(op::V128_LOAD, 4, 0);

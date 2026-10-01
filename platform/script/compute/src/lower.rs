@@ -67,6 +67,12 @@ pub const UNROLL_MAX: u32 = 8;
 pub const UNROLL_BYTES: u64 = 2048;
 /// Estimated bytes of emitted code per AIR operation.
 const BYTES_PER_OP: u64 = 4;
+/// A kernel helper estimated at more AIR operations than this, called
+/// from more than one place, is lowered once as a function and called
+/// (each call costs a few instructions; its body would otherwise be copied
+/// to every call site). Smaller helpers, helpers called once and calls
+/// whose arguments are all constants (they fold) are inlined.
+pub const INLINE_OPS: u64 = 48;
 pub const MAX_STATE_WORDS: u32 = 1 << 20;
 pub const MAX_SHARED_WORDS: u32 = 1 << 22;
 pub const MAX_FRAME_WORDS: u32 = 1 << 14;
@@ -346,6 +352,13 @@ impl Builder {
                 if off.is_none() && !matches!(region, Region::Buf(_)) {
                     let ty = self.prog.vals[val.0 as usize];
                     self.cse.last_mut().unwrap().0.insert(Key::Load(region, *base, 1, None, ty), *val);
+                }
+            }
+            // A function may write memory (not the caller's variables, not
+            // the tables).
+            IS::Call { .. } => {
+                for (map, _) in &mut self.cse {
+                    map.retain(|k, _| !matches!(k, Key::Load(r, ..) if *r != Region::Shared));
                 }
             }
             // A host call may write its slices' buffers (and ctx words).
@@ -807,6 +820,7 @@ fn dce(p: &mut Program) {
                         vec![]
                     }
                     IS::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
+                    IS::Call { args, .. } => args.clone(),
                     _ => vec![],
                 };
                 for u in us {
@@ -889,6 +903,24 @@ struct Lowerer {
     /// `math: portable`: f32 math functions evaluate in f64 with the
     /// fdlibm kernels of `makepad_csg_math::portable` and round once.
     portable: bool,
+    /// Helpers lowered as functions (the program's `funcs`), each with
+    /// what its calls need ([`FnMeta`]).
+    funcs_out: Vec<(Program, FnMeta)>,
+    /// Per helper and argument kinds (literal arguments by their bits):
+    /// its function (None: inlined).
+    func_cache: HashMap<(String, Vec<u8>, Vec<u64>), Option<u16>>,
+    /// Call sites per helper name in the source (counted once).
+    call_sites: Option<HashMap<String, usize>>,
+}
+
+/// How a call of a lowered function passes and returns values.
+#[derive(Clone)]
+struct FnMeta {
+    /// Its params end with the element index and the emit counters'
+    /// values; its results with the counters' new values.
+    emits: bool,
+    /// The value it returns (its leading results; None: nothing).
+    ret: Option<T>,
 }
 
 fn ty_of(t: &T) -> Ty {
@@ -1819,6 +1851,9 @@ impl Lowerer {
         if args.len() != f.params.len() {
             return err(span, format!("`{}` takes {} arguments, got {}", f.name, f.params.len(), args.len()));
         }
+        if let Some(v) = self.try_outline(f, &args, span)? {
+            return Ok(v);
+        }
         let mut scope = HashMap::new();
         for ((name, ann), a) in f.params.iter().zip(args) {
             let bind = match (a, ann) {
@@ -1897,6 +1932,375 @@ impl Lowerer {
             return Ok(V::Unit);
         }
         Ok(self.read_vars(&t, &vars))
+    }
+
+    /// Calls of helper `name` in the source (every function's body).
+    fn sites(&mut self, name: &str) -> usize {
+        if self.call_sites.is_none() {
+            fn expr(e: &Expr, out: &mut HashMap<String, usize>) {
+                match &e.kind {
+                    ExprKind::Call(n, args) => {
+                        *out.entry(n.clone()).or_default() += 1;
+                        args.iter().for_each(|a| expr(a, out));
+                    }
+                    ExprKind::Field(a, _) | ExprKind::Neg(a) | ExprKind::Not(a) => expr(a, out),
+                    ExprKind::Index(a, b) | ExprKind::Bin(_, a, b) | ExprKind::ArrayRepeat(a, b) => {
+                        expr(a, out);
+                        expr(b, out);
+                    }
+                    ExprKind::ArrayList(xs) => xs.iter().for_each(|x| expr(x, out)),
+                    ExprKind::StructLit(_, fs) => fs.iter().for_each(|(_, x)| expr(x, out)),
+                    ExprKind::Block(b) => stmts(b, out),
+                    ExprKind::If(arms, else_) => {
+                        for (c, b) in arms {
+                            expr(c, out);
+                            stmts(b, out);
+                        }
+                        if let Some(b) = else_ {
+                            stmts(b, out);
+                        }
+                    }
+                    ExprKind::Match(x, arms) => {
+                        expr(x, out);
+                        arms.iter().for_each(|(_, b)| stmts(b, out));
+                    }
+                    _ => {}
+                }
+            }
+            fn stmts(b: &[Stmt], out: &mut HashMap<String, usize>) {
+                for s in b {
+                    match s {
+                        Stmt::Let { value, .. } | Stmt::Expr(value) => expr(value, out),
+                        Stmt::Assign { target, value, .. } => {
+                            expr(target, out);
+                            expr(value, out);
+                        }
+                        Stmt::Return(Some(e), _) => expr(e, out),
+                        Stmt::For { from, to, body, .. } => {
+                            expr(from, out);
+                            expr(to, out);
+                            stmts(body, out);
+                        }
+                        Stmt::While { cond, body, .. } => {
+                            expr(cond, out);
+                            stmts(body, out);
+                        }
+                        Stmt::Loop { body, .. } => stmts(body, out),
+                        _ => {}
+                    }
+                }
+            }
+            let mut out = HashMap::new();
+            for f in self.fns.values() {
+                stmts(&f.body, &mut out);
+            }
+            self.call_sites = Some(out);
+        }
+        self.call_sites.as_ref().unwrap().get(name).copied().unwrap_or(0)
+    }
+
+    /// Whether `f` (or a helper it calls) emits.
+    fn emits_in(&self, f: &FnDecl) -> bool {
+        fn walk(l: &Lowerer, b: &[Stmt], seen: &mut Vec<String>) -> bool {
+            fn expr(l: &Lowerer, e: &Expr, seen: &mut Vec<String>) -> bool {
+                match &e.kind {
+                    ExprKind::Call(n, args) => {
+                        n == "emit"
+                            || args.iter().any(|a| expr(l, a, seen))
+                            || match l.fns.get(n) {
+                                Some(g) if !seen.contains(n) => {
+                                    seen.push(n.clone());
+                                    walk(l, &g.body, seen)
+                                }
+                                _ => false,
+                            }
+                    }
+                    ExprKind::Field(a, _) | ExprKind::Neg(a) | ExprKind::Not(a) => expr(l, a, seen),
+                    ExprKind::Index(a, b) | ExprKind::Bin(_, a, b) | ExprKind::ArrayRepeat(a, b) => expr(l, a, seen) || expr(l, b, seen),
+                    ExprKind::ArrayList(xs) => xs.iter().any(|x| expr(l, x, seen)),
+                    ExprKind::StructLit(_, fs) => fs.iter().any(|(_, x)| expr(l, x, seen)),
+                    ExprKind::Block(b) => walk(l, b, seen),
+                    ExprKind::If(arms, else_) => arms.iter().any(|(c, b)| expr(l, c, seen) || walk(l, b, seen)) || else_.as_ref().is_some_and(|b| walk(l, b, seen)),
+                    ExprKind::Match(x, arms) => expr(l, x, seen) || arms.iter().any(|(_, b)| walk(l, b, seen)),
+                    _ => false,
+                }
+            }
+            b.iter().any(|s| match s {
+                Stmt::Let { value, .. } | Stmt::Expr(value) => expr(l, value, seen),
+                Stmt::Assign { target, value, .. } => expr(l, target, seen) || expr(l, value, seen),
+                Stmt::Return(Some(e), _) => expr(l, e, seen),
+                Stmt::For { from, to, body, .. } => expr(l, from, seen) || expr(l, to, seen) || walk(l, body, seen),
+                Stmt::While { cond, body, .. } => expr(l, cond, seen) || walk(l, body, seen),
+                Stmt::Loop { body, .. } => walk(l, body, seen),
+                _ => false,
+            })
+        }
+        walk(self, &f.body, &mut vec![f.name.clone()])
+    }
+
+    /// A call of a helper lowered as a function (once per argument kinds),
+    /// when it is big and called from several places; None: inline it.
+    fn try_outline(&mut self, f: &FnDecl, args: &[V], span: Span) -> LResult<Option<V>> {
+        // Only helpers of kernel element code (not the entry itself).
+        if self.domain != Domain::Kernel || self.kernel.element.is_none() || self.in_init || self.call_stack.is_empty() {
+            return Ok(None);
+        }
+        if self.globals.values().any(|b| matches!(b, Bind::Value(_) | Bind::Local(..))) {
+            return Ok(None);
+        }
+        // Parameter annotations convert at the call, as when inlined.
+        let mut vals = Vec::new();
+        for ((_, ann), a) in f.params.iter().zip(args) {
+            vals.push(match (ann, a) {
+                (Some(TypeAnn::F32), a) => V::F(self.to_f(a, span)?),
+                (Some(TypeAnn::I32), a) => V::I(self.to_i(a, span)?),
+                (Some(ann @ (TypeAnn::Vec2 | TypeAnn::Vec3 | TypeAnn::Vec4 | TypeAnn::Mat4)), a) => {
+                    let n = ann_width(ann);
+                    V::Vec(n, self.to_vec(a, n, span)?)
+                }
+                (Some(_), _) => return Ok(None),
+                (None, a) => a.clone(),
+            });
+        }
+        // A literal argument stays a constant in the function (it folds
+        // there as when inlined): one function per literal values.
+        let mut kinds = Vec::new();
+        let mut lits = Vec::new();
+        for v in &vals {
+            kinds.push(match v {
+                V::Lit(x) => {
+                    lits.push(x.to_bits());
+                    3u8
+                }
+                V::F(_) => 0u8,
+                V::I(_) => 1,
+                V::B(_) => 2,
+                V::Vec(n, _) => 10 + *n,
+                _ => return Ok(None),
+            });
+        }
+        if !vals.is_empty() && vals.iter().all(|v| matches!(v, V::Lit(_))) {
+            return Ok(None);
+        }
+        let key = (f.name.clone(), kinds.clone(), lits);
+        let idx = match self.func_cache.get(&key) {
+            Some(x) => *x,
+            None => {
+                let big = self.sites(&f.name) >= 2 && self.ast_cost(&f.body) > INLINE_OPS;
+                let x = if big { self.lower_function(f, &vals, span)? } else { None };
+                self.func_cache.insert(key, x);
+                x
+            }
+        };
+        let Some(idx) = idx else { return Ok(None) };
+        let meta = self.funcs_out[idx as usize].1.clone();
+        // The arguments (constants as f32 values), the emit context.
+        let mut argv = Vec::new();
+        for v in &vals {
+            match v {
+                V::Vec(n, l) => argv.extend_from_slice(&l[..*n as usize]),
+                V::B(x) | V::I(x) | V::F(x) => argv.push(*x),
+                // Bound in the function itself.
+                _ => {}
+            }
+        }
+        let counters: Vec<Var> = self.kernel.counters.iter().map(|(_, c)| *c).collect();
+        if meta.emits {
+            argv.push(self.kernel.element.unwrap());
+            for c in &counters {
+                let x = self.b.get(*c);
+                argv.push(x);
+            }
+        }
+        let tys: Vec<Ty> = {
+            let g = &self.funcs_out[idx as usize].0;
+            g.results.iter().map(|r| g.vals[r.0 as usize]).collect()
+        };
+        let rets: Vec<Val> = tys
+            .iter()
+            .map(|t| {
+                self.b.prog.vals.push(*t);
+                self.b.consts.push(None);
+                Val(self.b.prog.vals.len() as u32 - 1)
+            })
+            .collect();
+        self.b.push(IS::Call { f: idx, args: argv, rets: rets.clone() });
+        let words = match &meta.ret {
+            Some(T::Vec(n)) => *n as usize,
+            Some(_) => 1,
+            None => 0,
+        };
+        if meta.emits {
+            for (c, r) in counters.iter().zip(&rets[words..]) {
+                self.b.set(*c, *r);
+            }
+        }
+        Ok(Some(match meta.ret {
+            Some(T::F) => V::F(rets[0]),
+            Some(T::I) => V::I(rets[0]),
+            Some(T::B) => V::B(rets[0]),
+            Some(T::Vec(n)) => {
+                let mut l = [rets[0]; 16];
+                l[..n as usize].copy_from_slice(&rets[..n as usize]);
+                V::Vec(n, l)
+            }
+            _ => V::Unit,
+        }))
+    }
+
+    /// Lowers helper `f` with arguments of `kinds` as a function of the
+    /// program; None when it cannot be one (it returns an aggregate, or its
+    /// writes would no longer be provably the element's own): then it is
+    /// inlined.
+    fn lower_function(&mut self, f: &FnDecl, args: &[V], span: Span) -> LResult<Option<u16>> {
+        let emits = self.emits_in(f);
+        let saved_b = std::mem::replace(&mut self.b, Builder::new());
+        let saved_elem = self.kernel.element;
+        let saved_counters = self.kernel.counters.clone();
+        let saved_offsets = std::mem::take(&mut self.kernel.local_offsets);
+        let saved_nonlocal = self.kernel.nonlocal;
+        let saved_loops = std::mem::take(&mut self.loops);
+        let r = self.function_body(f, args, emits, span);
+        let fb = std::mem::replace(&mut self.b, saved_b);
+        let nonlocal = self.kernel.nonlocal && !saved_nonlocal;
+        self.kernel.element = saved_elem;
+        self.kernel.counters = saved_counters;
+        self.kernel.local_offsets = saved_offsets;
+        self.kernel.nonlocal = saved_nonlocal;
+        self.loops = saved_loops;
+        let Some((params, results, ret)) = r? else { return Ok(None) };
+        if nonlocal {
+            return Ok(None);
+        }
+        let mut g = fb.prog;
+        g.body = fb.blocks.into_iter().next().unwrap();
+        g.params = params;
+        g.results = results;
+        self.funcs_out.push((g, FnMeta { emits, ret }));
+        Ok(Some(self.funcs_out.len() as u16 - 1))
+    }
+
+    /// The body of function `f` in the (fresh) builder: (params, results,
+    /// returned type), or None when it returns what a function cannot.
+    #[allow(clippy::type_complexity)]
+    fn function_body(&mut self, f: &FnDecl, args: &[V], emits: bool, span: Span) -> LResult<Option<(Vec<Val>, Vec<Val>, Option<T>)>> {
+        let mut params = Vec::new();
+        let mut param = |l: &mut Lowerer, t: Ty| {
+            l.b.prog.vals.push(t);
+            l.b.consts.push(None);
+            let v = Val(l.b.prog.vals.len() as u32 - 1);
+            params.push(v);
+            v
+        };
+        let mut scope = HashMap::new();
+        for ((name, _), a) in f.params.iter().zip(args) {
+            let v = match a {
+                V::Lit(x) => {
+                    // As when inlined: a constant.
+                    scope.insert(name.clone(), Bind::Const(V::Lit(*x)));
+                    continue;
+                }
+                V::F(_) => V::F(param(self, Ty::F32)),
+                V::I(_) => V::I(param(self, Ty::I32)),
+                V::B(_) => V::B(param(self, Ty::Bool)),
+                V::Vec(n, _) => {
+                    let mut l = [Val(0); 16];
+                    for x in l.iter_mut().take(*n as usize) {
+                        *x = param(self, Ty::F32);
+                    }
+                    V::Vec(*n, l)
+                }
+                _ => unreachable!("kinds checked"),
+            };
+            let bind = if assigns(&f.body, name) { self.new_local(&v, span)? } else { Bind::Value(v) };
+            scope.insert(name.clone(), bind);
+        }
+        // The emit context: the element index, the counters (as the
+        // function's own variables, their values in and out).
+        let mut counters = Vec::new();
+        if emits {
+            let e = param(self, Ty::I32);
+            self.kernel.element = Some(e);
+            let kds: Vec<u8> = self.kernel.counters.iter().map(|(k, _)| *k).collect();
+            self.kernel.counters.clear();
+            for kd in kds {
+                let c = self.b.var(Ty::I32);
+                let x = param(self, Ty::I32);
+                self.b.set(c, x);
+                self.kernel.counters.push((kd, c));
+                counters.push(c);
+            }
+        }
+        self.call_stack.push(f.name.clone());
+        self.frames.push(vec![scope]);
+        self.rets.push(Ret { vars: None, used: false });
+        self.loops.push(LoopKind::Wrapper);
+        self.b.open();
+        let r = self.stmts(&f.body);
+        let body = self.b.close();
+        self.loops.pop();
+        let ret = self.rets.pop().unwrap();
+        self.frames.pop();
+        self.call_stack.pop();
+        let v = match r {
+            Ok(v) => v,
+            Err(e) if e.start >= self.prelude_base && span.start < self.prelude_base => {
+                return err(span, format!("in `{}`: {}", f.name, e.message));
+            }
+            Err(e) => return Err(e),
+        };
+        // The returned value, as when inlined.
+        let v = if !ret.used {
+            self.b.splice(body);
+            v
+        } else {
+            let (t, vars) = ret.vars.clone().unwrap_or((T::F, vec![]));
+            let mut body = body;
+            if !matches!(body.last(), Some(IS::Break(_))) {
+                if vars.is_empty() {
+                    if !matches!(v, V::Unit) {
+                        return err(span, format!("`{}` returns a value in some paths only", f.name));
+                    }
+                } else {
+                    if matches!(v, V::Unit) {
+                        return err(f.span, format!("`{}` must end with a value (its `return`s give one)", f.name));
+                    }
+                    self.b.open();
+                    self.assign_vars(&t, &vars, &v, f.span)?;
+                    let tail = self.b.close();
+                    body.extend(tail);
+                }
+            }
+            self.zero_vars(&vars);
+            self.b.push(IS::Loop { cap: 1, body });
+            if vars.is_empty() {
+                V::Unit
+            } else {
+                self.read_vars(&t, &vars)
+            }
+        };
+        let (t, words): (Option<T>, Vec<Val>) = match v {
+            V::Unit => (None, vec![]),
+            V::Lit(_) | V::F(_) => (Some(T::F), vec![self.to_f(&v, span)?]),
+            V::I(x) => (Some(T::I), vec![x]),
+            V::B(x) => (Some(T::B), vec![x]),
+            V::Vec(n, l) => (Some(T::Vec(n)), l[..n as usize].to_vec()),
+            V::D(_) | V::Place(_) => return Ok(None),
+        };
+        // Results are read at the end of the top level (through variables:
+        // a value of a nested block is not visible there).
+        let mut results = Vec::new();
+        for w in words {
+            let ty = self.b.prog.vals[w.0 as usize];
+            let c = self.b.var(ty);
+            self.b.set(c, w);
+            results.push(c);
+        }
+        let mut results: Vec<Val> = results.into_iter().map(|c| self.b.get(c)).collect();
+        for c in counters {
+            results.push(self.b.get(c));
+        }
+        Ok(Some((params, results, t)))
     }
 
     fn zero_vars(&mut self, vars: &[Var]) {
@@ -3709,6 +4113,9 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         domain,
         kernel: Default::default(),
         portable: false,
+        funcs_out: Vec::new(),
+        func_cache: HashMap::new(),
+        call_sites: None,
     }
 }
 

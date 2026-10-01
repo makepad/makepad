@@ -18,6 +18,9 @@ use std::fmt::Write;
 
 /// The function's source (None: audio I/O or host calls).
 pub fn function(p: &Program) -> Option<String> {
+    // Functions are inlined: the JS is one body.
+    let flat = ir::flat(p);
+    let p = &*flat;
     let mut g = Gen { p, out: String::new(), loops: 0, loop_stack: Vec::new(), bounds: ir::bounds(p), consts: vec![None; p.vals.len()] };
     crate::wasm::collect_consts(&p.body, &mut g.consts);
     fn ok(b: &Block) -> bool {
@@ -158,6 +161,7 @@ impl Gen<'_> {
                 let _ = writeln!(self.out, "continue L{id};");
             }
             Stmt::Out { .. } | Stmt::CallHost { .. } => unreachable!("declined"),
+            Stmt::Call { .. } => unreachable!("flattened"),
         }
     }
 

@@ -277,6 +277,7 @@ impl Liveness {
                     self.loops[li].1 = self.pos;
                 }
                 Stmt::Break(_) | Stmt::Continue(_) => {}
+                Stmt::Call { .. } => unreachable!("flattened"),
                 Stmt::CallHost { args, slices, rets, .. } => {
                     for a in args {
                         self.touch(Ent::Val(a.0), bid);
@@ -911,6 +912,7 @@ impl<'a> Emit<'a> {
                 self.jump(Fix::B, 0x1400_0000, exit);
             }
             Stmt::CallHost { f, args, slices, rets } => self.call_host(*f, args, slices, rets),
+            Stmt::Call { .. } => unreachable!("flattened"),
             Stmt::Continue(d) => {
                 let (top, _) = self.loop_labels[self.loop_labels.len() - 1 - *d as usize];
                 self.jump(Fix::B, 0x1400_0000, top);
@@ -1440,6 +1442,9 @@ fn has_host_call(b: &Block) -> bool {
 /// Compiles a kernel whose host buffers have write permission `writable`
 /// (bit k: buffer k), which host calls pass on to the trampoline.
 pub fn compile_with(p: &Program, writable: u64) -> Option<Code> {
+    // Functions are inlined: native code is one body.
+    let flat = crate::ir::flat(p);
+    let p = &*flat;
     let alloc = allocate(p);
     if alloc.spill_bytes >= 16384 {
         return None;

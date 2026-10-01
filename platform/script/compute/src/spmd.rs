@@ -94,6 +94,15 @@ impl Info {
                     let m = self.masked.contains(&id(s));
                     changed |= self.pass(body, div || m);
                 }
+                // A function's results vary (it runs on every lane's values).
+                Stmt::Call { rets, .. } => {
+                    for r in rets {
+                        if !self.vval[r.0 as usize] {
+                            self.vval[r.0 as usize] = true;
+                            changed = true;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -294,7 +303,7 @@ pub(crate) fn bool_masks(p: &Program) -> (Vec<bool>, Vec<bool>) {
 
 /// What the vector code cannot express (the scalar code runs instead).
 pub(crate) fn supported(p: &Program, body: &Block) -> bool {
-    if p.uses_f64() || p.frame_words > MAX_FRAME_WORDS {
+    if p.uses_f64() || p.funcs.iter().any(|g| g.uses_f64()) || p.frame_words > MAX_FRAME_WORDS {
         return false;
     }
     // Ctx words written per element must not be read per element (a
@@ -324,7 +333,8 @@ pub(crate) fn supported(p: &Program, body: &Block) -> bool {
         }
         true
     }
-    if !walk(body, &mut ctx_loads, &mut ctx_stores) {
+    // The functions' accesses count as the element's (calls run per element).
+    if !walk(body, &mut ctx_loads, &mut ctx_stores) || !p.funcs.iter().all(|g| walk(&g.body, &mut ctx_loads, &mut ctx_stores)) {
         return false;
     }
     let overlaps = |a: &(u32, u32), b: &(u32, u32)| a.0 < b.0.saturating_add(b.1) && b.0 < a.0.saturating_add(a.1);
@@ -422,3 +432,22 @@ pub(crate) fn steps(p: &Program, info: &Info, i: Var) -> (Vec<Option<i64>>, Vec<
     (step, consts)
 }
 
+
+/// The analysis of a function of a four-wide kernel: its parameters vary
+/// (each lane's values), and its body runs under the caller's execution
+/// mask (as inside a divergent branch: every variable it sets varies).
+pub(crate) fn analyse_fn(g: &Program) -> Option<Info> {
+    let mut info = Info { vval: vec![false; g.vals.len()], vvar: vec![false; g.vars.len()], ..Default::default() };
+    for pv in &g.params {
+        info.vval[pv.0 as usize] = true;
+    }
+    for _ in 0..64 {
+        let mut changed = info.pass(&g.body, true);
+        changed |= info.forms(&g.body, &mut Vec::new());
+        if !changed {
+            info.mark_escapes(&g.body);
+            return Some(info);
+        }
+    }
+    None
+}

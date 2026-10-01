@@ -166,6 +166,7 @@ fn the_validator_checks_host_calls() {
         vars: vec![],
         body: vec![Stmt::Def(Val(0), Op::ConstI(1)), Stmt::Def(Val(2), Op::ConstF(1.0)), Stmt::CallHost { f, args, slices, rets }],
         frame_words: 1,
+        ..Default::default()
     };
     let s = |buf| vec![SliceArg { buf, off: Val(0), len: Val(0) }];
     assert!(ir::validate(&prog(s(2), vec![Val(0)], vec![Val(1)], f), &r).is_ok());

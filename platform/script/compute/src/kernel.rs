@@ -76,6 +76,9 @@ pub struct Kernel {
     buffers: Vec<BufferDecl>,
     shared: Box<[u32]>,
     program: Program,
+    /// `program` with its calls inlined and optimized again (the same
+    /// bits): what the interpreter and native code run.
+    flat: Program,
     /// Worst-case AIR ops per element.
     pub cost: u64,
     /// Element ranges may run on different threads.
@@ -167,15 +170,16 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
         let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
         ir::run(init, &mut scratch, &mut mem, &mut io, 1);
     }
+    let flat = ir::flat(&lowered.program).into_owned();
     #[cfg(target_arch = "aarch64")]
     let native = if backend == Backend::Native {
         let writable = lowered.buffers.iter().enumerate().fold(0u64, |m, (k, b)| if b.access != Access::Read && k < 64 { m | 1 << k } else { m });
-        crate::arm64::compile_with(&lowered.program, writable)
+        crate::arm64::compile_with(&flat, writable)
     } else {
         None
     };
     #[cfg(target_arch = "aarch64")]
-    let neon = if native.is_some() && lowered.parallel_safe { crate::neon::compile(&lowered.program) } else { None };
+    let neon = if native.is_some() && lowered.parallel_safe { crate::neon::compile(&flat) } else { None };
     #[cfg(not(target_arch = "aarch64"))]
     let _ = backend;
     let kernel = Arc::new(Kernel {
@@ -186,6 +190,7 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
         buffers: lowered.buffers,
         shared: shared.into_boxed_slice(),
         program: lowered.program,
+        flat,
         cost: lowered.cost,
         parallel_safe: lowered.parallel_safe,
         #[cfg(target_arch = "aarch64")]
@@ -662,7 +667,7 @@ impl Kernel {
         }
         SCRATCH.with(|scratch| {
             let mut scratch = scratch.borrow_mut();
-            let need = self.program.scratch_words();
+            let need = self.flat.scratch_words();
             if scratch.len() < need {
                 scratch.resize(need, 0);
             }
@@ -676,7 +681,7 @@ impl Kernel {
             let zeros = [0f32; 1];
             let (mut o0, mut o1) = ([0f32; 1], [0f32; 1]);
             let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
-            ir::run(&self.program, &mut scratch[..need], &mut mem, &mut io, n as u32);
+            ir::run(&self.flat, &mut scratch[..need], &mut mem, &mut io, n as u32);
         });
     }
 

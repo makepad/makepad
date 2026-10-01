@@ -20,8 +20,52 @@
 use crate::ir::{self, Block, Op, Program, Region, Stmt, Val};
 use std::collections::{HashMap, HashSet};
 
-/// Runs every pass (then dead code elimination) to a fixpoint-ish order.
+thread_local! {
+    /// What the functions of the program being optimized may write, all
+    /// together: a call's effect (each function's passes see only its
+    /// own body). Empty when the program has no functions.
+    static CALLEE_WRITES: std::cell::RefCell<Writes> = std::cell::RefCell::new(Writes::default());
+    /// Frame words some function of the program reads (and whether one
+    /// reads at a dynamic offset): the frame is the whole call's, so a
+    /// store one function makes may be read by another.
+    static FRAME_READS: std::cell::RefCell<(HashSet<u32>, bool)> = std::cell::RefCell::new((HashSet::new(), false));
+}
+
+/// What any function of `p` writes.
+fn callee_writes(p: &Program) -> Writes {
+    let mut out = Writes::default();
+    for g in &p.funcs {
+        out.walk(&g.body);
+    }
+    out
+}
+
+/// Runs every pass (then dead code elimination) to a fixpoint-ish order,
+/// on the program and each of its functions (a call is opaque: what a
+/// function computes is optimized in the function).
 pub fn optimize(p: &mut Program) {
+    let mut written = callee_writes(p);
+    written.bufs.extend(Writes::of(&p.body).bufs);
+    CALLEE_WRITES.with(|w| *w.borrow_mut() = written);
+    let mut reads = (HashSet::new(), false);
+    for g in &p.funcs {
+        frame_loads(&g.body, &mut reads.0, &mut reads.1);
+    }
+    if !p.funcs.is_empty() {
+        frame_loads(&p.body, &mut reads.0, &mut reads.1);
+    }
+    FRAME_READS.with(|f| *f.borrow_mut() = reads);
+    let mut funcs = std::mem::take(&mut p.funcs);
+    for g in &mut funcs {
+        optimize_one(g);
+    }
+    p.funcs = funcs;
+    optimize_one(p);
+    CALLEE_WRITES.with(|w| *w.borrow_mut() = Writes::default());
+    FRAME_READS.with(|f| *f.borrow_mut() = (HashSet::new(), false));
+}
+
+fn optimize_one(p: &mut Program) {
     forward_sets(p);
     licm(p);
     if_convert(p);
@@ -290,6 +334,9 @@ pub fn drop_wraps(p: &mut Program) {
     }
     walk(&p.body, &b, &mut map);
     rename(&mut p.body, &map);
+    for r in &mut p.results {
+        subst(r, &map);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +411,12 @@ pub fn forward_stores(p: &mut Program) {
                     out.insert(*region);
                 }
                 Stmt::CallHost { .. } => *host = true,
+                // What the functions write.
+                Stmt::Call { .. } => CALLEE_WRITES.with(|w| {
+                    let w = w.borrow();
+                    out.extend(w.stores.iter().map(|x| x.0));
+                    *host |= w.host_call;
+                }),
                 Stmt::If(_, t, e) => {
                     written(t, out, host);
                     written(e, out, host);
@@ -432,6 +485,18 @@ pub fn forward_stores(p: &mut Program) {
                     rename_stmt(s, map);
                     forget(known, Region::Ctx);
                 }
+                Stmt::Call { .. } => {
+                    rename_stmt(s, map);
+                    CALLEE_WRITES.with(|w| {
+                        let w = w.borrow();
+                        for x in &w.stores {
+                            forget(known, x.0);
+                        }
+                        if w.host_call {
+                            forget(known, Region::Ctx);
+                        }
+                    });
+                }
                 other => rename_stmt(other, map),
             }
         }
@@ -440,39 +505,43 @@ pub fn forward_stores(p: &mut Program) {
     let mut map = HashMap::new();
     walk(&mut p.body, &mut HashMap::new(), &tys, &mut map);
     rename(&mut p.body, &map);
+    for r in &mut p.results {
+        subst(r, &map);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Dead frame stores and dead loops
 // ---------------------------------------------------------------------------
 
+/// The frame words `b` loads (`dynamic`: some load has a dynamic offset).
+fn frame_loads(b: &Block, read: &mut HashSet<u32>, dynamic: &mut bool) {
+    for s in b {
+        match s {
+            Stmt::Def(_, Op::Load { region: Region::Frame, base, off, .. }) => {
+                if off.is_some() {
+                    *dynamic = true;
+                } else {
+                    read.insert(*base);
+                }
+            }
+            Stmt::If(_, t, e) => {
+                frame_loads(t, read, dynamic);
+                frame_loads(e, read, dynamic);
+            }
+            Stmt::Loop { body, .. } => frame_loads(body, read, dynamic),
+            _ => {}
+        }
+    }
+}
+
 /// Frame (per-call scratch) stores no load can read are removed: when
 /// every frame load has a static address, a store whose words no load
 /// names is dead. (A struct literal emitted or read field by field leaves
 /// only such stores once its loads are forwarded.)
 pub fn dead_frame_stores(p: &mut Program) {
-    let mut read: HashSet<u32> = HashSet::new();
-    let mut dynamic = false;
-    fn loads(b: &Block, read: &mut HashSet<u32>, dynamic: &mut bool) {
-        for s in b {
-            match s {
-                Stmt::Def(_, Op::Load { region: Region::Frame, base, off, .. }) => {
-                    if off.is_some() {
-                        *dynamic = true;
-                    } else {
-                        read.insert(*base);
-                    }
-                }
-                Stmt::If(_, t, e) => {
-                    loads(t, read, dynamic);
-                    loads(e, read, dynamic);
-                }
-                Stmt::Loop { body, .. } => loads(body, read, dynamic),
-                _ => {}
-            }
-        }
-    }
-    loads(&p.body, &mut read, &mut dynamic);
+    let (mut read, mut dynamic) = FRAME_READS.with(|f| f.borrow().clone());
+    frame_loads(&p.body, &mut read, &mut dynamic);
     if dynamic {
         return;
     }
@@ -505,7 +574,7 @@ pub fn dead_frame_stores(p: &mut Program) {
 pub fn dead_loops(p: &mut Program) {
     fn effects(b: &Block, depth: u32) -> bool {
         b.iter().any(|s| match s {
-            Stmt::Store { .. } | Stmt::Out { .. } | Stmt::CallHost { .. } => true,
+            Stmt::Store { .. } | Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Call { .. } => true,
             Stmt::Break(d) | Stmt::Continue(d) => *d >= depth,
             Stmt::If(_, t, e) => effects(t, depth) || effects(e, depth),
             Stmt::Loop { body, .. } => effects(body, depth + 1),
@@ -681,6 +750,11 @@ fn rename_stmt(s: &mut Stmt, map: &HashMap<u32, Val>) {
                 subst(&mut x.len, map);
             }
         }
+        Stmt::Call { args, .. } => {
+            for a in args {
+                subst(a, map);
+            }
+        }
         Stmt::Break(_) | Stmt::Continue(_) => {}
     }
 }
@@ -760,6 +834,9 @@ pub fn forward_sets(p: &mut Program) {
     // sweep covers uses the walk saw before their Def's mapping existed
     // (none in structured code, but cheap).
     rename(&mut p.body, &map);
+    for r in &mut p.results {
+        subst(r, &map);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -767,7 +844,7 @@ pub fn forward_sets(p: &mut Program) {
 // ---------------------------------------------------------------------------
 
 /// What a block may write.
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct Writes {
     /// (region, word range) of stores with a static range; a dynamic store
     /// counts its whole extent.
@@ -805,6 +882,13 @@ impl Writes {
                         self.bufs.insert(x.buf);
                     }
                 }
+                // What the functions write (not the caller's variables).
+                Stmt::Call { .. } => CALLEE_WRITES.with(|w| {
+                    let w = w.borrow();
+                    self.stores.extend(w.stores.iter().copied());
+                    self.bufs.extend(w.bufs.iter().copied());
+                    self.host_call |= w.host_call;
+                }),
                 Stmt::If(_, t, e) => {
                     self.walk(t);
                     self.walk(e);
@@ -856,7 +940,8 @@ fn read_only_bufs(p: &Program) -> HashSet<u8> {
         }
     }
     walk(&p.body, &mut used);
-    used.retain(|k| !w.bufs.contains(k) && *k != 0);
+    let callee = CALLEE_WRITES.with(|c| c.borrow().bufs.clone());
+    used.retain(|k| !w.bufs.contains(k) && !callee.contains(k) && *k != 0);
     used
 }
 
@@ -903,7 +988,7 @@ fn defs_in(b: &Block, out: &mut HashSet<u32>) {
             Stmt::Def(v, _) => {
                 out.insert(v.0);
             }
-            Stmt::CallHost { rets, .. } => {
+            Stmt::CallHost { rets, .. } | Stmt::Call { rets, .. } => {
                 for r in rets {
                     out.insert(r.0);
                 }
@@ -1081,6 +1166,9 @@ pub fn cse(p: &mut Program) {
     walk(&mut p.body, &mut st, &mut Vec::new());
     let map = st.map;
     rename(&mut p.body, &map);
+    for r in &mut p.results {
+        subst(r, &map);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1213,6 +1301,10 @@ pub fn if_convert(p: &mut Program) {
 /// fast` kernels run it; every backend and the interpreter give the same
 /// fused bits.
 pub fn fuse_fma(p: &mut Program) {
+    for g in &mut p.funcs {
+        fuse(g, true);
+        negate_constant_addends(g);
+    }
     fuse(p, true);
     negate_constant_addends(p);
 }
@@ -1303,6 +1395,7 @@ fn fuse(p: &mut Program, float: bool) {
                     vec![]
                 }
                 Stmt::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
+                Stmt::Call { args, .. } => args.clone(),
                 _ => vec![],
             };
             for u in us {
@@ -1311,6 +1404,9 @@ fn fuse(p: &mut Program, float: bool) {
         }
     }
     count(&p.body, &mut uses, &mut muls, mul);
+    for r in &p.results {
+        uses[r.0 as usize] += 1;
+    }
     let single = |v: Val| if uses[v.0 as usize] == 1 { muls.get(&v.0).copied() } else { None };
     fn walk(b: &mut Block, f: &dyn Fn(Val) -> Option<(Val, Val)>, float: bool) {
         for s in b {
@@ -1396,6 +1492,7 @@ pub fn dce(p: &mut Program) {
                         vec![]
                     }
                     Stmt::CallHost { args, slices, .. } => args.iter().copied().chain(slices.iter().flat_map(|x| [x.off, x.len])).collect(),
+                    Stmt::Call { args, .. } => args.clone(),
                     _ => vec![],
                 };
                 for u in us {
@@ -1404,6 +1501,10 @@ pub fn dce(p: &mut Program) {
             }
         }
         mark(&p.body, &mut used);
+        // A function's results are read by its callers.
+        for r in &p.results {
+            used[r.0 as usize] = true;
+        }
         let mut removed = false;
         fn sweep(b: &mut Block, used: &[bool], removed: &mut bool) {
             b.retain(|s| match s {

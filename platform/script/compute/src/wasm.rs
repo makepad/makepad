@@ -84,26 +84,70 @@ pub struct Entry<'a> {
 /// what the backend does not compile (audio I/O, host calls, or the four
 /// wide form for a program without the element loop's shape).
 pub fn module(entries: &[Entry], target: Target) -> Option<Vec<u8>> {
-    // The four-wide exact multiply-add's rare fix-up is one function after
-    // the entries.
-    let fix = entries.len() as u32;
+    // Function indices: the entries; the four-wide exact multiply-add's
+    // rare fix-up (when some four-wide code has a fused multiply-add);
+    // then each entry's functions, in the entry's form.
+    let n = entries.len() as u32;
+    let uses_fix = !target.relaxed_fma && entries.iter().any(|e| e.simd && (has_float_fma(&e.program.body) || e.program.funcs.iter().any(|g| has_float_fma(&g.body))));
+    let fix = n;
+    let mut next = n + uses_fix as u32;
+    let calls: Vec<Vec<u32>> = entries
+        .iter()
+        .map(|e| {
+            e.program
+                .funcs
+                .iter()
+                .map(|_| {
+                    next += 1;
+                    next - 1
+                })
+                .collect()
+        })
+        .collect();
+    let mut types: Vec<(Vec<u8>, Vec<u8>)> = vec![(vec![op::I32; N_PARAMS as usize], vec![])];
+    let mut ty = |params: Vec<u8>, results: Vec<u8>| -> u32 {
+        match types.iter().position(|t| t.0 == params && t.1 == results) {
+            Some(k) => k as u32,
+            None => {
+                types.push((params, results));
+                types.len() as u32 - 1
+            }
+        }
+    };
     let mut funcs = Vec::new();
-    let mut uses_fix = false;
-    for e in entries {
-        let body = if e.simd {
-            let (b, f) = simd::body(e.program, target, fix)?;
-            uses_fix |= f;
-            b
-        } else {
-            scalar(e.program, target)?
-        };
-        funcs.push((body, 0));
+    for (k, e) in entries.iter().enumerate() {
+        funcs.push((if e.simd { simd::body(e.program, target, fix, &calls[k])? } else { scalar(e.program, target, &calls[k])? }, 0));
     }
     if uses_fix {
-        funcs.push((simd::fma_fix(), 1));
+        funcs.push((simd::fma_fix(), ty(vec![op::I32], vec![])));
     }
-    let exports: Vec<(String, u32)> = (0..entries.len() as u32).map(|k| (format!("run{}", k), k)).collect();
-    Some(assemble(&funcs, &[(&[op::I32; N_PARAMS as usize], &[]), (&[op::I32], &[])], &exports, target))
+    for (k, e) in entries.iter().enumerate() {
+        for g in &e.program.funcs {
+            let base = vec![op::I32; N_PARAMS as usize];
+            if e.simd {
+                let params = base.into_iter().chain(g.params.iter().map(|_| op::V128)).chain([op::V128]).collect();
+                let t = ty(params, g.results.iter().map(|_| op::V128).collect());
+                funcs.push((simd::function(g, target, fix, &calls[k])?, t));
+            } else {
+                let params = base.into_iter().chain(g.params.iter().map(|v| wty(g.vals[v.0 as usize]))).collect();
+                let t = ty(params, g.results.iter().map(|v| wty(g.vals[v.0 as usize])).collect());
+                funcs.push((scalar_fn(g, target, &calls[k])?, t));
+            }
+        }
+    }
+    let exports: Vec<(String, u32)> = (0..n).map(|k| (format!("run{}", k), k)).collect();
+    let types: Vec<(&[u8], &[u8])> = types.iter().map(|(a, b)| (&a[..], &b[..])).collect();
+    Some(assemble(&funcs, &types, &exports, target))
+}
+
+/// Any f32 fused multiply-add in `b`.
+fn has_float_fma(b: &Block) -> bool {
+    b.iter().any(|s| match s {
+        Stmt::Def(_, Op::Fma(k, ..)) => *k != Fma::MulAddI,
+        Stmt::If(_, t, e) => has_float_fma(t) || has_float_fma(e),
+        Stmt::Loop { body, .. } => has_float_fma(body),
+        _ => false,
+    })
 }
 
 /// Words of host scratch an entry of `p` needs as its `frame` (the four
@@ -578,10 +622,23 @@ struct Sc<'a> {
     ti64: [u32; 2],
     tf32: u32,
     relaxed: bool,
+    /// The wasm function of each of the program's functions.
+    calls: Vec<u32>,
 }
 
 /// The scalar body of `p` (None: audio I/O or host calls).
-pub(crate) fn scalar(p: &Program, target: Target) -> Option<Body> {
+pub(crate) fn scalar(p: &Program, target: Target, calls: &[u32]) -> Option<Body> {
+    if !scalar_ok(p) {
+        return None;
+    }
+    let mut sc = Sc::new(p, target, Body::new(), &|_| true, &|_| true);
+    sc.calls = calls.to_vec();
+    sc.block(&p.body);
+    Some(sc.f)
+}
+
+/// Audio I/O and host calls are not compiled (anywhere in `p`).
+fn scalar_ok(p: &Program) -> bool {
     fn ok(b: &Block) -> bool {
         b.iter().all(|s| match s {
             Stmt::Out { .. } | Stmt::CallHost { .. } | Stmt::Def(_, Op::In { .. }) => false,
@@ -590,11 +647,24 @@ pub(crate) fn scalar(p: &Program, target: Target) -> Option<Body> {
             _ => true,
         })
     }
-    if !ok(&p.body) {
+    ok(&p.body) && p.funcs.iter().all(|g| ok(&g.body))
+}
+
+/// The scalar code of function `g`: the six entry parameters, then its
+/// params; its results returned.
+pub(crate) fn scalar_fn(g: &Program, target: Target, calls: &[u32]) -> Option<Body> {
+    if !scalar_ok(g) {
         return None;
     }
-    let mut sc = Sc::new(p, target, Body::new(), &|_| true, &|_| true);
-    sc.block(&p.body);
+    let mut sc = Sc::new(g, target, Body::with_params(N_PARAMS + g.params.len() as u32), &|_| true, &|_| true);
+    sc.calls = calls.to_vec();
+    for (k, pv) in g.params.iter().enumerate() {
+        sc.val[pv.0 as usize] = N_PARAMS + k as u32;
+    }
+    sc.block(&g.body);
+    for r in &g.results {
+        sc.v(*r);
+    }
     Some(sc.f)
 }
 
@@ -718,6 +788,14 @@ pub(crate) fn lifetimes(p: &Program) -> Lifetimes {
                             self.defined(*r);
                         }
                     }
+                    Stmt::Call { args, rets, .. } => {
+                        for a in args {
+                            self.used(*a);
+                        }
+                        for r in rets {
+                            self.defined(*r);
+                        }
+                    }
                     Stmt::Break(_) | Stmt::Continue(_) => {}
                 }
             }
@@ -725,6 +803,12 @@ pub(crate) fn lifetimes(p: &Program) -> Lifetimes {
     }
     let mut st = St { pos: 0, loops: Vec::new(), next_loop: 0, loop_end: &loop_end, def: vec![(u32::MAX, 0); p.vals.len()], last: vec![0; p.vals.len()], add_of: &add_of };
     st.walk(&p.body);
+    // A function's results are read at its end.
+    st.pos += 1;
+    for r in &p.results {
+        st.used(*r);
+    }
+    let npos = npos.max(st.pos);
     let mut lt = Lifetimes { defs: vec![Vec::new(); npos as usize + 1], frees: vec![Vec::new(); npos as usize + 1] };
     for (k, (d, _)) in st.def.iter().enumerate() {
         if *d != u32::MAX {
@@ -815,7 +899,7 @@ impl<'a> Sc<'a> {
         let tf32 = f.local(op::F32);
         let mut consts = vec![None; p.vals.len()];
         collect_consts(&p.body, &mut consts);
-        let mut sc = Sc { p, f, val, var, buf: Vec::new(), labels: Vec::new(), bounds: ir::bounds(p), consts, ti, tf64, ti64, tf32, relaxed: target.relaxed_fma };
+        let mut sc = Sc { p, f, val, var, buf: Vec::new(), labels: Vec::new(), bounds: ir::bounds(p), consts, ti, tf64, ti64, tf32, relaxed: target.relaxed_fma, calls: Vec::new() };
         let mut used = Vec::new();
         used_bufs(&p.body, &mut used);
         sc.buf = vec![None; used.iter().copied().max().map_or(0, |m| m as usize + 1)];
@@ -939,6 +1023,20 @@ impl<'a> Sc<'a> {
                 let depth = self.depth_of(Label::IterEnd, *d);
                 self.f.b(op::BR);
                 self.f.u(depth);
+            }
+            Stmt::Call { f, args, rets } => {
+                for k in 0..N_PARAMS {
+                    self.f.get(k);
+                }
+                for a in args {
+                    self.v(*a);
+                }
+                self.f.b(op::CALL);
+                self.f.u(self.calls[*f as usize]);
+                for r in rets.iter().rev() {
+                    let l = self.val[r.0 as usize];
+                    self.f.set(l);
+                }
             }
             Stmt::Out { .. } | Stmt::CallHost { .. } => unreachable!("declined"),
         }

@@ -156,7 +156,7 @@ fn regions() -> Regions {
 }
 
 fn prog(vals: Vec<Ty>, vars: Vec<Ty>, body: Block) -> Program {
-    Program { vals, vars, body, frame_words: 4 }
+    Program { vals, vars, body, frame_words: 4, ..Default::default() }
 }
 
 #[test]
@@ -238,7 +238,7 @@ fn random_program(r: &mut Rng) -> Program {
         b
     }
     let nvars = vars.len();
-    Program { body: block(r, 0, nvals, nvars), vals, vars, frame_words: r.below(6) as u32 }
+    Program { body: block(r, 0, nvals, nvars), vals, vars, frame_words: r.below(6) as u32, ..Default::default() }
 }
 
 #[test]
