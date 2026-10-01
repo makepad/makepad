@@ -49,7 +49,7 @@
 //! bindings.
 
 use crate::admission::{JobBudget, Ledger, Origin, Refused, Ticket};
-use crate::kernel::{check, run_chunks, Access, ChunkCell, Kernel, KernelError, Mode, RunStats, CHUNK, K_COUNT, K_PARAMS, K_SEED, K_TIME};
+use crate::kernel::{check, run_chunks, Access, CancelToken, ChunkCell, Kernel, KernelError, Mode, RunStats, CHUNK, K_COUNT, K_PARAMS, K_SEED, K_TIME};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
@@ -1048,6 +1048,64 @@ fn watchdog(weak: Weak<SInner>) {
             Some(d) => std::thread::park_timeout(d),
             None => std::thread::park(),
         }
+    }
+}
+
+// =========================================================================
+// Deadlines for a single call
+// =========================================================================
+
+/// The deadlines of calls run outside a [`Scheduler`] job (a host that runs
+/// a kernel `Call` itself under an admission ticket): one parked thread for
+/// the process cancels each armed call at its deadline.
+struct Deadlines {
+    armed: Mutex<Vec<(u64, Instant, CancelToken)>>,
+    wake: Condvar,
+    next: AtomicU64,
+}
+
+fn deadlines() -> &'static Deadlines {
+    static D: OnceLock<&'static Deadlines> = OnceLock::new();
+    D.get_or_init(|| {
+        let d: &'static Deadlines = Box::leak(Box::new(Deadlines { armed: Mutex::new(Vec::new()), wake: Condvar::new(), next: AtomicU64::new(0) }));
+        let _ = std::thread::Builder::new().name("kernel-deadlines".into()).spawn(move || {
+            let mut armed = lock(&d.armed);
+            loop {
+                let now = Instant::now();
+                armed.retain(|(_, at, token)| {
+                    if *at <= now {
+                        token.cancel();
+                        false
+                    } else {
+                        true
+                    }
+                });
+                armed = match armed.iter().map(|a| a.1).min() {
+                    Some(at) => d.wake.wait_timeout(armed, at - now).unwrap_or_else(|e| e.into_inner()).0,
+                    None => d.wake.wait(armed).unwrap_or_else(|e| e.into_inner()),
+                };
+            }
+        });
+        d
+    })
+}
+
+/// A deadline armed by [`arm_deadline`]; disarmed on drop (the call
+/// finished first).
+pub struct Armed(u64);
+
+/// Cancel `token`'s call at `at`, unless the returned guard is dropped first.
+pub fn arm_deadline(at: Instant, token: CancelToken) -> Armed {
+    let d = deadlines();
+    let id = d.next.fetch_add(1, Ordering::Relaxed);
+    lock(&d.armed).push((id, at, token));
+    d.wake.notify_one();
+    Armed(id)
+}
+
+impl Drop for Armed {
+    fn drop(&mut self) {
+        lock(&deadlines().armed).retain(|a| a.0 != self.0);
     }
 }
 
