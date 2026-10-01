@@ -558,11 +558,11 @@ test("missing cube samplers get one complete six-face fallback", () => {
   );
 });
 
-test("bad pointers, unaligned indices, and over-limit buffers fail before allocation", () => {
+test("bad pointers, unaligned indices, and buffers outside wasm memory fail before allocation", () => {
   const cases = [
     (s) => s.FromWasmAllocArrayBuffer(f32_upload(1, 4092, 2)),
     (s) => s.FromWasmAllocIndexBuffer(u16_indices(1, 65, 2)),
-    (s) => s.FromWasmAllocArrayBuffer(byte_upload(1, 64, 64 * 1024 * 1024 + 1)),
+    (s) => s.FromWasmAllocArrayBuffer(byte_upload(1, 64, s.memory.buffer.byteLength)),
   ];
   for (const run of cases) {
     const s = subject();
@@ -679,9 +679,9 @@ test("valid empty buffers allocate explicitly and submit a zero-count draw", () 
   assert.deepEqual(s.gl.calls.draws[0], [s.gl.TRIANGLES, 0, s.gl.UNSIGNED_INT, 0, 0]);
 });
 
-test("expanded triangle metadata admits the exact boundary and rejects over it once", () => {
-  const limit = 16 * 1024 * 1024;
-  for (const [instances, allowed] of [[limit, true], [limit + 1, false]]) {
+test("expanded triangle counts have no cap of the runtime's own", () => {
+  const many = 16 * 1024 * 1024;
+  for (const [instances, allowed] of [[many, true], [many + 1, true]]) {
     const s = subject();
     prepare_triangle(
       s,

@@ -7,9 +7,10 @@ import {
 
 const MAKEPAD_WEBGL_FALLBACK_DIMENSION = 2048;
 const MAKEPAD_WEBGL_FALLBACK_VERTEX_ATTRIBS = 16;
-const MAKEPAD_WEBGL_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
-const MAKEPAD_WEBGL_MAX_TEXTURE_BYTES = 64 * 1024 * 1024;
-const MAKEPAD_WEBGL_MAX_EXPANDED_TRIANGLES = 16 * 1024 * 1024;
+// No byte or triangle caps of the runtime's own (GPU-SAFETY.md): sizes are
+// bounded by the device's reported limits and by the wasm memory a slice
+// must lie in; a driver that cannot allocate says so (GL_OUT_OF_MEMORY,
+// checked where textures and buffers are allocated).
 const MAKEPAD_WEBGL_MAX_SUBMISSION_REPORTS = 64;
 // @section video-playback
 const MAKEPAD_WEBGL_VIDEO_UPLOAD_FORMAT = "video-rgba8";
@@ -534,12 +535,6 @@ export class WasmWebGL extends WasmWebBrowser {
     if (byte_length === null || byte_length % element_size !== 0) {
       return { ok: false, reason: `${label} byte length is invalid` };
     }
-    if (byte_length > MAKEPAD_WEBGL_MAX_BUFFER_BYTES) {
-      return {
-        ok: false,
-        reason: `${label} exceeds the ${MAKEPAD_WEBGL_MAX_BUFFER_BYTES}-byte limit`,
-      };
-    }
     const end = makepad_safe_sum(slice.ptr, byte_length);
     const memory = this.memory && this.memory.buffer;
     if (
@@ -727,14 +722,6 @@ export class WasmWebGL extends WasmWebBrowser {
         "texture size arithmetic is unsafe",
       );
     }
-    if (allocation_bytes > MAKEPAD_WEBGL_MAX_TEXTURE_BYTES) {
-      return this.reject_texture_upload(
-        args,
-        "allocation-byte-limit",
-        `texture exceeds the ${MAKEPAD_WEBGL_MAX_TEXTURE_BYTES}-byte allocation limit`,
-        { allocation_bytes },
-      );
-    }
 
     const data = args.data;
     if (!data || !Number.isSafeInteger(data.ptr) || data.ptr < 0) {
@@ -821,7 +808,8 @@ export class WasmWebGL extends WasmWebBrowser {
       if (
         !(this.bgra_upload_scratch instanceof Uint32Array) ||
         this.bgra_upload_scratch.length < admission.required_elements ||
-        this.bgra_upload_scratch.byteLength > MAKEPAD_WEBGL_MAX_TEXTURE_BYTES
+        // Not kept at more than twice what uploads need.
+        this.bgra_upload_scratch.length > admission.required_elements * 2
       ) {
         this.bgra_upload_scratch = new Uint32Array(admission.required_elements);
       }
@@ -1948,12 +1936,6 @@ export class WasmWebGL extends WasmWebBrowser {
     );
     if (expanded_triangles === null) {
       return { ok: false, reason: "expanded triangle count is unsafe" };
-    }
-    if (expanded_triangles > MAKEPAD_WEBGL_MAX_EXPANDED_TRIANGLES) {
-      return {
-        ok: false,
-        reason: `expanded triangle count exceeds ${MAKEPAD_WEBGL_MAX_EXPANDED_TRIANGLES}`,
-      };
     }
 
     const uniform_slices = [
@@ -3570,15 +3552,6 @@ export class WasmWebGL extends WasmWebBrowser {
         );
         continue;
       }
-      if (allocation_bytes > MAKEPAD_WEBGL_MAX_TEXTURE_BYTES) {
-        this.reject_texture_upload(
-          video_args,
-          "video-allocation-byte-limit",
-          `video texture exceeds the ${MAKEPAD_WEBGL_MAX_TEXTURE_BYTES}-byte allocation limit`,
-          { allocation_bytes },
-        );
-        continue;
-      }
 
       const old_texture = this.textures[player.texture_id];
       let gl_tex = old_texture;
@@ -3974,6 +3947,10 @@ export class WasmWebGL extends WasmWebBrowser {
       (event) => this.handle_webgl_context_lost(event),
       false,
     );
+    // Live GPU bytes from the first allocation on (GPU-SAFETY.md).
+    if (typeof this.install_gpu_ledger === "function") {
+      this.install_gpu_ledger(gl);
+    }
     // Query immutable hardware ceilings exactly once, immediately after the
     // context exists, then share the cached values with canvas and targets.
     this.webgl_limits = makepad_query_webgl_limits(gl);

@@ -6,7 +6,6 @@ import {mkdtempSync, rmSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
-const PIXEL_BUDGET = 2_097_152;
 const STARTUP_TIMEOUT_MS = 45_000;
 const CDP_TIMEOUT_MS = 15_000;
 const LOSS_WARNING_TIMEOUT_MS = 5_000;
@@ -475,6 +474,8 @@ function pageInstrumentation(diagnostics) {
                     height: canvas.height,
                     cssWidth: canvas.clientWidth,
                     cssHeight: canvas.clientHeight,
+                    devicePixelRatio: window.devicePixelRatio || 1,
+                    maxTextureSize: gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : null,
                     live: canvas.isConnected && canvas.width > 0 && canvas.height > 0 && canvas.clientWidth > 0 && canvas.clientHeight > 0,
                     hasWebgl: Boolean(gl),
                     contextLost: gl ? gl.isContextLost() : false,
@@ -577,12 +578,23 @@ function isLiveWebGlCanvas(canvas) {
     return canvas.live && canvas.hasWebgl;
 }
 
+// The drawable is the CSS size at the device's pixel ratio, bounded only by
+// the device's limits (no pixel budget of the runtime's own; GPU-SAFETY.md).
 function assertPixelBudget(snapshot, phase) {
     assert(snapshot.canvases.length > 0, `No canvas found during ${phase}`);
-    assert(
-        snapshot.canvases.every(canvas => canvas.width * canvas.height <= PIXEL_BUDGET),
-        `Canvas exceeded ${PIXEL_BUDGET} pixels during ${phase}`,
-    );
+    for (const canvas of snapshot.canvases) {
+        const dpr = canvas.devicePixelRatio || 1;
+        assert(
+            canvas.width <= Math.ceil(canvas.cssWidth * dpr) + 1 && canvas.height <= Math.ceil(canvas.cssHeight * dpr) + 1,
+            `Canvas ${canvas.width}x${canvas.height} exceeded its CSS size ${canvas.cssWidth}x${canvas.cssHeight} at DPR ${dpr} during ${phase}`,
+        );
+        if (canvas.maxTextureSize) {
+            assert(
+                canvas.width <= canvas.maxTextureSize && canvas.height <= canvas.maxTextureSize,
+                `Canvas ${canvas.width}x${canvas.height} exceeded the device's MAX_TEXTURE_SIZE ${canvas.maxTextureSize} during ${phase}`,
+            );
+        }
+    }
 }
 
 function assertNoRenderWorkAfterContextLoss(snapshot, phase) {

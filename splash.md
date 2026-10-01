@@ -18,6 +18,15 @@ General Makepad Splash DSL patterns that apply to ANY app body.
 - AI Chat `runsplash` blocks run in a sandbox with `net.http_request`, `http_resource(...)`, `parse_json()`, and `url_encode()` enabled. Use these for HTTP-backed mini apps.
 - **Array / argument / object-body items may be separated by whitespace, newlines, OR commas — all work.** Adjacent values like `{a:1} {b:2}` (or one per line) are TWO separate items. Two object literals next to each other are NEVER "object inherits from object" — to extend/merge an object use `base += {field: val}` or a named prototype `Proto{...}`, not bare `{...}{...}`. (So `let days = [{...} {...} {...}]` correctly yields a 3-element array; a stray earlier bug collapsed comma-less object arrays to length 1.)
 
+## GPU safety rules
+
+A page or app must never hang the GPU. A frame that runs past about 2 s makes the operating system reset the GPU for every application, and that closes people's other windows. Shaders (`pixel`, `vertex`) run once per pixel or vertex, on drawables at native resolution: 4-7 Mpx on a retina laptop, 15 Mpx on a 5K screen.
+- **Shader loops have literal bounds**, like `for i in 0..8`, and stay small. A loop bounded by a uniform or by data is capped by the compiler, but every pixel pays for it. A 100-step loop in a full-screen shader is 1.5 billion steps a frame on 5K.
+- **Full-screen effects do constant work per pixel.** No ray march or blur with a data-dependent step count. Take fewer steps in live previews (`self.realtime()`).
+- **No allocation per frame.** Create textures, render targets and big arrays once and reuse them. Never size a target from an animated value.
+- **Generated geometry is bounded and finite.** No NaN or huge coordinates, and no more vertices or instances than the picture shows.
+- **The runtime does not hide mistakes.** A frame the GPU runs for more than 1 s lowers the page's resolution and logs an error. Texture churn and GPU out-of-memory are logged (`makepad_gpu_stats()` on the web). Fix the cause; don't tune around the log.
+
 ## Widget Availability
 
 **Available:** View, RoundedView, SolidView, ScrollYView, Label, TextInput, LinkLabel, Button, ButtonFlat, ButtonFlatter, Slider, CheckBox, CheckBoxFlat, RadioButton, RadioButtonFlat, ToggleFlat, DropDown, TabBar, Tab, PopupMenu, ScrollBar, ScrollBars, LoadingSpinner, Hr, Vr, Icon, Image

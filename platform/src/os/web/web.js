@@ -1,8 +1,12 @@
 import { WasmBridge } from "../makepad_wasm_bridge/wasm_bridge.js"
 
-export const MAKEPAD_WEBGL_PIXEL_BUDGET = 2 * 1024 * 1024;
-export const MAKEPAD_WEBGL_DPR_CEILING = 1.5;
-export const MAKEPAD_WEBGL_PHONE_DPR_CEILING = 1.0;
+// The drawable has no pixel budget and no DPR ceiling of its own: the
+// canvas is the CSS size at the device's pixel ratio, bounded only by the
+// device's reported limits (MAX_TEXTURE_SIZE, MAX_RENDERBUFFER_SIZE,
+// MAX_VIEWPORT_DIMS). A page author can still choose a budget
+// (`renderpixelbudget`) or a ceiling (`maxdpr`) on the canvas; the GPU
+// watchdog lowers the budget only when a frame runs too long.
+export const MAKEPAD_WEBGL_PIXEL_BUDGET = Infinity;
 
 function makepad_positive_number(value, fallback) {
     const number = Number(value);
@@ -30,8 +34,8 @@ export function makepad_compute_webgl_size(
         : 0;
     const max_width = makepad_positive_number(limits.max_width, Number.MAX_SAFE_INTEGER);
     const max_height = makepad_positive_number(limits.max_height, Number.MAX_SAFE_INTEGER);
-    const budget = makepad_positive_number(pixel_budget, MAKEPAD_WEBGL_PIXEL_BUDGET);
-    let scale = makepad_positive_number(scale_ceiling, 1.0);
+    const budget = Number(pixel_budget) > 0 ? Number(pixel_budget) : MAKEPAD_WEBGL_PIXEL_BUDGET;
+    let scale = Number(scale_ceiling) > 0 ? Number(scale_ceiling) : 1.0;
 
     if (logical_width === 0 || logical_height === 0) {
         return {
@@ -76,6 +80,270 @@ export function makepad_compute_webgl_size(
         height: physical_height,
         scale,
     };
+}
+
+// GPU safety (local/agent_state/edits/reports/GPU-SAFETY.md). A page may at
+// worst lose its own context; it must never queue unbounded GPU work, hold a
+// GPU busy for longer than an operating system tolerates, or leak GPU memory
+// unnoticed. Nothing here refuses work or stops drawing, and nothing is a
+// guessed budget: the bounds come from the browser's own frame pipeline, the
+// operating systems' GPU watchdogs and the viewport.
+//
+// Watchdog: one fence per animation frame.
+// - Backpressure: while MAX_FRAMES_IN_FLIGHT frames (the depth of the
+//   browser's own swap chain) are unsignalled, the next animation frame
+//   waits instead of queueing more work, so queued GPU work never grows with
+//   time. The frame is delayed, never dropped.
+// - A frame the GPU is still running after HUNG_FRAME_MS (half of the
+//   shortest operating-system GPU watchdog, Windows' 2 s TDR, after which the
+//   driver resets the device for every application) halves the drawable's
+//   pixels, with one console error per step, down to a quarter of the
+//   viewport's CSS pixels: the content keeps drawing, at fewer pixels.
+// Ordinary GPU-bound slowness (a frame rate below the display's) is the
+// app's to handle (it can scale its own targets); this layer only stands
+// between the page and a device reset.
+export const MAKEPAD_GPU_MAX_FRAMES_IN_FLIGHT = 3;
+export const MAKEPAD_GPU_HUNG_FRAME_MS = 1000;
+
+export function makepad_create_gpu_watchdog() {
+    return {
+        in_flight: [],
+        frames: 0,
+        held_frames: 0,
+        hung_frames: 0,
+        worst_ms: 0,
+        degrade_steps: 0,
+        at_floor_reported: false,
+    };
+}
+
+// Records one completed frame's latency (as seen running). Returns true when
+// the drawable should shrink one step.
+export function makepad_gpu_watchdog_complete(watchdog, latency_ms) {
+    watchdog.frames += 1;
+    if (latency_ms > watchdog.worst_ms) {
+        watchdog.worst_ms = latency_ms;
+    }
+    if (latency_ms > MAKEPAD_GPU_HUNG_FRAME_MS) {
+        watchdog.hung_frames += 1;
+        return true;
+    }
+    return false;
+}
+
+// The pixel budget one degrade step gives: half, but never below a quarter
+// of the viewport's CSS pixels (half its CSS resolution on each axis).
+export function makepad_gpu_degraded_budget(pixel_budget, css_pixels) {
+    const floor = Math.max(1, Math.floor(css_pixels / 4));
+    return Math.max(Math.min(floor, pixel_budget), Math.floor(pixel_budget / 2));
+}
+
+// Ledger: live GPU bytes by object (textures, buffers, renderbuffers), kept
+// by wrapping the context's allocation calls. Accounting only, it never
+// refuses. It reports, once each, with what dominates:
+// - at least one texture allocated per animation frame, on average over a
+//   whole second: a steady frame allocates nothing, so this is a target
+//   re-created per frame (a size that changes each frame) instead of reused;
+// - GL_OUT_OF_MEMORY, the driver's own allocation failure, with the live
+//   bytes at that moment.
+// `makepad_gpu_stats()` on the page gives the numbers to harnesses and the
+// export's browser-safety gate.
+export function makepad_gpu_texel_bytes(gl, internal_format, type) {
+    switch (internal_format) {
+        case gl.RGBA32F: case gl.RGBA32UI: case gl.RGBA32I: return 16;
+        case gl.RGB32F: return 12;
+        case gl.RGBA16F: case gl.RG32F: case gl.RGBA16UI: case gl.RGBA16I: case gl.RG32UI: return 8;
+        case gl.RGB16F: return 6;
+        case gl.R32F: case gl.RG16F: case gl.R32UI: case gl.R32I: case gl.RGB10_A2:
+        case gl.R11F_G11F_B10F: case gl.DEPTH_COMPONENT32F: case gl.DEPTH24_STENCIL8:
+        case gl.DEPTH_COMPONENT24: case gl.DEPTH32F_STENCIL8: return 4;
+        case gl.R16F: case gl.RG8: case gl.DEPTH_COMPONENT16: case gl.R16UI: return 2;
+        case gl.R8: case gl.R8UI: case gl.ALPHA: case gl.LUMINANCE: return 1;
+        default:
+            // RGBA8, SRGB8_ALPHA8 and the unsized formats, whose size the
+            // component type gives.
+            if (type === gl.FLOAT) return 16;
+            if (type === gl.HALF_FLOAT) return 8;
+            return 4;
+    }
+}
+
+export function makepad_create_gpu_ledger() {
+    return {
+        objects: new Map(),
+        bytes: { texture: 0, buffer: 0, renderbuffer: 0 },
+        peak_bytes: 0,
+        allocations: 0,
+        // The current one-second window: its start, animation frames and
+        // texture allocations (by size).
+        window_start: -1,
+        window_frames: 0,
+        window_textures: 0,
+        window_sizes: new Map(),
+        warned_churn: false,
+        warned_oom: false,
+    };
+}
+
+export function makepad_gpu_ledger_total(ledger) {
+    return ledger.bytes.texture + ledger.bytes.buffer + ledger.bytes.renderbuffer;
+}
+
+// Sets the bytes `object` (of `kind`) holds under `part` (a cube face or
+// mip level of a texture; 0 for buffers and renderbuffers).
+export function makepad_gpu_ledger_set(ledger, kind, object, part, bytes) {
+    if (!object || !Number.isFinite(bytes) || bytes < 0) {
+        return;
+    }
+    let entry = ledger.objects.get(object);
+    if (!entry) {
+        entry = { kind, parts: new Map(), bytes: 0 };
+        ledger.objects.set(object, entry);
+    }
+    const old = entry.parts.get(part) || 0;
+    entry.parts.set(part, bytes);
+    entry.bytes += bytes - old;
+    ledger.bytes[kind] += bytes - old;
+    ledger.allocations += 1;
+    const total = makepad_gpu_ledger_total(ledger);
+    if (total > ledger.peak_bytes) {
+        ledger.peak_bytes = total;
+    }
+    if (kind === "texture") {
+        ledger.window_textures += 1;
+        const size_key = `${Math.round(bytes / 1024)} KB`;
+        ledger.window_sizes.set(size_key, (ledger.window_sizes.get(size_key) || 0) + 1);
+    }
+}
+
+// Ends one animation frame at `now` (ms). `gl_error` is the context's
+// getError() for the frame (or 0); `report` takes one message.
+export function makepad_gpu_ledger_frame(ledger, now, gl_error, out_of_memory, report) {
+    if (ledger.window_start < 0) {
+        ledger.window_start = now;
+    }
+    ledger.window_frames += 1;
+    if (now - ledger.window_start >= 1000) {
+        if (!ledger.warned_churn && ledger.window_textures >= ledger.window_frames) {
+            ledger.warned_churn = true;
+            const common = [...ledger.window_sizes.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3)
+                .map(([size, count]) => `${count}x ${size}`).join(", ");
+            report(`makepad: ${ledger.window_textures} textures allocated in ${ledger.window_frames} frames within a second (${common}): a render target re-created each frame (a size that changes every frame?) instead of reused`);
+        }
+        ledger.window_start = now;
+        ledger.window_frames = 0;
+        ledger.window_textures = 0;
+        ledger.window_sizes.clear();
+    }
+    if (gl_error === out_of_memory && out_of_memory !== undefined && !ledger.warned_oom) {
+        ledger.warned_oom = true;
+        const total = makepad_gpu_ledger_total(ledger);
+        report(`makepad: the GPU driver is out of memory (GL_OUT_OF_MEMORY) with ${Math.round(total / 1048576)} MB live on this page (textures ${Math.round(ledger.bytes.texture / 1048576)} MB, buffers ${Math.round(ledger.bytes.buffer / 1048576)} MB, renderbuffers ${Math.round(ledger.bytes.renderbuffer / 1048576)} MB, peak ${Math.round(ledger.peak_bytes / 1048576)} MB)`);
+    }
+}
+
+export function makepad_gpu_ledger_free(ledger, object) {
+    const entry = object && ledger.objects.get(object);
+    if (!entry) {
+        return;
+    }
+    ledger.bytes[entry.kind] -= entry.bytes;
+    ledger.objects.delete(object);
+}
+
+export function makepad_gpu_ledger_stats(ledger) {
+    let textures = 0;
+    for (const entry of ledger.objects.values()) {
+        if (entry.kind === "texture") textures += 1;
+    }
+    return {
+        live_bytes: makepad_gpu_ledger_total(ledger),
+        texture_bytes: ledger.bytes.texture,
+        buffer_bytes: ledger.bytes.buffer,
+        renderbuffer_bytes: ledger.bytes.renderbuffer,
+        live_textures: textures,
+        peak_bytes: ledger.peak_bytes,
+        allocations: ledger.allocations,
+    };
+}
+
+// Wraps `gl`'s allocation calls so `ledger` follows every live byte. The
+// wrapped calls behave exactly as before (the ledger never refuses).
+export function makepad_install_gpu_ledger(gl, ledger) {
+    const wrap = (name, before) => {
+        const original = gl[name];
+        if (typeof original !== "function") {
+            return;
+        }
+        gl[name] = function (...args) {
+            try {
+                before(args);
+            } catch (_error) {
+            }
+            return original.apply(gl, args);
+        };
+    };
+    const texture_binding = (target) => {
+        if (target === gl.TEXTURE_2D) return gl.getParameter(gl.TEXTURE_BINDING_2D);
+        if (target === gl.TEXTURE_3D) return gl.getParameter(gl.TEXTURE_BINDING_3D);
+        if (target === gl.TEXTURE_2D_ARRAY) return gl.getParameter(gl.TEXTURE_BINDING_2D_ARRAY);
+        if (target === gl.TEXTURE_CUBE_MAP || (target >= gl.TEXTURE_CUBE_MAP_POSITIVE_X && target <= gl.TEXTURE_CUBE_MAP_NEGATIVE_Z)) {
+            return gl.getParameter(gl.TEXTURE_BINDING_CUBE_MAP);
+        }
+        return null;
+    };
+    const buffer_binding = (target) => {
+        if (target === gl.ARRAY_BUFFER) return gl.getParameter(gl.ARRAY_BUFFER_BINDING);
+        if (target === gl.ELEMENT_ARRAY_BUFFER) return gl.getParameter(gl.ELEMENT_ARRAY_BUFFER_BINDING);
+        if (target === gl.UNIFORM_BUFFER) return gl.getParameter(gl.UNIFORM_BUFFER_BINDING);
+        if (target === gl.PIXEL_PACK_BUFFER) return gl.getParameter(gl.PIXEL_PACK_BUFFER_BINDING);
+        if (target === gl.PIXEL_UNPACK_BUFFER) return gl.getParameter(gl.PIXEL_UNPACK_BUFFER_BINDING);
+        if (target === gl.COPY_READ_BUFFER) return gl.getParameter(gl.COPY_READ_BUFFER_BINDING);
+        if (target === gl.COPY_WRITE_BUFFER) return gl.getParameter(gl.COPY_WRITE_BUFFER_BINDING);
+        return null;
+    };
+    // Mip levels below the base add a third (texStorage) or their own size.
+    wrap("texStorage2D", ([target, levels, format, width, height]) => {
+        const bytes = width * height * makepad_gpu_texel_bytes(gl, format, 0) * (levels > 1 ? 4 / 3 : 1);
+        const faces = target === gl.TEXTURE_CUBE_MAP ? 6 : 1;
+        makepad_gpu_ledger_set(ledger, "texture", texture_binding(target), "storage", bytes * faces);
+    });
+    wrap("texStorage3D", ([target, levels, format, width, height, depth]) => {
+        const bytes = width * height * depth * makepad_gpu_texel_bytes(gl, format, 0) * (levels > 1 ? 4 / 3 : 1);
+        makepad_gpu_ledger_set(ledger, "texture", texture_binding(target), "storage", bytes);
+    });
+    wrap("texImage2D", (args) => {
+        // The (target, level, internalformat, width, height, ...) forms;
+        // the DOM-source forms (6 arguments) take the source's size.
+        let [target, level, format, width, height] = args;
+        let type = args[7];
+        if (args.length === 6) {
+            const source = args[5];
+            width = source && (source.videoWidth || source.naturalWidth || source.width);
+            height = source && (source.videoHeight || source.naturalHeight || source.height);
+            type = args[4];
+        }
+        if (!Number.isFinite(width) || !Number.isFinite(height)) {
+            return;
+        }
+        const bytes = width * height * makepad_gpu_texel_bytes(gl, format, type);
+        makepad_gpu_ledger_set(ledger, "texture", texture_binding(target), `${target}:${level}`, bytes);
+    });
+    wrap("deleteTexture", ([texture]) => makepad_gpu_ledger_free(ledger, texture));
+    wrap("bufferData", ([target, data_or_size]) => {
+        const bytes = typeof data_or_size === "number" ? data_or_size : (data_or_size ? data_or_size.byteLength : 0);
+        makepad_gpu_ledger_set(ledger, "buffer", buffer_binding(target), 0, bytes);
+    });
+    wrap("deleteBuffer", ([buffer]) => makepad_gpu_ledger_free(ledger, buffer));
+    wrap("renderbufferStorage", ([_target, format, width, height]) => {
+        const bytes = width * height * makepad_gpu_texel_bytes(gl, format, 0);
+        makepad_gpu_ledger_set(ledger, "renderbuffer", gl.getParameter(gl.RENDERBUFFER_BINDING), 0, bytes);
+    });
+    wrap("renderbufferStorageMultisample", ([_target, samples, format, width, height]) => {
+        const bytes = width * height * makepad_gpu_texel_bytes(gl, format, 0) * Math.max(1, samples);
+        makepad_gpu_ledger_set(ledger, "renderbuffer", gl.getParameter(gl.RENDERBUFFER_BINDING), 0, bytes);
+    });
+    wrap("deleteRenderbuffer", ([renderbuffer]) => makepad_gpu_ledger_free(ledger, renderbuffer));
 }
 
 const MAKEPAD_CRASH_MAX_REPORTS = 20;
@@ -1214,6 +1482,12 @@ export class WasmWebBrowser extends WasmBridge {
             if (this.xr !== undefined) {
                 return
             }
+            if (this.gpu_watchdog_hold()) {
+                // The GPU is still on earlier frames: no new work until it
+                // drains (the frame is only delayed, never dropped).
+                this.FromWasmRequestAnimationFrame();
+                return
+            }
             this.gpu_timer_poll();
             const gpu_query = this.gpu_timer_begin();
             this.to_wasm.ToWasmAnimationFrame({ time: time / 1000.0 });
@@ -1221,7 +1495,129 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
             this.in_animation_frame = false;
             this.gpu_timer_end(gpu_query);
+            this.gpu_watchdog_submit();
         })
+    }
+
+    // GPU watchdog (see makepad_create_gpu_watchdog): polls the frames in
+    // flight; true while too many are, so this animation frame waits.
+    gpu_watchdog_hold() {
+        const gl = this.gl;
+        if (!gl || this.webgl_context_lost || typeof gl.fenceSync !== "function") {
+            return false;
+        }
+        if (!this.gpu_watchdog) {
+            this.gpu_watchdog = makepad_create_gpu_watchdog();
+        }
+        const watchdog = this.gpu_watchdog;
+        const now = performance.now();
+        // A frame's latency is what was SEEN: the last poll that found it
+        // still running, minus its submission. An idle page (no animation
+        // frames for a while) therefore never reads as a slow GPU.
+        while (watchdog.in_flight.length > 0) {
+            const frame = watchdog.in_flight[0];
+            const signalled = gl.getSyncParameter(frame.sync, gl.SYNC_STATUS) === gl.SIGNALED;
+            if (!signalled) {
+                for (const queued of watchdog.in_flight) {
+                    queued.seen_running = now;
+                }
+                // A frame far past the hang bound degrades once while it
+                // is still running, not only when it ends.
+                if (!frame.flagged && now - frame.submitted > MAKEPAD_GPU_HUNG_FRAME_MS) {
+                    frame.flagged = true;
+                    this.gpu_watchdog_degrade(now - frame.submitted);
+                }
+                break;
+            }
+            watchdog.in_flight.shift();
+            gl.deleteSync(frame.sync);
+            const latency = frame.seen_running > 0 ? frame.seen_running - frame.submitted : 0;
+            if (makepad_gpu_watchdog_complete(watchdog, latency) && !frame.flagged) {
+                this.gpu_watchdog_degrade(latency);
+            }
+        }
+        if (watchdog.in_flight.length >= MAKEPAD_GPU_MAX_FRAMES_IN_FLIGHT) {
+            watchdog.held_frames += 1;
+            return true;
+        }
+        return false;
+    }
+
+    gpu_watchdog_submit() {
+        const gl = this.gl;
+        const watchdog = this.gpu_watchdog;
+        if (!gl || !watchdog || this.webgl_context_lost) {
+            return;
+        }
+        const now = performance.now();
+        if (this.gpu_ledger) {
+            // The driver's own allocation failure, read at most once a
+            // second (getError waits for the GPU process).
+            let error = 0;
+            if (!(now - (this.gpu_ledger_error_checked || 0) < 1000)) {
+                this.gpu_ledger_error_checked = now;
+                error = gl.getError();
+            }
+            makepad_gpu_ledger_frame(this.gpu_ledger, now, error, gl.OUT_OF_MEMORY, (message) => makepad_page_console.error(message));
+        }
+        const sync = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
+        if (sync) {
+            gl.flush();
+            watchdog.in_flight.push({ sync, submitted: now, seen_running: 0, flagged: false });
+        }
+    }
+
+    // One step down in drawable pixels, with one console error per step.
+    gpu_watchdog_degrade(latency_ms) {
+        const watchdog = this.gpu_watchdog;
+        const quality = this.ensure_render_quality();
+        const canvas_pixels = this.canvas ? this.canvas.width * this.canvas.height : Infinity;
+        const budget = Math.min(quality.pixel_budget, canvas_pixels);
+        const info = this.window_info || {};
+        const css_pixels = (info.inner_width || 0) * (info.inner_height || 0);
+        const next = makepad_gpu_degraded_budget(budget, css_pixels);
+        if (next >= budget) {
+            if (!watchdog.at_floor_reported) {
+                watchdog.at_floor_reported = true;
+                makepad_page_console.error(`makepad: a GPU frame ran ${Math.round(latency_ms)} ms at the smallest drawable (${budget} pixels): this content is too heavy for this GPU`);
+            }
+            return;
+        }
+        watchdog.degrade_steps += 1;
+        makepad_page_console.error(`makepad: a GPU frame ran ${Math.round(latency_ms)} ms, over the ${MAKEPAD_GPU_HUNG_FRAME_MS} ms that keeps clear of the operating systems' GPU reset: the drawable drops from ${budget} to ${next} pixels`);
+        quality.pixel_budget = next;
+        if (this.handlers && this.handlers.on_screen_resize) {
+            this.handlers.on_screen_resize();
+        }
+    }
+
+    // Follows the context's live GPU bytes from its creation on (see
+    // makepad_install_gpu_ledger), and publishes `makepad_gpu_stats()`.
+    install_gpu_ledger(gl) {
+        if (this.gpu_ledger || !gl) {
+            return;
+        }
+        this.gpu_ledger = makepad_create_gpu_ledger();
+        makepad_install_gpu_ledger(gl, this.gpu_ledger);
+        if (typeof window !== "undefined" && window && !window.makepad_gpu_stats) {
+            window.makepad_gpu_stats = () => this.gpu_safety_stats();
+        }
+    }
+
+    // What the GPU safety layer saw: for test harnesses and the export's
+    // browser-safety gate (`makepad_gpu_stats()` on the page).
+    gpu_safety_stats() {
+        const watchdog = this.gpu_watchdog || makepad_create_gpu_watchdog();
+        return {
+            frames: watchdog.frames,
+            held_frames: watchdog.held_frames,
+            hung_frames: watchdog.hung_frames,
+            worst_frame_ms: Math.round(watchdog.worst_ms),
+            degrade_steps: watchdog.degrade_steps,
+            // null: no budget (the device's limits only).
+            pixel_budget: Number.isFinite(this.ensure_render_quality().pixel_budget) ? this.ensure_render_quality().pixel_budget : null,
+            ledger: this.gpu_ledger ? makepad_gpu_ledger_stats(this.gpu_ledger) : null,
+        };
     }
 
     // Frame GPU time (gpu_frame_timer): one TIME_ELAPSED query around each
@@ -3267,14 +3663,11 @@ export class WasmWebBrowser extends WasmBridge {
             const attribute = canvas.getAttribute(name);
             return makepad_positive_number(attribute, fallback);
         };
-        const phone_ceiling = WasmBridge.is_phone()
-            ? MAKEPAD_WEBGL_PHONE_DPR_CEILING
-            : MAKEPAD_WEBGL_DPR_CEILING;
-        // These optional attributes are escape hatches for deliberately
-        // quality-tuned embeds; conservative defaults protect ordinary apps.
+        // Optional page-author choices; without them the drawable follows
+        // the device (see MAKEPAD_WEBGL_PIXEL_BUDGET).
         this.render_quality = {
             pixel_budget: read_number("renderpixelbudget", MAKEPAD_WEBGL_PIXEL_BUDGET),
-            dpr_ceiling: read_number("maxdpr", phone_ceiling),
+            dpr_ceiling: read_number("maxdpr", Infinity),
         };
         return this.render_quality;
     }

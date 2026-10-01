@@ -222,7 +222,7 @@ test("valid BGRA, odd-width R8, RGBA32F, and cube uploads preserve their formats
   assert.equal(cube.textures[4]._texture_target, cube.gl.TEXTURE_CUBE_MAP);
 });
 
-test("64 MiB is admitted exactly and format/cube byte accounting rejects the next allocation", () => {
+test("format and cube byte accounting, with no byte cap of the runtime's own", () => {
   const s = subject(4);
   s.memory.buffer = { byteLength: 64 * 1024 * 1024 + 4 };
   const bgra_boundary = s.admit_texture_upload(
@@ -261,6 +261,7 @@ test("64 MiB is admitted exactly and format/cube byte accounting rejects the nex
     },
   ).allocation_bytes, 64 * 1024 * 1024);
 
+  s.memory.buffer = { byteLength: 2048 * 2048 * 6 * 4 + 4 };
   assert.equal(s.admit_texture_upload(
     upload_args(4, 2048, 2048, 4, 2048 * 2048 * 6),
     {
@@ -270,7 +271,7 @@ test("64 MiB is admitted exactly and format/cube byte accounting rejects the nex
       element_size: 4,
       nearest: false,
     },
-  ), null);
+  ).allocation_bytes, 96 * 1024 * 1024);
   assert.equal(s.gl.calls.create, 0);
 });
 
@@ -541,8 +542,9 @@ test("video dimensions are admitted before GL and cached storage uses sub-images
     video: {
       readyState: 2,
       currentTime: 0,
-      videoWidth: 8192,
-      videoHeight: 8192,
+      // Over the device's MAX_TEXTURE_SIZE (8192 in this subject).
+      videoWidth: 8193,
+      videoHeight: 8193,
     },
     video_id_lo: 1,
     video_id_hi: 0,

@@ -167,13 +167,14 @@ const web_gl = load_web_gl(
   gl_console,
 );
 
-function assert_bounded(size, budget = web.MAKEPAD_WEBGL_PIXEL_BUDGET) {
+function assert_bounded(size, budget = web.MAKEPAD_WEBGL_PIXEL_BUDGET, limits = { max_width: 8192, max_height: 8192 }) {
   assert.ok(size.width * size.height <= budget);
+  assert.ok(size.width <= limits.max_width && size.height <= limits.max_height);
   assert.equal(size.width, Math.floor(size.logical_width * size.scale));
   assert.equal(size.height, Math.floor(size.logical_height * size.scale));
 }
 
-test("large, retina, phone, and hidden viewports use a uniform bounded DPI", () => {
+test("large, retina, phone, and hidden viewports use a uniform DPI within the device limits", () => {
   const limits = { max_width: 8192, max_height: 8192 };
 
   const large = web.makepad_compute_webgl_size(10000, 10000, 1.5, limits);
@@ -193,8 +194,13 @@ test("large, retina, phone, and hidden viewports use a uniform bounded DPI", () 
     canvas: { getAttribute() { return null; } },
     render_quality: null,
   });
-  assert.equal(phone_browser.ensure_render_quality().dpr_ceiling, 1.0);
+  // No DPR ceiling of its own: the device's pixel ratio, phone or not.
+  assert.equal(phone_browser.ensure_render_quality().dpr_ceiling, Infinity);
+  assert.equal(phone_browser.ensure_render_quality().pixel_budget, Infinity);
   MockWasmBridge.phone = false;
+  // A page author's budget still bounds the drawable.
+  const budgeted = web.makepad_compute_webgl_size(1920, 1080, 2, limits, 1024 * 1024);
+  assert_bounded(budgeted, 1024 * 1024);
 
   const hidden = web.makepad_compute_webgl_size(0, Number.NaN, 1.5, limits);
   assert.deepEqual([hidden.width, hidden.height], [0, 0]);
@@ -234,8 +240,9 @@ test("canvas pixels and WASM window info receive the same effective DPI", () => 
 });
 
 test("unchanged canvas dimensions do not reallocate its backbuffer", () => {
-  let width = 960;
-  let height = 720;
+  // 640x480 CSS pixels at the window's device pixel ratio of 2.
+  let width = 1280;
+  let height = 960;
   let width_sets = 0;
   let height_sets = 0;
   const canvas = {
