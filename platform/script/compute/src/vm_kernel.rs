@@ -43,6 +43,11 @@ pub enum Decl {
     /// emitted per element, at most `capacity` each.
     EmitBuffer { name: String, record: Record, capacity: u32, buffer: Option<String> },
     Param { name: String, default: f32, range: Option<(f32, f32)> },
+    /// A record type: its fields and their zero values, in order
+    /// (`struct Name {a: 0.0, b: vec3(0.0)}`).
+    Struct { name: String, fields: Vec<(String, String)> },
+    /// A constant table of an element type (`let Name: i32 = [..]`).
+    Table { name: String, ty: String, values: Vec<String> },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -54,7 +59,7 @@ pub enum Record {
 impl Decl {
     pub fn name(&self) -> &str {
         match self {
-            Decl::Input { name, .. } | Decl::Output { name, .. } | Decl::EmitBuffer { name, .. } | Decl::Param { name, .. } => name,
+            Decl::Input { name, .. } | Decl::Output { name, .. } | Decl::EmitBuffer { name, .. } | Decl::Param { name, .. } | Decl::Struct { name, .. } | Decl::Table { name, .. } => name,
         }
     }
 }
@@ -118,6 +123,12 @@ pub struct KernelSource {
     pub text: String,
     /// (start in `text`, the fn's document location) per compiled-in fn.
     chunks: Vec<(usize, String, u32, u32)>,
+    /// The names the compiled-in fns use that none of them binds itself
+    /// (a parameter, a `let`, `var` or loop variable), in first-use order:
+    /// the declarations, the kernel's own inputs (`time`, …), and names
+    /// nothing declares (a host may declare those it provides, such as
+    /// signals, and build again).
+    pub free: Vec<String>,
 }
 
 impl KernelSource {
@@ -247,6 +258,13 @@ pub fn kernel_source(vm: &ScriptVm, k: &VmKernel) -> Result<KernelSource, Shader
                 let r = range.map(|(lo, hi)| format!(", {lo:?}, {hi:?}")).unwrap_or_default();
                 let _ = writeln!(text, "let {name} = param({default:?}{r})");
             }
+            Decl::Struct { name, fields } => {
+                let fields: Vec<String> = fields.iter().map(|(k, v)| format!("{k}: {v}")).collect();
+                let _ = writeln!(text, "struct {name} {{{}}}", fields.join(", "));
+            }
+            Decl::Table { name, ty, values } => {
+                let _ = writeln!(text, "let {name}: {ty} = [{}]", values.join(", "));
+            }
         }
     }
     // The entry, then what it reaches (breadth first; each name once).
@@ -262,6 +280,7 @@ pub fn kernel_source(vm: &ScriptVm, k: &VmKernel) -> Result<KernelSource, Shader
     }
     let mut emitted: HashSet<String> = HashSet::new();
     let mut consts = String::new();
+    let mut free: Vec<String> = Vec::new();
     while let Some((f, name, loc, src)) = todo.pop() {
         emitted.insert(name.clone());
         let _ = write!(text, "fn {name}");
@@ -269,10 +288,40 @@ pub fn kernel_source(vm: &ScriptVm, k: &VmKernel) -> Result<KernelSource, Shader
         text.push_str(&src);
         text.push('\n');
         let toks = crate::parse::lex(&src).map_err(|e| ShaderError::new(e.start, e.end, format!("{name}: {}", e.message)))?;
+        // The names this fn binds: its parameters (the text starts at its
+        // parameter list) and its `let`, `var` and loop variables.
+        let mut bound: HashSet<&str> = HashSet::new();
+        let params_end = toks.iter().position(|t| t.tk == crate::parse::Tk::Punct(")")).unwrap_or(0);
+        for (n, t) in toks.iter().enumerate() {
+            match &t.tk {
+                // A parameter, not its type (`uv: vec2`).
+                crate::parse::Tk::Ident(id) if n > 0 && n < params_end && toks[n - 1].tk != crate::parse::Tk::Punct(":") => {
+                    bound.insert(id);
+                }
+                crate::parse::Tk::Ident(kw) if kw == "let" || kw == "var" || kw == "for" => {
+                    if let Some(crate::parse::Token { tk: crate::parse::Tk::Ident(id), .. }) = toks.get(n + 1) {
+                        bound.insert(id);
+                    }
+                }
+                _ => {}
+            }
+        }
         for (n, t) in toks.iter().enumerate() {
             let crate::parse::Tk::Ident(id) = &t.tk else { continue };
             let after_dot = n > 0 && toks[n - 1].tk == crate::parse::Tk::Punct(".");
-            if after_dot || KEYWORDS.contains(&id.as_str()) || known.contains(id) || emitted.contains(id) {
+            if after_dot || KEYWORDS.contains(&id.as_str()) {
+                continue;
+            }
+            // A name the fn binds itself is its own, not the VM's (unless it
+            // is called: `let lift = lift(g)`).
+            let called = toks.get(n + 1).is_some_and(|t| t.tk == crate::parse::Tk::Punct("("));
+            if bound.contains(id.as_str()) && !called {
+                continue;
+            }
+            if !free.contains(id) {
+                free.push(id.clone());
+            }
+            if known.contains(id) || emitted.contains(id) {
                 continue;
             }
             let value = vm.bx.heap.scope_value(f, LiveId::from_str(id), NoTrap);
@@ -297,7 +346,9 @@ pub fn kernel_source(vm: &ScriptVm, k: &VmKernel) -> Result<KernelSource, Shader
         c.0 += consts.len();
     }
     consts.push_str(&text);
-    Ok(KernelSource { text: consts, chunks })
+    // A free name that is a compiled-in fn is not free.
+    free.retain(|n| !emitted.contains(n));
+    Ok(KernelSource { text: consts, chunks, free })
 }
 
 /// Compiles a kernel made from Splash values (see the module docs). The
@@ -361,10 +412,19 @@ pub fn script_mod(vm: &mut ScriptVm, layouts: &[Layout]) {
     vm.add_method(m, id_lut!(param), script_args!(default = NIL, min = NIL, max = NIL), |vm, args| {
         decl(vm, id!(param), args, &[id!(default), id!(min), id!(max)])
     });
+    // `record({a: 0.0 b: vec3(0.0)})`: a record type, its fields' zero
+    // values in order.
+    vm.add_method(m, id_lut!(record), script_args!(fields = NIL), |vm, args| decl(vm, id!(record), args, &[id!(fields)]));
+    // `table(i32, [0, 1, 3])`: a constant table.
+    vm.add_method(m, id_lut!(table), script_args!(ty = NIL, values = NIL), |vm, args| decl(vm, id!(table), args, &[id!(ty), id!(values)]));
 }
 
-/// An element type value's name: a pod type or a registered layout.
+/// An element type value's name: a pod type, a registered layout, or a
+/// record type the kernel declares, by name (`@Seg`).
 fn type_name(vm: &ScriptVm, v: ScriptValue) -> Option<String> {
+    if let Some(id) = v.as_id() {
+        return Some(id.to_string());
+    }
     if let Some(o) = v.as_object() {
         if let Some(id) = vm.bx.heap.value(o, id!(kernel_layout).into(), NoTrap).as_id() {
             return Some(id.to_string());
@@ -375,7 +435,8 @@ fn type_name(vm: &ScriptVm, v: ScriptValue) -> Option<String> {
     Some(
         match vm.bx.heap.pod_type_ref(ty).ty {
             P::F32 => "f32",
-            P::I32 | P::U32 => "i32",
+            P::I32 => "i32",
+            P::U32 => "u32",
             P::Vec(V::Vec2f) => "vec2",
             P::Vec(V::Vec3f) => "vec3",
             P::Vec(V::Vec4f) => "vec4",
@@ -384,6 +445,76 @@ fn type_name(vm: &ScriptVm, v: ScriptValue) -> Option<String> {
         }
         .to_string(),
     )
+}
+
+/// The declaration a value of `mod.kernel` makes under `name` (`input(..)`,
+/// `output(..)`, `emit_buffer(..)`, `param(..)`, `record(..)`, `table(..)`);
+/// None for any other value.
+pub fn read_decl(vm: &ScriptVm, name: &str, v: ScriptValue) -> Result<Option<Decl>, String> {
+    let Some(o) = v.as_object() else { return Ok(None) };
+    let Some(kind) = vm.bx.heap.value(o, id!(kernel_decl).into(), NoTrap).as_id() else { return Ok(None) };
+    let name = name.to_string();
+    let get = |k: LiveId| vm.bx.heap.value(o, k.into(), NoTrap);
+    let count = |k: LiveId| -> Result<Option<u32>, String> {
+        let v = get(k);
+        if v.is_nil() {
+            return Ok(None);
+        }
+        match v.as_number() {
+            Some(x) if x >= 0.0 && x.fract() == 0.0 && x < 16_777_216.0 => Ok(Some(x as u32)),
+            _ => Err(format!("{name}: {k} is a whole number")),
+        }
+    };
+    let buffer = || vm.bx.heap.string_with(get(id!(buffer)), |_, s| s.to_string());
+    let number = |k: LiveId| get(k).as_number().map(|x| x as f32);
+    Ok(Some(if kind == id!(input) || kind == id!(output) {
+        let ty = type_name(vm, get(id!(ty))).ok_or_else(|| format!("{name}: the element type (f32, i32, u32, vec2, vec3, vec4, mat4, a layout or a record @Name)"))?;
+        let (stride, offset, buffer) = (count(id!(stride))?, count(id!(offset))?, buffer());
+        if kind == id!(input) {
+            Decl::Input { name, ty, stride, offset, buffer }
+        } else {
+            Decl::Output { name, ty, stride, offset, buffer }
+        }
+    } else if kind == id!(emit_buffer) {
+        let record = match type_name(vm, get(id!(ty))) {
+            Some(t) => Record::Type(t),
+            None => Record::Words(count(id!(ty))?.ok_or_else(|| format!("{name}: the record type or width"))?),
+        };
+        let capacity = count(id!(slots))?.ok_or_else(|| format!("{name}: the slots per element"))?;
+        Decl::EmitBuffer { name, record, capacity, buffer: buffer() }
+    } else if kind == id!(record) {
+        let f = get(id!(fields)).as_object().ok_or_else(|| format!("{name}: record({{field: zero value ..}})"))?;
+        let mut fields = Vec::new();
+        let mut err = None;
+        vm.bx.heap.object_data(f).map_iter_ordered(|k, v| {
+            let Some(k) = k.as_id() else { return };
+            match constant(vm, v) {
+                Some(c) => fields.push((k.to_string(), c)),
+                None => err = Some(format!("{name}.{k}: a record field's zero value is a number or a vec2/3/4")),
+            }
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+        Decl::Struct { name, fields }
+    } else if kind == id!(table) {
+        let ty = type_name(vm, get(id!(ty))).ok_or_else(|| format!("{name}: table(type, [values])"))?;
+        let a = get(id!(values)).as_array().ok_or_else(|| format!("{name}: table(type, [values])"))?;
+        let int = ty == "i32" || ty == "u32";
+        let mut values = Vec::new();
+        for i in 0..vm.bx.heap.array_len(a) {
+            let x = vm.bx.heap.array_index(a, i, NoTrap).as_number().ok_or_else(|| format!("{name}[{i}]: a number"))?;
+            values.push(if int { format!("{}", x as i64) } else { constant(vm, x.into()).unwrap_or_default() });
+        }
+        Decl::Table { name, ty, values }
+    } else {
+        let default = number(id!(default)).ok_or_else(|| format!("{name}: param(default [, min, max]) takes numbers"))?;
+        let range = match (number(id!(min)), number(id!(max))) {
+            (Some(lo), Some(hi)) => Some((lo, hi)),
+            _ => None,
+        };
+        Decl::Param { name, default, range }
+    }))
 }
 
 /// The kernel a Splash object declares (see [`script_mod`]): its
@@ -419,44 +550,9 @@ pub fn from_object(vm: &ScriptVm, obj: ScriptObject) -> Result<VmKernel, String>
             };
             continue;
         }
-        let Some(o) = v.as_object() else { continue };
-        let Some(kind) = vm.bx.heap.value(o, id!(kernel_decl).into(), NoTrap).as_id() else { continue };
-        let get = |k: LiveId| vm.bx.heap.value(o, k.into(), NoTrap);
-        let count = |k: LiveId| -> Result<Option<u32>, String> {
-            let v = get(k);
-            if v.is_nil() {
-                return Ok(None);
-            }
-            match v.as_number() {
-                Some(x) if x >= 0.0 && x.fract() == 0.0 && x < 16_777_216.0 => Ok(Some(x as u32)),
-                _ => Err(format!("{name}: {k} is a whole number")),
-            }
-        };
-        let buffer = || vm.bx.heap.string_with(get(id!(buffer)), |_, s| s.to_string());
-        let number = |k: LiveId| get(k).as_number().map(|x| x as f32);
-        decls.push(if kind == id!(input) || kind == id!(output) {
-            let ty = type_name(vm, get(id!(ty))).ok_or_else(|| format!("{name}: the element type (f32, i32, vec2, vec3, vec4, mat4 or a layout)"))?;
-            let (stride, offset, buffer) = (count(id!(stride))?, count(id!(offset))?, buffer());
-            if kind == id!(input) {
-                Decl::Input { name, ty, stride, offset, buffer }
-            } else {
-                Decl::Output { name, ty, stride, offset, buffer }
-            }
-        } else if kind == id!(emit_buffer) {
-            let record = match type_name(vm, get(id!(ty))) {
-                Some(t) => Record::Type(t),
-                None => Record::Words(count(id!(ty))?.ok_or_else(|| format!("{name}: the record type or width"))?),
-            };
-            let capacity = count(id!(slots))?.ok_or_else(|| format!("{name}: the slots per element"))?;
-            Decl::EmitBuffer { name, record, capacity, buffer: buffer() }
-        } else {
-            let default = number(id!(default)).ok_or_else(|| format!("{name}: param(default [, min, max]) takes numbers"))?;
-            let range = match (number(id!(min)), number(id!(max))) {
-                (Some(lo), Some(hi)) => Some((lo, hi)),
-                _ => None,
-            };
-            Decl::Param { name, default, range }
-        });
+        if let Some(d) = read_decl(vm, &name, v)? {
+            decls.push(d);
+        }
     }
     let (entry, entry_fn) = entry.ok_or("missing kernel entry: element, vertex, instance, primitive or reduce_sum / reduce_min / reduce_max")?;
     Ok(VmKernel { decls, entry, entry_fn, math, uses: Vec::new(), bind: Vec::new() })
