@@ -318,10 +318,17 @@ pub fn top_use(vm: &mut ScriptVm) -> Vec<BlockUse> {
         out.push(BlockUse { file: script_mod.file.clone(), line: script_mod.line, column: script_mod.column, code: script_mod.code.clone(), statements });
     }
     // A block's last statement stays: a block that ends in a `use` and a
-    // lone `;` (or nothing) does not evaluate.
+    // lone `;` (or nothing) does not evaluate. So does a definition that is
+    // a Rust type's registration (`= #(..)`, `= set_type_default() do
+    // #(..)`): Rust checks fields against the type by that object.
     for block in &mut out {
-        if let Some((_, used)) = block.statements.last_mut() {
-            if *used == Some(false) {
+        let code = block.code.clone();
+        let last = block.statements.len().saturating_sub(1);
+        for (i, (s, used)) in block.statements.iter_mut().enumerate() {
+            let text = &code[s.start..s.end];
+            let rhs = text.split_once('=').map(|(_, r)| r.trim_start()).unwrap_or("");
+            let registers = rhs.starts_with("#(") || rhs.starts_with("set_type_default() do #(");
+            if *used == Some(false) && (i == last || registers) {
                 *used = Some(true);
             }
         }
