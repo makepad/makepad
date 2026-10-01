@@ -896,10 +896,10 @@ impl Cx {
             height: (pass_size.y * dpi_factor) as usize
         });*/
 
-        let mut color_targets = [WColorTarget::default()];
+        let mut color_targets: Vec<WColorTarget> = Vec::new();
         let mut depth_target = WDepthTarget::default();
 
-        for (index, color_texture) in self.passes[draw_pass_id].color_textures.iter().enumerate() {
+        for color_texture in self.passes[draw_pass_id].color_textures.iter() {
             let size = pass_size * dpi_factor;
             self.textures[color_texture.texture.texture_id()]
                 .alloc_render(size.x as usize, size.y as usize);
@@ -913,20 +913,20 @@ impl Cx {
             };
             match color_texture.clear_color {
                 DrawPassClearColor::InitWith(clear_color) => {
-                    color_targets[index] = WColorTarget {
+                    color_targets.push(WColorTarget {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: true,
                         clear_color: clear_color.into(),
                         format,
-                    };
+                    });
                 }
                 DrawPassClearColor::ClearWith(clear_color) => {
-                    color_targets[index] = WColorTarget {
+                    color_targets.push(WColorTarget {
                         texture_id: color_texture.texture.texture_id().0,
                         init_only: false,
                         clear_color: clear_color.into(),
                         format,
-                    };
+                    });
                 }
             }
         }

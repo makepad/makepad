@@ -2796,6 +2796,8 @@ export class WasmWebGL extends WasmWebBrowser {
     let clear_color = { r: 0, g: 0, b: 0, a: 0 };
     let allocation_changed = false;
     const color_attachments = [];
+    // Several color targets (MRT): each clears to its own color.
+    const color_clears = [];
 
     for (let i = 0; i < args.color_targets.length; i++) {
       let tgt = args.color_targets[i];
@@ -2821,6 +2823,7 @@ export class WasmWebGL extends WasmWebBrowser {
         this.clear_texture_upload_allocation(gl_tex);
 
         clear_flags |= gl.COLOR_BUFFER_BIT;
+        color_clears.push(i);
 
         gl_tex._width = render_width;
         gl_tex._height = render_height;
@@ -2866,15 +2869,26 @@ export class WasmWebGL extends WasmWebBrowser {
         }
       } else if (!tgt.init_only) {
         clear_flags |= gl.COLOR_BUFFER_BIT;
+        color_clears.push(i);
       }
 
       gl.framebufferTexture2D(
         gl.FRAMEBUFFER,
-        gl.COLOR_ATTACHMENT0,
+        gl.COLOR_ATTACHMENT0 + i,
         gl.TEXTURE_2D,
         gl_tex,
         0,
       );
+    }
+    // Attachments a previous use of this framebuffer had beyond this pass's.
+    const previous_count = Array.isArray(gl_framebuffer._color_attachments)
+      ? gl_framebuffer._color_attachments.length
+      : 0;
+    for (let i = args.color_targets.length; i < previous_count; i++) {
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0 + i, gl.TEXTURE_2D, null, 0);
+    }
+    if (args.color_targets.length !== 1 || previous_count > 1) {
+      gl.drawBuffers(args.color_targets.map((_, i) => gl.COLOR_ATTACHMENT0 + i));
     }
     // Depth target: a real depth/stencil texture, so a texture pass
     // depth-tests exactly like the canvas and like Metal. Without it every
@@ -2990,9 +3004,19 @@ export class WasmWebGL extends WasmWebBrowser {
       // glClear honours the depth mask; the previous draw call may have
       // left it off.
       gl.depthMask(true);
-      gl.clearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
       gl.clearDepth(clear_depth);
-      gl.clear(clear_flags);
+      if (args.color_targets.length > 1) {
+        for (const i of color_clears) {
+          const c = args.color_targets[i].clear_color;
+          gl.clearBufferfv(gl.COLOR, i, [c.r, c.g, c.b, c.a]);
+        }
+        if ((clear_flags & ~gl.COLOR_BUFFER_BIT) !== 0) {
+          gl.clear(clear_flags & ~gl.COLOR_BUFFER_BIT);
+        }
+      } else {
+        gl.clearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+        gl.clear(clear_flags);
+      }
     }
     } catch (error) {
       this.reject_render_target(

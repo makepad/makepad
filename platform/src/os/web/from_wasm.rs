@@ -460,7 +460,8 @@ pub struct FromWasmBeginRenderTexture {
     pub pass_id: usize,
     pub width: usize,
     pub height: usize,
-    pub color_targets: [WColorTarget; 1],
+    /// One per color attachment (several: MRT, written through drawBuffers).
+    pub color_targets: Vec<WColorTarget>,
     pub depth_target: WDepthTarget,
 }
 
