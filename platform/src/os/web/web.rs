@@ -615,6 +615,13 @@ impl Cx {
                     let tw = ToWasmWebGLShadersDone::read_to_wasm(&mut to_wasm);
                     self.os.webgl_shaders_pending =
                         self.os.webgl_shaders_pending.saturating_sub(tw.count);
+                    self.os.webgl_shaders_waiting =
+                        self.os.webgl_shaders_waiting.saturating_sub(tw.waited);
+                }
+
+                live_id!(ToWasmWebGLShadersLinked) => {
+                    let tw = ToWasmWebGLShadersLinked::read_to_wasm(&mut to_wasm);
+                    self.os.webgl_shaders_waiting += tw.count;
                 }
 
                 live_id!(ToWasmPaintDirty) => {
@@ -1544,6 +1551,7 @@ impl CxOsApi for Cx {
             ToWasmRedrawAll::to_js_code(),
             ToWasmGpuReset::to_js_code(),
             ToWasmWebGLShadersDone::to_js_code(),
+            ToWasmWebGLShadersLinked::to_js_code(),
             ToWasmRetainedUploadFailed::to_js_code(),
             ToWasmLiveFileChange::to_js_code(),
             ToWasmLocationChange::to_js_code(),
@@ -1745,6 +1753,9 @@ pub struct CxOs {
     /// linked or failed (`ToWasmWebGLShadersDone`). While non-zero, draw calls
     /// on those programs are dropped by the browser side.
     pub(crate) webgl_shaders_pending: usize,
+    /// Of those, the ones linked and waiting for their first draw
+    /// (`ToWasmWebGLShadersLinked`, first draws spread).
+    pub(crate) webgl_shaders_waiting: usize,
     /// The page measures frames' GPU time (`gpu_frame_timer` is on).
     pub(crate) gpu_timer_on: bool,
     pub(crate) gpu_timer_frame: u64,
@@ -1777,6 +1788,7 @@ impl Default for CxOs {
             index_buffers: 0,
             vaos: 0,
             webgl_shaders_pending: 0,
+            webgl_shaders_waiting: 0,
             gpu_timer_on: false,
             gpu_timer_frame: 0,
             completion_pending: 0,

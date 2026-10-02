@@ -1395,7 +1395,7 @@ export class WasmWebGL extends WasmWebBrowser {
     this.pending_webgl_shader_count -= shader.pending ? 1 : 0;
     shader.pending = false;
     this.webgl_shader_batch_failed_count++;
-    this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
+    this.to_wasm.ToWasmWebGLShadersDone({ count: 1, waited: 0 });
     this.schedule_webgl_shader_summary();
   }
 
@@ -1515,8 +1515,9 @@ export class WasmWebGL extends WasmWebBrowser {
     // With first draws spread, it stays open until the program's first draw.
     if (this.first_draw_spread) {
       finished_shader.first_draw_waiting = true;
+      this.to_wasm.ToWasmWebGLShadersLinked({ count: 1 });
     } else {
-      this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
+      this.to_wasm.ToWasmWebGLShadersDone({ count: 1, waited: 0 });
     }
     this.schedule_webgl_shader_summary();
     return true;
@@ -1590,7 +1591,7 @@ export class WasmWebGL extends WasmWebBrowser {
       }
     }
     if (released != 0) {
-      this.to_wasm.ToWasmWebGLShadersDone({ count: released });
+      this.to_wasm.ToWasmWebGLShadersDone({ count: released, waited: released });
       this.to_wasm.ToWasmRedrawAll();
       this.FromWasmRequestAnimationFrame();
     }
@@ -2594,7 +2595,7 @@ export class WasmWebGL extends WasmWebBrowser {
       }
       this.first_draw_this_frame = true;
       shader.first_draw_waiting = false;
-      this.to_wasm.ToWasmWebGLShadersDone({ count: 1 });
+      this.to_wasm.ToWasmWebGLShadersDone({ count: 1, waited: 1 });
     }
 
     let vao_bound = false;

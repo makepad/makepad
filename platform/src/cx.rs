@@ -1267,6 +1267,23 @@ impl Cx {
         }
     }
 
+    /// Of the draw shaders [`Cx::draw_shaders_pending`] waits for, how many
+    /// are compiling (the browser's parallel compile), and how many are
+    /// built and wait for their first draw (first draws spread,
+    /// [`Cx::spread_first_draws`]): a host drawing ahead of showing gives
+    /// the first time to draw again, the second a draw that uses them.
+    pub fn draw_shaders_compiling_and_waiting(&self) -> (usize, usize) {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let waiting = self.os.webgl_shaders_waiting.min(self.os.webgl_shaders_pending);
+            (self.os.webgl_shaders_pending - waiting, waiting)
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            (0, 0)
+        }
+    }
+
     /// WebGL: draw each program for the first time in a frame of its own. A
     /// program's first draw is where the driver builds it for that draw; on
     /// Direct3D (ANGLE) that compile takes up to seconds of the browser's GPU

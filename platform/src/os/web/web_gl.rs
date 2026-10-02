@@ -188,6 +188,7 @@ impl Cx {
             shader.os_shader_id = None;
         }
         self.os.webgl_shaders_pending = 0;
+        self.os.webgl_shaders_waiting = 0;
         self.os.completion_pending = 0;
         let submitted = self.frame_submission_serial();
         self.textures.1.serials.complete(submitted);

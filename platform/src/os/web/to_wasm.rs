@@ -163,12 +163,22 @@ pub struct ToWasmRedrawAll {}
 #[derive(ToWasm)]
 pub struct ToWasmGpuReset {}
 
-/// `count` WebGL programs finished compiling (or failed) since the last
-/// report. Pairs with the compiles queued through `FromWasmCompileWebGLShader`
-/// so `Cx::draw_shaders_pending` can say whether draws are still being
-/// dropped for a program that has not linked yet.
+/// `count` WebGL programs are done since the last report: linked (and,
+/// with first draws spread, drawn for the first time) or failed. Pairs
+/// with the compiles queued through `FromWasmCompileWebGLShader` so
+/// `Cx::draw_shaders_pending` can say whether draws are still being
+/// dropped. `waited`: how many of them had waited for their first draw
+/// (`ToWasmWebGLShadersLinked`).
 #[derive(ToWasm)]
 pub struct ToWasmWebGLShadersDone {
+    pub count: usize,
+    pub waited: usize,
+}
+
+/// `count` WebGL programs linked and now wait for their first draw (first
+/// draws spread, `Cx::spread_first_draws`).
+#[derive(ToWasm)]
+pub struct ToWasmWebGLShadersLinked {
     pub count: usize,
 }
 
