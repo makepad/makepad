@@ -238,7 +238,8 @@ pub struct ScriptTokenPos {
 }
 
 /// The unit suffix of a number literal: what a value means (an editor picks its
-/// control by it). The token's value is in the base unit (seconds, radians).
+/// control by it). The token's value is in the base unit: seconds for time,
+/// radians for angles, virtual pixels for lengths.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ScriptUnit {
     /// `0.12s`: seconds.
@@ -247,6 +248,10 @@ pub enum ScriptUnit {
     Millis,
     /// `90deg`: degrees, the value in radians.
     Degrees,
+    /// `1.5rad`: radians (the base unit of angles).
+    Radians,
+    /// `12px`: virtual (DPI-scaled) pixels, the base unit of lengths and positions.
+    Pixels,
 }
 
 impl ScriptUnit {
@@ -255,13 +260,15 @@ impl ScriptUnit {
             "s" => Some(Self::Seconds),
             "ms" => Some(Self::Millis),
             "deg" => Some(Self::Degrees),
+            "rad" => Some(Self::Radians),
+            "px" => Some(Self::Pixels),
             _ => None,
         }
     }
     /// The value of `v` written in this unit, in the base unit.
     pub fn to_base(self, v: f64) -> f64 {
         match self {
-            Self::Seconds => v,
+            Self::Seconds | Self::Radians | Self::Pixels => v,
             Self::Millis => v / 1000.0,
             Self::Degrees => v * std::f64::consts::PI / 180.0,
         }
