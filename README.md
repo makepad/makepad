@@ -64,6 +64,15 @@ The Makepad desktop (window manager) is the main entry point for exploring the a
 cargo run -p makepad-app-wm --release
 ```
 
+## Build And Run The Widget Catalogue
+
+The widget catalogue shows every widget in the library, organised,
+documented and previewed live.
+
+```bash
+cargo run -p makepad-app-storybook --release
+```
+
 ## Examples
 
 Run a few representative apps directly from the repo:
