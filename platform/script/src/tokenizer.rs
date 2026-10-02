@@ -232,6 +232,40 @@ pub struct ScriptTokenPos {
     /// every token but an unterminated string.
     start: u32,
     end: u32,
+    /// The unit a number literal was written in (`0.12s`, `120ms`, `90deg`): its
+    /// value is already in seconds or radians; the unit says what it is.
+    pub unit: Option<ScriptUnit>,
+}
+
+/// The unit suffix of a number literal: what a value means (an editor picks its
+/// control by it). The token's value is in the base unit (seconds, radians).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ScriptUnit {
+    /// `0.12s`: seconds.
+    Seconds,
+    /// `120ms`: milliseconds, the value in seconds.
+    Millis,
+    /// `90deg`: degrees, the value in radians.
+    Degrees,
+}
+
+impl ScriptUnit {
+    fn parse(suffix: &str) -> Option<Self> {
+        match suffix {
+            "s" => Some(Self::Seconds),
+            "ms" => Some(Self::Millis),
+            "deg" => Some(Self::Degrees),
+            _ => None,
+        }
+    }
+    /// The value of `v` written in this unit, in the base unit.
+    pub fn to_base(self, v: f64) -> f64 {
+        match self {
+            Self::Seconds => v,
+            Self::Millis => v / 1000.0,
+            Self::Degrees => v * std::f64::consts::PI / 180.0,
+        }
+    }
 }
 
 impl ScriptTokenPos {
@@ -355,6 +389,8 @@ pub struct ScriptTokenizer {
     line_starts: Vec<u32>,
     unfinished: String,
     temp: String,
+    /// Where a number's unit suffix starts in `temp` (`0.12s`), when it has one.
+    unit_start: Option<usize>,
     state: State,
     /// First character of the token being lexed, and one past its last
     /// when it is emitted (see `ScriptTokenPos::span`).
@@ -421,6 +457,7 @@ impl ScriptTokenizer {
             preceded_by_space,
             start: self.lex_start as u32,
             end: self.tok_end as u32,
+            unit: None,
         });
     }
 
@@ -532,6 +569,27 @@ impl ScriptTokenizer {
     }
 
     fn emit_f64(&mut self) {
+        if let Some(k) = self.unit_start.take() {
+            let suffix = self.temp.split_off(k);
+            match ScriptUnit::parse(&suffix) {
+                Some(unit) => {
+                    let len = self.temp.chars().count() + suffix.chars().count();
+                    let v = self.temp.parse::<f64>().unwrap_or(0.0);
+                    self.temp.clear();
+                    self.push_tok(self.pos - len, ScriptToken::F64(unit.to_base(v)));
+                    if let Some(t) = self.tokens.last_mut() {
+                        t.unit = Some(unit);
+                    }
+                }
+                None => {
+                    // not a unit: the number, then an identifier
+                    self.emit_f64();
+                    self.temp = suffix;
+                    self.emit_identifier();
+                }
+            }
+            return;
+        }
         // Measure before clearing: a float token's position was taken from
         // an already-emptied `temp`, so it pointed one past its terminator —
         // a float ending a line resolved to the NEXT line, column 0.
@@ -1220,7 +1278,9 @@ impl ScriptTokenizer {
                     }
                 }
                 State::Number => {
-                    if c.is_numeric() {
+                    if self.unit_start.is_some() && c.is_alphabetic() {
+                        self.temp.push(c);
+                    } else if c.is_numeric() {
                         self.temp.push(c);
                     } else if c == '.' && self.temp.chars().last() == Some('.') {
                         self.temp.pop();
@@ -1277,6 +1337,10 @@ impl ScriptTokenizer {
                         // Moving to Whitespace here left `temp` stale and let a
                         // later separator reach emit_separator and panic.
                         continue;
+                    } else if c.is_alphabetic() && !self.temp.contains(['x', 'X']) {
+                        // a unit suffix (`0.12s`, `120ms`, `90deg`)
+                        self.unit_start = Some(self.temp.len());
+                        self.temp.push(c);
                     } else if c == '$' || c.is_alphabetic() {
                         self.emit_f64();
                         self.state = State::Identifier;
