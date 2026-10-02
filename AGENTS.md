@@ -283,8 +283,9 @@ or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 
 ## Threading and realtime ownership
 
-- The UI thread never takes a `Mutex`, `RwLock`, or `Condvar` another thread
-  can hold, and never waits on a channel.
+- The UI thread never waits on a channel or a `Condvar`, and takes a lock
+  another thread can hold only when every holder keeps it briefly (see the
+  spin rule below).
 - UI-to-worker/audio commands use bounded, non-blocking sends. Report a
   full queue and retain/retry the command on a subsequent frame.
 - Workers/audio publish snapshots through atomics, a triple buffer, or a
@@ -295,9 +296,13 @@ or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 - A realtime audio callback owns its state, does not allocate on its hot
   path, and never takes a lock the UI or a worker can hold.
 - Use one mechanism on native and wasm. Do not retain a desktop shared-lock
-  path alongside a wasm workaround. UI/audio threads must not use
-  `Atomics.wait` or spin-wait fallbacks.
-- `lock_from_ui` is allowed only for state provably touched by the UI alone.
+  path alongside a wasm workaround. The UI thread and the audio worklet never
+  block or wait on long work. Brief spins on short locks (held only for a
+  few field updates, never across I/O, parsing, evaluation or a job) are
+  allowed; on wasm the optimiser's `waits` pass turns a contended
+  `Atomics.wait` on those threads into such a spin, so plain `.lock()` is
+  the one mechanism. Anything longer goes to a worker and returns through a
+  channel.
 - Do not spawn a temporary thread for each job. Use `cx.thread_spawner()`,
   the pool TaskHandle API, or a long-lived platform worker fed by a channel.
 

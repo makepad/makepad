@@ -4,7 +4,7 @@ use {
         to_wasm::ToWasmAudioDeviceList,
         web::CxOs,
     },
-    crate::{audio::*, makepad_live_id::*, thread::{lock_from_audio, lock_from_ui, SignalToUI}},
+    crate::{audio::*, makepad_live_id::*, thread::SignalToUI},
     std::sync::{Arc, Mutex},
 };
 
@@ -44,7 +44,7 @@ impl WebAudioAccess {
             output_device_id: Default::default(),
         }));
         let self_arc = ret.clone();
-        lock_from_ui(&ret).self_arc = Arc::into_raw(self_arc);
+        ret.lock().unwrap_or_else(|e| e.into_inner()).self_arc = Arc::into_raw(self_arc);
         ret
     }
 
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
 ) -> u32 {
     let wa = context_ptr as *const Mutex<WebAudioAccess>;
     let (output_fn, mut output_buffer, device_id) = {
-        let mut wa = lock_from_audio(&*wa);
+        let mut wa = (*wa).lock().unwrap_or_else(|e| e.into_inner());
         (
             wa.audio_output_cb[0].clone(),
             wa.output_buffer.take().unwrap(),
@@ -162,7 +162,7 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
     output_buffer.clear_final_size();
     output_buffer.resize(frames as usize, channels as usize);
     output_buffer.set_final_size();
-    let mut output_fn = lock_from_audio(&output_fn);
+    let mut output_fn = output_fn.lock().unwrap_or_else(|e| e.into_inner());
 
     if let Some(output_fn) = &mut *output_fn {
         output_fn(
@@ -176,7 +176,7 @@ pub unsafe extern "C" fn wasm_audio_output_entrypoint(
     }
     let ptr = output_buffer.data.as_ptr();
 
-    lock_from_audio(&*wa).output_buffer = Some(output_buffer);
+    (*wa).lock().unwrap_or_else(|e| e.into_inner()).output_buffer = Some(output_buffer);
 
     ptr as u32
 }

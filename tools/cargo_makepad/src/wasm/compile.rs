@@ -1058,6 +1058,9 @@ pub fn build(config: WasmConfig, args: &[String]) -> Result<WasmBuildResult, Str
         let _ = fs::remove_file(&named_wasm_dest);
         remove_brotli_artifact(&named_wasm_dest);
     }
+    // A threaded build's waits spin on the threads that may not block (the
+    // browser's main thread, an audio worklet): wasm_strip's `waits`.
+    let data = wasm_guard_waits(&data).map_err(|e| format!("Cannot guard the waits of {:?}: {e}", wasm_source))?;
     let mut output = if config.optimize_size || config.strip {
         if config.optimize_size {
             let report = wasm_size_report(&data)

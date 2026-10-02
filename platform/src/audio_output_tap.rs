@@ -14,7 +14,6 @@
 //! held while it runs). Copy into a channel and get off the thread.
 
 use crate::audio::{AudioBuffer, AudioInfo};
-use crate::thread::{lock_from_audio, lock_from_ui};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -42,14 +41,14 @@ where
 
 pub fn add_audio_output_tap_box(f: AudioOutputTapFn) -> u64 {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let mut taps = lock_from_ui(taps());
+    let mut taps = taps().lock().unwrap_or_else(|e| e.into_inner());
     taps.insert(id, f);
     ACTIVE.store(true, Ordering::Release);
     id
 }
 
 pub fn remove_audio_output_tap(id: u64) {
-    let mut taps = lock_from_ui(taps());
+    let mut taps = taps().lock().unwrap_or_else(|e| e.into_inner());
     taps.remove(&id);
     ACTIVE.store(!taps.is_empty(), Ordering::Release);
 }
@@ -72,7 +71,7 @@ pub(crate) fn feed_audio_output_tap(info: AudioInfo, buffer: &AudioBuffer) {
     let Some(taps) = TAPS.get() else {
         return;
     };
-    let mut taps = lock_from_audio(taps);
+    let mut taps = taps.lock().unwrap_or_else(|e| e.into_inner());
     for f in taps.values_mut() {
         f(info, buffer);
     }

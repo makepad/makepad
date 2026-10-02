@@ -26,7 +26,9 @@ const WAIT64: u16 = 0x02;
 /// Rewrites the module (see the module docs); returns how many sites it
 /// rewrote.
 pub fn run(module: &mut Module) -> usize {
-    if !module.memory_types().first().is_some_and(|m| m.shared) {
+    // Unshared memory: nothing waits. Guarded already (a build that guards
+    // and then optimises): its waits sit in the helpers.
+    if !module.memory_types().first().is_some_and(|m| m.shared) || module.exports.iter().any(|e| e.name == CANNOT_BLOCK_EXPORT) {
         return 0;
     }
     // One helper per (width, offset, align) a wait uses.

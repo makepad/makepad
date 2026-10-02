@@ -6,7 +6,7 @@ pub use opt::profile::{
 };
 pub use opt::units::{Coverage, ModuleUse, COVERAGE_EXPORT};
 pub use opt::{
-    wasm_coverage, wasm_instrument_coverage, wasm_optimize, wasm_optimize_checked, wasm_validate,
+    wasm_coverage, wasm_guard_waits, wasm_instrument_coverage, wasm_optimize, wasm_optimize_checked, wasm_validate,
     OptimizeOptions, OptimizePassReport, OptimizeReport,
 };
 pub use wasm_strip::*;

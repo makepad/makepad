@@ -381,6 +381,9 @@ fn waits_answer_at_once_where_a_thread_may_not_block() {
     let flag = module.exports.iter().find(|e| e.name == waits::CANNOT_BLOCK_EXPORT).expect("the flag is exported");
     assert_eq!(flag.kind, ExternKind::Global);
     assert!(module.globals[flag.index as usize].ty.mutable);
+    // Guarding again changes nothing.
+    let again = wasm_guard_waits(&encode::encode(&module)).unwrap();
+    assert_eq!(again, encode::encode(&module));
     // An unshared memory has nothing to guard.
     let plain = optimize(&wat(r#"(module (memory 1) (func (result i32) i32.const 0))"#), &only(|_| {}));
     assert!(plain.exports.is_empty() && plain.globals.is_empty());

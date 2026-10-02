@@ -297,6 +297,18 @@ pub fn wasm_optimize_checked(
     Ok((bytes, report))
 }
 
+/// The module with its shared-memory waits guarded (see `waits`): what
+/// every threaded web build ships, optimised or not. A module with no
+/// shared memory, or no waits, comes back as it was.
+pub fn wasm_guard_waits(buf: &[u8]) -> Result<Vec<u8>, String> {
+    let mut module = ir::decode(buf)?;
+    if waits::run(&mut module) == 0 {
+        return Ok(buf.to_vec());
+    }
+    ir::validate_module(&module).map_err(|msg| format!("guarded module does not validate: {msg}"))?;
+    Ok(encode::encode(&module))
+}
+
 /// The module with a coverage probe at every function entry (see
 /// `units`): an exported memory, `units::COVERAGE_EXPORT`, holding a phase
 /// byte per function index. Names are kept.

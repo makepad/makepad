@@ -464,10 +464,10 @@ story = """
 CxMediaApi installs input and output callbacks so applications can process PCM across native devices and web AudioWorklets.
 Callbacks receive device and sample-rate information; device changes return to the UI.
 Failed devices are tracked for fallback selection.
-The web callback still resizes buffers and uses lock_from_audio; a lock-free or allocation-free guarantee is absent.
+The web callback still resizes buffers and takes short plain locks (on wasm the optimiser's waits pass makes a contended wait on the worklet a brief spin); a lock-free or allocation-free guarantee is absent.
 Latency and underrun budgets are unknown."""
 lane = "audio"
-refs = ["platform/src/audio.rs", "platform/src/media_api.rs::CxMediaApi", "platform/src/os/apple/apple_media.rs", "platform/src/os/apple/audio_unit.rs", "platform/src/os/web/web_audio.rs::wasm_audio_output_entrypoint", "platform/src/thread.rs::lock_from_audio"]
+refs = ["platform/src/audio.rs", "platform/src/media_api.rs::CxMediaApi", "platform/src/os/apple/apple_media.rs", "platform/src/os/apple/audio_unit.rs", "platform/src/os/web/web_audio.rs::wasm_audio_output_entrypoint", "libs/wasm_strip/src/opt/waits.rs"]
 
 [nodes.cx]
 kind = "component"
@@ -618,7 +618,7 @@ The runtime starts pool workers at Startup so small background jobs avoid thread
 Light and heavy work use separate lanes; ThreadSpawner also supports dedicated long-lived loops.
 Callers poll TaskHandle results, and blocking join rejects the UI thread.
 Failures include unsupported spawning, cancellation, panic and lost workers.
-Legacy lock wrappers still block natively or spin on wasm; the whole runtime is not lock-free."""
+Locks are plain std locks; on wasm the optimiser's waits pass turns a contended wait on the UI thread or audio worklet into a brief spin. The whole runtime is not lock-free."""
 lane = "workers"
 refs = ["platform/src/thread.rs::TaskPool", "platform/src/thread.rs::ThreadSpawner", "platform/src/thread.rs::TaskHandle", "platform/src/os/cx_shared.rs::Cx::call_event_handler"]
 

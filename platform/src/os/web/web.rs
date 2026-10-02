@@ -21,7 +21,7 @@ use {
             StorageError, StorageEstimate, StorageList, StorageOp, StorageRequestId,
             StorageRequestKind, StorageResult, StorageStat,
         },
-        thread::{lock_from_ui, SignalToUI},
+        thread::SignalToUI,
         HttpError, HttpProgress, HttpResponse, Vec2d,
     },
     std::{
@@ -929,7 +929,7 @@ impl Cx {
 
                 live_id!(ToWasmAudioDeviceList) => {
                     let tw = ToWasmAudioDeviceList::read_to_wasm(&mut to_wasm);
-                    lock_from_ui(&self.os.web_audio()).to_wasm_audio_device_list(tw);
+                    self.os.web_audio().lock().unwrap_or_else(|e| e.into_inner()).to_wasm_audio_device_list(tw);
                 }
                 live_id!(ToWasmMidiPortList) => {
                     let tw = ToWasmMidiPortList::read_to_wasm(&mut to_wasm);
