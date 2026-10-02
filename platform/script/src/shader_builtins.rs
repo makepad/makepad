@@ -59,7 +59,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.abs())
+                .map_num(|v: f32| v.abs(), |v: f64| v.abs())
                 .to_script_value_vm(vm)
         },
     );
@@ -74,7 +74,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.acos())
+                .map_num(|v: f32| v.acos(), |v: f64| v.acos())
                 .to_script_value_vm(vm)
         },
     );
@@ -89,7 +89,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.acosh())
+                .map_num(|v: f32| v.acosh(), |v: f64| v.acosh())
                 .to_script_value_vm(vm)
         },
     );
@@ -104,7 +104,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.asin())
+                .map_num(|v: f32| v.asin(), |v: f64| v.asin())
                 .to_script_value_vm(vm)
         },
     );
@@ -119,7 +119,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.asinh())
+                .map_num(|v: f32| v.asinh(), |v: f64| v.asinh())
                 .to_script_value_vm(vm)
         },
     );
@@ -134,7 +134,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.atan())
+                .map_num(|v: f32| v.atan(), |v: f64| v.atan())
                 .to_script_value_vm(vm)
         },
     );
@@ -155,7 +155,7 @@ pub fn define_shader_builtins(
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
             // atan2 computes atan(y/x) with correct quadrant
-            y_nv.zip_f32(x_nv, |y, x| y.atan2(x)).to_script_value_vm(vm)
+            y_nv.zip_num(x_nv, |y: f32, x: f32| y.atan2(x), |y: f64, x: f64| y.atan2(x)).to_script_value_vm(vm)
         },
     );
     native.add_method(
@@ -169,7 +169,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.atanh())
+                .map_num(|v: f32| v.atanh(), |v: f64| v.atanh())
                 .to_script_value_vm(vm)
         },
     );
@@ -184,7 +184,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.ceil())
+                .map_num(|v: f32| v.ceil(), |v: f64| v.ceil())
                 .to_script_value_vm(vm)
         },
     );
@@ -199,7 +199,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.cos())
+                .map_num(|v: f32| v.cos(), |v: f64| v.cos())
                 .to_script_value_vm(vm)
         },
     );
@@ -214,7 +214,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.cosh())
+                .map_num(|v: f32| v.cosh(), |v: f64| v.cosh())
                 .to_script_value_vm(vm)
         },
     );
@@ -229,7 +229,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.to_degrees())
+                .map_num(|v: f32| v.to_degrees(), |v: f64| v.to_degrees())
                 .to_script_value_vm(vm)
         },
     );
@@ -244,7 +244,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.exp())
+                .map_num(|v: f32| v.exp(), |v: f64| v.exp())
                 .to_script_value_vm(vm)
         },
     );
@@ -259,7 +259,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.exp2())
+                .map_num(|v: f32| v.exp2(), |v: f64| v.exp2())
                 .to_script_value_vm(vm)
         },
     );
@@ -274,7 +274,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.floor())
+                .map_num(|v: f32| v.floor(), |v: f64| v.floor())
                 .to_script_value_vm(vm)
         },
     );
@@ -289,7 +289,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.fract())
+                .map_num(|v: f32| v.fract(), |v: f64| v.fract())
                 .to_script_value_vm(vm)
         },
     );
@@ -304,7 +304,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.sqrt().recip())
+                .map_num(|v: f32| v.sqrt().recip(), |v: f64| v.sqrt().recip())
                 .to_script_value_vm(vm)
         },
     );
@@ -372,7 +372,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.ln())
+                .map_num(|v: f32| v.ln(), |v: f64| v.ln())
                 .to_script_value_vm(vm)
         },
     );
@@ -390,7 +390,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.log2())
+                .map_num(|v: f32| v.log2(), |v: f64| v.log2())
                 .to_script_value_vm(vm)
         },
     );
@@ -405,7 +405,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.to_radians())
+                .map_num(|v: f32| v.to_radians(), |v: f64| v.to_radians())
                 .to_script_value_vm(vm)
         },
     );
@@ -420,7 +420,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.round())
+                .map_num(|v: f32| v.round(), |v: f64| v.round())
                 .to_script_value_vm(vm)
         },
     );
@@ -435,15 +435,10 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| {
-                    if v > 0.0 {
-                        1.0
-                    } else if v < 0.0 {
-                        -1.0
-                    } else {
-                        0.0
-                    }
-                })
+                .map_num(
+                    |v: f32| if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 },
+                    |v: f64| if v > 0.0 { 1.0 } else if v < 0.0 { -1.0 } else { 0.0 },
+                )
                 .to_script_value_vm(vm)
         },
     );
@@ -459,7 +454,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.sin())
+                .map_num(|v: f32| v.sin(), |v: f64| v.sin())
                 .to_script_value_vm(vm)
         },
     );
@@ -474,7 +469,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.sinh())
+                .map_num(|v: f32| v.sinh(), |v: f64| v.sinh())
                 .to_script_value_vm(vm)
         },
     );
@@ -489,7 +484,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.sqrt())
+                .map_num(|v: f32| v.sqrt(), |v: f64| v.sqrt())
                 .to_script_value_vm(vm)
         },
     );
@@ -504,7 +499,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.tan())
+                .map_num(|v: f32| v.tan(), |v: f64| v.tan())
                 .to_script_value_vm(vm)
         },
     );
@@ -519,7 +514,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.tanh())
+                .map_num(|v: f32| v.tanh(), |v: f64| v.tanh())
                 .to_script_value_vm(vm)
         },
     );
@@ -534,7 +529,7 @@ pub fn define_shader_builtins(
                 .heap
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             NumericValue::from_script_value_vm(vm, x_val)
-                .map_f32(|v| v.trunc())
+                .map_num(|v: f32| v.trunc(), |v: f64| v.trunc())
                 .to_script_value_vm(vm)
         },
     );
@@ -693,7 +688,7 @@ pub fn define_shader_builtins(
                 .value(args, id!(x).into(), vm.bx.threads.cur_ref().trap.pass());
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
-            y_nv.zip_f32(x_nv, |y, x| y.atan2(x)).to_script_value_vm(vm)
+            y_nv.zip_num(x_nv, |y: f32, x: f32| y.atan2(x), |y: f64, x: f64| y.atan2(x)).to_script_value_vm(vm)
         },
     );
     native.add_method(
@@ -713,7 +708,7 @@ pub fn define_shader_builtins(
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
             // distance returns a scalar (length of difference)
-            let diff = x_nv.zip_f32(y_nv, |a, b| a - b);
+            let diff = x_nv.zip_num(y_nv, |a: f32, b: f32| a - b, |a: f64, b: f64| a - b);
             ScriptValue::from_f64(diff.length())
         },
     );
@@ -788,7 +783,7 @@ pub fn define_shader_builtins(
                 .value(args, id!(y).into(), vm.bx.threads.cur_ref().trap.pass());
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
-            x_nv.zip_f32(y_nv, |a, b| a.max(b)).to_script_value_vm(vm)
+            x_nv.zip_num(y_nv, |a: f32, b: f32| a.max(b), |a: f64, b: f64| a.max(b)).to_script_value_vm(vm)
         },
     );
     native.add_method(
@@ -807,7 +802,7 @@ pub fn define_shader_builtins(
                 .value(args, id!(y).into(), vm.bx.threads.cur_ref().trap.pass());
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
-            x_nv.zip_f32(y_nv, |a, b| a.min(b)).to_script_value_vm(vm)
+            x_nv.zip_num(y_nv, |a: f32, b: f32| a.min(b), |a: f64, b: f64| a.min(b)).to_script_value_vm(vm)
         },
     );
     native.add_method(
@@ -826,7 +821,7 @@ pub fn define_shader_builtins(
                 .value(args, id!(y).into(), vm.bx.threads.cur_ref().trap.pass());
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
-            x_nv.zip_f32(y_nv, |a, b| a.powf(b)).to_script_value_vm(vm)
+            x_nv.zip_num(y_nv, |a: f32, b: f32| a.powf(b), |a: f64, b: f64| a.powf(b)).to_script_value_vm(vm)
         },
     );
     // Packed-attribute unpackers: two f16s / four unorm8s bitcast into one
@@ -910,7 +905,7 @@ pub fn define_shader_builtins(
                 .value(args, id!(y).into(), vm.bx.threads.cur_ref().trap.pass());
             let x_nv = NumericValue::from_script_value_vm(vm, x_val);
             let y_nv = NumericValue::from_script_value_vm(vm, y_val);
-            x_nv.zip_f32(y_nv, |a, b| a % b).to_script_value_vm(vm)
+            x_nv.zip_num(y_nv, |a: f32, b: f32| a % b, |a: f64, b: f64| a % b).to_script_value_vm(vm)
         },
     );
     native.add_method(
@@ -934,7 +929,7 @@ pub fn define_shader_builtins(
             } else {
                 let edge_nv = NumericValue::from_script_value_vm(vm, edge_val);
                 edge_nv
-                    .zip_f32(x_nv, |e, x| if x < e { 0.0 } else { 1.0 })
+                    .zip_num(x_nv, |e: f32, x: f32| if x < e { 0.0 } else { 1.0 }, |e: f64, x: f64| if x < e { 0.0 } else { 1.0 })
                     .to_script_value_vm(vm)
             }
         },
@@ -966,8 +961,8 @@ pub fn define_shader_builtins(
             } else {
                 let min_nv = NumericValue::from_script_value_vm(vm, min_val);
                 let max_nv = NumericValue::from_script_value_vm(vm, max_val);
-                x_nv.zip_f32(min_nv, |x, m| x.max(m))
-                    .zip_f32(max_nv, |x, m| x.min(m))
+                x_nv.zip_num(min_nv, |x: f32, m: f32| x.max(m), |x: f64, m: f64| x.max(m))
+                    .zip_num(max_nv, |x: f32, m: f32| x.min(m), |x: f64, m: f64| x.min(m))
                     .to_script_value_vm(vm)
             }
         },
@@ -1158,8 +1153,8 @@ pub fn define_shader_builtins(
             let b_nv = NumericValue::from_script_value_vm(vm, b_val);
             let c_nv = NumericValue::from_script_value_vm(vm, c_val);
             // fma: a * b + c, component-wise
-            a_nv.zip_f32(b_nv, |a, b| a * b)
-                .zip_f32(c_nv, |ab, c| ab + c)
+            a_nv.zip_num(b_nv, |a: f32, b: f32| a * b, |a: f64, b: f64| a * b)
+                .zip_num(c_nv, |ab: f32, c: f32| ab + c, |ab: f64, c: f64| ab + c)
                 .to_script_value_vm(vm)
         },
     );

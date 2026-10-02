@@ -263,6 +263,16 @@ enum State {
     RustValue,
     String(bool),
     EscapeInString(bool),
+    /// `\` then a newline in a string: the newline and the next line's
+    /// leading whitespace are skipped (Rust's line continuation).
+    ContinueInString(bool),
+    /// `r` then this many `#`: a raw string opens at the `"`.
+    RawStringOpen(usize),
+    /// Inside `r#…"…"#…` with this many `#`: no escapes, any line.
+    RawString(usize),
+    /// A `"` inside a raw string with this many `#`, then `seen` of them:
+    /// the string ends when they match.
+    RawStringClose(usize, usize),
     UnicodeHexInString(bool),
     UnicodeCurlyInString(bool),
     AsciiHexInString(bool),
@@ -294,6 +304,10 @@ impl State {
                 | State::Color
                 | State::String(_)
                 | State::EscapeInString(_)
+                | State::RawStringOpen(_)
+                | State::ContinueInString(_)
+                | State::RawString(_)
+                | State::RawStringClose(..)
                 | State::UnicodeHexInString(_)
                 | State::UnicodeCurlyInString(_)
                 | State::AsciiHexInString(_)
@@ -305,6 +319,9 @@ impl State {
             self,
             State::String(_)
                 | State::EscapeInString(_)
+                | State::ContinueInString(_)
+                | State::RawString(_)
+                | State::RawStringClose(..)
                 | State::UnicodeHexInString(_)
                 | State::UnicodeCurlyInString(_)
                 | State::AsciiHexInString(_)
@@ -816,6 +833,16 @@ impl ScriptTokenizer {
                     }
                 }
                 State::Identifier => {
+                    // `r"…"` / `r#"…"#`: a raw string, as in Rust
+                    if self.temp == "r" && (c == '"' || c == '#') {
+                        if c == '"' {
+                            self.temp.clear();
+                            self.state = State::RawString(0);
+                        } else {
+                            self.state = State::RawStringOpen(1);
+                        }
+                        continue;
+                    }
                     if c == '_' || c == '$' || c.is_alphanumeric() {
                         self.temp.push(c);
                     } else if c.is_whitespace() {
@@ -970,6 +997,64 @@ impl ScriptTokenizer {
                         self.emit_operator();
                     }
                 }
+                State::RawStringOpen(hashes) => {
+                    if c == '#' {
+                        self.state = State::RawStringOpen(hashes + 1);
+                    } else if c == '"' {
+                        self.temp.clear();
+                        self.state = State::RawString(hashes);
+                    } else {
+                        // `r#x` is no raw string: the identifier `r`
+                        self.emit_identifier();
+                        self.state = State::Whitespace;
+                    }
+                }
+                State::RawString(hashes) => {
+                    if c == '"' {
+                        if hashes == 0 {
+                            self.finish_string(heap);
+                            self.state = State::Whitespace;
+                        } else {
+                            self.state = State::RawStringClose(hashes, 0);
+                        }
+                    } else {
+                        self.append_unfinished_string(c);
+                    }
+                }
+                State::RawStringClose(hashes, seen) => {
+                    if c == '#' && seen + 1 == hashes {
+                        self.finish_string(heap);
+                        self.state = State::Whitespace;
+                    } else if c == '#' {
+                        self.state = State::RawStringClose(hashes, seen + 1);
+                    } else {
+                        // not the closer: the `"` and the `#`s were text
+                        self.append_unfinished_string('"');
+                        for _ in 0..seen {
+                            self.append_unfinished_string('#');
+                        }
+                        if c == '"' {
+                            self.state = State::RawStringClose(hashes, 0);
+                        } else {
+                            self.append_unfinished_string(c);
+                            self.state = State::RawString(hashes);
+                        }
+                    }
+                }
+                State::ContinueInString(double) => {
+                    if !c.is_whitespace() {
+                        self.state = State::String(double);
+                        if c == '\\' {
+                            self.temp.clear();
+                            self.state = State::EscapeInString(double);
+                        } else if (double && c == '"') || (!double && c == '\'') {
+                            self.finish_string(heap);
+                            self.state = State::Whitespace;
+                        } else {
+                            self.append_unfinished_string(c);
+                        }
+                    }
+                }
                 State::EscapeInString(double) => {
                     // ok lets see what we have for an escape character sequence
                     if c == '\\' {
@@ -997,6 +1082,13 @@ impl ScriptTokenizer {
                         self.state = State::AsciiHexInString(double);
                     } else if c == 'u' {
                         self.state = State::UnicodeHexInString(double);
+                    } else if c == '\n' {
+                        self.state = State::ContinueInString(double);
+                    } else {
+                        // not an escape: the backslash and the char stay text
+                        self.append_unfinished_string('\\');
+                        self.append_unfinished_string(c);
+                        self.state = State::String(double);
                     }
                 }
                 State::AsciiHexInString(double) => {

@@ -155,6 +155,26 @@ impl NumericValue {
         }
     }
 
+    /// Apply a unary operation component-wise: a number in f64 (`f64f`), the
+    /// components of vectors, colours and matrices in f32 (`f32f`), as a
+    /// shader computes them.
+    pub fn map_num<F: Fn(f32) -> f32, G: Fn(f64) -> f64>(self, f32f: F, f64f: G) -> Self {
+        match self {
+            NumericValue::F64(v) => NumericValue::F64(f64f(v)),
+            other => other.map_f32(f32f),
+        }
+    }
+
+    /// Apply a binary operation component-wise: two numbers in f64 (`f64f`),
+    /// anything with a vector, colour or matrix in f32 (`f32f`, broadcast as
+    /// [`Self::zip_f32`]).
+    pub fn zip_num<F: Fn(f32, f32) -> f32, G: Fn(f64, f64) -> f64>(self, other: Self, f32f: F, f64f: G) -> Self {
+        match (self, other) {
+            (NumericValue::F64(a), NumericValue::F64(b)) => NumericValue::F64(f64f(a, b)),
+            (a, b) => a.zip_f32(b, f32f),
+        }
+    }
+
     /// Apply a unary f32 operation component-wise
     pub fn map_f32<F: Fn(f32) -> f32>(self, f: F) -> Self {
         match self {
@@ -484,9 +504,7 @@ impl NumericValue {
         let a = alpha as f32;
         let one_minus_a = 1.0 - a;
         match (self, other) {
-            (NumericValue::F64(x), NumericValue::F64(y)) => {
-                NumericValue::F64((x as f32 * one_minus_a + y as f32 * a) as f64)
-            }
+            (NumericValue::F64(x), NumericValue::F64(y)) => NumericValue::F64(x * (1.0 - alpha) + y * alpha),
             (NumericValue::Vec2(x), NumericValue::Vec2(y)) => NumericValue::Vec2(Vec2f {
                 x: x.x * one_minus_a + y.x * a,
                 y: x.y * one_minus_a + y.y * a,
@@ -516,10 +534,7 @@ impl NumericValue {
     /// Mix two values with component-wise alpha (alpha has same type as self/other)
     pub fn mix_componentwise(self, other: Self, alpha: Self) -> Self {
         match (self, other, alpha) {
-            (NumericValue::F64(x), NumericValue::F64(y), NumericValue::F64(a)) => {
-                let a = a as f32;
-                NumericValue::F64((x as f32 * (1.0 - a) + y as f32 * a) as f64)
-            }
+            (NumericValue::F64(x), NumericValue::F64(y), NumericValue::F64(a)) => NumericValue::F64(x * (1.0 - a) + y * a),
             (NumericValue::Vec2(x), NumericValue::Vec2(y), NumericValue::Vec2(a)) => {
                 NumericValue::Vec2(Vec2f {
                     x: x.x * (1.0 - a.x) + y.x * a.x,
@@ -566,6 +581,9 @@ impl NumericValue {
 
     /// Clamp with scalar min/max
     pub fn clamp_scalar(self, min_val: f64, max_val: f64) -> Self {
+        if let NumericValue::F64(v) = self {
+            return NumericValue::F64(v.max(min_val).min(max_val));
+        }
         let min_f = min_val as f32;
         let max_f = max_val as f32;
         self.map_f32(|v| v.max(min_f).min(max_f))
@@ -573,12 +591,19 @@ impl NumericValue {
 
     /// Step function with scalar edge
     pub fn step_scalar(edge: f64, self_val: Self) -> Self {
+        if let NumericValue::F64(v) = self_val {
+            return NumericValue::F64(if v < edge { 0.0 } else { 1.0 });
+        }
         let edge_f = edge as f32;
         self_val.map_f32(|v| if v < edge_f { 0.0 } else { 1.0 })
     }
 
     /// Smoothstep with scalar edges
     pub fn smoothstep_scalar(e0: f64, e1: f64, self_val: Self) -> Self {
+        if let NumericValue::F64(x) = self_val {
+            let t = ((x - e0) / (e1 - e0)).max(0.0).min(1.0);
+            return NumericValue::F64(t * t * (3.0 - 2.0 * t));
+        }
         let e0_f = e0 as f32;
         let e1_f = e1 as f32;
         self_val.map_f32(|x| {
