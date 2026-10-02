@@ -57,6 +57,7 @@ pub mod menu;
 pub mod select;
 pub mod dialog;
 pub mod button;
+pub mod pointer_field;
 pub mod check_box;
 pub mod icon;
 pub mod image;
