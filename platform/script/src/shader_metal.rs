@@ -205,7 +205,9 @@ impl ShaderOutput {
                         TextureType::TextureDepthArray => "depth2d_array<float>",
                         TextureType::TextureVideo => "texture2d<float>", // Video textures are standard texture2d on Metal
                     };
-                    writeln!(out, "    {} {};", metal_type, io.name).ok();
+                    // `t_`: a texture is named by the document (a pass
+                    // `half`), and MSL reserves type names.
+                    writeln!(out, "    {} t_{};", metal_type, io.name).ok();
                 }
                 ShaderIoKind::Sampler(_) => {
                     writeln!(out, "    sampler {};", io.name).ok();
@@ -564,7 +566,7 @@ impl ShaderOutput {
                     };
                     writeln!(
                         out,
-                        "    {} {} [[texture({})]],",
+                        "    {} t_{} [[texture({})]],",
                         metal_type, io.name, tex_idx
                     )
                     .ok();
@@ -619,7 +621,10 @@ impl ShaderOutput {
                 ShaderIoKind::UniformBuffer => {
                     writeln!(out, "    _io.u_{} = u_{};", io.name, io.name).ok();
                 }
-                ShaderIoKind::Texture(_) | ShaderIoKind::Sampler(_) => {
+                ShaderIoKind::Texture(_) => {
+                    writeln!(out, "    _io.t_{} = t_{};", io.name, io.name).ok();
+                }
+                ShaderIoKind::Sampler(_) => {
                     writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
                 }
                 _ => (),
@@ -729,7 +734,7 @@ impl ShaderOutput {
                     writeln!(out, ",").ok();
                     write!(
                         out,
-                        "    {} {} [[texture({})]]",
+                        "    {} t_{} [[texture({})]]",
                         metal_type, io.name, tex_idx
                     )
                     .ok();
@@ -783,7 +788,10 @@ impl ShaderOutput {
                 ShaderIoKind::UniformBuffer => {
                     writeln!(out, "    _io.u_{} = u_{};", io.name, io.name).ok();
                 }
-                ShaderIoKind::Texture(_) | ShaderIoKind::Sampler(_) => {
+                ShaderIoKind::Texture(_) => {
+                    writeln!(out, "    _io.t_{} = t_{};", io.name, io.name).ok();
+                }
+                ShaderIoKind::Sampler(_) => {
                     writeln!(out, "    _io.{} = {};", io.name, io.name).ok();
                 }
                 _ => (),
