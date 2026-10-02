@@ -39,6 +39,9 @@ impl App {
         self.state_mut().snap.clear();
         cx.stop_timer(self.snap_hover_timer);
         let area = self.desk_area(cx);
+        // Every screen's layout switches presentation, each in its own area.
+        let screen_count = self.state_mut().screens.screens.len();
+        let areas: Vec<LRect> = (0..screen_count).map(|i| self.screen_area(cx, i)).collect();
         let dark = self.state_mut().style.dark;
         let sheet = desktop_style::StyleSheet::load(entry.light().with_appearance(dark));
         if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() {desk.set_startup_style(cx, &sheet);}
@@ -49,9 +52,12 @@ impl App {
         state.dragging.clear();
         state.style.select(style);
         if changes_size { state.style.step(1.0); }
-        state.layout.desktop.enabled = style.floating();
-        for c in state.layout.all_clients() {
-            state.layout.desktop.ensure(c, area);
+        for (i, s) in state.screens.screens.iter_mut().enumerate() {
+            s.layout.desktop.enabled = style.floating();
+            let a = areas.get(i).copied().unwrap_or(area);
+            for c in s.layout.all_clients() {
+                s.layout.desktop.ensure(c, a);
+            }
         }
         // Send the complete stylesheet, so already-running and warm applications
         // receive exactly the version selected in the WM, even across hosts.
@@ -163,9 +169,11 @@ impl App {
                 .and_then(|bar| bar.hit_rect(&crate::mobile::PhoneHit::Style))
         } else {
             self.ui.widget(cx, ids!(shell_bar)).borrow::<crate::shell::bar::ShellBar>()
-                .and_then(|bar| bar.module_rect(BarModule::Style))
+                .and_then(|bar| bar.module_rect(self.bar_press_segment, BarModule::Style))
         };
         self.open_shell_menu(cx, "desktop", MenuSkin::Menu);
+        // Under the switch it was pressed in: that segment's screen.
+        self.menu_screen = self.bar_screen(self.bar_press_segment);
         let active = format!("desktop.{}", self.current_desktop_sheet().id);
         if let Some(mut menu) = self.ui.widget(cx, ids!(shell_menu)).borrow_mut::<ShellMenu>() {
             menu.anchor = anchor;
@@ -193,7 +201,7 @@ impl App {
         }
     }
     fn minimize_desktop(&mut self, cx: &mut Cx, client: ClientId) {
-        let layout = &mut self.state_mut().layout;
+        let layout = self.state_mut().layout_of_mut(client);
         if let Some(w) = layout.desktop.get_mut(client) {
             w.minimized = true;
         }
@@ -212,7 +220,7 @@ impl App {
         self.redraw_all(cx);
     }
     fn maximize_desktop(&mut self, cx: &mut Cx, client: ClientId) {
-        if let Some(w) = self.state_mut().layout.desktop.get_mut(client) {
+        if let Some(w) = self.state_mut().layout_of_mut(client).desktop.get_mut(client) {
             w.maximized = !w.maximized;
             w.minimized = false;
         }
@@ -220,7 +228,7 @@ impl App {
         self.redraw_all(cx);
     }
     pub(super) fn apply_snap(&mut self, cx: &mut Cx, client: ClientId, zone: crate::snap::Zone) {
-        if let Some(w)=self.state_mut().layout.desktop.get_mut(client) {
+        if let Some(w)=self.state_mut().layout_of_mut(client).desktop.get_mut(client) {
             w.maximized=zone==crate::snap::Zone::Maximize;
             w.snap=(!w.maximized).then_some(zone);
             w.minimized=false;
@@ -234,7 +242,8 @@ impl App {
         if self.state_mut().style.target!=DesktopStyle::Windows || self.drag.is_some() || self.div_drag.is_some() {return false;}
         if let Some(client)=self.state_mut().snap.picker.as_ref().map(|p|p.client) {
             let state=self.state_mut();
-            if state.layout.workspace_of(client)!=Some(state.layout.active) || state.layout.desktop.minimized(client) {
+            let layout=state.layout_of(client);
+            if layout.workspace_of(client)!=Some(layout.active) || layout.desktop.minimized(client) {
                 state.snap.clear();cx.stop_timer(self.snap_hover_timer);self.redraw_all(cx);
             }
         }
@@ -284,13 +293,19 @@ impl App {
             ShelfHit::App(app) => {
                 let existing = {
                     let s = self.state_mut();
-                    s.layout
-                        .desktop
-                        .windows
-                        .iter()
-                        .rev()
-                        .find(|w| s.clients.get(&w.client).is_some_and(|c| c.app == app))
-                        .map(|w| w.client)
+                    // The app's window on any screen, the active one first.
+                    let active = s.screens.active;
+                    std::iter::once(active)
+                        .chain((0..s.screens.live_count()).filter(|i| *i != active))
+                        .find_map(|i| {
+                            s.layout_at(i)
+                                .desktop
+                                .windows
+                                .iter()
+                                .rev()
+                                .find(|w| s.clients.get(&w.client).is_some_and(|c| c.app == app))
+                                .map(|w| w.client)
+                        })
                 };
                 if let Some(c) = existing {
                     self.restore_desktop(cx, c);
@@ -299,8 +314,8 @@ impl App {
                 }
             }
             ShelfHit::Window(c) => {
-                if self.state_mut().layout.focused_client() == Some(c)
-                    && !self.state_mut().layout.desktop.minimized(c)
+                if self.state_mut().layout().focused_client() == Some(c)
+                    && !self.state_mut().layout_of(c).desktop.minimized(c)
                 {
                     self.minimize_desktop(cx, c);
                 } else {
@@ -308,7 +323,7 @@ impl App {
                 }
             }
             ShelfHit::ShowDesktop => {
-                let layout = &mut self.state_mut().layout;
+                let layout = self.state_mut().layout_mut();
                 let clients = layout.clients_on(layout.active);
                 let hide = clients.iter().any(|c| !layout.desktop.minimized(*c));
                 for c in clients {
@@ -321,10 +336,10 @@ impl App {
         }
     }
     fn restore_desktop(&mut self, cx: &mut Cx, client: ClientId) {
-        if let Some(w) = self.state_mut().layout.desktop.get_mut(client) {
+        if let Some(w) = self.state_mut().layout_of_mut(client).desktop.get_mut(client) {
             w.minimized = false;
         }
-        self.state_mut().layout.raise_float(client);
+        self.state_mut().layout_of_mut(client).raise_float(client);
         self.focus_client(cx, client);
         self.redraw_all(cx);
     }
@@ -338,7 +353,7 @@ impl App {
             return true;
         }
         if e.key_code == KeyCode::F4 && e.modifiers.alt {
-            if let Some(c) = self.state_mut().layout.focused_client() {
+            if let Some(c) = self.state_mut().layout().focused_client() {
                 self.request_close(cx, c);
             }
             return true;
@@ -350,7 +365,7 @@ impl App {
             self.activate_shelf(cx, ShelfHit::ShowDesktop);
             return true;
         }
-        let Some(client) = self.state_mut().layout.focused_client() else {
+        let Some(client) = self.state_mut().layout().focused_client() else {
             return false;
         };
         if e.key_code == KeyCode::KeyM {
@@ -370,7 +385,7 @@ impl App {
                 KeyCode::ArrowDown => {
                     if self
                         .state_mut()
-                        .layout
+                        .layout()
                         .desktop
                         .get(client)
                         .is_some_and(|w| w.maximized)

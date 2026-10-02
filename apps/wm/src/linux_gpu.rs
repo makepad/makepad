@@ -89,7 +89,7 @@ impl App {
         &self,
     ) -> Option<(ClientId, String, Option<[u8; 16]>, [u8; 16])> {
         let state = self.state.as_ref()?;
-        let client = state.layout.focused_client()?;
+        let client = state.layout().focused_client()?;
         let slot = state.clients.get(&client)?;
         if slot.child.is_none() || slot.warm {
             return None;

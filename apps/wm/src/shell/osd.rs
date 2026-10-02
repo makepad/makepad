@@ -117,6 +117,11 @@ pub struct ShellOsd {
     area: Area,
     #[rust]
     screen: Rect,
+    /// Where the surface draws instead of the whole overlay: the screen it
+    /// was opened on, on a multi-screen desktop (set by the WM before each
+    /// draw). `None` draws across the overlay, as on one screen.
+    #[rust]
+    pub target: Option<Rect>,
     #[rust]
     next_frame: NextFrame,
     #[rust]
@@ -241,7 +246,7 @@ impl ShellOsd {
 impl Widget for ShellOsd {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
-        let screen = cx.turtle().rect();
+        let screen = self.target.unwrap_or_else(|| cx.turtle().rect());
         self.draw_surface(cx, screen);
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()

@@ -868,6 +868,84 @@ impl PointerGate {
     }
 }
 
+/// What the menu card's placement depends on, besides the screen.
+pub(crate) struct MenuCardSpec<'a> {
+    /// A top-bar selector's module rect (the compact dropdown).
+    pub anchor: Option<Rect>,
+    pub style: DesktopStyle,
+    pub filter_empty: bool,
+    pub row_height: f64,
+    /// One entry per row: whether a divider follows it.
+    pub dividers: &'a [bool],
+    pub empty_block_h: f64,
+    pub panel_padding: f64,
+    pub gaps_out: f64,
+    pub frozen_top: Option<f64>,
+}
+
+/// Total height of the first `n` rows (`row_height` each, spacing between,
+/// plus their dividers).
+pub(crate) fn rows_height_of(row_height: f64, dividers: &[bool], n: usize) -> f64 {
+    let d = dividers.iter().take(n).filter(|d| **d).count() as f64;
+    if n == 0 {
+        0.0
+    } else {
+        n as f64 * row_height + (n as f64 - 1.0) * ROW_SPACING + d * DIVIDER_HEIGHT
+    }
+}
+
+/// The menu card rect inside `screen` (the overlay, or the active screen's
+/// rect on a multi-screen desktop), and how many rows fit in it.
+pub(crate) fn menu_card_layout(spec: &MenuCardSpec, screen: Rect) -> (Rect, usize) {
+    if let Some(anchor) = spec.anchor {
+        let width = 248.0f64.min((screen.size.x - 12.0).max(1.0));
+        let top = (anchor.pos.y + anchor.size.y + 4.0).max(screen.pos.y + 4.0);
+        let available = (screen.pos.y + screen.size.y - top - 6.0).max(1.0);
+        let visible = (((available - 12.0) / (spec.row_height + ROW_SPACING)).floor() as usize)
+            .max(1).min(spec.dividers.len().max(1));
+        let height = (12.0 + rows_height_of(spec.row_height, spec.dividers, visible)).min(available);
+        let left = anchor.pos.x.clamp(screen.pos.x + 6.0, (screen.pos.x + screen.size.x - width - 6.0).max(screen.pos.x + 6.0));
+        return (rect(left, top, width, height), visible);
+    }
+    let classic=spec.style==DesktopStyle::Windows2000;
+    let next=spec.style==DesktopStyle::NextStep;
+    let pad = if classic || next {3.0}else{spec.panel_padding};
+    let header_h=if classic && spec.filter_empty {0.0}else{HEADER_HEIGHT+HEADER_GAP};
+    let gaps_out = spec.gaps_out;
+    let chrome = pad * 2.0 + header_h;
+    let max_h = (screen.size.y * MAX_HEIGHT_FRACTION).min(screen.size.y - gaps_out * 2.0);
+    let avail = (max_h - chrome).max(spec.row_height);
+    let rh = spec.row_height;
+    let full = (((avail + ROW_SPACING) / (rh + ROW_SPACING)).floor() as usize).max(1);
+    let visible = full.min(spec.dividers.len().max(1));
+    let clipped = spec.dividers.len() > visible;
+    let list_h = if spec.dividers.is_empty() {
+        // The rows area collapses to exactly the empty-state block —
+        // never the zero it fell out to before, never a full page.
+        spec.empty_block_h
+    } else if clipped {
+        rows_height_of(spec.row_height, spec.dividers, visible) + ROW_PEEK
+    } else {
+        rows_height_of(spec.row_height, spec.dividers, spec.dividers.len())
+    };
+    let height = (chrome + list_h).min(max_h);
+    let x = (screen.pos.x + (screen.size.x - CARD_WIDTH) * 0.5).floor();
+    let y = match spec.frozen_top {
+        Some(top) => top,
+        None => (screen.pos.y + (screen.size.y - height) * 0.5)
+            .max(screen.pos.y + gaps_out)
+            .floor(),
+    };
+    let (x,y)=match spec.style {
+        crate::desktop::DesktopStyle::Windows2000=>(screen.pos.x+3.0,screen.pos.y+screen.size.y-height-34.0),
+        crate::desktop::DesktopStyle::Windows=>(x,screen.pos.y+screen.size.y-height-66.0),
+        crate::desktop::DesktopStyle::Macos=>(x,screen.pos.y+screen.size.y-height-98.0),
+        DesktopStyle::NextStep=>(screen.pos.x+10.0,screen.pos.y+42.0),
+        _=>(x,y),
+    };
+    (rect(x.max(screen.pos.x),y.max(screen.pos.y+4.0),(if classic || next {244.0}else{CARD_WIDTH}).min(screen.size.x),height),visible)
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct ShellMenu {
     #[rust] app_icons: AppIconDraw,
@@ -901,6 +979,11 @@ pub struct ShellMenu {
     /// A top-bar selector uses the menu rows as a compact anchored dropdown.
     #[rust]
     pub anchor: Option<Rect>,
+    /// Where the surface draws instead of the whole overlay: the screen it
+    /// was opened on, on a multi-screen desktop (set by the WM before each
+    /// draw). `None` draws across the overlay, as on one screen.
+    #[rust]
+    pub target: Option<Rect>,
     #[rust]
     touch_press: Option<(u64, Vec2d, Vec2d)>,
     #[rust]
@@ -975,71 +1058,25 @@ impl ShellMenu {
 
     /// Total height of `n` rows including their spacing and any dividers.
     fn rows_height(&self, n: usize) -> f64 {
-        let rh = self.row_height();
-        let dividers = self
-            .model
-            .rows
-            .iter()
-            .take(n)
-            .filter(|r| r.divider)
-            .count() as f64;
-        if n == 0 {
-            0.0
-        } else {
-            n as f64 * rh + (n as f64 - 1.0) * ROW_SPACING + dividers * DIVIDER_HEIGHT
-        }
+        let dividers: Vec<bool> = self.model.rows.iter().take(n).map(|r| r.divider).collect();
+        rows_height_of(self.row_height(), &dividers, n)
     }
 
     /// The card rect for a screen, and how many rows fit in it.
     fn layout_card(&self, screen: Rect) -> (Rect, usize) {
-        if let Some(anchor) = self.anchor {
-            let width = 248.0f64.min((screen.size.x - 12.0).max(1.0));
-            let top = (anchor.pos.y + anchor.size.y + 4.0).max(screen.pos.y + 4.0);
-            let available = (screen.pos.y + screen.size.y - top - 6.0).max(1.0);
-            let visible = (((available - 12.0) / (self.row_height() + ROW_SPACING)).floor() as usize)
-                .max(1).min(self.model.rows.len().max(1));
-            let height = (12.0 + self.rows_height(visible)).min(available);
-            let left = anchor.pos.x.clamp(screen.pos.x + 6.0, (screen.pos.x + screen.size.x - width - 6.0).max(screen.pos.x + 6.0));
-            return (rect(left, top, width, height), visible);
-        }
-        let tok = &self.tokens;
-        let classic=self.desktop_style==DesktopStyle::Windows2000;
-        let next=self.desktop_style==DesktopStyle::NextStep;
-        let pad = if classic || next {3.0}else{tok.spacing.panel_padding};
-        let header_h=if classic && self.model.filter.is_empty() {0.0}else{HEADER_HEIGHT+HEADER_GAP};
-        let gaps_out = tok.spacing.gaps_out;
-        let chrome = pad * 2.0 + header_h;
-        let max_h = (screen.size.y * MAX_HEIGHT_FRACTION).min(screen.size.y - gaps_out * 2.0);
-        let avail = (max_h - chrome).max(self.row_height());
-        let rh = self.row_height();
-        let full = (((avail + ROW_SPACING) / (rh + ROW_SPACING)).floor() as usize).max(1);
-        let visible = full.min(self.model.rows.len().max(1));
-        let clipped = self.model.rows.len() > visible;
-        let list_h = if self.model.rows.is_empty() {
-            // The rows area collapses to exactly the empty-state block —
-            // never the zero it fell out to before, never a full page.
-            self.empty_block_height()
-        } else if clipped {
-            self.rows_height(visible) + ROW_PEEK
-        } else {
-            self.rows_height(self.model.rows.len())
+        let dividers: Vec<bool> = self.model.rows.iter().map(|r| r.divider).collect();
+        let spec = MenuCardSpec {
+            anchor: self.anchor,
+            style: self.desktop_style,
+            filter_empty: self.model.filter.is_empty(),
+            row_height: self.row_height(),
+            dividers: &dividers,
+            empty_block_h: self.empty_block_height(),
+            panel_padding: self.tokens.spacing.panel_padding,
+            gaps_out: self.tokens.spacing.gaps_out,
+            frozen_top: self.model.frozen_top,
         };
-        let height = (chrome + list_h).min(max_h);
-        let x = (screen.pos.x + (screen.size.x - CARD_WIDTH) * 0.5).floor();
-        let y = match self.model.frozen_top {
-            Some(top) => top,
-            None => (screen.pos.y + (screen.size.y - height) * 0.5)
-                .max(screen.pos.y + gaps_out)
-                .floor(),
-        };
-        let (x,y)=match self.desktop_style {
-            crate::desktop::DesktopStyle::Windows2000=>(screen.pos.x+3.0,screen.pos.y+screen.size.y-height-34.0),
-            crate::desktop::DesktopStyle::Windows=>(x,screen.pos.y+screen.size.y-height-66.0),
-            crate::desktop::DesktopStyle::Macos=>(x,screen.pos.y+screen.size.y-height-98.0),
-            DesktopStyle::NextStep=>(screen.pos.x+10.0,screen.pos.y+42.0),
-            _=>(x,y),
-        };
-        (rect(x.max(screen.pos.x),y.max(screen.pos.y+4.0),(if classic || next {244.0}else{CARD_WIDTH}).min(screen.size.x),height),visible)
+        menu_card_layout(&spec, screen)
     }
 
     /// Draw the whole surface into `screen` (scrim included).
@@ -1531,7 +1568,7 @@ impl ShellMenu {
 impl Widget for ShellMenu {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
-        let screen = cx.turtle().rect();
+        let screen = self.target.unwrap_or_else(|| cx.turtle().rect());
         self.draw_surface(cx, screen);
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()

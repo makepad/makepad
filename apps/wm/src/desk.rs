@@ -358,7 +358,22 @@ pub struct WmState {
     pub phone: crate::mobile::PhoneState,
     pub style: StyleTween,
     pub dock_backdrop: Option<gauss_view::GaussBlurSnapshot>,
-    pub layout: WmLayout,
+    /// One layout per physical screen (a single `""` entry covering the
+    /// desk off the multi-screen Linux direct desktop, which is today's WM).
+    pub screens: crate::screens::ScreenSet,
+    /// The physical screens as last read from the platform (App refreshes
+    /// it on WindowGeomChange and the tick); `sync_screens` clips them to
+    /// the desk every time the desk rect may have moved.
+    pub screen_source: ScreenSource,
+    /// The (rects, main) the screen set was last reconciled to.
+    pub screen_key: (Vec<(String, LRect)>, Option<String>),
+    /// The physical screens (names, unclipped geoms, main) the set was
+    /// last reconciled to: a change of the desk clip alone is not one.
+    pub screen_phys: (Vec<String>, Vec<LRect>, Option<String>),
+    /// Set when `sync_screens` reconciled (possibly from the desk draw);
+    /// App drains it on the next event to refresh the bar and cancel a
+    /// drag whose screen index may have shifted.
+    pub screens_changed: bool,
     pub clients: HashMap<ClientId, ClientSlot>,
     pub hub_port: u16,
     pub theme_name: String,
@@ -402,9 +417,169 @@ pub struct WmState {
     pub provision: Option<String>,
 }
 
+/// What the platform says about the screens. `per_screen` false (not the
+/// Linux direct backend, or the gallery) keeps the single `""` desk.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ScreenSource {
+    pub per_screen: bool,
+    pub names: Vec<String>,
+    pub geoms: Vec<LRect>,
+    /// The connector of the screen whose `is_primary` is set.
+    pub main_name: Option<String>,
+    pub generation: u64,
+}
+
 impl WmState {
+    /// Several screens, each tiling on its own (not the single `""` desk).
+    pub fn per_screen(&self) -> bool {
+        self.screens.is_named()
+    }
+
+    /// Screen `i`'s layout.
+    pub fn layout_at(&self, i: usize) -> &WmLayout {
+        &self.screens.screens[i].layout
+    }
+
+    pub fn layout_at_mut(&mut self, i: usize) -> &mut WmLayout {
+        &mut self.screens.screens[i].layout
+    }
+
+    /// The layout holding `client`: the active one when no screen does.
+    pub fn layout_of(&self, client: ClientId) -> &WmLayout {
+        let i = self.screens.screen_of(client).unwrap_or(self.screens.active);
+        &self.screens.screens[i].layout
+    }
+
+    pub fn layout_of_mut(&mut self, client: ClientId) -> &mut WmLayout {
+        let i = self.screens.screen_of(client).unwrap_or(self.screens.active);
+        &mut self.screens.screens[i].layout
+    }
+
+    /// The live screen under `(x, y)` (the nearest one outside them all),
+    /// the active one when there is only one or in a mobile style.
+    pub fn screen_under(&self, x: f64, y: f64) -> usize {
+        // A mobile style shows the active layout across the whole desk.
+        if self.style.target.mobile() {
+            return self.screens.active;
+        }
+        let live = self.screens.live_count();
+        let rects: Vec<LRect> = self.screens.screens[..live].iter().map(|s| s.rect).collect();
+        crate::screens::screen_at(&rects, x, y).unwrap_or(self.screens.active)
+    }
+
+    /// Bring the screen set in line with `screen_source` clipped to `desk`
+    /// (the desk widget's current rect). Off the multi-screen desktop this
+    /// only records the desk rect on the single `""` entry, so the WM keeps
+    /// today's single-desk behaviour; otherwise it reconciles when the
+    /// clipped rects or the main screen changed, or while a screen waits
+    /// out its removal debounce (so the removal expires). True when the set
+    /// was reconciled. Cheap when nothing changed: one clip per screen and
+    /// a Vec compare.
+    pub fn sync_screens(&mut self, desk: LRect, now: f64) -> bool {
+        if desk.w <= 1.0 {
+            return false;
+        }
+        let src = &self.screen_source;
+        let new = crate::screens::screen_rects_for(
+            src.per_screen,
+            self.screens.is_named(),
+            &src.names,
+            &src.geoms,
+            desk,
+        );
+        if new.is_empty() {
+            return false;
+        }
+        if !self.screens.is_named() && new.len() == 1 && new[0].0.is_empty() {
+            self.screens.screens[0].rect = desk;
+            self.screen_key = (new, None);
+            return false;
+        }
+        let pending = self.screens.live_count() < self.screens.screens.len();
+        let same_phys = src.names == self.screen_phys.0
+            && src.geoms == self.screen_phys.1
+            && src.main_name == self.screen_phys.2;
+        let key = (new, src.main_name.clone());
+        if !pending && same_phys && self.screens.is_named() {
+            if key == self.screen_key {
+                return false;
+            }
+            // Only the desk clip moved (the AI pane sliding): new rects in
+            // place, no window moved or fitted.
+            if self.screens.set_clip(&key.0) {
+                self.screen_key = key;
+                return false;
+            }
+        }
+        let live_before = self.live_screens();
+        self.screen_phys = (src.names.clone(), src.geoms.clone(), src.main_name.clone());
+        let reserved = self.style.reserved_height();
+        self.screens.reconcile(&key.0, key.1.as_deref(), now, self.gap, reserved, self.gaps_out);
+        // A screen that just appeared has a fresh layout: give it the
+        // style's presentation (desktop-style windows or tiles).
+        let floating = self.style.target.floating();
+        let several = self.screens.live_count() >= 2;
+        for s in &mut self.screens.screens {
+            s.layout.desktop.enabled = floating;
+            // Several screens share the bar strip: a true Fullscreen from
+            // the single desk becomes Maximized (see do_action).
+            if several {
+                for w in &mut s.layout.workspaces {
+                    if w.fullscreen_mode == crate::layout::FullscreenMode::Fullscreen {
+                        w.fullscreen_mode = crate::layout::FullscreenMode::Maximized;
+                    }
+                }
+            }
+        }
+        self.screen_key = key;
+        let live_after = self.live_screens();
+        if live_after != live_before {
+            let list: Vec<String> = live_after
+                .iter()
+                .map(|(n, r)| format!("{} {},{} {}x{}", n, r.x, r.y, r.w, r.h))
+                .collect();
+            log!(
+                "wm: screens [{}] active={} main={}",
+                list.join(", "),
+                self.screens.active,
+                self.screens.main
+            );
+        }
+        self.screens_changed = true;
+        true
+    }
+
+    fn live_screens(&self) -> Vec<(String, LRect)> {
+        self.screens.screens[..self.screens.live_count()]
+            .iter()
+            .map(|s| (s.name.clone(), s.rect))
+            .collect()
+    }
+
+    /// The windows the dock or taskbar lists: every live screen's shown
+    /// windows (`ScreenSet::shown_clients`), so the one dock on the main
+    /// screen reaches a window on any screen; in a mobile style (one
+    /// layout shown) the active screen's only.
+    pub fn dock_clients(&self) -> Vec<ClientId> {
+        if self.style.target.mobile() {
+            let l = self.layout();
+            return l.clients_on(l.active);
+        }
+        self.screens.shown_clients()
+    }
+
+    /// The active screen's layout: where new windows, workspace keys and
+    /// the focused window live.
+    pub fn layout(&self) -> &WmLayout {
+        self.screens.active_layout()
+    }
+
+    pub fn layout_mut(&mut self) -> &mut WmLayout {
+        self.screens.active_layout_mut()
+    }
+
     pub fn focused_terminal_cwd(&self) -> Option<std::path::PathBuf> {
-        let focus = self.layout.focused_client()?;
+        let focus = self.layout().focused_client()?;
         let slot = self.clients.get(&focus)?;
         if slot.app == "terminal" {
             slot.pwd.clone()
@@ -1412,8 +1587,10 @@ impl WmDesk {
                 // `group_set_active` acts on the FOCUSED leaf, so focus the
                 // group's visible member first — the click may well have
                 // landed on a strip belonging to some other tile.
-                state.layout.set_focus(visible);
-                state.layout.group_set_active(index + 1);
+                // The strip may be on another screen: act on its layout.
+                let layout = state.layout_of_mut(visible);
+                layout.set_focus(visible);
+                layout.group_set_active(index + 1);
             }
         }
         // The same press may still turn into a tear-out; until it travels
@@ -1640,6 +1817,12 @@ impl Widget for WmDesk {
         self.style = state.style.clone();
         self.titles = state.clients.iter().map(|(c,s)| (*c,s.display_title().to_string())).collect();
         self.title_hits.clear();
+        // The screens are clipped to this frame's desk rect (the AI pane
+        // may be sliding it), before anything is laid out.
+        state.sync_screens(
+            LRect::new(rect.pos.x, rect.pos.y, rect.size.x, rect.size.y),
+            crate::host::now(),
+        );
         rect.size.y = (rect.size.y - self.style.reserved_height()).max(1.0);
         let gap = state.gap;
         let gaps_out = state.gaps_out;
@@ -1649,14 +1832,44 @@ impl Widget for WmDesk {
             (rect.size.x - gaps_out * 2.0).max(1.0),
             (rect.size.y - gaps_out * 2.0).max(1.0),
         );
+        // Each screen tiles its own layout in its own area (the dock only
+        // reserved on the main one); the single desk is the one area above.
+        let shown: Vec<(usize, LRect)> = if state.per_screen() {
+            let reserved = self.style.reserved_height();
+            (0..state.screens.live_count())
+                .map(|i| (i, state.screens.area(i, reserved, gaps_out)))
+                .collect()
+        } else {
+            vec![(state.screens.active, area)]
+        };
         // `rects` already hands floats (and the scratchpad) back after the
         // tiled windows, so drawing in order puts them on top.
-        let mut targets = state.layout.rects(area, gap);
+        let mut targets: Vec<(ClientId, LRect)> = shown
+            .iter()
+            .flat_map(|(i, a)| state.layout_at(*i).rects(*a, gap))
+            .collect();
+        if shown.len() > 1 {
+            // Every screen's tiles under every screen's floats, the
+            // dragged window on top: a float crossing a seam (it changes
+            // screen only on the drop) is not hidden by the next screen's
+            // tiles. One screen keeps `rects`' own order.
+            targets.sort_by_key(|(c, _)| {
+                let float = state.layout_of(*c).is_float(*c);
+                (float, float && state.dragging.contains(c))
+            });
+        }
+        let shown_clients: Vec<ClientId> = shown
+            .iter()
+            .flat_map(|(i, _)| {
+                let l = state.layout_at(*i);
+                l.clients_on(l.active)
+            })
+            .collect();
         let was_minimized = self.minimized.clone();
-        self.minimized = state.layout.clients_on(state.layout.active).into_iter().filter(|c| state.layout.desktop.minimized(*c)).collect();
+        self.minimized = shown_clients.iter().copied().filter(|c| state.layout_of(*c).desktop.minimized(*c)).collect();
         if self.style.target == crate::desktop::DesktopStyle::Macos {
             let size=cx.owning_window_or_root_pass_size();
-            for client in state.layout.clients_on(state.layout.active) {
+            for client in shown_clients.iter().copied() {
                 let hidden=self.minimized.contains(&client);
                 let restored=was_minimized.contains(&client) && !hidden;
                 if (hidden && !was_minimized.contains(&client)) || restored {
@@ -1689,7 +1902,7 @@ impl Widget for WmDesk {
                 targets.push((*client,LRect::new(rect.pos.x+rect.size.x*0.5,rect.pos.y+rect.size.y+12.0,48.0,34.0)));
             }
         }
-        let focused = state.layout.focused_client();
+        let focused = state.layout().focused_client();
         self.accent = state.accent;
         self.hint = state.drop_hint;
         let borders = state.borders;
@@ -1715,14 +1928,19 @@ impl Widget for WmDesk {
         self.group_tabs.clear();
         self.tab_hits.clear();
         let prev_groups = std::mem::take(&mut self.prev_group_members);
-        for group in state.layout.groups(area, gap).into_iter().filter(|_| !state.layout.desktop.enabled) {
+        let groups: Vec<_> = shown
+            .iter()
+            .filter(|(i, _)| !state.layout_at(*i).desktop.enabled)
+            .flat_map(|(i, a)| state.layout_at(*i).groups(*a, gap))
+            .collect();
+        for group in groups {
             let Some(visible) = group.clients.get(group.active).copied() else {
                 continue;
             };
             // A fullscreen window is exactly the one place a strip must not
             // steal a row: it is showing one member, full bleed.
             let drawn = targets.iter().any(|(c, _)| *c == visible);
-            if !drawn || state.layout.is_client_fullscreen(visible) {
+            if !drawn || state.layout_of(visible).is_client_fullscreen(visible) {
                 continue;
             }
             let members = group

@@ -22,8 +22,9 @@ pub struct LinuxDisplayOutput {
     pub height: u32,
     /// Selected mode refresh in Hz (0.0 when no mode was selected).
     pub refresh_hz: f64,
-    /// The main screen: the dock, menus and new windows go here. It may be
-    /// on any GPU.
+    /// The main screen: the dock goes here. It may be on any GPU. Under the
+    /// window manager, new windows and menus go to the active screen
+    /// instead (the one the pointer or the focused window is on).
     pub primary: bool,
     /// The DRM card driving this connector, e.g. `card1`.
     pub card: String,

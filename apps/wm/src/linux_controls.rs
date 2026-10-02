@@ -219,7 +219,7 @@ impl App {
             return;
         };
         let bar = self.ui.widget(cx, ids!(shell_bar));
-        let anchor = bar.borrow::<shell::bar::ShellBar>().and_then(|b| b.module_rect(kind.module()));
+        let anchor = bar.borrow::<shell::bar::ShellBar>().and_then(|b| b.module_rect(self.shell_panel_segment, kind.module()));
         if let Some(anchor) = anchor {
             if let Some(mut p) = panel.borrow_mut::<ShellPanel>() {
                 p.reanchor(cx, anchor);

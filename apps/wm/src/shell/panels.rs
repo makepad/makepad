@@ -352,6 +352,25 @@ enum Hit {
     PointerSpeedSlider(bool),
 }
 
+/// A flyout card `w` wide and up to `height` tall under its bar module
+/// `anchor` (the top of `screen`'s centre when it has none, `bar_h` tall),
+/// centred on it, `margin` off the bar edge and clamped into `screen` by the
+/// same margin. `screen` is the module's own screen on a multi-screen
+/// desktop, so a module next to a seam keeps its card on its side.
+pub(crate) fn panel_card_rect(anchor: Rect, screen: Rect, w: f64, height: f64, margin: f64, bar_h: f64) -> Rect {
+    let anchor = if anchor.size.x > 0.0 {
+        anchor
+    } else {
+        rect(screen.pos.x + screen.size.x * 0.5, screen.pos.y, 0.0, bar_h)
+    };
+    let x = (anchor.pos.x + anchor.size.x * 0.5 - w * 0.5)
+        .max(screen.pos.x + margin)
+        .min(screen.pos.x + screen.size.x - w - margin)
+        .floor();
+    let y = (anchor.pos.y + anchor.size.y + margin).floor();
+    rect(x, y, w, height.min(screen.pos.y + screen.size.y - y - margin))
+}
+
 #[derive(Script, ScriptHook, Widget)]
 pub struct ShellPanel {
     #[uid]
@@ -380,8 +399,15 @@ pub struct ShellPanel {
     #[area]
     #[rust]
     area: Area,
+    /// The whole overlay as last drawn (what a re-laid-out window is
+    /// measured against, see `follow_screen`).
     #[rust]
     screen: Rect,
+    /// The screen the flyout is clamped into instead of the whole overlay:
+    /// its bar segment's screen on a multi-screen desktop (set by the WM
+    /// before each draw). `None` uses the overlay, as on one screen.
+    #[rust]
+    pub target: Option<Rect>,
     #[rust]
     card: Rect,
     #[rust]
@@ -615,22 +641,7 @@ impl ShellPanel {
         // scale) gets the card fitted between the margins, not clipped.
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         let w = w.min((screen.size.x - margin * 2.0).max(0.0));
-        let anchor = if self.anchor.size.x > 0.0 {
-            self.anchor
-        } else {
-            rect(
-                screen.pos.x + screen.size.x * 0.5,
-                screen.pos.y,
-                0.0,
-                self.tokens.bar.size_horizontal,
-            )
-        };
-        let x = (anchor.pos.x + anchor.size.x * 0.5 - w * 0.5)
-            .max(screen.pos.x + margin)
-            .min(screen.pos.x + screen.size.x - w - margin)
-            .floor();
-        let y = (anchor.pos.y + anchor.size.y + margin).floor();
-        rect(x, y, w, height.min(screen.pos.y + screen.size.y - y - margin))
+        panel_card_rect(self.anchor, screen, w, height, margin, self.tokens.bar.size_horizontal)
     }
 
     fn section_header(&mut self, cx: &mut Cx2d, r: Rect, label: &str, value: &str) {
@@ -720,7 +731,13 @@ impl ShellPanel {
     }
 
     pub fn draw_surface(&mut self, cx: &mut Cx2d, screen: Rect) {
-        self.screen = screen;
+        self.draw_surface_in(cx, screen, screen);
+    }
+
+    /// Draw into `window` (the whole overlay) with the card clamped into
+    /// `screen` (`window` itself on one screen).
+    fn draw_surface_in(&mut self, cx: &mut Cx2d, window: Rect, screen: Rect) {
+        self.screen = window;
         let Some(kind) = self.open else {
             self.card = Rect::default();
             self.hits.clear();
@@ -750,7 +767,7 @@ impl ShellPanel {
             height
         };
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-        self.follow_screen(kind, screen);
+        self.follow_screen(kind, window);
         let card = self.card_rect(screen, kind, height);
         self.card = card;
         self.d.card(cx, card, &tok.popups);
@@ -1920,8 +1937,9 @@ impl ShellPanel {
 impl Widget for ShellPanel {
     fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
         cx.begin_turtle(walk, self.layout);
-        let screen = cx.turtle().rect();
-        self.draw_surface(cx, screen);
+        let window = cx.turtle().rect();
+        let screen = self.target.unwrap_or(window);
+        self.draw_surface_in(cx, window, screen);
         cx.end_turtle_with_area(&mut self.area);
         DrawStep::done()
     }

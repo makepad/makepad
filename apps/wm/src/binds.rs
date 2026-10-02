@@ -42,6 +42,12 @@ pub enum WmAction {
     TiledFullscreen,
     FocusDir(Dir),
     SwapDir(Dir),
+    /// SUPER+SHIFT+ALT+Right/Left — move the focused window to the next
+    /// (or previous) screen, wrapping; focus follows it. A no-op with one
+    /// screen.
+    MoveToScreen {
+        forward: bool,
+    },
     /// Move the nearest divider on `axis` by `px` (positive = right/down).
     ResizePx {
         axis: Axis,
@@ -171,6 +177,8 @@ pub fn keymap() -> Vec<Bind> {
         Bind { layer: SuperShift, key: ArrowRight, action: WmAction::SwapDir(Dir::Right), help: "Swap window to the right" },
         Bind { layer: SuperShift, key: ArrowUp, action: WmAction::SwapDir(Dir::Up), help: "Swap window up" },
         Bind { layer: SuperShift, key: ArrowDown, action: WmAction::SwapDir(Dir::Down), help: "Swap window down" },
+        Bind { layer: SuperShiftAlt, key: ArrowRight, action: WmAction::MoveToScreen { forward: true }, help: "Move window to next screen" },
+        Bind { layer: SuperShiftAlt, key: ArrowLeft, action: WmAction::MoveToScreen { forward: false }, help: "Move window to previous screen" },
         Bind { layer: Alt, key: Tab, action: WmAction::CycleFocus(true), help: "Focus on next window" },
         Bind { layer: AltShift, key: Tab, action: WmAction::CycleFocus(false), help: "Focus on previous window" },
         // Omarchy: SUPER+code:20/21 = minus/equals, resize({x|y = ±N}).
@@ -434,6 +442,10 @@ mod tests {
         mods(false, true, true, false)
     }
 
+    fn sup_shift_alt() -> KeyModifiers {
+        mods(true, false, true, true)
+    }
+
     #[test]
     fn the_three_fullscreen_layers_are_distinct() {
         assert_eq!(
@@ -545,6 +557,18 @@ mod tests {
         assert_eq!(
             match_bind(KeyCode::Key3, &sup_alt()),
             Some(WmAction::GroupActive(3))
+        );
+    }
+
+    #[test]
+    fn move_to_screen_binds_on_super_shift_alt_arrows() {
+        assert_eq!(
+            match_bind(KeyCode::ArrowRight, &sup_shift_alt()),
+            Some(WmAction::MoveToScreen { forward: true })
+        );
+        assert_eq!(
+            match_bind(KeyCode::ArrowLeft, &sup_shift_alt()),
+            Some(WmAction::MoveToScreen { forward: false })
         );
     }
 
