@@ -49,17 +49,20 @@ pub struct SingScore {
     pub singer: usize,
 }
 
-/// Expressive pitch: legato spring, scoop, delayed vibrato, drift.
+/// Expressive pitch, sung in tune: a timed glide (or a scoop into a fresh
+/// note) through the onset consonants that lands by the vowel, delayed
+/// vibrato swinging evenly about the note, a little drift.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PitchStyle {
-    /// Glide time constant between legato notes (s).
-    pub glide: f32,
-    /// Damping of the glide spring (below 1 overshoots a little).
-    pub damping: f32,
-    /// Semitones below a fresh note the voice starts from.
+    /// Glide time between notes (s); wider intervals take a little longer,
+    /// and a glide lands by the vowel plus half this at the latest.
+    pub portamento: f32,
+    /// Semitones below a fresh note (after a rest) the voice starts from.
     pub scoop: f32,
+    /// Vibrato peak depth (semitones) and rate (Hz).
     pub vibrato_depth: f32,
     pub vibrato_rate: f32,
+    /// Seconds after the vowel starts before vibrato begins, and its fade in.
     pub vibrato_delay: f32,
     pub vibrato_fade: f32,
     /// Slow random drift, semitones (std).
@@ -69,17 +72,7 @@ pub struct PitchStyle {
 
 impl Default for PitchStyle {
     fn default() -> Self {
-        PitchStyle {
-            glide: 0.07,
-            damping: 0.75,
-            scoop: 0.35,
-            vibrato_depth: 0.3,
-            vibrato_rate: 5.6,
-            vibrato_delay: 0.28,
-            vibrato_fade: 0.35,
-            drift: 0.06,
-            seed: 1,
-        }
+        PitchStyle { portamento: 0.08, scoop: 0.3, vibrato_depth: 0.3, vibrato_rate: 5.4, vibrato_delay: 0.22, vibrato_fade: 0.35, drift: 0.025, seed: 1 }
     }
 }
 
@@ -453,43 +446,62 @@ pub fn align_segment(score: &SingScore, frames: usize) -> Frames {
     f
 }
 
-/// The rule pitch model, frame by frame: a damped spring toward the note
-/// (legato glides with a little overshoot), a scoop into fresh notes, a
-/// delayed vibrato with a wandering rate, slow drift. Unvoiced frames are 0.
+/// The rule pitch model, frame by frame. A note starts where the frames'
+/// note changes (its onset consonants carry it) or at a vowel attack; the
+/// voice glides there from where it is (legato) or from `scoop` below (after
+/// a rest), timed to land by the vowel plus half the portamento, so the vowel
+/// is sung on pitch. Vibrato starts `vibrato_delay` into the vowel and swings
+/// evenly about the note; drift is a slow random walk of a few cents.
+/// Unvoiced frames are 0.
 pub fn rule_f0(f: &Frames, s: &PitchStyle) -> Vec<f32> {
     let dt = 0.01f32;
-    let w = 1.0 / s.glide.max(0.005);
+    let n = f.len();
     let mut rng = Rng::new(s.seed);
-    let (mut x, mut v) = (0.0f32, 0.0f32);
-    let mut started = false;
-    let mut note_age = 0.0f32;
-    let mut prev_note = 0.0f32;
-    let mut vib_phase = 0.0f32;
-    let mut drift = 0.0f32;
-    let mut out = vec![0.0; f.len()];
-    for t in 0..f.len() {
-        let target = f.note[t];
-        if target <= 0.0 {
-            started = false;
+    let mut out = vec![0.0; n];
+    let (mut x, mut from, mut target) = (0.0f32, 0.0f32, 0.0f32);
+    let (mut glide_t, mut glide_len) = (0.0f32, 0.0f32);
+    let (mut vowel_at, mut vib_phase, mut drift) = (None::<usize>, 0.0f32, 0.0f32);
+    for t in 0..n {
+        let note = f.note[t];
+        if note <= 0.0 {
+            target = 0.0;
             continue;
         }
-        let fresh = f.onset[t] > 0.0 && !(prev_note > 0.0 && t > 0 && f.note[t - 1] > 0.0);
-        if !started || (fresh && f.note[t - 1] <= 0.0) {
-            x = target - s.scoop;
-            v = 0.0;
-            started = true;
+        let fresh = t == 0 || f.note[t - 1] <= 0.0;
+        if fresh || note != f.note[t - 1] {
+            // A new note: where its vowel starts (the next attack on this note;
+            // a melisma note has none, its vowel is already sounding).
+            let mut v = t;
+            while v + 1 < n && f.onset[v] <= 0.0 && f.note[v + 1] == note {
+                v += 1;
+            }
+            if f.onset[v] <= 0.0 {
+                v = t;
+            }
+            let lead = (v - t) as f32 * dt;
+            from = if fresh || target <= 0.0 { note - s.scoop } else { x };
+            target = note;
+            let jump = (target - from).abs();
+            glide_len = (s.portamento + 0.004 * jump).min(lead + 0.5 * s.portamento).max(0.015);
+            glide_t = 0.0;
+            vowel_at = Some(v);
+            vib_phase = 0.0;
         }
-        if target != prev_note {
-            note_age = 0.0;
+        if f.onset[t] > 0.0 && vowel_at.map(|v| v < t).unwrap_or(true) {
+            vowel_at = Some(t);
+            vib_phase = 0.0;
         }
-        prev_note = target;
-        let a = w * w * (target - x) - 2.0 * s.damping * w * v;
-        v += a * dt;
-        x += v * dt;
-        note_age += dt;
-        let fade = ((note_age - s.vibrato_delay) / s.vibrato_fade.max(1e-3)).clamp(0.0, 1.0);
-        vib_phase += 2.0 * std::f32::consts::PI * s.vibrato_rate * (1.0 + 0.08 * rng.normal()) * dt;
-        drift = drift * 0.98 + 0.02 * rng.normal() * s.drift * 7.0;
+        // The glide: a smooth step from `from` to the note.
+        let u = (glide_t / glide_len).clamp(0.0, 1.0);
+        x = from + (target - from) * u * u * (3.0 - 2.0 * u);
+        glide_t += dt;
+        // Vibrato about the note, from `vibrato_delay` into the vowel.
+        let age = vowel_at.map(|v| (t as f32 - v as f32) * dt).unwrap_or(0.0);
+        let fade = ((age - s.vibrato_delay) / s.vibrato_fade.max(1e-3)).clamp(0.0, 1.0);
+        if fade > 0.0 {
+            vib_phase += 2.0 * std::f32::consts::PI * s.vibrato_rate * dt;
+        }
+        drift = drift * 0.98 + 0.199 * s.drift * rng.normal();
         let midi = x + fade * s.vibrato_depth * vib_phase.sin() + drift;
         let tok = f.tokens[f.token_of_frame[t]];
         out[t] = if ph::is_voiced(tok) { midi_to_hz(midi) } else { 0.0 };
@@ -564,9 +576,17 @@ mod tests {
         assert!(f.token_frames[tok] >= 90, "melisma token {} frames", f.token_frames[tok]);
         assert_eq!(f.note[first_a + 10], 60.0);
         assert_eq!(f.note[first_a + 60], 62.0);
-        // f0 is voiced on the vowel and near the note after the glide.
-        let m = hz_to_midi(f.f0[first_a + 20]);
-        assert!((m - 60.0).abs() < 0.5, "midi {m}");
+        // f0 is voiced on the vowel and on the note once the glide has landed
+        // (before the vibrato starts).
+        for q in first_a + 5..first_a + 20 {
+            let m = hz_to_midi(f.f0[q]);
+            assert!((m - 60.0).abs() < 0.12, "midi {m} at frame {q}");
+        }
+        // The second "a" lands on 64 by its vowel plus half the portamento.
+        let second_a = f.token_of_frame.iter().rposition(|t| f.tokens[*t] == a).unwrap();
+        let first_of_second = (0..second_a).rev().take_while(|q| f.tokens[f.token_of_frame[*q]] == a).last().unwrap();
+        let m = hz_to_midi(f.f0[first_of_second + 5]);
+        assert!((m - 64.0).abs() < 0.12, "midi {m}");
         // s is unvoiced.
         let s_id = ph::id("s").unwrap();
         let s_frame = f.token_of_frame.iter().position(|t| f.tokens[*t] == s_id).unwrap();

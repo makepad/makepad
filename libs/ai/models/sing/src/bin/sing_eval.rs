@@ -12,6 +12,9 @@
 //!         recorded f0 (teacher-forced);
 //!   free  the full render of the segment's score, as a host renders a score
 //!         (durations from the model, f0 from its f0 head, refined).
+//! Pitch: how far (median |cents|) each render's f0 is from the f0 it was
+//! given (copy, tf: the recording's), and the free render's vowels from the
+//! score's notes (`--f0 rule|model`: the free render's f0, default model).
 //! Each render (and the recording, `gt`) is transcribed and scored against
 //! the line's lyric (word error rate, capped at 100% per line); a segment can
 //! hold sung words of the next line at its edges, so `gt` is the floor. Also: how well the
@@ -59,6 +62,20 @@ fn transcribe(whisper: &WhisperModel, audio: &[f32]) -> String {
     let a: Vec<f32> = audio.iter().map(|v| v * 0.5 / peak).collect();
     let mut st = WhisperState::new(whisper);
     st.transcribe(whisper, &dsp::resample(&a, 48_000, 16_000), &WhisperParams::default()).iter().map(|s| s.text.clone()).collect::<Vec<_>>().join(" ")
+}
+
+/// Median |cents| between the f0 of `audio` and `want` (Hz per 10 ms frame) where both are voiced.
+fn follow_cents(audio: &[f32], want: &[f32]) -> Vec<f32> {
+    let got = dsp::f0_yin(audio, 55.0, 1400.0);
+    got.iter().zip(want).filter(|(g, w)| **g > 0.0 && **w > 0.0).map(|(g, w)| (1200.0 * (g / w).log2()).abs()).collect()
+}
+
+fn median(mut v: Vec<f32>) -> f32 {
+    if v.is_empty() {
+        return f32::NAN;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    v[v.len() / 2]
 }
 
 fn corr(a: &[f32], b: &[f32]) -> f32 {
@@ -113,6 +130,8 @@ fn main() {
 
     let names = ["gt", "copy", "tf", "free"];
     let mut sum = [0.0f32; 4];
+    let mut pitch_follow: [Vec<f32>; 4] = Default::default();
+    let mut pitch_free_note = Vec::new();
     let (mut d_lab, mut d_pred, mut c_lab, mut c_pred) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut n_lines = 0usize;
     for (k, g) in picked.iter().enumerate() {
@@ -170,8 +189,26 @@ fn main() {
                 c_pred.push(p);
             }
         }
-        let opts = RenderOpts { f0: F0Mode::Model, ..RenderOpts::default() };
-        let (free, _) = cantor.render(&sc, &opts);
+        let opts = RenderOpts { f0: if arg("--f0").as_deref() == Some("rule") { F0Mode::Rule } else { F0Mode::Model }, ..RenderOpts::default() };
+        let (free, phrases) = cantor.render(&sc, &opts);
+        // Free: per vowel (a token's run of frames on one note), the median of
+        // the render's signed cents from the note, as a note pitch error.
+        for p in &phrases {
+            let got = dsp::f0_yin(&p.audio, 55.0, 1400.0);
+            let f = &p.frames;
+            let mut q = 0;
+            while q < f.len() {
+                let e = (q..f.len()).find(|r| f.token_of_frame[*r] != f.token_of_frame[q] || f.note[*r] != f.note[q]).unwrap_or(f.len());
+                if ph::is_vowel(f.tokens[f.token_of_frame[q]]) && f.note[q] > 0.0 && e - q >= 8 {
+                    let (a, b) = (q + (e - q) / 4, q + 3 * (e - q) / 4);
+                    let c: Vec<f32> = (a..b.min(got.len())).filter(|r| got[*r] > 0.0).map(|r| 100.0 * (hz_to_midi(got[r]) - f.note[q])).collect();
+                    if c.len() >= 3 {
+                        pitch_free_note.push(median(c).abs());
+                    }
+                }
+                q = e;
+            }
+        }
         let renders = [audio.clone(), voc(&gt_mel), voc(&coarse), free];
         let reference = lyric.trim().to_string();
         let toks: String = al.tokens.iter().map(|p| ph::symbol(*p)).collect::<Vec<_>>().join(" ");
@@ -184,6 +221,9 @@ fn main() {
             let (err, nw) = wer(&reference, &text);
             let w = (err as f32 / nw.max(1) as f32).min(1.0);
             sum[e] += w;
+            if e == 1 || e == 2 {
+                pitch_follow[e].extend(follow_cents(a, &al.f0));
+            }
             println!("    {:<6} {:4.0}%  [{}]", names[e], w * 100.0, text.trim());
             if k < wavs {
                 std::fs::write(out.join(format!("{k:02}-{}.wav", names[e])), dsp::wav_bytes(48_000, a)).unwrap();
@@ -196,5 +236,11 @@ fn main() {
     for e in 0..names.len() {
         println!("{:<6} {:5.1}%", names[e], 100.0 * sum[e] / n_lines.max(1) as f32);
     }
+    println!(
+        "pitch: copy follows the recording's f0 within {:.1} c, tf {:.1} c (median |cents|); free: note pitch error {:.1} c (mean over vowels of |median cents|)",
+        median(pitch_follow[1].clone()),
+        median(pitch_follow[2].clone()),
+        pitch_free_note.iter().sum::<f32>() / pitch_free_note.len().max(1) as f32
+    );
     println!("durations: corr(ln 1+frames) all tokens {:.3} ({}), consonants {:.3} ({})", corr(&d_lab, &d_pred), d_lab.len(), corr(&c_lab, &c_pred), c_lab.len());
 }
