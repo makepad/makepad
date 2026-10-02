@@ -4,7 +4,13 @@ alignment.json) and where the line's segment starts in its take, so
 `sing_prep lyrics` can rebuild each training segment as a score-aligned item
 and `sing_eval` can score held-out songs against their lyric.
 
-  python3 lyric_words.py <out dir>     (reads ~/nv1/lyric/out, ~/nv1/prep/lyrics)
+  python3 lyric_words.py <out dir> [--exclude MODEL]...
+  python3 lyric_words.py --count-secs [--exclude MODEL]...
+      (reads ~/nv1/lyric/out, ~/nv1/prep/lyrics, ~/nv1/lyric/inbox)
+
+--exclude MODEL leaves out every song group made by that music model (the
+producer's request, `<inbox>/<take>.json`, names it). --count-secs prints the
+harvested clean seconds (harvest.tsv) of the groups kept.
 
 Out: <out>/<group>.tsv with
   seg <cand.mksdat path> <item k> <f0a frame> <p0> <p1> <f0 match err>
@@ -14,7 +20,34 @@ import json, os, struct, sys, glob
 
 OUT_DIR = os.path.expanduser("~/nv1/lyric/out")
 SHARDS = os.path.expanduser("~/nv1/prep/lyrics")
-dst = sys.argv[1]
+INBOX = os.path.expanduser("~/nv1/lyric/inbox")
+args = sys.argv[1:]
+exclude = [args[i + 1] for i, a in enumerate(args) if a == "--exclude"]
+
+
+def made_by_excluded(take):
+    try:
+        req = open(os.path.join(INBOX, take + ".json")).read()
+    except OSError:
+        return False
+    return any(m in req for m in exclude)
+
+
+def group_excluded(g):
+    takes = [t for t in (g, g + "-t0", g + "-t1") if os.path.exists(os.path.join(INBOX, t + ".json"))]
+    return any(made_by_excluded(t) for t in takes)
+
+
+if "--count-secs" in args:
+    s = 0.0
+    for l in open(os.path.join(SHARDS, "harvest.tsv")):
+        c = l.rstrip("\n").split("\t")
+        if not group_excluded(c[0]):
+            s += float(c[4])
+    print(int(s))
+    sys.exit(0)
+
+dst = args[0]
 os.makedirs(dst, exist_ok=True)
 
 
@@ -45,7 +78,7 @@ for d in sorted(os.listdir(OUT_DIR)):
 
 stats = dict(groups=0, segs=0, null_word=0, bad_match=0, no_line=0)
 for g, takes in sorted(groups.items()):
-    if not os.path.exists(os.path.join(SHARDS, g + ".picked")):
+    if not os.path.exists(os.path.join(SHARDS, g + ".picked")) or group_excluded(g):
         continue
     best = {}
     for d in takes:

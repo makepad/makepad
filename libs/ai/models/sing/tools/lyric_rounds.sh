@@ -8,6 +8,7 @@
 # the eval lines on both word error and note pitch. Then restart what was
 # paused, exactly as it ran, and check it is back.
 #   start: setsid nohup ~/sr1/lyric_rounds.sh > ~/sr1/rounds/out.log 2>&1 < /dev/null &
+#   now:   ... lyric_rounds.sh --now    (the first round starts at once)
 #   stop:  touch ~/sr1/rounds/STOP   (between rounds; a running round finishes)
 # Log: ~/sr1/rounds/run.log
 set -u
@@ -18,12 +19,14 @@ W=$N/models/ggml-large-v3-turbo.bin
 VOC=$N/runs/distill-voc/voc.ema.mksing
 BEST=$N/lyric/eval/best.mksing
 GROW=${GROW:-150}          # percent of the last round's clean seconds that starts a round
+EXCLUDE=${EXCLUDE:-}       # music models whose songs are left out (space separated)
+EXCL=""; for m in $EXCLUDE; do EXCL="$EXCL --exclude $m"; done
 mkdir -p $R
 log() { echo "$(date +%FT%T) $*" >> $R/run.log; }
-secs() { awk -F'\t' '{s+=$5} END {printf "%d", s}' $N/prep/lyrics/harvest.tsv; }
+secs() { python3 $S/words_extract.py --count-secs $EXCL; }
 last=$(cat $R/last-secs 2>/dev/null || secs)
 echo $last > $R/last-secs
-log "rounds start: $(secs) s harvested, next round at $((last * GROW / 100)) s"
+log "rounds start: $(secs) s harvested${EXCLUDE:+ (without $EXCLUDE)}, next round at $((last * GROW / 100)) s"
 
 # --- pause / restart ---------------------------------------------------------
 HARVEST_CMD='cd ~/nv1; while [ ! -f lyric/STOP ]; do timeout 900 ./makepad/target/release/sing_data lyric/inbox lyric/out --shards prep/lyrics --watch --no-wav --whisper models/ggml-large-v3-turbo.bin --stems /home/arch/.makepad/weights/stems/model_bs_roformer_ep_17_sdr_9.6568.ckpt >> lyric/harvest.log 2>&1; done'
@@ -79,7 +82,7 @@ round() {
   log "round $r: $(secs) s harvested"
   pause
   rm -rf $D/words $D/sa
-  nice -n 10 python3 $S/words_extract.py $D/words >> $D/prep.log 2>&1
+  nice -n 10 python3 $S/words_extract.py $D/words $EXCL >> $D/prep.log 2>&1
   nice -n 10 $B/sing_prep lyrics $D/words $D/sa >> $D/prep.log 2>&1 || { log "round $r: prep failed"; restart; return 1; }
   hours=$(tail -1 $D/prep.log | awk '{print $5}')
   # About 6000 steps at 6.7 h (best held-out WER at 5-6k), scaled with the data.
@@ -96,14 +99,14 @@ round() {
   done
   wait
   for s in $(seq 2000 1000 $steps); do
-    local fr=$(awk '$1 == "free" { gsub("%", "", $2); print $2 }' $D/held-$s.txt)
-    log "round $r: step $s held-out WER tf $(awk '$1 == "tf" {print $2}' $D/held-$s.txt) free $fr%"
+    local fr=$(awk '/^free / { gsub("%", "", $2); print $2 }' $D/held-$s.txt)
+    log "round $r: step $s held-out WER tf $(awk '/^tf / {print $2}' $D/held-$s.txt) free $fr%"
     [ -n "$fr" ] && awk "BEGIN {exit !($fr < $bw)}" && { bw=$fr; best=$s; }
   done
   [ -n "$best" ] || { log "round $r: no scored checkpoint"; restart; return 1; }
   # The incumbent on this round's held-out songs, for the log.
   nice -n 10 $B/sing_eval --whisper $W --cantor $BEST --words $D/words --items 40 --wavs 0 --out $D/held-incumbent > $D/held-incumbent.txt 2>&1
-  local inc=$(awk '$1 == "free" {print $2}' $D/held-incumbent.txt)
+  local inc=$(awk '/^free / {print $2}' $D/held-incumbent.txt)
   read cw cand_p <<< "$(eval_lines $D/ac-$best.mksing cand)"
   read iw inc_p <<< "$(eval_lines $BEST best)"
   log "round $r: candidate step $best (held-out free $bw%, incumbent $inc): eval lines WER $cw% pitch $cand_p c; incumbent $iw% $inc_p c"
@@ -119,9 +122,11 @@ round() {
 }
 
 r=$(ls -d $R/r* 2>/dev/null | wc -l)
+force=0; [ "${1:-}" = "--now" ] && force=1
 while [ ! -f $R/STOP ]; do
   now=$(secs)
-  if [ $((now * 100)) -ge $((last * GROW)) ]; then
+  if [ $force = 1 ] || [ $((now * 100)) -ge $((last * GROW)) ]; then
+    force=0
     r=$((r + 1))
     round $r
     last=$now; echo $last > $R/last-secs
