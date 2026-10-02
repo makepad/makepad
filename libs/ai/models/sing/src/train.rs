@@ -136,21 +136,55 @@ impl Aligned {
         Some(Aligned { tokens: it.tokens.clone(), dur: Vec::new(), notes, f0: it.f0.clone(), vel: vec![0.8; nf], audio: it.audio_f32(), singer: it.speaker as usize, band: it.band_hz })
     }
 
+    /// A score-aligned sung-lyric item: its tokens and frames per token, the
+    /// score's notes. None when longer than `max_frames`.
+    pub fn from_aligned_item(it: &Item, max_frames: usize) -> Option<Aligned> {
+        if it.kind != Kind::SungAligned || it.frames() > max_frames || it.dur.len() != it.tokens.len() {
+            return None;
+        }
+        let nf = it.frames();
+        let dur: Vec<usize> = it.dur.iter().map(|d| *d as usize).collect();
+        if dur.iter().sum::<usize>() != nf {
+            return None;
+        }
+        let mut notes = it.notes.clone();
+        notes.resize(nf, 0.0);
+        let vel = notes.iter().map(|n| if *n > 0.0 { 0.8 } else { 0.0 }).collect();
+        Some(Aligned { tokens: it.tokens.clone(), dur, notes, f0: it.f0.clone(), vel, audio: it.audio_f32(), singer: it.speaker as usize, band: it.band_hz })
+    }
+
+    /// A sung-lyric item of either kind (score-aligned, or aligned in training).
+    pub fn from_lyric_item(it: &Item, max_frames: usize) -> Option<Aligned> {
+        match it.kind {
+            Kind::SungAligned => Self::from_aligned_item(it, max_frames),
+            _ => Self::from_sungtext_item(it, max_frames),
+        }
+    }
+
     /// Speed perturbation of an unaligned item: played `f` times faster (0.9..1.1),
     /// so pitch rises by 12·log2 f semitones and it lasts 1/f as long; f0 and
     /// notes follow. Formants move with it, as in a tape-speed change.
     pub fn speed(&self, f: f32) -> Aligned {
-        assert!(self.dur.is_empty(), "speed perturbation is for unaligned items");
         let audio = dsp::resample(&self.audio, (SR as f32 * f).round() as u32, SR as u32);
         let nf = audio.len() / HOP;
+        // Token boundaries move with the audio (a token keeps at least a frame).
+        let mut dur = Vec::with_capacity(self.dur.len());
+        let (mut at, mut prev) = (0usize, 0usize);
+        for (k, d) in self.dur.iter().enumerate() {
+            at += d;
+            let left = self.dur.len() - 1 - k;
+            let b = if left == 0 { nf } else { ((at as f32 / f).round() as usize).clamp(prev + 1, nf.saturating_sub(left)) };
+            dur.push(b.saturating_sub(prev));
+            prev = b;
+        }
         let src = |q: usize| ((q as f32 * f).round() as usize).min(self.f0.len().saturating_sub(1));
         let semis = 12.0 * f.log2();
         Aligned {
             tokens: self.tokens.clone(),
-            dur: Vec::new(),
+            dur,
             notes: (0..nf).map(|q| self.notes[src(q).min(self.notes.len() - 1)]).map(|n| if n > 0.0 { n + semis } else { 0.0 }).collect(),
             f0: (0..nf).map(|q| self.f0[src(q)] * f).collect(),
-            vel: vec![0.8; nf],
+            vel: (0..nf).map(|q| self.vel[src(q).min(self.vel.len() - 1)]).collect(),
             audio: audio[..nf * HOP].to_vec(),
             singer: self.singer,
             band: self.band,
@@ -237,7 +271,19 @@ pub fn ac_batch(items: &[Aligned]) -> AcBatch {
         f.pos.truncate(nf);
         f.note = a.notes[..nf].to_vec();
         f.vel = a.vel[..nf].to_vec();
-        f.onset = (0..nf).map(|q| if a.notes[q] > 0.0 && (q == 0 || a.notes[q - 1] != a.notes[q]) { 1.0 } else { 0.0 }).collect();
+        f.onset = if a.dur.is_empty() {
+            (0..nf).map(|q| if a.notes[q] > 0.0 && (q == 0 || a.notes[q - 1] != a.notes[q]) { 1.0 } else { 0.0 }).collect()
+        } else {
+            // As the front end marks them: where a syllable's vowel starts on its note.
+            (0..nf)
+                .map(|q| {
+                    let k = f.token_of_frame[q];
+                    let first = q == 0 || f.token_of_frame[q - 1] != k;
+                    let after_vowel = k > 0 && ph::is_vowel(a.tokens[k - 1]);
+                    if first && a.notes[q] > 0.0 && ph::is_vowel(a.tokens[k]) && !after_vowel { 1.0 } else { 0.0 }
+                })
+                .collect()
+        };
         let nfeat = f.note_feats();
         for q in 0..t {
             out.frame_idx[i * t + q] = if q < nf { i * n + f.token_of_frame[q] } else { i * n + n - 1 };

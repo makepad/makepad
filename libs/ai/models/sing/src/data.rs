@@ -4,7 +4,8 @@
 //! A shard is `MKSDAT01` then items, each: a fixed header (kind, speaker,
 //! sample count, frame count, token count, note count, band limit in Hz),
 //! the tokens (u8), the notes per frame (f32 MIDI, 0 = none; only for sung
-//! items), the f0 per frame (f32 Hz, 0 = unvoiced) and the 48 kHz audio (i16).
+//! items), the f0 per frame (f32 Hz, 0 = unvoiced) and the 48 kHz audio (i16);
+//! a score-aligned item then has its frames per token (u16, one per token).
 
 use crate::dsp::{self, HOP, SR};
 use crate::phonemes::{self as ph, Ph};
@@ -24,6 +25,22 @@ pub enum Kind {
     /// Sung lyrics with a phoneme transcript and notes, no durations
     /// (aligned in training like speech).
     SungText = 3,
+    /// Sung lyrics aligned to their score: the tokens and frames per token the
+    /// front end (`score::align`) gives the line's timed words, the score's
+    /// notes per frame, the recorded f0 and audio.
+    SungAligned = 4,
+}
+
+impl Kind {
+    fn from_u32(v: u32) -> Kind {
+        match v {
+            0 => Kind::Speech,
+            1 => Kind::Sung,
+            3 => Kind::SungText,
+            4 => Kind::SungAligned,
+            _ => Kind::Audio,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -36,6 +53,8 @@ pub struct Item {
     pub notes: Vec<f32>,
     pub f0: Vec<f32>,
     pub audio: Vec<i16>,
+    /// Frames per token (`SungAligned` only; empty otherwise).
+    pub dur: Vec<u16>,
 }
 
 impl Item {
@@ -59,9 +78,15 @@ impl Item {
         for v in &self.f0 {
             w.write_all(&v.to_le_bytes())?;
         }
-        let mut b = Vec::with_capacity(self.audio.len() * 2);
+        let mut b = Vec::with_capacity(self.audio.len() * 2 + self.dur.len() * 2);
         for v in &self.audio {
             b.extend_from_slice(&v.to_le_bytes());
+        }
+        if self.kind == Kind::SungAligned {
+            assert_eq!(self.dur.len(), self.tokens.len(), "a score-aligned item has one duration per token");
+            for v in &self.dur {
+                b.extend_from_slice(&v.to_le_bytes());
+            }
         }
         w.write_all(&b)
     }
@@ -74,12 +99,7 @@ impl Item {
             Err(e) => return Err(e),
         }
         let u = |i: usize| u32::from_le_bytes(h[i * 4..i * 4 + 4].try_into().unwrap());
-        let kind = match u(0) {
-            0 => Kind::Speech,
-            1 => Kind::Sung,
-            3 => Kind::SungText,
-            _ => Kind::Audio,
-        };
+        let kind = Kind::from_u32(u(0));
         let (speaker, ns, nf, nt, nn) = (u(1), u(2) as usize, u(3) as usize, u(4) as usize, u(5) as usize);
         let band_hz = f32::from_le_bytes(h[24..28].try_into().unwrap());
         let mut tokens = vec![0u8; nt];
@@ -94,7 +114,13 @@ impl Item {
         let mut b = vec![0u8; ns * 2];
         r.read_exact(&mut b)?;
         let audio = b.chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
-        Ok(Some(Item { kind, speaker, band_hz, tokens, notes, f0, audio }))
+        let mut dur = Vec::new();
+        if kind == Kind::SungAligned {
+            let mut b = vec![0u8; nt * 2];
+            r.read_exact(&mut b)?;
+            dur = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        }
+        Ok(Some(Item { kind, speaker, band_hz, tokens, notes, f0, audio, dur }))
     }
 }
 
@@ -210,16 +236,27 @@ mod tests {
 
     #[test]
     fn shard_round_trip_and_notes() {
-        let it = Item { kind: Kind::Sung, speaker: 3, band_hz: 22050.0, tokens: vec![1, 5, 1], notes: vec![0.0, 60.0], f0: vec![0.0, 261.6], audio: vec![1, -2, 3] };
+        let it = Item { kind: Kind::Sung, speaker: 3, band_hz: 22050.0, tokens: vec![1, 5, 1], notes: vec![0.0, 60.0], f0: vec![0.0, 261.6], audio: vec![1, -2, 3], dur: vec![] };
+        let al = Item { kind: Kind::SungAligned, dur: vec![1, 0, 1], ..it.clone() };
         let mut b = Vec::new();
         it.write(&mut b).unwrap();
-        let back = Item::read(&mut &b[..]).unwrap().unwrap();
-        assert_eq!(back, it);
+        al.write(&mut b).unwrap();
+        it.write(&mut b).unwrap();
+        let mut r = &b[..];
+        assert_eq!(Item::read(&mut r).unwrap().unwrap(), it);
+        assert_eq!(Item::read(&mut r).unwrap().unwrap(), al);
+        assert_eq!(Item::read(&mut r).unwrap().unwrap(), it);
         let f0: Vec<f32> = (0..50).map(|i| if i < 25 { 261.63 } else { 293.66 }).collect();
         let n = notes_from_f0(&f0);
         assert_eq!(n[5], 60.0);
         assert_eq!(n[45], 62.0);
     }
+}
+
+/// Whether the song (shard) `name` is among the `pct`% held out of training.
+pub fn held_out_name(name: &str, pct: u64) -> bool {
+    let h = name.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    h % 100 < pct
 }
 
 /// Where one item sits in its shard, and its sizes.
@@ -248,6 +285,13 @@ impl ItemRef {
     }
     fn audio_at(&self) -> u64 {
         self.f0_at() + 4 * self.frames as u64
+    }
+    fn dur_at(&self) -> u64 {
+        self.audio_at() + 2 * self.samples as u64
+    }
+    /// Where the next item starts.
+    fn end(&self) -> u64 {
+        self.dur_at() + if self.kind == Kind::SungAligned { 2 * self.tokens as u64 } else { 0 }
     }
 }
 
@@ -309,12 +353,7 @@ impl Store {
             while at + 28 <= len {
                 read_at(&f, &mut h, at)?;
                 let u = |i: usize| u32::from_le_bytes(h[i * 4..i * 4 + 4].try_into().unwrap());
-                let kind = match u(0) {
-                    0 => Kind::Speech,
-                    1 => Kind::Sung,
-                    3 => Kind::SungText,
-                    _ => Kind::Audio,
-                };
+                let kind = Kind::from_u32(u(0));
                 let r = ItemRef {
                     shard: si as u32,
                     offset: at,
@@ -326,7 +365,7 @@ impl Store {
                     notes: u(5),
                     band_hz: f32::from_le_bytes(h[24..28].try_into().unwrap()),
                 };
-                at = r.audio_at() + 2 * r.samples as u64;
+                at = r.end();
                 items.push(r);
             }
             files.push(f);
@@ -338,8 +377,7 @@ impl Store {
     /// held out of training: by a hash of the shard's name, so the same songs
     /// stay out whatever else the store holds.
     pub fn held_out(&self, r: &ItemRef, pct: u64) -> bool {
-        let h = self.names[r.shard as usize].bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
-        h % 100 < pct
+        held_out_name(&self.names[r.shard as usize], pct)
     }
 
     fn bytes(&self, r: &ItemRef, at: u64, n: usize) -> Vec<u8> {
@@ -375,7 +413,12 @@ impl Store {
     /// The whole item.
     pub fn item(&self, r: &ItemRef) -> Item {
         let audio = self.bytes(r, r.audio_at(), 2 * r.samples as usize).chunks_exact(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
-        Item { kind: r.kind, speaker: r.speaker, band_hz: r.band_hz, tokens: self.tokens(r), notes: self.notes(r), f0: self.f0(r, 0, r.frames as usize), audio }
+        let dur = if r.kind == Kind::SungAligned {
+            self.bytes(r, r.dur_at(), 2 * r.tokens as usize).chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect()
+        } else {
+            Vec::new()
+        };
+        Item { kind: r.kind, speaker: r.speaker, band_hz: r.band_hz, tokens: self.tokens(r), notes: self.notes(r), f0: self.f0(r, 0, r.frames as usize), audio, dur }
     }
 
     pub fn hours(&self) -> f64 {

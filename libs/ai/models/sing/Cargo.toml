@@ -9,6 +9,8 @@ license = "MIT"
 default = []
 # Lyrics -> phonemes with the speech family's English G2P (lexicon + rules).
 g2p = ["dep:makepad-ai-speech"]
+# sing_eval: held-out word error rate through our speech recogniser.
+eval = ["g2p", "makepad-ai-speech/whisper"]
 
 [dependencies]
 # The matmul gateway: Metal on macOS, cuBLAS on Linux with the CUDA store,
@@ -33,3 +35,8 @@ path = "src/bin/sing_train.rs"
 name = "sing_prep"
 path = "src/bin/sing_prep.rs"
 required-features = ["g2p"]
+
+[[bin]]
+name = "sing_eval"
+path = "src/bin/sing_eval.rs"
+required-features = ["eval"]

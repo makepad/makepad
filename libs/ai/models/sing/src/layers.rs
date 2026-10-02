@@ -93,9 +93,11 @@ pub fn declare_transformer(p: &mut Params, rng: &mut Rng, name: &str, d: usize, 
 pub fn transformer(g: &mut Graph, name: &str, x: Id, heads: usize) -> Id {
     let h = norm(g, &format!("{name}.n1"), x);
     let h = attn(g, &format!("{name}.attn"), h, heads);
+    let h = g.drop(h);
     let x = g.add(x, h);
     let h = norm(g, &format!("{name}.n2"), x);
     let h = ffn(g, &format!("{name}.ffn"), h);
+    let h = g.drop(h);
     g.add(x, h)
 }
 
@@ -117,6 +119,7 @@ pub fn declare_conformer(p: &mut Params, rng: &mut Rng, name: &str, d: usize, hi
 pub fn conformer(g: &mut Graph, name: &str, x: Id, heads: usize, k: usize) -> Id {
     let h = norm(g, &format!("{name}.n1"), x);
     let h = attn(g, &format!("{name}.attn"), h, heads);
+    let h = g.drop(h);
     let x = g.add(x, h);
     let h = norm(g, &format!("{name}.n2"), x);
     let h = linear(g, &format!("{name}.pw1"), h);
@@ -125,9 +128,11 @@ pub fn conformer(g: &mut Graph, name: &str, x: Id, heads: usize, k: usize) -> Id
     let h = norm(g, &format!("{name}.n3"), h);
     let h = g.act(h, Act::Silu);
     let h = linear(g, &format!("{name}.pw2"), h);
+    let h = g.drop(h);
     let x = g.add(x, h);
     let h = norm(g, &format!("{name}.n4"), x);
     let h = ffn(g, &format!("{name}.ffn"), h);
+    let h = g.drop(h);
     let x = g.add(x, h);
     norm(g, &format!("{name}.out"), x)
 }
