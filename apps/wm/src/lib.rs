@@ -3407,7 +3407,8 @@ impl App {
 
     /// Toggle a bar module's flyout, anchored to the module itself.
     /// `seg` is the bar segment it was pressed in, so the flyout opens on
-    /// that screen.
+    /// that screen; pressed on another segment while its flyout is up, it
+    /// moves there.
     fn toggle_shell_panel(&mut self, cx: &mut Cx, seg: usize, module: BarModule) {
         let Some(kind) = shell::panels::PanelKind::for_module(module) else {
             return;
@@ -3420,15 +3421,22 @@ impl App {
                 .and_then(|b| b.module_rect(seg, module))
                 .unwrap_or_default()
         };
+        let open_seg = self.shell_panel_segment;
         self.shell_panel_segment = seg;
         let panel = self.ui.widget(cx, ids!(shell_panel));
         let mut opened_network = false;
         {
             let mut borrowed = panel.borrow_mut::<shell::panels::ShellPanel>();
             if let Some(p) = borrowed.as_mut() {
-                p.toggle(cx, kind, anchor);
+                // The same module pressed on another screen's segment: the
+                // flyout moves there instead of closing.
+                if shell::bar::flyout_press_moves(p.open == Some(kind), open_seg, seg) {
+                    p.move_to(cx, anchor);
+                } else {
+                    p.toggle(cx, kind, anchor);
+                    opened_network = p.open == Some(shell::panels::PanelKind::Network);
+                }
                 self.shell_panel_open = p.open.map(|k| k.module());
-                opened_network = p.open == Some(shell::panels::PanelKind::Network);
             }
         }
         if opened_network {
@@ -3674,9 +3682,13 @@ impl App {
     /// A click on workspace cell `i` of bar segment `seg`: that segment's
     /// screen becomes active, then switches to the workspace. When the
     /// switch leaves the new screen without a window to focus, the
-    /// keyboard leaves the old screen's window too.
+    /// keyboard leaves the old screen's window too. A segment or cell the
+    /// last `update_bar` did not publish (a stale press across a reconcile)
+    /// is ignored: `i` is a cell index, not a workspace number.
     fn bar_workspace(&mut self, cx: &mut Cx, seg: usize, i: usize) {
-        let ws = self.bar_workspaces.get(seg).and_then(|v| v.get(i)).copied().unwrap_or(i);
+        let Some(ws) = self.bar_workspaces.get(seg).and_then(|v| v.get(i)).copied() else {
+            return;
+        };
         let screen = self.bar_screen(seg);
         let old = self.state_mut().screens.active;
         self.state_mut().screens.active = screen;
@@ -5672,7 +5684,17 @@ impl AppMain for App {
             }
             self.wifi_shutdown();
             #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-            self.shutdown_linux_controls();
+            {
+                self.shutdown_linux_controls();
+                // "Restart desktop now": exit 75, which the systemd units
+                // restart (`RestartForceExitStatus`/`SuccessExitStatus`).
+                // An ordinary quit is left alone and still exits 0 through
+                // the platform's own shutdown path.
+                let code = linux_controls::exit_code(self.restart_requested());
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
         }
         if let Event::Timer(te) = event {
             if self.tick.is_timer(te).is_some() && self.state.is_some() {

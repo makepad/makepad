@@ -331,12 +331,26 @@ enum Hit {
     /// The Display panel's DPI slider: previews while held, applies on release.
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     DpiScaleSlider,
-    /// The "Optimize for" row and its list of driven outputs.
+    /// A screen row's move button: the row (left to right) and the
+    /// direction, -1 left or +1 right.
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    SourcePicker,
+    ScreenMove(usize, i32),
+    /// A screen row's "Make main".
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-    Source(usize),
-    /// The compositor GPU row and its list: Auto (display GPU), then the GPUs.
+    ScreenMain(usize),
+    /// A screen row's mode picker, and a row of its unfolded list.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    ScreenModePicker(usize),
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    ScreenMode(usize),
+    /// "Restart desktop now", then its confirm and cancel.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    RestartDesktop,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    RestartConfirm,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    RestartCancel,
+    /// The "Render on" row and its list: Auto (display GPU), then the GPUs.
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     GpuPicker,
     /// The focused app's GPU row and its list: Follow compositor, then the GPUs.
@@ -447,8 +461,8 @@ pub struct ShellPanel {
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
     pub dpi_preview: Option<u32>,
-    /// What the renderer sees: the connected outputs, and whether the WM
-    /// drives them itself (clone) or the desktop does.
+    /// What the renderer sees: the connected screens and their place in
+    /// the wide desktop, and whether the WM drives them or the desktop does.
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
     pub display_snapshot: LinuxDisplaySnapshot,
@@ -477,25 +491,53 @@ pub struct ShellPanel {
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
     anchor_screen: Rect,
-    /// The "Optimize for" list is unfolded.
+    /// The connector names behind the drawn screen rows (left to right,
+    /// then the screens outside the desktop), so a click lands on the
+    /// screen that was shown, never on whatever a fresh inventory put at
+    /// that index.
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
-    source_picker: bool,
-    /// The unfolded list's first shown row, so every driven output stays
-    /// reachable when the screen leaves room for a single row.
+    screen_targets: Vec<String>,
+    /// How many of `screen_targets` are in the desktop (the movable ones).
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
-    source_scroll: usize,
-    /// The unfolded list did not fit: the wheel scrolls it.
+    screen_placed: usize,
+    /// The screen whose mode list is unfolded, by name.
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
-    source_overflow: bool,
-    /// The connector names behind the drawn `Hit::Source` rows, in row
-    /// order, so a click lands on the output that was shown — never on
-    /// whatever a fresh inventory put at that index.
+    mode_picker: Option<String>,
+    /// The unfolded mode list's first shown row.
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
-    source_targets: Vec<String>,
+    mode_scroll: usize,
+    /// The unfolded mode list did not fit: the wheel scrolls it.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    mode_overflow: bool,
+    /// The mode behind each drawn `Hit::ScreenMode` row (`None` is
+    /// Automatic) and the screen they are for, bound at draw time.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    mode_targets: Vec<Option<String>>,
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    mode_target_screen: Option<String>,
+    /// "Restart desktop now" was pressed once and asks to confirm.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    restart_confirm: bool,
+    /// The restart was confirmed and is waiting for the display layout
+    /// save to land before the process exits (`LinuxControls::restart_requested`,
+    /// mirrored here every poll). The restart row shows "Restarting…"
+    /// while this holds, in place of the button or the confirm step.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    pub restart_waiting: bool,
+    /// The saved render-on GPU (`None` is Auto): the WM's working layout,
+    /// so a pick shows at once. The render-on list checks it.
+    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[rust]
+    pub render_on_saved: Option<String>,
     /// The compositor GPU list is unfolded.
     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
     #[rust]
@@ -560,6 +602,21 @@ impl ShellPanel {
         self.redraw(cx);
     }
 
+    /// The open flyout follows its module to another bar segment (the
+    /// same module pressed on another screen): a new anchor, still open,
+    /// nothing re-read.
+    pub fn move_to(&mut self, cx: &mut Cx, anchor: Rect) {
+        if self.open.is_none() {
+            return;
+        }
+        self.anchor = anchor;
+        #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+        {
+            self.anchor_screen = self.screen;
+        }
+        self.redraw(cx);
+    }
+
     pub fn close(&mut self, cx: &mut Cx) {
         let was_open = self.open;
         self.open = None;
@@ -615,9 +672,11 @@ impl ShellPanel {
             self.device_scroll = 0;
             self.dpi_preview = None;
             self.display_scroll = 0;
-            self.source_picker = false;
-            self.source_scroll = 0;
-            self.source_targets.clear();
+            self.mode_picker = None;
+            self.mode_scroll = 0;
+            self.mode_targets.clear();
+            self.mode_target_screen = None;
+            self.restart_confirm = false;
             self.gpu_picker = false;
             self.app_gpu_picker = false;
             self.gpu_scroll = 0;
@@ -757,8 +816,8 @@ impl ShellPanel {
         } + pad * 2.0;
         // The body is inset by the padding AND the popup border. The
         // Display panel's plan is sized to the body, so its card asks for
-        // the border too; otherwise the full plan never fits and the clone
-        // picture is dropped even on a tall desktop. The screen clamp and
+        // the border too; otherwise the full plan never fits and the
+        // arrangement picture is dropped even on a tall desktop. The screen clamp and
         // the compact fallback still apply.
         #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
         let height = if kind == PanelKind::Monitor {
@@ -1784,12 +1843,13 @@ impl ShellPanel {
 
     /// The keys the flyout takes before the WM binds, the AI pane and the
     /// tiles (lib.rs routes them here first): the Wi-Fi prompt's, and
-    /// Escape while a scale preview is held or the "Optimize for" list is
-    /// unfolded.
+    /// Escape while a scale preview is held, a Display list is unfolded or
+    /// a restart asks to confirm.
     pub fn wants_keys(&self) -> bool {
         self.open == Some(PanelKind::Network)
             || self.dpi_preview.is_some()
-            || self.source_picker
+            || self.mode_picker.is_some()
+            || self.restart_confirm
             || self.gpu_picker
             || self.app_gpu_picker
             || self.pointer_settings
@@ -1832,11 +1892,11 @@ impl ShellPanel {
             self.swallow_escape_up = true;
             return true;
         }
-        // Escape folds the "Optimize for" list; the Display panel stays.
-        if e.key_code == KeyCode::Escape && self.source_picker {
-            self.source_picker = false;
-            self.source_scroll = 0;
-            self.source_targets.clear();
+        // Escape folds a screen's mode list, or drops a restart confirm;
+        // the Display panel stays.
+        if e.key_code == KeyCode::Escape && (self.mode_picker.is_some() || self.restart_confirm) {
+            self.close_mode_list();
+            self.restart_confirm = false;
             self.swallow_escape_up = true;
             self.redraw(cx);
             return true;
@@ -1902,7 +1962,7 @@ impl ShellPanel {
         (self.open == Some(PanelKind::Audio) && self.device_picker.is_some() && contains(self.card, p))
             || (self.open == Some(PanelKind::Monitor)
                 && (self.display_overflow
-                    || (self.source_picker && self.source_overflow)
+                    || (self.mode_picker.is_some() && self.mode_overflow)
                     || ((self.gpu_picker || self.app_gpu_picker) && self.gpu_overflow))
                 && contains(self.card, p))
             || (self.open == Some(PanelKind::Network)
@@ -2030,7 +2090,9 @@ impl Widget for ShellPanel {
                     }
                     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
                     Some(hit @ (Hit::DevicePicker(_) | Hit::Device(_, _) | Hit::InputMute
-                        | Hit::SourcePicker | Hit::Source(_) | Hit::GpuPicker | Hit::AppGpuPicker
+                        | Hit::ScreenMove(..) | Hit::ScreenMain(_) | Hit::ScreenModePicker(_) | Hit::ScreenMode(_)
+                        | Hit::RestartDesktop | Hit::RestartConfirm | Hit::RestartCancel
+                        | Hit::GpuPicker | Hit::AppGpuPicker
                         | Hit::Gpu(_) | Hit::PointerSettings)) => self.system_press(cx, hit),
                     #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
                     Some(Hit::DpiScaleSlider) => {
@@ -2089,9 +2151,9 @@ impl Widget for ShellPanel {
                 if self.wants_scroll(e.abs) {
                     if self.open == Some(PanelKind::Audio) { self.device_scroll_by(cx, e.scroll.y); }
                     else if self.open == Some(PanelKind::Monitor) {
-                        // The unfolded source list takes the wheel while it
-                        // is the thing that overflows.
-                        if self.source_picker && self.source_overflow { self.source_scroll_by(cx, e.scroll.y); }
+                        // An unfolded list takes the wheel while it is the
+                        // thing that overflows.
+                        if self.mode_picker.is_some() && self.mode_overflow { self.mode_scroll_by(cx, e.scroll.y); }
                         else if (self.gpu_picker || self.app_gpu_picker) && self.gpu_overflow { self.gpu_scroll_by(cx, e.scroll.y); }
                         else { self.display_scroll_by(cx, e.scroll.y); }
                     }

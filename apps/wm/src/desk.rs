@@ -471,10 +471,11 @@ impl WmState {
     /// (the desk widget's current rect). Off the multi-screen desktop this
     /// only records the desk rect on the single `""` entry, so the WM keeps
     /// today's single-desk behaviour; otherwise it reconciles when the
-    /// clipped rects or the main screen changed, or while a screen waits
-    /// out its removal debounce (so the removal expires). True when the set
-    /// was reconciled. Cheap when nothing changed: one clip per screen and
-    /// a Vec compare.
+    /// clipped rects or the main screen changed, or when a pending screen's
+    /// removal debounce has run out (so the removal expires); the same
+    /// input during the debounce is no reconcile. True (and
+    /// `screens_changed` set) when the reconcile changed something. Cheap
+    /// when nothing changed: one clip per screen and a Vec compare.
     pub fn sync_screens(&mut self, desk: LRect, now: f64) -> bool {
         if desk.w <= 1.0 {
             return false;
@@ -500,13 +501,15 @@ impl WmState {
             && src.geoms == self.screen_phys.1
             && src.main_name == self.screen_phys.2;
         let key = (new, src.main_name.clone());
-        if !pending && same_phys && self.screens.is_named() {
-            if key == self.screen_key {
+        if same_phys && self.screens.is_named() {
+            // Nothing moved: done, unless a pending screen's debounce just
+            // ran out (it only expires inside reconcile).
+            if key == self.screen_key && !(pending && self.screens.removal_due(now)) {
                 return false;
             }
             // Only the desk clip moved (the AI pane sliding): new rects in
             // place, no window moved or fitted.
-            if self.screens.set_clip(&key.0) {
+            if !pending && self.screens.set_clip(&key.0) {
                 self.screen_key = key;
                 return false;
             }
@@ -514,7 +517,14 @@ impl WmState {
         let live_before = self.live_screens();
         self.screen_phys = (src.names.clone(), src.geoms.clone(), src.main_name.clone());
         let reserved = self.style.reserved_height();
-        self.screens.reconcile(&key.0, key.1.as_deref(), now, self.gap, reserved, self.gaps_out);
+        let changed = self.screens.reconcile(
+            &key.0,
+            key.1.as_deref(),
+            now,
+            self.gap,
+            reserved,
+            self.gaps_out,
+        );
         // A screen that just appeared has a fresh layout: give it the
         // style's presentation (desktop-style windows or tiles).
         let floating = self.style.target.floating();
@@ -545,8 +555,12 @@ impl WmState {
                 self.screens.main
             );
         }
-        self.screens_changed = true;
-        true
+        // An idempotent reconcile is no change: no drag is cancelled, no
+        // full redraw.
+        if changed {
+            self.screens_changed = true;
+        }
+        changed
     }
 
     fn live_screens(&self) -> Vec<(String, LRect)> {

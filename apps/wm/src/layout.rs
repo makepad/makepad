@@ -2101,8 +2101,9 @@ pub(crate) fn fit_inside(mut r: LRect, area: LRect) -> LRect {
 /// workspace (a scratchpad client too). Its float and desktop-style rects
 /// are shifted by `offset` (the target screen's origin minus the source's)
 /// and fitted inside `to_area`. `c` becomes `to`'s focus, and an open
-/// scratchpad there closes so the focus really is `c`. False when `c` is
-/// not in `from`.
+/// scratchpad there closes so the focus really is `c` (a Quick-Look
+/// preview excepted: it never takes the focus). False when `c` is not in
+/// `from`.
 pub fn transfer_client(
     from: &mut WmLayout,
     to: &mut WmLayout,
@@ -2115,9 +2116,14 @@ pub fn transfer_client(
         return false;
     };
     let ws = to.active;
+    // A Quick-Look preview never becomes a focus (`adopt` keeps it out),
+    // so the target's keyboard and open scratchpad stay as they are.
+    let takes_focus = !d.no_key_focus;
     to.adopt(ws, d, offset, to_area, gap);
-    to.scratchpad_open = false;
-    to.workspaces[ws].focus = Some(c);
+    if takes_focus {
+        to.scratchpad_open = false;
+        to.workspaces[ws].focus = Some(c);
+    }
     true
 }
 
@@ -3203,6 +3209,24 @@ mod tests {
         assert_eq!(to.focused_client(), Some(3));
         // The scratchpad keeps its window for the next toggle.
         assert_eq!(to.clients_on(SCRATCHPAD), vec![12]);
+    }
+
+    #[test]
+    fn a_quick_look_preview_transfer_leaves_the_targets_focus_alone() {
+        let mut from = abc();
+        from.add_preview_float(9, LRect::new(100.0, 100.0, 300.0, 200.0), 0);
+        let mut to = right_layout();
+        to.insert(12, RIGHT, 0.0);
+        to.move_focused_to_scratchpad(RIGHT, 0.0);
+        to.toggle_scratchpad();
+        assert_eq!(to.focused_client(), Some(12));
+        assert!(transfer_client(&mut from, &mut to, 9, (1000.0, 0.0), RIGHT, 0.0));
+        // Still a no-focus preview, and the keyboard stays where it was.
+        assert!(!to.takes_key_focus(9));
+        assert_eq!(to.workspace_of(9), Some(2));
+        assert!(to.scratchpad_open);
+        assert_eq!(to.focused_client(), Some(12));
+        assert_ne!(to.workspaces[2].focus, Some(9));
     }
 
     #[test]

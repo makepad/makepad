@@ -502,6 +502,14 @@ pub fn hit_at_in(hits: &[(usize, BarModule, Rect)], p: Vec2d) -> Option<(usize, 
     hits.iter().find(|(_, _, r)| contains(*r, p)).map(|(s, m, _)| (*s, *m))
 }
 
+/// A bar module with a flyout was pressed in segment `seg` while
+/// `same_open` (its own flyout is already up) in segment `open_seg`: true
+/// when the press should move that flyout to `seg` rather than toggle it
+/// closed (the same module on another screen's segment).
+pub fn flyout_press_moves(same_open: bool, open_seg: usize, seg: usize) -> bool {
+    same_open && seg != open_seg
+}
+
 /// Each segment's rect across the strip `r`, from the screens' x ranges
 /// (`spans`, left to right): the first starts at the strip's left edge
 /// (the AI pane may clip the leftmost screen, never the bar), each ends
@@ -1193,6 +1201,17 @@ impl Widget for ShellBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_same_flyout_pressed_on_another_segment_moves() {
+        // Open on segment 0, pressed again on segment 1: it moves.
+        assert!(flyout_press_moves(true, 0, 1));
+        // Pressed again on its own segment: it toggles closed.
+        assert!(!flyout_press_moves(true, 1, 1));
+        // Another flyout (or none) up: the press opens this one.
+        assert!(!flyout_press_moves(false, 0, 1));
+        assert!(!flyout_press_moves(false, 0, 0));
+    }
 
     #[test]
     fn the_volume_ladder_matches_the_osd_thresholds() {

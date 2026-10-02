@@ -127,7 +127,7 @@ pub fn screen_at(rects: &[LRect], x: f64, y: f64) -> Option<usize> {
         .min_by(|(_, a), (_, b)| {
             dist_sq_to_rect(x, y, a)
                 .partial_cmp(&dist_sq_to_rect(x, y, b))
-                .unwrap()
+                .unwrap_or(std::cmp::Ordering::Equal)
         })
         .map(|(i, _)| i)
 }
@@ -427,7 +427,45 @@ impl ScreenSet {
     /// went), `main` is `main_name`'s index, else 0. An empty `new` is
     /// ignored. A merged survivor's own clients have no `homes` entry, so
     /// after a later split they stay on the screen the fallback is renamed to.
+    ///
+    /// True when something changed: the live screens (names or rects), the
+    /// main or active screen, or a pending screen started or expired. An
+    /// idempotent call (the same input while a screen waits out its
+    /// debounce) is false and keeps the pointer's last screen, which is
+    /// forgotten only when the live names changed (indices may shift).
     pub fn reconcile(
+        &mut self,
+        new: &[(String, LRect)],
+        main_name: Option<&str>,
+        now: f64,
+        gap: f64,
+        reserved_bottom: f64,
+        gaps_out: f64,
+    ) -> bool {
+        let snapshot = |set: &Self| {
+            let live: Vec<(String, LRect)> = set.screens[..set.live_count()]
+                .iter()
+                .map(|s| (s.name.clone(), s.rect))
+                .collect();
+            (live, set.main, set.active, set.screens.len())
+        };
+        let before = snapshot(self);
+        self.reconcile_inner(new, main_name, now, gap, reserved_bottom, gaps_out);
+        let after = snapshot(self);
+        let names = |v: &[(String, LRect)]| v.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>();
+        if names(&before.0) != names(&after.0) {
+            self.pointer = None;
+        }
+        before != after
+    }
+
+    /// A pending removal has been missing for `REMOVAL_DEBOUNCE` or longer
+    /// at `now`: the next `reconcile` expires it.
+    pub fn removal_due(&self, now: f64) -> bool {
+        self.pending_removal.iter().any(|(_, t)| now - *t >= REMOVAL_DEBOUNCE)
+    }
+
+    fn reconcile_inner(
         &mut self,
         new: &[(String, LRect)],
         main_name: Option<&str>,
@@ -439,7 +477,6 @@ impl ScreenSet {
         if new.is_empty() {
             return;
         }
-        self.pointer = None;
         let main_name = main_name.filter(|m| new.iter().any(|(n, _)| n == m));
         let active_name = self.screens.get(self.active).map(|s| s.name.clone());
 
@@ -1285,10 +1322,63 @@ mod tests {
     fn reconcile_forgets_the_pointer_screen() {
         let mut set = two_screens();
         assert_eq!(set.on_pointer(2500.0, 100.0), Some(1));
-        set.reconcile(&ab(), Some("A"), 1.0, GAP, RB, GO);
-        set.active = 0;
-        // Indices may have shifted: the next sighting counts as a crossing.
+        // A screen inserted on the left shifts every index.
+        let rz = LRect::new(-1920.0, 0.0, 1920.0, 1080.0);
+        let zab = vec![(n("Z"), rz), (n("A"), RA), (n("B"), RB_)];
+        assert!(set.reconcile(&zab, Some("A"), 1.0, GAP, RB, GO));
+        assert_eq!(set.active, 2);
+        // Index 1 is A now, not B: the pointer on A is a crossing.
+        assert_eq!(set.on_pointer(100.0, 100.0), Some(1));
+    }
+
+    #[test]
+    fn an_idempotent_reconcile_is_no_change_and_keeps_the_pointer() {
+        let mut set = two_screens();
         assert_eq!(set.on_pointer(2500.0, 100.0), Some(1));
+        assert!(!set.reconcile(&ab(), Some("A"), 1.0, GAP, RB, GO));
+        // The dock (say) made A active; the pointer has not crossed since.
+        assert_eq!(set.activate_screen_of(1), Some(0));
+        assert_eq!(set.on_pointer(2500.0, 100.0), None);
+        assert_eq!(set.active, 0);
+    }
+
+    #[test]
+    fn reconciles_during_the_debounce_change_nothing_until_expiry() {
+        // [A, B, C]: C goes, A and B stay live while C is pending.
+        let rc = LRect::new(3840.0, 0.0, 1920.0, 1080.0);
+        let mut set = ScreenSet::new(WmLayout::new(), DESK);
+        let abc = vec![(n("A"), RA), (n("B"), RB_), (n("C"), rc)];
+        assert!(set.reconcile(&abc, Some("A"), 0.0, GAP, RB, GO));
+        set.screens[2].layout.insert(20, screen_area(rc, RB, GO), GAP);
+        set.screens[0].layout.insert(1, screen_area(RA, RB, GO), GAP);
+        assert!(!set.removal_due(0.0));
+        // C unplugged at t = 10.
+        assert!(set.reconcile(&ab(), Some("A"), 10.0, GAP, RB, GO));
+        assert_eq!(set.live_count(), 2);
+        assert!(!set.removal_due(10.0));
+        // Pointer on B, then the dock activates A.
+        assert_eq!(set.on_pointer(2500.0, 100.0), Some(1));
+        assert_eq!(set.activate_screen_of(1), Some(0));
+        // Frames and events reconcile with unchanged input for 2 s.
+        for k in 1..20 {
+            let t = 10.0 + k as f64 * 0.1;
+            assert!(!set.removal_due(t), "t {t}");
+            assert!(!set.reconcile(&ab(), Some("A"), t, GAP, RB, GO), "t {t}");
+        }
+        // Still pointer-on-B: no crossing, A stays active, C still pending.
+        assert_eq!(set.on_pointer(2500.0, 100.0), None);
+        assert_eq!(set.active, 0);
+        assert_eq!(set.screens.len(), 3);
+        assert_eq!(set.screen_of(20), Some(2));
+        // The debounce ends: due, and the expiry is a change.
+        assert!(set.removal_due(12.0));
+        assert!(set.reconcile(&ab(), Some("A"), 12.0, GAP, RB, GO));
+        assert!(!set.removal_due(12.0));
+        assert_eq!(set.screens.len(), 2);
+        assert_eq!(set.screen_of(20), Some(0));
+        // Expiry left the live indices alone: still no crossing.
+        assert_eq!(set.on_pointer(2500.0, 100.0), None);
+        assert_eq!(set.active, 0);
     }
 
     #[test]
