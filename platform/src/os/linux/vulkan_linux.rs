@@ -771,16 +771,18 @@ impl CxVulkan {
     }
 
     /// The main render target size. In direct mode this is the composition:
-    /// the render source output's native mode.
+    /// the whole wide desktop (every active output side by side; each shows
+    /// its own slice of it, unscaled).
     pub fn size(&self) -> (u32, u32) {
         (self.swapchain_extent.width, self.swapchain_extent.height)
     }
 }
 
 // ---------------------------------------------------------------------------
-// Direct display (DRM/KMS) output: one composition image rendered at the
-// source output's native mode, presented to every acquired connector of the
-// same GPU through a sampled fullscreen pass. Outputs acquire and present
+// Direct display (DRM/KMS) output: one composition image the size of the
+// wide desktop (every acquired connector of the rendering GPU side by side,
+// see `linux_wide_desktop`), presented to each connector as its own slice
+// through a sampled fullscreen pass. Outputs acquire and present
 // independently: a slow clone never gates the source, and a source that is
 // not ready skips the frame (the pass stays dirty and is retried on a short,
 // input-interruptible deadline).
@@ -985,8 +987,12 @@ struct DirectOutput {
     /// When this entry was (re)acquired after a kernel event or watchdog;
     /// kernel events inside REACQUIRE_SUPPRESS are treated as our own echo.
     reacquired_at: Option<Instant>,
-    /// This output is the render source: the composition matches its mode.
+    /// This output is the main screen: dock, menus and new windows go here.
     primary: bool,
+    /// This output's rectangle of the wide desktop; `None` before the first
+    /// layout or when it does not fit, in which case the whole desktop is
+    /// shown letterboxed.
+    desktop_rect: Option<crate::linux_wide_desktop::SliceRect>,
     /// Internal readiness: the output owns a swapchain and can be presented to.
     active: bool,
     status: String,
@@ -1030,6 +1036,7 @@ impl DirectOutput {
             reacquire: false,
             reacquired_at: None,
             primary: false,
+            desktop_rect: None,
             active: false,
             status,
             retry_at: Some(Instant::now() + retry_interval),
@@ -1295,8 +1302,15 @@ pub(super) struct DirectState {
     /// Latest connector scan (init or hotplug worker).
     connected: Vec<DrmConnector>,
     scan_dirty: bool,
-    /// The output the UI asked to render for; kept across reconnects.
+    /// The output the UI asked to make the main screen; kept across reconnects.
     preferred_source: Option<String>,
+    /// Saved left-to-right order of connector names for the wide desktop.
+    preferred_order: Vec<String>,
+    /// Bumped (`wrapping_add(1)`) every time `direct_reconcile` gets past its
+    /// "nothing to do" early return: hotplug, retries, main-screen and order
+    /// requests all set `scan_dirty` first. `screens()` republishes only
+    /// when this, or the DPI factor, moved since the last publish.
+    layout_generation: u64,
     /// A source request accepted but not yet applied at a frame boundary.
     pending_source: Option<String>,
     source_name: Option<String>,
@@ -1890,6 +1904,28 @@ fn choose_output_format(formats: &[vk::SurfaceFormatKHR]) -> Result<vk::SurfaceF
     ))
 }
 
+/// Show one output's rectangle of the wide-desktop composition, unscaled:
+/// the composition is drawn shifted by the rectangle's origin and clipped to it.
+#[cfg(linux_direct)]
+fn slice(
+    composition: vk::Extent2D,
+    rect: crate::linux_wide_desktop::SliceRect,
+    target: vk::Extent2D,
+) -> (vk::Viewport, vk::Rect2D) {
+    let ([x, y, width, height], (scissor_width, scissor_height)) = crate::linux_wide_desktop::slice_viewport(
+        rect,
+        (composition.width, composition.height),
+        (target.width, target.height),
+    );
+    (
+        vk::Viewport { x, y, width, height, min_depth: 0.0, max_depth: 1.0 },
+        vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: vk::Extent2D { width: scissor_width.max(1), height: scissor_height.max(1) },
+        },
+    )
+}
+
 /// Letterbox the composition into an output: uniform scale, centered,
 /// integer pixel rectangle. The render pass clears the rest to black.
 #[cfg(linux_direct)]
@@ -2161,7 +2197,9 @@ fn hotplug_worker(
 #[cfg(linux_direct)]
 impl CxVulkan {
     /// Direct-to-display renderer: acquire every connected connector of one
-    /// GPU, render at the source output's native mode and clone it elsewhere.
+    /// GPU and compose them into one wide desktop, each connector showing
+    /// its own slice of it side by side (`linux_wide_desktop`); the main
+    /// screen is where the dock and new windows go.
     pub fn new_direct(mode: Option<&str>, spawner: &ThreadSpawner) -> Result<Self, String> {
         let init = DesktopInit::new(&[
             vk::KHR_DISPLAY_NAME,
@@ -2194,6 +2232,8 @@ impl CxVulkan {
                 connected: connected.clone(),
                 scan_dirty: false,
                 preferred_source: None,
+                preferred_order: Vec::new(),
+                layout_generation: 0,
                 pending_source: None,
                 source_name: None,
                 source_switch_failures: 0,
@@ -3079,6 +3119,7 @@ impl CxVulkan {
             reacquire: false,
             reacquired_at: None,
             primary: false,
+            desktop_rect: None,
             active: true,
             status: "ready".into(),
             retry_at: None,
@@ -3494,10 +3535,15 @@ impl CxVulkan {
         let display = std::mem::take(&mut output.display);
         let interval = output.retry_interval;
         output.status = status;
+        output.desktop_rect = None;
         output.reacquire = false;
         output.retry_at = Some(Instant::now() + interval);
         output.retry_interval = (interval * 2).min(RETRY_MAX);
         direct.release_surface_and_display(surface, display);
+        // Bumped here too (not only in `direct_select_source`): the output
+        // leaving the desktop must be published even if the next
+        // `direct_select_source` early-returns before touching the layout.
+        direct.layout_generation = direct.layout_generation.wrapping_add(1);
         // The source may have gone; the next reconcile picks a fallback and
         // reports the geometry change.
         direct.scan_dirty = true;
@@ -3707,12 +3753,12 @@ impl CxVulkan {
         self.destroy_uncached_texture_resource(targets.resource);
     }
 
-    /// Choose the render source and, when its mode differs from the desktop,
-    /// replace the composition transactionally. Nothing observable (primary
-    /// flags, source name, the pending request) changes unless the swap
-    /// succeeded, except when no source is active at all: then the fallback
-    /// output is published so rendering continues at the old desktop size
-    /// while the swap is retried (bounded).
+    /// Choose the main screen and, when the wide desktop's size differs from
+    /// the composition, replace it transactionally. Nothing observable
+    /// (primary flags, source name, the pending request) changes unless the
+    /// swap succeeded, except when no source is active at all: then the
+    /// fallback output is published so rendering continues at the old
+    /// desktop size while the swap is retried (bounded).
     /// Returns the new desktop extent when it changed.
     fn direct_select_source(
         &mut self,
@@ -3744,7 +3790,12 @@ impl CxVulkan {
             }
             return Ok(None);
         };
-        let extent = direct.outputs[target].mode_extent;
+        let layout = self.direct_wide_layout(direct);
+        let extent = if layout.width > 0 && layout.height > 0 {
+            vk::Extent2D { width: layout.width, height: layout.height }
+        } else {
+            direct.outputs[target].mode_extent
+        };
         let explicit_target = explicit.is_some() && requested == Some(target);
         let needs_swap = direct.composition.is_none() || direct.desktop_extent != extent;
         let mut installed = None;
@@ -3816,17 +3867,39 @@ impl CxVulkan {
                 }
             }
         }
+        // Bump the layout generation here too, independent of `direct_reconcile`'s
+        // bump: a routed resize can be deferred across a GPU transition and this
+        // runs later, from `routed_reconcile`'s composition install, with no
+        // further call into `direct_reconcile` to notice the change.
+        let previous_layout: Vec<(bool, Option<crate::linux_wide_desktop::SliceRect>)> = direct
+            .outputs
+            .iter()
+            .map(|output| (output.primary, output.desktop_rect))
+            .collect();
         for output in &mut direct.outputs {
             output.primary = false;
+            output.desktop_rect = if direct.desktop_extent == extent {
+                layout.rect_of(&output.connector.name)
+            } else {
+                None
+            };
         }
         direct.outputs[target].primary = true;
+        if direct
+            .outputs
+            .iter()
+            .map(|output| (output.primary, output.desktop_rect))
+            .ne(previous_layout)
+        {
+            direct.layout_generation = direct.layout_generation.wrapping_add(1);
+        }
         if explicit_target && !(needs_swap && direct.defer_composition_resize) {
             direct.pending_source = None;
         }
         let name = direct.outputs[target].connector.name.clone();
         if direct.source_name.as_deref() != Some(name.as_str()) {
             crate::log!(
-                "Vulkan direct: rendering for {name} at {}x{} @ {:.3} Hz; other outputs clone it",
+                "Vulkan direct: main screen {name}; wide desktop {}x{}; main screen at {:.3} Hz",
                 extent.width,
                 extent.height,
                 direct.outputs[target].refresh_hz()
@@ -3834,6 +3907,48 @@ impl CxVulkan {
             direct.source_name = Some(name);
         }
         Ok(installed)
+    }
+
+    /// The wide desktop for the active outputs: saved order first, then
+    /// connector rank, limited to what this GPU can render and blit.
+    fn direct_wide_layout(&self, direct: &DirectState) -> crate::linux_wide_desktop::WideLayout {
+        let limits = unsafe { self.instance.get_physical_device_properties(self.physical_device) }.limits;
+        let viewport_reach = (-limits.viewport_bounds_range[0]).max(0.0) as u32;
+        let max_width = limits
+            .max_image_dimension2_d
+            .min(limits.max_framebuffer_width)
+            .min(limits.max_viewport_dimensions[0])
+            .min(viewport_reach);
+        let max_height = limits
+            .max_image_dimension2_d
+            .min(limits.max_framebuffer_height)
+            .min(limits.max_viewport_dimensions[1]);
+        let mut active: Vec<&DirectOutput> = direct.outputs.iter().filter(|output| output.active).collect();
+        active.sort_by_key(|output| connector_rank(&output.connector.name));
+        let screens: Vec<crate::linux_wide_desktop::ScreenMode> = active
+            .iter()
+            .map(|output| crate::linux_wide_desktop::ScreenMode {
+                name: output.connector.name.clone(),
+                width: output.mode_extent.width,
+                height: output.mode_extent.height,
+            })
+            .collect();
+        crate::linux_wide_desktop::arrange(&screens, &direct.preferred_order, max_width, max_height)
+    }
+
+    /// UI request: lay the screens out left to right in this order of
+    /// connector names from the next frame boundary on. Names not given
+    /// follow in the default order.
+    pub(crate) fn direct_request_display_order(&mut self, order: &[String]) -> Result<(), String> {
+        if let Some(routed) = &mut self.desktop.routed {
+            return routed.display.direct_request_display_order(order);
+        }
+        let Some(direct) = self.desktop.direct.as_mut() else {
+            return Err("display arrangement needs the direct Vulkan backend (DRM/KMS)".into());
+        };
+        direct.preferred_order = order.to_vec();
+        direct.scan_dirty = true;
+        Ok(())
     }
 
     /// UI request: render for `name` from the next frame boundary on. Only
@@ -3975,6 +4090,7 @@ impl CxVulkan {
         if !direct.scan_dirty && !retry_due && !source_retry_due {
             return Ok(None);
         }
+        direct.layout_generation = direct.layout_generation.wrapping_add(1);
         let scan_changed = std::mem::take(&mut direct.scan_dirty);
         let connected = direct.connected.clone();
 
@@ -4762,7 +4878,10 @@ impl CxVulkan {
             unsafe { self.device.update_descriptor_sets(&writes, &[]) };
             output.descriptor_epoch = direct.composition_epoch;
         }
-        let (viewport, scissor) = letterbox(direct.desktop_extent, output.extent);
+        let (viewport, scissor) = match output.desktop_rect {
+            Some(rect) => slice(direct.desktop_extent, rect, output.extent),
+            None => letterbox(direct.desktop_extent, output.extent),
+        };
         let clear_values = [vk::ClearValue {
             color: vk::ClearColorValue {
                 float32: [0.0, 0.0, 0.0, 1.0],
@@ -5396,7 +5515,7 @@ impl CxVulkan {
 
     /// The UI's view of the outputs. Only observed state: `active` means a
     /// present on the current swapchain succeeded (`ready` before that);
-    /// `primary` marks the applied render source.
+    /// `primary` marks the main screen.
     pub(crate) fn direct_display_snapshot(&self) -> LinuxDisplaySnapshot {
         if let Some(routed) = &self.desktop.routed {
             return routed.display.direct_display_snapshot();
@@ -5404,17 +5523,30 @@ impl CxVulkan {
         let Some(direct) = self.desktop.direct.as_ref() else {
             return LinuxDisplaySnapshot::default();
         };
+        let desktop_non_empty = direct.desktop_extent.width > 0 && direct.desktop_extent.height > 0;
         let mut outputs: Vec<LinuxDisplayOutput> = direct
             .outputs
             .iter()
-            .map(|output| LinuxDisplayOutput {
-                name: output.connector.name.clone(),
-                width: output.mode_extent.width,
-                height: output.mode_extent.height,
-                refresh_hz: output.refresh_hz(),
-                primary: output.primary,
-                active: output.active && output.presented_ok,
-                status: output.status.clone(),
+            .map(|output| {
+                let active = output.active && output.presented_ok;
+                // Left out by the layout (it would exceed the GPU's limits),
+                // not merely not yet laid out: say so instead of `active`'s
+                // generic status.
+                let status = if active && output.desktop_rect.is_none() && desktop_non_empty {
+                    "active: not in the wide desktop (exceeds GPU limits)".to_string()
+                } else {
+                    output.status.clone()
+                };
+                LinuxDisplayOutput {
+                    name: output.connector.name.clone(),
+                    width: output.mode_extent.width,
+                    height: output.mode_extent.height,
+                    refresh_hz: output.refresh_hz(),
+                    primary: output.primary,
+                    desktop_position: output.desktop_rect.map(|rect| (rect.x, rect.y)),
+                    active,
+                    status,
+                }
             })
             .chain(
                 direct
@@ -5426,6 +5558,7 @@ impl CxVulkan {
                         height: 0,
                         refresh_hz: 0.0,
                         primary: false,
+                        desktop_position: None,
                         active: false,
                         status: status.clone(),
                     }),
@@ -5436,6 +5569,19 @@ impl CxVulkan {
             direct: true,
             outputs,
         }
+    }
+
+    /// Current layout generation: bumped whenever outputs, statuses, the
+    /// main screen or the order could have changed. 0 when there is no
+    /// direct state (routed presenter not yet attached, or offscreen).
+    pub(crate) fn direct_layout_generation(&self) -> u64 {
+        if let Some(routed) = &self.desktop.routed {
+            return routed.display.direct_layout_generation();
+        }
+        self.desktop
+            .direct
+            .as_ref()
+            .map_or(0, |direct| direct.layout_generation)
     }
 }
 

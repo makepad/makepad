@@ -74,6 +74,11 @@ pub mod linux_display;
 #[path = "os/linux/input.rs"]
 pub mod linux_input;
 
+// Wide-desktop geometry for the direct backend: pure, unit tested anywhere.
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[path = "os/linux/wide_desktop.rs"]
+pub mod linux_wide_desktop;
+
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 #[path = "os/linux/gpu.rs"]
 pub mod linux_gpu;

@@ -887,7 +887,7 @@ impl RawInput {
         input
     }
 
-    /// The pointer's clamp rectangle follows the primary display. Called when a
+    /// The pointer's clamp rectangle follows the wide desktop. Called when a
     /// hotplug reconcile changes the desktop size; the current pointer position
     /// is kept and clamped so it stays on screen.
     pub fn set_bounds(&mut self, width: f64, height: f64, dpi_factor: f64) {

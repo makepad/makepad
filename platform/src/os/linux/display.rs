@@ -1,8 +1,10 @@
 //! Native Linux display inventory for the direct (DRM/KMS) Vulkan backend.
 //!
-//! The direct backend drives one logical desktop: the primary connector's
-//! native pixels divided by the global DPI factor. Every other connector on
-//! the same GPU clones that desktop, letterboxed to its own aspect ratio.
+//! The direct backend drives one wide desktop: every connector of the
+//! rendering GPU side by side, left to right along their top edges, at their
+//! native pixels divided by the global DPI factor (see `linux_wide_desktop`).
+//! Each connector shows its own rectangle of it. A connector that does not
+//! fit within the GPU's limits shows the whole desktop letterboxed.
 //! This module is the UI-facing contract: the window manager reads the
 //! snapshot to list displays and their state; it never touches Vulkan.
 //!
@@ -20,8 +22,11 @@ pub struct LinuxDisplayOutput {
     pub height: u32,
     /// Selected mode refresh in Hz (0.0 when no mode was selected).
     pub refresh_hz: f64,
-    /// This connector defines the logical desktop size.
+    /// The main screen: the dock, menus and new windows go here.
     pub primary: bool,
+    /// Top-left corner of this connector's rectangle in the wide desktop, in
+    /// native pixels; `None` when it is not part of the desktop.
+    pub desktop_position: Option<(u32, u32)>,
     /// The connector has a live swapchain and its last presentation succeeded.
     pub active: bool,
     /// Human-readable state: `active`, `unsupported: …`, `failed: …`, `lost: …`.
@@ -34,7 +39,7 @@ pub struct LinuxDisplayOutput {
 pub struct LinuxDisplaySnapshot {
     /// `true` only while the direct Vulkan backend owns the displays.
     pub direct: bool,
-    /// Outputs in primary-preference order: built-in panels first, then by name.
+    /// Outputs in default order: built-in panels first, then by name.
     pub outputs: Vec<LinuxDisplayOutput>,
 }
 
@@ -83,6 +88,22 @@ impl crate::cx::Cx {
         self.redraw_all();
         Ok(())
     }
+
+    /// Lay the screens out left to right in this order of connector names
+    /// (`outputs[].name` from the snapshot). Names not listed follow in the
+    /// default order; unknown names are ignored. Like the display source,
+    /// the request is applied at the next safe frame boundary; when the
+    /// desktop size changes the main window gets a `WindowGeomChange`.
+    pub fn linux_set_display_order(&mut self, order: &[String]) -> Result<(), String> {
+        let vulkan = self
+            .os
+            .vulkan
+            .as_mut()
+            .ok_or_else(|| "the direct Vulkan renderer is not initialized".to_string())?;
+        vulkan.direct_request_display_order(order)?;
+        self.redraw_all();
+        Ok(())
+    }
 }
 
 #[cfg(not(all(not(gpusim), linux_direct, use_vulkan)))]
@@ -99,5 +120,10 @@ impl crate::cx::Cx {
         Err(format!(
             "cannot select display source {name}: this build is not the direct Vulkan backend"
         ))
+    }
+
+    /// Only the direct Vulkan backend arranges displays.
+    pub fn linux_set_display_order(&mut self, _order: &[String]) -> Result<(), String> {
+        Err("cannot arrange displays: this build is not the direct Vulkan backend".to_string())
     }
 }
