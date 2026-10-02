@@ -329,6 +329,12 @@ enum State {
     /// Saw `*` inside a block doc; `/` closes it.
     BlockDocMaybeEnd,
     LineComment,
+    /// Just after `//`: a third `/` makes a `///` doc line (a fourth, a plain comment).
+    LineCommentStart,
+    /// Just after `///`: a fourth `/` makes it plain (`////`), else the doc text begins.
+    LineDocStart,
+    /// Inside a `///` doc line: text accumulates into `temp`.
+    LineDoc,
     Number,
     Color,
 }
@@ -1052,7 +1058,7 @@ impl ScriptTokenizer {
                         self.state = State::BlockCommentStart;
                         self.temp.clear();
                     } else if self.temp == "//" {
-                        self.state = State::LineComment;
+                        self.state = State::LineCommentStart;
                         self.temp.clear();
                     }
                     // Emit complete operators that can't be extended
@@ -1231,6 +1237,39 @@ impl ScriptTokenizer {
                     if c == '\n' {
                         // end line comment
                         self.state = State::Whitespace;
+                    }
+                }
+                State::LineCommentStart => {
+                    self.state = if c == '/' {
+                        State::LineDocStart
+                    } else if c == '\n' {
+                        State::Whitespace
+                    } else {
+                        State::LineComment
+                    };
+                }
+                State::LineDocStart => {
+                    if c == '/' {
+                        self.state = State::LineComment;
+                    } else if c == '\n' {
+                        self.state = State::Whitespace;
+                    } else {
+                        self.temp.clear();
+                        self.temp.push(c);
+                        self.state = State::LineDoc;
+                    }
+                }
+                State::LineDoc => {
+                    if c == '\n' {
+                        // `///text`: a doc for what follows, as `/**text*/` (Rust's doc line)
+                        let text = self.temp.trim().to_string();
+                        if !text.is_empty() {
+                            self.docs.push(ScriptTokDoc { next_token: self.tokens.len() as u32, text });
+                        }
+                        self.temp.clear();
+                        self.state = State::Whitespace;
+                    } else {
+                        self.temp.push(c);
                     }
                 }
                 State::BlockCommentStart => {

@@ -273,11 +273,10 @@ fn token_parser_to_whitespace_matching_string(
                             out.pop();
                         }
                         last_tt = None;
-                        // Two Rust spellings share the #[doc] token form,
-                        // but only ONE is the splash annotation grammar:
-                        // `/** ... */` blocks. `///` lines fold back as
-                        // plain `//` comments (inert to the runtime
-                        // tokenizer — deliberately NOT an annotation).
+                        // Both Rust spellings share the #[doc] token form and
+                        // both are the splash annotation (`/** ... */` and
+                        // `///` lines): each folds back as written, so the
+                        // source a reader sees keeps it.
                         // Recover which spelling this was from the span:
                         // a comment spanning lines is a block; on one line,
                         // width == text + 5 is `/**text*/`, width == text
@@ -289,7 +288,7 @@ fn token_parser_to_whitespace_matching_string(
                         let is_line_doc = end.line == start.line
                             && end.column.saturating_sub(start.column) == text_chars + 3;
                         if is_line_doc {
-                            out.push_str("//");
+                            out.push_str("///");
                             out.push_str(&text);
                         } else {
                             out.push_str("/**");
