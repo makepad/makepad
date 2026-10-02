@@ -624,6 +624,10 @@ impl<'a> ScriptVm<'a> {
         }
     }
 
+    /// Where the running code is: the instruction now, then each caller's
+    /// call, innermost first (at most `max`). A caller's frame keeps where
+    /// it returns to, the instruction after its call; its site is the call
+    /// itself, so a caller maps to the line it called from.
     pub fn call_sites(&self, out: &mut Vec<ScriptIp>, max: usize) {
         out.clear();
         let thread = self.bx.threads.cur_ref();
@@ -633,7 +637,7 @@ impl<'a> ScriptVm<'a> {
                 break;
             }
             if let Some(ip) = frame.return_ip {
-                out.push(ip);
+                out.push(ScriptIp { body: ip.body, index: ip.index.saturating_sub(1) });
             }
         }
     }
