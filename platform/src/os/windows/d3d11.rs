@@ -4034,7 +4034,7 @@ impl DrawVars {
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Hlsl;
             output.const_table = vm.host.cx().shader_const_table_mode();
-            output.live_literals = vm.host.cx().shader_live_literals();
+            output.live_literals = crate::makepad_script::literal::live();
             output.use_vulkan = false;
 
             output.pre_collect_rust_instance_io(vm, io_self);

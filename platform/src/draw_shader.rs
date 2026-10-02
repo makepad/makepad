@@ -7,6 +7,7 @@ use {
         makepad_script::heap::ScriptHeap,
         makepad_script::pod::{ScriptPodTy, ScriptPodVec},
         makepad_script::shader::*,
+        makepad_script::literal::{LiteralOrigin, LiteralReach, LiteralSite, LiteralValue},
         makepad_script::value::{ScriptIp, ScriptObject, ScriptPodType},
         makepad_script::NoTrap,
         makepad_script::ScriptObjectRef,
@@ -107,10 +108,6 @@ pub struct CxDrawShaders {
     /// Explicit const-table mode override; None = decide from the
     /// environment / remote bridge (see `Cx::shader_const_table_mode`).
     pub const_table_mode: Option<bool>,
-    /// Edit mode's live literals (`Cx::set_shader_live_literals`): the
-    /// edited files, and the module texts whose literals compile as
-    /// patchable slots.
-    pub literal_sources: std::sync::Arc<ShaderLiveLiterals>,
 
     pub cache_object_reuse_epoch_seen: u64,
     /// Keyed by (heap key, object): an isolate's objects share index space
@@ -207,74 +204,48 @@ impl Cx {
         self.shader_const_patch(shader_id, index, initial)
     }
 
-    /// Edit mode for shader literals, for the files `edited` (the names
-    /// their copies' origins give, see [`Self::set_shader_literal_source`];
-    /// none = off). On, every float and colour literal a registered module
-    /// text copies from an edited file compiles as a uniform slot named by
-    /// its [`ShaderLiteralSite`], so [`Self::patch_shader_literal`] changes
-    /// it with a redraw and no recompile, and a literal-only edit of the
-    /// source compiles to the same program text (the GPU program is
-    /// reused). Off (the default, and for shipped or web playback) the
-    /// literals fold and the code is byte-identical to a compiler without
-    /// the feature. Takes effect for shaders compiled from now on.
-    pub fn set_shader_live_literals(&mut self, edited: Vec<String>) {
-        if self.draw_shaders.literal_sources.edited == edited {
+    /// Edit mode's literal-site map for the files `edited` (the names their
+    /// compiled copies' origins give, see [`Self::set_literal_source`];
+    /// none = off). On, every float and colour literal a compiled text
+    /// copies from an edited file lands somewhere [`Self::patch_literal`]
+    /// reaches: shaders read it from a uniform slot, kernels from a hidden
+    /// parameter, a running program's VM from its code and what load
+    /// stored it in (see [`makepad_script::literal`]). A literal-only edit of
+    /// the source then compiles to the same program text (the GPU program
+    /// is reused). Off (the default, and for shipped or web playback)
+    /// literals fold and compiled code is byte-identical to a build without
+    /// the map. Takes effect for what compiles from now on.
+    pub fn set_live_literals(&mut self, edited: Vec<String>) {
+        if !crate::makepad_script::literal::set_edited(edited) {
             return;
         }
-        std::sync::Arc::make_mut(&mut self.draw_shaders.literal_sources).edited = edited;
         self.draw_shaders.reset_for_live_reload();
         self.draw_shaders.cache_code_to_shader.clear();
     }
 
-    pub fn shader_live_literals_on(&self) -> bool {
-        !self.draw_shaders.literal_sources.edited.is_empty()
+    pub fn live_literals_on(&self) -> bool {
+        crate::makepad_script::literal::edit_mode()
     }
 
-    /// Name the rows of module text `module_file` (a `ScriptMod::file`)
-    /// that are copies of an edited file: its literals there compile live.
-    /// Replaces what was registered under that name; an empty list removes
-    /// it. A host that evaluates text copied out of a document (a layer's
-    /// shader fn, a pass) registers its origins just before it compiles.
-    pub fn set_shader_literal_source(&mut self, module_file: &str, origins: Vec<ShaderLiteralOrigin>) {
-        let sources = &self.draw_shaders.literal_sources.sources;
-        let same = match sources.get(module_file) {
-            Some(old) => {
-                old.len() == origins.len()
-                    && old.iter().zip(&origins).all(|(a, b)| {
-                        a.rows == b.rows && a.code_col == b.code_col && a.file == b.file && a.line == b.line && a.col == b.col
-                    })
-            }
-            None => origins.is_empty(),
-        };
-        if same {
-            return;
-        }
-        let live = std::sync::Arc::make_mut(&mut self.draw_shaders.literal_sources);
-        if origins.is_empty() {
-            live.sources.remove(module_file);
-        } else {
-            live.sources.insert(module_file.to_string(), origins);
-        }
+    /// Name the rows of compiled text `module` (a `ScriptMod::file`, a
+    /// kernel's name) that are copies of an edited file: its literals there
+    /// compile live. Replaces what was registered under that name; an empty
+    /// list removes it. A host that compiles text copied out of a document
+    /// (a layer's shader fn, a pass) registers its origins just before.
+    pub fn set_literal_source(&mut self, module: &str, origins: Vec<LiteralOrigin>) {
         // The same text compiled where it now sits names other sites: the
         // function-keyed caches would hand back the old ones.
-        if self.shader_live_literals_on() {
+        if crate::makepad_script::literal::set_source(module, origins) && self.live_literals_on() {
             self.draw_shaders.reset_for_live_reload();
         }
     }
 
-    /// What a shader compile lifts (None when edit mode is off or nothing
-    /// is registered).
-    pub fn shader_live_literals(&self) -> Option<std::sync::Arc<ShaderLiveLiterals>> {
-        (self.shader_live_literals_on() && !self.draw_shaders.literal_sources.sources.is_empty())
-            .then(|| self.draw_shaders.literal_sources.clone())
-    }
-
-    /// Write a literal's new value into every compiled shader slot made
-    /// from `site`: the GPU reads it on the next frame (a redraw, no
-    /// recompile). How many slots it wrote: 0 when no compiled shader
-    /// holds the site (it is not in a shader, or edit mode was off when
-    /// it compiled).
-    pub fn patch_shader_literal(&mut self, site: &ShaderLiteralSite, value: ShaderLiteralValue) -> usize {
+    /// Set the literal at `site` to `value` everywhere it landed, for the
+    /// next frame: every compiled shader slot made from it, and every
+    /// registered sink (kernel parameters, a running program's VM). What it
+    /// reached, and whether a reload is still needed (the literal also fed
+    /// a value computed while the program loaded).
+    pub fn patch_literal(&mut self, site: &LiteralSite, value: LiteralValue) -> LiteralReach {
         let uniforms_gen = self.next_uniform_gen();
         let mut wrote = 0;
         for sh in self.draw_shaders.shaders.iter_mut() {
@@ -282,22 +253,27 @@ impl Cx {
                 wrote += sh.mapping.patch_literal(site, value, uniforms_gen);
             }
         }
-        if wrote > 0 {
+        let mut reach = crate::makepad_script::literal::patch_sinks(site, value);
+        reach.places += wrote;
+        if self.draw_shaders.shaders.iter().any(|sh| sh.mapping.folded_sites.contains(site)) {
+            reach.reload.push("compiled into a shader as a constant (an integer)".to_string());
+        }
+        if reach.places > 0 {
             self.redraw_all();
         }
-        wrote
+        reach
     }
 
     /// Every live literal site the compiled shaders hold, with its value
     /// now (an editor's or a test's view of what patches will reach).
-    pub fn shader_literal_sites(&self) -> Vec<(DrawShaderId, ShaderLiteralSite, ShaderLiteralValue)> {
+    pub fn shader_literal_sites(&self) -> Vec<(DrawShaderId, LiteralSite, LiteralValue)> {
         let mut out = Vec::new();
         for (index, sh) in self.draw_shaders.shaders.iter().enumerate() {
             for tc in &sh.mapping.table_consts {
                 let Some(site) = &tc.site else { continue };
                 let value = match tc.color {
-                    Some(c) => ShaderLiteralValue::Color(c),
-                    None => ShaderLiteralValue::Number(if tc.negated { -tc.value } else { tc.value } as f64),
+                    Some(c) => LiteralValue::Color(c),
+                    None => LiteralValue::Number(if tc.negated { -tc.value } else { tc.value } as f64),
                 };
                 out.push((DrawShaderId { index }, site.clone(), value));
             }
@@ -993,6 +969,8 @@ pub struct DrawShaderDesc {
     pub samplers: Vec<ShaderSampler>,
     pub scope_uniforms: Vec<DrawShaderDescScopeUniform>,
     pub table_consts: Vec<ShaderTableConst>,
+    /// Live literals that stayed folded (see `ShaderOutput::folded_sites`).
+    pub folded_sites: Vec<LiteralSite>,
     pub uniform_buffer_bindings: UniformBufferBindings,
 }
 
@@ -1057,6 +1035,7 @@ impl DrawShaderDesc {
             samplers: output.samplers.clone(),
             scope_uniforms,
             table_consts: output.table_consts.clone(),
+            folded_sites: output.folded_sites.clone(),
             uniform_buffer_bindings: output.get_uniform_buffer_bindings(heap),
         }
     }
@@ -1088,7 +1067,7 @@ pub struct DrawShaderTableConst {
     pub ip: ScriptIp,
     /// A live literal's place in its edited file (edit mode, see
     /// `Cx::set_shader_live_literals`); `None` for a tweaker constant.
-    pub site: Option<ShaderLiteralSite>,
+    pub site: Option<LiteralSite>,
     /// A colour literal's live value (its slot is a vec4); `value` and
     /// `initial` are unused then.
     pub color: Option<[f32; 4]>,
@@ -1097,12 +1076,6 @@ pub struct DrawShaderTableConst {
     pub negated: bool,
 }
 
-/// A literal's new value, as an editor writes it at a [`ShaderLiteralSite`].
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ShaderLiteralValue {
-    Number(f64),
-    Color([f32; 4]),
-}
 
 #[derive(Clone)]
 pub struct CxDrawShaderMapping {
@@ -1132,6 +1105,9 @@ pub struct CxDrawShaderMapping {
     /// The shader's hot-patchable constants (annotated literals compiled
     /// under const-table mode), each backed by one scope-uniform slot.
     pub table_consts: Vec<DrawShaderTableConst>,
+    /// Live literals compiled in as constants: a patch of one needs a new
+    /// program.
+    pub folded_sites: Vec<LiteralSite>,
     /// Bumped by every patch of `scope_uniforms_buf`; backends that keep a
     /// GPU-side copy of the buffer re-upload when it moves.
     pub scope_uniforms_gen: u64,
@@ -1678,6 +1654,7 @@ impl CxDrawShaderMapping {
             scope_uniform_sources,
             scope_uniforms_buf,
             table_consts,
+            folded_sites: desc.folded_sites.clone(),
             scope_uniforms_gen: 0,
             geometry_id,
             varying_total_slots: 0,
@@ -1721,7 +1698,7 @@ impl CxDrawShaderMapping {
     /// Write `value` into every live literal slot compiled from `site`;
     /// how many it wrote (a number never lands in a colour's slot, nor the
     /// reverse).
-    pub fn patch_literal(&mut self, site: &ShaderLiteralSite, value: ShaderLiteralValue, uniforms_gen: u64) -> usize {
+    pub fn patch_literal(&mut self, site: &LiteralSite, value: LiteralValue, uniforms_gen: u64) -> usize {
         let mut wrote = 0;
         for tc in self.table_consts.iter_mut() {
             if tc.site.as_ref() != Some(site) {
@@ -1729,14 +1706,14 @@ impl CxDrawShaderMapping {
             }
             let offset = self.scope_uniforms.inputs[tc.input].offset;
             match (value, tc.color.is_some()) {
-                (ShaderLiteralValue::Number(v), false) => {
+                (LiteralValue::Number(v), false) => {
                     let v = if tc.negated { -v } else { v } as f32;
                     tc.value = v;
                     if let Some(slot) = self.scope_uniforms_buf.get_mut(offset) {
                         *slot = v;
                     }
                 }
-                (ShaderLiteralValue::Color(c), true) => {
+                (LiteralValue::Color(c), true) => {
                     tc.color = Some(c);
                     if let Some(slots) = self.scope_uniforms_buf.get_mut(offset..offset + 4) {
                         slots.copy_from_slice(&c);

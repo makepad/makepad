@@ -743,6 +743,7 @@ impl ShaderPackEntry {
                     negated: false,
                 })
                 .collect(),
+            folded_sites: Vec::new(),
             uniform_buffer_bindings: UniformBufferBindings {
                 bindings: self.uniform_buffer_bindings.iter().map(|(name, index)| (LiveId(*name), *index as usize)).collect(),
                 scope_uniform_buffer_index: self.scope_uniform_buffer_index.map(|i| i as usize),

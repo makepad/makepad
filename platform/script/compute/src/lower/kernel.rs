@@ -164,6 +164,10 @@ pub struct KernelLowered {
     /// Every write (and every read of a written buffer) touches only the
     /// element's own records: element ranges can run on different threads.
     pub parallel_safe: bool,
+    /// Edit mode: the literals read from hidden parameters, and the live
+    /// ones that stayed constants (source offsets).
+    pub live: Vec<crate::lower::LiveParam>,
+    pub folded: Vec<usize>,
 }
 
 /// A host-defined record layout (a GPU vertex or instance struct from the
@@ -508,8 +512,9 @@ impl Lowerer {
 }
 
 /// Lowers a kernel.
-pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> Result<KernelLowered, ShaderError> {
+pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], live: Option<crate::lower::LiveLift>) -> Result<KernelLowered, ShaderError> {
     let mut l = new_lowerer(prelude_base, Domain::Kernel);
+    l.live = live;
     l.add_layouts(layouts)?;
     // `let math = portable | fast`: the kernel's math mode.
     let mut math = MathMode::Fast;
@@ -652,7 +657,15 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout]) -> 
         return Err(ShaderError::new(0, 1, format!("too much work per element (worst case {} ops); reduce loop sizes", cost)));
     }
     let parallel_safe = !l.kernel.nonlocal;
-    Ok(KernelLowered { kind, math, entry: entry_name, program, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, parallel_safe })
+    let (live, folded) = match l.live.take() {
+        Some(lift) => {
+            let mut live: Vec<crate::lower::LiveParam> = lift.slots.iter().map(|(&(offset, ch), &param)| crate::lower::LiveParam { offset, channel: lift.colours.contains(&offset).then_some(ch), param }).collect();
+            live.sort_by_key(|p| p.param);
+            (live, lift.folded)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
+    Ok(KernelLowered { kind, math, entry: entry_name, program, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, parallel_safe, live, folded })
 }
 
 /// Every f32 stored to a host buffer goes through `x != x ? NaN : x`, so

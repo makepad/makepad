@@ -1473,6 +1473,9 @@ impl<'a> ScriptVm<'a> {
                 }
             } else {
                 // its a direct value-to-stack
+                if let Some(trace) = &mut self.bx.literal_trace {
+                    trace.ran.insert((body_index as u16, ip_index as u32));
+                }
                 self.bx.threads.cur().push_stack_value(opcode);
                 self.bx.threads.cur().trap.goto_next();
                 if self.bx.threads.cur_ref().has_execution_limit_exceeded() {
@@ -2173,6 +2176,10 @@ pub struct ScriptVmBase {
     pub injected_globals: std::collections::HashMap<LiveId, ScriptValue>,
     pub is_reload: bool,
     pub debug_trace: bool,
+    /// Edit mode, while a program loads: the literal immediates that ran
+    /// (`crate::literal::LoadTrace`), so an editor knows which literals fed
+    /// load-time values. None (always, outside edit mode): nothing recorded.
+    pub literal_trace: Option<Box<crate::literal::LoadTrace>>,
     pub silence_errors: bool,
     /// Whether script-directed debug output (the `~` LOG operator and
     /// `ScriptVm::log`) may reach the host log. Raw Makepad hosts keep it on;
@@ -2219,6 +2226,7 @@ impl ScriptVmBase {
             injected_globals: Default::default(),
             is_reload: false,
             debug_trace: false,
+            literal_trace: None,
             silence_errors: false,
             allow_debug_output: true,
             bail_on_uncaught_error: false,
@@ -2261,6 +2269,7 @@ impl ScriptVmBase {
             injected_globals: Default::default(),
             is_reload: false,
             debug_trace: false,
+            literal_trace: None,
             silence_errors: false,
             allow_debug_output: true,
             bail_on_uncaught_error: false,

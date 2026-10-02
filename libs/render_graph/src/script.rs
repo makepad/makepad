@@ -204,7 +204,7 @@ pub fn read_pass(vm: &mut ScriptVm, v: ScriptValue, label: &str) -> Result<PassR
         };
         outputs.push(crate::pass::OutputDecl { slot: name.clone(), name, format });
     }
-    let decl = PassDecl { name, stage, reads, slots, scale, scale_height, preview_scale, size, format, uniforms: Vec::new(), pixel, helpers, history, outputs, label: label.to_string(), map, origins };
+    let decl = PassDecl { name, stage, reads, slots, scale, scale_height, preview_scale, size, format, uniforms: Vec::new(), pixel, helpers, history, outputs, label: label.to_string(), map, origins, live_literals: false };
     Ok(PassRead { decl, uniforms })
 }
 

@@ -391,8 +391,7 @@ pub use {
 /// The compiled-shader handle the const-table API is keyed by
 /// (`Cx::shader_const_table`, `shader_const_patch`, `shader_const_reset`).
 pub use crate::draw_shader::DrawShaderId;
-/// Edit mode's live shader literals (`Cx::set_shader_live_literals`,
-/// `set_shader_literal_source`, `patch_shader_literal`).
-pub use crate::draw_shader::ShaderLiteralValue;
-pub use makepad_script_std::makepad_script::shader::{ShaderLiteralOrigin, ShaderLiteralSite};
+/// Edit mode's literal-site map (`Cx::set_live_literals`,
+/// `set_literal_source`, `patch_literal`).
+pub use makepad_script_std::makepad_script::literal::{LiteralOrigin, LiteralReach, LiteralSite, LiteralValue};
 pub use crate::collect::{ScanEvent, Scanner};

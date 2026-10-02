@@ -121,6 +121,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             label: "mrt".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
         };
         mrt.validate().unwrap();
         compile_pass(vm, &mrt);
@@ -133,6 +134,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             label: "grad".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
             ..mrt.clone()
         };
         compile_pass(vm, &grad);
@@ -155,6 +157,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             label: "bad".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
         };
         let code = bad.source().replacen("mod.draw.DrawGraphPass{", "let sh = mod.draw.DrawGraphPass{", 1) + "mod.shader.test_compile_draw_source(sh, \"metal\", false)\n";
         assert!(compile_value(vm, "bad", code).is_err());
@@ -177,6 +180,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             label: "short".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
         };
         short.validate().unwrap();
         compile_pass(vm, &short);

@@ -74,7 +74,7 @@ impl DrawVars {
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Glsl;
             output.const_table = vm.host.cx().shader_const_table_mode();
-            output.live_literals = vm.host.cx().shader_live_literals();
+            output.live_literals = crate::makepad_script::literal::live();
             // Shader source for the API this process renders with, not the one
             // the binary was built with: a Vulkan-capable build that fell back
             // to OpenGL ES compiles plain GLSL. Only desktop Linux chooses at

@@ -111,6 +111,9 @@ pub struct PassDecl {
     /// a helper) and its place in the document, so a compile error names
     /// the document's line.
     pub origins: Vec<(String, CodeAt)>,
+    /// An editor's document: in edit mode its literals compile live (as
+    /// slots named by `origins`; see `Cx::set_live_literals`).
+    pub live_literals: bool,
 }
 
 /// A place in a document's source.
@@ -446,6 +449,7 @@ pub fn fuse(decls: &[PassDecl]) -> (Vec<PassDecl>, Vec<Vec<usize>>) {
             label: members.iter().map(|d| d.label.as_str()).collect::<Vec<_>>().join(" + "),
             map: true,
             origins: members.iter().flat_map(|d| d.origins.iter().cloned()).collect(),
+            live_literals: members.iter().any(|d| d.live_literals),
         });
         map.push((i..j).collect());
         i = j;
@@ -477,6 +481,7 @@ mod tests {
             label: label.into(),
             map: true,
             origins: Vec::new(),
+            live_literals: false,
         };
         let a = m("a", &["color", "bloom"], "fn() -> vec4 { let c = self.color.sample(self.uv()) return c + self.bloom.sample(self.uv()) * self.amount }", &["amount"]);
         let b = m("b", &["color"], "fn() -> vec4 { let c = self.color.sample(self.uv()) return c * self.amount }", &["amount"]);
@@ -517,6 +522,7 @@ mod tests {
             label: "Pass".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
         }
     }
 

@@ -255,7 +255,7 @@ pub enum ScriptUnit {
 }
 
 impl ScriptUnit {
-    fn parse(suffix: &str) -> Option<Self> {
+    pub fn parse(suffix: &str) -> Option<Self> {
         match suffix {
             "s" => Some(Self::Seconds),
             "ms" => Some(Self::Millis),

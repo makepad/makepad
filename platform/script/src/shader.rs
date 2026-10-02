@@ -1061,6 +1061,14 @@ impl ShaderFnCompiler {
             if is_int && output.const_table {
                 self.warn_annotated_int(vm, ip);
             }
+            // A live int literal stays folded (a loop bound or an index no
+            // uniform can replace): its site is recorded, so a patch of it
+            // says the program must be compiled again.
+            if is_int && output.live_literals.is_some() {
+                if let Some(site) = Self::ip_token(vm, ip).and_then(|tok| self.live_site(vm, output, ip.body, tok)) {
+                    output.folded_sites.push(site);
+                }
+            }
             return false;
         }
         let Some(tok) = Self::ip_token(vm, ip) else {
@@ -1115,7 +1123,7 @@ impl ShaderFnCompiler {
 
     /// Where the literal token `tok` of body `body` is written in an edited
     /// file, under live-literal mode (None outside it).
-    fn live_site(&self, vm: &ScriptVm, output: &ShaderOutput, body: u16, tok: u32) -> Option<ShaderLiteralSite> {
+    fn live_site(&self, vm: &ScriptVm, output: &ShaderOutput, body: u16, tok: u32) -> Option<crate::literal::LiteralSite> {
         let live = output.live_literals.as_ref()?;
         let bodies = vm.bx.code.bodies.borrow();
         let body = bodies.get(body as usize)?;
@@ -1164,6 +1172,11 @@ impl ShaderFnCompiler {
                         return (ShaderType::Pod(pod_f32), expr);
                     }
                     (Some(_), None) => self.warn_annotated_int_at(vm, ip),
+                    (None, None) => {
+                        if let Some(site) = self.live_site(vm, output, ip.body, lit_tok) {
+                            output.folded_sites.push(site);
+                        }
+                    }
                     (None, Some(v)) if site.is_some() => {
                         let expr = self.register_table_const(vm, output, String::new(), v, None, ip, site);
                         return (ShaderType::Pod(pod_f32), expr);
@@ -1222,7 +1235,7 @@ impl ShaderFnCompiler {
         v: f64,
         color: Option<[f32; 4]>,
         ip: ScriptIp,
-        site: Option<ShaderLiteralSite>,
+        site: Option<crate::literal::LiteralSite>,
     ) -> String {
         let index = output.table_consts.len();
         // `ct<n>` never collides with a scope value's field name in practice;
