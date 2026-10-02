@@ -1058,6 +1058,11 @@ impl CodeEditor {
     /// Set external selection focus without triggering a redraw.
     /// Use this when you know a redraw will happen anyway (e.g., during draw cycle).
     /// Scroll the viewport (a host resetting to the top-left after new text).
+    /// Where the view is scrolled to.
+    pub fn scroll_pos(&self) -> Vec2d {
+        self.scroll_bars.get_scroll_pos()
+    }
+
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2d) {
         self.scroll_bars.set_scroll_pos(cx, pos);
         self.scroll_bars.redraw(cx);

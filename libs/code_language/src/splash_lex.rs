@@ -15,7 +15,7 @@ use crate::cpp_lex::LexError;
 use crate::token::{TokenRole, TokenSpan};
 
 /// Version of this lexer; part of parse and search cache identity.
-pub const SPLASH_LEXER_VERSION: u32 = 1;
+pub const SPLASH_LEXER_VERSION: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 enum SplashMode {
@@ -23,6 +23,8 @@ enum SplashMode {
     Normal,
     BlockComment,
     String,
+    /// Inside `r"…"` or `r#"…"#` (no escapes; may span lines).
+    RawString,
 }
 
 /// Provider-owned line continuation. Default is Normal.
@@ -33,6 +35,9 @@ pub struct SplashState {
     comment_depth: u8,
     /// `true` = `"..."`, `false` = `'...'`. Meaningful in `String` mode.
     string_double: bool,
+    /// The `#`s of the raw string open (`RawString` mode): it closes at a
+    /// `"` followed by as many.
+    raw_hashes: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -257,6 +262,19 @@ fn scan_string_body(bytes: &[u8], i: &mut usize, double: bool) -> bool {
     false
 }
 
+/// A raw string's body up to and past its close (`"` and `hashes` `#`s);
+/// false when the line ends first.
+fn scan_raw_string_body(bytes: &[u8], i: &mut usize, hashes: u8) -> bool {
+    while *i < bytes.len() {
+        if bytes[*i] == b'"' && (1..=hashes as usize).all(|k| bytes.get(*i + k) == Some(&b'#')) {
+            *i += 1 + hashes as usize;
+            return true;
+        }
+        *i += 1;
+    }
+    false
+}
+
 fn scan_block_comment(bytes: &[u8], i: &mut usize, state: &mut SplashState) -> bool {
     while *i < bytes.len() {
         if bytes[*i] == b'/' && bytes.get(*i + 1) == Some(&b'*') {
@@ -454,6 +472,19 @@ fn lex_one(
                 kind: SplashKind::String,
             });
         }
+        SplashMode::RawString => {
+            if scan_raw_string_body(bytes, i, state.raw_hashes) {
+                state.mode = SplashMode::Normal;
+            }
+            if (*i as u32) <= start {
+                return Err(LexError::Nonprogress { at: start });
+            }
+            return Ok(SplashToken {
+                start,
+                end: *i as u32,
+                kind: SplashKind::String,
+            });
+        }
         SplashMode::Normal => {}
     }
 
@@ -557,6 +588,29 @@ fn lex_one(
             end: *i as u32,
             kind: SplashKind::RustValue,
         });
+    }
+
+    // `r"…"`, `r#"…"#`: a raw string (an `r` not inside a name).
+    if b == b'r' && (*i == 0 || !(bytes[*i - 1].is_ascii_alphanumeric() || bytes[*i - 1] == b'_')) {
+        let mut k = *i + 1;
+        while bytes.get(k) == Some(&b'#') {
+            k += 1;
+        }
+        if bytes.get(k) == Some(&b'"') {
+            let hashes = (k - *i - 1).min(255) as u8;
+            *i = k + 1;
+            if scan_raw_string_body(bytes, i, hashes) {
+                state.mode = SplashMode::Normal;
+            } else {
+                state.mode = SplashMode::RawString;
+                state.raw_hashes = hashes;
+            }
+            return Ok(SplashToken {
+                start,
+                end: *i as u32,
+                kind: SplashKind::String,
+            });
+        }
     }
 
     if b == b'"' || b == b'\'' {
@@ -719,7 +773,7 @@ pub fn lex_line(line: &str, incoming: SplashState) -> (SplashState, Vec<(usize, 
     if i < bytes.len() {
         let role = match state.mode {
             SplashMode::BlockComment => TokenRole::Comment,
-            SplashMode::String => TokenRole::String,
+            SplashMode::String | SplashMode::RawString => TokenRole::String,
             SplashMode::Normal => TokenRole::Unknown,
         };
         push_role(bytes.len(), role, &mut out);
@@ -746,4 +800,31 @@ pub fn document_spans(bytes: &[u8], tokens: &[SplashToken]) -> Vec<TokenSpan> {
         out.push(TokenSpan::new(t.start, t.end, token_role(bytes, *t, next_paren)));
     }
     out
+}
+
+#[cfg(test)]
+mod raw_string_tests {
+    use super::*;
+
+    fn roles(line: &str, state: SplashState) -> (SplashState, Vec<(usize, TokenRole)>) {
+        lex_line(line, state)
+    }
+
+    #[test]
+    fn raw_strings_are_strings_across_lines() {
+        // On one line, with a quote and backslashes inside.
+        let (state, out) = roles(r##"let a = r#"\draw "q" \x"# b"##, SplashState::default());
+        assert_eq!(state, SplashState::default());
+        let string_end = r##"let a = r#"\draw "q" \x"#"##.len();
+        assert!(out.iter().any(|(end, role)| *end == string_end && *role == TokenRole::String), "{out:?}");
+        // Opened on one line, closed on the next.
+        let (state, _) = roles(r#"let b = r"first"#, SplashState::default());
+        assert_eq!(state.mode, SplashMode::RawString);
+        let (state, out) = roles(r#"second" c"#, state);
+        assert_eq!(state.mode, SplashMode::Normal);
+        assert_eq!(out.first(), Some(&(7, TokenRole::String)), "{out:?}");
+        // An `r` ending a name is not a raw string.
+        let (state, _) = roles(r#"let var = "x""#, SplashState::default());
+        assert_eq!(state.mode, SplashMode::Normal);
+    }
 }
