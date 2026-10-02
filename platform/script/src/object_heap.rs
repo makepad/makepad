@@ -809,6 +809,51 @@ impl ScriptHeap {
         }
     }
 
+    /// The construction sites (`Self::made_at`) in code body `body` that
+    /// live objects were built at, each once, in order.
+    pub fn made_at_sites(&self, body: u16) -> Vec<ScriptIp> {
+        let mut out: Vec<ScriptIp> = (0..self.objects.len())
+            .map(|i| self.objects.get_at(i))
+            .filter(|o| o.tag.is_alloced() && !o.made_at.is_unknown() && o.made_at.body == body)
+            .map(|o| o.made_at)
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Set own field `key` to `value`, in place (even in a frozen object),
+    /// in every live object built at `made_at` whose field holds `was` now:
+    /// a host editing the running code's literals (an editor's drag on a
+    /// record's field written as a literal), where the records that literal
+    /// built already exist. A field that holds something else (set again
+    /// since) is left. How many changed.
+    pub fn poke_made_at_field(&mut self, made_at: ScriptIp, key: LiveId, was: ScriptValue, value: ScriptValue) -> usize {
+        self.escape_value(value);
+        let key: ScriptValue = key.into();
+        let mut changed = 0;
+        for i in 0..self.objects.len() {
+            let object = self.objects.get_at_mut(i);
+            if !object.tag.is_alloced() || object.made_at != made_at {
+                continue;
+            }
+            if let Some(set) = object.map.get_mut(&key) {
+                if set.value == was {
+                    set.value = value;
+                    changed += 1;
+                }
+                continue;
+            }
+            for kv in object.vec.iter_mut() {
+                if kv.key == key && kv.value == was {
+                    kv.value = value;
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
+
     /// A name's value as seen from scope `ptr`, or `None` when no scope in
     /// its chain has it (no error raised).
     pub fn scope_value_opt(&self, ptr: ScriptObject, key: LiveId) -> Option<ScriptValue> {
