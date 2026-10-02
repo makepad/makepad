@@ -219,6 +219,7 @@ pub struct Cx {
     pub perf_monitor: PerfMonitor,
     /// The exploded z-layer inspection view. Inert while off.
     pub sploded: SplodedView,
+    pub(crate) pick: crate::pick::CxPick,
     /// How many `WidgetRef` draw scopes deep the current draw is — the turtle
     /// nesting AS COMPONENTS SEE IT. Maintained by `WidgetRef::draw_walk` and
     /// its siblings, stamped onto every draw call at creation, and used as the
@@ -1066,6 +1067,7 @@ impl Cx {
             performance_stats: Default::default(),
             perf_monitor: Default::default(),
             sploded: Default::default(),
+            pick: Default::default(),
             nesting_depth: 0,
             nesting_depth_max: 0,
 

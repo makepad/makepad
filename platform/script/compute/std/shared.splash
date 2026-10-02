@@ -19,6 +19,29 @@ fn inside(uv) { return step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * ste
 // x wrapped into 0..n.
 fn wrap(x, n) { return x - n * floor(x / n) }
 
+// ---- Timing (documents, shaders and kernels alike) --------------------------
+
+// 0 at `a`, 1 at `b`, linear between and held outside: `ease(@ease_out_expo, prog(t, t0, t0 + 0.3))`
+// (b below a runs from 1 down to 0; a = b steps there).
+fn prog(t, a, b) {
+    if b == a { return step(a, t) }
+    return clamp((t - a) / (b - a), 0.0, 1.0)
+}
+// `x` from the range a..b to the range c..d, unclamped: `remap(t, 2.0, 3.0, 0.0, 360.0)`.
+fn remap(x, a, b, c, d) { return c + (x - a) * (d - c) / (b - a) }
+// A decaying hit: 1 at `t0`, halving every `half_life` s, 0 before (slams, shakes, flashes).
+fn pulse(t, t0, half_life) {
+    if t < t0 { return 0.0 }
+    return pow(0.5, (t - t0) / half_life)
+}
+// A damped spring's response to a step at 0 (0 -> 1, an overshoot and a settle): `freq` Hz,
+// `damping` 0..1 (`spring_step(t - t_open, 3.4, 0.42)` opens with a 23 % overshoot at 0.16 s).
+fn spring_step(t, freq, damping) {
+    if t <= 0.0 { return 0.0 }
+    let w = 6.283185307179586 * freq
+    return 1.0 - exp(0.0 - damping * w * t) * cos(w * sqrt(1.0 - damping * damping) * t)
+}
+
 // ---- Colour -----------------------------------------------------------------
 
 // Cosine palette: a + b * cos(2 pi (c t + d)).
@@ -128,27 +151,4 @@ fn bayer4(p) {
     let a = wrap(x, 2.0) * 2.0 + wrap(y, 2.0) * 3.0 - wrap(x, 2.0) * wrap(y, 2.0) * 4.0
     let b = floor(x / 2.0) * 2.0 + floor(y / 2.0) * 3.0 - floor(x / 2.0) * floor(y / 2.0) * 4.0
     return (a * 4.0 + b + 0.5) / 16.0
-}
-
-// ---- Eases (the documents' formulas, libs/tween named.rs; 0..1 in, 0..1 out) ----
-// `out` is 1 - in(1 - u); `in_out` joins the two halves. Values outside 0..1
-// clamp, as in Motion.
-
-fn ease_in_quad(u) { let v = clamp(u, 0.0, 1.0) return v * v }
-fn ease_in_cubic(u) { let v = clamp(u, 0.0, 1.0) return v * v * v }
-fn ease_in_expo(u) {
-    let v = clamp(u, 0.0, 1.0)
-    if v <= 0.0 { return 0.0 }
-    return (pow(2.0, 10.0 * v - 10.0) - pow(2.0, -10.0)) / (1.0 - pow(2.0, -10.0))
-}
-fn ease_out_quad(u) { return 1.0 - ease_in_quad(1.0 - u) }
-fn ease_out_cubic(u) { return 1.0 - ease_in_cubic(1.0 - u) }
-fn ease_out_expo(u) { return 1.0 - ease_in_expo(1.0 - u) }
-fn ease_in_out_cubic(u) {
-    if u < 0.5 { return 0.5 * ease_in_cubic(2.0 * u) }
-    return 1.0 - 0.5 * ease_in_cubic(2.0 - 2.0 * u)
-}
-fn ease_in_out_expo(u) {
-    if u < 0.5 { return 0.5 * ease_in_expo(2.0 * u) }
-    return 1.0 - 0.5 * ease_in_expo(2.0 - 2.0 * u)
 }

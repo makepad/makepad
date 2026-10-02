@@ -809,6 +809,151 @@ impl ScriptHeap {
         }
     }
 
+    /// The construction sites (`Self::made_at`) in code body `body` that
+    /// live objects were built at, each once, in order.
+    pub fn made_at_sites(&self, body: u16) -> Vec<ScriptIp> {
+        let mut out: Vec<ScriptIp> = (0..self.objects.len())
+            .map(|i| self.objects.get_at(i))
+            .filter(|o| o.tag.is_alloced() && !o.made_at.is_unknown() && o.made_at.body == body)
+            .map(|o| o.made_at)
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Set own field `key` to `value`, in place (even in a frozen object),
+    /// in every live object built at `made_at` whose field holds `was` now:
+    /// a host editing the running code's literals (an editor's drag on a
+    /// record's field written as a literal), where the records that literal
+    /// built already exist. A field that holds something else (set again
+    /// since) is left. How many changed.
+    pub fn poke_made_at_field(&mut self, made_at: ScriptIp, key: LiveId, was: ScriptValue, value: ScriptValue) -> usize {
+        self.escape_value(value);
+        let key: ScriptValue = key.into();
+        let mut changed = 0;
+        for i in 0..self.objects.len() {
+            let object = self.objects.get_at_mut(i);
+            if !object.tag.is_alloced() || object.made_at != made_at {
+                continue;
+            }
+            if let Some(set) = object.map.get_mut(&key) {
+                if set.value == was {
+                    set.value = value;
+                    changed += 1;
+                }
+                continue;
+            }
+            for kv in object.vec.iter_mut() {
+                if kv.key == key && kv.value == was {
+                    kv.value = value;
+                    changed += 1;
+                }
+            }
+        }
+        changed
+    }
+
+    /// Every field, entry and list item that holds `was` now: where a value
+    /// was copied as data (`{sung: BONE}` holds BONE's colour, not BONE),
+    /// for a host to set in place with [`Self::set_places`] (a running
+    /// document recoloured as a colour is dragged, without a load). Plain
+    /// values compare by their bits.
+    pub fn places_holding(&self, was: ScriptValue) -> Vec<ScriptValuePlace> {
+        let mut out = Vec::new();
+        for i in 0..self.objects.len() {
+            let object = self.objects.get_at(i);
+            if !object.tag.is_alloced() {
+                continue;
+            }
+            for (key, set) in object.map.iter() {
+                if set.value == was {
+                    out.push(ScriptValuePlace::Field { object: i, made_at: object.made_at, key: *key });
+                }
+            }
+            for (slot, kv) in object.vec.iter().enumerate() {
+                if kv.value == was {
+                    out.push(ScriptValuePlace::Entry { object: i, made_at: object.made_at, slot });
+                }
+            }
+        }
+        for i in 0..self.arrays.len() {
+            let array = self.arrays.get_at(i);
+            if !array.tag.is_alloced() {
+                continue;
+            }
+            if let crate::array::ScriptArrayStorage::ScriptValue(items) = &array.storage {
+                for (slot, item) in items.iter().enumerate() {
+                    if *item == was {
+                        out.push(ScriptValuePlace::Item { array: i, slot });
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Set each of `places` ([`Self::places_holding`]) that still holds
+    /// `was` (and is still the object built where it was) to `value`, in
+    /// place, frozen objects too. A place that holds something else now
+    /// (set again, or its slot reused) is left. How many changed.
+    pub fn set_places(&mut self, places: &[ScriptValuePlace], was: ScriptValue, value: ScriptValue) -> usize {
+        self.escape_value(value);
+        let mut changed = 0;
+        for place in places {
+            match place {
+                ScriptValuePlace::Field { object, made_at, key } => {
+                    if *object >= self.objects.len() {
+                        continue;
+                    }
+                    let o = self.objects.get_at_mut(*object);
+                    if !o.tag.is_alloced() || o.made_at != *made_at {
+                        continue;
+                    }
+                    if let Some(set) = o.map.get_mut(key) {
+                        if set.value == was {
+                            set.value = value;
+                            changed += 1;
+                        }
+                    }
+                }
+                ScriptValuePlace::Entry { object, made_at, slot } => {
+                    if *object >= self.objects.len() {
+                        continue;
+                    }
+                    let o = self.objects.get_at_mut(*object);
+                    if !o.tag.is_alloced() || o.made_at != *made_at {
+                        continue;
+                    }
+                    if let Some(kv) = o.vec.get_mut(*slot) {
+                        if kv.value == was {
+                            kv.value = value;
+                            changed += 1;
+                        }
+                    }
+                }
+                ScriptValuePlace::Item { array, slot } => {
+                    if *array >= self.arrays.len() {
+                        continue;
+                    }
+                    let a = self.arrays.get_at_mut(*array);
+                    if !a.tag.is_alloced() {
+                        continue;
+                    }
+                    if let crate::array::ScriptArrayStorage::ScriptValue(items) = &mut a.storage {
+                        if let Some(item) = items.get_mut(*slot) {
+                            if *item == was {
+                                *item = value;
+                                changed += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        changed
+    }
+
     /// A name's value as seen from scope `ptr`, or `None` when no scope in
     /// its chain has it (no error raised).
     pub fn scope_value_opt(&self, ptr: ScriptObject, key: LiveId) -> Option<ScriptValue> {
@@ -827,6 +972,27 @@ impl ScriptHeap {
                 }
             }
             ptr = object.proto.as_object()?;
+        }
+    }
+
+    /// The host rebinding `key` where a scope chain from `ptr` binds it (the
+    /// nearest scope that has it), past a frozen document: what a script
+    /// cannot do, a host does between runs (a value it recomputes per frame).
+    /// False when no scope in the chain binds `key`.
+    pub fn rebind_scope_value(&mut self, ptr: ScriptObject, key: LiveId, value: ScriptValue) -> bool {
+        self.escape_value(value);
+        let key: ScriptValue = key.into();
+        let mut ptr = ptr;
+        loop {
+            let object = &mut self.objects[ptr];
+            if let Some(set) = object.map.get_mut(&key) {
+                set.value = value;
+                return true;
+            }
+            match object.proto.as_object() {
+                Some(next) => ptr = next,
+                None => return false,
+            }
         }
     }
 
@@ -1676,4 +1842,13 @@ mod tests {
         assert!(heap.take_heap_limit_exceeded());
         assert!(heap.objects[object].vec.is_empty());
     }
+}
+
+/// A place in the heap a value is held: an object's field (by key) or
+/// entry (by slot), or a list's item. See [`ScriptHeap::places_holding`].
+#[derive(Clone, Debug)]
+pub enum ScriptValuePlace {
+    Field { object: usize, made_at: ScriptIp, key: ScriptValue },
+    Entry { object: usize, made_at: ScriptIp, slot: usize },
+    Item { array: usize, slot: usize },
 }

@@ -457,6 +457,10 @@ pub struct Graph<'p> {
     param_of: Vec<Option<usize>>,
     pub record: bool,
     pub gpu: bool,
+    /// Drop rate of `drop` on a recording (training) graph; 0 = off.
+    pub dropout: f32,
+    /// Seed of the next `drop` noise (advanced per call).
+    pub noise_seed: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -517,7 +521,7 @@ fn tap(r: usize, j: usize, dil: usize, pad: usize, seg: usize) -> Option<usize> 
 impl<'p> Graph<'p> {
     /// A CPU graph.
     pub fn new(params: &'p Params, record: bool) -> Graph<'p> {
-        Graph { params, dev_params: None, vals: Vec::new(), backs: Vec::new(), needs: Vec::new(), param_of: Vec::new(), record, gpu: false }
+        Graph { params, dev_params: None, vals: Vec::new(), backs: Vec::new(), needs: Vec::new(), param_of: Vec::new(), record, gpu: false, dropout: 0.0, noise_seed: 0 }
     }
 
     /// A device graph over device copies of `params` (same order).
@@ -668,6 +672,26 @@ impl<'p> Graph<'p> {
             }
         });
         self.push(t, &[a, b], Some(back))
+    }
+
+    /// Gaussian dropout while training: x·(1 + σε), ε ~ N(0, 1), with
+    /// σ² = p / (1 - p) for the drop rate p (`self.dropout`), the same mean and
+    /// variance as dropping at rate p. The identity on a graph that does not
+    /// record, or with `dropout` 0.
+    pub fn drop(&mut self, x: Id) -> Id {
+        let p = self.dropout;
+        if !self.record || p <= 0.0 {
+            return x;
+        }
+        let (rows, cols, seg, lens) = {
+            let v = &self.vals[x];
+            (v.rows, v.cols, v.seg, v.lens.as_ref().map(|l| l.to_vec()))
+        };
+        self.noise_seed = self.noise_seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let e = self.randn(rows, cols, seg, lens, self.noise_seed);
+        let xe = self.mul(x, e);
+        let xe = self.scale(xe, (p / (1.0 - p)).sqrt());
+        self.add(x, xe)
     }
 
     pub fn scale(&mut self, x: Id, s: f32) -> Id {

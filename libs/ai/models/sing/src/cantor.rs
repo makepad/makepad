@@ -24,7 +24,9 @@ pub struct Cantor {
 pub enum F0Mode {
     /// The rule curve (spring, scoop, vibrato).
     Rule,
-    /// The model's f0 head over the note.
+    /// The model's f0 head over the note, re-centred on each note: its shape
+    /// (scoops, glides, vibrato) at `RenderOpts::f0_depth`, with each note's
+    /// median sung on the note.
     Model,
 }
 
@@ -32,6 +34,9 @@ pub enum F0Mode {
 pub struct RenderOpts {
     pub style: PitchStyle,
     pub f0: F0Mode,
+    /// How much of the f0 head's deviation from the notes is sung (`Model`):
+    /// 1 its full shape, 0 flat on the notes.
+    pub f0_depth: f32,
     pub refine_steps: usize,
     pub refine_t0: f32,
     pub seed: u64,
@@ -39,7 +44,7 @@ pub struct RenderOpts {
 
 impl Default for RenderOpts {
     fn default() -> Self {
-        RenderOpts { style: PitchStyle::default(), f0: F0Mode::Rule, refine_steps: 4, refine_t0: 0.6, seed: 1 }
+        RenderOpts { style: PitchStyle::default(), f0: F0Mode::Model, f0_depth: 0.5, refine_steps: 0, refine_t0: 0.6, seed: 1 }
     }
 }
 
@@ -122,23 +127,45 @@ impl Cantor {
         let n = f.tokens.len();
         let enc = acoustic::encode(&mut g, &self.ac, &f.tokens, &[f.singer], n, None);
         let note = f.note_feats();
+        // The frames and the f0 head (it reads no f0), once for both uses.
+        let (h, f0_head) = acoustic::frames_in(&mut g, enc.enc, &RowIndex::Host(f.token_of_frame.clone()), t, None, &note);
         let f0 = match opts.f0 {
             F0Mode::Rule => f.f0.clone(),
             F0Mode::Model => {
-                // Run the f0 head with no f0 input, then build the curve.
-                let mut g2 = Graph::new(&self.params, false);
-                let e2 = acoustic::encode(&mut g2, &self.ac, &f.tokens, &[f.singer], n, None);
-                let d = acoustic::decode(&mut g2, &self.ac, e2.enc, &RowIndex::Host(f.token_of_frame.clone()), t, None, &note, &vec![0.0; t * score::FEATS]);
-                let head = g2.val(d.f0_head).clone();
-                (0..t)
+                let head = g.val(f0_head).clone();
+                let mut dev: Vec<Option<f32>> = (0..t)
                     .map(|r| {
                         let voiced = ph::is_voiced(f.tokens[f.token_of_frame[r]]) && head.data[r * 2 + 1] > 0.0 && f.note[r] > 0.0;
-                        if voiced { midi_to_hz(f.note[r] + 2.0 * head.data[r * 2]) } else { 0.0 }
+                        voiced.then(|| 2.0 * head.data[r * 2])
                     })
-                    .collect()
+                    .collect();
+                // Each note's run (its onset consonants, then the vowel from its
+                // attack): subtract the median deviation over the middle half of
+                // the sung part, from the attack to the run's end.
+                let mut q = 0;
+                while q < t {
+                    let e = (q..t).find(|r| f.note[*r] != f.note[q]).unwrap_or(t);
+                    if f.note[q] > 0.0 {
+                        let v = (q..e).find(|r| f.onset[*r] > 0.0).unwrap_or(q);
+                        let (a, b) = (v + (e - v) / 4, (v + 3 * (e - v) / 4).max(v + (e - v) / 4 + 1).min(e));
+                        let mut m: Vec<f32> = dev[a..b].iter().flatten().copied().collect();
+                        if m.is_empty() {
+                            m = dev[q..e].iter().flatten().copied().collect();
+                        }
+                        if !m.is_empty() {
+                            m.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                            let c = m[m.len() / 2];
+                            for d in dev[q..e].iter_mut().flatten() {
+                                *d = (*d - c) * opts.f0_depth;
+                            }
+                        }
+                    }
+                    q = e;
+                }
+                (0..t).map(|r| dev[r].map(|d| midi_to_hz(f.note[r] + d)).unwrap_or(0.0)).collect()
             }
         };
-        let dec = acoustic::decode(&mut g, &self.ac, enc.enc, &RowIndex::Host(f.token_of_frame.clone()), t, None, &note, &f.f0_feats(&f0));
+        let dec = acoustic::decode_frames(&mut g, &self.ac, h, f0_head, t, None, &f.f0_feats(&f0));
         let coarse = g.val(dec.mel).clone();
         let cond = g.val(dec.cond).clone();
         let t_ac = t0.elapsed();

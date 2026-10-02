@@ -7,12 +7,20 @@
 //!       Sung-technique corpus: files ending `_<a|e|i|o|u>.wav` become
 //!       sustained-vowel sung items (notes from the f0); the rest audio-only.
 //!
+//!   sing_prep lyrics <words dir> <out dir>
+//!       Recorded sung lyric lines as score-aligned items: per song group a
+//!       `<group>.tsv` of segments (`seg <cand.mksdat> <item> ...`) and their
+//!       timed words (`w <start s> <end s> <note> <ipa>`); each segment's
+//!       score (`score::score_from_words`) through the front end gives its
+//!       tokens, frames per token and notes. Out: `<group>.mksdat`.
+//!
 //! Speaker ids: speech speakers are numbered from 0 in sorted order; singers
 //! from 1536. The mapping is written to `<out dir>/speakers.tsv`.
 
 use makepad_ai_sing::data::{self, Item, Kind};
 use makepad_ai_sing::dsp;
 use makepad_ai_sing::phonemes as ph;
+use makepad_ai_sing::score;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
@@ -40,10 +48,76 @@ fn pronounce(word: &str) -> String {
     makepad_ai_speech::g2p::pronounce(word)
 }
 
+/// One timed-words file: its segments, each (shard, item index, timed words).
+fn read_words(path: &Path) -> Vec<(String, usize, Vec<score::SungWord>)> {
+    let mut out: Vec<(String, usize, Vec<score::SungWord>)> = Vec::new();
+    for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
+        let c: Vec<&str> = line.split('\t').collect();
+        match c[0] {
+            "seg" => out.push((c[1].to_string(), c[2].parse().unwrap(), Vec::new())),
+            "w" => {
+                if let Some(seg) = out.last_mut() {
+                    seg.2.push(score::SungWord { start: c[1].parse().unwrap(), end: c[2].parse().unwrap(), phones: ph::parse(c[4]) });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn lyrics(src: &Path, out: &Path) {
+    let mut groups: Vec<PathBuf> = std::fs::read_dir(src).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().map(|x| x == "tsv").unwrap_or(false)).collect();
+    groups.sort();
+    let (mut n, mut secs, mut skipped) = (0usize, 0f64, 0usize);
+    for g in &groups {
+        let mut shards: std::collections::HashMap<String, Vec<Item>> = Default::default();
+        let mut items = Vec::new();
+        for (shard, k, words) in read_words(g) {
+            let cand = shards.entry(shard.clone()).or_insert_with(|| data::read_shard(Path::new(&shard)).unwrap_or_default());
+            let Some(it) = cand.get(k) else {
+                skipped += 1;
+                continue;
+            };
+            let score = score::score_from_words(&words, &it.f0, it.speaker as usize);
+            if score.notes.is_empty() {
+                skipped += 1;
+                continue;
+            }
+            let f = score::align_segment(&score, it.frames());
+            if f.token_frames.iter().any(|d| *d > u16::MAX as usize) {
+                skipped += 1;
+                continue;
+            }
+            secs += it.audio.len() as f64 / dsp::SR as f64;
+            items.push(Item {
+                kind: Kind::SungAligned,
+                speaker: it.speaker,
+                band_hz: it.band_hz,
+                tokens: f.tokens.clone(),
+                notes: f.note.clone(),
+                f0: it.f0.clone(),
+                audio: it.audio.clone(),
+                dur: f.token_frames.iter().map(|d| *d as u16).collect(),
+            });
+        }
+        if !items.is_empty() {
+            n += items.len();
+            data::write_shard(&out.join(g.with_extension("mksdat").file_name().unwrap()), &items).unwrap();
+        }
+    }
+    eprintln!("{} groups: {n} score-aligned items, {:.2} h ({skipped} skipped)", groups.len(), secs / 3600.0);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 4 && args[1] == "lyrics" {
+        std::fs::create_dir_all(&args[3]).unwrap();
+        lyrics(Path::new(&args[2]), Path::new(&args[3]));
+        return;
+    }
     if args.len() < 4 {
-        eprintln!("usage: sing_prep speech|vowels <corpus dir> <out dir> [threads]");
+        eprintln!("usage: sing_prep speech|vowels <corpus dir> <out dir> [threads] | lyrics <words dir> <out dir>");
         std::process::exit(2);
     }
     let (mode, src, out) = (args[1].as_str(), PathBuf::from(&args[2]), PathBuf::from(&args[3]));
@@ -106,7 +180,7 @@ fn main() {
                             if tokens.len() < 3 || f0.len() < tokens.len() + 10 {
                                 continue;
                             }
-                            Item { kind: Kind::Speech, speaker, band_hz: band, tokens, notes: Vec::new(), f0, audio }
+                            Item { kind: Kind::Speech, speaker, band_hz: band, tokens, notes: Vec::new(), f0, audio, dur: Vec::new() }
                         }
                         _ => {
                             let stem = p.file_stem().unwrap().to_string_lossy().to_string();
@@ -122,9 +196,9 @@ fn main() {
                             match vowel {
                                 Some(v) => {
                                     let notes = data::notes_from_f0(&f0);
-                                    Item { kind: Kind::Sung, speaker, band_hz: band, tokens: data::vowel_tokens(v), notes, f0, audio }
+                                    Item { kind: Kind::Sung, speaker, band_hz: band, tokens: data::vowel_tokens(v), notes, f0, audio, dur: Vec::new() }
                                 }
-                                None => Item { kind: Kind::Audio, speaker, band_hz: band, tokens: Vec::new(), notes: Vec::new(), f0, audio },
+                                None => Item { kind: Kind::Audio, speaker, band_hz: band, tokens: Vec::new(), notes: Vec::new(), f0, audio, dur: Vec::new() },
                             }
                         }
                     };

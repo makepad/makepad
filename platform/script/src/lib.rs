@@ -25,6 +25,7 @@ pub mod docs;
 pub mod equality;
 pub mod gen_index;
 pub mod heap;
+pub mod literal;
 pub mod mod_gc;
 pub mod mod_html;
 pub mod mod_math;

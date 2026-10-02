@@ -16,7 +16,7 @@ fn ease_in(c: usize, u: f64) -> f64 {
         "quart" => u * u * u * u,
         "quint" => u * u * u * u * u,
         "sine" => 1.0 - pm::cos(u * pi * 0.5),
-        "expo" => if u <= 0.0 { 0.0 } else { (pm::powf(2.0, 10.0 * u - 10.0) - pm::powf(2.0, -10.0)) / (1.0 - pm::powf(2.0, -10.0)) },
+        "expo" => if u <= 0.0 { 0.0 } else { pm::powf(2.0, 10.0 * u - 10.0) },
         "circ" => 1.0 - (1.0 - u * u).max(0.0).sqrt(),
         "back" => { let c1 = 1.70158; let c3 = c1 + 1.0; c3 * u * u * u - c1 * u * u }
         "elastic" => if u <= 0.0 { 0.0 } else { let c4 = (2.0 * pi) / 3.0; -pm::powf(2.0, 10.0 * u - 10.0) * pm::sin((u * 10.0 - 10.75) * c4) },

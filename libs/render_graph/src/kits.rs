@@ -97,6 +97,7 @@ $M.BloomTent = {
 
 /// Put the shared filters ([`FILTERS`]) in `mod.draw` (once per VM, before
 /// the draw shaders that spread them). Returns the evaluation errors.
+#[cfg(feature = "gpu")]
 pub fn install_filters(vm: &mut makepad_draw::ScriptVm) -> Vec<String> {
     use makepad_draw::*;
     vm.bx.captured_errors = Some(Vec::new());

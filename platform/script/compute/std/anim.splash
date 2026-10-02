@@ -85,9 +85,7 @@ fn spring_to(age, freq, z) {
     }
 }
 
-// A decaying pulse from an event at `t0`: 1 at the event, halving every
-// `half_life` seconds, 0 before it.
-fn pulse(t, t0, half_life) { if t < t0 { 0.0 } else { exp(-(t - t0) * 0.6931471805599453 / half_life) } }
+// (A decaying pulse from one event is the shared stdlib's `pulse(t, t0, half_life)`.)
 
 // Sum of the pulses of the (at most 32) latest events at or before t.
 fn pulse_sum(times, n, t, half_life) {

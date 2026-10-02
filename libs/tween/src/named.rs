@@ -175,7 +175,7 @@ impl Curve {
             (Curve::Sine, In) => Easing::InSine,
             (Curve::Sine, Out) => Easing::OutSine,
             (Curve::Sine, InOut) => Easing::InOutSine,
-            (Curve::Expo, dir) => Easing::ExpoExact { dir },
+            (Curve::Expo, dir) => Easing::ExpoClassic { dir },
             (Curve::Circ, In) => Easing::InCirc,
             (Curve::Circ, Out) => Easing::OutCirc,
             (Curve::Circ, InOut) => Easing::InOutCirc,

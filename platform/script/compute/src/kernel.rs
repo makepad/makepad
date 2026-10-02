@@ -98,6 +98,11 @@ pub struct Kernel {
     /// wide; 0: none; a host links one of the two), once the host linked
     /// its document's module (see [`wasm_module`]).
     wasm_slots: [AtomicU32; 2],
+    /// Edit mode: literals read from hidden parameters ([`compile_live`]),
+    /// their values now, and the live literals that stayed constants.
+    live: Box<[crate::lower::LiveParam]>,
+    live_values: Box<[AtomicU32]>,
+    folded: Box<[usize]>,
 }
 
 impl std::fmt::Debug for Kernel {
@@ -119,7 +124,31 @@ pub fn compile_with(src: &str, layouts: &[Layout], backend: Backend) -> Result<A
 /// Compiles with host layouts and the modules the kernel's `use` items
 /// name (the host resolved each to its text; std modules are built in).
 pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module]) -> Result<Arc<Kernel>, Vec<ShaderError>> {
+    compile_live(src, layouts, backend, modules, None)
+}
+
+/// [`compile_with_modules`] in an editor's edit mode: the number and colour
+/// literals of `src` that `live` accepts (by their byte offset) are read
+/// from hidden parameters where the code computes with them, so
+/// [`Kernel::set_live`] changes them for the next call with the same code;
+/// a live literal that must stay a constant (an integer, a size, a value
+/// computed once) is in [`Kernel::folds`]. `None` compiles exactly as
+/// [`compile_with_modules`].
+pub fn compile_live(src: &str, layouts: &[Layout], backend: Backend, modules: &[crate::module::Module], live: Option<&dyn Fn(usize) -> bool>) -> Result<Arc<Kernel>, Vec<ShaderError>> {
     let toks = crate::parse::lex(src).map_err(|e| vec![e])?;
+    let lift = live.map(|live| {
+        let mut lift = crate::lower::LiveLift::default();
+        for t in &toks {
+            let colour = matches!(t.tk, crate::parse::Tk::Color(_));
+            if (colour || matches!(t.tk, crate::parse::Tk::Num(..))) && t.start < src.len() && live(t.start) {
+                lift.live.insert(t.start);
+                if colour {
+                    lift.colours.insert(t.start);
+                }
+            }
+        }
+        lift
+    });
     let items = crate::parse::Parser::new(&toks).items().map_err(|e| vec![e])?;
     let prelude = crate::parse_prelude(KERNEL_PRELUDE, src.len());
     // Module spans go past the prelude's, so errors inside them are
@@ -129,7 +158,7 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
     let roots: std::collections::HashSet<String> = items.iter().filter(|i| !matches!(i, crate::parse::Item::Use { .. })).map(|i| i.name().to_string()).collect();
     let items = crate::module::resolve(items, src.len() + 1 + KERNEL_PRELUDE.len() + 1, modules, &prelude).map_err(|e| vec![e])?;
     let all = crate::module::prune(crate::with_prelude(&items, prelude, &roots), &roots);
-    let lowered = kl::lower_kernel(&all, src.len() + 1, layouts).map_err(|e| vec![e])?;
+    let lowered = kl::lower_kernel(&all, src.len() + 1, layouts, lift).map_err(|e| vec![e])?;
     let ctx_words = K_PARAMS as usize + lowered.params.len();
     let shared_words = lowered.shared_init.len().max(1);
     let regions = ir::Regions {
@@ -182,6 +211,7 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
     let neon = if native.is_some() && lowered.parallel_safe { crate::neon::compile(&flat) } else { None };
     #[cfg(not(target_arch = "aarch64"))]
     let _ = backend;
+    let live_values: Box<[AtomicU32]> = lowered.live.iter().map(|p| AtomicU32::new(lowered.params[p.param as usize].default.to_bits())).collect();
     let kernel = Arc::new(Kernel {
         kind: lowered.kind,
         math: lowered.math,
@@ -200,6 +230,9 @@ pub fn compile_with_modules(src: &str, layouts: &[Layout], backend: Backend, mod
         admission: std::sync::OnceLock::new(),
         speed: AtomicU32::new(0),
         wasm_slots: [AtomicU32::new(0), AtomicU32::new(0)],
+        live_values,
+        live: lowered.live.into_boxed_slice(),
+        folded: lowered.folded.into_boxed_slice(),
     });
     #[cfg(target_arch = "wasm32")]
     match precompiled(&kernel.program) {
@@ -529,11 +562,42 @@ impl Kernel {
         K_PARAMS as usize + self.params.len()
     }
 
+    /// Set the live literal at source offset `offset` ([`compile_live`])
+    /// for the calls from now on: a number takes `values[0]`, a colour its
+    /// four channels. How many parameters changed (0: not a live literal of
+    /// this kernel).
+    pub fn set_live(&self, offset: usize, values: &[f32]) -> usize {
+        let mut changed = 0;
+        for (p, v) in self.live.iter().zip(self.live_values.iter()) {
+            if p.offset != offset {
+                continue;
+            }
+            let Some(x) = values.get(p.channel.unwrap_or(0) as usize) else { continue };
+            v.store(x.to_bits(), Ordering::Relaxed);
+            changed += 1;
+        }
+        changed
+    }
+
+    /// Whether the live literal at `offset` stayed a constant in this
+    /// kernel (changing it needs a new compile).
+    pub fn folds(&self, offset: usize) -> bool {
+        self.folded.contains(&offset)
+    }
+
+    /// The source offsets of the literals this kernel reads live.
+    pub fn live_offsets(&self) -> impl Iterator<Item = usize> + '_ {
+        self.live.iter().map(|p| p.offset)
+    }
+
     /// A call with every param at its default.
     pub fn call(&self) -> Call<'_> {
         let mut ctx = vec![0u32; self.ctx_words()];
         for (k, p) in self.params.iter().enumerate() {
             ctx[K_PARAMS as usize + k] = p.default.to_bits();
+        }
+        for (p, v) in self.live.iter().zip(self.live_values.iter()) {
+            ctx[K_PARAMS as usize + p.param as usize] = v.load(Ordering::Relaxed);
         }
         let cancel = Arc::new(AtomicU32::new(0));
         let mut bufs = vec![None; self.buffers.len()];

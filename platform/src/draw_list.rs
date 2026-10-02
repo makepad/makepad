@@ -1730,6 +1730,9 @@ pub struct CxDrawCall {
     /// Stamped always (one f32 write per call creation); read only while the
     /// mode is up.
     pub turtle_depth: f32,
+    /// The pick id (`Cx::set_pick_id`) current when this call was made: a
+    /// pick variant writes it where the call covers.
+    pub pick_id: u32,
 }
 
 /// `dst` = `src` at exactly `floats` lanes (cut or padded with zeros): a
@@ -1805,6 +1808,7 @@ impl CxDrawCall {
             uniforms_dirty: true,
             uniforms_gen,
             turtle_depth,
+            pick_id: 0,
         }
     }
 
@@ -2540,6 +2544,7 @@ impl CxDrawList {
         sh: &CxDrawShader,
         draw_vars: &DrawVars,
         depth_target: Option<f32>,
+        pick_target: Option<u32>,
     ) -> Option<usize> {
         // find our drawcall to append to the current layer
         if draw_vars.draw_shader_id.is_none() {
@@ -2572,6 +2577,15 @@ impl CxDrawList {
             // like any other uniform difference.
             if let Some(depth) = depth_target {
                 if draw_call.turtle_depth != depth {
+                    if can_cross {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            // Pick ids on: a call names one draw (`Cx::set_pick_id`).
+            if let Some(pick) = pick_target {
+                if draw_call.pick_id != pick {
                     if can_cross {
                         continue;
                     }
@@ -3222,6 +3236,7 @@ mod uniform_generation_tests {
             uniforms_dirty: true,
             uniforms_gen,
             turtle_depth: 0.0,
+            pick_id: 0,
         }
     }
 

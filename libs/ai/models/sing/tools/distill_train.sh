@@ -8,6 +8,8 @@
 #   start: setsid nohup ~/nv1/distill_train.sh > ~/nv1/lyric/distill.out 2>&1 < /dev/null &
 #   stop:  touch ~/nv1/lyric/STOP  (finishes the current round)
 set -u
+# A round that kept no checkpoints (the trainer failed to start) has nothing to score.
+shopt -s nullglob
 cd ~/nv1
 B=./makepad/target/release
 L=lyric
@@ -57,6 +59,7 @@ log "distill training (data-proportional rounds) start: $(items) segments, $(sec
           $B/sing_train export --ac $ck --voc runs/distill-voc/voc.ema.mksing --out $L/eval/$tag.mksing > /dev/null 2>&1
           $B/voice_eval --whisper models/ggml-large-v3-turbo.bin --cantor $L/eval/$tag.mksing --diag prep/lyrics --held --items 24 --out $L/eval/$tag-held > $L/eval/$tag-held.txt 2>/dev/null
           w=$(grep "^free " $L/eval/$tag-held.txt | awk '{print $2}' | tr -d %)
+          [ -n "$w" ] || { log "eval $tag failed"; continue; }
           log "eval $tag ($n segments): held-out WER $(grep -E '^(tf|free) ' $L/eval/$tag-held.txt | awk '{printf "%s %s ", $1, $2}')"
           b=$(cut -d' ' -f1 $L/eval/best.txt 2>/dev/null || echo 101)
           if awk "BEGIN {exit !($w < $b)}"; then

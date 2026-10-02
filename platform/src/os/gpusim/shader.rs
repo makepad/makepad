@@ -127,7 +127,7 @@ impl DrawVars {
 
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
+                if let Some(shader_id) = cx.draw_shaders.code_hit(&code, pipe, &output.table_consts) {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader

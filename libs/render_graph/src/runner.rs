@@ -566,6 +566,7 @@ mod tests {
             label: "Pass".into(),
             map: false,
             origins: Vec::new(),
+            live_literals: false,
         }
     }
 

@@ -24,7 +24,14 @@
 //! - a doc that resolves to nothing (e.g. above an array element or at the
 //!   very end of a body) is dropped.
 //!
-//! `//` and `/* */` stay plain comments; `///` is NOT an annotation form.
+//! - before `let NAME` / `var NAME`: a LET doc naming that binding
+//!   (resolve_let_docs), the label an editor shows for it.
+//! - immediately before a `color(…)` call: a VALUE NAME for that colour (the
+//!   name's token is the call's `color`), as before a `#hex`.
+//!
+//! `///text` lines are the same annotation as `/**text*/` (Rust's doc line;
+//! `script_mod!` hands both on as written); `//`, `////` and `/* */` stay plain
+//! comments.
 //!
 //! The cascade query (`ScriptVm::construction_chain`) walks an object's
 //! proto chain and returns one level per prototype: where it was
@@ -155,10 +162,13 @@ pub fn resolve_docs(
         let text = clean_block_text(&d.text);
         let toks = &tokenizer.tokens;
 
-        // VALUE NAME position (`/**name*/ 0.35`): resolve_value_names.
+        // VALUE NAME position (`/**name*/ 0.35`, `/**ember*/ color(…)`) and
+        // LET docs: resolve_value_names, resolve_let_docs.
         if toks
             .get(t as usize)
             .is_some_and(|tp| is_value_token(&tp.token))
+            || is_color_call(toks, t as usize)
+            || is_binding(toks, t as usize)
         {
             continue;
         }
@@ -306,8 +316,54 @@ pub struct ScriptValueName {
     pub name: String,
 }
 
+/// Whether token `t` begins a `color(…)` call (a named colour's value).
+fn is_color_call(toks: &[crate::tokenizer::ScriptTokenPos], t: usize) -> bool {
+    toks.get(t).is_some_and(|tp| matches!(tp.token, ScriptToken::Identifier(id) if id == id!(color)))
+        && toks.get(t + 1).is_some_and(|tp| matches!(tp.token, ScriptToken::OpenRound))
+}
+
+/// Whether token `t` is `let` or `var` (a binding a doc names).
+fn is_binding(toks: &[crate::tokenizer::ScriptTokenPos], t: usize) -> bool {
+    toks.get(t).is_some_and(|tp| matches!(tp.token, ScriptToken::Identifier(id) if id == id!(let) || id == id!(var)))
+}
+
+/// A doc naming a `let` / `var` binding: its name and the doc's text.
+#[derive(Clone, Debug)]
+pub struct ScriptLetDoc {
+    /// Token index of the binding's name.
+    pub token: u32,
+    pub name: LiveId,
+    pub text: String,
+}
+
+/// The binding annotations of a tokenizer, in token order: docs whose next
+/// token is `let` or `var` (consecutive lines merged).
+pub fn resolve_let_docs(tokenizer: &ScriptTokenizer) -> Vec<ScriptLetDoc> {
+    let toks = &tokenizer.tokens;
+    let mut out: Vec<ScriptLetDoc> = Vec::new();
+    for d in &tokenizer.docs {
+        let t = d.next_token as usize;
+        if !is_binding(toks, t) {
+            continue;
+        }
+        let Some(ScriptToken::Identifier(name)) = toks.get(t + 1).map(|tp| tp.token) else {
+            continue;
+        };
+        let text = clean_block_text(&d.text);
+        match out.iter_mut().find(|e| e.token == t as u32 + 1) {
+            Some(e) => {
+                e.text.push('\n');
+                e.text.push_str(&text);
+            }
+            None => out.push(ScriptLetDoc { token: t as u32 + 1, name, text }),
+        }
+    }
+    out
+}
+
 /// The value-position annotations of a tokenizer, in token order: docs
-/// whose next token is a value literal (or `-` then one).
+/// whose next token is a value literal (or `-` then one), or a `color(…)`
+/// call (the name's token is `color`).
 pub fn resolve_value_names(tokenizer: &ScriptTokenizer) -> Vec<ScriptValueName> {
     let toks = &tokenizer.tokens;
     tokenizer
@@ -315,6 +371,9 @@ pub fn resolve_value_names(tokenizer: &ScriptTokenizer) -> Vec<ScriptValueName> 
         .iter()
         .filter_map(|d| {
             let t = d.next_token as usize;
+            if is_color_call(toks, t) {
+                return Some(ScriptValueName { token: d.next_token, name: clean_block_text(&d.text) });
+            }
             if toks.get(t).is_some_and(|tp| is_value_token(&tp.token)) {
                 return Some(ScriptValueName {
                     token: d.next_token,
@@ -381,6 +440,15 @@ impl ScriptCode {
             return Vec::new();
         };
         resolve_value_names(&body.tokenizer)
+    }
+
+    /// The `let` / `var` annotations of one body.
+    pub fn resolve_body_let_docs(&self, body_index: u16) -> Vec<ScriptLetDoc> {
+        let bodies = self.bodies.borrow();
+        let Some(body) = bodies.get(body_index as usize) else {
+            return Vec::new();
+        };
+        resolve_let_docs(&body.tokenizer)
     }
 
     /// Doc entries of one body, resolved fresh from its compile artifacts.

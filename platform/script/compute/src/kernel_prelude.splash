@@ -371,7 +371,6 @@ fn grid_normal(buf, w, h, x, z, cell) {
 
 // ---- Shaping ------------------------------------------------------------------
 
-fn remap(x, a, b, c, d) { c + (x - a) * (d - c) / (b - a) }
 fn saturate(x) { clamp(x, 0.0, 1.0) }
 fn smin(a, b, k) {
     let h = saturate(0.5 + 0.5 * (b - a) / k)

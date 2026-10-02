@@ -1842,7 +1842,11 @@ impl CodeEditor {
                             } => {
                                 let (x, y) =
                                     line.grid_to_normalized_position(row_index, column_index);
-                                if session.layout().line_byte_range(line_index).contains(&byte_index) {
+                                // (An inlay at the line's end shows too: a
+                                // value written after the line.)
+                                let shown = session.layout().line_byte_range(line_index);
+                                let line_len = session.layout().as_text().as_lines()[line_index].len();
+                                if shown.contains(&byte_index) || (byte_index == shown.end && byte_index == line_len) {
                                     self.draw_text.color = self.token_colors.identifier;
                                     self.draw_text.color.w *= self.content_opacity;
                                     self.draw_text.draw_abs(cx, Vec2d { x, y: origin_y + y } * self.cell_size + self.viewport_rect.pos, text);

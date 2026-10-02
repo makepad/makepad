@@ -25,10 +25,69 @@ impl ShaderOutput {
         self.metal_create_io_fragment_struct(vm, &mut out);
         self.metal_create_sampler_decls(&mut out);
         self.metal_create_helpers(&mut out);
+        self.metal_create_pick_helpers(&mut out);
         self.create_functions(&mut out);
         self.metal_create_vertex_fn(vm, &mut out);
         self.metal_create_fragment_main_fn(vm, &mut out);
         out
+    }
+
+    /// The pick variant of the same draw shader ([`Self::pick`]): every
+    /// 2D texture it samples has a pick twin (bound after its textures)
+    /// read at the same place, and the fragment writes the id of what is
+    /// drawn there into every colour target instead of its colour: the id
+    /// the most opaque of its samples found, else the draw's own
+    /// (`_pk.x`), where its colour covers (alpha over 0.1); nothing
+    /// elsewhere. `_pk.y` says which textures' twins hold ids.
+    pub fn metal_draw_source_pick(&mut self, vm: &ScriptVm) -> String {
+        self.pick_emit = true;
+        let out = self.metal_draw_source(vm);
+        self.pick_emit = false;
+        out
+    }
+
+    /// The textures with a pick twin: (index among the shader's textures,
+    /// name).
+    fn metal_pick_textures(&self) -> Vec<(usize, LiveId)> {
+        self.io
+            .iter()
+            .filter(|io| matches!(io.kind, ShaderIoKind::Texture(_)))
+            .enumerate()
+            .filter(|(k, io)| *k < 32 && matches!(io.kind, ShaderIoKind::Texture(TextureType::Texture2d)))
+            .map(|(k, io)| (k, io.name))
+            .collect()
+    }
+
+    fn metal_create_pick_helpers(&self, out: &mut String) {
+        if !self.pick {
+            return;
+        }
+        if !self.pick_emit {
+            writeln!(out, "#define _MP_PS(b, tw, e, uv) (e)").ok();
+            return;
+        }
+        writeln!(out, "#define _MP_PS(b, tw, e, uv) _mp_pick_sample(_io, b, _io.tw, (e), (uv))").ok();
+        // How much a colour shows: its alpha, or its light where it adds
+        // (premultiplied, alpha 0).
+        writeln!(out, "inline float _mp_pick_cover(float4 c) {{ return max(c.w, max(c.x, max(c.y, c.z))); }}").ok();
+        writeln!(out, "inline float4 _mp_pick_sample(thread Io &io, uint b, texture2d<float> tw, float4 c, float2 uv) {{").ok();
+        writeln!(out, "    float w = _mp_pick_cover(c);").ok();
+        writeln!(out, "    if ((io._pick_mask & (1u << b)) != 0u && w > io._pick_w) {{").ok();
+        writeln!(out, "        float2 sz = float2(tw.get_width(), tw.get_height());").ok();
+        // The texel under the place, else one beside it: a filtered
+        // sample sees its neighbours too.
+        writeln!(out, "        int2 q = int2(clamp(uv, float2(0.0), float2(0.99999)) * sz);").ok();
+        writeln!(out, "        int2 hi = int2(sz) - 1;").ok();
+        writeln!(out, "        uint id = 0u;").ok();
+        writeln!(out, "        for (int k = 0; k < 5 && id == 0u; k++) {{").ok();
+        writeln!(out, "            int2 o = k == 0 ? int2(0) : (k == 1 ? int2(1, 0) : (k == 2 ? int2(-1, 0) : (k == 3 ? int2(0, 1) : int2(0, -1))));").ok();
+        writeln!(out, "            float4 e = tw.read(uint2(clamp(q + o, int2(0), hi)));").ok();
+        writeln!(out, "            id = uint(e.x * 255.0 + 0.5) | (uint(e.y * 255.0 + 0.5) << 8) | (uint(e.z * 255.0 + 0.5) << 16);").ok();
+        writeln!(out, "        }}").ok();
+        writeln!(out, "        if (id != 0u) {{ io._pick_w = w; io._pick_id = id; }}").ok();
+        writeln!(out, "    }}").ok();
+        writeln!(out, "    return c;").ok();
+        writeln!(out, "}}").ok();
     }
 
     pub fn metal_create_helpers(&self, out: &mut String) {
@@ -171,6 +230,14 @@ impl ShaderOutput {
                     have_vb = true;
                 }
             }
+        }
+        if self.pick_emit {
+            for (_, name) in self.metal_pick_textures() {
+                writeln!(out, "    texture2d<float> {}__pick;", name).ok();
+            }
+            writeln!(out, "    uint _pick_mask;").ok();
+            writeln!(out, "    uint _pick_id;").ok();
+            writeln!(out, "    float _pick_w;").ok();
         }
         writeln!(out, "}};").ok();
     }
@@ -517,6 +584,11 @@ impl ShaderOutput {
 
         writeln!(out, "    Io _io;").ok();
         writeln!(out, "    _io._mp_iter = 0u;").ok();
+        if self.pick_emit {
+            writeln!(out, "    _io._pick_mask = 0u;").ok();
+            writeln!(out, "    _io._pick_id = 0u;").ok();
+            writeln!(out, "    _io._pick_w = 0.0;").ok();
+        }
         writeln!(
             out,
             "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);"
@@ -586,7 +658,20 @@ impl ShaderOutput {
             .iter()
             .any(|io| matches!(io.kind, ShaderIoKind::ScopeUniform));
 
-        writeln!(out, "fragment IoFb fragment_main(").ok();
+        let has_outputs = self.io.iter().any(|io| matches!(io.kind, ShaderIoKind::FragmentOutput(_)));
+        let pick = self.pick_emit && has_outputs;
+        if pick {
+            writeln!(out, "struct IoPk {{").ok();
+            for io in &self.io {
+                if let ShaderIoKind::FragmentOutput(index) = io.kind {
+                    writeln!(out, "    float4 fb{} [[color({})]];", index, index).ok();
+                }
+            }
+            writeln!(out, "}};").ok();
+            writeln!(out, "fragment IoPk fragment_main(").ok();
+        } else {
+            writeln!(out, "fragment IoFb fragment_main(").ok();
+        }
         writeln!(out, "    IoVarying v [[stage_in]],").ok();
         writeln!(out, "    constant IoVertexBufferRaw *vb [[buffer(0)]],").ok();
         writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
@@ -659,10 +744,27 @@ impl ShaderOutput {
             }
         }
 
+        let ntex = self.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::Texture(_))).count();
+        if self.pick_emit {
+            for (k, name) in self.metal_pick_textures() {
+                writeln!(out, ",").ok();
+                write!(out, "    texture2d<float> {}__pick [[texture({})]]", name, ntex + k).ok();
+            }
+            writeln!(out, ",").ok();
+            write!(out, "    constant uint4 *_pk [[buffer(30)]]").ok();
+        }
         writeln!(out, ") {{").ok();
 
         writeln!(out, "    Io _io;").ok();
         writeln!(out, "    _io._mp_iter = 0u;").ok();
+        if self.pick_emit {
+            writeln!(out, "    _io._pick_mask = _pk->y;").ok();
+            writeln!(out, "    _io._pick_id = 0u;").ok();
+            writeln!(out, "    _io._pick_w = 0.0;").ok();
+            for (_, name) in self.metal_pick_textures() {
+                writeln!(out, "    _io.{0}__pick = {0}__pick;", name).ok();
+            }
+        }
         writeln!(
             out,
             "    IoInstance _inst = _mp_decode_instance(i_raw[v._iid]);"
@@ -693,7 +795,30 @@ impl ShaderOutput {
         writeln!(out, "    _iof.v = &v;").ok();
         writeln!(out, "    _iof.fb = &_iofb;").ok();
         writeln!(out, "    io_fragment(_io, _iof);").ok();
-        writeln!(out, "    return _iofb;").ok();
+        if pick {
+            // The coverage: the first colour target's alpha (a data target
+            // of one channel covers).
+            let first = self.io.iter().filter_map(|io| match io.kind {
+                ShaderIoKind::FragmentOutput(index) => Some((index, io.ty)),
+                _ => None,
+            }).min_by_key(|(index, _)| *index);
+            let alpha = match first {
+                Some((index, ty)) if ty == vm.bx.code.builtins.pod.pod_vec4f => format!("_mp_pick_cover(_iofb.fb{})", index),
+                _ => "1.0".to_string(),
+            };
+            writeln!(out, "    uint _pid = _io._pick_w > 0.0 ? _io._pick_id : _pk->x;").ok();
+            writeln!(out, "    if ({} < 0.1 || _pid == 0u) discard_fragment();", alpha).ok();
+            writeln!(out, "    float4 _pc = float4(float(_pid & 255u), float((_pid >> 8) & 255u), float((_pid >> 16) & 255u), 255.0) / 255.0;").ok();
+            writeln!(out, "    IoPk _pko;").ok();
+            for io in &self.io {
+                if let ShaderIoKind::FragmentOutput(index) = io.kind {
+                    writeln!(out, "    _pko.fb{} = _pc;", index).ok();
+                }
+            }
+            writeln!(out, "    return _pko;").ok();
+        } else {
+            writeln!(out, "    return _iofb;").ok();
+        }
         writeln!(out, "}}").ok();
     }
 

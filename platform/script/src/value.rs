@@ -16,7 +16,7 @@ impl Default for ScriptValue {
     }
 }
 
-#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ScriptIp {
     pub body: u16,
     pub index: u32,

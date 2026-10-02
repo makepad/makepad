@@ -172,13 +172,13 @@ fn fn_source(vm: &ScriptVm, f: ScriptObject) -> Option<(ScriptLoc, String)> {
         return None;
     }
     // The location of the parameter list (where the text taken starts),
-    // with a 1-based line: the `fn` token's line is 0-based.
+    // 1-based: the `fn` token's line and column are 0-based.
     let skipped = &text[..text.len() - rest.len()];
     loc.line += 1 + skipped.matches('\n').count() as u32;
     if let Some(nl) = skipped.rfind('\n') {
         loc.col = (skipped.len() - nl) as u32;
     } else {
-        loc.col += skipped.len() as u32;
+        loc.col += 1 + skipped.len() as u32;
     }
     Some((loc, rest.to_string()))
 }

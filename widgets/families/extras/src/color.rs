@@ -1,11 +1,11 @@
 //! The colour picker family: one colour, and the several ways a person
 //! reaches for it.
 //!
-//! A swatch that shows a colour and can be pressed; a hue ring; a
-//! saturation/value square; an alpha strip; a strip of palette cells; a text
-//! field that takes a colour written down and repairs itself when you leave
-//! it; and a picker panel that puts them together, either standing inline on
-//! a page or hanging off a swatch that opens it.
+//! A swatch that shows a colour and can be pressed; a hue ring, and a hue
+//! strip; a saturation/value square; an alpha strip; a strip of palette
+//! cells; a text field that takes a colour written down and repairs itself
+//! when you leave it; and a picker panel that puts them together, either
+//! standing inline on a page or hanging off a swatch that opens it.
 //!
 //! The geometry is not new. The ring's radii, the square's mapping and the
 //! two-tone pucks are carried over from the node editor's picker, constants
@@ -702,6 +702,52 @@ script_mod! {
                 // shorter than a puck is wide, and a circle would spill out
                 // of it at both edges.
                 let hx = self.alpha * w
+                sdf.box(hx - 2.5, -1.0, 5.0, h + 2.0, 2.0)
+                sdf.stroke(self.puck_dark, 1.4)
+                sdf.box(hx - 1.5, 0.5, 3.0, h - 1.0, 1.5)
+                sdf.stroke(self.puck_light, 1.6)
+                return sdf.result
+            }
+        }
+    }
+
+    // ---- the hue strip ----------------------------------------------------
+
+    mod.widgets.DrawHueStripBase = #(DrawHueStrip::script_component(vm))
+    set_type_default() do #(DrawHueStrip::script_shader(vm)){
+        ..mod.draw.DrawQuad
+    }
+
+    mod.widgets.ColorHueBase = #(ColorHue::register_widget(vm))
+
+    /** The hue strip: a full turn of hue from red at the left, through
+     * green and blue, back to red at the right. The ring's job laid flat,
+     * for a panel that has a row to spare and not a square: beside a
+     * saturation/value square it makes the classic plane-and-strip picker. */
+    mod.widgets.ColorHue = set_type_default() do mod.widgets.ColorHueBase{
+        width: Fill
+        height: 14
+        /** the colour whose hue is being chosen */
+        color: #xFF0000FF
+        draw_bg +: {
+            hue: 0.0
+            /** border thickness in pixels 0..4 step 0.5 */
+            border_size: theme.size_border
+            /** corner rounding 0..24 step 0.5 */
+            border_radius: theme.radius_xs
+            border_color: theme.color_outline_variant
+            puck_dark: #x0A0A0AE6
+            puck_light: #xFFFFFFF2
+            pixel: fn() {
+                let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                let w = self.rect_size.x
+                let h = self.rect_size.y
+                sdf.box(0.5, 0.5, w - 1.0, h - 1.0, self.border_radius)
+                sdf.fill_keep(Pal.hsv2rgb(vec4(clamp(self.pos.x, 0.0, 1.0), 1.0, 1.0, 1.0)))
+                sdf.stroke(self.border_color, self.border_size)
+                // A bar, as on the alpha strip: the strip is shorter than a
+                // puck is wide.
+                let hx = self.hue * w
                 sdf.box(hx - 2.5, -1.0, 5.0, h + 2.0, 2.0)
                 sdf.stroke(self.puck_dark, 1.4)
                 sdf.box(hx - 1.5, 0.5, 3.0, h - 1.0, 1.5)
@@ -1460,6 +1506,16 @@ impl Widget for ColorArea {
 }
 
 impl ColorAreaRef {
+    pub fn set_hsva(&self, cx: &mut Cx, hsva: Hsva) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_hsva(cx, hsva);
+        }
+    }
+
+    pub fn hsva(&self) -> Option<Hsva> {
+        self.borrow().map(|inner| inner.hsva())
+    }
+
     pub fn set_color(&self, cx: &mut Cx, color: Vec4f) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_color(cx, color);
@@ -1638,6 +1694,16 @@ impl Widget for ColorAlpha {
 }
 
 impl ColorAlphaRef {
+    pub fn set_hsva(&self, cx: &mut Cx, hsva: Hsva) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_hsva(cx, hsva);
+        }
+    }
+
+    pub fn hsva(&self) -> Option<Hsva> {
+        self.borrow().map(|inner| inner.hsva())
+    }
+
     pub fn set_color(&self, cx: &mut Cx, color: Vec4f) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_color(cx, color);
@@ -1646,6 +1712,179 @@ impl ColorAlphaRef {
 
     pub fn changed(&self, actions: &Actions) -> Option<Vec4f> {
         changed_in(actions, self.widget_uid())
+    }
+
+    pub fn ended(&self, actions: &Actions) -> Option<Vec4f> {
+        ended_in(actions, self.widget_uid())
+    }
+}
+
+// ===========================================================================
+// The hue strip
+// ===========================================================================
+
+#[derive(Script, ScriptHook)]
+#[repr(C)]
+pub struct DrawHueStrip {
+    #[deref]
+    draw_super: DrawQuad,
+    #[live]
+    pub hue: f32,
+    #[live]
+    pub border_size: f32,
+    #[live]
+    pub border_radius: f32,
+    #[live]
+    pub border_color: Vec4f,
+    #[live]
+    pub puck_dark: Vec4f,
+    #[live]
+    pub puck_light: Vec4f,
+}
+
+/// The hue of a colour, chosen along a strip. It keeps the hue it was given
+/// through greys and black (the [`Hsva`] it holds), like the ring.
+#[derive(Script, ScriptHook, Widget)]
+pub struct ColorHue {
+    #[uid]
+    uid: WidgetUid,
+    #[source]
+    source: ScriptObjectRef,
+    #[walk]
+    walk: Walk,
+    #[redraw]
+    #[live]
+    draw_bg: DrawHueStrip,
+    #[live]
+    pub color: Vec4f,
+    #[live(true)]
+    #[visible]
+    visible: bool,
+    #[rust(Hsva::white())]
+    hsva: Hsva,
+    #[rust]
+    adopted: Vec4f,
+    #[rust]
+    dragging: bool,
+}
+
+impl ColorHue {
+    fn adopt(&mut self) {
+        if self.color != self.adopted {
+            let h = self.hsva.h;
+            self.hsva = Hsva::from_vec4(self.color);
+            // A grey has no hue of its own: it keeps the one it had.
+            if self.hsva.s <= 0.0 || self.hsva.v <= 0.0 {
+                self.hsva.h = h;
+            }
+            self.adopted = self.color;
+        }
+    }
+
+    fn store(&mut self, cx: &mut Cx) {
+        self.color = self.hsva.to_vec4();
+        self.adopted = self.color;
+        self.draw_bg.redraw(cx);
+    }
+
+    pub fn hsva(&self) -> Hsva {
+        self.hsva
+    }
+
+    pub fn set_hsva(&mut self, cx: &mut Cx, hsva: Hsva) {
+        if self.hsva != hsva {
+            self.hsva = hsva;
+            self.store(cx);
+        }
+    }
+
+    fn track(&mut self, cx: &mut Cx, uid: WidgetUid, abs: DVec2, ended: bool) {
+        let rect = self.draw_bg.area().rect(cx);
+        // The right end is red again: kept just short of a full turn, so the
+        // strip's last pixel does not jump back to its first.
+        self.hsva.h = alpha_at(abs.x - rect.pos.x, rect.size.x).min(0.9999);
+        self.store(cx);
+        report(cx, uid, self.color, ended);
+    }
+}
+
+impl Widget for ColorHue {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        if !self.visible {
+            return DrawStep::done();
+        }
+        self.adopt();
+        self.draw_bg.hue = self.hsva.h;
+        self.draw_bg.draw_walk(cx, walk);
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
+        if !self.visible && !matches!(event, Event::FingerCancel(_)) {
+            return;
+        }
+        let uid = self.widget_uid();
+        match event.hits(cx, self.draw_bg.area()) {
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+            }
+            Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
+                cx.set_key_focus(self.draw_bg.area());
+                self.dragging = true;
+                self.track(cx, uid, fe.abs, false);
+            }
+            Hit::FingerMove(fe) => {
+                if self.dragging {
+                    self.track(cx, uid, fe.abs, false);
+                }
+            }
+            Hit::FingerUp(fe) => {
+                if self.dragging {
+                    self.dragging = false;
+                    if fe.cancelled {
+                        report(cx, uid, self.color, true);
+                    } else {
+                        self.track(cx, uid, fe.abs, true);
+                    }
+                }
+            }
+            Hit::KeyDown(ke) => {
+                let step = if ke.modifiers.shift { 1.0 / 360.0 } else { 5.0 / 360.0 };
+                let delta = match ke.key_code {
+                    KeyCode::ArrowLeft | KeyCode::ArrowDown => -step,
+                    KeyCode::ArrowRight | KeyCode::ArrowUp => step,
+                    _ => return,
+                };
+                self.hsva.h = (self.hsva.h + delta).rem_euclid(1.0);
+                self.store(cx);
+                report(cx, uid, self.color, true);
+            }
+            _ => {}
+        }
+    }
+
+    fn snapshot_value(&self, _cx: &Cx) -> Option<String> {
+        Some(format!("hue {:.0}", self.hsva.h * 360.0))
+    }
+}
+
+impl ColorHueRef {
+    pub fn set_hsva(&self, cx: &mut Cx, hsva: Hsva) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_hsva(cx, hsva);
+        }
+    }
+
+    pub fn hsva(&self) -> Option<Hsva> {
+        self.borrow().map(|inner| inner.hsva())
+    }
+
+    pub fn changed(&self, actions: &Actions) -> Option<Vec4f> {
+        changed_in(actions, self.widget_uid())
+    }
+
+    pub fn ended(&self, actions: &Actions) -> Option<Vec4f> {
+        ended_in(actions, self.widget_uid())
     }
 }
 

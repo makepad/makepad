@@ -149,6 +149,15 @@ pub struct ShaderTableConst {
     /// Where the literal sits: the immediate's ip (resolves to file:line:col
     /// through `ScriptCode::ip_to_loc`).
     pub ip: ScriptIp,
+    /// A live literal ([`ShaderOutput::live_literals`]): where it is written
+    /// in its source file. `None` for an annotated constant outside them.
+    pub site: Option<crate::literal::LiteralSite>,
+    /// A colour literal (`#ff8800`): the slot is a vec4 holding these, and
+    /// `value` is unused.
+    pub color: Option<[f32; 4]>,
+    /// The table holds the literal negated (`/**x*/ -0.5` holds -0.5): a
+    /// patch of the site's literal writes its negation.
+    pub negated: bool,
 }
 
 /// Tracks a uniform buffer defined in the script scope (e.g., `let buf = shader.uniform_buffer(...)`)
@@ -239,6 +248,27 @@ pub struct ShaderOutput {
     /// `ShaderIoKind::ScopeUniform` io and a [`ScopeUniformSource`] with
     /// `table_const: Some(index)`.
     pub table_consts: Vec<ShaderTableConst>,
+    /// Edit mode: lift every float and colour literal written on the rows
+    /// these name into hot-patchable table constants with their sites
+    /// ([`crate::literal::LiveLiterals`]). `None` (the default) emits byte-identical
+    /// code to a compiler without the feature.
+    pub live_literals: Option<std::sync::Arc<crate::literal::LiveLiterals>>,
+    /// Pick variants (an editor's click-to-code): every sample of a 2D
+    /// texture is emitted through `_MP_PS`, which the plain source defines
+    /// as the sample itself and the pick source ([`Self::metal_draw_source_pick`])
+    /// as the sample plus a read of the texture's pick twin at the same
+    /// place (the ids of what drew there). Off (the default) emits
+    /// byte-identical code to a compiler without the feature.
+    pub pick: bool,
+    /// While the pick source is assembled.
+    pub pick_emit: bool,
+    /// The expressions lifted literals were emitted as (`scope.ct3`), so an
+    /// operator meeting one with a half or integer operand casts it the way
+    /// the folded literal would have adapted.
+    pub lifted_exprs: std::collections::HashSet<String>,
+    /// Live literals that stayed folded (ints): a patch of one needs the
+    /// program compiled again.
+    pub folded_sites: Vec<crate::literal::LiteralSite>,
     /// Per-texture sampler bindings inferred during shader lowering.
     /// Entries are `(texture_expr, sampler_index)`.
     pub texture_sampler_bindings: Vec<(String, usize)>,
@@ -760,6 +790,24 @@ impl ShaderOutput {
         }
 
         bindings
+    }
+
+    /// A 2D texture's sample as emitted: itself, or with pick variants
+    /// ([`Self::pick`]) through `_MP_PS(bit, twin, sample, coord)` (`bit`
+    /// the texture's index among the shader's textures, `twin` its pick
+    /// twin in `Io`). Only a texture of the shader's own (`_io.name`) has
+    /// a twin.
+    pub fn pick_sample(&self, texture_expr: &str, tex_type: TextureType, sample: String, coord: &str) -> String {
+        if !self.pick || !matches!(self.backend, ShaderBackend::Metal) || !matches!(tex_type, TextureType::Texture2d) {
+            return sample;
+        }
+        let Some(name) = texture_expr.strip_prefix("_io.") else { return sample };
+        let textures = self.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::Texture(_)));
+        let Some(bit) = textures.map(|io| io.name.to_string()).position(|n| n == name) else { return sample };
+        if bit >= 32 {
+            return sample;
+        }
+        format!("_MP_PS({bit}u, {name}__pick, {sample}, {coord})")
     }
 
     /// Get or create a sampler with the given properties, returns the sampler index

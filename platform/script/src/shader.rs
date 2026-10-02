@@ -512,7 +512,8 @@ impl ShaderFnCompiler {
                 } else {
                     // id or immediate value — an annotated float literal
                     // becomes a table constant under const_table mode
-                    if !(output.const_table && self.try_push_table_const(vm, output, opcode)) {
+                    let lifts = output.const_table || output.live_literals.is_some();
+                    if !(lifts && self.try_push_table_const(vm, output, opcode)) {
                         self.push_immediate(opcode, &vm.bx.code.builtins.pod, &output.backend);
                     }
                     self.trap.goto_next();
@@ -587,7 +588,11 @@ impl ShaderFnCompiler {
         if let Some(ShaderMe::FnBody { ret, .. }) = value {
             return ret.unwrap_or(vm.bx.code.builtins.pod.pod_void);
         }
-        panic!("Unexpected ME at end {:?}", value)
+        // A body whose errors left its stack unbalanced (an unknown name
+        // inside an expression): the shader is refused with those errors,
+        // not the process stopped.
+        output.push_error(format!("shader function did not close (after the errors above): {:?}", value.map(|_| "an open expression")));
+        vm.bx.code.builtins.pod.pod_void
     }
 
     pub(crate) fn pop_resolved(
@@ -1039,10 +1044,13 @@ impl ShaderFnCompiler {
     /// `/** name … */` value annotation is lifted into the shader's constant
     /// table — registered as one more scope uniform (`ct<n>`) and read from
     /// the scope-uniform buffer — so a runtime patch of that slot changes
-    /// the look with no recompile and no source edit. Returns false (fold as
-    /// usual) for anything else: unannotated literals, and int literals,
-    /// which may be loop bounds or array indices a uniform cannot replace
-    /// (an annotated int is reported once so the annotator learns).
+    /// the look with no recompile and no source edit. Live-literal mode
+    /// (edit mode, [`ShaderOutput::live_literals`]) lifts every float and
+    /// colour literal written on an edited file's rows the same way, each
+    /// with its source site. Returns false (fold as usual) for anything
+    /// else: int literals, which may be loop bounds or array indices a
+    /// uniform cannot replace (an annotated int is reported once so the
+    /// annotator learns), and literals outside both.
     fn try_push_table_const(
         &mut self,
         vm: &ScriptVm,
@@ -1051,33 +1059,86 @@ impl ShaderFnCompiler {
     ) -> bool {
         let ip = self.trap.ip;
         let is_int = value.as_u40().is_some();
-        let Some(v) = value.as_f64() else {
-            if is_int {
+        let color = value.as_color();
+        let float = value.as_f64();
+        if float.is_none() && color.is_none() {
+            if is_int && output.const_table {
                 self.warn_annotated_int(vm, ip);
             }
+            // A live int literal stays folded (a loop bound or an index no
+            // uniform can replace): its site is recorded, so a patch of it
+            // says the program must be compiled again.
+            if is_int && output.live_literals.is_some() {
+                if let Some(site) = Self::ip_token(vm, ip).and_then(|tok| self.live_site(vm, output, ip.body, tok)) {
+                    output.folded_sites.push(site);
+                }
+            }
+            return false;
+        }
+        let Some(tok) = Self::ip_token(vm, ip) else {
             return false;
         };
-        let (doc, negated) = {
-            let bodies = vm.bx.code.bodies.borrow();
-            let Some(body) = bodies.get(ip.body as usize) else {
-                return false;
-            };
-            let Some(Some(tok)) = body.parser.source_map.get(ip.index as usize) else {
-                return false;
-            };
-            match crate::docs::value_name_at(&body.tokenizer, *tok) {
-                Some(found) => found,
-                None => return false,
+        let site = self.live_site(vm, output, ip.body, tok);
+        // An annotated float (the tweaker's table): its sign folded in.
+        if output.const_table {
+            if let Some(v) = float {
+                let annotated = {
+                    let bodies = vm.bx.code.bodies.borrow();
+                    bodies.get(ip.body as usize).and_then(|body| crate::docs::value_name_at(&body.tokenizer, tok))
+                };
+                if let Some((doc, negated)) = annotated {
+                    // `/**x*/ -0.5`: the table holds -0.5 and the NEG that
+                    // follows the immediate is dropped, so a patch means
+                    // what the source shows.
+                    let v = if negated { -v } else { v };
+                    self.skip_next_neg = negated;
+                    let expr = self.register_table_const(vm, output, doc, v, None, ip, site);
+                    if let Some(tc) = output.table_consts.last_mut() {
+                        tc.negated = negated;
+                    }
+                    let pod_f32 = vm.bx.code.builtins.pod.pod_f32;
+                    self.stack.push(self.trap.pass(), ShaderType::Pod(pod_f32), expr);
+                    return true;
+                }
             }
+        }
+        // A live literal: the value as written (a sign stays in the code).
+        if site.is_none() {
+            return false;
+        }
+        let pods = &vm.bx.code.builtins.pod;
+        let (ty, rgba) = match color {
+            Some(c) => {
+                let c = Vec4f::from_u32(c);
+                (pods.pod_vec4f, Some([c.x, c.y, c.z, c.w]))
+            }
+            None => (pods.pod_f32, None),
         };
-        // `/**x*/ -0.5`: the table holds -0.5 and the NEG that follows the
-        // immediate is dropped, so a patch means what the source shows.
-        let v = if negated { -v } else { v };
-        self.skip_next_neg = negated;
-        let expr = self.register_table_const(vm, output, doc, v, ip);
-        let pod_f32 = vm.bx.code.builtins.pod.pod_f32;
-        self.stack.push(self.trap.pass(), ShaderType::Pod(pod_f32), expr);
+        let expr = self.register_table_const(vm, output, String::new(), float.unwrap_or(0.0), rgba, ip, site);
+        self.stack.push(self.trap.pass(), ShaderType::Pod(ty), expr);
         true
+    }
+
+    /// The source token of the opcode at `ip`.
+    fn ip_token(vm: &ScriptVm, ip: ScriptIp) -> Option<u32> {
+        let bodies = vm.bx.code.bodies.borrow();
+        bodies.get(ip.body as usize)?.parser.source_map.get(ip.index as usize).copied().flatten()
+    }
+
+    /// Where the literal token `tok` of body `body` is written in an edited
+    /// file, under live-literal mode (None outside it).
+    fn live_site(&self, vm: &ScriptVm, output: &ShaderOutput, body: u16, tok: u32) -> Option<crate::literal::LiteralSite> {
+        let live = output.live_literals.as_ref()?;
+        let bodies = vm.bx.code.bodies.borrow();
+        let body = bodies.get(body as usize)?;
+        let ScriptSource::Mod(m) = &body.source else {
+            return None;
+        };
+        if !live.sources.contains_key(&m.file) {
+            return None;
+        }
+        let (row, col) = body.tokenizer.token_start_row_col(tok)?;
+        live.site(&m.file, row, col)
     }
 
     /// The right-hand operand the parser packed into an arithmetic /
@@ -1090,27 +1151,42 @@ impl ShaderFnCompiler {
         output: &mut ShaderOutput,
         opargs: OpcodeArgs,
     ) -> (ShaderType, String) {
-        if output.const_table {
+        if output.const_table || output.live_literals.is_some() {
             let ip = self.trap.ip;
-            // (doc, float value): Some(v) lifts; None with a doc is an
-            // annotated int operand, reported below
+            let pod_f32 = vm.bx.code.builtins.pod.pod_f32;
+            // (literal token, doc, float value): a float lifts; an
+            // annotated int operand is reported below
             let found = {
                 let bodies = vm.bx.code.bodies.borrow();
                 bodies.get(ip.body as usize).and_then(|body| {
                     let op_tok = body.parser.source_map.get(ip.index as usize).copied().flatten()?;
                     let lit_tok = op_tok + 1;
-                    let (doc, _) = crate::docs::value_name_at(&body.tokenizer, lit_tok)?;
-                    Some((doc, crate::docs::float_literal_at(&body.tokenizer, lit_tok)))
+                    let doc = if output.const_table { crate::docs::value_name_at(&body.tokenizer, lit_tok).map(|(doc, _)| doc) } else { None };
+                    Some((lit_tok, doc, crate::docs::float_literal_at(&body.tokenizer, lit_tok)))
                 })
             };
-            match found {
-                Some((doc, Some(v))) => {
-                    let expr = self.register_table_const(vm, output, doc, v, ip);
-                    let pod_f32 = vm.bx.code.builtins.pod.pod_f32;
-                    return (ShaderType::Pod(pod_f32), expr);
+            if let Some((lit_tok, doc, v)) = found {
+                let site = match v {
+                    Some(_) => self.live_site(vm, output, ip.body, lit_tok),
+                    None => None,
+                };
+                match (doc, v) {
+                    (Some(doc), Some(v)) => {
+                        let expr = self.register_table_const(vm, output, doc, v, None, ip, site);
+                        return (ShaderType::Pod(pod_f32), expr);
+                    }
+                    (Some(_), None) => self.warn_annotated_int_at(vm, ip),
+                    (None, None) => {
+                        if let Some(site) = self.live_site(vm, output, ip.body, lit_tok) {
+                            output.folded_sites.push(site);
+                        }
+                    }
+                    (None, Some(v)) if site.is_some() => {
+                        let expr = self.register_table_const(vm, output, String::new(), v, None, ip, site);
+                        return (ShaderType::Pod(pod_f32), expr);
+                    }
+                    _ => {}
                 }
-                Some((_, None)) => self.warn_annotated_int_at(vm, ip),
-                None => {}
             }
         }
         let mut s = self.stack.new_string();
@@ -1161,7 +1237,9 @@ impl ShaderFnCompiler {
         output: &mut ShaderOutput,
         doc: String,
         v: f64,
+        color: Option<[f32; 4]>,
         ip: ScriptIp,
+        site: Option<crate::literal::LiteralSite>,
     ) -> String {
         let index = output.table_consts.len();
         // `ct<n>` never collides with a scope value's field name in practice;
@@ -1175,24 +1253,30 @@ impl ShaderFnCompiler {
             }
             n += 1000;
         };
-        let pod_f32 = vm.bx.code.builtins.pod.pod_f32;
+        let ty = match color {
+            Some(_) => vm.bx.code.builtins.pod.pod_vec4f,
+            None => vm.bx.code.builtins.pod.pod_f32,
+        };
         output.table_consts.push(ShaderTableConst {
             shader_name,
             doc,
             value: v,
             ip,
+            site,
+            color,
+            negated: false,
         });
         output.scope_uniforms.push(ScopeUniformSource {
             source_obj: ScriptObject::ZERO,
             key: shader_name,
             shader_name,
-            ty: pod_f32,
+            ty,
             table_const: Some(index),
         });
         output.io.push(ShaderIo {
             kind: ShaderIoKind::ScopeUniform,
             name: shader_name,
-            ty: pod_f32,
+            ty,
             buffer_index: None,
         });
         let mut s = self.stack.new_string();
@@ -1207,6 +1291,7 @@ impl ShaderFnCompiler {
             ShaderIoPrefix::Full(full) => write!(s, "{}", full).ok(),
             ShaderIoPrefix::FullOwned(full) => write!(s, "{}", full).ok(),
         };
+        output.lifted_exprs.insert(s.clone());
         s
     }
 

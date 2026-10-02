@@ -1790,6 +1790,9 @@ impl ShaderFnCompiler {
                                     }
                                 }
                             }
+                            if output.pick {
+                                s = output.pick_sample(&texture_expr, tex_type, std::mem::take(&mut s), coord);
+                            }
                         }
                         ShaderBackend::Wgsl => {
                             if let Some(lod) = lod {
@@ -1935,6 +1938,9 @@ impl ShaderFnCompiler {
                     match output.backend {
                         ShaderBackend::Metal => {
                             write!(s, "{}.sample(_s{}, {}, gradient2d({}, {}))", texture_expr, sampler_idx, coord, dx, dy).ok();
+                            if output.pick {
+                                s = output.pick_sample(&texture_expr, tex_type, std::mem::take(&mut s), coord);
+                            }
                         }
                         ShaderBackend::Wgsl => {
                             write!(s, "textureSampleGrad({}, _s{}, {}, {}, {})", texture_expr, sampler_idx, coord, dx, dy).ok();

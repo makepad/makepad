@@ -919,3 +919,14 @@ fn inline_inlays_every_byte_has_a_grid_position() {
         }
     }
 }
+
+#[test]
+fn a_range_replace_keeps_the_given_indentation() {
+    // An outside change put in as given: typing's autoindent would move
+    // these lines (and `}` at column 0 once took 4 from 0).
+    let document = doc("let a = {\n    x: 1\n}\nlet b = 2\n");
+    document.replace_range(pos(0, 8), pos(2, 1), "{\nx: 1,\n        y: 2\n}".into());
+    assert_eq!(document.as_text().to_string(), "let a = {\nx: 1,\n        y: 2\n}\nlet b = 2\n");
+    document.replace_range(pos(4, 8), pos(4, 9), "{\n}".into());
+    assert_eq!(document.as_text().to_string(), "let a = {\nx: 1,\n        y: 2\n}\nlet b = {\n}\n");
+}

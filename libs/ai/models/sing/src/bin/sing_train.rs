@@ -8,6 +8,8 @@
 //!
 //! opts: --steps N --batch B --frames T --lr X --config tiny|base --cpu
 //!       --resume --log N --save N --workers N
+//! ac:   --data DIR... --mix lyric=..,speech=..,sung=.. --holdout P --augment P
+//!       --dropout P --init W.mksing --keep --patience N
 //!
 //! Every op runs on the device (nn_gpu); CPU worker threads build batches
 //! ahead into a bounded queue; per step the host only enqueues work, and reads
@@ -699,10 +701,21 @@ fn main() {
             }
         }
         "gta" => {
-            // V2: sing_train gta --data DIR --acoustic A.ema.mksing --resume-from VOC_STEM
+            // V2: sing_train gta --data DIR --acoustic A.ema.mksing --resume-from VOC_STEM [--holdout P]
             let store = Arc::new(data::Store::open(&a.all("--data")).expect("data"));
             let max_frames = a.num("--ac-frames", 400usize);
-            let sung: Vec<Aligned> = store.items.iter().filter(|r| r.kind == Kind::Sung).filter_map(|r| Aligned::from_vowel_item(&store.item(r))).collect();
+            // Sung vowels and score-aligned sung lyrics (--holdout P keeps the held-out songs out).
+            let holdout: u64 = a.num("--holdout", 0u64);
+            let sung: Vec<Aligned> = store
+                .items
+                .iter()
+                .filter(|r| !(r.kind == Kind::SungAligned && store.held_out(r, holdout)))
+                .filter_map(|r| match r.kind {
+                    Kind::Sung => Aligned::from_vowel_item(&store.item(r)),
+                    Kind::SungAligned => Aligned::from_aligned_item(&store.item(r), 100_000),
+                    _ => None,
+                })
+                .collect();
             eprintln!("{} sung items for GTA", sung.len());
             let sung = Arc::new(sung);
             let rx = prefetch(workers, 8, 3, Arc::new(move |rng: &mut Rng| {
@@ -757,7 +770,9 @@ fn main() {
                     })
                     .collect()
             };
-            let (speech, mut lyric) = (pick(Kind::Speech), pick(Kind::SungText));
+            // Sung lyrics: score-aligned items, and text-only ones aligned in training (a
+            // batch holding any of those aligns all of it by alignment search).
+            let (speech, mut lyric) = (pick(Kind::Speech), [pick(Kind::SungAligned), pick(Kind::SungText)].concat());
             // --holdout P: whole songs (shards) held out of training, P% by hash; their
             // segments score each log step (--patience logs without improvement stop the round).
             let holdout: u64 = a.num("--holdout", 0u64);
@@ -810,7 +825,7 @@ fn main() {
                 let v: Vec<Aligned> = match kind {
                     0 => (0..batch)
                         .map(|_| {
-                            let a = Aligned::from_sungtext_item(&st2.item(&st2.items[lyric[rng.below(lyric.len())]]), speech_frames).unwrap();
+                            let a = Aligned::from_lyric_item(&st2.item(&st2.items[lyric[rng.below(lyric.len())]]), speech_frames).unwrap();
                             // --augment P: speed perturbation on P of the segments, at one of
                             // nine speeds k/40 (0.9..1.1): 48 kHz·k/40 shares a large factor
                             // with 48 kHz, so the resampler runs its 40-phase table (~3 ms
@@ -826,11 +841,25 @@ fn main() {
             let mut opt = if a.flag("--resume") && out.join("ac.mksing").exists() {
                 Optimizer::load(&out.join("ac"), oc.clone()).unwrap()
             } else {
-                Optimizer::new(declare(Some(&ac), None, 3), oc.clone())
+                let mut p = declare(Some(&ac), None, 3);
+                // --init W.mksing: start from another run's acoustic weights (same
+                // config), with a fresh optimiser and schedule.
+                if let Some(init) = a.get("--init") {
+                    let w = makepad_ai_sing::weights::read(Path::new(&init)).unwrap_or_else(|e| panic!("{init}: {e}"));
+                    let mut n = 0;
+                    for (name, t) in w.params.names.iter().zip(&w.params.vals) {
+                        if name.starts_with("ac.") && p.has(name) && (p.get(name).rows, p.get(name).cols) == (t.rows, t.cols) {
+                            p.insert(name, (**t).clone());
+                            n += 1;
+                        }
+                    }
+                    eprintln!("{n} of {} acoustic tensors from {init}", p.names.len());
+                }
+                Optimizer::new(p, oc.clone())
             };
             let voc_params = a.get("--vocoder").map(|p| makepad_ai_sing::weights::read(Path::new(&p)).unwrap().params);
             let val_batch = (!held.is_empty()).then(|| {
-                let v: Vec<Aligned> = held.iter().take(64).filter_map(|i| Aligned::from_sungtext_item(&store.item(&store.items[*i]), speech_frames)).collect();
+                let v: Vec<Aligned> = held.iter().take(64).filter_map(|i| Aligned::from_lyric_item(&store.item(&store.items[*i]), speech_frames)).collect();
                 train::ac_batch(&v)
             });
             let ac_v = ac.clone();
@@ -852,7 +881,11 @@ fn main() {
             let ac_c = ac.clone();
             let (acc, vc) = (ac.clone(), voc.clone());
             let outc = out.clone();
+            // --dropout P: Gaussian dropout on every residual branch of the encoder and decoder.
+            let dropout: f32 = a.num("--dropout", 0.0f32);
             run("ac", &mut opt, use_gpu, steps, log_every, save_every, &out, &cfg_kv, &rx, &|g, b: &AcBatch, r| {
+                g.dropout = dropout;
+                g.noise_seed = r.next_u64();
                 let l = train::acoustic_loss(g, &ac_c, b, r);
                 vec![("total", l.total), ("mel", l.mel), ("dur", l.dur), ("f0", l.f0), ("voicing", l.voicing), ("flow", l.flow), ("prior", l.prior)]
             }, &|o, step| {

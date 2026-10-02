@@ -7,6 +7,7 @@ use {
         widget::*,
         widget_async::CxSplashVmExt,
     },
+    crate::makepad_draw::makepad_platform::makepad_script::{ScriptFnRef, ScriptRefOptionExt},
     std::cell::RefCell,
     std::rc::Rc,
 };
@@ -477,6 +478,9 @@ pub struct DropDown {
     source: ScriptObjectRef,
     #[apply_default]
     animator: Animator,
+    /// Called (from script) with the chosen label when the choice changes.
+    #[live]
+    on_change: Option<ScriptFnRef>,
 
     // `redraw`/`walk`/`uid`/`action_data` are the `Widget` derive's helper
     // attributes; this widget hand-writes `WidgetNode` (for `children`), so
@@ -714,6 +718,20 @@ pub enum DropDownAction {
 }
 
 impl DropDown {
+    /// The script's `on_change`, with the chosen label.
+    fn emit_change(&mut self, cx: &mut Cx) {
+        let Some(handler) = self.on_change.as_object() else { return };
+        let label = self.labels.get(self.selected_item).cloned().unwrap_or_default();
+        // Nothing to call into if the isolate that minted it is gone.
+        let Some(vm_id) = cx.script_ref_vm_id(&self.source) else { return };
+        cx.with_script_vm_id(vm_id, |vm| {
+            let label = vm.bx.heap.new_string_from_str(&label);
+            vm.with_instruction_limit(crate::widget_async::WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
+                vm.call(ScriptValue::from(handler), &[ScriptValue::from(label)]);
+            });
+        });
+    }
+
     /// Remove every cached popup minted by one script heap before that heap's
     /// isolate is freed. PopupMenu objects retain script refs (including their
     /// item template), so allowing them to outlive the heap is both a leak and
@@ -1029,6 +1047,7 @@ impl Widget for DropDown {
                             uid,
                             DropDownAction::Select(self.selected_item),
                         );
+                        self.emit_change(cx);
                         self.draw_bg.redraw(cx);
                         close = true;
                     }
@@ -1079,6 +1098,7 @@ impl Widget for DropDown {
                             uid,
                             DropDownAction::Select(self.selected_item),
                         );
+                        self.emit_change(cx);
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }
@@ -1091,6 +1111,7 @@ impl Widget for DropDown {
                             uid,
                             DropDownAction::Select(self.selected_item),
                         );
+                        self.emit_change(cx);
                         self.set_closed(cx);
                         self.draw_bg.redraw(cx);
                     }

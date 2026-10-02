@@ -331,11 +331,14 @@ struct Builder {
     /// Per open block: values by key, and whether the block is a loop body
     /// (memory keys from outside it are not reused inside).
     cse: Vec<(HashMap<Key, Val>, bool)>,
+    /// A throwaway builder for constant evaluation ([`Lowerer::scratch`]):
+    /// literals in it stay constants.
+    scratch: bool,
 }
 
 impl Builder {
     fn new() -> Self {
-        Builder { prog: Program::default(), blocks: vec![Vec::new()], consts: Vec::new(), cse: vec![(HashMap::new(), false)] }
+        Builder { prog: Program::default(), blocks: vec![Vec::new()], consts: Vec::new(), cse: vec![(HashMap::new(), false)], scratch: false }
     }
 
     fn lookup(&self, key: &Key) -> Option<Val> {
@@ -936,6 +939,35 @@ struct Lowerer {
     /// constant is kept as unreadable (an error where read) instead of
     /// failing the whole `let`.
     lenient_objects: bool,
+    /// Edit mode: the kernel's live literals (see [`LiveLift`]).
+    live: Option<LiveLift>,
+}
+
+/// Edit mode's live literals in a kernel: the source offsets of the number
+/// and colour literals an editor may change (`live`, from the host), and
+/// what lowering made of each: a hidden parameter the kernel reads (so a
+/// changed value is a parameter write, the same code), or a constant it
+/// had to stay (a loop bound, a size, an integer: `folded`).
+#[derive(Default)]
+pub struct LiveLift {
+    pub live: std::collections::HashSet<usize>,
+    /// Colour literals' offsets: their four channels lift apart.
+    pub colours: std::collections::HashSet<usize>,
+    /// Per (offset, channel): the hidden parameter.
+    pub slots: HashMap<(usize, u8), u32>,
+    /// Channels seen so far per colour offset (a colour is lowered as its
+    /// four channels in order).
+    seen: HashMap<usize, u32>,
+    pub folded: Vec<usize>,
+}
+
+/// A literal a kernel reads from a hidden parameter: its source offset, its
+/// channel (a colour's), and the parameter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveParam {
+    pub offset: usize,
+    pub channel: Option<u8>,
+    pub param: u32,
 }
 
 /// How a call of a lowered function passes and returns values.
@@ -959,10 +991,55 @@ fn ty_of(t: &T) -> Ty {
 }
 
 impl Lowerer {
+    /// A number literal: a constant, or, a live literal lowered in code (not
+    /// while evaluating a constant), a read of its hidden parameter.
+    fn num(&mut self, x: f64, int: bool, span: Span) -> V {
+        let Some(mut live) = self.live.take() else { return V::Lit(x) };
+        let v = self.live_num(&mut live, x, int, span);
+        self.live = Some(live);
+        v
+    }
+
+    fn live_num(&mut self, live: &mut LiveLift, x: f64, int: bool, span: Span) -> V {
+        if !live.live.contains(&span.start) {
+            return V::Lit(x);
+        }
+        let channel = if live.colours.contains(&span.start) {
+            let n = live.seen.entry(span.start).or_insert(0);
+            let c = (*n % 4) as u8;
+            *n += 1;
+            Some(c)
+        } else {
+            None
+        };
+        let key = (span.start, channel.unwrap_or(0));
+        let in_code = !int && !self.b.scratch && !self.in_init && !self.call_stack.is_empty();
+        let param = match live.slots.get(&key) {
+            Some(p) => Some(*p),
+            None if in_code && self.params.len() < 256 => {
+                let p = self.params.len() as u32;
+                self.params.push(ParamInfo { name: format!("\u{1}{}.{}", span.start, key.1), default: x as f32, min: f32::MIN, max: f32::MAX });
+                live.slots.insert(key, p);
+                Some(p)
+            }
+            None => None,
+        };
+        match param {
+            Some(p) if in_code => V::F(self.b.load(Ty::F32, Region::Ctx, kernel::K_PARAMS + p, 1, None)),
+            _ => {
+                if !live.folded.contains(&span.start) {
+                    live.folded.push(span.start);
+                }
+                V::Lit(x)
+            }
+        }
+    }
+
     /// A throwaway builder for constant evaluation (sees the same vars).
     fn scratch(&self) -> Builder {
         let mut b = Builder::new();
         b.prog.vars = self.b.prog.vars.clone();
+        b.scratch = true;
         b
     }
 
@@ -3063,7 +3140,7 @@ impl Lowerer {
     fn expr(&mut self, e: &Expr) -> LResult<V> {
         let span = e.span;
         match &e.kind {
-            ExprKind::Num(x, _) => Ok(V::Lit(*x)),
+            ExprKind::Num(x, int) => Ok(self.num(*x, *int, span)),
             ExprKind::Bool(x) => Ok(V::B(self.b.cb(*x))),
             ExprKind::Ident(name) => self.ident(name, span),
             ExprKind::Neg(a) => {
@@ -4510,6 +4587,7 @@ fn new_lowerer(prelude_base: usize, domain: Domain) -> Lowerer {
         call_sites: None,
         object_tables: HashMap::new(),
         lenient_objects: false,
+        live: None,
     }
 }
 

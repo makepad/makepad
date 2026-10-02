@@ -1068,6 +1068,8 @@ impl Cx {
                 }
             }
         }
+        // A pick asked for: drawn after the frame it picks in.
+        self.paint_picks(metal_cx);
         // NextFrame/worker wakes need not dirty a pass. The queued receipt
         // added to Atlas settlement must still be serviced and cleared on
         // these beats, including work deferred by the last repaint's budget.

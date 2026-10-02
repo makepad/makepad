@@ -726,6 +726,83 @@ impl ScriptArrayData {
                 )
             },
         );
+
+        // Iterator-style methods, as Rust's: `xs.map(f)` and `xs.filter(f)`
+        // make a new array, `xs.find(f)` gives the first item `f` accepts (or
+        // nil), `xs.any(f)` / `xs.all(f)` a bool, `xs.sum()` the numbers'
+        // sum. `f` is called with each item, in order.
+        for (name, kind) in [
+            (id!(map), IterKind::Map),
+            (id!(filter), IterKind::Filter),
+            (id!(find), IterKind::Find),
+            (id!(any), IterKind::Any),
+            (id!(all), IterKind::All),
+        ] {
+            native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, name, script_args!(f = NIL), move |vm, args| {
+                let Some(sself) = script_value!(vm, args.self).as_array() else {
+                    return script_err_unexpected!(vm.bx.threads.cur_ref().trap, "{} called on non-array value", name);
+                };
+                let f = script_value!(vm, args.f);
+                // The result is held while `f` runs (a collection may run in it).
+                let out = match kind {
+                    IterKind::Map | IterKind::Filter => Some(vm.bx.heap.new_array()),
+                    _ => None,
+                };
+                let _hold = out.map(|o| vm.bx.heap.new_array_ref(o));
+                let mut i = 0;
+                while i < vm.bx.heap.array_len(sself) {
+                    let value = script_array_index!(vm, sself[i]);
+                    let ret = vm.call(f, &[value]);
+                    if ret.is_err() {
+                        return ret;
+                    }
+                    let trap = vm.bx.threads.cur().trap.pass();
+                    match kind {
+                        IterKind::Map => vm.bx.heap.array_push(out.unwrap(), ret, trap),
+                        IterKind::Filter => {
+                            if vm.bx.heap.cast_to_bool(ret) {
+                                vm.bx.heap.array_push(out.unwrap(), value, trap)
+                            }
+                        }
+                        IterKind::Find => {
+                            if vm.bx.heap.cast_to_bool(ret) {
+                                return value;
+                            }
+                        }
+                        IterKind::Any => {
+                            if vm.bx.heap.cast_to_bool(ret) {
+                                return true.into();
+                            }
+                        }
+                        IterKind::All => {
+                            if !vm.bx.heap.cast_to_bool(ret) {
+                                return false.into();
+                            }
+                        }
+                    }
+                    i += 1;
+                }
+                match kind {
+                    IterKind::Map | IterKind::Filter => out.unwrap().into(),
+                    IterKind::Find => NIL,
+                    IterKind::Any => false.into(),
+                    IterKind::All => true.into(),
+                }
+            });
+        }
+
+        native.add_type_method(heap, ScriptValueType::REDUX_ARRAY, id!(sum), &[], |vm, args| {
+            let Some(sself) = script_value!(vm, args.self).as_array() else {
+                return script_err_unexpected!(vm.bx.threads.cur_ref().trap, "sum called on non-array value");
+            };
+            let ip = vm.bx.threads.cur_ref().trap.ip;
+            let mut total = 0.0;
+            for i in 0..vm.bx.heap.array_len(sself) {
+                let value = script_array_index!(vm, sself[i]);
+                total += vm.bx.heap.cast_to_f64(value, ip);
+            }
+            total.into()
+        });
     }
 
     pub fn clear(&mut self) {
@@ -740,6 +817,16 @@ impl ScriptArrayData {
             false
         }
     }
+}
+
+/// What an iterator-style array method does with each answer of its function.
+#[derive(Clone, Copy)]
+enum IterKind {
+    Map,
+    Filter,
+    Find,
+    Any,
+    All,
 }
 
 #[cfg(test)]

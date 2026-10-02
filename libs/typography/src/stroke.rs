@@ -61,7 +61,15 @@ pub struct StrokeFont {
 }
 
 /// Our bundled single-stroke fonts (drawn for Makepad).
-pub const BUNDLED: &[(&str, &str)] = &[("technical", include_str!("../resources/stroke/technical.strokefont"))];
+pub const BUNDLED: &[(&str, &str)] = &[
+    ("technical", include_str!("../resources/stroke/technical.strokefont")),
+    // EMS Tech (SIL OFL 1.1, resources/stroke/ems_tech-OFL.txt): set it with
+    // `StrokeKerning::Holes`, as its sidebearings are drawn to be used.
+    ("ems_tech", include_str!("../resources/stroke/ems_tech.strokefont")),
+    // EMS Osmotron (SIL OFL 1.1, resources/stroke/ems_osmotron-OFL.txt): a
+    // single-stroke Orbitron, set with `StrokeKerning::Holes` as EMS Tech is.
+    ("ems_osmotron", include_str!("../resources/stroke/ems_osmotron.strokefont")),
+];
 
 fn arc_points(cx: f32, cy: f32, rx: f32, ry: f32, a0: f32, a1: f32) -> Vec<[f32; 2]> {
     let sweep = (a1 - a0).abs();
@@ -302,13 +310,28 @@ pub struct StrokeStyle {
     pub spacing: f32,
     /// Word space multiplier (1 = the font's).
     pub word_space: f32,
-    /// false: plain advances, no optical kerning.
-    pub optical: bool,
+    pub kerning: StrokeKerning,
+}
+
+/// How letters are spaced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StrokeKerning {
+    /// Every pair spaced by its ink to `spacing` (fonts drawn without
+    /// spacing of their own).
+    Optical,
+    /// The glyphs' advances as drawn.
+    Plain,
+    /// The advances, and kerning only where a pair leaves a hole (To, AV,
+    /// r., 0.): the right glyph moves in until its closest approach over
+    /// the zone both share comes most of the way to the font's own n/o
+    /// pairs, never nearer than a tenth of an em. For fonts whose
+    /// sidebearings already space plain pairs.
+    Holes,
 }
 
 impl Default for StrokeStyle {
     fn default() -> Self {
-        Self { size: 1.0, spacing: 0.12, word_space: 1.0, optical: true }
+        Self { size: 1.0, spacing: 0.12, word_space: 1.0, kerning: StrokeKerning::Optical }
     }
 }
 
@@ -342,10 +365,12 @@ fn poly_len(p: &[[f32; 2]]) -> f32 {
 pub fn stroke_layout(font: &StrokeFont, text: &str, style: &StrokeStyle) -> StrokeLayout {
     let k = style.size / font.em;
     let gap = style.spacing * font.em;
+    let optical = style.kerning == StrokeKerning::Optical;
+    let holes = (style.kerning == StrokeKerning::Holes).then(|| HoleKerning::new(font));
     let mut strokes = Vec::new();
     let mut missing = Vec::new();
     let mut pen = 0.0f32;
-    let mut prev: Option<(&StrokeGlyph, f32)> = None;
+    let mut prev: Option<(char, &StrokeGlyph, f32)> = None;
     let mut word = 0usize;
     let mut in_word = false;
     let mut total = 0.0f32;
@@ -354,7 +379,7 @@ pub fn stroke_layout(font: &StrokeFont, text: &str, style: &StrokeStyle) -> Stro
         if c.is_whitespace() {
             let adv = font.space * style.word_space;
             pen = match prev {
-                Some((g, o)) if style.optical => o + g.x_max + adv,
+                Some((_, g, o)) if optical => o + g.x_max + adv,
                 _ => pen + adv,
             };
             prev = None;
@@ -372,9 +397,9 @@ pub fn stroke_layout(font: &StrokeFont, text: &str, style: &StrokeStyle) -> Stro
             continue;
         };
         let origin = match prev {
-            Some((p, o)) if style.optical => o + font.pair_offset(p, g, gap),
-            Some((p, o)) => o + p.advance,
-            None => pen - if style.optical { g.x_min } else { 0.0 },
+            Some((_, p, o)) if optical => o + font.pair_offset(p, g, gap),
+            Some((pc, p, o)) => o + p.advance + holes.as_ref().map_or(0.0, |h| h.kern(pc, c)),
+            None => pen - if optical { g.x_min } else { 0.0 },
         };
         for s in &g.strokes {
             let points: Vec<[f32; 2]> = s.iter().map(|p| [(origin + p[0]) * k, p[1] * k]).collect();
@@ -383,10 +408,150 @@ pub fn stroke_layout(font: &StrokeFont, text: &str, style: &StrokeStyle) -> Stro
             total += length;
         }
         width = width.max((origin + g.x_max) * k);
-        prev = Some((g, origin));
+        prev = Some((c, g, origin));
         pen = origin + g.advance;
     }
     StrokeLayout { strokes, length: total, width, size: style.size, missing }
+}
+
+/// Bands of [`StrokeKerning::Holes`]'s ink profiles over the font's ink.
+const HOLE_ROWS: usize = 90;
+/// Ink this many band heights above or below a band counts as this much
+/// further out in it (a T's arm shades the bands under it).
+const HOLE_SHADE: f32 = 0.4;
+/// The closest the inks of a pair come, in ems (measured at 45°).
+const HOLE_CLEAR: f32 = 0.1;
+/// How much of the way to the font's own spacing a hole is closed.
+const HOLE_STRENGTH: f32 = 0.6;
+/// Glyphs whose right side overhangs or slants, and whose left side slants
+/// or tucks under: only pairs with one of them kern.
+const HOLE_OPEN_RIGHT: &str = "AFLPTVWYKXfrvwyk7'\"\u{2019}\u{201D}";
+const HOLE_OPEN_LEFT: &str = "AJTVWYXvwyj.,'\"\u{2019}\u{201D}\u{2026}";
+
+/// A glyph's ink as left and right extents per band (`None`: no ink),
+/// widened by `shade`.
+struct HoleProfile {
+    left: Vec<Option<f32>>,
+    right: Vec<Option<f32>>,
+    left45: Vec<Option<f32>>,
+    right45: Vec<Option<f32>>,
+}
+
+/// [`StrokeKerning::Holes`] for one font.
+struct HoleKerning<'a> {
+    font: &'a StrokeFont,
+    y_lo: f32,
+    dy: f32,
+    base: f32,
+    x_top: f32,
+    cap_top: f32,
+    /// The mean closest approach of the font's own lowercase and capital
+    /// pairs (nn, oo, no, on; HH, OO, HO, OH).
+    target: (f32, f32),
+}
+
+impl<'a> HoleKerning<'a> {
+    fn new(font: &'a StrokeFont) -> Self {
+        let ink_y = |c: char| {
+            let pts = font.glyph(c).into_iter().flat_map(|g| g.strokes.iter().flatten());
+            pts.fold(None, |r: Option<(f32, f32)>, p| Some(r.map_or((p[1], p[1]), |(a, b)| (a.min(p[1]), b.max(p[1])))))
+        };
+        let (mut y_lo, mut y_hi) = (f32::MAX, f32::MIN);
+        for g in font.glyphs.values() {
+            for p in g.strokes.iter().flatten() {
+                y_lo = y_lo.min(p[1]);
+                y_hi = y_hi.max(p[1] + 1.0);
+            }
+        }
+        let (base, cap_top) = ink_y('H').unwrap_or((0.0, 0.7 * font.em));
+        let x_top = ink_y('x').map_or(0.45 * font.em, |(_, top)| top);
+        let mut h = HoleKerning { font, y_lo, dy: (y_hi - y_lo) / HOLE_ROWS as f32, base, x_top, cap_top, target: (0.0, 0.0) };
+        let mean = |h: &HoleKerning, pairs: [&str; 4]| {
+            pairs.iter().map(|p| { let mut c = p.chars(); h.approach(c.next().unwrap(), c.next().unwrap()).unwrap_or(0.0) }).sum::<f32>() / 4.0
+        };
+        h.target = (mean(&h, ["nn", "oo", "no", "on"]), mean(&h, ["HH", "OO", "HO", "OH"]));
+        h
+    }
+
+    fn profile(&self, c: char) -> Option<HoleProfile> {
+        let g = self.font.glyph(c).filter(|g| !g.strokes.is_empty())?;
+        let mut l = vec![None::<f32>; HOLE_ROWS];
+        let mut r = vec![None::<f32>; HOLE_ROWS];
+        let mut put = |x: f32, y: f32| {
+            let i = ((y - self.y_lo) / self.dy).floor();
+            if i < 0.0 || i >= HOLE_ROWS as f32 {
+                return;
+            }
+            let i = i as usize;
+            l[i] = Some(l[i].map_or(x, |v: f32| v.min(x)));
+            r[i] = Some(r[i].map_or(x, |v: f32| v.max(x)));
+        };
+        for s in &g.strokes {
+            if s.len() == 1 {
+                put(s[0][0], s[0][1]);
+            }
+            for w in s.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let n = (((b[0] - a[0]).hypot(b[1] - a[1])) / (self.dy * 0.35)).ceil().max(1.0) as usize;
+                for j in 0..=n {
+                    put(a[0] + (b[0] - a[0]) * j as f32 / n as f32, a[1] + (b[1] - a[1]) * j as f32 / n as f32);
+                }
+            }
+        }
+        let widen = |shade: f32| {
+            let mut lw = vec![None::<f32>; HOLE_ROWS];
+            let mut rw = vec![None::<f32>; HOLE_ROWS];
+            for i in 0..HOLE_ROWS {
+                for j in 0..HOLE_ROWS {
+                    let d = i.abs_diff(j) as f32 * self.dy * shade;
+                    if let Some(v) = l[j] {
+                        lw[i] = Some(lw[i].map_or(v + d, |w: f32| w.min(v + d)));
+                    }
+                    if let Some(v) = r[j] {
+                        rw[i] = Some(rw[i].map_or(v - d, |w: f32| w.max(v - d)));
+                    }
+                }
+            }
+            (lw, rw)
+        };
+        let (left, right) = widen(HOLE_SHADE);
+        let (left45, right45) = widen(1.0);
+        Some(HoleProfile { left, right, left45, right45 })
+    }
+
+    fn lowercase_zone(a: char, b: char) -> bool {
+        let lower = |c: char| c.is_lowercase();
+        lower(a) || lower(b) || !a.is_alphanumeric() || !b.is_alphanumeric()
+    }
+
+    /// The closest approach (font units) of `b` set at `a`'s advance, over
+    /// the zone they share (x-height for lowercase, cap height otherwise).
+    fn approach(&self, a: char, b: char) -> Option<f32> {
+        let (pa, pb) = (self.profile(a)?, self.profile(b)?);
+        let adv = self.font.glyph(a)?.advance;
+        let top = if Self::lowercase_zone(a, b) { self.x_top } else { self.cap_top };
+        let i0 = ((self.base - self.y_lo) / self.dy).floor().max(0.0) as usize;
+        let i1 = (((top - self.y_lo) / self.dy).floor() as usize).min(HOLE_ROWS - 1);
+        (i0..=i1).filter_map(|i| Some(adv + pb.left[i]? - pa.right[i]?)).reduce(f32::min)
+    }
+
+    /// The kern (font units, never positive) between two adjacent glyphs.
+    fn kern(&self, a: char, b: char) -> f32 {
+        if !(HOLE_OPEN_RIGHT.contains(a) || HOLE_OPEN_LEFT.contains(b)) || (!a.is_alphanumeric() && !b.is_alphanumeric()) {
+            return 0.0;
+        }
+        let Some(m) = self.approach(a, b) else { return 0.0 };
+        let em = self.font.em;
+        let target = if Self::lowercase_zone(a, b) { self.target.0 } else { self.target.1 };
+        let mut k = (HOLE_STRENGTH * (target - m)).min(0.0).max(-0.15 * em);
+        // the clearance over the full height (descenders and arms too)
+        if let (Some(pa), Some(pb), Some(g)) = (self.profile(a), self.profile(b), self.font.glyph(a)) {
+            if let Some(near) = (0..HOLE_ROWS).filter_map(|i| Some(g.advance + pb.left45[i]? - pa.right45[i]?)).reduce(f32::min) {
+                k = k.max((HOLE_CLEAR * em - near).min(0.0));
+            }
+        }
+        k
+    }
 }
 
 /// Words per [`stroke_segments`] record: a (x, y), b (x, y), the written
@@ -569,7 +734,7 @@ mod tests {
         assert!((hh - 0.12 * 14.0).abs() < 0.3, "HH gap {hh}");
         assert!(gap("OO") < hh && gap("AV") < hh, "OO {} AV {} vs HH {hh}", gap("OO"), gap("AV"));
         assert!(gap("AV") < 0.0, "A and V interlock");
-        let plain = stroke_layout(&f, "AV", &StrokeStyle { optical: false, ..style });
+        let plain = stroke_layout(&f, "AV", &StrokeStyle { kerning: StrokeKerning::Plain, ..style });
         assert!(plain.width > stroke_layout(&f, "AV", &style).width);
     }
 

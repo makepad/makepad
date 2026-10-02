@@ -20,6 +20,7 @@ use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::OnceLock;
 
 enum IoLine {
     Out(String),
@@ -174,13 +175,23 @@ impl CliTurn {
     /// `turn_dir` is the per-turn working directory to remove when the
     /// turn ends, however it ends.
     pub fn spawn(
-        mut command: Command,
+        command: Command,
         stdin: Option<String>,
         what: &str,
         turn_dir: Option<PathBuf>,
     ) -> Result<CliTurn, String> {
+        CliTurn::start(command, stdin, false, what, turn_dir)
+    }
+
+    fn start(
+        mut command: Command,
+        stdin: Option<String>,
+        keep_stdin: bool,
+        what: &str,
+        turn_dir: Option<PathBuf>,
+    ) -> Result<CliTurn, String> {
         command
-            .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+            .stdin(if stdin.is_some() || keep_stdin { Stdio::piped() } else { Stdio::null() })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         #[cfg(unix)]
@@ -199,7 +210,8 @@ impl CliTurn {
             }
         };
         let mut child = child;
-        if let (Some(text), Some(mut pipe)) = (stdin, child.stdin.take()) {
+        // (Taken only for a prompt: a live process keeps its pipe.)
+        if let Some((text, mut pipe)) = stdin.and_then(|text| Some((text, child.stdin.take()?))) {
             std::thread::spawn(move || {
                 let _ = pipe.write_all(text.as_bytes());
             });
@@ -211,6 +223,30 @@ impl CliTurn {
         spawn_reader(child.stdout.take(), tx.clone(), IoLine::Out, true);
         spawn_reader(child.stderr.take(), tx, IoLine::Err, false);
         Ok(CliTurn { child, rx, stderr_tail: String::new(), finished: false, turn_dir })
+    }
+
+    /// [`Self::spawn`] for a process that stays up across turns: stdin
+    /// stays open, and each line sent on the returned channel is written to
+    /// it (from a writer thread that lives as long as the process; dropping
+    /// the sender closes stdin).
+    pub fn spawn_live(command: Command, what: &str, turn_dir: Option<PathBuf>) -> Result<(CliTurn, Sender<String>), String> {
+        let mut turn = CliTurn::start(command, None, true, what, turn_dir)?;
+        let (tx, rx) = channel::<String>();
+        if let Some(mut pipe) = turn.child.stdin.take() {
+            std::thread::spawn(move || {
+                for line in rx {
+                    if pipe.write_all(line.as_bytes()).and_then(|_| pipe.flush()).is_err() {
+                        return;
+                    }
+                }
+            });
+        }
+        Ok((turn, tx))
+    }
+
+    /// Whether the process is still running.
+    pub fn alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
     }
 
     /// Non-blocking: everything that arrived since the last call.
@@ -241,10 +277,14 @@ impl CliTurn {
         categorize_cli_error(what, &self.stderr_tail, true)
     }
 
-    /// Reap a finished process and remove its turn directory.
+    /// Reap a finished process and remove its turn directory. Never waits:
+    /// a process still exiting (the CLI goes on for a second or so after
+    /// its result line) is reaped on the reaper thread.
     pub fn wait(mut self) {
-        let _ = self.child.wait();
-        self.cleanup();
+        match self.child.try_wait() {
+            Ok(Some(_)) | Err(_) => self.cleanup(),
+            Ok(None) => reap_later(self),
+        }
     }
 
     /// Kill the process and everything it spawned (the group we created),
@@ -271,6 +311,34 @@ impl CliTurn {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+}
+
+/// Finished turns whose processes have not exited yet, reaped (waited for,
+/// their turn directories removed) on one long-lived thread, so whoever
+/// polls a turn never waits for a process to exit.
+fn reap_later(turn: CliTurn) {
+    static REAPER: OnceLock<Option<Sender<CliTurn>>> = OnceLock::new();
+    let reaper = REAPER.get_or_init(|| {
+        let (tx, rx) = channel::<CliTurn>();
+        let spawned = std::thread::Builder::new().name("cli-reaper".into()).spawn(move || {
+            for mut turn in rx {
+                let _ = turn.child.wait();
+                turn.cleanup();
+            }
+        });
+        spawned.ok().map(|_| tx)
+    });
+    let turn = match reaper {
+        Some(tx) => match tx.send(turn) {
+            Ok(()) => return,
+            Err(failed) => failed.0,
+        },
+        None => turn,
+    };
+    // No reaper thread: reap here, as before.
+    let mut turn = turn;
+    let _ = turn.child.wait();
+    turn.cleanup();
 }
 
 fn spawn_reader<R: std::io::Read + Send + 'static>(

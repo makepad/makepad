@@ -232,6 +232,47 @@ pub struct ScriptTokenPos {
     /// every token but an unterminated string.
     start: u32,
     end: u32,
+    /// The unit a number literal was written in (`0.12s`, `120ms`, `90deg`): its
+    /// value is already in seconds or radians; the unit says what it is.
+    pub unit: Option<ScriptUnit>,
+}
+
+/// The unit suffix of a number literal: what a value means (an editor picks its
+/// control by it). The token's value is in the base unit: seconds for time,
+/// radians for angles, virtual pixels for lengths.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ScriptUnit {
+    /// `0.12s`: seconds.
+    Seconds,
+    /// `120ms`: milliseconds, the value in seconds.
+    Millis,
+    /// `90deg`: degrees, the value in radians.
+    Degrees,
+    /// `1.5rad`: radians (the base unit of angles).
+    Radians,
+    /// `12px`: virtual (DPI-scaled) pixels, the base unit of lengths and positions.
+    Pixels,
+}
+
+impl ScriptUnit {
+    pub fn parse(suffix: &str) -> Option<Self> {
+        match suffix {
+            "s" => Some(Self::Seconds),
+            "ms" => Some(Self::Millis),
+            "deg" => Some(Self::Degrees),
+            "rad" => Some(Self::Radians),
+            "px" => Some(Self::Pixels),
+            _ => None,
+        }
+    }
+    /// The value of `v` written in this unit, in the base unit.
+    pub fn to_base(self, v: f64) -> f64 {
+        match self {
+            Self::Seconds | Self::Radians | Self::Pixels => v,
+            Self::Millis => v / 1000.0,
+            Self::Degrees => v * std::f64::consts::PI / 180.0,
+        }
+    }
 }
 
 impl ScriptTokenPos {
@@ -263,6 +304,16 @@ enum State {
     RustValue,
     String(bool),
     EscapeInString(bool),
+    /// `\` then a newline in a string: the newline and the next line's
+    /// leading whitespace are skipped (Rust's line continuation).
+    ContinueInString(bool),
+    /// `r` then this many `#`: a raw string opens at the `"`.
+    RawStringOpen(usize),
+    /// Inside `r#…"…"#…` with this many `#`: no escapes, any line.
+    RawString(usize),
+    /// A `"` inside a raw string with this many `#`, then `seen` of them:
+    /// the string ends when they match.
+    RawStringClose(usize, usize),
     UnicodeHexInString(bool),
     UnicodeCurlyInString(bool),
     AsciiHexInString(bool),
@@ -278,6 +329,12 @@ enum State {
     /// Saw `*` inside a block doc; `/` closes it.
     BlockDocMaybeEnd,
     LineComment,
+    /// Just after `//`: a third `/` makes a `///` doc line (a fourth, a plain comment).
+    LineCommentStart,
+    /// Just after `///`: a fourth `/` makes it plain (`////`), else the doc text begins.
+    LineDocStart,
+    /// Inside a `///` doc line: text accumulates into `temp`.
+    LineDoc,
     Number,
     Color,
 }
@@ -294,6 +351,10 @@ impl State {
                 | State::Color
                 | State::String(_)
                 | State::EscapeInString(_)
+                | State::RawStringOpen(_)
+                | State::ContinueInString(_)
+                | State::RawString(_)
+                | State::RawStringClose(..)
                 | State::UnicodeHexInString(_)
                 | State::UnicodeCurlyInString(_)
                 | State::AsciiHexInString(_)
@@ -305,6 +366,9 @@ impl State {
             self,
             State::String(_)
                 | State::EscapeInString(_)
+                | State::ContinueInString(_)
+                | State::RawString(_)
+                | State::RawStringClose(..)
                 | State::UnicodeHexInString(_)
                 | State::UnicodeCurlyInString(_)
                 | State::AsciiHexInString(_)
@@ -338,6 +402,8 @@ pub struct ScriptTokenizer {
     line_starts: Vec<u32>,
     unfinished: String,
     temp: String,
+    /// Where a number's unit suffix starts in `temp` (`0.12s`), when it has one.
+    unit_start: Option<usize>,
     state: State,
     /// First character of the token being lexed, and one past its last
     /// when it is emitted (see `ScriptTokenPos::span`).
@@ -379,6 +445,19 @@ impl ScriptTokenizer {
         })
     }
 
+    /// The zero-based row and column (characters) of the first character
+    /// of token `tok_index`: where it is written, from its lexed span (a
+    /// token's `pos` may sit a character into it).
+    pub fn token_start_row_col(&self, tok_index: u32) -> Option<(u32, u32)> {
+        let char_index = self.tokens.get(tok_index as usize)?.start as usize;
+        if char_index >= self.pos {
+            return None;
+        }
+        let line = self.line_starts.partition_point(|&start| start as usize <= char_index);
+        let line_start = if line == 0 { 0 } else { self.line_starts[line - 1] as usize };
+        Some((line as u32, (char_index - line_start) as u32))
+    }
+
     pub fn token_index_to_row_col(&self, tok_index: u32) -> Option<(u32, u32)> {
         let char_index = self.tokens[tok_index as usize].pos;
         if char_index >= self.pos {
@@ -404,6 +483,7 @@ impl ScriptTokenizer {
             preceded_by_space,
             start: self.lex_start as u32,
             end: self.tok_end as u32,
+            unit: None,
         });
     }
 
@@ -515,6 +595,27 @@ impl ScriptTokenizer {
     }
 
     fn emit_f64(&mut self) {
+        if let Some(k) = self.unit_start.take() {
+            let suffix = self.temp.split_off(k);
+            match ScriptUnit::parse(&suffix) {
+                Some(unit) => {
+                    let len = self.temp.chars().count() + suffix.chars().count();
+                    let v = self.temp.parse::<f64>().unwrap_or(0.0);
+                    self.temp.clear();
+                    self.push_tok(self.pos - len, ScriptToken::F64(unit.to_base(v)));
+                    if let Some(t) = self.tokens.last_mut() {
+                        t.unit = Some(unit);
+                    }
+                }
+                None => {
+                    // not a unit: the number, then an identifier
+                    self.emit_f64();
+                    self.temp = suffix;
+                    self.emit_identifier();
+                }
+            }
+            return;
+        }
         // Measure before clearing: a float token's position was taken from
         // an already-emptied `temp`, so it pointed one past its terminator —
         // a float ending a line resolved to the NEXT line, column 0.
@@ -816,6 +917,16 @@ impl ScriptTokenizer {
                     }
                 }
                 State::Identifier => {
+                    // `r"…"` / `r#"…"#`: a raw string, as in Rust
+                    if self.temp == "r" && (c == '"' || c == '#') {
+                        if c == '"' {
+                            self.temp.clear();
+                            self.state = State::RawString(0);
+                        } else {
+                            self.state = State::RawStringOpen(1);
+                        }
+                        continue;
+                    }
                     if c == '_' || c == '$' || c.is_alphanumeric() {
                         self.temp.push(c);
                     } else if c.is_whitespace() {
@@ -960,7 +1071,7 @@ impl ScriptTokenizer {
                         self.state = State::BlockCommentStart;
                         self.temp.clear();
                     } else if self.temp == "//" {
-                        self.state = State::LineComment;
+                        self.state = State::LineCommentStart;
                         self.temp.clear();
                     }
                     // Emit complete operators that can't be extended
@@ -968,6 +1079,64 @@ impl ScriptTokenizer {
                     {
                         self.tok_end = self.pos;
                         self.emit_operator();
+                    }
+                }
+                State::RawStringOpen(hashes) => {
+                    if c == '#' {
+                        self.state = State::RawStringOpen(hashes + 1);
+                    } else if c == '"' {
+                        self.temp.clear();
+                        self.state = State::RawString(hashes);
+                    } else {
+                        // `r#x` is no raw string: the identifier `r`
+                        self.emit_identifier();
+                        self.state = State::Whitespace;
+                    }
+                }
+                State::RawString(hashes) => {
+                    if c == '"' {
+                        if hashes == 0 {
+                            self.finish_string(heap);
+                            self.state = State::Whitespace;
+                        } else {
+                            self.state = State::RawStringClose(hashes, 0);
+                        }
+                    } else {
+                        self.append_unfinished_string(c);
+                    }
+                }
+                State::RawStringClose(hashes, seen) => {
+                    if c == '#' && seen + 1 == hashes {
+                        self.finish_string(heap);
+                        self.state = State::Whitespace;
+                    } else if c == '#' {
+                        self.state = State::RawStringClose(hashes, seen + 1);
+                    } else {
+                        // not the closer: the `"` and the `#`s were text
+                        self.append_unfinished_string('"');
+                        for _ in 0..seen {
+                            self.append_unfinished_string('#');
+                        }
+                        if c == '"' {
+                            self.state = State::RawStringClose(hashes, 0);
+                        } else {
+                            self.append_unfinished_string(c);
+                            self.state = State::RawString(hashes);
+                        }
+                    }
+                }
+                State::ContinueInString(double) => {
+                    if !c.is_whitespace() {
+                        self.state = State::String(double);
+                        if c == '\\' {
+                            self.temp.clear();
+                            self.state = State::EscapeInString(double);
+                        } else if (double && c == '"') || (!double && c == '\'') {
+                            self.finish_string(heap);
+                            self.state = State::Whitespace;
+                        } else {
+                            self.append_unfinished_string(c);
+                        }
                     }
                 }
                 State::EscapeInString(double) => {
@@ -997,6 +1166,13 @@ impl ScriptTokenizer {
                         self.state = State::AsciiHexInString(double);
                     } else if c == 'u' {
                         self.state = State::UnicodeHexInString(double);
+                    } else if c == '\n' {
+                        self.state = State::ContinueInString(double);
+                    } else {
+                        // not an escape: the backslash and the char stay text
+                        self.append_unfinished_string('\\');
+                        self.append_unfinished_string(c);
+                        self.state = State::String(double);
                     }
                 }
                 State::AsciiHexInString(double) => {
@@ -1076,6 +1252,39 @@ impl ScriptTokenizer {
                         self.state = State::Whitespace;
                     }
                 }
+                State::LineCommentStart => {
+                    self.state = if c == '/' {
+                        State::LineDocStart
+                    } else if c == '\n' {
+                        State::Whitespace
+                    } else {
+                        State::LineComment
+                    };
+                }
+                State::LineDocStart => {
+                    if c == '/' {
+                        self.state = State::LineComment;
+                    } else if c == '\n' {
+                        self.state = State::Whitespace;
+                    } else {
+                        self.temp.clear();
+                        self.temp.push(c);
+                        self.state = State::LineDoc;
+                    }
+                }
+                State::LineDoc => {
+                    if c == '\n' {
+                        // `///text`: a doc for what follows, as `/**text*/` (Rust's doc line)
+                        let text = self.temp.trim().to_string();
+                        if !text.is_empty() {
+                            self.docs.push(ScriptTokDoc { next_token: self.tokens.len() as u32, text });
+                        }
+                        self.temp.clear();
+                        self.state = State::Whitespace;
+                    } else {
+                        self.temp.push(c);
+                    }
+                }
                 State::BlockCommentStart => {
                     if c == '*' {
                         self.state = State::BlockDocStart;
@@ -1128,7 +1337,9 @@ impl ScriptTokenizer {
                     }
                 }
                 State::Number => {
-                    if c.is_numeric() {
+                    if self.unit_start.is_some() && c.is_alphabetic() {
+                        self.temp.push(c);
+                    } else if c.is_numeric() {
                         self.temp.push(c);
                     } else if c == '.' && self.temp.chars().last() == Some('.') {
                         self.temp.pop();
@@ -1185,6 +1396,10 @@ impl ScriptTokenizer {
                         // Moving to Whitespace here left `temp` stale and let a
                         // later separator reach emit_separator and panic.
                         continue;
+                    } else if c.is_alphabetic() && !self.temp.contains(['x', 'X']) {
+                        // a unit suffix (`0.12s`, `120ms`, `90deg`)
+                        self.unit_start = Some(self.temp.len());
+                        self.temp.push(c);
                     } else if c == '$' || c.is_alphabetic() {
                         self.emit_f64();
                         self.state = State::Identifier;
