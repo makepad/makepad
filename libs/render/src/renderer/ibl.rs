@@ -1,7 +1,7 @@
 //! Image-based lighting for Splash materials (KERNELS.md §3.3.3). Opt-in:
 //! `World::environment.ibl` names an environment, the renderer builds its
-//! lane texture once per change (render-material's ibl.rs: the prefiltered
-//! atlas, SH9 and a meta row) and binds it on the detail slot of the
+//! lane texture once per change (render-material's ibl.rs: a meta row with
+//! SH9, then the prefiltered atlas) and binds it on the detail slot of the
 //! materials compiled with IBL. Without it nothing is built or bound, and
 //! every stock lane keeps its analytic sky reflection.
 use super::*;
