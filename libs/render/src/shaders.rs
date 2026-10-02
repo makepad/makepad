@@ -1254,6 +1254,7 @@ mod shader_registration_tests {
                 mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
             });
             vm.bx.heap.new_module(id!(widgets));
+            makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
             crate::fast_gi::script_mod(vm);
@@ -1291,6 +1292,7 @@ mod shader_registration_tests {
                 }
             });
             vm.bx.heap.new_module(id!(widgets));
+            makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
             crate::fast_gi::script_mod(vm);
