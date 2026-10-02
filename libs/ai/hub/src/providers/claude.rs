@@ -18,6 +18,14 @@
 //!
 //! Process plumbing lives in [`crate::providers::cli`], shared with the `grok` CLI
 //! (same Messages-format stream, [`parse_stream_line`]) and `codex`.
+//!
+//! [`ClaudeCodeChatProvider::live`] keeps ONE process across turns instead
+//! (`--input-format stream-json`: a user message per stdin line, a result
+//! line per turn): the conversation stays in that process, so a turn sends
+//! only what is new since the last reply and pays no process start. The
+//! process is started by the first turn; one that died (or a system prompt
+//! that changed) is replaced at the next turn, which then sends the whole
+//! history, as a fresh conversation does.
 
 use crate::chat_wire::{ChatRole, ProviderAvailability, ProviderKind};
 use crate::providers::cli::{categorize_cli_error, cli_command, turn_dir, CliTurn};
@@ -52,11 +60,128 @@ pub struct ClaudeCodeChatProvider {
     /// Images for the next turn: sent as image blocks of a stream-json
     /// user message beside the rendered prompt.
     images: Vec<ToolImage>,
+    /// Keep one process across turns ([`Self::live`]), and that process.
+    live: bool,
+    /// `--effort` (low … max), when set.
+    effort: Option<String>,
+    session: Option<LiveSession>,
+}
+
+/// The process of a live provider: its streams, the line writer to its
+/// stdin, the system prompt it was started with, and the parse of the turn
+/// in flight (none between turns).
+struct LiveSession {
+    cli: CliTurn,
+    stdin: std::sync::mpsc::Sender<String>,
+    system: String,
+    parse: Option<ParseState>,
+}
+
+impl LiveSession {
+    fn end(self) {
+        drop(self.stdin);
+        self.cli.kill_group();
+    }
 }
 
 impl ClaudeCodeChatProvider {
     pub fn new(model: Option<String>) -> ClaudeCodeChatProvider {
-        ClaudeCodeChatProvider { cli: find_cli(), model, mcp: None, resume: None, turn: None, images: Vec::new() }
+        ClaudeCodeChatProvider { cli: find_cli(), model, mcp: None, resume: None, turn: None, images: Vec::new(), live: false, effort: None, session: None }
+    }
+
+    /// One process for the whole conversation (see the module doc).
+    pub fn live(mut self) -> Self {
+        self.live = true;
+        self
+    }
+
+    /// How hard the model thinks (`--effort`: low, medium, high, xhigh,
+    /// max): low for quick, small answers.
+    pub fn effort(mut self, level: &str) -> Self {
+        self.effort = Some(level.to_string());
+        self
+    }
+
+    fn begin_live(&mut self, cli: PathBuf, input: &TurnInput) -> Result<(), String> {
+        if self.session.as_mut().is_some_and(|s| s.system != input.system || !s.cli.alive()) {
+            if let Some(session) = self.session.take() {
+                session.end();
+            }
+        }
+        let resuming = self.session.is_some();
+        let mut prompt = render_prompt(input, resuming);
+        if !input.dynamic_context.is_empty() {
+            // The system stays as the process started with it: what changes
+            // per turn goes in the turn.
+            prompt = format!("[context]\n{}\n{prompt}", input.dynamic_context);
+        }
+        let line = image_message(&prompt, &std::mem::take(&mut self.images));
+        if self.session.is_none() {
+            let mut args = build_args_with_mcp(&self.model, &None, &input.system, self.mcp.as_ref());
+            args.insert(1, "--input-format".into());
+            args.insert(2, "stream-json".into());
+            if let Some(effort) = &self.effort {
+                args.insert(3, "--effort".into());
+                args.insert(4, effort.clone());
+            }
+            let dir = turn_dir("claude");
+            let mut command = cli_command(&cli, &dir);
+            command.args(&args);
+            if self.mcp.is_some() {
+                command.env("MCP_TOOL_TIMEOUT", "900000");
+            }
+            let (cli, stdin) = CliTurn::spawn_live(command, "Claude Code", Some(dir))?;
+            self.session = Some(LiveSession { cli, stdin, system: input.system.clone(), parse: None });
+        }
+        let session = self.session.as_mut().expect("started above");
+        if session.stdin.send(line).is_err() {
+            if let Some(session) = self.session.take() {
+                session.end();
+            }
+            return Err("Claude Code CLI exited".to_string());
+        }
+        session.cli.finished = false;
+        session.parse = Some(ParseState::default());
+        Ok(())
+    }
+
+    fn poll_live(&mut self) -> Vec<ProviderEvent> {
+        let Some(session) = self.session.as_mut() else { return Vec::new() };
+        let drained = session.cli.drain();
+        let mut events = Vec::new();
+        if let Some(parse) = session.parse.as_mut() {
+            for line in drained.lines {
+                let Ok(v) = json::parse(line.as_bytes()) else { continue };
+                if v.get("type").and_then(Value::as_str) == Some("result") {
+                    if let Some(usage) = usage_note(&v) {
+                        eprintln!("chat Claude Code turn: {usage}");
+                    }
+                }
+                let (mut evs, done) = parse_stream_line(&v, parse);
+                for ev in &mut evs {
+                    if let ProviderEvent::Error(raw) = ev {
+                        *ev = ProviderEvent::Error(categorize_cli_error("Claude Code", raw, false));
+                    }
+                }
+                events.append(&mut evs);
+                if done {
+                    session.cli.finished = true;
+                    break;
+                }
+            }
+            if drained.exited && !session.cli.finished {
+                events.push(ProviderEvent::Error(session.cli.exit_error("Claude Code")));
+            }
+            if session.cli.finished || drained.exited {
+                session.parse = None;
+            }
+        }
+        if drained.exited {
+            if let Some(session) = self.session.take() {
+                session.cli.wait();
+            }
+        }
+        events
     }
 
     /// Give the model the tools of one MCP server (`config` is the
@@ -365,12 +490,15 @@ impl ChatProvider for ClaudeCodeChatProvider {
     }
 
     fn begin_turn(&mut self, input: &TurnInput) -> Result<(), String> {
-        if self.turn.is_some() {
+        if self.turn.is_some() || self.session.as_ref().is_some_and(|s| s.parse.is_some()) {
             return Err("a turn is already in flight".to_string());
         }
         let Some(cli) = self.cli.clone() else {
             return Err("Claude Code CLI not found".to_string());
         };
+        if self.live {
+            return self.begin_live(cli, input);
+        }
         let mut prompt = render_prompt(input, self.resume.is_some());
         let mut args = build_args_with_mcp(&self.model, &self.resume, &input.system_with_dynamic(), self.mcp.as_ref());
         let images = std::mem::take(&mut self.images);
@@ -395,6 +523,9 @@ impl ChatProvider for ClaudeCodeChatProvider {
     }
 
     fn poll(&mut self) -> Vec<ProviderEvent> {
+        if self.live {
+            return self.poll_live();
+        }
         poll_messages_turn(&mut self.turn, &mut self.resume, "Claude Code")
     }
 
@@ -404,7 +535,7 @@ impl ChatProvider for ClaudeCodeChatProvider {
 
     fn attach_tool_images(&mut self, images: Vec<ToolImage>) -> Result<(), String> {
         validate_tool_images(&images)?;
-        if self.turn.is_some() {
+        if self.turn.is_some() || self.session.as_ref().is_some_and(|s| s.parse.is_some()) {
             return Err("images must be attached between turns".into());
         }
         self.images = images;
@@ -416,13 +547,33 @@ impl ChatProvider for ClaudeCodeChatProvider {
         if let Some((cli, _)) = self.turn.take() {
             cli.kill_group();
         }
+        // A live process mid-turn is ended (its reply would arrive as the
+        // next turn's); the next turn starts another with the history.
+        if self.session.as_ref().is_some_and(|s| s.parse.is_some()) {
+            if let Some(session) = self.session.take() {
+                session.end();
+            }
+        }
     }
 }
 
 impl Drop for ClaudeCodeChatProvider {
     fn drop(&mut self) {
         self.cancel();
+        if let Some(session) = self.session.take() {
+            session.end();
+        }
     }
+}
+
+/// A turn's token counts from its result line, for the log.
+fn usage_note(result: &Value) -> Option<String> {
+    let usage = result.get("usage")?;
+    let n = |key: &str| usage.get(key).and_then(Value::as_i64).unwrap_or(0);
+    Some(format!(
+        "in {} + cache write {} + cache read {}, out {}",
+        n("input_tokens"), n("cache_creation_input_tokens"), n("cache_read_input_tokens"), n("output_tokens")
+    ))
 }
 
 #[cfg(test)]
