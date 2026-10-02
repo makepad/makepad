@@ -66,6 +66,9 @@ pub const BUNDLED: &[(&str, &str)] = &[
     // EMS Tech (SIL OFL 1.1, resources/stroke/ems_tech-OFL.txt): set it with
     // `StrokeKerning::Holes`, as its sidebearings are drawn to be used.
     ("ems_tech", include_str!("../resources/stroke/ems_tech.strokefont")),
+    // EMS Osmotron (SIL OFL 1.1, resources/stroke/ems_osmotron-OFL.txt): a
+    // single-stroke Orbitron, set with `StrokeKerning::Holes` as EMS Tech is.
+    ("ems_osmotron", include_str!("../resources/stroke/ems_osmotron.strokefont")),
 ];
 
 fn arc_points(cx: f32, cy: f32, rx: f32, ry: f32, a0: f32, a1: f32) -> Vec<[f32; 2]> {
