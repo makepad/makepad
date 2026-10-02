@@ -701,10 +701,21 @@ fn main() {
             }
         }
         "gta" => {
-            // V2: sing_train gta --data DIR --acoustic A.ema.mksing --resume-from VOC_STEM
+            // V2: sing_train gta --data DIR --acoustic A.ema.mksing --resume-from VOC_STEM [--holdout P]
             let store = Arc::new(data::Store::open(&a.all("--data")).expect("data"));
             let max_frames = a.num("--ac-frames", 400usize);
-            let sung: Vec<Aligned> = store.items.iter().filter(|r| r.kind == Kind::Sung).filter_map(|r| Aligned::from_vowel_item(&store.item(r))).collect();
+            // Sung vowels and score-aligned sung lyrics (--holdout P keeps the held-out songs out).
+            let holdout: u64 = a.num("--holdout", 0u64);
+            let sung: Vec<Aligned> = store
+                .items
+                .iter()
+                .filter(|r| !(r.kind == Kind::SungAligned && store.held_out(r, holdout)))
+                .filter_map(|r| match r.kind {
+                    Kind::Sung => Aligned::from_vowel_item(&store.item(r)),
+                    Kind::SungAligned => Aligned::from_aligned_item(&store.item(r), 100_000),
+                    _ => None,
+                })
+                .collect();
             eprintln!("{} sung items for GTA", sung.len());
             let sung = Arc::new(sung);
             let rx = prefetch(workers, 8, 3, Arc::new(move |rng: &mut Rng| {
