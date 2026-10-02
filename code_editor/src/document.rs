@@ -500,7 +500,7 @@ impl CodeDocument {
                     })
                     .unwrap_or(false)
                 {
-                    desired_indentation_column_count -= 4;
+                    desired_indentation_column_count = desired_indentation_column_count.saturating_sub(4);
                 }
                 self.edit_lines_internal(line, edits, |line| {
                     crate::session::reindent(line, |_| desired_indentation_column_count)
