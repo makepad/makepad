@@ -59,7 +59,7 @@ pub fn screens() -> Vec<ScreenGeom> {
 }
 
 /// Published by the direct backend whenever its desktop layout may change.
-#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos")))]
+#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos"), linux_direct))]
 pub(crate) fn set_linux_screens(screens: Vec<ScreenGeom>) {
     *LINUX_SCREENS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = screens;
 }

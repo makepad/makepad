@@ -101,6 +101,40 @@ pub fn slice_viewport(rect: SliceRect, composition: (u32, u32), output: (u32, u3
     )
 }
 
+/// The smallest rectangle holding all `rects`; `None` when there are none.
+/// A card's slice of the wide desktop is the bounding box of its screens.
+pub fn bounding(rects: impl IntoIterator<Item = SliceRect>) -> Option<SliceRect> {
+    let mut bounds: Option<(u32, u32, u32, u32)> = None;
+    for rect in rects {
+        let (right, bottom) = (rect.x + rect.width, rect.y + rect.height);
+        bounds = Some(match bounds {
+            None => (rect.x, rect.y, right, bottom),
+            Some((x, y, r, b)) => (x.min(rect.x), y.min(rect.y), r.max(right), b.max(bottom)),
+        });
+    }
+    bounds.map(|(x, y, right, bottom)| SliceRect { x, y, width: right - x, height: bottom - y })
+}
+
+/// Per-connector display modes from text like
+/// `card0-HDMI-A-2=3840x2160@30, card1-DP-1=1920x1080`. Entries without `=`
+/// or with an empty side are ignored; surrounding spaces are trimmed. The mode
+/// part uses the same forms as `MAKEPAD_DRM_MODE`.
+pub fn parse_mode_overrides(text: &str) -> Vec<(String, String)> {
+    text.split([',', ';'])
+        .filter_map(|entry| {
+            let (connector, mode) = entry.split_once('=')?;
+            let (connector, mode) = (connector.trim(), mode.trim());
+            (!connector.is_empty() && !mode.is_empty()).then(|| (connector.to_string(), mode.to_string()))
+        })
+        .collect()
+}
+
+/// A left-to-right order of connector names from text like
+/// `card0-HDMI-A-2, card1-HDMI-A-1` (commas or semicolons; blanks ignored).
+pub fn parse_display_order(text: &str) -> Vec<String> {
+    text.split([',', ';']).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,5 +227,38 @@ mod tests {
         let (viewport, scissor) = slice_viewport(SliceRect { x: 0, y: 0, width: 3840, height: 2160 }, (3840, 2160), (3840, 2160));
         assert_eq!(viewport, [0.0, 0.0, 3840.0, 2160.0]);
         assert_eq!(scissor, (3840, 2160));
+    }
+
+    #[test]
+    fn a_card_slice_is_the_bounding_box_of_its_screens() {
+        assert_eq!(bounding([]), None);
+        let a = SliceRect { x: 3840, y: 0, width: 1920, height: 1080 };
+        let b = SliceRect { x: 5760, y: 0, width: 3840, height: 2160 };
+        assert_eq!(bounding([a]), Some(a));
+        assert_eq!(bounding([b, a]), Some(SliceRect { x: 3840, y: 0, width: 5760, height: 2160 }));
+        let low = SliceRect { x: 0, y: 200, width: 100, height: 50 };
+        let high = SliceRect { x: 150, y: 10, width: 100, height: 100 };
+        assert_eq!(bounding([low, high]), Some(SliceRect { x: 0, y: 10, width: 250, height: 240 }));
+    }
+
+    #[test]
+    fn mode_overrides_are_read_per_connector() {
+        assert_eq!(
+            parse_mode_overrides(" card0-HDMI-A-2=3840x2160@30 ; card1-DP-1 = 1920x1080,broken,=x,y="),
+            vec![
+                ("card0-HDMI-A-2".to_string(), "3840x2160@30".to_string()),
+                ("card1-DP-1".to_string(), "1920x1080".to_string()),
+            ]
+        );
+        assert_eq!(parse_mode_overrides(""), vec![]);
+    }
+
+    #[test]
+    fn display_order_is_read_from_text() {
+        assert_eq!(
+            parse_display_order(" card0-HDMI-A-2 ,card1-HDMI-A-1;; "),
+            vec!["card0-HDMI-A-2".to_string(), "card1-HDMI-A-1".to_string()]
+        );
+        assert!(parse_display_order("").is_empty());
     }
 }
