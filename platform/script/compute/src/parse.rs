@@ -102,7 +102,10 @@ pub fn lex(src: &str) -> Result<Vec<Token>, ShaderError> {
                 Ok(v) => Tk::Num(v, int),
                 Err(_) => return Err(ShaderError::new(start, i, format!("bad number `{}`", &src[start..i]))),
             }
-        } else if c.is_ascii_alphabetic() || c == b'_' {
+        } else if c.is_ascii_alphabetic() || c == b'_' || (c == b'@' && b.get(i + 1).is_some_and(|d| d.is_ascii_alphabetic() || *d == b'_')) {
+            // `@name` (an id, as documents write an ease's name) is an
+            // identifier starting with `@`: only `ease(@name, u)` takes one.
+            i += 1;
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
                 i += 1;
             }
@@ -904,6 +907,9 @@ impl<'a> Parser<'a> {
                             self.expect(")")?;
                         }
                     }
+                    if name == "ease" && matches!(args.first().map(|a| &a.kind), Some(ExprKind::Ident(n)) if n.starts_with('@')) {
+                        return self.ease_call(start, args);
+                    }
                     return done(self, ExprKind::Call(name, args));
                 }
                 let upper = name.chars().next().is_some_and(|c| c.is_ascii_uppercase());
@@ -917,6 +923,29 @@ impl<'a> Parser<'a> {
             Tk::Str(_) => self.err("no strings here (a string only names a library: `use lib(\"id\", \"rev\")`)"),
             ref other => self.err(format!("expected a value, found {}", describe(other))),
         }
+    }
+
+    /// `ease(@name, u)` as documents write it: the std.ease curve of that
+    /// name (`ease(@ease_out_cubic, u)` is `ease.out_cubic(u)`), so one
+    /// spelling eases in a document and in the kernels compiled from it.
+    fn ease_call(&mut self, start: usize, mut args: Vec<Expr>) -> PResult<Expr> {
+        let span = Span { start, end: self.prev_end() };
+        let name = match args.first().map(|a| &a.kind) {
+            Some(ExprKind::Ident(n)) if n.starts_with('@') && args.len() == 2 => n[1..].to_string(),
+            _ => return Err(ShaderError::new(start, span.end, "a kernel eases by name: `ease(@ease_out_cubic, u)`".into())),
+        };
+        let u = args.pop().unwrap();
+        let curve = match name.as_str() {
+            "linear" => return Ok(Expr { kind: ExprKind::Call("clamp".into(), vec![u, Expr { kind: ExprKind::Num(0.0, false), span }, Expr { kind: ExprKind::Num(1.0, false), span }]), span }),
+            "ease_in" => "in_quad".to_string(),
+            "ease_out" => "out_quad".to_string(),
+            "ease_in_out" => "in_out_quad".to_string(),
+            n => match n.strip_prefix("ease_") {
+                Some(c) if ["in_", "out_", "in_out_"].iter().any(|d| c.starts_with(d)) => c.to_string(),
+                _ => return Err(ShaderError::new(start, span.end, format!("`@{name}` is not an ease a kernel takes: @linear, @ease_in, @ease_out, @ease_in_out, @ease_{{in,out,in_out}}_<curve>"))),
+            },
+        };
+        Ok(Expr { kind: ExprKind::Call(format!("ease.{curve}"), vec![u]), span })
     }
 
     fn if_expr(&mut self) -> PResult<Expr> {

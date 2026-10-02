@@ -19,6 +19,29 @@ fn inside(uv) { return step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * ste
 // x wrapped into 0..n.
 fn wrap(x, n) { return x - n * floor(x / n) }
 
+// ---- Timing (documents, shaders and kernels alike) --------------------------
+
+// 0 at `a`, 1 at `b`, linear between and held outside: `ease(@ease_out_expo, prog(t, t0, t0 + 0.3))`
+// (b below a runs from 1 down to 0; a = b steps there).
+fn prog(t, a, b) {
+    if b == a { return step(a, t) }
+    return clamp((t - a) / (b - a), 0.0, 1.0)
+}
+// `x` from the range a..b to the range c..d, unclamped: `remap(t, 2.0, 3.0, 0.0, 360.0)`.
+fn remap(x, a, b, c, d) { return c + (x - a) * (d - c) / (b - a) }
+// A decaying hit: 1 at `t0`, halving every `half_life` s, 0 before (slams, shakes, flashes).
+fn pulse(t, t0, half_life) {
+    if t < t0 { return 0.0 }
+    return pow(0.5, (t - t0) / half_life)
+}
+// A damped spring's response to a step at 0 (0 -> 1, an overshoot and a settle): `freq` Hz,
+// `damping` 0..1 (`spring_step(t - t_open, 3.4, 0.42)` opens with a 23 % overshoot at 0.16 s).
+fn spring_step(t, freq, damping) {
+    if t <= 0.0 { return 0.0 }
+    let w = 6.283185307179586 * freq
+    return 1.0 - exp(0.0 - damping * w * t) * cos(w * sqrt(1.0 - damping * damping) * t)
+}
+
 // ---- Colour -----------------------------------------------------------------
 
 // Cosine palette: a + b * cos(2 pi (c t + d)).
