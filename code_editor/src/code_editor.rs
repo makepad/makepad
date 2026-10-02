@@ -106,6 +106,9 @@ script_mod! {
         draw_indent_guide +: {
             color: theme.color_u_2
         }
+        draw_folded +: {
+            color: theme.color_u_2
+        }
         draw_diff_added +: {color: theme.color_success}
         draw_diff_removed +: {color: theme.color_error}
         draw_diff_changed +: {color: theme.color_warning}
@@ -217,6 +220,11 @@ struct DrawCodeText {
     outline: f32,
 }
 
+/// A line drawn smaller than this (in logical pixels, a folded line) is
+/// too small to read: it draws as one bar the length of its text instead
+/// of glyph by glyph.
+const LEGIBLE_LINE_HEIGHT: f64 = 4.0;
+
 #[derive(Script, ScriptHook, Animator)]
 pub struct CodeEditor {
     #[source]
@@ -233,6 +241,9 @@ pub struct CodeEditor {
     token_colors: TokenColors,
     #[live]
     draw_indent_guide: DrawIndentGuide,
+    /// A folded line too small to read: one bar.
+    #[live]
+    draw_folded: DrawColor,
     #[live]
     draw_decoration: DrawDecoration,
     #[live]
@@ -1599,6 +1610,11 @@ impl CodeEditor {
         {
             match element {
                 BlockElement::Line { line, .. } => {
+                    if line.scale() * self.cell_size.y < LEGIBLE_LINE_HEIGHT {
+                        line_index += 1;
+                        origin_y += line.height();
+                        continue;
+                    }
                     self.draw_gutter.font_scale = self.base_font_scale * line.scale() as f32;
                     buf.clear();
                     let diff = session.document().diff_metadata()
@@ -1659,11 +1675,36 @@ impl CodeEditor {
         let highlighted_delimiter_positions = session.highlighted_delimiter_positions();
         let mut line_index = self.line_start;
         let mut origin_y = session.layout().block_y(self.line_start);
+        // Only the columns in view draw: a long line (a list of hundreds of
+        // numbers) costs what fits in the viewport, not its whole length.
+        let scroll_x = self.scroll_bars.get_scroll_pos().x;
+        let (seen_x0, seen_x1) = (scroll_x - self.cell_size.x * 2.0, scroll_x + self.viewport_rect.size.x + self.cell_size.x * 2.0);
         for element in session
             .layout()
             .block_elements(self.line_start, self.line_end)
         {
             match element {
+                BlockElement::Line { line, .. } if line.scale() * self.cell_size.y < LEGIBLE_LINE_HEIGHT => {
+                    // Too small to read (folded): one bar from its indent to
+                    // its end, within the view.
+                    let columns = line.text().chars().count();
+                    let indent = line.indent_column_count().min(columns);
+                    if columns > indent {
+                        let (x0, y) = line.grid_to_normalized_position(0, indent);
+                        let (x1, _) = line.grid_to_normalized_position(0, columns);
+                        let (x0, x1) = ((x0 * self.cell_size.x).max(seen_x0), (x1 * self.cell_size.x).min(seen_x1));
+                        if x1 > x0 {
+                            let h = (line.scale() * self.cell_size.y * 0.6).max(0.5);
+                            self.draw_folded.color.w = 0.5 * self.content_opacity;
+                            self.draw_folded.draw_abs(cx, Rect {
+                                pos: dvec2(x0 + self.viewport_rect.pos.x, (origin_y + y) * self.cell_size.y + self.viewport_rect.pos.y + (line.scale() * self.cell_size.y - h) * 0.5),
+                                size: dvec2(x1 - x0, h),
+                            });
+                        }
+                    }
+                    line_index += 1;
+                    origin_y += line.height();
+                }
                 BlockElement::Line { line, .. } => {
                     self.draw_text.font_scale = self.base_font_scale * line.scale() as f32;
                     let mut token_iter = line.tokens().iter().copied();
@@ -1742,6 +1783,12 @@ impl CodeEditor {
                                         }
                                         let (x, y) = line
                                             .grid_to_normalized_position(row_index, column_index);
+                                        let x_px = x * self.cell_size.x;
+                                        if x_px < seen_x0 || x_px > seen_x1 {
+                                            byte_index += grapheme.len();
+                                            column_index += grapheme.column_count_at(column_index, line.tab_column_count);
+                                            continue;
+                                        }
                                         self.draw_text.draw_abs(
                                             cx,
                                             Vec2d { x, y: origin_y + y } * self.cell_size
