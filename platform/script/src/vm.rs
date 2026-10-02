@@ -612,6 +612,24 @@ impl<'a> ScriptVm<'a> {
     /// sites of the calls it is inside, innermost first, at most `max`. A
     /// native reads where it was called from, and through which calls (a
     /// host that records what code drew what).
+    /// The loops running now on this thread, outermost first: each loop
+    /// variable's name and value (`for li in 0..n` gives `li` and the
+    /// iteration's number; a key or index variable too). For a host that
+    /// records which iteration drew something (an editor's traced frame).
+    pub fn loop_values(&self, out: &mut Vec<(LiveId, f64)>) {
+        out.clear();
+        let thread = self.bx.threads.cur_ref();
+        let Some(&scope) = thread.scopes.last() else { return };
+        for frame in thread.loops.iter() {
+            let Some(values) = &frame.values else { continue };
+            for id in std::iter::once(values.value_id).chain(values.index_id).chain(values.key_id) {
+                if let Some(v) = self.bx.heap.scope_value_opt(scope, id).and_then(|v| v.as_number()) {
+                    out.push((id, v));
+                }
+            }
+        }
+    }
+
     pub fn call_sites(&self, out: &mut Vec<ScriptIp>, max: usize) {
         out.clear();
         let thread = self.bx.threads.cur_ref();
