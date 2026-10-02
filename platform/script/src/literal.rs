@@ -264,9 +264,10 @@ pub struct LoadTrace {
     /// The names the load read, and where (body, instruction): a `let`
     /// read while loading may have been copied away.
     pub name_reads: std::collections::HashSet<(crate::makepad_live_id::LiveId, u16, u32)>,
-    /// The record fields the load read (`look.BONE`): a value read out of
-    /// a record while loading may have been copied away.
-    pub field_reads: std::collections::HashSet<(crate::value::ScriptObject, crate::makepad_live_id::LiveId)>,
+    /// The record fields the load read (`look.BONE`) and where (the FIELD
+    /// instruction): a value read out of a record while loading may have
+    /// been copied away.
+    pub field_reads: std::collections::HashSet<(crate::value::ScriptObject, crate::makepad_live_id::LiveId, u16, u32)>,
 }
 
 impl crate::vm::ScriptVm<'_> {
@@ -401,6 +402,15 @@ pub fn literal_edits(old: &str, new: &str) -> Option<Vec<LiteralEdit>> {
         }
     }
     Some(out)
+}
+
+/// The value of `text` when it is exactly one literal (a number as
+/// written, with its unit; a `#colour`).
+pub fn literal_value(text: &str) -> Option<LiteralValue> {
+    match pieces(text).as_slice() {
+        [Piece::Literal { at: 0, text: t, value }] if t.len() == text.len() => Some(*value),
+        _ => None,
+    }
 }
 
 /// Splits Splash text into literals and the text between them (strings,

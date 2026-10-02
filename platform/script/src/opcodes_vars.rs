@@ -340,7 +340,8 @@ impl<'a> ScriptVm<'a> {
         }
         if let Some(obj) = object.as_object() {
             if let (Some(trace), Some(key)) = (&mut self.bx.literal_trace, field.as_id()) {
-                trace.field_reads.insert((obj, key));
+                let ip = self.bx.threads.cur_ref().trap.ip;
+                trace.field_reads.insert((obj, key, ip.body, ip.index));
             }
             let value = self
                 .bx
