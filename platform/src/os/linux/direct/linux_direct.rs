@@ -444,7 +444,10 @@ impl Cx {
             return;
         }
         let snapshot = self.linux_display_snapshot();
-        let mut screens: Vec<crate::screen::ScreenGeom> = snapshot
+        // Named alongside the geometry so the two end up in the same
+        // left-to-right order after the sort below: index i of one is
+        // index i of the other, for `screens()` and `linux_screen_names()`.
+        let mut named_screens: Vec<(String, crate::screen::ScreenGeom)> = snapshot
             .outputs
             .iter()
             .filter_map(|output| {
@@ -453,12 +456,34 @@ impl Cx {
                     pos: dvec2(x as f64 / dpi_factor, y as f64 / dpi_factor),
                     size: dvec2(output.width as f64 / dpi_factor, output.height as f64 / dpi_factor),
                 };
-                Some(crate::screen::ScreenGeom { bounds, work_area: bounds, is_primary: output.primary })
+                Some((
+                    output.name.clone(),
+                    crate::screen::ScreenGeom { bounds, work_area: bounds, is_primary: output.primary },
+                ))
             })
             .collect();
         // Desktop order: left to right by position.
-        screens.sort_by(|a, b| a.bounds.pos.x.partial_cmp(&b.bounds.pos.x).unwrap_or(std::cmp::Ordering::Equal));
-        crate::screen::set_linux_screens(screens);
+        named_screens.sort_by(|a, b| a.1.bounds.pos.x.partial_cmp(&b.1.bounds.pos.x).unwrap_or(std::cmp::Ordering::Equal));
+        let (names, screens): (Vec<String>, Vec<crate::screen::ScreenGeom>) = named_screens.into_iter().unzip();
+        // Raw input's pointer lives in its own space (native pixels over the base DPI
+        // factor), which is not necessarily `dpi_factor` above (the window's effective
+        // factor, with any DPI override) — so its rectangles are built separately, from
+        // the same snapshot outputs.
+        let screen_rects: Vec<[f64; 4]> = snapshot
+            .outputs
+            .iter()
+            .filter_map(|output| {
+                let (x, y) = output.desktop_position?;
+                Some([
+                    x as f64 / direct_app.dpi_factor,
+                    y as f64 / direct_app.dpi_factor,
+                    output.width as f64 / direct_app.dpi_factor,
+                    output.height as f64 / direct_app.dpi_factor,
+                ])
+            })
+            .collect();
+        direct_app.raw_input.set_screen_rects(screen_rects);
+        crate::screen::set_linux_screens(screens, names);
         direct_app.published_screens = Some(key);
     }
 

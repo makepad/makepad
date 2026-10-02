@@ -934,6 +934,10 @@ struct PendingOutput {
     display_mode: vk::DisplayModeKHR,
     extent: vk::Extent2D,
     refresh_mhz: u32,
+    /// Carried onto `DirectOutput::modes` once acquired; empty when the
+    /// connector's mode list was not (re)enumerated to build this entry
+    /// (a plane move: see `DisplayMode::modes`).
+    modes: Vec<(u32, u32, f64)>,
 }
 
 /// A fence handed to vkAcquireNextImageKHR that never signaled. It cannot be
@@ -955,6 +959,11 @@ struct DirectOutput {
     display_mode: vk::DisplayModeKHR,
     mode_extent: vk::Extent2D,
     refresh_mhz: u32,
+    /// Every mode this connector offers, from the enumeration
+    /// `select_display_mode` used to choose `display_mode` (see
+    /// `DisplayMode::modes`); carried across a plane move, empty for an
+    /// inactive row.
+    modes: Vec<(u32, u32, f64)>,
     swapchain: vk::SwapchainKHR,
     format: vk::Format,
     extent: vk::Extent2D,
@@ -1021,6 +1030,7 @@ impl DirectOutput {
             display_mode: vk::DisplayModeKHR::null(),
             mode_extent: vk::Extent2D::default(),
             refresh_mhz: 0,
+            modes: Vec::new(),
             swapchain: vk::SwapchainKHR::null(),
             format: vk::Format::UNDEFINED,
             extent: vk::Extent2D::default(),
@@ -1134,6 +1144,11 @@ struct ExternalLayout {
 /// First retry interval of a card whose peer could not be created.
 #[cfg(linux_direct)]
 const PEER_RETRY: Duration = Duration::from_secs(5);
+
+/// Status prefix of a connector driven by another GPU: such a card's screens
+/// join the wide desktop through a peer renderer.
+#[cfg(linux_direct)]
+const OTHER_GPU_STATUS: &str = "unsupported: driven by another GPU";
 
 /// Per-tick peer errors repeat at most this often unless their text changes.
 #[cfg(linux_direct)]
@@ -1368,6 +1383,9 @@ pub(super) struct DirectState {
     /// Set on a peer: the rendering GPU decides its composition size and its
     /// screens' rectangles.
     external_layout: Option<ExternalLayout>,
+    /// When the last frame was drawn with no output of this GPU to pace it
+    /// (all screens are on peers); frames then follow the main screen's rate.
+    unpaced_frame_at: Option<Instant>,
     /// Bumped (`wrapping_add(1)`) every time `direct_reconcile` gets past its
     /// "nothing to do" early return: hotplug, retries, main-screen and order
     /// requests all set `scan_dirty` first. `screens()` republishes only
@@ -1376,6 +1394,11 @@ pub(super) struct DirectState {
     /// A source request accepted but not yet applied at a frame boundary.
     pending_source: Option<String>,
     source_name: Option<String>,
+    /// Set once the "no screen on this GPU … paced by a timer" line has been
+    /// logged for the current no-own-screen stretch, including at startup
+    /// (where `source_name` starts at `None` and would otherwise look
+    /// unchanged); cleared again once this GPU has an own screen to pace on.
+    logged_no_own_screen: bool,
     source_switch_failures: u8,
     source_retry_at: Option<Instant>,
     /// A routed presenter proposes a new extent; both GPUs commit it together.
@@ -1684,11 +1707,18 @@ fn drm_native_resolution(fd: i32, connector_id: u32) -> Option<vk::Extent2D> {
 }
 
 #[cfg(linux_direct)]
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct DisplayMode {
     mode: vk::DisplayModeKHR,
     extent: vk::Extent2D,
     refresh_mhz: u32,
+    /// Every mode the connector offers (width, height, refresh Hz),
+    /// deduplicated and sorted by area then refresh, both descending. Only
+    /// populated by `select_display_mode`'s own enumeration; a `DisplayMode`
+    /// rebuilt elsewhere from an already-chosen mode (a plane move, or
+    /// `direct_claim_plane`'s re-check of a live output) leaves it empty,
+    /// since those never change which modes the connector offers.
+    modes: Vec<(u32, u32, f64)>,
 }
 
 #[cfg(linux_direct)]
@@ -1712,6 +1742,9 @@ struct PlaneMove {
     display_mode: vk::DisplayModeKHR,
     extent: vk::Extent2D,
     refresh_mhz: u32,
+    /// The vacated output's known modes, carried through to the rebuilt
+    /// `DirectOutput` so a plane move does not lose them.
+    modes: Vec<(u32, u32, f64)>,
 }
 
 /// The fastest mode at the connector's native resolution (or the requested
@@ -1788,10 +1821,23 @@ fn select_display_mode(
             "fastest native-resolution mode"
         }
     );
+    let mut all_modes: Vec<(u32, u32, f64)> = modes
+        .iter()
+        .map(|mode| {
+            let size = mode.parameters.visible_region;
+            (size.width, size.height, mode.parameters.refresh_rate as f64 / 1000.0)
+        })
+        .collect();
+    all_modes.sort_by(|a, b| {
+        let area = |m: &(u32, u32, f64)| u64::from(m.0) * u64::from(m.1);
+        area(b).cmp(&area(a)).then_with(|| b.2.total_cmp(&a.2))
+    });
+    all_modes.dedup();
     Ok(DisplayMode {
         mode: selected.display_mode,
         extent,
         refresh_mhz,
+        modes: all_modes,
     })
 }
 
@@ -2303,9 +2349,11 @@ impl CxVulkan {
                 preferred_source: None,
                 preferred_order: Vec::new(),
                 external_layout: None,
+                unpaced_frame_at: None,
                 layout_generation: 0,
                 pending_source: None,
                 source_name: None,
+                logged_no_own_screen: false,
                 source_switch_failures: 0,
                 source_retry_at: None,
                 defer_composition_resize: false,
@@ -2362,11 +2410,30 @@ impl CxVulkan {
                     }
                 }
             }
+            // "Render on": a chosen compositor GPU that drives a screen of its
+            // own renders directly; other GPUs' screens then join as peers
+            // (a compositor GPU without screens still uses the routed path).
+            let render_on = render_on_preference();
+            // Resolved once per distinct device (not per connector, as a
+            // `min_by_key` closure checked on every comparison would): a
+            // `RenderOn::Pci` match canonicalises a sysfs symlink, and a card
+            // can own several connectors.
+            let mut preferred_devices: Vec<(vk::PhysicalDevice, bool)> = Vec::new();
+            if let Some(choice) = &render_on {
+                for (connector, _, device, _) in &owners {
+                    if !preferred_devices.iter().any(|(seen, _)| seen == device) {
+                        preferred_devices.push((*device, choice.matches(instance, *device, &connector.card)));
+                    }
+                }
+            }
             let selected = owners
                 .iter()
                 .min_by_key(|(connector, _, device, _)| {
                     let (builtin, name) = connector_rank(&connector.name);
-                    (builtin, device_type_rank(instance, *device), name)
+                    let preferred = preferred_devices
+                        .iter()
+                        .any(|(seen, matches)| seen == device && *matches);
+                    (!preferred, builtin, device_type_rank(instance, *device), name)
                 })
                 .map(|(_, _, device, _)| *device);
             let Some(selected) = selected else {
@@ -2393,7 +2460,7 @@ impl CxVulkan {
             for (connector, fd, device, display) in owners {
                 if device != selected {
                     let status = format!(
-                        "unsupported: driven by another GPU ({}); clone outputs must share the rendering GPU",
+                        "{OTHER_GPU_STATUS} ({}); it joins the wide desktop as a peer",
                         connector_card_name(&connector.card)
                     );
                     direct.unsupported.push((connector, status));
@@ -2493,6 +2560,7 @@ impl CxVulkan {
                             display_mode: mode.mode,
                             extent: mode.extent,
                             refresh_mhz: mode.refresh_mhz,
+                            modes: mode.modes,
                         });
                     }
                     Err(err) => {
@@ -2559,17 +2627,32 @@ impl CxVulkan {
                 format!("MAKEPAD_VULKAN_COMPOSITOR_UUID={pin:?} is not 32 hex digits")
             })?)
         } else if let Ok(pci) = std::env::var("MAKEPAD_VULKAN_COMPOSITOR_PCI") {
-            let uuid = renderer
-                .desktop
-                .gpu
-                .devices
-                .iter()
-                .find(|device| device.pci_address.as_deref() == Some(pci.as_str()))
-                .map(|device| device.uuid);
-            if uuid.is_none() {
-                crate::log!("Vulkan direct: saved compositor PCI {pci} is unavailable; using the display GPU");
+            // Pass 1 in `new_direct_presenter` already preferred a GPU on
+            // this card by its DRM card's sysfs PCI link, so render-on may
+            // already have succeeded here even when the device below (found
+            // by Vulkan's own, less widely supported, PCI bus info) is not.
+            let saved = RenderOn::Pci(pci.clone());
+            let rendering_on_pci = renderer.desktop.direct.as_ref().is_some_and(|direct| {
+                direct.outputs.iter().any(|output| {
+                    saved.matches(&renderer.instance, renderer.physical_device, &output.connector.card)
+                })
+            });
+            if rendering_on_pci {
+                crate::log!("Vulkan direct: rendering on the saved GPU {pci}");
+                None
+            } else {
+                let uuid = renderer
+                    .desktop
+                    .gpu
+                    .devices
+                    .iter()
+                    .find(|device| device.pci_address.as_deref() == Some(pci.as_str()))
+                    .map(|device| device.uuid);
+                if uuid.is_none() {
+                    crate::log!("Vulkan direct: saved compositor PCI {pci} is unavailable; using the display GPU");
+                }
+                uuid
             }
-            uuid
         } else {
             None
         };
@@ -3192,6 +3275,7 @@ impl CxVulkan {
             display_mode: pending.display_mode,
             mode_extent: pending.extent,
             refresh_mhz: pending.refresh_mhz,
+            modes: pending.modes,
             swapchain: vk::SwapchainKHR::null(),
             format: vk::Format::UNDEFINED,
             extent: vk::Extent2D::default(),
@@ -3289,6 +3373,7 @@ impl CxVulkan {
                         display_mode: output.display_mode,
                         extent: output.mode_extent,
                         refresh_mhz: output.refresh_mhz,
+                        modes: output.modes,
                     },
                     err,
                 ))
@@ -3851,12 +3936,17 @@ impl CxVulkan {
         self.destroy_uncached_texture_resource(targets.resource);
     }
 
-    /// Choose the main screen and, when the wide desktop's size differs from
-    /// the composition, replace it transactionally. Nothing observable
-    /// (primary flags, source name, the pending request) changes unless the
-    /// swap succeeded, except when no source is active at all: then the
-    /// fallback output is published so rendering continues at the old
-    /// desktop size while the swap is retried (bounded).
+    /// Choose the main screen — which may be an active screen of this GPU or
+    /// of a peer — and, when the wide desktop's size differs from the
+    /// composition, replace it transactionally. When the chosen screen is an
+    /// active output of this GPU, it also becomes the output that paces
+    /// frames (`source_name`/`primary`); a peer's screen becoming the main
+    /// screen does not change pacing, and with no active output of this GPU
+    /// at all, frames are paced on a timer for the peers' screens instead.
+    /// Nothing observable (primary flags, source name, the pending request)
+    /// changes unless the swap succeeded, except when no source is active at
+    /// all: then the fallback output is published so rendering continues at
+    /// the old desktop size while the swap is retried (bounded).
     /// Returns the new desktop extent when it changed.
     fn direct_select_source(
         &mut self,
@@ -3879,7 +3969,15 @@ impl CxVulkan {
             .filter(|(_, output)| output.active)
             .min_by_key(|(_, output)| connector_rank(&output.connector.name))
             .map(|(index, _)| index);
-        let Some(target) = requested.or(current).or(fallback) else {
+        let target = requested.or(current).or(fallback);
+        let layout = self.direct_wide_layout(direct);
+        let laid_out = layout.width > 0 && layout.height > 0;
+        // With no active output of its own, this GPU still renders the wide
+        // desktop when other GPUs' screens are in it (they are fed slices).
+        let Some(fallback_extent) = target
+            .map(|target| direct.outputs[target].mode_extent)
+            .or(laid_out.then_some(vk::Extent2D { width: layout.width, height: layout.height }))
+        else {
             for output in &mut direct.outputs {
                 output.primary = false;
             }
@@ -3888,13 +3986,15 @@ impl CxVulkan {
             }
             return Ok(None);
         };
-        let layout = self.direct_wide_layout(direct);
-        let extent = if layout.width > 0 && layout.height > 0 {
+        let extent = if laid_out {
             vk::Extent2D { width: layout.width, height: layout.height }
         } else {
-            direct.outputs[target].mode_extent
+            fallback_extent
         };
-        let explicit_target = explicit.is_some() && requested == Some(target);
+        let target_name = target
+            .map(|target| direct.outputs[target].connector.name.clone())
+            .unwrap_or_else(|| "the screens on other GPUs".to_string());
+        let explicit_target = explicit.is_some() && target.is_some() && requested == target;
         let needs_swap = direct.composition.is_none() || direct.desktop_extent != extent;
         let mut installed = None;
         if needs_swap {
@@ -3935,7 +4035,7 @@ impl CxVulkan {
                             "Vulkan direct: composition {}x{} for {} failed ({err}); attempt {}/{}",
                             extent.width,
                             extent.height,
-                            direct.outputs[target].connector.name,
+                            target_name,
                             direct.source_switch_failures,
                             SOURCE_SWITCH_RETRIES
                         );
@@ -3945,7 +4045,7 @@ impl CxVulkan {
                             // stays pending without a reconcile to clear it.
                             crate::error!(
                                 "Vulkan direct: giving up rendering for {}: composition allocation failed {} times; keeping {}",
-                                direct.outputs[target].connector.name,
+                                target_name,
                                 SOURCE_SWITCH_RETRIES,
                                 direct.source_name.as_deref().unwrap_or("the current source")
                             );
@@ -3985,7 +4085,9 @@ impl CxVulkan {
                 None
             };
         }
-        direct.outputs[target].primary = true;
+        if let Some(target) = target {
+            direct.outputs[target].primary = true;
+        }
         if direct
             .outputs
             .iter()
@@ -3997,17 +4099,34 @@ impl CxVulkan {
         if explicit_target && !(needs_swap && direct.defer_composition_resize) {
             direct.pending_source = None;
         }
-        let name = direct.outputs[target].connector.name.clone();
-        if direct.source_name.as_deref() != Some(name.as_str()) {
+        let name = target.map(|target| direct.outputs[target].connector.name.clone());
+        // `source_name` starts at `None`, same as `name` when this GPU has no
+        // own screen from the start: that leaves the two looking unchanged,
+        // so also fire on startup's first no-own-screen reconcile, tracked by
+        // `logged_no_own_screen` rather than by the name comparison alone.
+        if direct.source_name != name || (target.is_none() && !direct.logged_no_own_screen) {
             if direct.external_layout.is_none() {
-                crate::log!(
-                    "Vulkan direct: main screen {name}; wide desktop {}x{}; main screen at {:.3} Hz",
-                    extent.width,
-                    extent.height,
-                    direct.outputs[target].refresh_hz()
-                );
+                let main_screen = self.direct_main_screen(direct);
+                let main_screen = main_screen.as_deref().unwrap_or("none");
+                match target {
+                    Some(target) => crate::log!(
+                        "Vulkan direct: frames paced by {}; main screen {}; wide desktop {}x{}; {:.3} Hz",
+                        direct.outputs[target].connector.name,
+                        main_screen,
+                        extent.width,
+                        extent.height,
+                        direct.outputs[target].refresh_hz()
+                    ),
+                    None => crate::log!(
+                        "Vulkan direct: no screen on this GPU; main screen {}; wide desktop {}x{} paced by a timer for the screens on other GPUs",
+                        main_screen,
+                        extent.width,
+                        extent.height
+                    ),
+                }
             }
-            direct.source_name = Some(name);
+            direct.logged_no_own_screen = target.is_none();
+            direct.source_name = name;
         }
         Ok(installed)
     }
@@ -4147,7 +4266,7 @@ impl CxVulkan {
         let mut cards: Vec<PathBuf> = direct
             .unsupported
             .iter()
-            .filter(|(_, status)| status.contains("another GPU"))
+            .filter(|(_, status)| status.starts_with(OTHER_GPU_STATUS))
             .map(|(connector, _)| connector.card.clone())
             .collect();
         cards.sort();
@@ -4339,6 +4458,126 @@ impl CxVulkan {
         self.desktop.peers = peers;
     }
 
+    /// With no output of this GPU to pace frames: `None` when no peer has an
+    /// active screen either (nothing to draw for), otherwise the period
+    /// between frames at the main screen's refresh rate (60 Hz when unknown).
+    fn direct_peer_refresh_interval(&self, direct: &DirectState) -> Option<Duration> {
+        let main = self.direct_main_screen(direct);
+        let mut refresh_mhz = None;
+        let mut any = false;
+        for peer in &self.desktop.peers {
+            let Some(peer_direct) = peer.display.desktop.direct.as_ref() else {
+                continue;
+            };
+            for output in peer_direct.outputs.iter().filter(|output| output.active) {
+                any = true;
+                if refresh_mhz.is_none() || main.as_deref() == Some(output.connector.name.as_str()) {
+                    refresh_mhz = Some(output.refresh_mhz);
+                }
+            }
+        }
+        if !any {
+            return None;
+        }
+        let hz = refresh_mhz.filter(|mhz| *mhz > 0).map_or(60.0, |mhz| mhz as f64 / 1000.0);
+        Some(Duration::from_secs_f64(1.0 / hz))
+    }
+
+    /// With no output of this GPU to pace frames: `None` when no peer has an
+    /// active screen either (nothing to draw for), otherwise whether the next
+    /// frame is due at the main screen's refresh rate (60 Hz when unknown).
+    fn direct_peer_pacing(&self, direct: &DirectState) -> Option<bool> {
+        let interval = self.direct_peer_refresh_interval(direct)?;
+        Some(direct.unpaced_frame_at.map_or(true, |at| at.elapsed() >= interval))
+    }
+
+    /// The main screen's connector name: the chosen one when it is an active
+    /// screen of this GPU or of a peer, else the output pacing frames, else
+    /// (when this GPU has no active output of its own and nothing was
+    /// explicitly chosen) the best-ranked active screen among the peers, so a
+    /// main screen always exists while any screen in the desktop is up.
+    fn direct_main_screen(&self, direct: &DirectState) -> Option<String> {
+        let active = |name: &str| {
+            direct.outputs.iter().any(|output| output.active && output.connector.name == name)
+                || self.desktop.peers.iter().any(|peer| {
+                    peer.display.desktop.direct.as_ref().is_some_and(|peer_direct| {
+                        peer_direct.outputs.iter().any(|output| output.active && output.connector.name == name)
+                    })
+                })
+        };
+        direct
+            .preferred_source
+            .clone()
+            .filter(|name| active(name))
+            .or_else(|| direct.source_index().map(|index| direct.outputs[index].connector.name.clone()))
+            .or_else(|| {
+                self.desktop
+                    .peers
+                    .iter()
+                    .filter_map(|peer| peer.display.desktop.direct.as_ref())
+                    .flat_map(|peer_direct| peer_direct.outputs.iter())
+                    .filter(|output| output.active)
+                    .min_by_key(|output| connector_rank(&output.connector.name))
+                    .map(|output| output.connector.name.clone())
+            })
+    }
+
+    /// UI request: show `name` in `mode` (`None` = its fastest native mode).
+    /// The screen is reacquired with the new mode at the next reconcile, on
+    /// whichever GPU drives it.
+    pub(crate) fn direct_request_display_mode(&mut self, name: &str, mode: Option<&str>) -> Result<(), String> {
+        if let Some(mode) = mode {
+            let mode = mode.trim();
+            if !mode.is_empty() && !mode_string_is_valid(mode) {
+                return Err(format!(
+                    "{mode:?} is not a display mode: use WxH, WxH@Hz or WxH-Hz with digits only, e.g. \"3840x2160\" or \"3840x2160@30\""
+                ));
+            }
+        }
+        if let Some(routed) = &mut self.desktop.routed {
+            return routed.display.direct_request_display_mode(name, mode);
+        }
+        let mut owners: Vec<&mut DirectState> = Vec::new();
+        if let Some(direct) = self.desktop.direct.as_mut() {
+            owners.push(direct);
+        }
+        for peer in &mut self.desktop.peers {
+            if let Some(direct) = peer.display.desktop.direct.as_mut() {
+                owners.push(direct);
+            }
+        }
+        let owner = owners
+            .into_iter()
+            .find(|direct| direct.outputs.iter().any(|output| output.connector.name == name));
+        let Some(owner) = owner else {
+            // Not yet an output of any renderer: accept the mode for a
+            // connected connector anyway (the rendering GPU's own scan, or
+            // a peer's connector it has already recognized as such) so a
+            // peer that has not started yet reads it from the table once it
+            // does. Error only for a name that is not connected at all.
+            let connected = self.desktop.direct.as_ref().is_some_and(|direct| {
+                direct.connected.iter().any(|connector| connector.name == name)
+                    || direct.unsupported.iter().any(|(connector, status)| {
+                        connector.name == name && status.starts_with(OTHER_GPU_STATUS)
+                    })
+            });
+            if connected {
+                set_connector_mode_override(name, mode);
+                return Ok(());
+            }
+            return Err(format!("{name} is not a screen of the wide desktop"));
+        };
+        set_connector_mode_override(name, mode);
+        for output in owner.outputs.iter_mut().filter(|output| output.connector.name == name) {
+            output.reacquire = true;
+        }
+        owner.scan_dirty = true;
+        if let Some(direct) = self.desktop.direct.as_mut() {
+            direct.scan_dirty = true;
+        }
+        Ok(())
+    }
+
     /// Lets every peer catch up on the retained composition (`main`: the
     /// desktop extent and the composition image while it is valid), receive
     /// a pending slice and present.
@@ -4423,6 +4662,24 @@ impl CxVulkan {
         if let Some(routed) = &mut self.desktop.routed {
             return routed.display.direct_request_display_source(name);
         }
+        // A screen on another GPU can be the main screen too: it changes
+        // where the desktop's main screen is, not which output paces frames.
+        let on_peer = self.desktop.peers.iter().any(|peer| {
+            peer.display.desktop.direct.as_ref().is_some_and(|direct| {
+                direct.outputs.iter().any(|output| output.active && output.connector.name == name)
+            })
+        });
+        if on_peer {
+            let direct = self
+                .desktop
+                .direct
+                .as_mut()
+                .ok_or("display source selection needs the direct Vulkan backend (DRM/KMS)")?;
+            direct.preferred_source = Some(name.to_owned());
+            direct.pending_source = None;
+            direct.scan_dirty = true;
+            return Ok(());
+        }
         let Some(direct) = self.desktop.direct.as_mut() else {
             return Err(
                 "display source selection needs the direct Vulkan backend (DRM/KMS)".into(),
@@ -4440,6 +4697,18 @@ impl CxVulkan {
             .iter()
             .find(|(connector, _)| connector.name == name)
         {
+            if status.starts_with(OTHER_GPU_STATUS) {
+                // Confirmed as a peer's connector (not yet reached the
+                // `on_peer` check above because that peer has not made it
+                // active yet): accept it anyway. `direct_main_screen`
+                // ignores a `preferred_source` that is not an active screen
+                // of this GPU or any peer, so a name whose peer never
+                // starts is harmless; once it does, the peer reads it there.
+                direct.preferred_source = Some(name.to_owned());
+                direct.pending_source = None;
+                direct.scan_dirty = true;
+                return Ok(());
+            }
             return Err(format!("{name} cannot render the desktop: {status}"));
         }
         match direct
@@ -4673,7 +4942,7 @@ impl CxVulkan {
             _ => {
                 direct.unsupported.push((
                     connector,
-                    "unsupported: driven by another GPU; clone outputs must share the rendering GPU".into(),
+                    format!("{OTHER_GPU_STATUS}; it joins the wide desktop as a peer"),
                 ));
                 return;
             }
@@ -4736,6 +5005,7 @@ impl CxVulkan {
             display_mode: mode.mode,
             extent: mode.extent,
             refresh_mhz: mode.refresh_mhz,
+            modes: mode.modes,
         };
         let created = {
             let DirectState {
@@ -4808,6 +5078,7 @@ impl CxVulkan {
                 mode: output.display_mode,
                 extent: output.mode_extent,
                 refresh_mhz: output.refresh_mhz,
+                modes: Vec::new(),
             };
             let mut candidates = plane_candidates(
                 &direct.display_loader,
@@ -4926,6 +5197,7 @@ impl CxVulkan {
             display_mode: output.display_mode,
             extent: output.mode_extent,
             refresh_mhz: output.refresh_mhz,
+            modes: output.modes,
         }
     }
 
@@ -4943,11 +5215,13 @@ impl CxVulkan {
             display_mode,
             extent,
             refresh_mhz,
+            modes,
         } = plane_move;
         let mode = DisplayMode {
             mode: display_mode,
             extent,
             refresh_mhz,
+            modes: Vec::new(),
         };
         let surface = match create_plane_surface(&direct.display_loader, &mode, &candidate) {
             Ok(surface) => surface,
@@ -4966,6 +5240,7 @@ impl CxVulkan {
             display_mode,
             extent,
             refresh_mhz,
+            modes,
         };
         let created = {
             let DirectState {
@@ -5032,7 +5307,11 @@ impl CxVulkan {
                 DirectWait::NoOutput
             } else {
                 match direct.source_index() {
-                    None => DirectWait::NoOutput,
+                    None => match self.direct_peer_pacing(&direct) {
+                        None => DirectWait::NoOutput,
+                        Some(true) => DirectWait::Ready,
+                        Some(false) => DirectWait::GpuBusy,
+                    },
                     Some(index) => {
                         if self.direct_output_can_take_frame(&direct.outputs[index])? {
                             DirectWait::Ready
@@ -5499,18 +5778,33 @@ impl CxVulkan {
         // dirty pass is kept for the reconnect and the loop waits normally.
         let explicit_capture = !cx.screenshot_requests.is_empty()
             || crate::screen_capture::capture_wants_window(capture_window_id);
-        match direct.source_index() {
+        let own_output = direct.source_index();
+        match own_output {
             Some(index) => {
                 if !self.direct_output_can_take_frame(&direct.outputs[index])? {
                     direct.wait = DirectWait::GpuBusy;
                     return Ok(false);
                 }
             }
-            None if !explicit_capture => {
-                direct.wait = DirectWait::NoOutput;
-                return Ok(false);
+            None => {
+                // No output of this GPU can pace frames; a peer's screen
+                // does. Computed once: an explicit capture always renders,
+                // regardless of whether a paced frame is due yet.
+                let pacing = self.direct_peer_pacing(direct);
+                if !explicit_capture {
+                    match pacing {
+                        Some(false) => {
+                            direct.wait = DirectWait::GpuBusy;
+                            return Ok(false);
+                        }
+                        None => {
+                            direct.wait = DirectWait::NoOutput;
+                            return Ok(false);
+                        }
+                        Some(true) => {}
+                    }
+                }
             }
-            None => {}
         }
         let composition = match direct.composition.as_ref() {
             Some(composition) => composition.image,
@@ -5526,6 +5820,27 @@ impl CxVulkan {
                 DirectWait::GpuBusy
             };
             return Ok(false);
+        }
+        if own_output.is_none() {
+            // Stamp only now that a frame was actually drawn, and advance
+            // from the previous due time rather than from now, so peers get
+            // a steady rate instead of drifting later each frame; resync to
+            // now when more than one interval behind (e.g. after a stall).
+            // Capped at `now`: an explicit capture can draw faster than the
+            // peers' refresh (it bypasses the "due" gate above), and without
+            // the cap the stamp would run ahead of real time, starving the
+            // peers of frames for the accumulated drift once the capture stops.
+            let now = Instant::now();
+            direct.unpaced_frame_at = Some(
+                match (direct.unpaced_frame_at, self.direct_peer_refresh_interval(direct)) {
+                    (Some(prev), Some(interval))
+                        if now.saturating_duration_since(prev) <= interval * 2 =>
+                    {
+                        (prev + interval).min(now)
+                    }
+                    _ => now,
+                },
+            );
         }
         direct.composition_generation += 1;
         direct.composition_valid = true;
@@ -6002,7 +6317,9 @@ impl CxVulkan {
 
     /// The UI's view of the outputs. Only observed state: `active` means a
     /// present on the current swapchain succeeded (`ready` before that);
-    /// `primary` marks the main screen.
+    /// `primary` marks the main screen, which may be on any GPU and follows
+    /// a `linux_set_display_source` request as soon as the requested output
+    /// is active, ahead of any composition resize the switch still needs.
     pub(crate) fn direct_display_snapshot(&self) -> LinuxDisplaySnapshot {
         if let Some(routed) = &self.desktop.routed {
             return routed.display.direct_display_snapshot();
@@ -6011,6 +6328,8 @@ impl CxVulkan {
             return LinuxDisplaySnapshot::default();
         };
         let desktop_non_empty = direct.desktop_extent.width > 0 && direct.desktop_extent.height > 0;
+        let main = self.direct_main_screen(direct);
+        let main = &main;
         let mut outputs: Vec<LinuxDisplayOutput> = direct
             .outputs
             .iter()
@@ -6033,16 +6352,20 @@ impl CxVulkan {
                     width: output.mode_extent.width,
                     height: output.mode_extent.height,
                     refresh_hz: output.refresh_hz(),
-                    primary: output.primary,
+                    primary: main.as_deref() == Some(output.connector.name.as_str()),
+                    card: connector_card_name(&output.connector.card),
                     desktop_position: output.desktop_rect.map(|rect| (rect.x, rect.y)),
                     active,
                     status,
+                    modes: output.modes.clone(),
+                    mode_override: connector_mode_override(&output.connector.name),
+                    pci: card_pci_address(&output.connector.card),
                 }
             })
             .chain(self.desktop.peers.iter().flat_map(|peer| {
                 let slice = peer.slice;
                 peer.display.direct_display_snapshot().outputs.into_iter().map(move |mut output| {
-                    output.primary = false;
+                    output.primary = main.as_deref() == Some(output.name.as_str());
                     output.desktop_position =
                         output.desktop_position.map(|(x, y)| (slice.x + x, slice.y + y));
                     output
@@ -6061,9 +6384,13 @@ impl CxVulkan {
                         height: 0,
                         refresh_hz: 0.0,
                         primary: false,
+                        card: connector_card_name(&connector.card),
                         desktop_position: None,
                         active: false,
                         status: status.clone(),
+                        modes: Vec::new(),
+                        mode_override: connector_mode_override(&connector.name),
+                        pci: card_pci_address(&connector.card),
                     }),
             )
             .collect();
@@ -6088,17 +6415,108 @@ impl CxVulkan {
     }
 }
 
+/// Whether `mode` (already trimmed and non-empty) is `WxH`, `WxH@Hz` or
+/// `WxH-Hz` with digits only, the forms `MAKEPAD_DRM_MODE` and
+/// `direct_request_display_mode` accept.
+#[cfg(linux_direct)]
+fn mode_string_is_valid(mode: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|byte| byte.is_ascii_digit());
+    let resolution = match mode.split_once('@').or_else(|| mode.split_once('-')) {
+        Some((resolution, rate)) => {
+            if !digits(rate) {
+                return false;
+            }
+            resolution
+        }
+        None => mode,
+    };
+    match resolution.split_once('x') {
+        Some((width, height)) => digits(width) && digits(height),
+        None => false,
+    }
+}
+
 /// `MAKEPAD_DRM_MODES` names a display mode per connector, e.g.
 /// `card0-HDMI-A-2=3840x2160@30,card1-DP-1=1920x1080`, for links that cannot
 /// carry a screen's fastest native mode. `MAKEPAD_DRM_MODE` (no connector)
 /// goes to the first connector with no entry here whose mode plan succeeds.
 #[cfg(linux_direct)]
 fn connector_mode_override(name: &str) -> Option<String> {
-    let text = std::env::var("MAKEPAD_DRM_MODES").ok()?;
-    crate::linux_wide_desktop::parse_mode_overrides(&text)
-        .into_iter()
-        .find(|(connector, _)| connector == name)
-        .map(|(_, mode)| mode)
+    with_mode_overrides(|table| {
+        table.iter().find(|(connector, _)| connector == name).map(|(_, mode)| mode.clone())
+    })
+}
+
+/// Per-connector modes for every renderer in the process (the rendering GPU
+/// and its peers): seeded from `MAKEPAD_DRM_MODES`, changed at runtime by
+/// `direct_request_display_mode`.
+#[cfg(linux_direct)]
+static MODE_OVERRIDES: std::sync::Mutex<Option<Vec<(String, String)>>> = std::sync::Mutex::new(None);
+
+#[cfg(linux_direct)]
+fn with_mode_overrides<R>(f: impl FnOnce(&mut Vec<(String, String)>) -> R) -> R {
+    let mut guard = MODE_OVERRIDES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let table = guard.get_or_insert_with(|| {
+        std::env::var("MAKEPAD_DRM_MODES")
+            .map(|text| crate::linux_wide_desktop::parse_mode_overrides(&text))
+            .unwrap_or_default()
+    });
+    f(table)
+}
+
+#[cfg(linux_direct)]
+fn set_connector_mode_override(name: &str, mode: Option<&str>) {
+    with_mode_overrides(|table| {
+        table.retain(|(connector, _)| connector != name);
+        if let Some(mode) = mode.map(str::trim).filter(|mode| !mode.is_empty()) {
+            table.push((name.to_string(), mode.to_string()));
+        }
+    });
+}
+
+/// The GPU chosen to render on (`MAKEPAD_VULKAN_COMPOSITOR_UUID` or
+/// `MAKEPAD_VULKAN_COMPOSITOR_PCI`, as the window manager's saved GPU choice
+/// sets it), for preferring its own screens.
+#[cfg(linux_direct)]
+enum RenderOn {
+    Uuid([u8; 16]),
+    Pci(String),
+}
+
+#[cfg(linux_direct)]
+impl RenderOn {
+    fn matches(&self, instance: &ash::Instance, device: vk::PhysicalDevice, card: &Path) -> bool {
+        match self {
+            RenderOn::Uuid(uuid) => device_uuid(instance, device) == *uuid,
+            RenderOn::Pci(pci) => card_pci_address(card).is_some_and(|name| &name == pci),
+        }
+    }
+}
+
+/// The card's PCI address: the basename of
+/// `canonicalize(/sys/class/drm/<card>/device)`, the DRM sysfs symlink that
+/// resolves to the PCI device directory (e.g. `0000:01:00.0`). `None` when
+/// the link cannot be resolved (card gone, or not a PCI device). Shared by
+/// `RenderOn::Pci::matches` and the display snapshot's `pci` field, so the
+/// window manager's GPU list and the render-on preference agree on one
+/// card's address.
+#[cfg(linux_direct)]
+fn card_pci_address(card: &Path) -> Option<String> {
+    let link = PathBuf::from("/sys/class/drm").join(connector_card_name(card)).join("device");
+    std::fs::canonicalize(link)
+        .ok()
+        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+}
+
+#[cfg(linux_direct)]
+fn render_on_preference() -> Option<RenderOn> {
+    if let Ok(pin) = std::env::var("MAKEPAD_VULKAN_COMPOSITOR_UUID") {
+        return parse_uuid_hex(&pin).map(RenderOn::Uuid);
+    }
+    std::env::var("MAKEPAD_VULKAN_COMPOSITOR_PCI")
+        .ok()
+        .filter(|pci| !pci.is_empty())
+        .map(RenderOn::Pci)
 }
 
 #[cfg(linux_direct)]

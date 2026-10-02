@@ -135,6 +135,38 @@ pub fn parse_display_order(text: &str) -> Vec<String> {
     text.split([',', ';']).map(str::trim).filter(|name| !name.is_empty()).map(str::to_string).collect()
 }
 
+/// Clamps a pointer to the union of `rects` (each `[x, y, width, height]`, in the pointer's
+/// own coordinates): a point already inside any rect (edges inclusive) is returned unchanged,
+/// so the pointer can reach every edge, including the seam between two adjoining screens.
+/// Otherwise returns the closest point (Euclidean distance) on the boundary of any rect, by
+/// clamping the point into each rect and keeping the nearest result — unlike clamping a
+/// window's rectangle, there is no size to reserve, so every point on every screen is
+/// reachable. An empty `rects` leaves the point unchanged, for a backend with no published
+/// screens to clamp to. A non-finite coordinate (NaN or infinite) cannot be
+/// inside any rect or clamped toward one — every comparison against it is
+/// false, and clamping it would propagate the NaN/infinity through the
+/// nearest-point search — so it snaps to the first rect's origin instead,
+/// or is left unchanged when there are no rects to snap to.
+pub fn clamp_to_rects(rects: &[[f64; 4]], x: f64, y: f64) -> (f64, f64) {
+    if !x.is_finite() || !y.is_finite() {
+        return rects.first().map_or((x, y), |r| (r[0], r[1]));
+    }
+    if rects.iter().any(|r| x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) {
+        return (x, y);
+    }
+    let mut nearest: Option<(f64, f64, f64)> = None;
+    for r in rects {
+        let cx = x.clamp(r[0], r[0] + r[2]);
+        let cy = y.clamp(r[1], r[1] + r[3]);
+        let (dx, dy) = (x - cx, y - cy);
+        let dist_sq = dx * dx + dy * dy;
+        if nearest.map_or(true, |(_, _, best)| dist_sq < best) {
+            nearest = Some((cx, cy, dist_sq));
+        }
+    }
+    nearest.map_or((x, y), |(cx, cy, _)| (cx, cy))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,5 +292,74 @@ mod tests {
             vec!["card0-HDMI-A-2".to_string(), "card1-HDMI-A-1".to_string()]
         );
         assert!(parse_display_order("").is_empty());
+    }
+
+    #[test]
+    fn clamp_to_rects_leaves_an_inside_point_unchanged() {
+        let rects = [[0.0, 0.0, 100.0, 50.0]];
+        assert_eq!(clamp_to_rects(&rects, 40.0, 20.0), (40.0, 20.0));
+    }
+
+    #[test]
+    fn clamp_to_rects_crosses_a_shared_edge_between_screens() {
+        // Two screens meet at x = 100; a point on that seam stays put so the
+        // pointer can cross it, rather than being pulled toward either centre.
+        let rects = [[0.0, 0.0, 100.0, 50.0], [100.0, 0.0, 100.0, 80.0]];
+        assert_eq!(clamp_to_rects(&rects, 100.0, 30.0), (100.0, 30.0));
+    }
+
+    #[test]
+    fn clamp_to_rects_reaches_the_right_and_bottom_edge() {
+        let rects = [[0.0, 0.0, 100.0, 50.0]];
+        assert_eq!(clamp_to_rects(&rects, 100.0, 50.0), (100.0, 50.0));
+    }
+
+    #[test]
+    fn clamp_to_rects_moves_a_dead_corner_straight_up_onto_the_shorter_screen() {
+        // A shorter screen (0,0,100x50) sits next to a taller one (100,0,100x80).
+        // (50, 60) is below the shorter screen and left of the taller one: the
+        // nearest point on the shorter screen (50, 50) is 10 away; the nearest
+        // point on the taller screen (100, 60) is 50 away. It moves straight up.
+        let rects = [[0.0, 0.0, 100.0, 50.0], [100.0, 0.0, 100.0, 80.0]];
+        assert_eq!(clamp_to_rects(&rects, 50.0, 60.0), (50.0, 50.0));
+    }
+
+    #[test]
+    fn clamp_to_rects_moves_a_dead_corner_onto_the_taller_screen_when_closer() {
+        // Same two screens; (95, 60) is closer to the taller screen's edge
+        // (100, 60), distance 5, than to the shorter screen's bottom (95, 50),
+        // distance 10.
+        let rects = [[0.0, 0.0, 100.0, 50.0], [100.0, 0.0, 100.0, 80.0]];
+        assert_eq!(clamp_to_rects(&rects, 95.0, 60.0), (100.0, 60.0));
+    }
+
+    #[test]
+    fn clamp_to_rects_clamps_a_point_beyond_the_far_right_edge() {
+        let rects = [[0.0, 0.0, 100.0, 50.0], [100.0, 0.0, 200.0, 50.0]];
+        assert_eq!(clamp_to_rects(&rects, 500.0, 20.0), (300.0, 20.0));
+    }
+
+    #[test]
+    fn clamp_to_rects_with_no_rects_leaves_the_point_unchanged() {
+        assert_eq!(clamp_to_rects(&[], 12.0, 34.0), (12.0, 34.0));
+    }
+
+    #[test]
+    fn clamp_to_rects_a_non_finite_point_snaps_to_the_first_rects_origin() {
+        // NaN or infinite input cannot be clamped into any rect (every
+        // comparison against it is false); rather than propagating NaN
+        // through the nearest-point search, it snaps to the first rect's
+        // origin, same as the "no rects" case falls back to the input.
+        let rects = [[10.0, 20.0, 100.0, 50.0], [200.0, 0.0, 50.0, 50.0]];
+        assert_eq!(clamp_to_rects(&rects, f64::NAN, 5.0), (10.0, 20.0));
+        assert_eq!(clamp_to_rects(&rects, 5.0, f64::NAN), (10.0, 20.0));
+        assert_eq!(clamp_to_rects(&rects, f64::INFINITY, f64::NEG_INFINITY), (10.0, 20.0));
+    }
+
+    #[test]
+    fn clamp_to_rects_a_non_finite_point_with_no_rects_is_returned_unchanged() {
+        let (x, y) = clamp_to_rects(&[], f64::NAN, 5.0);
+        assert!(x.is_nan());
+        assert_eq!(y, 5.0);
     }
 }
