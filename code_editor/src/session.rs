@@ -359,6 +359,54 @@ impl CodeSession {
         }
     }
 
+    /// Fold `fold` and unfold `unfold` at once, without animating (a host
+    /// jumping to a line it opened: the line is where it will stay).
+    pub fn set_folds_now(&self, fold: &[usize], unfold: &[usize]) {
+        let line_count = self.document().as_text().as_lines().len();
+        {
+            let fold_state = &mut *self.fold_state.borrow_mut();
+            let mut layout = self.layout.borrow_mut();
+            let mut first = usize::MAX;
+            // Folds still moving land now too.
+            for line in fold_state.folding_lines.drain().collect::<Vec<_>>() {
+                if let Some(scale) = layout.scale.get_mut(line) {
+                    *scale = 0.1;
+                }
+                fold_state.folded_lines.insert(line);
+                first = first.min(line);
+            }
+            for line in fold_state.unfolding_lines.drain().collect::<Vec<_>>() {
+                if let Some(scale) = layout.scale.get_mut(line) {
+                    *scale = 1.0;
+                }
+                first = first.min(line);
+            }
+            for &line in fold.iter().filter(|l| **l < line_count) {
+                fold_state.unfolding_lines.remove(&line);
+                fold_state.folding_lines.remove(&line);
+                fold_state.folded_lines.insert(line);
+                layout.fold_column[line] = 0;
+                if let Some(scale) = layout.scale.get_mut(line) {
+                    *scale = 0.1;
+                }
+                first = first.min(line);
+            }
+            for &line in unfold.iter().filter(|l| **l < line_count) {
+                fold_state.unfolding_lines.remove(&line);
+                fold_state.folding_lines.remove(&line);
+                fold_state.folded_lines.remove(&line);
+                if let Some(scale) = layout.scale.get_mut(line) {
+                    *scale = 1.0;
+                }
+                first = first.min(line);
+            }
+            if first != usize::MAX {
+                layout.y.truncate(first + 1);
+            }
+        }
+        self.update_y();
+    }
+
     /// Whether a fold or unfold is still animating.
     pub fn folds_animating(&self) -> bool {
         let fold_state = self.fold_state.borrow();

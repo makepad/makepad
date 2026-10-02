@@ -801,7 +801,9 @@ impl CodeEditor {
                     scroll.x
                 };
                 let y = (cursor_pos.y + self.cell_size.y * 0.5 - view.y * 0.5).max(0.0);
-                self.scroll_bars.set_scroll_pos(cx, dvec2(x, y));
+                // Not clipped to the size laid out last: the lines just
+                // unfolded to show it make the text longer than it was.
+                self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(x, y));
                 self.keep_cursor_in_view = KeepCursorInView::Off;
             }
             KeepCursorInView::FontResize(last_pos) => {
