@@ -41,6 +41,22 @@ impl PartialEq for Choice {
 /// Read off the library's own list rather than written out here, so a sheet
 /// added there turns up in the catalogue without anybody remembering to add
 /// it, and so the catalogue names none of them itself.
+/// The sheets whose design frames the catalogue's panes as windows: the
+/// segment display's windows set into its black plate, the handheld's
+/// screens in its shell. Under every other sheet the panes are clear and the
+/// window's own ground shows through them, as it always did; a sheet whose
+/// ground is its design (the futuristic metal hull, the cyberpunk board)
+/// would lose it under a pane of panel.
+const FRAMING_SHEETS: &[&str] = &["lcd", "handheld"];
+
+/// Whether the catalogue's panes are drawn as the sheet's panels.
+pub fn frames_panes() -> bool {
+    match choices().get(choice()) {
+        Some(Choice::Sheet(entry)) => FRAMING_SHEETS.contains(&entry.id),
+        _ => false,
+    }
+}
+
 pub fn choices() -> Vec<Choice> {
     let mut out: Vec<Choice> = (0..BASE.len()).map(Choice::Base).collect();
     out.extend(desktop_style::catalogue().into_iter().map(Choice::Sheet));

@@ -1,5 +1,5 @@
-//! The kitchen sink: every common control on one screen, and the same
-//! controls held still in each of their states.
+//! The kitchen sink: every common control and every instrument on one
+//! screen, and the same controls held still in each of their states.
 //!
 //! Both pages use the library's templates under their own names and dress
 //! nothing, so whatever a style sheet does to a widget is what shows here.
@@ -78,6 +78,33 @@ script_mod! {
         align: Align{x: 0.5 y: 0.}
     }
 
+    let ScreenCaption = Label{
+        draw_text +: {color: theme.color_screen_ink text_style: theme.font_regular{font_size: theme.font_size_p * 0.8}}
+    }
+
+    // A readout with its unit beside it, bottoms aligned, on one screen.
+    let ScreenLine = View{
+        width: Fit
+        height: Fit
+        flow: Right
+        spacing: theme.space_1
+        align: Align{x: 0. y: 1.}
+    }
+
+    // Each lamp in a cell of its own size, so the grid is the same under a
+    // sheet that draws a halo and one that draws none (and so takes no room
+    // for one).
+    let SinkLamp = Lamp{width: 24. height: 24.}
+    let SinkBar = LampBar{width: 40. height: 24.}
+
+    let LampColumn = View{
+        width: Fit
+        height: Fit
+        flow: Down
+        spacing: theme.space_1
+        align: Align{x: 0.5 y: 0.}
+    }
+
     mod.stories.KitchenSinkOverview = SinkPage{
         Group{
             GroupCaption{text: "Buttons"}
@@ -104,8 +131,8 @@ script_mod! {
             }
         }
 
-        // Three columns of two groups each, weighed so that no column
-        // runs much longer than the others under a sheet with large metrics.
+        // Four columns of two groups each, weighed so that no column runs
+        // much longer than the others under a sheet with large metrics.
         Band{
             Column{
                 Group{
@@ -146,6 +173,7 @@ script_mod! {
                     Slider{width: Fill text: "Output" default: 0.85}
                     SliderMinimal{width: Fill text: "Minimal" default: 0.4}
                     SliderRound{width: Fill text: "Round" default: 0.65}
+                    RangeSlider{width: Fill text: "Band" min: 20.0 max: 20000.0 step: 10.0 default_start: 200.0 default_end: 5000.0 unit: " Hz" precision: 0}
                 }
                 Group{
                     GroupCaption{text: "Feedback"}
@@ -184,86 +212,6 @@ script_mod! {
                     Tabs{width: Fill labels: ["Mixer" "Effects" "Routing"]}
                 }
             }
-        }
-
-        Group{
-            GroupCaption{text: "Surfaces"}
-            Band{
-                PanelView{
-                    width: Fill
-                    height: 100.
-                    flow: Down
-                    padding: theme.mspace_3
-                    spacing: theme.space_1
-                    GroupCaption{text: "Panel"}
-                    Label{text: "A raised surface."}
-                }
-                InsetPanelView{
-                    width: Fill
-                    height: 100.
-                    flow: Down
-                    padding: theme.mspace_3
-                    spacing: theme.space_1
-                    GroupCaption{text: "Inset"}
-                    Label{text: "A sunken well."}
-                }
-                Card{
-                    width: Fill
-                    header: CardHeader{H4{text: "Card"}}
-                    body: CardBody{Label{text: "Title and body."}}
-                }
-                View{
-                    width: Fill
-                    height: 100.
-                    ScrollYView{
-                        width: Fill
-                        height: Fill
-                        flow: Down
-                        // Held on screen: the stock bar fades out at rest,
-                        // and a bar nobody can see is a bar no sheet is
-                        // judged on.
-                        scroll_bars +: {scroll_bar_y +: {auto_hide: false}}
-                        ListItemOne{text: "Kick"}
-                        ListItemOne{text: "Snare" selected: true}
-                        ListItemOne{text: "Hats"}
-                        ListItemOne{text: "Bass"}
-                        ListItemOne{text: "Keys"}
-                        ListItemOne{text: "Vocals"}
-                    }
-                }
-            }
-        }
-    }
-
-    let ScreenCaption = Label{
-        draw_text +: {color: theme.color_screen_ink text_style: theme.font_regular{font_size: theme.font_size_p * 0.8}}
-    }
-
-    // A readout with its unit beside it, bottoms aligned, on one screen.
-    let ScreenLine = View{
-        width: Fit
-        height: Fit
-        flow: Right
-        spacing: theme.space_1
-        align: Align{x: 0. y: 1.}
-    }
-
-    // Each lamp in a cell of its own size, so the grid is the same under a
-    // sheet that draws a halo and one that draws none (and so takes no room
-    // for one).
-    let SinkLamp = Lamp{width: 24. height: 24.}
-    let SinkBar = LampBar{width: 40. height: 24.}
-
-    let LampColumn = View{
-        width: Fit
-        height: Fit
-        flow: Down
-        spacing: theme.space_1
-        align: Align{x: 0.5 y: 0.}
-    }
-
-    mod.stories.KitchenSinkInstruments = SinkPage{
-        Band{
             Column{
                 Group{
                     GroupCaption{text: "Readouts"}
@@ -280,7 +228,7 @@ script_mod! {
                 Group{
                     GroupCaption{text: "Screen"}
                     ScreenView{
-                        width: 190.
+                        width: Fill
                         ScreenCaption{text: "OUTPUT"}
                         Readout{text: "-12.0" cells: 5 digit_height: 26.}
                         LevelMeter{width: Fill height: 6. lamp: false level: 0.68 draw_bg.segment: 4.}
@@ -288,6 +236,11 @@ script_mod! {
                     }
                 }
             }
+        }
+
+        // The instruments: lamps and the meter, switches and the fader
+        // bank, a big knob with the panel knob beside it, and a list.
+        Band{
             Column{
                 Group{
                     GroupCaption{text: "Lamps"}
@@ -327,22 +280,24 @@ script_mod! {
                     GroupCaption{text: "Faders"}
                     Line{
                         align: Align{x: 0. y: 1.}
-                        SliderFaderY{height: 110. default: 0.72}
-                        SliderFaderY{height: 110. default: 0.45}
-                        SliderFaderY{height: 110. default: 0.6}
-                        SliderFaderY{height: 110. default: 0.3}
+                        SliderFaderY{height: 96. default: 0.72}
+                        SliderFaderY{height: 96. default: 0.45}
+                        SliderFaderY{height: 96. default: 0.6}
+                        SliderFaderY{height: 96. default: 0.3}
                     }
                 }
             }
-        }
-
-        Band{
             Column{
+                // A big knob and the panel knob, so a sheet's knob is seen at
+                // the sizes a panel gives it; the small one has no readout, as
+                // the panel knob has none.
                 Group{
-                    GroupCaption{text: "Inputs"}
-                    RangeSlider{width: Fill text: "Band" min: 20.0 max: 20000.0 step: 10.0 default_start: 200.0 default_end: 5000.0 unit: " Hz" precision: 0}
-                    NumberField{width: Fill min: 0.0 max: 99.0 step: 1.0}
-                    SegmentedControl{options: ["Mono" "Stereo" "Wide"] selected: 1}
+                    GroupCaption{text: "Big knob"}
+                    Line{
+                        align: Align{x: 0. y: 1.}
+                        Rotary{width: 130. height: 150. text: "Gain" default: 0.6}
+                        RotaryKnob{text: "Pan" default: 0.4}
+                    }
                 }
             }
             Column{
@@ -350,16 +305,20 @@ script_mod! {
                     GroupCaption{text: "List"}
                     View{
                         width: Fill
-                        height: 104.
+                        height: 130.
                         ScrollYView{
                             width: Fill
                             height: Fill
                             flow: Down
+                            // Held on screen: the stock bar fades out at rest,
+                            // and a bar nobody can see is a bar no sheet is
+                            // judged on.
                             scroll_bars +: {scroll_bar_y +: {auto_hide: false}}
-                            ListItemOne{text: "Drums"}
-                            ListItemOne{text: "Bass" selected: true}
+                            ListItemOne{text: "Kick"}
+                            ListItemOne{text: "Snare" selected: true}
+                            ListItemOne{text: "Hats"}
+                            ListItemOne{text: "Bass"}
                             ListItemOne{text: "Keys"}
-                            ListItemOne{text: "Guitar"}
                             ListItemOne{text: "Vocals"}
                         }
                     }
@@ -367,33 +326,44 @@ script_mod! {
             }
         }
 
-        // Three surfaces set on the window's ground with room between
-        // them, so a sheet's panel texture and its ground both show.
+        // Four surfaces set on the window's ground with room between them,
+        // so a sheet's panel texture and its ground both show.
         Group{
-            GroupCaption{text: "Grounds"}
+            GroupCaption{text: "Surfaces"}
             Band{
                 spacing: theme.space_6
                 PanelView{
                     width: Fill
-                    height: 70.
+                    height: 80.
                     flow: Down
                     padding: theme.mspace_3
+                    spacing: theme.space_1
                     GroupCaption{text: "Panel"}
+                    Label{text: "A raised surface."}
                 }
                 InsetPanelView{
                     width: Fill
-                    height: 70.
+                    height: 80.
                     flow: Down
                     padding: theme.mspace_3
+                    spacing: theme.space_1
                     GroupCaption{text: "Inset"}
+                    Label{text: "A sunken well."}
+                }
+                Card{
+                    width: Fill
+                    header: CardHeader{H4{text: "Card"}}
+                    body: CardBody{Label{text: "Title and body."}}
                 }
                 RoundedView{
                     width: Fill
-                    height: 70.
+                    height: 80.
                     draw_bg +: {color: theme.color_surface_container}
                     flow: Down
                     padding: theme.mspace_3
+                    spacing: theme.space_1
                     GroupCaption{text: "Rounded"}
+                    Label{text: "A plain surface."}
                 }
             }
         }
@@ -545,8 +515,8 @@ pub const STORIES: &[Story] = &[
         name: "Overview",
         dsl: "KitchenSinkOverview",
         added: "2025-06-01",
-        tags: &["style sheet review", "every control"],
-        doc: "# Kitchen sink\n\nEvery common control on one screen, each under its stock name and dressed by nothing but the style sheet, so one grab shows what a sheet does to all of them.",
+        tags: &["style sheet review", "every control", "displays and meters"],
+        doc: "# Kitchen sink\n\nEvery common control and every instrument on one screen, each under its stock name and dressed by nothing but the style sheet, so one grab shows what a sheet does to all of them: buttons, selection, text, sliders, feedback, knobs, choice, readouts of a time, a level and a frequency, a screen holding a readout and a level ladder, lamps lit, half lit and out in every intent, a needle meter, rocker and slide switches, a bank of faders, a big knob and a small one, a list with a selected row, and four surfaces on the window's ground.",
         subject: "",
         feature: None,
         controls: &[],
@@ -562,21 +532,6 @@ pub const STORIES: &[Story] = &[
         added: "2025-06-01",
         tags: &["style sheet review", "state matrix"],
         doc: "# States\n\nEight controls held still in rest, hover, pressed, focus, active and disabled. The matrix passes no events to what is inside it, so the pointer cannot move a cell out of its state. A dash marks a state the control does not have.",
-        subject: "",
-        feature: None,
-        controls: &[],
-        on_actions: None,
-    },
-    Story {
-        key: "overview/kitchen-sink/instruments",
-        category: "Overview",
-        component: "Kitchen sink",
-        also: &[],
-        name: "Instruments",
-        dsl: "KitchenSinkInstruments",
-        added: "2026-09-28",
-        tags: &["style sheet review", "displays and meters"],
-        doc: "# Instruments\n\nThe displays, lamps, meters and hardware controls on one screen, each under its stock name and dressed by nothing but the style sheet: readouts of a time, a level and a frequency, a screen holding a readout and a level ladder, lamps lit, half lit and out in every intent, a needle meter, rocker and slide switches on and off, a bank of four faders, a range slider, a number field, a segmented group, a list with a selected row, and three surfaces standing on the window's ground.",
         subject: "",
         feature: None,
         controls: &[],
