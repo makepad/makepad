@@ -2,6 +2,11 @@
 //!
 //!   sing_render [--weights model.mksing | --random tiny|base] [--out line.wav]
 //!               [--steps N] [--f0 rule|model]
+//!   sing_render --weights model.mksing --bench N
+//!       Speed: N lines of 8-14 syllables on random C-major melodies (96 BPM),
+//!       after one warm-up render; prints seconds of audio per second of
+//!       render (x real time). With CANTOR_TIMING set, each phrase's acoustic /
+//!       refiner / vocoder times go to stderr.
 //!
 //! With no weights it renders the demo line on randomly initialised weights,
 //! which proves the pipeline end to end (the sound is noise-like until trained).
@@ -38,6 +43,34 @@ fn main() {
     }
     if arg("--f0").as_deref() == Some("model") {
         opts.f0 = F0Mode::Model;
+    }
+    if let Some(n) = arg("--bench").and_then(|v| v.parse::<usize>().ok()) {
+        let syl = ["ðə", "sʌn", "ɪz", "ʃaɪ", "nɪŋ", "ɑn", "ðə", "ɹɪ", "vəɹ", "aɪ", "wɪl", "ɹɪ", "mɛm", "bəɹ", "ju", "tə", "naɪt", "wi", "wɔk", "ə", "lɔŋ", "ðə", "ɛmp", "ti", "stɹit"];
+        let scale = [0.0, 2.0, 4.0, 5.0, 7.0, 9.0, 11.0, 12.0, 14.0, 16.0];
+        let mut rng = makepad_ai_sing::dsp::Rng::new(17);
+        let warm = simple_line(&[(60.0, 1.0, "la"), (62.0, 1.0, "la")], 96.0);
+        cantor.render(&warm, &opts);
+        let (mut audio_s, mut took) = (0.0f32, 0.0f32);
+        let mut k = 0;
+        for _ in 0..n {
+            let count = 8 + rng.below(7);
+            let mut deg = 2i32;
+            let notes: Vec<(f32, f32, &str)> = (0..count)
+                .map(|i| {
+                    deg = (deg + rng.below(5) as i32 - 2).clamp(0, 9);
+                    let beats = if i + 1 == count { 2.0 } else { [1.0, 1.0, 0.5, 0.5, 1.5][rng.below(5)] };
+                    k += 1;
+                    (60.0 + scale[deg as usize], beats, syl[k % syl.len()])
+                })
+                .collect();
+            let line = simple_line(&notes, 96.0);
+            let t = Instant::now();
+            let (audio, _) = cantor.render(&line, &opts);
+            took += t.elapsed().as_secs_f32();
+            audio_s += audio.len() as f32 / SR as f32;
+        }
+        println!("bench: {n} lines, {audio_s:.1} s of audio in {took:.2} s: {:.1}x real time", audio_s / took);
+        return;
     }
     // "Twinkle" opening, with a melisma and a rest.
     let line = simple_line(

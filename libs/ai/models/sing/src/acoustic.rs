@@ -156,15 +156,28 @@ pub fn encode(g: &mut Graph, cfg: &AcousticConfig, tokens: &[u8], singers: &[usi
 /// recording's f0, or the head's own prediction), and decode.
 #[allow(clippy::too_many_arguments)]
 pub fn decode(g: &mut Graph, cfg: &AcousticConfig, enc: Id, frame_idx: &RowIndex, t: usize, lens: Option<Vec<u32>>, note_feats: &[f32], f0_feats: &[f32]) -> Decoded {
+    let (h, f0_head) = frames_in(g, enc, frame_idx, t, lens.clone(), note_feats);
+    decode_frames(g, cfg, h, f0_head, t, lens, f0_feats)
+}
+
+/// The first half of `decode`: the frames with their note features, and the
+/// f0 head over them (all a render needs to make the f0 curve).
+pub fn frames_in(g: &mut Graph, enc: Id, frame_idx: &RowIndex, t: usize, lens: Option<Vec<u32>>, note_feats: &[f32]) -> (Id, Id) {
     let rows = frame_idx.len();
     let h = g.gather_rows_idx(enc, frame_idx, t, lens.clone());
-    let nf = g.input(Tensor::batched(rows, FEATS, note_feats.to_vec(), t, lens.clone()));
+    let nf = g.input(Tensor::batched(rows, FEATS, note_feats.to_vec(), t, lens));
     let nf = linear(g, "ac.note_in", nf);
     let h = g.add(h, nf);
     let f = conv(g, "ac.f0.c1", h, 5);
     let f = g.act(f, Act::Gelu);
     let f = norm(g, "ac.f0.n1", f);
     let f0_head = linear(g, "ac.f0.out", f);
+    (h, f0_head)
+}
+
+/// The second half of `decode`: the f0 features added, the conformer decoder.
+pub fn decode_frames(g: &mut Graph, cfg: &AcousticConfig, h: Id, f0_head: Id, t: usize, lens: Option<Vec<u32>>, f0_feats: &[f32]) -> Decoded {
+    let rows = g.val(h).rows;
     let ff = g.input(Tensor::batched(rows, FEATS, f0_feats.to_vec(), t, lens));
     let ff = linear(g, "ac.f0_in", ff);
     let mut x = g.add(h, ff);

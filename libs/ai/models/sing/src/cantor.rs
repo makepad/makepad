@@ -44,7 +44,7 @@ pub struct RenderOpts {
 
 impl Default for RenderOpts {
     fn default() -> Self {
-        RenderOpts { style: PitchStyle::default(), f0: F0Mode::Model, f0_depth: 0.5, refine_steps: 4, refine_t0: 0.6, seed: 1 }
+        RenderOpts { style: PitchStyle::default(), f0: F0Mode::Model, f0_depth: 0.5, refine_steps: 0, refine_t0: 0.6, seed: 1 }
     }
 }
 
@@ -127,14 +127,12 @@ impl Cantor {
         let n = f.tokens.len();
         let enc = acoustic::encode(&mut g, &self.ac, &f.tokens, &[f.singer], n, None);
         let note = f.note_feats();
+        // The frames and the f0 head (it reads no f0), once for both uses.
+        let (h, f0_head) = acoustic::frames_in(&mut g, enc.enc, &RowIndex::Host(f.token_of_frame.clone()), t, None, &note);
         let f0 = match opts.f0 {
             F0Mode::Rule => f.f0.clone(),
             F0Mode::Model => {
-                // Run the f0 head with no f0 input, then build the curve.
-                let mut g2 = Graph::new(&self.params, false);
-                let e2 = acoustic::encode(&mut g2, &self.ac, &f.tokens, &[f.singer], n, None);
-                let d = acoustic::decode(&mut g2, &self.ac, e2.enc, &RowIndex::Host(f.token_of_frame.clone()), t, None, &note, &vec![0.0; t * score::FEATS]);
-                let head = g2.val(d.f0_head).clone();
+                let head = g.val(f0_head).clone();
                 let mut dev: Vec<Option<f32>> = (0..t)
                     .map(|r| {
                         let voiced = ph::is_voiced(f.tokens[f.token_of_frame[r]]) && head.data[r * 2 + 1] > 0.0 && f.note[r] > 0.0;
@@ -167,7 +165,7 @@ impl Cantor {
                 (0..t).map(|r| dev[r].map(|d| midi_to_hz(f.note[r] + d)).unwrap_or(0.0)).collect()
             }
         };
-        let dec = acoustic::decode(&mut g, &self.ac, enc.enc, &RowIndex::Host(f.token_of_frame.clone()), t, None, &note, &f.f0_feats(&f0));
+        let dec = acoustic::decode_frames(&mut g, &self.ac, h, f0_head, t, None, &f.f0_feats(&f0));
         let coarse = g.val(dec.mel).clone();
         let cond = g.val(dec.cond).clone();
         let t_ac = t0.elapsed();
