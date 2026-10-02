@@ -12,7 +12,7 @@ fn in_quart_d(u) { u * u * u * u }
 fn in_quint_d(u) { u * u * u * u * u }
 fn in_sine_d(u) { 1.0 - cos(u * f64(PI) * 0.5) }
 fn in_expo_d(u) {
-    if u <= 0.0 { f64(0.0) } else { (pow(f64(2.0), 10.0 * u - 10.0) - pow(f64(2.0), f64(-10.0))) / (1.0 - pow(f64(2.0), f64(-10.0))) }
+    if u <= 0.0 { f64(0.0) } else { pow(f64(2.0), 10.0 * u - 10.0) }
 }
 fn in_circ_d(u) { 1.0 - sqrt(max(1.0 - u * u, f64(0.0))) }
 fn in_back_d(u) {

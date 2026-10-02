@@ -129,26 +129,3 @@ fn bayer4(p) {
     let b = floor(x / 2.0) * 2.0 + floor(y / 2.0) * 3.0 - floor(x / 2.0) * floor(y / 2.0) * 4.0
     return (a * 4.0 + b + 0.5) / 16.0
 }
-
-// ---- Eases (the documents' formulas, libs/tween named.rs; 0..1 in, 0..1 out) ----
-// `out` is 1 - in(1 - u); `in_out` joins the two halves. Values outside 0..1
-// clamp, as in Motion.
-
-fn ease_in_quad(u) { let v = clamp(u, 0.0, 1.0) return v * v }
-fn ease_in_cubic(u) { let v = clamp(u, 0.0, 1.0) return v * v * v }
-fn ease_in_expo(u) {
-    let v = clamp(u, 0.0, 1.0)
-    if v <= 0.0 { return 0.0 }
-    return (pow(2.0, 10.0 * v - 10.0) - pow(2.0, -10.0)) / (1.0 - pow(2.0, -10.0))
-}
-fn ease_out_quad(u) { return 1.0 - ease_in_quad(1.0 - u) }
-fn ease_out_cubic(u) { return 1.0 - ease_in_cubic(1.0 - u) }
-fn ease_out_expo(u) { return 1.0 - ease_in_expo(1.0 - u) }
-fn ease_in_out_cubic(u) {
-    if u < 0.5 { return 0.5 * ease_in_cubic(2.0 * u) }
-    return 1.0 - 0.5 * ease_in_cubic(2.0 - 2.0 * u)
-}
-fn ease_in_out_expo(u) {
-    if u < 0.5 { return 0.5 * ease_in_expo(2.0 * u) }
-    return 1.0 - 0.5 * ease_in_expo(2.0 - 2.0 * u)
-}
