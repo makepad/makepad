@@ -339,6 +339,9 @@ impl<'a> ScriptVm<'a> {
             return;
         }
         if let Some(obj) = object.as_object() {
+            if let (Some(trace), Some(key)) = (&mut self.bx.literal_trace, field.as_id()) {
+                trace.field_reads.insert((obj, key));
+            }
             let value = self
                 .bx
                 .heap

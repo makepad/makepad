@@ -261,6 +261,49 @@ pub fn row_col(text: &str, at: usize) -> (u32, u32) {
 #[derive(Clone, Debug, Default)]
 pub struct LoadTrace {
     pub ran: std::collections::HashSet<(u16, u32)>,
+    /// The names the load read, and where (body, instruction): a `let`
+    /// read while loading may have been copied away.
+    pub name_reads: std::collections::HashSet<(crate::makepad_live_id::LiveId, u16, u32)>,
+    /// The record fields the load read (`look.BONE`): a value read out of
+    /// a record while loading may have been copied away.
+    pub field_reads: std::collections::HashSet<(crate::value::ScriptObject, crate::makepad_live_id::LiveId)>,
+}
+
+impl crate::vm::ScriptVm<'_> {
+    /// Start tracing a load (edit mode): the literals it runs, the names
+    /// and record fields it reads.
+    pub fn begin_literal_trace(&mut self) {
+        self.bx.literal_trace = Some(Box::default());
+        self.bx.threads.cur().name_reads = Some(Box::default());
+    }
+
+    /// The trace of the load since [`Self::begin_literal_trace`].
+    pub fn end_literal_trace(&mut self) -> Option<LoadTrace> {
+        let mut trace = *self.bx.literal_trace.take()?;
+        if let Some(reads) = self.bx.threads.cur().name_reads.take() {
+            trace.name_reads = *reads;
+        }
+        Some(trace)
+    }
+}
+
+/// Whether the name `id` read at `body`, `index` was a record's field of the
+/// same name built from it (`{BONE: BONE}`, a module's exports): a copy a
+/// patch of the `let` finds by its name.
+pub fn named_copy(code: &crate::vm::ScriptCode, id: crate::makepad_live_id::LiveId, body: u16, index: u32) -> bool {
+    use crate::tokenizer::ScriptToken;
+    let bodies = code.bodies.borrow();
+    let Some(b) = bodies.get(body as usize) else { return false };
+    let Some((op, _)) = b.parser.opcodes.get(index as usize).and_then(|o| o.as_opcode()) else { return false };
+    if op != crate::opcode::Opcode::ASSIGN_ME {
+        return false;
+    }
+    let Some(Some(tok)) = b.parser.source_map.get(index as usize) else { return false };
+    let toks = &b.tokenizer.tokens;
+    let tok = *tok as usize;
+    // `key: value`: the `:` with the name before and after it.
+    let is = |t: Option<&crate::tokenizer::ScriptTokenPos>| matches!(t.map(|t| &t.token), Some(ScriptToken::Identifier(x)) if *x == id);
+    (tok > 0 && is(toks.get(tok - 1)) && is(toks.get(tok + 1))) || (is(toks.get(tok)) && is(toks.get(tok + 2)))
 }
 
 /// Where a literal's value went in a program that has loaded.

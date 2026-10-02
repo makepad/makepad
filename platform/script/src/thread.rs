@@ -132,6 +132,9 @@ pub struct ScriptThread {
     //pub(crate) last_err: ScriptValue,
     pub(crate) json_parser: JsonParserThread,
     pub(crate) thread_id: ScriptThreadId,
+    /// Edit mode, while a program loads: the names read and where (see
+    /// `crate::literal::LoadTrace::name_reads`). None otherwise.
+    pub(crate) name_reads: Option<Box<std::collections::HashSet<(LiveId, u16, u32)>>>,
 }
 
 impl ScriptThread {
@@ -158,6 +161,7 @@ impl ScriptThread {
             instruction_limit_remaining: None,
             trap: ScriptTrapInner::default(),
             json_parser: Default::default(),
+            name_reads: None,
         }
     }
 
@@ -412,6 +416,9 @@ impl ScriptThread {
     // lets resolve an id to a ScriptValue
     #[inline]
     pub fn scope_value(&mut self, heap: &ScriptHeap, id: LiveId) -> ScriptValue {
+        if let Some(reads) = &mut self.name_reads {
+            reads.insert((id, self.trap.ip.body, self.trap.ip.index));
+        }
         heap.scope_value(*self.scopes.last().unwrap(), id.into(), self.trap.pass())
     }
 
