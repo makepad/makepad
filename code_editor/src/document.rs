@@ -249,6 +249,33 @@ impl CodeDocument {
         self.update_after_edit(None, None, &edits);
     }
 
+    /// Replaces the text between `start` and `end` with `new_text` as it is:
+    /// one undo step, no autoindent, no delimiter injection. For a host
+    /// putting an outside change into the text, where typing's indent rules
+    /// would rewrite what it was given.
+    pub fn replace_range(&self, start: Position, end: Position, new_text: Text) {
+        if self.is_read_only() { return; }
+        let mut history = self.0.history.borrow_mut();
+        let delete_edit = Edit {
+            change: Change::Delete(start, end - start),
+            drift: Drift::Before,
+        };
+        let insert_edit = Edit {
+            change: Change::Insert(start, new_text),
+            drift: Drift::Before,
+        };
+        history.force_new_group();
+        history.push_or_extend_group(
+            SessionId::default(),
+            EditKind::Other,
+            &SelectionSet::default(),
+        );
+        history.apply_edit(delete_edit.clone());
+        history.apply_edit(insert_edit.clone());
+        drop(history);
+        self.update_after_edit(None, None, &[delete_edit, insert_edit]);
+    }
+
     pub fn as_text(&self) -> Ref<'_, Text> {
         Ref::map(self.0.history.borrow(), |history| history.as_text())
     }
