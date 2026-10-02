@@ -263,9 +263,16 @@ impl PassDecl {
         s
     }
 
+    /// The program's identity: its source, and where its functions are
+    /// written (an editor's live literals are named by their places, so the
+    /// same text moved is another program; its GPU program is shared by
+    /// source).
     pub fn program_id(&self) -> ProgramId {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         self.source().hash(&mut h);
+        for (_, at) in &self.origins {
+            at.hash(&mut h);
+        }
         ProgramId(h.finish())
     }
 }

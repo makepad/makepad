@@ -107,6 +107,10 @@ pub struct CxDrawShaders {
     /// Explicit const-table mode override; None = decide from the
     /// environment / remote bridge (see `Cx::shader_const_table_mode`).
     pub const_table_mode: Option<bool>,
+    /// Edit mode's live literals (`Cx::set_shader_live_literals`): the
+    /// edited files, and the module texts whose literals compile as
+    /// patchable slots.
+    pub literal_sources: std::sync::Arc<ShaderLiveLiterals>,
 
     pub cache_object_reuse_epoch_seen: u64,
     /// Keyed by (heap key, object): an isolate's objects share index space
@@ -201,6 +205,122 @@ impl Cx {
             None => return false,
         };
         self.shader_const_patch(shader_id, index, initial)
+    }
+
+    /// Edit mode for shader literals, for the files `edited` (the names
+    /// their copies' origins give, see [`Self::set_shader_literal_source`];
+    /// none = off). On, every float and colour literal a registered module
+    /// text copies from an edited file compiles as a uniform slot named by
+    /// its [`ShaderLiteralSite`], so [`Self::patch_shader_literal`] changes
+    /// it with a redraw and no recompile, and a literal-only edit of the
+    /// source compiles to the same program text (the GPU program is
+    /// reused). Off (the default, and for shipped or web playback) the
+    /// literals fold and the code is byte-identical to a compiler without
+    /// the feature. Takes effect for shaders compiled from now on.
+    pub fn set_shader_live_literals(&mut self, edited: Vec<String>) {
+        if self.draw_shaders.literal_sources.edited == edited {
+            return;
+        }
+        std::sync::Arc::make_mut(&mut self.draw_shaders.literal_sources).edited = edited;
+        self.draw_shaders.reset_for_live_reload();
+        self.draw_shaders.cache_code_to_shader.clear();
+    }
+
+    pub fn shader_live_literals_on(&self) -> bool {
+        !self.draw_shaders.literal_sources.edited.is_empty()
+    }
+
+    /// Name the rows of module text `module_file` (a `ScriptMod::file`)
+    /// that are copies of an edited file: its literals there compile live.
+    /// Replaces what was registered under that name; an empty list removes
+    /// it. A host that evaluates text copied out of a document (a layer's
+    /// shader fn, a pass) registers its origins just before it compiles.
+    pub fn set_shader_literal_source(&mut self, module_file: &str, origins: Vec<ShaderLiteralOrigin>) {
+        let sources = &self.draw_shaders.literal_sources.sources;
+        let same = match sources.get(module_file) {
+            Some(old) => {
+                old.len() == origins.len()
+                    && old.iter().zip(&origins).all(|(a, b)| {
+                        a.rows == b.rows && a.code_col == b.code_col && a.file == b.file && a.line == b.line && a.col == b.col
+                    })
+            }
+            None => origins.is_empty(),
+        };
+        if same {
+            return;
+        }
+        let live = std::sync::Arc::make_mut(&mut self.draw_shaders.literal_sources);
+        if origins.is_empty() {
+            live.sources.remove(module_file);
+        } else {
+            live.sources.insert(module_file.to_string(), origins);
+        }
+        // The same text compiled where it now sits names other sites: the
+        // function-keyed caches would hand back the old ones.
+        if self.shader_live_literals_on() {
+            self.draw_shaders.reset_for_live_reload();
+        }
+    }
+
+    /// What a shader compile lifts (None when edit mode is off or nothing
+    /// is registered).
+    pub fn shader_live_literals(&self) -> Option<std::sync::Arc<ShaderLiveLiterals>> {
+        (self.shader_live_literals_on() && !self.draw_shaders.literal_sources.sources.is_empty())
+            .then(|| self.draw_shaders.literal_sources.clone())
+    }
+
+    /// Write a literal's new value into every compiled shader slot made
+    /// from `site`: the GPU reads it on the next frame (a redraw, no
+    /// recompile). How many slots it wrote: 0 when no compiled shader
+    /// holds the site (it is not in a shader, or edit mode was off when
+    /// it compiled).
+    pub fn patch_shader_literal(&mut self, site: &ShaderLiteralSite, value: ShaderLiteralValue) -> usize {
+        let uniforms_gen = self.next_uniform_gen();
+        let mut wrote = 0;
+        for sh in self.draw_shaders.shaders.iter_mut() {
+            if !sh.mapping.table_consts.is_empty() {
+                wrote += sh.mapping.patch_literal(site, value, uniforms_gen);
+            }
+        }
+        if wrote > 0 {
+            self.redraw_all();
+        }
+        wrote
+    }
+
+    /// Every live literal site the compiled shaders hold, with its value
+    /// now (an editor's or a test's view of what patches will reach).
+    pub fn shader_literal_sites(&self) -> Vec<(DrawShaderId, ShaderLiteralSite, ShaderLiteralValue)> {
+        let mut out = Vec::new();
+        for (index, sh) in self.draw_shaders.shaders.iter().enumerate() {
+            for tc in &sh.mapping.table_consts {
+                let Some(site) = &tc.site else { continue };
+                let value = match tc.color {
+                    Some(c) => ShaderLiteralValue::Color(c),
+                    None => ShaderLiteralValue::Number(if tc.negated { -tc.value } else { tc.value } as f64),
+                };
+                out.push((DrawShaderId { index }, site.clone(), value));
+            }
+        }
+        out
+    }
+}
+
+impl CxDrawShaders {
+    /// The shader compiled before from the same code, when it can stand
+    /// for this compile. A table constant's value is the shader's own (a
+    /// live literal compiles to the same text whatever it says), so a
+    /// compile whose table holds other values or sites is a shader of its
+    /// own: it gets its own mapping, and the backend reuses the GPU
+    /// program by its source.
+    pub fn code_hit(&self, code: &CxDrawShaderCode, pipe: LiveId, table: &[ShaderTableConst]) -> Option<DrawShaderId> {
+        let id = *self.cache_code_to_shader.get(&(code.clone(), pipe))?;
+        let have = &self.shaders.get(id.index)?.mapping.table_consts;
+        let same = have.len() == table.len()
+            && have.iter().zip(table).all(|(h, t)| {
+                h.initial == t.value as f32 && h.initial_color == t.color && h.site == t.site && h.doc == t.doc
+            });
+        same.then_some(id)
     }
 }
 
@@ -966,6 +1086,22 @@ pub struct DrawShaderTableConst {
     pub input: usize,
     /// The literal's immediate ip (file:line:col via the script code).
     pub ip: ScriptIp,
+    /// A live literal's place in its edited file (edit mode, see
+    /// `Cx::set_shader_live_literals`); `None` for a tweaker constant.
+    pub site: Option<ShaderLiteralSite>,
+    /// A colour literal's live value (its slot is a vec4); `value` and
+    /// `initial` are unused then.
+    pub color: Option<[f32; 4]>,
+    pub initial_color: Option<[f32; 4]>,
+    /// The slot holds the literal negated (`/**x*/ -0.5`).
+    pub negated: bool,
+}
+
+/// A literal's new value, as an editor writes it at a [`ShaderLiteralSite`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ShaderLiteralValue {
+    Number(f64),
+    Color([f32; 4]),
 }
 
 #[derive(Clone)]
@@ -1361,6 +1497,10 @@ impl CxDrawShaderMapping {
                         value: tc.value as f32,
                         input,
                         ip: tc.ip,
+                        site: tc.site.clone(),
+                        color: tc.color,
+                        initial_color: tc.color,
+                        negated: tc.negated,
                     });
                 }
                 DrawShaderDescScope::Scope(obj, key) => {
@@ -1578,6 +1718,40 @@ impl CxDrawShaderMapping {
         true
     }
 
+    /// Write `value` into every live literal slot compiled from `site`;
+    /// how many it wrote (a number never lands in a colour's slot, nor the
+    /// reverse).
+    pub fn patch_literal(&mut self, site: &ShaderLiteralSite, value: ShaderLiteralValue, uniforms_gen: u64) -> usize {
+        let mut wrote = 0;
+        for tc in self.table_consts.iter_mut() {
+            if tc.site.as_ref() != Some(site) {
+                continue;
+            }
+            let offset = self.scope_uniforms.inputs[tc.input].offset;
+            match (value, tc.color.is_some()) {
+                (ShaderLiteralValue::Number(v), false) => {
+                    let v = if tc.negated { -v } else { v } as f32;
+                    tc.value = v;
+                    if let Some(slot) = self.scope_uniforms_buf.get_mut(offset) {
+                        *slot = v;
+                    }
+                }
+                (ShaderLiteralValue::Color(c), true) => {
+                    tc.color = Some(c);
+                    if let Some(slots) = self.scope_uniforms_buf.get_mut(offset..offset + 4) {
+                        slots.copy_from_slice(&c);
+                    }
+                }
+                _ => continue,
+            }
+            wrote += 1;
+        }
+        if wrote > 0 {
+            self.scope_uniforms_gen = uniforms_gen;
+        }
+        wrote
+    }
+
     /// Fill the scope uniform buffer from script values.
     ///
     /// This reads values from the script heap using the source_obj and key for each entry,
@@ -1595,8 +1769,18 @@ impl CxDrawShaderMapping {
                 ScopeUniformSlot::Scope(obj, key) => (obj, key),
                 ScopeUniformSlot::Const(ci) => {
                     // A table constant: its live value, never the heap.
-                    if let Some(slot) = self.scope_uniforms_buf.get_mut(input.offset) {
-                        *slot = self.table_consts[ci].value;
+                    let tc = &self.table_consts[ci];
+                    match tc.color {
+                        Some(c) => {
+                            if let Some(slots) = self.scope_uniforms_buf.get_mut(input.offset..input.offset + 4) {
+                                slots.copy_from_slice(&c);
+                            }
+                        }
+                        None => {
+                            if let Some(slot) = self.scope_uniforms_buf.get_mut(input.offset) {
+                                *slot = tc.value;
+                            }
+                        }
                     }
                     continue;
                 }

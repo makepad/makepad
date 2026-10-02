@@ -4034,6 +4034,7 @@ impl DrawVars {
             let mut output = ShaderOutput::default();
             output.backend = ShaderBackend::Hlsl;
             output.const_table = vm.host.cx().shader_const_table_mode();
+            output.live_literals = vm.host.cx().shader_live_literals();
             output.use_vulkan = false;
 
             output.pre_collect_rust_instance_io(vm, io_self);
@@ -4114,7 +4115,7 @@ impl DrawVars {
             // Cache 3: Check if this exact code has been compiled before
             {
                 let cx = vm.host.cx();
-                if let Some(&shader_id) = cx.draw_shaders.cache_code_to_shader.get(&(code.clone(), pipe)) {
+                if let Some(shader_id) = cx.draw_shaders.code_hit(&code, pipe, &output.table_consts) {
                     let cx = vm.host.cx_mut();
                     cx.draw_shaders
                         .cache_object_id_to_shader

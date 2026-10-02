@@ -1198,6 +1198,7 @@ pub fn compile_draw_shader_wgsl_source(
     // Same table decision as the layout compile, so the WGSL side of a
     // shader carries the same hot-patchable constants.
     output.const_table = layout_source.const_table;
+    output.live_literals = layout_source.live_literals.clone();
     output.pre_collect_rust_instance_io(vm, io_self);
     output.pre_collect_shader_io(vm, io_self);
 

@@ -178,6 +178,11 @@ impl Programs {
             if v.is_err() || v.as_object().is_none() {
                 return Err(format!("{label} did not compile"));
             }
+            // Edit mode: the pass's functions are the document's text, and
+            // their literals compile as slots named by where they are written.
+            if vm.host.cx().shader_live_literals_on() {
+                vm.host.cx_mut().set_shader_literal_source(&file, literal_origins(decl));
+            }
             let mut scope = Scope::default();
             let mut d = Box::new(DrawGraphPass::script_new_with_default(vm));
             d.script_apply(vm, &Apply::Eval, &mut scope, v);
@@ -199,6 +204,27 @@ impl Programs {
     }
 }
 
+
+/// The rows of a pass's [`PassDecl::source`] that are the document's own
+/// text (its functions, from `origins`), as shader literal origins: what
+/// edit mode's live literals are named by.
+fn literal_origins(decl: &PassDecl) -> Vec<ShaderLiteralOrigin> {
+    let src = decl.source();
+    let mut out = Vec::new();
+    for (text, at) in &decl.origins {
+        let Some(start) = src.find(text.as_str()) else { continue };
+        let row = src[..start].matches('\n').count() as u32;
+        let row_start = src[..start].rfind('\n').map_or(0, |n| n + 1);
+        out.push(ShaderLiteralOrigin {
+            rows: row..row + text.matches('\n').count() as u32 + 1,
+            code_col: src[row_start..start].chars().count() as u32,
+            file: at.file.clone(),
+            line: at.line.saturating_sub(1),
+            col: at.col.saturating_sub(1),
+        });
+    }
+    out
+}
 
 /// `error` with its `file:line:col` in the generated pass source replaced by
 /// where that line is written in the document (`at`), when it is.

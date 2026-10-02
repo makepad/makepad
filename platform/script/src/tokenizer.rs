@@ -445,6 +445,19 @@ impl ScriptTokenizer {
         })
     }
 
+    /// The zero-based row and column (characters) of the first character
+    /// of token `tok_index`: where it is written, from its lexed span (a
+    /// token's `pos` may sit a character into it).
+    pub fn token_start_row_col(&self, tok_index: u32) -> Option<(u32, u32)> {
+        let char_index = self.tokens.get(tok_index as usize)?.start as usize;
+        if char_index >= self.pos {
+            return None;
+        }
+        let line = self.line_starts.partition_point(|&start| start as usize <= char_index);
+        let line_start = if line == 0 { 0 } else { self.line_starts[line - 1] as usize };
+        Some((line as u32, (char_index - line_start) as u32))
+    }
+
     pub fn token_index_to_row_col(&self, tok_index: u32) -> Option<(u32, u32)> {
         let char_index = self.tokens[tok_index as usize].pos;
         if char_index >= self.pos {

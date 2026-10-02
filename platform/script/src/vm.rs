@@ -336,7 +336,8 @@ impl ScriptCode {
         }
         let end = end?;
         let text: String = chars[start..end].iter().collect();
-        let (row, col) = body.tokenizer.token_index_to_row_col(k as u32)?;
+        // Where the `fn` keyword is written (its first character).
+        let (row, col) = body.tokenizer.token_start_row_col(k as u32)?;
         let loc = match &body.source {
             ScriptSource::Mod(script_mod) => ScriptLoc { file: script_mod.file.clone(), line: row + script_mod.line as u32, col },
             _ => ScriptLoc { file: "generated".into(), line: row, col },

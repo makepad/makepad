@@ -738,6 +738,9 @@ impl ShaderPackEntry {
                     doc: tc.doc.clone(),
                     value: tc.value,
                     ip: Default::default(),
+                    site: None,
+                    color: None,
+                    negated: false,
                 })
                 .collect(),
             uniform_buffer_bindings: UniformBufferBindings {

@@ -94,6 +94,46 @@ pub(crate) fn int_literal_type(
 }
 
 impl ShaderFnCompiler {
+    /// A lifted literal (an `f32` or colour `vec4f` uniform read standing
+    /// where a literal was written, see [`ShaderOutput::live_literals`])
+    /// meeting a half or integer operand: cast to that operand's element
+    /// type, the type the folded literal would have taken there.
+    pub(crate) fn adapt_lifted(
+        vm: &ScriptVm,
+        output: &ShaderOutput,
+        ty: ShaderType,
+        s: String,
+        other: &ShaderType,
+    ) -> (ShaderType, String) {
+        if output.lifted_exprs.is_empty() || !output.lifted_exprs.contains(&s) {
+            return (ty, s);
+        }
+        let p = &vm.bx.code.builtins.pod;
+        let ShaderType::Pod(o) = other else {
+            return (ty, s);
+        };
+        let o = *o;
+        let colour = ty == ShaderType::Pod(p.pod_vec4f);
+        let target = if o == p.pod_f16 || o == p.pod_vec2h || o == p.pod_vec3h {
+            (!colour).then_some((p.pod_f16, id!(f16)))
+        } else if o == p.pod_vec4h {
+            Some(if colour { (p.pod_vec4h, id!(vec4h)) } else { (p.pod_f16, id!(f16)) })
+        } else if o == p.pod_i32 || o == p.pod_vec2i || o == p.pod_vec3i || o == p.pod_vec4i {
+            (!colour).then_some((p.pod_i32, id!(i32)))
+        } else if o == p.pod_u32 || o == p.pod_vec2u || o == p.pod_vec3u || o == p.pod_vec4u {
+            (!colour).then_some((p.pod_u32, id!(u32)))
+        } else {
+            None
+        };
+        match target {
+            Some((pod, name)) => {
+                let cast = format!("{}({})", output.backend.map_pod_name(name), s);
+                (ShaderType::Pod(pod), cast)
+            }
+            None => (ty, s),
+        }
+    }
+
     pub(crate) fn handle_not(
         &mut self,
         vm: &mut ScriptVm,
@@ -158,6 +198,8 @@ impl ShaderFnCompiler {
             self.pop_resolved(vm, output)
         };
         let (t1, s1) = self.pop_resolved(vm, output);
+        let (t1, s1) = Self::adapt_lifted(vm, output, t1, s1, &t2);
+        let (t2, s2) = Self::adapt_lifted(vm, output, t2, s2, &t1);
         let mut s = self.stack.new_string();
 
         let is_simple_int_literal = |value: &str| {
@@ -336,6 +378,8 @@ impl ShaderFnCompiler {
             self.pop_resolved(vm, output)
         };
         let (t1, s1) = self.pop_resolved(vm, output);
+        let (t1, s1) = Self::adapt_lifted(vm, output, t1, s1, &t2);
+        let (t2, s2) = Self::adapt_lifted(vm, output, t2, s2, &t1);
         let mut s = self.stack.new_string();
 
         let is_simple_int_literal = |value: &str| {
@@ -428,6 +472,7 @@ impl ShaderFnCompiler {
                     );
                 }
                 let t1 = ShaderType::Pod(var.ty());
+                let (t2, s2a) = Self::adapt_lifted(vm, output, t2.clone(), s2.clone(), &t1);
                 let _ty = if is_int {
                     type_table_int_arithmetic(&t1, &t2, self.trap.pass(), &vm.bx.code.builtins.pod)
                 } else {
@@ -439,7 +484,7 @@ impl ShaderFnCompiler {
                     )
                 };
 
-                let s2 = unsigned_literal(&output.backend, &t2, &s2, &t1, &vm.bx.code.builtins.pod);
+                let s2 = unsigned_literal(&output.backend, &t2, &s2a, &t1, &vm.bx.code.builtins.pod);
                 let mut s = self.stack.new_string();
                 let var_name = if matches!(var, ShaderScopeItem::Param { .. }) {
                     output.backend.map_param_name(id, shadow)
