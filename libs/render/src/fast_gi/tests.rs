@@ -28,6 +28,7 @@ fn gi_shaders_compile_without_errors() {
             mod.prelude.widgets_internal = {..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw}
         });
         vm.bx.heap.new_module(id!(widgets));
+        makepad_render_graph::pass_stdlib(vm);
         crate::local_shadows::sampling::script_mod(vm);
         crate::clustered::script_mod(vm);
         crate::fast_gi::script_mod(vm);
