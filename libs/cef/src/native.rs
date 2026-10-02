@@ -249,9 +249,8 @@ struct AccelStats {
 /// misalign `cef_browser_settings_t` (144 inserts `databases`).
 const CEF_API_VERSION: c_int = 13800;
 #[cfg(target_os = "macos")]
-const HELPER_APP_SUFFIXES: [(&str, &str); 5] = [
+const HELPER_APP_SUFFIXES: [(&str, &str); 4] = [
     ("", ""),
-    (" (Alerts)", ".alerts"),
     (" (GPU)", ".gpu"),
     (" (Plugin)", ".plugin"),
     (" (Renderer)", ".renderer"),
@@ -1369,7 +1368,10 @@ impl MainArgsStorage {
 /// ("Registration response error message: PHONE_REGISTRATION_ERROR"). The
 /// GCM client still registers with the background-networking switch on; its
 /// endpoints are overridable, so they point at an unroutable local address
-/// instead of Google.
+/// instead of Google. No notifications either: on macOS Chromium registers
+/// the app (and its Alerts helper, which the synthetic bundle no longer
+/// carries) with the notification centre, and every differently named build
+/// is a new app there, so each one raised its own system banner.
 fn chromium_switches() -> Vec<String> {
     let mut switches = Vec::new();
     if let Some(backend) = use_angle_backend() {
@@ -1381,7 +1383,8 @@ fn chromium_switches() -> Vec<String> {
         "--disable-background-networking",
         "--disable-sync",
         "--disable-component-update",
-        "--disable-features=OptimizationHints,InterestFeedContentSuggestions",
+        "--disable-features=OptimizationHints,InterestFeedContentSuggestions,NativeNotifications,SystemNotifications",
+        "--disable-notifications",
         "--gcm-checkin-url=http://127.0.0.1:9/checkin",
         "--gcm-registration-url=http://127.0.0.1:9/register",
         "--gcm-mcs-endpoint=127.0.0.1:9",
