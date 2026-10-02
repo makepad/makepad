@@ -1942,6 +1942,28 @@ impl<'a> ScriptVm<'a> {
         self.eval_body(body_id, ScriptObject::ZERO)
     }
 
+    /// [`Self::eval`] with `parent` behind the module's own scope: a name the
+    /// module does not define is read from `parent` and its scopes (another
+    /// body's [`Self::end_scope_of`]), so code compiled later reads a loaded
+    /// document's bindings as if written in it. A host uses it to compile
+    /// functions over a document after it has run.
+    pub fn eval_in_scope(&mut self, script_mod: ScriptMod, parent: ScriptObject) -> ScriptValue {
+        let body_id = self.add_script_mod(script_mod);
+        let scope = self.bx.code.bodies.borrow()[body_id as usize].scope.obj;
+        self.bx.heap.objects[scope].proto = parent.into();
+        self.eval_body(body_id, ScriptObject::ZERO)
+    }
+
+    /// The scope the last body evaluated from `file` ended in (its top-level
+    /// `let`s, `use`d names and the scopes they shadow), once it has run.
+    pub fn end_scope_of(&self, file: &str) -> Option<ScriptObject> {
+        let bodies = self.bx.code.bodies.borrow();
+        bodies.iter().rev().find_map(|body| match &body.source {
+            ScriptSource::Mod(m) if m.file == file => Some(body.end_scope.as_ref().map(|s| s.as_object()).unwrap_or_else(|| body.scope.as_object())),
+            _ => None,
+        })
+    }
+
     pub fn eval_with_source(&mut self, script_mod: ScriptMod, source: ScriptObject) -> ScriptValue {
         let body_id = self.add_script_mod(script_mod);
         self.eval_body(body_id, source)

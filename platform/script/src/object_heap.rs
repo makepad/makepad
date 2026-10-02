@@ -975,6 +975,27 @@ impl ScriptHeap {
         }
     }
 
+    /// The host rebinding `key` where a scope chain from `ptr` binds it (the
+    /// nearest scope that has it), past a frozen document: what a script
+    /// cannot do, a host does between runs (a value it recomputes per frame).
+    /// False when no scope in the chain binds `key`.
+    pub fn rebind_scope_value(&mut self, ptr: ScriptObject, key: LiveId, value: ScriptValue) -> bool {
+        self.escape_value(value);
+        let key: ScriptValue = key.into();
+        let mut ptr = ptr;
+        loop {
+            let object = &mut self.objects[ptr];
+            if let Some(set) = object.map.get_mut(&key) {
+                set.value = value;
+                return true;
+            }
+            match object.proto.as_object() {
+                Some(next) => ptr = next,
+                None => return false,
+            }
+        }
+    }
+
     pub fn scope_value(&self, ptr: ScriptObject, key: LiveId, trap: ScriptTrap) -> ScriptValue {
         let root_ptr = ptr;
         let mut ptr = ptr;
