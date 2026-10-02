@@ -310,6 +310,7 @@ pub use {
             DrawShaderInputPacking, DrawShaderInputs,
         },
         gpu_info::GpuPerformance,
+        gpu_info::{gpu_working_set_bytes, max_gpu_buffer_bytes, set_gpu_working_set_bytes, set_max_gpu_buffer_bytes},
         ime::{
             AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, SoftKeyboardConfig,
             TextInputConfig,

@@ -4998,7 +4998,7 @@ fn map_face_band_split_requires_all_three_triangle_records() {
     let decks = [0.0, 0.25, 0.5, 0.0, 0.0, 0.0];
     let mut casing_vertices = Vec::new();
     let mut casing_indices = Vec::new();
-    append_tessellated_geometry_decked(
+    if append_tessellated_geometry_decked(
         &verts,
         &source_indices,
         &mut casing_vertices,
@@ -5011,7 +5011,9 @@ fn map_face_band_split_requires_all_three_triangle_records() {
             zbias: 0.0,
         },
         Some(&decks),
-    );
+    ).is_err() {
+            log!("map tile: a shape past what memory or one GPU buffer holds is left out");
+        }
 
     let emitted = casing_vertices.clone();
     let (face_vertices, face_indices) = split_band_by_all(
@@ -6081,7 +6083,7 @@ fn build_tile_buffers_from_features_profiled(
             let fill_micro = road_surface_micro
                 + group.layer_rank as f32 * DEPTH_MICRO_PER_RANK
                 + (order_pos % 19) as f32 * DEPTH_MICRO_PER_FEATURE;
-            append_tessellated_geometry_decked(
+            if append_tessellated_geometry_decked(
                 &tess_verts,
                 &tess_indices,
                 target_verts,
@@ -6094,7 +6096,9 @@ fn build_tile_buffers_from_features_profiled(
                     zbias: *target_zbias,
                 },
                 fill_decks.as_deref(),
-            );
+            ).is_err() {
+            log!("map tile: a shape past what memory or one GPU buffer holds is left out");
+        }
             *target_zbias += VECTOR_ZBIAS_STEP;
             feature_count += 1;
 
@@ -6598,7 +6602,7 @@ fn build_tile_buffers_from_features_profiled(
                 false,
                 tolerance,
             );
-            append_tessellated_geometry(
+            if append_tessellated_geometry(
                 &tess_verts,
                 &tess_indices,
                 &mut fill_vertices,
@@ -6610,7 +6614,9 @@ fn build_tile_buffers_from_features_profiled(
                     params: [0.0, 0.0, 0.0, MAT_ROOF, job.height_m, BUILDING_SURFACE_DEPTH],
                     zbias: fill_zbias,
                 },
-            );
+            ).is_err() {
+            log!("map tile: a shape past what memory or one GPU buffer holds is left out");
+        }
             fill_zbias += VECTOR_ZBIAS_STEP;
             // T2 roof-edge AO: parapet gradient strip along the outline.
             if theme.shiny.bake_ao && job.height_m > 0.05 {
@@ -8159,7 +8165,7 @@ fn build_tile_buffers_from_features_profiled(
                                 face.color[2] * 0.72,
                                 face.color[3],
                             ];
-                            append_tessellated_geometry_decked(
+                            if append_tessellated_geometry_decked(
                                 &sk_verts,
                                 &sk_indices,
                                 &mut casing_vertices,
@@ -8179,7 +8185,9 @@ fn build_tile_buffers_from_features_profiled(
                                     zbias: casing_zbias,
                                 },
                                 Some(&sk_deck),
-                            );
+                            ).is_err() {
+            log!("map tile: a shape past what memory or one GPU buffer holds is left out");
+        }
                             casing_zbias += VECTOR_ZBIAS_STEP;
                         }
                     }
@@ -8234,7 +8242,7 @@ fn build_tile_buffers_from_features_profiled(
                         deck.as_deref(),
                     );
                 } else {
-                    append_tessellated_geometry_decked(
+                    if append_tessellated_geometry_decked(
                         verts,
                         indices,
                         &mut casing_vertices,
@@ -8254,7 +8262,9 @@ fn build_tile_buffers_from_features_profiled(
                             zbias: casing_zbias,
                         },
                         deck.as_deref(),
-                    );
+                    ).is_err() {
+            log!("map tile: a shape past what memory or one GPU buffer holds is left out");
+        }
                 }
                 casing_zbias += VECTOR_ZBIAS_STEP;
                 prof_body_ms += face_clock.elapsed_seconds() * 1e3;
@@ -8337,7 +8347,7 @@ fn build_tile_buffers_from_features_profiled(
                             None,
                         );
                     } else {
-                        append_tessellated_geometry_decked(
+                        if append_tessellated_geometry_decked(
                             fr_verts,
                             fr_indices,
                             &mut casing_vertices,
@@ -8359,7 +8369,9 @@ fn build_tile_buffers_from_features_profiled(
                                 zbias: casing_zbias,
                             },
                             fr_deck.as_deref(),
-                        );
+                        ).is_err() {
+            log!("map tile: a shape past what memory or one GPU buffer holds is left out");
+        }
                     }
                 }
                 // Reserve the fringe's rank even when this bake omits its
