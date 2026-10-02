@@ -809,6 +809,27 @@ impl ScriptHeap {
         }
     }
 
+    /// A name's value as seen from scope `ptr`, or `None` when no scope in
+    /// its chain has it (no error raised).
+    pub fn scope_value_opt(&self, ptr: ScriptObject, key: LiveId) -> Option<ScriptValue> {
+        let mut ptr = ptr;
+        let key_sv = key.into();
+        loop {
+            let object = &self.objects[ptr];
+            if let Some(set) = object.map.get(&key_sv) {
+                return Some(set.value);
+            }
+            if object.tag.is_vec2() {
+                for kv in object.vec.iter().rev() {
+                    if kv.key == key_sv {
+                        return Some(kv.value);
+                    }
+                }
+            }
+            ptr = object.proto.as_object()?;
+        }
+    }
+
     pub fn scope_value(&self, ptr: ScriptObject, key: LiveId, trap: ScriptTrap) -> ScriptValue {
         let root_ptr = ptr;
         let mut ptr = ptr;
