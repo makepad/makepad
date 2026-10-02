@@ -123,6 +123,10 @@ fleet-hosts*.txt
 window_*_frame_*.png
 remote-jobs/
 apps/asset-ui/resources/
+.makepad-notes.txt
+.makepad-rules.txt
+.makepad-names.txt
+.makepad-layouts.txt
 
 # Alternate cargo target directories (cross-checks, gpusim runs, lane
 # verification) live beside the checkout as `target-<name>`; anywhere in the

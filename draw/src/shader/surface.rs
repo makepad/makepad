@@ -212,6 +212,22 @@ script_mod! {
             return sdir * (max(depth, 0.0) / tanel)
         }
 
+        // The blur a shadow can spend inside the margin its quad keeps round
+        // the face: an exponential tail is at an eighth two blur lengths past
+        // the offset the shadow starts at, so that is where the quad's edge
+        // may be. A wider blur would only be cut off there, as a line.
+        blur_fit: fn(blur: float, margin: float, off: float) -> float {
+            return min(blur, max(margin - off, 1.0) * 0.5)
+        }
+
+        // The fade of what a quad holds against its own edge, `edge` points
+        // inside it: over the last quarter of the margin only, where a fitted
+        // tail is already spent, so nothing crosses the edge and no ramp lies
+        // across the shadow itself.
+        window: fn(edge: float, margin: float) -> float {
+            return smoothstep(0.0, max(margin * 0.25, 1.0), edge)
+        }
+
         // What a raised face throws on its ground, as one premultiplied
         // colour to lay UNDER the face: the cast shadow (`d_dark`, the shape
         // read at the pixel moved toward the light), the contact occlusion

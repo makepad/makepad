@@ -977,6 +977,21 @@ impl DrawVars {
             return;
         }
 
+        // An animator state's `snap(..)`: an object standing for the value
+        // it carries. A state the animator plays is resolved before it gets
+        // here, but a state applied as a widget's default (`hover: {default:
+        // @down}`) is handed over as written, and a slot that skipped it
+        // left the widget in the state before.
+        if let Some(obj) = value.as_object() {
+            if heap.has_apply_transform(value) {
+                let carried = heap.value(obj, live_id!(value).into(), NoTrap);
+                if !carried.is_nil() && !carried.is_err() && carried.as_object() != Some(obj) {
+                    Self::write_value_to_f32_slots(heap, carried, output, offset, slots, attr_format);
+                    return;
+                }
+            }
+        }
+
         // Try repr(u32) enum variant objects used by script APIs.
         // These carry the numeric payload in `_repr_u32_enum_value`.
         if let Some(obj) = value.as_object() {

@@ -621,7 +621,7 @@ impl Renderer {
         let shader = if stock.is_some() { self.lane_shaders(cx.cx, super::variants::ModelLane::City, stock).0 } else { None };
         let ready = shader.is_some_and(|id| cx.cx.draw_shader_ready(id, hdr));
         let mut draw = match city.as_deref_mut().filter(|_| ready && city_shader_on()) {
-            Some(c) => { c.city = vec4(night, stream_time, 0.0, 0.0); ModelDraw::City(c) }
+            Some(c) => { c.pbr.skinned.draw_vars.set_uniform(cx.cx, live_id!(city), &[night, stream_time, 0.0, 0.0]); ModelDraw::City(c) }
             None => ModelDraw::Diffuse(diffuse),
         };
         self.draw_stream_with(cx, &mut draw, eye, fog, sun);
@@ -661,12 +661,12 @@ impl Renderer {
         let glow = 1.0 + st.night.max(0.001);
         {
             let b = draw.base();
-            b.ao_enabled = 0.0;
+            b.draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[0.0]);
             b.lm_rect = Vec4f::default();
             b.dl_apply = 0.0;
             b.ground_y = 0.0;
             b.depth_bias = 0.0;
-            b.morph_ctl = Vec4f::default();
+            b.draw_vars.set_uniform(cx.cx, live_id!(morph_ctl), &[0.0, 0.0, 0.0, 0.0]);
             b.prelit = 0.0;
             b.tint = vec4(1.0, 1.0, 1.0, 1.0);
         }
@@ -683,7 +683,7 @@ impl Renderer {
                 draw.base().draw_vars.geometry_id = Some(g.geometry_id());
                 draw.base().draw_vars.set_texture(0, t);
                 draw.base().draw_vars.set_texture(5, d);
-                draw.base().detail_st = vec2f(s[0], s[1]);
+                draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[s[0], s[1]]);
                 draw.set_material(cx.cx, mat);
                 let cut = dither > 0.5 || mat.cutout;
                 draw.submit_as(cx, 0.0, &mut fur_budget, opaque.filter(|_| !cut));

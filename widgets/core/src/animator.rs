@@ -253,6 +253,25 @@ mod reload_tests {
     use super::*;
     use crate::widget_async::MAIN_SPLASH_VM_ID;
 
+    /// A state applied as a widget's default reaches the shader's slots as
+    /// written, `snap(..)` and all: the button's `hover.on` and `hover.down`
+    /// are both written with one, and a slot that skipped it left a button
+    /// built pressed showing rest.
+    #[test]
+    fn a_snap_in_a_default_state_is_written_to_a_shader_slot() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            script_mod(vm);
+            let animator = vm.module(id!(animator));
+            let snap = vm.bx.heap.value(animator, id!(snap).into(), NoTrap);
+            let snapped = vm.call(snap, &[1.0.into()]);
+            assert!(vm.bx.heap.has_apply_transform(snapped), "snap() made no snap object");
+            let mut slots = [0.0f32; 2];
+            DrawVars::write_value_to_f32_slots(&vm.bx.heap, snapped, &mut slots, 1, 1, DrawShaderAttrFormat::Float);
+            assert_eq!(slots, [0.0, 1.0]);
+        });
+    }
+
     #[test]
     fn running_animation_survives_collection_of_replaced_stylesheet() {
         let mut cx = Cx::new(Box::new(|_, _| {}));

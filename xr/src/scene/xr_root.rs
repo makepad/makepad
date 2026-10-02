@@ -83,6 +83,10 @@ pub struct XrCamera {
     pub orbit_last_abs: Option<DVec2>,
     #[rust]
     pub viewport_rect: Option<Rect>,
+    /// The last move was over the viewport, so the pointer wears the
+    /// camera's grab.
+    #[rust]
+    pub pointer_over: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -108,6 +112,7 @@ impl Default for XrCamera {
             orbit_pitch: 0.0,
             orbit_last_abs: None,
             viewport_rect: None,
+            pointer_over: false,
         }
     }
 }
@@ -167,6 +172,13 @@ impl XrCamera {
         self.viewport_rect.is_some_and(|rect| rect.contains(abs))
     }
 
+    /// Orbit and zoom from the desktop pointer, over `viewport_rect`.
+    ///
+    /// The pointer is only the camera's over its own viewport. A move
+    /// anywhere else leaves the cursor to whatever is under it: once the
+    /// pointer has left, it puts back the default only if the cursor still
+    /// wears the camera's grab, so a cursor a control set in the same move -
+    /// a resize edge, a hand - stands.
     pub fn handle_desktop_interaction(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::MouseDown(fe) if self.contains_abs(fe.abs) && fe.button.is_primary() => {
@@ -183,8 +195,11 @@ impl XrCamera {
                     cx.set_cursor(MouseCursor::Grabbing);
                     cx.redraw_all();
                 } else if self.contains_abs(fe.abs) {
+                    self.pointer_over = true;
                     cx.set_cursor(MouseCursor::Grab);
-                } else {
+                } else if std::mem::take(&mut self.pointer_over)
+                    && cx.mouse_cursor() == MouseCursor::Grab
+                {
                     cx.set_cursor(MouseCursor::Default);
                 }
             }
@@ -219,6 +234,7 @@ impl XrCamera {
                 }
             }
             Event::MouseLeave(_) if self.orbit_last_abs.is_none() => {
+                self.pointer_over = false;
                 cx.set_cursor(MouseCursor::Default);
             }
             _ => {}

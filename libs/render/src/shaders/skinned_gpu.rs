@@ -56,6 +56,35 @@ script_mod! {
         lm_world: uniform(vec4(0.0, 0.0, 1.0, 1.0))
         // Decode for top_map: absolute blocked height = x + byte * y.
         lm_top_decode: uniform(vec4(0.0, 8.0, 0.0, 0.0))
+        // ---- per-call and per-part values, off the vertex stream ----
+        // The joint palette already costs this shader a texture and a wide
+        // instance record; with the sun, the fog and the material lanes on
+        // top it asked `vs_5_0` for more than its 32 inputs and failed to
+        // compile, taking every character with it. The sun and fog are
+        // written once per call, before the character loop; the material
+        // values are written per material PART, in the same statements that
+        // bind that part's geometry and textures, so no two characters
+        // sharing a draw item can disagree about any of them.
+        surface_on: uniform(0.0)
+        material_alpha: uniform(1.0)
+        alpha_mode: uniform(0.0)
+        alpha_cutoff: uniform(0.5)
+        normal_scale: uniform(0.0)
+        occlusion_strength: uniform(0.0)
+        double_sided: uniform(0.0)
+        metallic: uniform(0.0)
+        roughness: uniform(1.0)
+        depth_clip: uniform(1.0)
+        fog_density: uniform(0.0)
+        // TRUE world camera position, for the specular lobe.
+        eye: uniform(vec3(0.0, 0.0, 0.0))
+        light_dir: uniform(vec3(0.35, 0.8, 0.45))
+        fog_color: uniform(vec3(0.75, 0.87, 0.96))
+        // Sun terms, written every frame from one [`crate::sun::SunLight`].
+        sun_color: uniform(vec3(0.72, 0.72, 0.72))
+        sun_sky: uniform(vec3(0.28, 0.28, 0.28))
+        sun_ground: uniform(vec3(0.28, 0.28, 0.28))
+        emissive: uniform(vec3(0.0, 0.0, 0.0))
         // xy = ground-region uv, z = in-field gate, w = TRUE world height
         // of the vertex (for the shadow-top comparison).
         v_lmg: varying(vec4f)

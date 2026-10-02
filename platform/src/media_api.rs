@@ -52,7 +52,7 @@ pub trait CxMediaApi {
             index,
             Box::new(move |info, buffer| {
                 fenced.call(info, buffer);
-                crate::audio_output_tap::feed_audio_output_tap(info, buffer);
+                crate::audio_output_tap::feed_audio_output_tap(index, info, buffer);
             }),
         )
     }
@@ -339,10 +339,12 @@ mod tests {
     /// with it, so a recorder loses that buffer and every one after.
     /// Fenced, it is handed the silence and goes on being handed buffers.
     ///
-    /// Taps receive every output, so distinguish this test's device from
-    /// the callbacks other tests can feed concurrently.
+    /// Taps hear output 0, which other tests' callbacks feed too, so this
+    /// test's device is told apart from theirs; and the registry is one per
+    /// process, so it takes the registry's turn.
     #[test]
     fn the_taps_are_handed_the_silence_too_so_a_recording_keeps_its_place() {
+        let _turn = crate::audio_output_tap::serial();
         let tap_info = AudioInfo { device_id: AudioDeviceId(LiveId(12)), ..info() };
         let fed = Arc::new(AtomicUsize::new(0));
         let quiet = Arc::new(AtomicUsize::new(0));
@@ -355,7 +357,8 @@ mod tests {
             if buffer.data.iter().all(|sample| *sample == 0.0) {
                 was_quiet.fetch_add(1, Ordering::SeqCst);
             }
-        });
+        })
+        .expect("a slot for one tap");
         let mut call = seam(0, |_info, buffer| {
             for sample in buffer.data.iter_mut() {
                 *sample = 1.0;

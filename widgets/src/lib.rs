@@ -19,7 +19,7 @@ pub use makepad_widgets_fab::{
 
 #[cfg(feature = "editors")]
 pub use makepad_widgets_editors::{
-    ease_editor, ease_editor::*, gizmo, sequencer, sequencer::*,
+    curve_editor, curve_editor::*, ease_editor, ease_editor::*, gizmo, sequencer, sequencer::*,
 };
 
 #[cfg(feature = "hotkeys")]

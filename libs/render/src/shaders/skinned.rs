@@ -56,6 +56,44 @@ script_mod! {
         // atlas and adding it again would double-light every facade —
         // while dynamic instances (dl_apply = 1) sum everything.
         dl_split: uniform(0.0)
+        // ---- per-frame and per-draw-item values, off the vertex stream ----
+        // These were `#[live]` instance fields until the D3D11 vertex stage
+        // ran out of room: `vs_5_0` takes 32 inputs, two of them the system
+        // values, so the whole shader failed to compile and no model drew on
+        // Windows. Each value below is CONSTANT for one draw item -- the sun,
+        // the fog and the debug switches for a whole frame, the fur recipe,
+        // the morph source and the detail overlay for one layer whose
+        // geometry and textures are bound in the same breath -- so a uniform
+        // says exactly what they are. A uniform difference opens a new draw
+        // item, which is why anything that varies per instance stayed on the
+        // stream. The defaults are the old instance defaults.
+        depth_clip: uniform(1.0)
+        // 1.0 = show the baked light alone (`HostSettings::lm_debug`).
+        lm_debug: uniform(0.0)
+        // 1.0 = show baked AO alone, contrast-stretched (the host's AO
+        // debug setting).
+        ao_debug: uniform(0.0)
+        // 1.0 when this pack has a baked AO atlas bound. Follows the pack and
+        // the LOD, which are what pick the geometry, so it cannot differ
+        // between two instances of one draw item.
+        ao_enabled: uniform(0.0)
+        // Detail overlay UV scale. Zero disables the overlay.
+        detail_st: uniform(vec2(0.0, 0.0))
+        light_dir: uniform(vec3(0.35, 0.8, 0.45))
+        fog_color: uniform(vec3(0.75, 0.87, 0.96))
+        fog_density: uniform(0.0)
+        // Sun terms, written every frame from one [`crate::sun::SunLight`].
+        sun_color: uniform(vec3(0.72, 0.72, 0.72))
+        sun_sky: uniform(vec3(0.28, 0.28, 0.28))
+        sun_ground: uniform(vec3(0.28, 0.28, 0.28))
+        // Fur recipe for this LAYER (length, density, cell scale, seed). The
+        // shell FRACTION is per instance and stays on the stream as
+        // `fur_layer`, since one submit walks a layer's shells.
+        fur: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // Morph source dimensions for this model LOD (width, height, vertex
+        // count, target count): it selects the same `morph_map` texture the
+        // draw item binds. The per-instance weights stay on the stream.
+        morph_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         dl_pos0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         dl_col0: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         dl_pos1: uniform(vec4(0.0, 0.0, 0.0, 0.0))

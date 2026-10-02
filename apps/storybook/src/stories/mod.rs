@@ -20,6 +20,7 @@ pub mod kitchen_sink;
 pub mod foundations;
 pub mod tween;
 pub mod ease_editor;
+pub mod curve_editor;
 pub mod tween_script;
 pub mod motion_path;
 pub mod sequencer;
@@ -42,7 +43,6 @@ pub mod glasspanel;
 pub mod glass_surfaces;
 pub mod glass_controls;
 pub mod surface_material;
-pub mod knob_presets;
 pub mod splash;
 pub mod label;
 pub mod typography;
@@ -157,6 +157,7 @@ pub mod dropzone_states;
 /// needs a template. The templates are script, they cost real time to
 /// evaluate, and only ever one page of them is on screen -- so they wait
 /// until that page is asked for. See [`script_mod`] for why that matters.
+#[derive(Clone, Copy)]
 pub struct StoryModule {
     /// Evaluating this writes the file's templates into `mod.stories`.
     pub script_mod: fn(&mut ScriptVm) -> ScriptValue,
@@ -188,6 +189,7 @@ static FILES: &[StoryModule] = &[
     file(foundations::script_mod, foundations::STORIES),
     file(tween::script_mod, tween::STORIES),
     file(ease_editor::script_mod, ease_editor::STORIES),
+    file(curve_editor::script_mod, curve_editor::STORIES),
     file(tween_script::script_mod, tween_script::STORIES),
     file(motion_path::script_mod, motion_path::STORIES),
     file(sequencer::script_mod, sequencer::STORIES),
@@ -214,7 +216,6 @@ static FILES: &[StoryModule] = &[
     file(glass_controls::script_mod, glass_controls::STORIES),
     file(screen_view::script_mod, screen_view::STORIES),
     file(surface_material::script_mod, surface_material::STORIES),
-    file(knob_presets::script_mod, knob_presets::STORIES),
     file(splash::script_mod, splash::STORIES),
     // 4 Text
     file(label::script_mod, label::STORIES),
@@ -328,9 +329,25 @@ static FILES: &[StoryModule] = &[
     file(chat::script_mod, chat::STORIES),
 ];
 
-/// Every story file, in navigator order.
+/// Story files from outside this crate, added before the app starts: a
+/// storybook built on this one registers its own pages here and they follow
+/// the public ones in the navigator. Set once; a later call is ignored.
+static EXTRA: std::sync::OnceLock<&'static [StoryModule]> = std::sync::OnceLock::new();
+static ALL: std::sync::OnceLock<Vec<StoryModule>> = std::sync::OnceLock::new();
+
+pub fn extend(files: &'static [StoryModule]) {
+    let _ = EXTRA.set(files);
+}
+
+/// Every story file, in navigator order: this crate's, then any added.
 pub fn modules() -> &'static [StoryModule] {
-    FILES
+    ALL.get_or_init(|| {
+        let mut all = FILES.to_vec();
+        if let Some(extra) = EXTRA.get() {
+            all.extend_from_slice(extra);
+        }
+        all
+    })
 }
 
 /// Which story files have been evaluated into this context's script heap.

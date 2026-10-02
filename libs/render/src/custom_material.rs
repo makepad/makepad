@@ -20,10 +20,19 @@ use std::rc::Rc;
 #[repr(C)]
 pub struct DrawSceneCustom {
     #[deref] pub pbr: DrawScenePbr,
-    /// The material's four keyable floats (`self.params` in the hooks).
-    /// The lane's instance stream is at the 31-attribute limit, so this is
-    /// the whole per-draw budget; more data rides textures.
-    #[live(vec4(0.0, 0.0, 0.0, 0.0))] pub params: Vec4f,
+}
+
+impl DrawSceneCustom {
+    /// Set the material's four keyable floats (`self.params` in the hooks).
+    pub fn set_params(&mut self, cx: &Cx, params: Vec4f) {
+        self.pbr.skinned.draw_vars.set_uniform(cx, live_id!(params), &[params.x, params.y, params.z, params.w]);
+    }
+
+    /// The material's four keyable floats as last set.
+    pub fn params(&self, cx: &Cx) -> Vec4f {
+        let p = self.pbr.skinned.uniform_value(cx, live_id!(params));
+        vec4(p[0], p[1], p[2], p[3])
+    }
 }
 
 /// The derived shadow caster: the sun-depth projection with the material's
@@ -41,6 +50,11 @@ script_mod! {
     use mod.prelude.widgets_internal.*
     mod.draw.DrawSceneCustom = mod.std.set_type_default() do #(DrawSceneCustom::script_shader(vm)) {
         ..mod.draw.DrawScenePbr
+        // The material's four keyable floats (`self.params` in the hooks),
+        // the whole per-draw budget; more data rides textures. A uniform: on
+        // the instance stream they took the lane one output register past
+        // what D3D11's `vs_5_0` allows, and they are one per material draw.
+        params: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         surface: fn(base: vec4) -> vec4 { return base }
         // What a hook may read besides its arguments: the clock, the true
         // world position, the mesh uv and the geometric normal.
@@ -202,10 +216,16 @@ impl CustomMaterial {
         !self.plan.builtins.iter().any(|b| matches!(b, Builtin::Unlit | Builtin::Flat | Builtin::Error))
     }
 
+    /// The blend the colour draw is set to (0 opaque, 1 mask, 2 over): a
+    /// uniform of the lane, read back from the draw.
+    pub fn alpha_mode(&self, cx: &Cx) -> f32 {
+        self.draw.pbr.skinned.uniform_value(cx, live_id!(alpha_mode))[0]
+    }
+
     /// Whether no draw of this material cuts a pixel (no hook can discard,
     /// opaque blend): it may draw through the variant without `clip`.
-    pub fn cuts_no_pixel(&self) -> bool {
-        !self.plan.can_discard && self.draw.pbr.alpha_mode == 0.0
+    pub fn cuts_no_pixel(&self, cx: &Cx) -> bool {
+        !self.plan.can_discard && self.alpha_mode(cx) == 0.0
     }
 
     /// The shaders for this frame's `features` (renderer/variants.rs): the
@@ -220,7 +240,7 @@ impl CustomMaterial {
         let features = Features { clip: true, ..features };
         if !self.variants.contains_key(&features) {
             let Some(program) = self.program.clone() else { return (Some(stock), None) };
-            let (lit, opaque) = (self.lit(), self.cuts_no_pixel() && std::env::var_os("MAKEPAD_OPAQUE_VARIANT").is_none_or(|v| v != "0"));
+            let (lit, opaque) = (self.lit(), self.cuts_no_pixel(cx) && std::env::var_os("MAKEPAD_OPAQUE_VARIANT").is_none_or(|v| v != "0"));
             let mut built = None;
             let mut run = |vm: &mut ScriptVm| {
                 // Only against the heap that owns the program.
@@ -319,18 +339,18 @@ impl DrawSceneCustom {
             Ok(draw) => draw,
             Err(e) => return Err(material::diagnose(vm, obj, hooks).err().unwrap_or(e)),
         };
-        draw.params = params;
+        draw.set_params(vm.cx(), params);
         let cutoff = match desc.blend {
             Blend::Mask { cutoff } => cutoff,
             _ => 0.0,
         };
         match desc.blend {
             Blend::Mask { cutoff } => {
-                draw.pbr.alpha_mode = 1.0;
-                draw.pbr.alpha_cutoff = cutoff;
+                draw.pbr.skinned.draw_vars.set_uniform(vm.cx(), live_id!(alpha_mode), &[1.0]);
+                draw.pbr.skinned.draw_vars.set_uniform(vm.cx(), live_id!(alpha_cutoff), &[cutoff]);
             }
             Blend::Over => {
-                draw.pbr.alpha_mode = 2.0;
+                draw.pbr.skinned.draw_vars.set_uniform(vm.cx(), live_id!(alpha_mode), &[2.0]);
                 draw.draw_vars.options.alpha_blend = true;
                 draw.draw_vars.options.depth_write = false;
             }
@@ -468,9 +488,9 @@ mod tests {
             let m = DrawSceneCustom::build(vm, &desc, &hooks, HookMask::ALL, vec4(0.5, 0.0, 0.0, 0.0)).unwrap_or_else(|e| panic!("{e}"));
             assert!(m.draw.draw_vars.can_instance());
             assert_eq!(m.plan.builtins, vec![Builtin::HookedCompose, Builtin::Ibl]);
-            assert!(m.ibl && !m.cuts_no_pixel(), "a surface hook can cut pixels");
+            assert!(m.ibl && !m.cuts_no_pixel(vm.cx()), "a surface hook can cut pixels");
             assert!(m.shadow.is_some(), "displaced, masked caster: {:?}", m.warnings);
-            assert_eq!((m.cutoff, m.draw.pbr.alpha_mode, m.bounds_pad), (0.4, 1.0, 0.05));
+            assert_eq!((m.cutoff, m.alpha_mode(vm.cx()), m.bounds_pad), (0.4, 1.0, 0.05));
             // The same program lowers for every backend, not only Metal.
             let base = vm.bx.heap.type_default_for_id(DrawSceneCustom::script_type_id_static()).unwrap();
             let mut overrides = builtin::overrides(vm, Builtin::HookedCompose);
@@ -490,7 +510,7 @@ mod tests {
             let obj = spec(vm, "test://finish.splash", "finish: fn(c: vec4) -> vec4 { return vec4(c.xyz * 0.5, c.w) }");
             let hooks = HookSet::from_spec(vm, obj, HookMask::ALL).unwrap();
             let m = DrawSceneCustom::build(vm, &MaterialDesc::default(), &hooks, HookMask::ALL, Vec4f::default()).unwrap();
-            assert!(m.cuts_no_pixel(), "no hook can cut");
+            assert!(m.cuts_no_pixel(vm.cx()), "no hook can cut");
             let stock = m.stock_shader().unwrap();
             let program = m.program.as_ref().unwrap().as_object();
             // Every feature on but `clip`, and every feature off: each has
@@ -548,14 +568,14 @@ mod tests {
         with_vm(|vm| {
             let unlit = DrawSceneCustom::unlit(vm, &HookSet::new(), HookMask::ALL, 2.0).unwrap();
             assert_eq!(unlit.plan.builtins, vec![Builtin::Unlit]);
-            assert_eq!(unlit.draw.params.w, 2.0);
+            assert_eq!(unlit.draw.params(vm.cx()).w, 2.0);
             let error = DrawSceneCustom::error_material(vm).unwrap();
             assert!(error.draw.draw_vars.can_instance());
             assert_ne!(error.draw.draw_vars.draw_shader_id, unlit.draw.draw_vars.draw_shader_id);
             let obj = spec(vm, "test://albedo.splash", "surface: fn(base: vec4) -> vec4 { return vec4(base.xyz * 0.5, base.w) }");
             let surface = HookSet::from_spec(vm, obj, HookMask::ALBEDO).unwrap().get(Hook::Surface).unwrap();
             let albedo = DrawSceneCustom::from_surface(vm, surface, vec4(1.0, 2.0, 3.0, 4.0)).unwrap();
-            assert_eq!(albedo.draw.params, vec4(1.0, 2.0, 3.0, 4.0));
+            assert_eq!(albedo.draw.params(vm.cx()), vec4(1.0, 2.0, 3.0, 4.0));
             let stock = DrawSceneCustom::script_new_with_default(vm).draw_vars.draw_shader_id;
             assert_ne!(albedo.draw.draw_vars.draw_shader_id, stock);
             // The unlit programs' variants drop the lighting with the

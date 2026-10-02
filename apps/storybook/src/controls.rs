@@ -69,6 +69,19 @@ script_mod! {
             RowDisabled := ControlRow{
                 value := CheckBox{text: "disabled"}
             }
+            // A curve wants the panel's width, so its name goes over it
+            // rather than beside it.
+            RowCurve := View{
+                width: Fill
+                height: Fit
+                flow: Down
+                spacing: theme.space_1
+                padding: Inset{top: 3. bottom: 6. left: 0. right: 0.}
+                name := Label{text: ""}
+                // The editor is Fit tall round its canvas and toolbar, so the
+                // canvas is what takes the height.
+                value := CurveEditor{width: Fill canvas +: {height: 150.}}
+            }
             // A section heading. The whole row is the click target, and the
             // arrow points right while folded and down while open.
             RowSection := View{
@@ -119,6 +132,8 @@ pub enum ControlValue {
     Choice(usize),
     Text(String),
     Color(u32),
+    /// A curve's anchors, `[x, y, kind]` each.
+    Curve(Vec<[f64; 3]>),
 }
 
 /// One edit the panel raised: which control changed and to what.
@@ -156,6 +171,10 @@ pub fn chunk_for(control: &Control, value: &ControlValue) -> Option<String> {
         (ControlKind::Color { prop, .. }, ControlValue::Color(c)) => {
             let writes: Vec<String> = prop.split_whitespace().map(|p| format!("{p}: #x{c:08X}")).collect();
             Some(format!("{{{}}}", writes.join(" ")))
+        }
+        (ControlKind::Curve { prop, .. }, ControlValue::Curve(anchors)) => {
+            let rows: Vec<String> = anchors.iter().map(|[x, y, k]| format!("[{x:?}, {y:?}, {k:?}]")).collect();
+            Some(format!("{{{prop}: [{}]}}", rows.join(", ")))
         }
         _ => None,
     }
@@ -272,7 +291,8 @@ pub fn prop_of(control: &Control) -> &'static str {
         | ControlKind::Number { prop, .. }
         | ControlKind::Choice { prop, .. }
         | ControlKind::Text { prop, .. }
-        | ControlKind::Color { prop, .. } => prop,
+        | ControlKind::Color { prop, .. }
+        | ControlKind::Curve { prop, .. } => prop,
         ControlKind::Disabled { .. } => "disabled",
         ControlKind::Section { .. } | ControlKind::Preset { .. } => "",
     }
@@ -285,6 +305,7 @@ pub fn default_of(control: &Control) -> ControlValue {
         ControlKind::Choice { default, .. } => ControlValue::Choice(*default),
         ControlKind::Text { default, .. } => ControlValue::Text(default.to_string()),
         ControlKind::Color { default, .. } => ControlValue::Color(*default),
+        ControlKind::Curve { default, .. } => ControlValue::Curve(default.to_vec()),
         ControlKind::Disabled { default } => ControlValue::Bool(*default),
         ControlKind::Section { open } => ControlValue::Bool(*open),
         ControlKind::Preset { default, .. } => ControlValue::Choice(*default),
@@ -406,6 +427,7 @@ impl ControlsPanel {
             ControlKind::Choice { .. } | ControlKind::Preset { .. } => live_id!(RowChoice),
             ControlKind::Text { .. } => live_id!(RowText),
             ControlKind::Color { .. } => live_id!(RowColor),
+            ControlKind::Curve { .. } => live_id!(RowCurve),
             ControlKind::Disabled { .. } => live_id!(RowDisabled),
             ControlKind::Section { .. } => live_id!(RowSection),
         }
@@ -444,6 +466,25 @@ impl ControlsPanel {
                 script_apply_eval!(cx, swatch, {
                     draw_bg +: {color: #(color)}
                 });
+            }
+            (ControlKind::Curve { left, right, guide, guide_label, mirror, .. }, ControlValue::Curve(anchors)) => {
+                // The dressing first: an apply that brings no `anchors`
+                // leaves the editor's curve alone, and the curve goes in
+                // after it. Below 0 is the editor's "no guide".
+                let mut editor = item.widget(cx, ids!(value));
+                let (left, right, mirror) = (*left, *right, *mirror);
+                let (guide, guide_label) = match guide {
+                    Some(y) => (*y, *guide_label),
+                    None => (-1.0, ""),
+                };
+                script_apply_eval!(cx, editor, {
+                    left_label: #(left)
+                    right_label: #(right)
+                    guide: #(guide)
+                    guide_label: #(guide_label)
+                    mirror: #(mirror)
+                });
+                item.curve_editor(cx, ids!(value)).set_anchors(cx, anchors);
             }
             (ControlKind::Section { .. }, ControlValue::Bool(open)) => {
                 let mut arrow = item.widget(cx, ids!(arrow));
@@ -536,6 +577,18 @@ impl Widget for ControlsPanel {
                     .returned(actions)
                     .and_then(|(t, _)| parse_color(&t))
                     .map(ControlValue::Color),
+                ControlKind::Curve { .. } => {
+                    // A drag sends every step, and its release a commit that
+                    // is most often the curve the last step sent: that one
+                    // is not sent twice. The row keeps what the editor
+                    // shows; only a value from outside fills it again.
+                    let editor = item.curve_editor(cx, ids!(value));
+                    editor
+                        .changed(actions)
+                        .or_else(|| editor.committed(actions))
+                        .map(ControlValue::Curve)
+                        .filter(|curve| self.values.get(index) != Some(curve))
+                }
                 ControlKind::Section { .. } => {
                     // A press the list took away as a scroll folds nothing.
                     if item
@@ -663,6 +716,130 @@ mod tests {
             chunk_for(&face, &ControlValue::Color(0x0E1013FF)).unwrap(),
             "{draw_bg.color: #x0E1013FF draw_bg.color_hover: #x0E1013FF}"
         );
+        let curve = profile("Profile", "prof");
+        let anchors = vec![[0.0, 1.0, 1.0], [0.5, 0.5, 2.0], [1.0, 0.0, 1.0]];
+        assert_eq!(
+            chunk_for(&curve, &ControlValue::Curve(anchors.clone())).unwrap(),
+            "{prof: [[0.0, 1.0, 1.0], [0.5, 0.5, 2.0], [1.0, 0.0, 1.0]]}"
+        );
+        // A curve is no lane: it writes itself, whole.
+        let written = write_for(std::slice::from_ref(&curve), &[ControlValue::Curve(anchors)], 0);
+        assert_eq!(
+            written,
+            Some(("prof".to_string(), "{prof: [[0.0, 1.0, 1.0], [0.5, 0.5, 2.0], [1.0, 0.0, 1.0]]}".to_string()))
+        );
+        assert_eq!(default_of(&curve), ControlValue::Curve(LINE.to_vec()));
+        // Neither a curve for another kind nor another kind for a curve.
+        assert_eq!(chunk_for(&curve, &ControlValue::Number(1.0)), None);
+        assert_eq!(chunk_for(&num, &ControlValue::Curve(LINE.to_vec())), None);
+    }
+
+    const LINE: [[f64; 3]; 2] = [[0.0, 1.0, 1.0], [1.0, 0.0, 1.0]];
+
+    /// A curve control on the subject that opens on [`LINE`].
+    const fn profile(label: &'static str, prop: &'static str) -> Control {
+        Control {
+            label,
+            target: "",
+            kind: ControlKind::Curve {
+                prop,
+                default: &LINE,
+                left: "CENTRE",
+                right: "SKIRT RIM",
+                guide: Some(0.5),
+                guide_label: "CAP TOP",
+                mirror: true,
+            },
+        }
+    }
+
+    /// A panel built from its template, as the app builds it.
+    fn panel(cx: &mut Cx) -> WidgetRef {
+        cx.with_vm(|vm| {
+            crate::theme::widgets_script_mod(vm);
+            crate::shell::script_mod(vm);
+            super::script_mod(vm);
+            let storybook = vm.module(id!(storybook));
+            let value = vm.bx.heap.value(
+                storybook,
+                id!(ControlsPanel).into(),
+                crate::makepad_widgets::makepad_script::trap::NoTrap,
+            );
+            assert!(value.as_object().is_some(), "no ControlsPanel template");
+            WidgetRef::script_from_value(vm, value)
+        })
+    }
+
+    /// A curve row builds from its template with no error, and filling it
+    /// names it and hands its editor the curve.
+    #[test]
+    fn a_curve_row_fills_its_editor() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let panel = panel(&mut cx);
+        let control = profile("Profile", "prof");
+        let anchors = vec![[0.0, 1.0, 2.0], [0.3, 0.8, 1.0], [0.6, 0.4, 3.0], [1.0, 0.0, 0.0]];
+        cx.with_vm(|vm| vm.bx.captured_errors = Some(Vec::new()));
+        let row = panel.portal_list(&mut cx, ids!(list)).item(&mut cx, 0, live_id!(RowCurve));
+        assert!(!row.is_empty(), "no RowCurve template");
+        let inner = panel.borrow::<ControlsPanel>().expect("a ControlsPanel");
+        inner.fill_row(&mut cx, &row, &control, &ControlValue::Curve(anchors.clone()));
+        drop(inner);
+        let errors = cx.with_vm(|vm| vm.take_errors());
+        assert!(errors.is_empty(), "the curve row did not build and fill cleanly: {errors:?}");
+        assert_eq!(row.label(&cx, ids!(name)).text(), "Profile");
+        assert_eq!(row.curve_editor(&cx, ids!(value)).anchors(), anchors);
+    }
+
+    /// A curve moves by label and by preset like any other control: every
+    /// control of its label takes the curve, and each writes it.
+    #[test]
+    fn a_curve_moves_by_label_and_by_preset() {
+        static CONTROLS: [Control; 4] = [
+            Control {
+                label: "Shape",
+                target: "",
+                kind: ControlKind::Preset { options: &["Line", "Bend"], default: 0, values: bend },
+            },
+            profile("Profile", "prof"),
+            Control { label: "Depth", target: "", kind: ControlKind::Number { prop: "depth", min: 0., max: 1., step: 0.1, default: 0. } },
+            profile("Profile", "prof_too"),
+        ];
+        fn bend(option: usize) -> Vec<(&'static str, ControlValue)> {
+            let curve = if option == 1 { vec![[0.0, 1.0, 1.0], [0.4, 0.9, 2.0], [1.0, 0.0, 1.0]] } else { LINE.to_vec() };
+            vec![("Profile", ControlValue::Curve(curve)), ("Depth", ControlValue::Number(option as f64))]
+        }
+        let story = Story {
+            key: "a/b/c",
+            category: "A",
+            component: "B",
+            also: &[],
+            name: "C",
+            dsl: "X",
+            added: "2026-09-27",
+            tags: &[],
+            doc: "",
+            subject: "",
+            feature: None,
+            controls: &CONTROLS,
+            on_actions: None,
+        };
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let panel = panel(&mut cx);
+        let mut inner = panel.borrow_mut::<ControlsPanel>().expect("a ControlsPanel");
+        inner.set_story(&mut cx, &story);
+        assert_eq!(visible_rows(&CONTROLS, &inner.values), vec![0, 1, 2], "two curves of one label are one row");
+
+        let bent = bend(1)[0].1.clone();
+        let changes = inner.preset_changes(0, 1);
+        assert_eq!(changes, vec![(1, bent.clone()), (3, bent), (2, ControlValue::Number(1.0))]);
+
+        let curve = vec![[0.0, 0.5, 0.0], [1.0, 0.5, 0.0]];
+        inner.set_by_label(&mut cx, "Profile", ControlValue::Curve(curve.clone()));
+        assert_eq!(inner.values[1], ControlValue::Curve(curve.clone()));
+        assert_eq!(inner.values[3], ControlValue::Curve(curve));
+        assert!(!inner.synced[1] && !inner.synced[3], "a curve set from outside fills its row again");
+        let writes: Vec<String> = [1, 3].iter().filter_map(|&i| write_for(&CONTROLS, &inner.values, i)).map(|(_, c)| c).collect();
+        assert_eq!(writes, vec!["{prof: [[0.0, 0.5, 0.0], [1.0, 0.5, 0.0]]}", "{prof_too: [[0.0, 0.5, 0.0], [1.0, 0.5, 0.0]]}"]);
     }
 
     /// Nothing a sheet sets reaches the panel: under a sheet that sets

@@ -943,7 +943,8 @@ impl App {
         let widget = self.ui.widget(cx, &[id]);
         let action = actions.find_widget_action(widget.widget_uid())?;
         match action.cast() {
-            SliderAction::TextSlide(v) | SliderAction::Slide(v) | SliderAction::EndSlide(v) => {
+            SliderAction::TextSlide(v) | SliderAction::Slide(v) | SliderAction::EndSlide(v)
+            | SliderAction::Reset(v) => {
                 Some(v)
             }
             _ => None,

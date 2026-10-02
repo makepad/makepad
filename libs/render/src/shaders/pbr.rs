@@ -48,6 +48,32 @@ script_mod! {
         // dynamic lights already use.
         eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
 
+        // ---- this layer's material, off the vertex stream ----
+        // Set once per layer by `ModelDraw::set_material`, in the same breath
+        // that binds that layer's geometry, ORM/normal/occlusion/emissive maps
+        // and blend options, so one draw item never holds two materials and a
+        // uniform is what they always were. They rode the instance stream
+        // until the base and material payload passed the 32-input `vs_5_0`
+        // limit and the lane stopped compiling on D3D11.
+        // glTF `metallicFactor`, multiplied by the ORM map's B channel.
+        metallic: uniform(0.0)
+        // glTF `roughnessFactor`, multiplied by the ORM map's G channel.
+        roughness: uniform(1.0)
+        // 1.0 when a metallicRoughness texture is bound on slot 6. Zero folds
+        // the sample out of both products, so a factors-only material costs
+        // one 1x1 fetch and nothing else.
+        orm_on: uniform(0.0)
+        surface_on: uniform(0.0)
+        material_alpha: uniform(1.0)
+        alpha_mode: uniform(0.0)
+        alpha_cutoff: uniform(0.5)
+        normal_scale: uniform(0.0)
+        occlusion_strength: uniform(0.0)
+        emissive: uniform(vec3(0.0, 0.0, 0.0))
+        double_sided: uniform(0.0)
+        // Triplanar UV scale (1/metres), 0 = mesh UVs (MaterialSurface).
+        triplanar: uniform(0.0)
+
         // The material hooks (makepad-render-material). Each stock body
         // returns its input, so the stock lane draws exactly as before and a
         // custom material (custom_material.rs) replaces only what it hooks.

@@ -408,41 +408,65 @@ impl ModelDraw<'_> {
     }
 
     /// Add light a copy gives off to the layer's emission (the PBR lane's;
-    /// the diffuse lane has none).
-    pub(super) fn add_emission(&mut self, e: Vec3f) {
+    /// the diffuse lane has none). Emission is a uniform, so a glowing copy
+    /// draws as an item of its own.
+    pub(super) fn add_emission(&mut self, cx: &Cx, e: Vec3f) {
         if let Some(d) = self.pbr() {
-            d.emissive = d.emissive + e;
+            let was = d.skinned.uniform_value(cx, live_id!(emissive));
+            d.skinned.draw_vars.set_uniform(cx, live_id!(emissive), &[was[0] + e.x, was[1] + e.y, was[2] + e.z]);
         }
     }
 
     /// Bind one layer's metallic-roughness. A no-op on the diffuse lane,
     /// which has no such lanes to bind — that is the whole reason the two
     /// shaders are siblings.
+    ///
+    /// The material values, the fur recipe and the morph source are the
+    /// shader's UNIFORMS, not instance lanes: the vertex stage ran out of
+    /// D3D11 input registers (`vs_5_0` allows 32), and a layer is exactly one
+    /// draw item -- its geometry and its textures are bound in the same
+    /// breath -- so a uniform states what they always were.
     pub(super) fn set_material(&mut self, cx: &Cx, m: &LayerMaterial) {
-        self.base().fur = Default::default();
+        let mut fur = Vec4f::default();
         self.base().fur_layer.x = 0.0;
         // Wind rides the morph lanes (morph_ctl.w = -1, draw_models sets it
         // after this call for foliage layers); every other draw sways nothing.
-        if self.base().morph_ctl.w < 0.0 { self.base().morph_ctl = Vec4f::default(); }
+        if self.base().uniform_value(cx, live_id!(morph_ctl))[3] < 0.0 {
+            self.base().draw_vars.set_uniform(cx, live_id!(morph_ctl), &[0.0, 0.0, 0.0, 0.0]);
+        }
         self.base().tex_mag = vec2f(if m.mag_nearest { 1.0 } else { 0.0 }, 0.0);
         if let Some(d) = self.pbr() {
-            d.metallic = m.metallic;
-            d.roughness = m.roughness;
-            d.orm_on = if m.orm_on { 1.0 } else { 0.0 };
-            d.surface_on=if m.surface.is_some(){1.0}else{0.0};
-            d.material_alpha=1.0;d.alpha_mode=0.0;d.alpha_cutoff=0.5;d.normal_scale=0.0;d.occlusion_strength=0.0;d.emissive=vec3f(0.0,0.0,0.0);d.double_sided=0.0;d.triplanar=0.0;
+            let surface_on = if m.surface.is_some() { 1.0 } else { 0.0 };
+            let (mut material_alpha, mut alpha_mode, mut alpha_cutoff) = (1.0f32, 0.0f32, 0.5f32);
+            let (mut normal_scale, mut occlusion_strength) = (0.0f32, 0.0f32);
+            let (mut emissive, mut double_sided, mut triplanar) = (vec3f(0.0, 0.0, 0.0), 0.0f32, 0.0f32);
             d.skinned.draw_vars.options.alpha_blend=false;d.skinned.draw_vars.options.depth_write=true;d.skinned.draw_vars.options.backface_culling=true;
             if let Some(surface)=&m.surface {
                 let definition=&surface.definition;
-                d.skinned.fur = crate::material_surface::fur_params(definition.fur);
-                d.material_alpha=definition.base_alpha;d.alpha_mode=definition.alpha_mode as f32;d.alpha_cutoff=definition.alpha_cutoff;
-                d.triplanar=definition.triplanar;
+                fur = crate::material_surface::fur_params(definition.fur);
+                material_alpha=definition.base_alpha;alpha_mode=definition.alpha_mode as f32;alpha_cutoff=definition.alpha_cutoff;
+                triplanar=definition.triplanar;
                 // Race paint in the spare tex_mag lane (shaders.rs DrawSceneSkinned).
                 d.skinned.tex_mag.y=definition.packed_shading();
                 // A number plate: tex_mag.x = 2 selects the per-copy digit remap.
-                if definition.plate { d.skinned.tex_mag.x = 2.0; }d.normal_scale=definition.normal_scale;d.occlusion_strength=definition.occlusion_strength;d.emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);d.double_sided=if definition.double_sided{1.0}else{0.0};
+                if definition.plate { d.skinned.tex_mag.x = 2.0; }
+                normal_scale=definition.normal_scale;occlusion_strength=definition.occlusion_strength;
+                emissive=vec3f(definition.emissive[0],definition.emissive[1],definition.emissive[2]);double_sided=if definition.double_sided{1.0}else{0.0};
                 d.skinned.draw_vars.options.alpha_blend=definition.alpha_mode==2;d.skinned.draw_vars.options.depth_write=definition.alpha_mode!=2;d.skinned.draw_vars.options.backface_culling=!definition.double_sided;
             }
+            let vars = &mut d.skinned.draw_vars;
+            vars.set_uniform(cx, live_id!(metallic), &[m.metallic]);
+            vars.set_uniform(cx, live_id!(roughness), &[m.roughness]);
+            vars.set_uniform(cx, live_id!(orm_on), &[if m.orm_on { 1.0 } else { 0.0 }]);
+            vars.set_uniform(cx, live_id!(surface_on), &[surface_on]);
+            vars.set_uniform(cx, live_id!(material_alpha), &[material_alpha]);
+            vars.set_uniform(cx, live_id!(alpha_mode), &[alpha_mode]);
+            vars.set_uniform(cx, live_id!(alpha_cutoff), &[alpha_cutoff]);
+            vars.set_uniform(cx, live_id!(normal_scale), &[normal_scale]);
+            vars.set_uniform(cx, live_id!(occlusion_strength), &[occlusion_strength]);
+            vars.set_uniform(cx, live_id!(emissive), &[emissive.x, emissive.y, emissive.z]);
+            vars.set_uniform(cx, live_id!(double_sided), &[double_sided]);
+            vars.set_uniform(cx, live_id!(triplanar), &[triplanar]);
             if let Some(id)=d.skinned.draw_vars.draw_shader_id {
                 for (name,texture) in [(live_id!(normal_map),m.surface.as_ref().map(|s|&s.normal)),(live_id!(occlusion_map),m.surface.as_ref().map(|s|&s.occlusion)),(live_id!(emissive_map),m.surface.as_ref().map(|s|&s.emissive))] {
                     if let Some(slot)=cx.draw_shaders[id.index].mapping.textures.iter().position(|t|t.id==name).filter(|slot|*slot<d.skinned.draw_vars.texture_slots.len()){d.skinned.draw_vars.set_texture(slot,texture.unwrap_or(&m.orm));}
@@ -459,6 +483,9 @@ impl ModelDraw<'_> {
                 }
             }
         }
+        // One recipe per layer: only the shell FRACTION differs between the
+        // instances a layer emits, and that stays on the instance stream.
+        self.base().draw_vars.set_uniform(cx, live_id!(fur), &[fur.x, fur.y, fur.z, fur.w]);
     }
 
     pub(super) fn submit(&mut self, cx: &mut Cx3d, distance: f32, fur_budget: &mut usize) -> usize {
@@ -472,7 +499,8 @@ impl ModelDraw<'_> {
         let draw = self.base();
         if !draw.draw_vars.can_instance() { return 0; }
         let triangles = draw.draw_vars.geometry_id.map_or(0, |id| cx.cx.geometries[id].indices.len() / 3);
-        let shells = crate::material_surface::fur_shell_count(draw.fur.x, &draw.transform, distance, triangles, fur_budget);
+        let fur_length = draw.uniform_value(cx.cx, live_id!(fur))[0];
+        let shells = crate::material_surface::fur_shell_count(fur_length, &draw.transform, distance, triangles, fur_budget);
         let stock = draw.draw_vars.draw_shader_id;
         for layer in 0..=shells {
             draw.fur_layer.x = layer as f32 / shells.max(1) as f32;

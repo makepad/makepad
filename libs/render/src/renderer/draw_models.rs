@@ -418,18 +418,21 @@ impl Renderer {
                 if let Some(name) = custom_name.as_deref() {
                     if wanted_custom.map(|m| m.name.as_str()) != Some(name) { continue; }
                     if let (ModelDraw::Custom(_, d), Some(material)) = (&mut draw, wanted_custom) {
-                        d.draw.params = material.params;
+                        d.draw.set_params(cx.cx, material.params);
                     }
                 } else if wanted_custom.is_some() || sways != foliage_lane || (!foliage_lane && uses_pbr_lane != pbr_lane) {
                     continue;
                 }
                 // Hoisted: `loaded` borrows self, and the per-instance light
                 // block below needs `&mut self` (cell hysteresis).
-                draw.base().morph_ctl=Vec4f::default();
+                // Per draw item: the morph source belongs to this model LOD, the
+                // same `loaded` that picks the geometry and binds `morph_map`.
+                // The per-instance weights stay on the instance stream.
+                draw.base().draw_vars.set_uniform(cx.cx,live_id!(morph_ctl),&[0.0,0.0,0.0,0.0]);
                 if let Some(morph)=&loaded.morph{
                     let target=match lane{WorldModelLane::Placed=>ModelTarget::Instance(i),WorldModelLane::Attachment=>ModelTarget::Attachment(i)};
                     let weights=self.model_anim_state.morph_weights(&target,&inst.model,&morph.source);
-                    draw.base().morph_ctl=vec4(morph.source.width as f32,morph.source.height as f32,morph.source.vertices as f32,morph.source.targets as f32);
+                    draw.base().draw_vars.set_uniform(cx.cx,live_id!(morph_ctl),&[morph.source.width as f32,morph.source.height as f32,morph.source.vertices as f32,morph.source.targets as f32]);
                     draw.base().morph_weights0=vec4(weights[0],weights[1],weights[2],weights[3]);
                     draw.base().morph_weights1=vec4(weights[4],weights[5],weights[6],weights[7]);
                     draw.base().morph_weights2=vec4(weights[8],weights[9],weights[10],weights[11]);
@@ -502,10 +505,10 @@ impl Renderer {
                 let ao_tex = ao_at.map(|k| &self.ao_textures[k].1);
                 if let Some(t) = ao_tex.filter(|_|lod_index==0) {
                     draw.base().draw_vars.set_texture(1, t);
-                    draw.base().ao_enabled = 1.0;
+                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[1.0]);
                     stats.ao_bound += (layer_pass == 0) as u64;
                 } else {
-                    draw.base().ao_enabled = 0.0;
+                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(ao_enabled), &[0.0]);
                     stats.ao_missing += (layer_pass == 0) as u64;
                 }
                 draw.base().transform = inst.transform;
@@ -604,7 +607,7 @@ impl Renderer {
                     draw.base().draw_vars.geometry_id = Some(*geometry_id);
                     draw.base().draw_vars.set_texture(0, texture);
                     draw.base().draw_vars.set_texture(5, detail);
-                    draw.base().detail_st = vec2f(dscale[0], dscale[1]);
+                    draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);
                     // An IBL material reads its environment on the detail slot.
                     if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
                     draw.base().prelit = if prelit { 1.0 } else { 0.0 };
@@ -612,7 +615,7 @@ impl Renderer {
                     // A world item's copy may glow on its own (items.rs).
                     if matches!(lane, WorldModelLane::Placed) {
                         if let Some(e) = i.checked_sub(instances.len().saturating_sub(self.items.appended)).and_then(|k| self.items.glow.get(k)).filter(|e| e.x + e.y + e.z > 0.0) {
-                            draw.add_emission(*e);
+                            draw.add_emission(cx.cx, *e);
                         }
                     }
                     // A far stand-in's cards in the foliage lane skip the
@@ -626,8 +629,9 @@ impl Renderer {
                         let d = &s.definition;
                         let flutter = if d.alpha_mode == 1 { d.wind * 0.035 } else { 0.0 };
                         // A morphing model never sways (the lanes are shared).
-                        if draw.base().morph_ctl.w < 0.5 {
-                            draw.base().morph_ctl.w = -1.0;
+                        let morph_ctl = draw.base().uniform_value(cx.cx, live_id!(morph_ctl));
+                        if morph_ctl[3] < 0.5 {
+                            draw.base().draw_vars.set_uniform(cx.cx, live_id!(morph_ctl), &[morph_ctl[0], morph_ctl[1], morph_ctl[2], -1.0]);
                             draw.base().morph_weights0 = vec4(d.wind * 0.35, inv_height, self.sky_time, flutter);
                         }
                     }
@@ -703,7 +707,7 @@ impl Renderer {
                         draw.base().draw_vars.geometry_id = Some(*geometry_id);
                         draw.base().draw_vars.set_texture(0, texture);
                         draw.base().draw_vars.set_texture(5, detail);
-                        draw.base().detail_st = vec2f(dscale[0], dscale[1]);
+                        draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);
                         // An IBL material reads its environment on the detail slot.
                         if let ModelDraw::Custom(_, m) = &mut draw { if let Some(t) = m.texture.clone() { m.draw.draw_vars.set_texture(5, &t); } else if let (true, Some(t)) = (m.ibl, self.ibl_texture()) { m.draw.draw_vars.set_texture(5, t); } }
                         draw.base().prelit = if prelit { 1.0 } else { 0.0 };
@@ -745,18 +749,19 @@ impl Renderer {
         let pbr_lane = draw.is_pbr();
         self.clustered.bind(cx.cx, &mut draw.base().draw_vars, self.clustered_enabled);
         self.gi.bind(cx.cx, &mut draw.base().draw_vars);
+        // Sun, fog and the debug switches, once for the whole lane. They are
+        // uniforms rather than instance lanes -- the vertex stage ran out of
+        // D3D11 input registers -- which is also what they describe: one
+        // frame has one sun and one fog, whatever draws under them.
         {
-            let draw = draw.base();
-            sun.write_into(
-                &mut draw.light_dir,
-                &mut draw.sun_color,
-                &mut draw.sun_sky,
-                &mut draw.sun_ground,
-            );
-            draw.fog_color = fog.0;
-            draw.fog_density = fog.1;
-            draw.depth_clip = 1.0;
-            draw.lm_debug = self.lm_debug;
+            let lm_debug = self.lm_debug;
+            let vars = &mut draw.base().draw_vars;
+            sun.write_uniforms(cx.cx, vars);
+            vars.set_uniform(cx.cx, live_id!(light_dir), &[sun.dir.x, sun.dir.y, sun.dir.z]);
+            vars.set_uniform(cx.cx, live_id!(fog_color), &[fog.0.x, fog.0.y, fog.0.z]);
+            vars.set_uniform(cx.cx, live_id!(fog_density), &[fog.1]);
+            vars.set_uniform(cx.cx, live_id!(depth_clip), &[1.0]);
+            vars.set_uniform(cx.cx, live_id!(lm_debug), &[lm_debug]);
         }
         // Shading space, once for the whole lane: written before anything
         // binds, so every draw item of the frame reads the same value.

@@ -54,6 +54,8 @@ script_mod! {
             disabled: instance(0.0)
             /** loading mix: fades the label out under the spinner 0..1 step 0.01 */
             loading: instance(0.0)
+            /** latched mix: the label of a button shown on, lit as a held one is 0..1 step 0.01 */
+            active: instance(0.0)
 
             // A button face is a box with one line of text in it: center the
             // ink, not the line box, or the label reads as sitting high.
@@ -84,8 +86,8 @@ script_mod! {
             material_glow_ink: uniform(theme.color_material_glow)
 
             /** ink mix order: focus, hover, down, disabled; lit toward the
-             * glow ink while held under an illuminating material; then
-             * faded out while loading */
+             * glow ink while held or latched under an illuminating
+             * material; then faded out while loading */
             get_color: fn() {
                 let ink = self.color
                     .mix(self.color_focus, self.focus)
@@ -95,7 +97,7 @@ script_mod! {
                 // Lit ink is one mix on a value already computed once per
                 // pixel: the glow's halo comes from the face, never from
                 // sampling the glyph again.
-                let lit = self.material_ink_glow * self.down * (1.0 - self.disabled)
+                let lit = self.material_ink_glow * max(self.down, self.active) * (1.0 - self.disabled)
                 let glow = self.material_glow_ink.rgb * self.material_ink_lift
                 return vec4(mix(ink.rgb, glow, lit), ink.a * (1.0 - self.loading))
             }
@@ -120,6 +122,8 @@ script_mod! {
             disabled: instance(0.0)
             /** loading mix: fades the spinner arc in over the face 0..1 step 0.01 */
             loading: instance(0.0)
+            /** latched mix: a button shown on, as a toggle holds it. Under a material it stays where a press leaves it and keeps the light a press gives it; without one it draws nothing 0..1 step 0.01 */
+            active: instance(0.0)
             /** the spinner's clock, ramped 0..1 once a second by the time track 0..1 step 0.01 */
             anim_time: instance(0.0)
 
@@ -302,10 +306,16 @@ script_mod! {
              * of it the cap only DEEPENS, near zero the glow carries the
              * press; disabled moulds it flat into the ground, which also
              * takes its shadow away. hover stays at 1 while held, so a held
-             * face starts from its lifted height. */
+             * face starts from its lifted height. A latched face is a held
+             * one the pointer has left. */
             material_elev: fn() -> float {
                 let raise = self.material_relief.z
-                return (raise + raise * 0.25 * self.hover + self.down * self.material_press) * (1.0 - self.disabled)
+                return (raise + raise * 0.25 * self.hover + self.material_held() * self.material_press) * (1.0 - self.disabled)
+            }
+
+            /** how far the face is held: by a press, or by a latch */
+            material_held: fn() -> float {
+                return max(self.down, self.active)
             }
 
             /** signed distance to the face box with its four corner radii,
@@ -354,7 +364,7 @@ script_mod! {
                 let off = Material.cast_offset(elev, self.material_light)
                 // A shadow wider than the margin it falls into would only be
                 // cut off: its blur stays within reach of the quad's edge.
-                let sh = vec4(self.material_shadow.x, min(self.material_shadow.y, max(m, 1.0) * 1.2), self.material_shadow.z, self.material_shadow.w)
+                let sh = vec4(self.material_shadow.x, Material.blur_fit(self.material_shadow.y, m, length(off)), self.material_shadow.z, self.material_shadow.w)
                 var under = Material.cast(
                     d,
                     self.material_sd(p - off, c, h, r_tl, r_tr, r_br, r_bl),
@@ -366,13 +376,13 @@ script_mod! {
                 // The halo of a held face under an illuminating material.
                 let glow = self.material_inner.w
                 if glow > 0.001 {
-                    let a3 = clamp(Material.tail(d, glow * 26.0, sh.z) * glow, 0.0, 1.0) * 0.85 * self.down * (1.0 - self.disabled)
+                    let a3 = clamp(Material.tail(d, glow * 26.0, sh.z) * glow, 0.0, 1.0) * 0.85 * self.material_held() * (1.0 - self.disabled)
                     under = vec4(self.material_glow_ink.rgb * a3, a3) + under * (1.0 - a3)
                 }
                 let qc = self.rect_size * 0.5
                 let rq = min((r_tl + r_tr + r_br + r_bl) * 0.5 + m, min(qc.x, qc.y))
                 let edge = -Material.sd_box(p, qc, qc, rq)
-                return under * smoothstep(0.0, max(m, 1.0), edge)
+                return under * Material.window(edge, m)
             }
 
             /** the face lit by the material: convex at rest, dished as far
@@ -401,7 +411,7 @@ script_mod! {
                 )
                 let glow = self.material_inner.w
                 if glow > 0.001 {
-                    o = mix(o, self.material_glow_ink.rgb, min(glow * 1.6, 1.0) * 0.72 * self.down * (1.0 - self.disabled))
+                    o = mix(o, self.material_glow_ink.rgb, min(glow * 1.6, 1.0) * 0.72 * self.material_held() * (1.0 - self.disabled))
                 }
                 return vec4(o, fill.a)
             }
