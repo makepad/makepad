@@ -339,9 +339,14 @@ impl<'a> ScriptVm<'a> {
             return;
         }
         if let Some(obj) = object.as_object() {
-            if let (Some(trace), Some(key)) = (&mut self.bx.literal_trace, field.as_id()) {
-                let ip = self.bx.threads.cur_ref().trap.ip;
-                trace.field_reads.insert((obj, key, ip.body, ip.index));
+            if self.bx.literal_trace.is_some() {
+                if let Some(key) = field.as_id() {
+                    let ip = self.bx.threads.cur_ref().trap.ip;
+                    let made = self.bx.heap.made_at(obj);
+                    if let Some(trace) = &mut self.bx.literal_trace {
+                        trace.field_reads.insert((made, key, ip.body, ip.index));
+                    }
+                }
             }
             let value = self
                 .bx

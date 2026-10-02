@@ -264,10 +264,12 @@ pub struct LoadTrace {
     /// The names the load read, and where (body, instruction): a `let`
     /// read while loading may have been copied away.
     pub name_reads: std::collections::HashSet<(crate::makepad_live_id::LiveId, u16, u32)>,
-    /// The record fields the load read (`look.BONE`) and where (the FIELD
-    /// instruction): a value read out of a record while loading may have
-    /// been copied away.
-    pub field_reads: std::collections::HashSet<(crate::value::ScriptObject, crate::makepad_live_id::LiveId, u16, u32)>,
+    /// The record fields the load read (`look.BONE`): where the record
+    /// was made, the field, and where it was read (the FIELD instruction).
+    /// A value read out of a record while loading may have been copied
+    /// away. (The record by where it was made: the record itself may be
+    /// collected after the load.)
+    pub field_reads: std::collections::HashSet<(crate::value::ScriptIp, crate::makepad_live_id::LiveId, u16, u32)>,
 }
 
 impl crate::vm::ScriptVm<'_> {
