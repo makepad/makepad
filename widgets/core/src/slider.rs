@@ -4,7 +4,8 @@ use crate::{
     makepad_draw::*,
     text_input::{TextInput, TextInputAction},
     widget::*,
-    widget_async::ScriptAsyncResult,
+    widget_async::{CxWidgetToScriptCallExt, ScriptAsyncResult},
+    makepad_draw::makepad_platform::makepad_script::ScriptFnRef,
 };
 
 script_mod! {
@@ -2466,6 +2467,13 @@ pub struct Slider {
     #[live(DragAxis::Horizontal)]
     pub axis: DragAxis,
 
+    /// Called (from script) with the value on each step of a slide, and
+    /// at its end.
+    #[live]
+    on_change: ScriptFnRef,
+    #[live]
+    on_commit: ScriptFnRef,
+
     #[layout]
     layout: Layout,
     #[apply_default]
@@ -2605,6 +2613,18 @@ pub enum SliderAction {
 }
 
 impl Slider {
+    fn emit_slide(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        let value = self.to_external();
+        cx.widget_action(uid, SliderAction::Slide(value));
+        cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_change.clone(), &[ScriptValue::from_f64(value)]);
+    }
+
+    fn emit_end_slide(&mut self, cx: &mut Cx, uid: WidgetUid) {
+        let value = self.to_external();
+        cx.widget_action(uid, SliderAction::EndSlide(value));
+        cx.widget_to_script_call(uid, NIL, self.source.clone(), self.on_commit.clone(), &[ScriptValue::from_f64(value)]);
+    }
+
     fn to_external(&self) -> f64 {
         taper_to_value(self.taper, self.relative_value, self.min, self.max, self.default, self.step)
     }
@@ -2842,8 +2862,8 @@ impl Widget for Slider {
                         self.set_internal(self.to_external());
                         self.draw_bg.redraw(cx);
                         self.update_text_input(cx);
-                        cx.widget_action(uid, SliderAction::Slide(self.to_external()));
-                        cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
+                        self.emit_slide(cx, uid);
+                        self.emit_end_slide(cx, uid);
                     }
                     // The wheel a slider took is spent: a list or a
                     // panel scrolling by the same wheel behind it -- an
@@ -2869,7 +2889,7 @@ impl Widget for Slider {
                 }
                 if tap_count == 2 {
                     self.reset_to_default(cx);
-                    cx.widget_action(uid, SliderAction::Slide(self.to_external()));
+                    self.emit_slide(cx, uid);
                     return ();
                 }
                 // cx.set_key_focus(self.slider.area());
@@ -2934,7 +2954,7 @@ impl Widget for Slider {
                     self.reset_to_default(cx);
                     cx.widget_action(uid, SliderAction::Reset(self.to_external()));
                 }
-                cx.widget_action(uid, SliderAction::EndSlide(self.to_external()));
+                self.emit_end_slide(cx, uid);
                 cx.set_cursor(MouseCursor::Grab);
             }
             Hit::FingerMove(fe) => {
@@ -2977,7 +2997,7 @@ impl Widget for Slider {
                     self.set_internal(self.to_external());
                     self.draw_bg.redraw(cx);
                     self.update_text_input(cx);
-                    cx.widget_action(uid, SliderAction::Slide(self.to_external()));
+                    self.emit_slide(cx, uid);
                 }
             }
             _ => (),
