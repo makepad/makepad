@@ -336,7 +336,12 @@ impl Splash {
         if self.vm_id == MAIN_SPLASH_VM_ID {
             return; // nothing running
         }
+        // The host's walk stays (`Splash{height: Fit}` in a scroll view): the
+        // next body's view takes it from here, and a blank default would make
+        // it Fill, the scroll view's height, so nothing past it could scroll.
+        let walk = self.view.walk;
         self.view = cx.with_vm(|vm| View::script_from_value(vm, NIL.into()));
+        self.view.walk = walk;
         self.body_id = None;
         self.startup_timers.clear();
         self.body_modules.clear();
