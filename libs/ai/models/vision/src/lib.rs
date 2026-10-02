@@ -1,4 +1,4 @@
-//! SAM3 / BiRefNet / DA3 / Real-ESRGAN vision family.
+//! SAM3 / BiRefNet / DA3 / Depth-Anything / Real-ESRGAN vision family.
 //! Re-exports the shared exec surface so existing `crate::backend` /
 //! `crate::emit_progress` / `crate::error` paths inside moved modules
 //! keep compiling unchanged.
@@ -16,6 +16,7 @@ pub use makepad_ai_common::{
 pub mod birefnet;
 mod birefnet_model;
 pub mod da3;
+pub mod depth_anything;
 pub mod realesrgan;
 mod realesrgan_model;
 pub mod sam3;
