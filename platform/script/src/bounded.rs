@@ -1,6 +1,6 @@
 //! The bounded, pure document contract: every evaluation of document code
 //! (a document's load, and each per-frame call of its closures) runs under
-//! the VM's instruction, time, heap-allocation, operand-stack and call-frame
+//! the VM's instruction, heap-allocation, operand-stack and call-frame
 //! limits, and after its load the document's own objects are frozen, so a
 //! per-frame call cannot keep state between calls and its result cannot
 //! depend on the order frames are evaluated in.
@@ -14,21 +14,21 @@
 //!
 //! A limit is an uncatchable script error (`try` does not swallow it): the
 //! evaluation bails and the host reports it; nothing is silently cut short.
+//! Every limit counts work, never wall time: a correct document does the same
+//! work on a busy machine as on an idle one, so it never fails because other
+//! work ran beside it, and a runaway loop still stops at its instruction count.
 //! A write into a frozen object is an ordinary script error (`Immutable`),
 //! reported with its source location.
 
 use crate::array::ScriptArrayStorage;
 use crate::heap::{ScriptAllocationReport, ScriptHeap};
 use crate::value::ScriptValue;
-use crate::vm::{ScriptRunBudget, ScriptVm};
-use std::time::Duration;
+use crate::vm::ScriptVm;
 
 /// The limits of one evaluation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvalLimits {
     pub instructions: usize,
-    /// Wall time (a backstop behind the instruction count).
-    pub time: Duration,
     /// Heap bytes the evaluation may allocate.
     pub heap_bytes: usize,
     pub stack_values: usize,
@@ -39,7 +39,6 @@ impl EvalLimits {
     /// A document's load: the top-level evaluation that builds its value.
     pub const DOC_LOAD: EvalLimits = EvalLimits {
         instructions: 200_000_000,
-        time: Duration::from_secs(5),
         heap_bytes: 512 << 20,
         stack_values: 1 << 20,
         call_frames: 4096,
@@ -48,7 +47,6 @@ impl EvalLimits {
     /// function, a tick).
     pub const DOC_FRAME: EvalLimits = EvalLimits {
         instructions: 20_000_000,
-        time: Duration::from_millis(250),
         heap_bytes: 64 << 20,
         stack_values: 1 << 18,
         call_frames: 1024,
@@ -94,14 +92,7 @@ impl ScriptVm<'_> {
             self.bx.captured_errors = Some(Vec::new());
         }
         let before = self.bx.captured_errors.as_ref().map_or(0, |e| e.len());
-        let previous = self.bx.run_budget;
         let strings_after = std::mem::replace(&mut self.bx.heap.charge_native_strings_after, true);
-        let hard = ScriptRunBudget::from_durations(limits.time, limits.time, 1024);
-        self.bx.run_budget = Some(match previous {
-            // Only narrow: keep the earlier deadline.
-            Some(p) if p.hard_deadline <= hard.hard_deadline => p,
-            _ => hard,
-        });
         let ((r, heap), instructions) = {
             let r = self.with_instruction_limit(limits.instructions, |vm| {
                 vm.with_stack_value_limit(limits.stack_values, |vm| {
@@ -110,7 +101,6 @@ impl ScriptVm<'_> {
             });
             (r, self.last_limit_consumed())
         };
-        self.bx.run_budget = previous;
         self.bx.heap.charge_native_strings_after = strings_after;
         let mut limit = None;
         if let Some(errors) = self.bx.captured_errors.as_ref() {

@@ -1471,7 +1471,9 @@ impl<'a> ScriptVm<'a> {
             } else {
                 // its a direct value-to-stack
                 if let Some(trace) = &mut self.bx.literal_trace {
-                    trace.ran.insert((body_index as u16, ip_index as u32));
+                    if trace.ran_seen.first(body_index as u16, ip_index as u32) {
+                        trace.ran.insert((body_index as u16, ip_index as u32));
+                    }
                 }
                 self.bx.threads.cur().push_stack_value(opcode);
                 self.bx.threads.cur().trap.goto_next();
