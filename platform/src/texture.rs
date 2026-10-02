@@ -82,7 +82,7 @@ impl WeakTexture {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Copy)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Copy)]
 pub struct TextureId(pub(crate) usize, u64);
 
 /// A request accepted by one `Cx`. Tickets are never reused by that context.

@@ -1081,6 +1081,8 @@ pub struct DrawShaderTableConst {
 pub struct CxDrawShaderMapping {
     pub source: ScriptObjectRef,
     pub code: CxDrawShaderCode,
+    /// The pick variant's source (`Cx::enable_pick_variants`).
+    pub pick_code: Option<String>,
     pub flags: DrawShaderFlags,
     pub instances: DrawShaderInputs,
     pub dyn_instances: DrawShaderInputs,
@@ -1629,6 +1631,7 @@ impl CxDrawShaderMapping {
         CxDrawShaderMapping {
             source,
             code,
+            pick_code: None,
             flags: DrawShaderFlags {
                 debug_draw,
                 debug_layout,

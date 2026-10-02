@@ -518,7 +518,11 @@ impl Cx {
         // pipelines are built for its declared format ahead of time; a pass
         // of other formats (an HDR scene target, a float data target, MRT)
         // gets a variant built from the same functions on first use.
-        let target_formats: Vec<MTLPixelFormat> = if self.passes[draw_pass_id].color_textures.is_empty() {
+        // A pick draws into 8-bit twins (`crate::pick`).
+        let picking = self.pick.paint.is_some();
+        let target_formats: Vec<MTLPixelFormat> = if picking {
+            vec![MTLPixelFormat::BGRA8Unorm; self.passes[draw_pass_id].color_textures.len().max(1)]
+        } else if self.passes[draw_pass_id].color_textures.is_empty() {
             vec![MTLPixelFormat::BGRA8Unorm]
         } else {
             self.passes[draw_pass_id]
@@ -717,7 +721,21 @@ impl Cx {
 
                 let format_variant;
                 let declared = mtl_declared_format(shp.color_format);
-                let pipeline = if target_formats.len() == 1 && target_formats[0] == declared {
+                let pipeline = if picking {
+                    // A shader without a pick variant draws nothing of the pick.
+                    let Some(pick) = shp.pick.as_ref() else { continue };
+                    if target_formats.len() == 1 {
+                        &pick.solid
+                    } else {
+                        format_variant = pick.mrt_variant(&target_formats, false);
+                        if !format_variant.queued.load(Ordering::Relaxed)
+                            && MetalPipelines::enqueue_mrt(metal_cx.allocator(), metal_cx.device, pick, &format_variant)
+                        {
+                            format_variant.queued.store(true, Ordering::Relaxed);
+                        }
+                        &format_variant.pipeline
+                    }
+                } else if target_formats.len() == 1 && target_formats[0] == declared {
                     if draw_call.options.alpha_blend { &shp.pipelines.blend } else { &shp.pipelines.solid }
                 } else {
                     if matches!(shp.pipelines.blend.get(), Some(Err(_))) {
@@ -736,6 +754,12 @@ impl Cx {
                 let render_pipeline_state = match pipeline.get() {
                     Some(Ok(pipeline)) => pipeline.as_id(),
                     Some(Err(_)) => continue,
+                    None if picking => {
+                        if let Some(paint) = self.pick.paint.as_mut() {
+                            paint.not_ready += 1;
+                        }
+                        continue;
+                    }
                     None => {
                         // Keep this pass live while the driver compiles. No wait,
                         // no fallback synchronous compile on first use.
@@ -1068,6 +1092,29 @@ impl Cx {
                     }
                 }
 
+                // A pick: each texture's twin after the textures, where this
+                // pick drew one, and the call's id and which twins hold ids.
+                if picking {
+                    let ntex = sh.mapping.textures.len();
+                    let mut mask = 0u32;
+                    for i in 0..ntex.min(32) {
+                        let twin = draw_call.texture_slots[i].as_ref().and_then(|t| {
+                            let paint = self.pick.paint.as_ref()?;
+                            paint.painted.contains(&t.texture_id()).then(|| self.pick.twins.get(&t.texture_id())).flatten()
+                        });
+                        let bound = twin.and_then(|t| self.textures[t.texture_id()].os.texture.as_ref().map(|m| m.as_id()));
+                        if bound.is_some() {
+                            mask |= 1 << i;
+                        }
+                        let texture = bound.unwrap_or(metal_cx.fallback_texture);
+                        let () = unsafe { msg_send![encoder, setFragmentTexture: texture atIndex: (ntex + i) as u64] };
+                    }
+                    let pk: [u32; 4] = [draw_call.pick_id, mask, 0, 0];
+                    let () = unsafe {
+                        msg_send![encoder, setFragmentBytes: pk.as_ptr() as *const std::ffi::c_void length: 16u64 atIndex: 30u64]
+                    };
+                }
+
                 // Debug output when shader has debug_draw flag enabled
                 if sh.mapping.flags.debug_draw {
                     CxDrawShaderMapping::debug_dump_shader_draw_call(
@@ -1364,6 +1411,11 @@ impl Cx {
                 }];
             }
         } else {
+            // A pick draws into its targets' twins (`crate::pick`).
+            let pick_twins: Option<Vec<crate::texture::TextureId>> = matches!(mode, DrawPassMode::Pick).then(|| {
+                let ids: Vec<crate::texture::TextureId> = self.passes[draw_pass_id].color_textures.iter().map(|c| c.texture.texture_id()).collect();
+                ids.into_iter().map(|id| self.pick.twin(&mut self.textures, id, false).texture_id()).collect()
+            });
             for (index, color_texture) in
                 self.passes[draw_pass_id].color_textures.iter().enumerate()
             {
@@ -1372,7 +1424,11 @@ impl Cx {
                 let color_attachment: ObjcId =
                     unsafe { msg_send![color_attachments, objectAtIndexedSubscript: index as u64] };
 
-                let cxtexture = &mut self.textures[color_texture.texture.texture_id()];
+                let attached = match &pick_twins {
+                    Some(twins) => twins[index],
+                    None => color_texture.texture.texture_id(),
+                };
+                let cxtexture = &mut self.textures[attached];
                 // the pass rect is an integral texel count divided by the
                 // pass DPI: the product rounds, never truncates (a texel
                 // short of the sheet a tile cache asked for)
@@ -1397,6 +1453,14 @@ impl Cx {
                 }
 
                 unsafe { msg_send![color_attachment, setStoreAction: MTLStoreAction::Store] }
+                if pick_twins.is_some() {
+                    // Nothing drew anywhere yet: id 0.
+                    unsafe {
+                        let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
+                        let () = msg_send![color_attachment, setClearColor: MTLClearColor { red: 0.0, green: 0.0, blue: 0.0, alpha: 0.0 }];
+                    }
+                    continue;
+                }
                 match color_texture.clear_color {
                     DrawPassClearColor::InitWith(color) => {
                         if is_initial {
@@ -1436,11 +1500,18 @@ impl Cx {
             }
         }
         // attach depth texture
-        if let Some(depth_texture) = &self.passes[draw_pass_id].depth_texture {
-            let cxtexture = &mut self.textures[depth_texture.texture_id()];
+        if let Some(depth_texture) = self.passes[draw_pass_id].depth_texture.clone() {
+            let pick = matches!(mode, DrawPassMode::Pick);
+            let attached = if pick {
+                self.pick.twin(&mut self.textures, depth_texture.texture_id(), true).texture_id()
+            } else {
+                depth_texture.texture_id()
+            };
+            let cxtexture = &mut self.textures[attached];
             let size = (dpi_factor * pass_rect.size).round();
             cxtexture.update_depth_stencil(metal_cx, size.x as usize, size.y as usize);
-            let is_initial = cxtexture.take_initial();
+            // (A pick's depth starts as the pass's does on every paint.)
+            let is_initial = cxtexture.take_initial() || pick;
 
             let depth_attachment: ObjcId =
                 unsafe { msg_send![render_pass_descriptor, depthAttachment] };
@@ -1619,10 +1690,14 @@ impl Cx {
         }
 
         encoders.end();
+        let picking = matches!(mode, DrawPassMode::Pick);
+        if picking {
+            self.encode_pick_readback(metal_cx, draw_pass_id, command_buffer);
+        }
         // Render targets with a mip chain: the levels again from what this
         // pass drew into level 0 (in order on this command buffer, so every
         // later reader sees them).
-        for color_texture in self.passes[draw_pass_id].color_textures.iter() {
+        for color_texture in self.passes[draw_pass_id].color_textures.iter().filter(|_| !picking) {
             let cxtexture = &self.textures[color_texture.texture.texture_id()];
             if !cxtexture.render_mips {
                 continue;
@@ -1651,7 +1726,9 @@ impl Cx {
         // producing queue — and delivered only from its completion handler,
         // so the bytes provably follow the render (see
         // `Cx::request_render_texture_capture`).
-        self.encode_render_texture_captures(metal_cx, draw_pass_id, command_buffer);
+        if !picking {
+            self.encode_render_texture_captures(metal_cx, draw_pass_id, command_buffer);
+        }
         // Which window this pass presents to, so a `--remote` grab can target one
         // window in a multi-window app instead of whichever pass presents first.
         let pass_window_id = self.get_pass_window_id(draw_pass_id).map(|w| w.id());
@@ -1758,7 +1835,7 @@ impl Cx {
                     Some((drawable, None)),
                 );
             }
-            DrawPassMode::Texture => {
+            DrawPassMode::Texture | DrawPassMode::Pick => {
                 self.commit_command_buffer(
                     metal_cx,
                     alone,
@@ -2523,13 +2600,16 @@ pub enum DrawPassMode {
     /// CAMetalDisplayLinkUpdate.targetPresentationTimestamp.
     Drawable(ObjcId, Option<f64>),
     Resizing(ObjcId),
+    /// The pass again with the pick variants into its targets' pick twins
+    /// (`crate::pick`).
+    Pick,
 }
 
 impl DrawPassMode {
     fn is_drawable(&self) -> Option<ObjcId> {
         match self {
             Self::Drawable(obj, _) | Self::Resizing(obj) => Some(*obj),
-            Self::StdinMain(_, _) | Self::Texture | Self::StdinTexture | Self::MTKView(_) => None,
+            Self::StdinMain(_, _) | Self::Texture | Self::StdinTexture | Self::MTKView(_) | Self::Pick => None,
         }
     }
 }
@@ -2565,7 +2645,7 @@ pub struct MetalCx {
     /// 1×1 BGRA fallback texture bound when a texture slot has no backing
     /// MTLTexture. Prevents Metal command-buffer aborts on iOS where sampling
     /// from nil is a GPU fault.
-    fallback_texture: ObjcId,
+    pub(crate) fallback_texture: ObjcId,
     render_setup: Arc<std::sync::OnceLock<Option<MetalRenderSetup>>>,
     render_setup_queued: bool,
     /// The repaint whose first pass could not be encoded. A frame is
@@ -3881,6 +3961,9 @@ impl Drop for MetalCx {
 pub struct CxOsDrawShader {
     // get() never waits; the driver completion handlers publish immutable PSOs.
     pipelines: Arc<MetalPipelines>,
+    /// The pick variant's pipelines (`crate::pick`), built on the first
+    /// pick that draws this shader.
+    pub(crate) pick: Option<Arc<MetalPipelines>>,
     compile_queued: bool,
     color_format: crate::draw_shader::DrawShaderColorFormat,
     draw_call_uniform_buffer_id: Option<u64>,
@@ -3941,6 +4024,7 @@ impl DrawVars {
             output.use_vulkan = false;
             output.const_table = vm.host.cx().shader_const_table_mode();
             output.live_literals = crate::makepad_script::literal::live();
+            output.pick = vm.host.cx().pick_variants();
 
             output.pre_collect_rust_instance_io(vm, io_self);
             output.pre_collect_shader_io(vm, io_self);
@@ -4018,6 +4102,7 @@ impl DrawVars {
             }
 
             let out = output.metal_draw_source(vm);
+            let pick_code = output.pick.then(|| output.metal_draw_source_pick(vm));
 
             let source = vm.bx.heap.new_object_ref(io_self);
 
@@ -4067,6 +4152,7 @@ impl DrawVars {
                 geometry_id,
             );
 
+            mapping.pick_code = pick_code;
             // Fill the scope uniform buffer from current script values
             mapping.fill_scope_uniforms_buffer(&vm.bx.heap, &vm.thread().trap.pass());
 
@@ -4111,7 +4197,7 @@ impl DrawVars {
 }
 
 #[derive(Default)]
-struct MetalPipelines {
+pub(crate) struct MetalPipelines {
     blend: std::sync::OnceLock<Result<RcObjcId, String>>,
     solid: std::sync::OnceLock<Result<RcObjcId, String>>,
     /// A `Bgra8Unorm` shader keeps its compiled functions so the same shader
@@ -4190,6 +4276,11 @@ pub(crate) unsafe fn describe_mrt_attachments(descriptor: ObjcId, formats: &[MTL
 }
 
 impl MetalPipelines {
+    /// A pick variant's pipelines (`crate::pick`): its outputs, no max blend.
+    pub(crate) fn for_pick(written_outputs: u8) -> Self {
+        Self { written_outputs, ..Default::default() }
+    }
+
     fn enqueue(
         allocator: &crate::makepad_network::mpsc::SyncSender<MetalAllocationRequest>,
         device: ObjcId,
@@ -4477,6 +4568,18 @@ impl MetalPipelines {
 }
 
 impl CxOsDrawShader {
+    /// The pick variant's pipelines (`crate::pick`), queued on first use:
+    /// one 8-bit attachment, nothing blended.
+    pub(crate) fn ensure_pick(&mut self, metal_cx: &MetalCx, code: String, written_outputs: u8) {
+        if self.pick.is_some() {
+            return;
+        }
+        let pipelines = Arc::new(MetalPipelines::for_pick(written_outputs));
+        if MetalPipelines::enqueue(metal_cx.allocator(), metal_cx.device, code, crate::draw_shader::DrawShaderColorFormat::Bgra8NoBlend, pipelines.clone()) {
+            self.pick = Some(pipelines);
+        }
+    }
+
     pub(crate) fn new(
         metal_cx: &MetalCx,
         mtlsl: String,
@@ -4517,6 +4620,7 @@ impl CxOsDrawShader {
 
         return Some(Self {
             pipelines,
+            pick: None,
             compile_queued,
             color_format: mapping.color_format,
             draw_call_uniform_buffer_id,

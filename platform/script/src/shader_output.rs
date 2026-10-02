@@ -253,6 +253,15 @@ pub struct ShaderOutput {
     /// ([`crate::literal::LiveLiterals`]). `None` (the default) emits byte-identical
     /// code to a compiler without the feature.
     pub live_literals: Option<std::sync::Arc<crate::literal::LiveLiterals>>,
+    /// Pick variants (an editor's click-to-code): every sample of a 2D
+    /// texture is emitted through `_MP_PS`, which the plain source defines
+    /// as the sample itself and the pick source ([`Self::metal_draw_source_pick`])
+    /// as the sample plus a read of the texture's pick twin at the same
+    /// place (the ids of what drew there). Off (the default) emits
+    /// byte-identical code to a compiler without the feature.
+    pub pick: bool,
+    /// While the pick source is assembled.
+    pub pick_emit: bool,
     /// The expressions lifted literals were emitted as (`scope.ct3`), so an
     /// operator meeting one with a half or integer operand casts it the way
     /// the folded literal would have adapted.
@@ -781,6 +790,24 @@ impl ShaderOutput {
         }
 
         bindings
+    }
+
+    /// A 2D texture's sample as emitted: itself, or with pick variants
+    /// ([`Self::pick`]) through `_MP_PS(bit, twin, sample, coord)` (`bit`
+    /// the texture's index among the shader's textures, `twin` its pick
+    /// twin in `Io`). Only a texture of the shader's own (`_io.name`) has
+    /// a twin.
+    pub fn pick_sample(&self, texture_expr: &str, tex_type: TextureType, sample: String, coord: &str) -> String {
+        if !self.pick || !matches!(self.backend, ShaderBackend::Metal) || !matches!(tex_type, TextureType::Texture2d) {
+            return sample;
+        }
+        let Some(name) = texture_expr.strip_prefix("_io.") else { return sample };
+        let textures = self.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::Texture(_)));
+        let Some(bit) = textures.map(|io| io.name.to_string()).position(|n| n == name) else { return sample };
+        if bit >= 32 {
+            return sample;
+        }
+        format!("_MP_PS({bit}u, {name}__pick, {sample}, {coord})")
     }
 
     /// Get or create a sampler with the given properties, returns the sampler index

@@ -100,6 +100,7 @@ pub mod memory_watchdog;
 pub mod perf_monitor;
 pub mod gpu_frame_timer;
 pub mod sploded;
+pub mod pick;
 pub mod permission;
 mod screen;
 mod texture;
@@ -391,6 +392,7 @@ pub use {
 /// The compiled-shader handle the const-table API is keyed by
 /// (`Cx::shader_const_table`, `shader_const_patch`, `shader_const_reset`).
 pub use crate::draw_shader::DrawShaderId;
+pub use crate::pick::{PickError, PickImage, PickTicket};
 /// Edit mode's literal-site map (`Cx::set_live_literals`,
 /// `set_literal_source`, `patch_literal`).
 pub use makepad_script_std::makepad_script::literal::{LiteralOrigin, LiteralReach, LiteralSite, LiteralValue};
