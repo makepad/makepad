@@ -375,6 +375,8 @@ pub enum KeepCursorInView {
     LockedCenter(Vec2d, Position, Affinity),
     FontResize(Vec2d),
     JumpToPosition,
+    /// Scroll so the cursor's line sits in the middle of the view.
+    CenterOnPosition,
     Off,
 }
 
@@ -790,6 +792,18 @@ impl CodeEditor {
                 );
                 self.keep_cursor_in_view = KeepCursorInView::Off;
             }
+            KeepCursorInView::CenterOnPosition => {
+                let view = self.viewport_rect.size;
+                let scroll = self.scroll_bars.get_scroll_pos();
+                let x = if cursor_pos.x < scroll.x || cursor_pos.x > scroll.x + view.x - self.cell_size.x * 4.0 {
+                    (cursor_pos.x - self.cell_size.x * 10.0).max(0.0)
+                } else {
+                    scroll.x
+                };
+                let y = (cursor_pos.y + self.cell_size.y * 0.5 - view.y * 0.5).max(0.0);
+                self.scroll_bars.set_scroll_pos(cx, dvec2(x, y));
+                self.keep_cursor_in_view = KeepCursorInView::Off;
+            }
             KeepCursorInView::FontResize(last_pos) => {
                 let new_pos = cursor_pos - self.scroll_bars.get_scroll_pos();
                 let delta = last_pos - new_pos;
@@ -961,6 +975,18 @@ impl CodeEditor {
             NewGroup::Yes,
         );
         self.keep_cursor_in_view = KeepCursorInView::JumpToPosition;
+        self.redraw(cx);
+    }
+
+    /// Put the cursor at `pos` and scroll its line to the middle of the view.
+    pub fn set_cursor_and_center(&mut self, cx: &mut Cx, pos: Position, session: &mut CodeSession) {
+        session.set_selection(
+            session.clamp_position(pos),
+            Affinity::Before,
+            SelectionMode::Simple,
+            NewGroup::Yes,
+        );
+        self.keep_cursor_in_view = KeepCursorInView::CenterOnPosition;
         self.redraw(cx);
     }
 
