@@ -588,7 +588,11 @@ impl ShaderFnCompiler {
         if let Some(ShaderMe::FnBody { ret, .. }) = value {
             return ret.unwrap_or(vm.bx.code.builtins.pod.pod_void);
         }
-        panic!("Unexpected ME at end {:?}", value)
+        // A body whose errors left its stack unbalanced (an unknown name
+        // inside an expression): the shader is refused with those errors,
+        // not the process stopped.
+        output.push_error(format!("shader function did not close (after the errors above): {:?}", value.map(|_| "an open expression")));
+        vm.bx.code.builtins.pod.pod_void
     }
 
     pub(crate) fn pop_resolved(
