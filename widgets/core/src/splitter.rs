@@ -46,6 +46,8 @@ script_mod! {
         key_step: 0.0
         /** a drag or an arrow key on the bar of a folded pane brings the pane back */
         bar_reopens: false
+        /** the pane a hand may fold: dragged shut (past half its floor) or a double click on the bar folds it, and a double click or a drag brings it back: SplitterCollapse.None A B */
+        fold: mod.widgets.SplitterCollapse.None
 
         draw_bg +: {
             /** dragging mix 0..1 step 0.01 */
@@ -518,6 +520,14 @@ pub struct Splitter {
     /// the hosts that fold from a button of their own rely on.
     #[live(false)]
     pub bar_reopens: bool,
+    /// The pane a hand may fold: dragged shut (past half its floor) or a
+    /// double click on the bar folds it; a double click, or a drag out of
+    /// the fold, brings it back. `None`: only the host folds.
+    #[live(SplitterCollapse::None)]
+    pub fold: SplitterCollapse,
+    /// This drag folded the pane: it stays folded until the finger lifts.
+    #[rust]
+    folded_by_drag: bool,
 
     #[rust]
     rect: Rect,
@@ -612,8 +622,16 @@ impl Widget for Splitter {
             // the pane back: a press that landed on it must not drag the
             // pane out again, which is why three callers used to force the
             // align back to zero every pass.
+            // A double click on the bar folds the pane a hand may fold, or
+            // brings it back.
+            Hit::FingerDown(fe) if self.fold != SplitterCollapse::None && fe.tap_count == 2 && fe.is_primary_hit() => {
+                self.drag_start_align = None;
+                let to = if self.collapse == self.fold { SplitterCollapse::None } else { self.fold };
+                self.set_collapse(cx, to);
+                self.redraw(cx);
+            }
             Hit::FingerDown(_)
-                if self.collapse != SplitterCollapse::None && !self.bar_reopens => {}
+                if self.collapse != SplitterCollapse::None && !self.bar_reopens && self.fold == SplitterCollapse::None => {}
             Hit::FingerDown(fe) if self.drag_start_align.is_none() && fe.is_primary_hit() => {
                 if self.key_step > 0.0 {
                     cx.set_key_focus(self.draw_bg.area());
@@ -639,6 +657,7 @@ impl Widget for Splitter {
             }
             Hit::FingerUp(f) => {
                 self.drag_start_align = None;
+                self.folded_by_drag = false;
                 if f.is_over && f.device.has_hovers() {
                     self.animator_play(cx, ids!(hover.on));
                 } else {
@@ -666,7 +685,10 @@ impl Widget for Splitter {
                     // A press alone must not bring a folded pane back: the
                     // bar is also the thing you click on your way to
                     // something else.
-                    let reopening = self.bar_reopens && self.collapse != SplitterCollapse::None;
+                    if self.folded_by_drag {
+                        return;
+                    }
+                    let reopening = (self.bar_reopens || self.fold != SplitterCollapse::None) && self.collapse != SplitterCollapse::None;
                     if !reopening || delta != 0.0 {
                         // A pane folded away comes back at its floor, which
                         // is the nearest legal size to where the bar is
@@ -679,6 +701,20 @@ impl Widget for Splitter {
                             self.redraw(cx);
                         }
                         let start = drag_start_align.to_position(self.axis, self.rect);
+                        // Dragged past half its floor, the pane a hand may
+                        // fold folds.
+                        let (min_a, min_b) = self.axis_min_max();
+                        let shut = match self.fold {
+                            SplitterCollapse::A => start + delta < min_a * 0.5,
+                            SplitterCollapse::B => self.room() - (start + delta) < min_b * 0.5,
+                            SplitterCollapse::None => false,
+                        };
+                        if shut && !reopening && self.collapse == SplitterCollapse::None {
+                            self.set_collapse(cx, self.fold);
+                            self.folded_by_drag = true;
+                            self.redraw(cx);
+                            return;
+                        }
                         let new_position = self.clamp(start + delta);
                         self.drag_moved = new_position != start;
                         self.bar_to(cx, new_position);
