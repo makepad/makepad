@@ -380,16 +380,9 @@ impl ScriptCode {
                         _ => LiveId(0),
                     };
                     if op == id!(:) || op == id!(:=) || op == id!(+:) {
-                        let (row, col) = body.tokenizer.token_index_to_row_col(k as u32)?;
-                        // A token's position may sit a character into it: back
-                        // to the identifier's first character.
-                        let chars: Vec<char> = body.effective_code.chars().collect();
-                        let pos = tokens[k].pos().min(chars.len());
-                        let mut start = pos;
-                        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
-                            start -= 1;
-                        }
-                        let col = col.saturating_sub((pos - start) as u32);
+                        // (The identifier's first character: a token's
+                        // position may sit a character into it.)
+                        let (row, col) = body.tokenizer.token_start_row_col(k as u32)?;
                         return Some(match &body.source {
                             ScriptSource::Mod(script_mod) => ScriptLoc { file: script_mod.file.clone(), line: row + script_mod.line as u32, col },
                             _ => ScriptLoc { file: "generated".into(), line: row, col },
