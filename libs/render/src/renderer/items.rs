@@ -338,7 +338,7 @@ impl Renderer {
             prelit: false,
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
-            sky: None,
+            sky: None, liquids: Vec::new(), liquid_ranges: Vec::new(),
             pbr,
         };
         let id = format!("item/{}/{:016x}", geometry.0, key.1);

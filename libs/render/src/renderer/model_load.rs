@@ -163,7 +163,7 @@ impl Renderer {
         LoadedModel{lods:uploaded.lods.into_iter().map(|(distance,model)|(distance,Self::uploaded_static_model(model))).collect(),morph:uploaded.morph,prepared_sdf:Some(uploaded.sdf),emitters:uploaded.emitters,geometry:uploaded.geometry,texture:uploaded.texture,detail:uploaded.detail,detail_scale:uploaded.detail_scale,
             extra_draws:uploaded.extra_draws,material:uploaded.material,wants_pbr:uploaded.wants_pbr,prelit:uploaded.prelit,triangles:uploaded.triangles,
             min:uploaded.min,max:uploaded.max,authored_collisions:uploaded.authored_collisions,collider_parts:uploaded.collider_parts,occluder_parts:uploaded.occluder_parts,
-            anim_parts:uploaded.anim_parts,driven_parts:uploaded.driven_parts,sky:uploaded.sky,mesh_positions:uploaded.positions,mesh_indices:uploaded.indices,
+            anim_parts:uploaded.anim_parts,driven_parts:uploaded.driven_parts,sky:uploaded.sky,liquids:Default::default(),mesh_positions:uploaded.positions,mesh_indices:uploaded.indices,
             lm_source:uploaded.lm_source,bake_geometry:uploaded.bake_geometry}
     }
 
@@ -264,6 +264,7 @@ impl Renderer {
         let anim_defs = std::mem::take(&mut model.anim_parts);
         let driven_defs = std::mem::take(&mut model.driven_parts);
         let sky_def = model.sky.take();
+        let liquids = std::mem::take(&mut model.liquids);
         let triangles = model.triangle_count();
         let (min, max) = (model.min, model.max);
         // Triangle-derived voxel boxes are the collider truth: measured
@@ -341,7 +342,9 @@ impl Renderer {
             (idx, verts)
         };
         let geometry = Geometry::new(cx);
-        let multi = model.draw_layers.len() > 1;
+        // A level with liquids draws through its layers even when one is
+        // left: the merged stream would draw the liquids too.
+        let multi = model.draw_layers.len() > 1 || (!model.draw_layers.is_empty() && !model.liquid_ranges.is_empty());
         if multi {
             geometry.update(
                 cx,
@@ -730,6 +733,7 @@ impl Renderer {
                 anim_parts,
                 driven_parts,
                 sky,
+                liquids: std::sync::Arc::new(liquids),
                 mesh_positions,
                 mesh_indices,
                 lm_source,

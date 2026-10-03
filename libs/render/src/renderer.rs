@@ -245,10 +245,8 @@ pub struct Renderer {
     /// and mesh revision — re-uploaded per chunk when a dig remeshes it.
     /// Drawn through the SAME terrain shader/lightmap path as the tiles.
     voxel_tiles: Vec<VoxelTile>,
-    /// One flat grid per `game.water` volume (W1), displaced in the vertex
-    /// shader by the sim's wave sum. Rebuilt when `WaterView::rev` moves.
-    water_tiles: Vec<WaterTile>,
-    water_rev: Option<u64>,
+    /// The water surface's mesh and textures (renderer/water.rs).
+    water: water::WaterGpu,
     /// REST meshes for GPU-skinned rigs — geometry plus the rig's rest-pose
     /// AO chart atlas — keyed by rig id and uploaded ONCE
     /// ([`Self::upload_skin_rig`]). Skinning happens in the vertex shader
@@ -633,6 +631,8 @@ mod grass_draw;
 mod vfx_draw;
 mod ibl;
 mod items;
+mod water;
+pub use water::{eye_under_water, pack_wave_uniforms};
 pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSFORM_TINT};
 
 pub use draw_items::*;
@@ -653,8 +653,7 @@ impl Default for Renderer {
             terrain_tiles: Vec::new(),
             terrain_revision: 0,
             voxel_tiles: Vec::new(),
-            water_tiles: Vec::new(),
-            water_rev: None,
+            water: Default::default(),
             skin_rig_geometries: Vec::new(),
             skin_material_draws: Default::default(),
             skin_lods:Default::default(),
@@ -812,7 +811,7 @@ mod chunk_tests;
 #[cfg(test)]
 mod light_tests;
 #[cfg(test)]
-mod water_sheet_tests;
+mod water_tests;
 #[cfg(test)]
 mod shadow_sdf_sidecar_tests;
 /// The rigid-part state machine: a door's whole behaviour, tested without a

@@ -144,6 +144,9 @@ pub struct ClusteredLights {
     /// HDR height fog (`fog_ctl`, `fog_eye`), bound with the cluster uniforms.
     pub(crate) fog_ctl: [f32; 4],
     pub(crate) fog_eye: [f32; 4],
+    /// The water every lit surface below it is seen through (`uw_ctl`,
+    /// `uw_rect`, `uw_color`; renderer/water.rs `water_column`).
+    pub(crate) uw: [[f32; 4]; 3],
 }
 
 impl Default for ClusteredLights {
@@ -173,6 +176,7 @@ impl Default for ClusteredLights {
             lin_ctl: [0.0, 1.0, 1.0, 1.0],
             fog_ctl: [0.0; 4],
             fog_eye: [0.0; 4],
+            uw: [[0.0; 4]; 3],
         }
     }
 }
@@ -625,6 +629,9 @@ impl ClusteredLights {
         vars.set_uniform(cx, live_id!(lin_ctl), &self.lin_ctl);
         vars.set_uniform(cx, live_id!(fog_ctl), &self.fog_ctl);
         vars.set_uniform(cx, live_id!(fog_eye), &self.fog_eye);
+        vars.set_uniform(cx, live_id!(uw_ctl), &self.uw[0]);
+        vars.set_uniform(cx, live_id!(uw_rect), &self.uw[1]);
+        vars.set_uniform(cx, live_id!(uw_color), &self.uw[2]);
         vars.set_uniform(cx, live_id!(cluster_on), &[if on { 1.0 } else { 0.0 }]);
         if !on {
             return;
@@ -705,6 +712,32 @@ script_mod! {
         // (the density). fog_eye = the true world camera.
         fog_ctl: uniform(vec4(0.0, 0.0, 0.0, 0.0))
         fog_eye: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // The water a surface below it is seen through (renderer/water.rs):
+        // uw_ctl = (still level, on, clarity m, swell amplitude), uw_rect =
+        // (min x, min z, max x, max z), uw_color = lit in-scatter colour.
+        // Every lit surface under the level absorbs along its path up to
+        // the surface, so the seabed, a hull or a swimmer's legs show
+        // through the water tinted and fading with depth — the surface
+        // itself only reflects. An eye under water gets the water as its
+        // fog instead (the renderer swaps it), so this is off then.
+        uw_ctl: uniform(vec4(0.0, 0.0, 1.0, 0.0))
+        uw_rect: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        uw_color: uniform(vec4(0.0, 0.0, 0.0, 0.0))
+        // A lit colour seen through the water (if under it), then fogged.
+        scene_fogged: fn(c: vec3, legacy: float, wp: vec3, density: float) -> vec3 {
+            var col = c
+            if self.uw_ctl.y > 0.5 {
+                let sub = self.uw_ctl.x - wp.y
+                let inside = step(self.uw_rect.x, wp.x) * step(wp.x, self.uw_rect.z) * step(self.uw_rect.y, wp.z) * step(wp.z, self.uw_rect.w)
+                if sub > 0.0 && inside > 0.5 {
+                    let up = max((self.fog_eye.y - wp.y) / max(length(self.fog_eye.xyz - wp), 0.001), 0.08)
+                    let t = exp(0.0 - sub / (up * self.uw_ctl.z))
+                    let w = smoothstep(0.0, self.uw_ctl.w + 0.05, sub)
+                    col = mix(c * 0.6, self.uw_color.xyz, (1.0 - t) * w)
+                }
+            }
+            return mix(col, self.fog_color, self.scene_fog(legacy, wp, density))
+        }
         scene_fog: fn(legacy: float, wp: vec3, density: float) -> float {
             if self.lin_ctl.x < 0.5 || self.fog_ctl.w < 0.5 { return legacy }
             let d = wp - self.fog_eye.xyz

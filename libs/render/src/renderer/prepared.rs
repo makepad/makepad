@@ -442,6 +442,9 @@ pub(super) struct LoadedModel {
     /// out of `geometry`: the bake must never see them (they would shadow
     /// the whole level from above) and the sun must never shade them.
     pub(super) sky: Option<LoadedSky>,
+    /// A level's liquid surfaces (StaticModel::liquids), handed to the host
+    /// for the water renderer; never drawn by the model lanes.
+    pub(super) liquids: std::sync::Arc<Vec<crate::model::LiquidSurface>>,
     /// The model's own triangles in MODEL space, kept after the GPU upload
     /// consumed the packed stream. This is the level-collision source
     /// (`level.rs` builds its BVH from it) — 16 bytes a vertex-and-index

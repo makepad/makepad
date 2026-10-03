@@ -1,88 +1,9 @@
-//! The scene pass's late layers: water sheets, dynamic shadow meshes and SDF quads,
+//! The scene pass's late layers: dynamic shadow meshes and SDF quads,
 //! the MR shadow catcher, fireworks, lamp flares, bullet decals and screens/sprites.
 
 use super::*;
 
 impl Renderer {
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn draw_water(
-        &mut self,
-        cx: &mut Cx3d,
-        draws: &mut SceneDraws,
-        world: &World,
-        sun: &SunLight,
-        (fog_color, fog_density): (Vec3f, f32),
-        frustum: Option<&Frustum>,
-        shows_environment: bool,
-        camera_pos: Vec3f,
-    ) {
-        // 3w. Water sheets (mix.md W1): one displaced grid per `game.water`
-        // volume, drawn after every opaque pass (blending sees depth: a hull
-        // below the surface tints, a hull above does not) and before the
-        // alpha batches, so sensor ghosts and particles composite over the
-        // water. The VERTEX shader displaces by the same wave sum the sim
-        // steps — same coefficients, same expression (pin test below) —
-        // visual only: physics never reads the GPU.
-        self.ensure_water_tiles(cx.cx, world.water.as_deref());
-        if !self.water_tiles.is_empty() && shows_environment {
-            if let Some(water_draw) = draws.water.as_deref_mut() {
-                water_draw.transform = Mat4f::identity();
-                water_draw.depth_clip = 1.0;
-                water_draw.fog_color = fog_color;
-                water_draw.fog_density = fog_density;
-                let lin = self.lin_ctl();
-                water_draw.draw_vars.set_uniform(cx.cx, live_id!(lin_ctl), &lin);
-                water_draw.draw_vars.set_uniform(cx.cx, live_id!(water_eye), &[camera_pos.x, camera_pos.y, camera_pos.z, 0.0]);
-                let fog_ctl = self.clustered.fog_ctl;
-                water_draw.draw_vars.set_uniform(cx.cx, live_id!(water_fog), &fog_ctl);
-                sun.write_into(
-                    &mut water_draw.light_dir,
-                    &mut water_draw.sun_color,
-                    &mut water_draw.sun_sky,
-                    &mut water_draw.sun_ground,
-                );
-                // The sim's own f32 tick-time — the ONE time base both sides
-                // of the wave expression consume.
-                let t = world.water_time;
-                const WAVE_A: [LiveId; 8] = [
-                    live_id!(wave_a0), live_id!(wave_a1), live_id!(wave_a2), live_id!(wave_a3),
-                    live_id!(wave_a4), live_id!(wave_a5), live_id!(wave_a6), live_id!(wave_a7),
-                ];
-                const WAVE_B: [LiveId; 8] = [
-                    live_id!(wave_b0), live_id!(wave_b1), live_id!(wave_b2), live_id!(wave_b3),
-                    live_id!(wave_b4), live_id!(wave_b5), live_id!(wave_b6), live_id!(wave_b7),
-                ];
-                for tile in &self.water_tiles {
-                    if let Some(frustum) = frustum {
-                        if !frustum.intersects_aabb(tile.min, tile.max) {
-                            continue;
-                        }
-                    }
-                    // Per-volume uniforms: a differing coefficient set starts
-                    // its own draw item (the appendable check compares
-                    // dyn_uniforms), so volumes never share stale waves.
-                    for i in 0..MAX_WAVES {
-                        water_draw
-                            .draw_vars
-                            .set_uniform(cx.cx, WAVE_A[i], &tile.waves_a[i]);
-                        water_draw
-                            .draw_vars
-                            .set_uniform(cx.cx, WAVE_B[i], &tile.waves_b[i]);
-                    }
-                    water_draw
-                        .draw_vars
-                        .set_uniform(cx.cx, live_id!(water_params), &[0.0, t, tile.cell, 0.0]);
-                    water_draw.draw_vars.geometry_id = Some(tile.geometry.geometry_id());
-                    if water_draw.draw_vars.can_instance() {
-                        let new_area = cx.add_instance(&water_draw.draw_vars);
-                        water_draw.draw_vars.area =
-                            cx.update_area_refs(water_draw.draw_vars.area, new_area);
-                    }
-                }
-            }
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn draw_late_layers(
         &mut self,

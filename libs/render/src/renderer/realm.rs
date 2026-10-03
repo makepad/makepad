@@ -23,8 +23,7 @@ impl Renderer {
         self.terrain_tiles.clear();
         self.terrain_revision = 0;
         self.voxel_tiles.clear();
-        self.water_tiles.clear();
-        self.water_rev = None;
+        self.water.enter_realm();
 
         // Keep resident rig geometry and the palette texture allocation;
         // only their frame-to-instance mapping belongs to the old realm.

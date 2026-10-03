@@ -446,9 +446,9 @@ script_mod! {
                 var result=self.fur_shade(direct+ambient*occlusion+punctual*ao_direct,n,self.eye-self.v_csm.xyz)+emission
                 if self.fur_layer.y>0.5{result=self.toy_coat(result,n,view,light,self.sun_color*(ndl*sun_vis*ao_direct*mix(1.0,3.14159265,self.lin_ctl.x)),ao)}
                 let coverage=mix(1.0,alpha,step(1.5,self.alpha_mode))
-                return self.csm_debug_view(self.gi_display(vec4(mix(mix(linear_to_srgb(result),result,self.lin_ctl.x),self.fog_color,self.scene_fog(self.v_fog,self.v_csm.xyz,self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
+                return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(mix(linear_to_srgb(result),result,self.lin_ctl.x),self.v_fog,self.v_csm.xyz,self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
             }
-            return self.csm_debug_view(self.gi_display(vec4(mix(lit, self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density)), 1.0),self.v_csm.xyz,self.v_csm_n),self.v_csm.xyz,self.v_csm_n)
+            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(lit, self.v_fog, self.v_csm.xyz, self.fog_density), 1.0),self.v_csm.xyz,self.v_csm_n),self.v_csm.xyz,self.v_csm_n)
         }
 
         fragment: fn() {

@@ -1,4 +1,4 @@
-//! Shadow casters, terrain/water/voxel tiles, shape geometry and static slabs.
+//! Shadow casters, terrain/voxel tiles, shape geometry and static slabs.
 
 use super::*;
 
@@ -136,44 +136,6 @@ impl Renderer {
             gz0 = gz1;
         }
         self.terrain_revision = terrain.revision;
-    }
-
-    /// Rebuild the water sheets when the world's water revision moved
-    /// (volume added, wave added by `game.surf_spot`, re-eval).
-    pub(super) fn ensure_water_tiles(&mut self, cx: &mut Cx, water: Option<&WaterView>) {
-        let rev = water.map(|w| w.rev);
-        if rev == self.water_rev {
-            return;
-        }
-        self.water_tiles.clear();
-        if let Some(water) = water {
-            for volume in &water.volumes {
-                // A physics-only volume draws NOTHING (`WaterSurface::draw_sheet`
-                // documents why a transparent sheet is not the same thing: this
-                // pass blends premultiplied, so alpha 0 adds instead of hides).
-                // A river's chain of axis-aligned boxes takes this branch; its
-                // channel-following ribbon is the visible surface.
-                if !volume.draw_sheet {
-                    continue;
-                }
-                let (vertices, indices, min, max) = water_sheet_data(volume);
-                if indices.is_empty() {
-                    continue;
-                }
-                let geometry = Geometry::new(cx);
-                geometry.update(cx, indices, vertices);
-                let (waves_a, waves_b) = pack_wave_uniforms(volume);
-                self.water_tiles.push(WaterTile {
-                    min,
-                    max,
-                    geometry,
-                    waves_a,
-                    waves_b,
-                    cell: water_sheet_cell(volume),
-                });
-            }
-        }
-        self.water_rev = rev;
     }
 
     /// Mirror the voxel field's chunk meshes into GPU geometries: a merge

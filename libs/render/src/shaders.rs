@@ -16,6 +16,7 @@ mod grass;
 mod foliage;
 mod skinned_gpu;
 mod world;
+mod water;
 mod lm_depth;
 mod lm_gather;
 mod lm_encode;
@@ -35,6 +36,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     foliage::script_mod(vm);
     skinned_gpu::script_mod(vm);
     world::script_mod(vm);
+    water::script_mod(vm);
     lm_depth::script_mod(vm);
     lm_gather::script_mod(vm);
     lm_encode::script_mod(vm)
@@ -52,6 +54,7 @@ pub(crate) const SHADER_SOURCE: &str = concat!(
     include_str!("shaders/pbr.rs"),
     include_str!("shaders/skinned_gpu.rs"),
     include_str!("shaders/world.rs"),
+    include_str!("shaders/water.rs"),
     include_str!("shaders/lm_depth.rs"),
     include_str!("shaders/lm_gather.rs"),
     include_str!("shaders/lm_encode.rs"),
@@ -1270,6 +1273,61 @@ mod shader_registration_tests {
                 assert_ne!(tex, morph, "{name}");
                 assert_eq!(crate::gpu_lightmap::cutout_slot(cx, &vars), Some(tex), "{name}: the alpha binds where the shader reads it");
             }
+        });
+    }
+
+    /// The water surface compiles on every backend, and its texture
+    /// bindings fit the WebGL2 fragment budget with room to spare.
+    #[test]
+    fn water_shader_compiles_on_every_backend() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(|vm| {
+            vm.bx.captured_errors = Some(Vec::new());
+            makepad_draw::script_mod(vm);
+            vm.bx.heap.new_module(id!(prelude));
+            script_eval!(vm, {
+                mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
+            });
+            vm.bx.heap.new_module(id!(widgets));
+            makepad_render_graph::pass_stdlib(vm);
+            crate::local_shadows::sampling::script_mod(vm);
+            crate::clustered::script_mod(vm);
+            crate::fast_gi::script_mod(vm);
+            super::script_mod(vm);
+            crate::local_shadows::script_mod(vm);
+            crate::custom_material::register(vm);
+            let setup_errors = vm.take_errors();
+            assert!(setup_errors.is_empty(), "script setup errors: {setup_errors:#?}");
+            // The water itself, and every lit lane that now sees through it
+            // (`scene_fogged`).
+            for (name, result) in [
+                ("water", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneWater)})),
+                ("cube", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCube)})),
+                ("alpha", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneAlpha)})),
+                ("terrain", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneTerrain)})),
+                ("model", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinned)})),
+                ("pbr", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawScenePbr)})),
+                ("skin", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneSkinnedGpu)})),
+                ("city", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneCity)})),
+                ("grass", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneGrass)})),
+                ("foliage", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneFoliageLit)})),
+            ] {
+                let errors = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                assert!(errors.is_empty(), "{name}: {errors}");
+            }
+            for (name,result) in [
+                ("water GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneWater,"glsl",false)})),
+                ("water HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneWater,"hlsl",false)})),
+                ("water Metal",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneWater,"metal",false)})),
+            ] {
+                let source=vm.bx.heap.string_with(result,|_heap,value|value.to_string()).unwrap();
+                assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
+                assert!(source.contains("detail_tex"),"{name}: missing ripple map");
+            }
+            let water = DrawSceneWater::script_new_with_default(vm);
+            let id = water.draw_vars.draw_shader_id.expect("registered water shader");
+            let textures = &vm.cx().draw_shaders[id.index].mapping.textures;
+            assert_eq!(textures.len(), 3, "sky, ripples, seabed");
         });
     }
 

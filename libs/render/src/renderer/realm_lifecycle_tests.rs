@@ -260,7 +260,7 @@ fn entering_a_realm_clears_world_identity_but_preserves_device_policy() {
     renderer.slab_key = Some((1, 1, 1));
     renderer.slab_instance_count = 23;
     renderer.terrain_revision = 1;
-    renderer.water_rev = Some(1);
+    renderer.water.bed_key = Some((1, 1));
     renderer.set_models(vec![model("town/house", 9.0, false, 0.0)]);
     renderer.set_world_attachments(vec![model("fps/pistol", 9.0, false, 0.0)]);
     renderer.world_attachment_ground.push(5.5);
@@ -311,8 +311,7 @@ fn entering_a_realm_clears_world_identity_but_preserves_device_policy() {
     assert!(renderer.terrain_tiles.is_empty());
     assert_eq!(renderer.terrain_revision, 0);
     assert!(renderer.voxel_tiles.is_empty());
-    assert!(renderer.water_tiles.is_empty());
-    assert_eq!(renderer.water_rev, None);
+    assert_eq!(renderer.water.bed_key, None);
     assert!(renderer.placed_models.is_empty());
     assert!(renderer.world_attachments.is_empty());
     assert!(renderer.world_attachment_ground.is_empty());

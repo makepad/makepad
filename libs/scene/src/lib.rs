@@ -33,5 +33,5 @@ pub use terrain::*;
 pub use vfx::*;
 pub use view::*;
 pub use voxel::{ChunkKey, ChunkMesh, VoxelView};
-pub use water::{WaterSurface, WaterView, WaterWave, MAX_WAVES};
+pub use water::{SeaLook, WaterMesh, WaterSurface, WaterView, WaterWave, DETAIL_N, MAX_WAVES};
 pub use world::*;
