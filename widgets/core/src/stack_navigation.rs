@@ -158,6 +158,14 @@ pub struct StackNavigationView {
     #[apply_default]
     animator: Animator,
 
+    /// The slide to play on the next frame, so that a slow first draw of the view
+    /// it reveals happens before the slide's clock starts, rather than making it jump.
+    #[rust]
+    pending_slide: Option<[LiveId; 2]>,
+
+    #[rust]
+    next_frame: NextFrame,
+
     /// The state of the stack view.
     #[rust]
     state: StackNavigationViewState,
@@ -255,6 +263,12 @@ impl StackNavigationView {
 
 impl Widget for StackNavigationView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if let Some(slide_state) = self.pending_slide {
+            if self.next_frame.is_event(event).is_some() {
+                self.pending_slide = None;
+                self.animator_play(cx, &slide_state);
+            }
+        }
         if self.animator_handle_event(cx, event).must_redraw() {
             self.view.redraw(cx);
         }
@@ -279,7 +293,7 @@ impl Widget for StackNavigationView {
 impl StackNavigationView {
     fn hide_stack_view(&mut self, cx: &mut Cx) {
         self.dismiss_transient_children(cx);
-        self.animator_play(cx, ids!(slide.hide));
+        self.schedule_slide(cx, ids!(slide.hide));
 
         cx.widget_action(
             self.widget_uid(),
@@ -379,8 +393,13 @@ impl StackNavigationView {
         self.state = state;
     }
 
+    fn schedule_slide(&mut self, cx: &mut Cx, slide_state: &[LiveId; 2]) {
+        self.pending_slide = Some(*slide_state);
+        self.next_frame = cx.new_next_frame();
+    }
+
     fn is_animating(&self) -> bool {
-        self.animator.is_track_animating(live_id!(slide))
+        self.pending_slide.is_some() || self.animator.is_track_animating(live_id!(slide))
     }
 }
 
@@ -394,7 +413,7 @@ impl StackNavigationViewRef {
 
             // Always slide in from fully hidden, wherever an earlier slide left off.
             inner.animator_cut(cx, ids!(slide.hide));
-            inner.animator_play(cx, ids!(slide.show));
+            inner.schedule_slide(cx, ids!(slide.show));
             inner.redraw(cx);
         }
     }
@@ -425,6 +444,7 @@ impl StackNavigationViewRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.view.visible = true;
             inner.slide = 0.0;
+            inner.pending_slide = None;
             inner.set_nav_state(cx, StackNavigationViewState::Active);
             inner.animator_cut(cx, ids!(slide.show));
             inner.redraw(cx);
@@ -437,6 +457,7 @@ impl StackNavigationViewRef {
                 inner.dismiss_transient_children(cx);
             }
             inner.slide = 1.0;
+            inner.pending_slide = None;
             inner.view.visible = false;
             inner.set_nav_state(cx, StackNavigationViewState::Inactive);
             inner.animator_cut(cx, ids!(slide.hide));
