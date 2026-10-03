@@ -82,15 +82,15 @@ impl Shr<usize> for u8 { type Output = u8; fn shr(self, rhs: usize) -> u8 { self
 impl ShrAssign<usize> for u8 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
 impl Not for u8 { type Output = u8; fn not(self) -> u8 { !self } }
 impl<'a> Not for &'a u8 { type Output = u8; fn not(self) -> u8 { !*self } }
-impl Sum for u8 { fn sum<I: Iterator<Item = u8>>(iter: I) -> u8 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a u8> for u8 { fn sum<I: Iterator<Item = &'a u8>>(iter: I) -> u8 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for u8 { fn product<I: Iterator<Item = u8>>(iter: I) -> u8 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a u8> for u8 { fn product<I: Iterator<Item = &'a u8>>(iter: I) -> u8 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for u8 { fn sum<I: Iterator<Item = u8>>(iter: I) -> u8 { crate::iter::sum_from(0 as u8, iter) } }
+impl<'a> Sum<&'a u8> for u8 { fn sum<I: Iterator<Item = &'a u8>>(iter: I) -> u8 { crate::iter::sum_from(0 as u8, iter.copied()) } }
+impl Product for u8 { fn product<I: Iterator<Item = u8>>(iter: I) -> u8 { crate::iter::product_from(1 as u8, iter) } }
+impl<'a> Product<&'a u8> for u8 { fn product<I: Iterator<Item = &'a u8>>(iter: I) -> u8 { crate::iter::product_from(1 as u8, iter.copied()) } }
 impl FromStr for u8 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u8, ParseIntError> { u8::from_str_radix(src, 10) } }
 impl Step for u8 {
     fn steps_between(start: &u8, end: &u8) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u8).wrapping_sub(*start as u8) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: u8, n: usize) -> Option<u8> { if (n as u128) > (u8::MAX as u128) { return None; } start.checked_add(n as u8) }
-    fn backward_checked(start: u8, n: usize) -> Option<u8> { if (n as u128) > (u8::MAX as u128) { return None; } start.checked_sub(n as u8) }
+    fn forward_checked(start: u8, n: usize) -> Option<u8> { if n > u8::MAX as usize { return None; } start.checked_add(n as u8) }
+    fn backward_checked(start: u8, n: usize) -> Option<u8> { if n > u8::MAX as usize { return None; } start.checked_sub(n as u8) }
 }
 
 // ---- u16
@@ -167,15 +167,15 @@ impl Shr<usize> for u16 { type Output = u16; fn shr(self, rhs: usize) -> u16 { s
 impl ShrAssign<usize> for u16 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
 impl Not for u16 { type Output = u16; fn not(self) -> u16 { !self } }
 impl<'a> Not for &'a u16 { type Output = u16; fn not(self) -> u16 { !*self } }
-impl Sum for u16 { fn sum<I: Iterator<Item = u16>>(iter: I) -> u16 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a u16> for u16 { fn sum<I: Iterator<Item = &'a u16>>(iter: I) -> u16 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for u16 { fn product<I: Iterator<Item = u16>>(iter: I) -> u16 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a u16> for u16 { fn product<I: Iterator<Item = &'a u16>>(iter: I) -> u16 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for u16 { fn sum<I: Iterator<Item = u16>>(iter: I) -> u16 { crate::iter::sum_from(0 as u16, iter) } }
+impl<'a> Sum<&'a u16> for u16 { fn sum<I: Iterator<Item = &'a u16>>(iter: I) -> u16 { crate::iter::sum_from(0 as u16, iter.copied()) } }
+impl Product for u16 { fn product<I: Iterator<Item = u16>>(iter: I) -> u16 { crate::iter::product_from(1 as u16, iter) } }
+impl<'a> Product<&'a u16> for u16 { fn product<I: Iterator<Item = &'a u16>>(iter: I) -> u16 { crate::iter::product_from(1 as u16, iter.copied()) } }
 impl FromStr for u16 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u16, ParseIntError> { u16::from_str_radix(src, 10) } }
 impl Step for u16 {
     fn steps_between(start: &u16, end: &u16) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u16).wrapping_sub(*start as u16) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: u16, n: usize) -> Option<u16> { if (n as u128) > (u16::MAX as u128) { return None; } start.checked_add(n as u16) }
-    fn backward_checked(start: u16, n: usize) -> Option<u16> { if (n as u128) > (u16::MAX as u128) { return None; } start.checked_sub(n as u16) }
+    fn forward_checked(start: u16, n: usize) -> Option<u16> { if n > u16::MAX as usize { return None; } start.checked_add(n as u16) }
+    fn backward_checked(start: u16, n: usize) -> Option<u16> { if n > u16::MAX as usize { return None; } start.checked_sub(n as u16) }
 }
 
 // ---- u32
@@ -248,15 +248,15 @@ impl Shr<usize> for u32 { type Output = u32; fn shr(self, rhs: usize) -> u32 { s
 impl ShrAssign<usize> for u32 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
 impl Not for u32 { type Output = u32; fn not(self) -> u32 { !self } }
 impl<'a> Not for &'a u32 { type Output = u32; fn not(self) -> u32 { !*self } }
-impl Sum for u32 { fn sum<I: Iterator<Item = u32>>(iter: I) -> u32 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a u32> for u32 { fn sum<I: Iterator<Item = &'a u32>>(iter: I) -> u32 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for u32 { fn product<I: Iterator<Item = u32>>(iter: I) -> u32 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a u32> for u32 { fn product<I: Iterator<Item = &'a u32>>(iter: I) -> u32 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for u32 { fn sum<I: Iterator<Item = u32>>(iter: I) -> u32 { crate::iter::sum_from(0 as u32, iter) } }
+impl<'a> Sum<&'a u32> for u32 { fn sum<I: Iterator<Item = &'a u32>>(iter: I) -> u32 { crate::iter::sum_from(0 as u32, iter.copied()) } }
+impl Product for u32 { fn product<I: Iterator<Item = u32>>(iter: I) -> u32 { crate::iter::product_from(1 as u32, iter) } }
+impl<'a> Product<&'a u32> for u32 { fn product<I: Iterator<Item = &'a u32>>(iter: I) -> u32 { crate::iter::product_from(1 as u32, iter.copied()) } }
 impl FromStr for u32 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u32, ParseIntError> { u32::from_str_radix(src, 10) } }
 impl Step for u32 {
     fn steps_between(start: &u32, end: &u32) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u32).wrapping_sub(*start as u32) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: u32, n: usize) -> Option<u32> { if (n as u128) > (u32::MAX as u128) { return None; } start.checked_add(n as u32) }
-    fn backward_checked(start: u32, n: usize) -> Option<u32> { if (n as u128) > (u32::MAX as u128) { return None; } start.checked_sub(n as u32) }
+    fn forward_checked(start: u32, n: usize) -> Option<u32> { if n > u32::MAX as usize { return None; } start.checked_add(n as u32) }
+    fn backward_checked(start: u32, n: usize) -> Option<u32> { if n > u32::MAX as usize { return None; } start.checked_sub(n as u32) }
 }
 
 // ---- u64
@@ -333,15 +333,15 @@ impl Shr<usize> for u64 { type Output = u64; fn shr(self, rhs: usize) -> u64 { s
 impl ShrAssign<usize> for u64 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
 impl Not for u64 { type Output = u64; fn not(self) -> u64 { !self } }
 impl<'a> Not for &'a u64 { type Output = u64; fn not(self) -> u64 { !*self } }
-impl Sum for u64 { fn sum<I: Iterator<Item = u64>>(iter: I) -> u64 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a u64> for u64 { fn sum<I: Iterator<Item = &'a u64>>(iter: I) -> u64 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for u64 { fn product<I: Iterator<Item = u64>>(iter: I) -> u64 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a u64> for u64 { fn product<I: Iterator<Item = &'a u64>>(iter: I) -> u64 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for u64 { fn sum<I: Iterator<Item = u64>>(iter: I) -> u64 { crate::iter::sum_from(0 as u64, iter) } }
+impl<'a> Sum<&'a u64> for u64 { fn sum<I: Iterator<Item = &'a u64>>(iter: I) -> u64 { crate::iter::sum_from(0 as u64, iter.copied()) } }
+impl Product for u64 { fn product<I: Iterator<Item = u64>>(iter: I) -> u64 { crate::iter::product_from(1 as u64, iter) } }
+impl<'a> Product<&'a u64> for u64 { fn product<I: Iterator<Item = &'a u64>>(iter: I) -> u64 { crate::iter::product_from(1 as u64, iter.copied()) } }
 impl FromStr for u64 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u64, ParseIntError> { u64::from_str_radix(src, 10) } }
 impl Step for u64 {
     fn steps_between(start: &u64, end: &u64) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u64).wrapping_sub(*start as u64) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: u64, n: usize) -> Option<u64> { if (n as u128) > (u64::MAX as u128) { return None; } start.checked_add(n as u64) }
-    fn backward_checked(start: u64, n: usize) -> Option<u64> { if (n as u128) > (u64::MAX as u128) { return None; } start.checked_sub(n as u64) }
+    fn forward_checked(start: u64, n: usize) -> Option<u64> { if false { return None; } start.checked_add(n as u64) }
+    fn backward_checked(start: u64, n: usize) -> Option<u64> { if false { return None; } start.checked_sub(n as u64) }
 }
 
 // ---- u128
@@ -418,15 +418,15 @@ impl Shr<usize> for u128 { type Output = u128; fn shr(self, rhs: usize) -> u128 
 impl ShrAssign<usize> for u128 { fn shr_assign(&mut self, rhs: usize) { *self = *self >> rhs; } }
 impl Not for u128 { type Output = u128; fn not(self) -> u128 { !self } }
 impl<'a> Not for &'a u128 { type Output = u128; fn not(self) -> u128 { !*self } }
-impl Sum for u128 { fn sum<I: Iterator<Item = u128>>(iter: I) -> u128 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a u128> for u128 { fn sum<I: Iterator<Item = &'a u128>>(iter: I) -> u128 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for u128 { fn product<I: Iterator<Item = u128>>(iter: I) -> u128 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a u128> for u128 { fn product<I: Iterator<Item = &'a u128>>(iter: I) -> u128 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for u128 { fn sum<I: Iterator<Item = u128>>(iter: I) -> u128 { crate::iter::sum_from(0 as u128, iter) } }
+impl<'a> Sum<&'a u128> for u128 { fn sum<I: Iterator<Item = &'a u128>>(iter: I) -> u128 { crate::iter::sum_from(0 as u128, iter.copied()) } }
+impl Product for u128 { fn product<I: Iterator<Item = u128>>(iter: I) -> u128 { crate::iter::product_from(1 as u128, iter) } }
+impl<'a> Product<&'a u128> for u128 { fn product<I: Iterator<Item = &'a u128>>(iter: I) -> u128 { crate::iter::product_from(1 as u128, iter.copied()) } }
 impl FromStr for u128 { type Err = ParseIntError; fn from_str(src: &str) -> Result<u128, ParseIntError> { u128::from_str_radix(src, 10) } }
 impl Step for u128 {
     fn steps_between(start: &u128, end: &u128) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u128).wrapping_sub(*start as u128); if s <= usize::MAX as u128 { (s as usize, Some(s as usize)) } else { (usize::MAX, None) } } else { (0, None) } }
-    fn forward_checked(start: u128, n: usize) -> Option<u128> { if (n as u128) > (u128::MAX as u128) { return None; } start.checked_add(n as u128) }
-    fn backward_checked(start: u128, n: usize) -> Option<u128> { if (n as u128) > (u128::MAX as u128) { return None; } start.checked_sub(n as u128) }
+    fn forward_checked(start: u128, n: usize) -> Option<u128> { if false { return None; } start.checked_add(n as u128) }
+    fn backward_checked(start: u128, n: usize) -> Option<u128> { if false { return None; } start.checked_sub(n as u128) }
 }
 
 // ---- usize
@@ -499,15 +499,15 @@ impl Shr<i32> for usize { type Output = usize; fn shr(self, rhs: i32) -> usize {
 impl ShrAssign<i32> for usize { fn shr_assign(&mut self, rhs: i32) { *self = *self >> rhs; } }
 impl Not for usize { type Output = usize; fn not(self) -> usize { !self } }
 impl<'a> Not for &'a usize { type Output = usize; fn not(self) -> usize { !*self } }
-impl Sum for usize { fn sum<I: Iterator<Item = usize>>(iter: I) -> usize { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a usize> for usize { fn sum<I: Iterator<Item = &'a usize>>(iter: I) -> usize { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for usize { fn product<I: Iterator<Item = usize>>(iter: I) -> usize { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a usize> for usize { fn product<I: Iterator<Item = &'a usize>>(iter: I) -> usize { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for usize { fn sum<I: Iterator<Item = usize>>(iter: I) -> usize { crate::iter::sum_from(0 as usize, iter) } }
+impl<'a> Sum<&'a usize> for usize { fn sum<I: Iterator<Item = &'a usize>>(iter: I) -> usize { crate::iter::sum_from(0 as usize, iter.copied()) } }
+impl Product for usize { fn product<I: Iterator<Item = usize>>(iter: I) -> usize { crate::iter::product_from(1 as usize, iter) } }
+impl<'a> Product<&'a usize> for usize { fn product<I: Iterator<Item = &'a usize>>(iter: I) -> usize { crate::iter::product_from(1 as usize, iter.copied()) } }
 impl FromStr for usize { type Err = ParseIntError; fn from_str(src: &str) -> Result<usize, ParseIntError> { usize::from_str_radix(src, 10) } }
 impl Step for usize {
     fn steps_between(start: &usize, end: &usize) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as usize).wrapping_sub(*start as usize) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: usize, n: usize) -> Option<usize> { if (n as u128) > (usize::MAX as u128) { return None; } start.checked_add(n as usize) }
-    fn backward_checked(start: usize, n: usize) -> Option<usize> { if (n as u128) > (usize::MAX as u128) { return None; } start.checked_sub(n as usize) }
+    fn forward_checked(start: usize, n: usize) -> Option<usize> { if false { return None; } start.checked_add(n as usize) }
+    fn backward_checked(start: usize, n: usize) -> Option<usize> { if false { return None; } start.checked_sub(n as usize) }
 }
 
 // ---- i8
@@ -586,15 +586,15 @@ impl Not for i8 { type Output = i8; fn not(self) -> i8 { !self } }
 impl<'a> Not for &'a i8 { type Output = i8; fn not(self) -> i8 { !*self } }
 impl Neg for i8 { type Output = i8; fn neg(self) -> i8 { -self } }
 impl<'a> Neg for &'a i8 { type Output = i8; fn neg(self) -> i8 { -*self } }
-impl Sum for i8 { fn sum<I: Iterator<Item = i8>>(iter: I) -> i8 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a i8> for i8 { fn sum<I: Iterator<Item = &'a i8>>(iter: I) -> i8 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for i8 { fn product<I: Iterator<Item = i8>>(iter: I) -> i8 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a i8> for i8 { fn product<I: Iterator<Item = &'a i8>>(iter: I) -> i8 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for i8 { fn sum<I: Iterator<Item = i8>>(iter: I) -> i8 { crate::iter::sum_from(0 as i8, iter) } }
+impl<'a> Sum<&'a i8> for i8 { fn sum<I: Iterator<Item = &'a i8>>(iter: I) -> i8 { crate::iter::sum_from(0 as i8, iter.copied()) } }
+impl Product for i8 { fn product<I: Iterator<Item = i8>>(iter: I) -> i8 { crate::iter::product_from(1 as i8, iter) } }
+impl<'a> Product<&'a i8> for i8 { fn product<I: Iterator<Item = &'a i8>>(iter: I) -> i8 { crate::iter::product_from(1 as i8, iter.copied()) } }
 impl FromStr for i8 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i8, ParseIntError> { i8::from_str_radix(src, 10) } }
 impl Step for i8 {
     fn steps_between(start: &i8, end: &i8) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u8).wrapping_sub(*start as u8) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: i8, n: usize) -> Option<i8> { if (n as u128) > (u8::MAX as u128) { return None; } let w = start.wrapping_add(n as u8 as i8); if w >= start { Some(w) } else { None } }
-    fn backward_checked(start: i8, n: usize) -> Option<i8> { if (n as u128) > (u8::MAX as u128) { return None; } let w = start.wrapping_sub(n as u8 as i8); if w <= start { Some(w) } else { None } }
+    fn forward_checked(start: i8, n: usize) -> Option<i8> { if n > u8::MAX as usize { return None; } let w = start.wrapping_add(n as u8 as i8); if w >= start { Some(w) } else { None } }
+    fn backward_checked(start: i8, n: usize) -> Option<i8> { if n > u8::MAX as usize { return None; } let w = start.wrapping_sub(n as u8 as i8); if w <= start { Some(w) } else { None } }
 }
 
 // ---- i16
@@ -673,15 +673,15 @@ impl Not for i16 { type Output = i16; fn not(self) -> i16 { !self } }
 impl<'a> Not for &'a i16 { type Output = i16; fn not(self) -> i16 { !*self } }
 impl Neg for i16 { type Output = i16; fn neg(self) -> i16 { -self } }
 impl<'a> Neg for &'a i16 { type Output = i16; fn neg(self) -> i16 { -*self } }
-impl Sum for i16 { fn sum<I: Iterator<Item = i16>>(iter: I) -> i16 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a i16> for i16 { fn sum<I: Iterator<Item = &'a i16>>(iter: I) -> i16 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for i16 { fn product<I: Iterator<Item = i16>>(iter: I) -> i16 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a i16> for i16 { fn product<I: Iterator<Item = &'a i16>>(iter: I) -> i16 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for i16 { fn sum<I: Iterator<Item = i16>>(iter: I) -> i16 { crate::iter::sum_from(0 as i16, iter) } }
+impl<'a> Sum<&'a i16> for i16 { fn sum<I: Iterator<Item = &'a i16>>(iter: I) -> i16 { crate::iter::sum_from(0 as i16, iter.copied()) } }
+impl Product for i16 { fn product<I: Iterator<Item = i16>>(iter: I) -> i16 { crate::iter::product_from(1 as i16, iter) } }
+impl<'a> Product<&'a i16> for i16 { fn product<I: Iterator<Item = &'a i16>>(iter: I) -> i16 { crate::iter::product_from(1 as i16, iter.copied()) } }
 impl FromStr for i16 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i16, ParseIntError> { i16::from_str_radix(src, 10) } }
 impl Step for i16 {
     fn steps_between(start: &i16, end: &i16) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u16).wrapping_sub(*start as u16) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: i16, n: usize) -> Option<i16> { if (n as u128) > (u16::MAX as u128) { return None; } let w = start.wrapping_add(n as u16 as i16); if w >= start { Some(w) } else { None } }
-    fn backward_checked(start: i16, n: usize) -> Option<i16> { if (n as u128) > (u16::MAX as u128) { return None; } let w = start.wrapping_sub(n as u16 as i16); if w <= start { Some(w) } else { None } }
+    fn forward_checked(start: i16, n: usize) -> Option<i16> { if n > u16::MAX as usize { return None; } let w = start.wrapping_add(n as u16 as i16); if w >= start { Some(w) } else { None } }
+    fn backward_checked(start: i16, n: usize) -> Option<i16> { if n > u16::MAX as usize { return None; } let w = start.wrapping_sub(n as u16 as i16); if w <= start { Some(w) } else { None } }
 }
 
 // ---- i32
@@ -756,15 +756,15 @@ impl Not for i32 { type Output = i32; fn not(self) -> i32 { !self } }
 impl<'a> Not for &'a i32 { type Output = i32; fn not(self) -> i32 { !*self } }
 impl Neg for i32 { type Output = i32; fn neg(self) -> i32 { -self } }
 impl<'a> Neg for &'a i32 { type Output = i32; fn neg(self) -> i32 { -*self } }
-impl Sum for i32 { fn sum<I: Iterator<Item = i32>>(iter: I) -> i32 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a i32> for i32 { fn sum<I: Iterator<Item = &'a i32>>(iter: I) -> i32 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for i32 { fn product<I: Iterator<Item = i32>>(iter: I) -> i32 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a i32> for i32 { fn product<I: Iterator<Item = &'a i32>>(iter: I) -> i32 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for i32 { fn sum<I: Iterator<Item = i32>>(iter: I) -> i32 { crate::iter::sum_from(0 as i32, iter) } }
+impl<'a> Sum<&'a i32> for i32 { fn sum<I: Iterator<Item = &'a i32>>(iter: I) -> i32 { crate::iter::sum_from(0 as i32, iter.copied()) } }
+impl Product for i32 { fn product<I: Iterator<Item = i32>>(iter: I) -> i32 { crate::iter::product_from(1 as i32, iter) } }
+impl<'a> Product<&'a i32> for i32 { fn product<I: Iterator<Item = &'a i32>>(iter: I) -> i32 { crate::iter::product_from(1 as i32, iter.copied()) } }
 impl FromStr for i32 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i32, ParseIntError> { i32::from_str_radix(src, 10) } }
 impl Step for i32 {
     fn steps_between(start: &i32, end: &i32) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u32).wrapping_sub(*start as u32) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: i32, n: usize) -> Option<i32> { if (n as u128) > (u32::MAX as u128) { return None; } let w = start.wrapping_add(n as u32 as i32); if w >= start { Some(w) } else { None } }
-    fn backward_checked(start: i32, n: usize) -> Option<i32> { if (n as u128) > (u32::MAX as u128) { return None; } let w = start.wrapping_sub(n as u32 as i32); if w <= start { Some(w) } else { None } }
+    fn forward_checked(start: i32, n: usize) -> Option<i32> { if n > u32::MAX as usize { return None; } let w = start.wrapping_add(n as u32 as i32); if w >= start { Some(w) } else { None } }
+    fn backward_checked(start: i32, n: usize) -> Option<i32> { if n > u32::MAX as usize { return None; } let w = start.wrapping_sub(n as u32 as i32); if w <= start { Some(w) } else { None } }
 }
 
 // ---- i64
@@ -843,15 +843,15 @@ impl Not for i64 { type Output = i64; fn not(self) -> i64 { !self } }
 impl<'a> Not for &'a i64 { type Output = i64; fn not(self) -> i64 { !*self } }
 impl Neg for i64 { type Output = i64; fn neg(self) -> i64 { -self } }
 impl<'a> Neg for &'a i64 { type Output = i64; fn neg(self) -> i64 { -*self } }
-impl Sum for i64 { fn sum<I: Iterator<Item = i64>>(iter: I) -> i64 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a i64> for i64 { fn sum<I: Iterator<Item = &'a i64>>(iter: I) -> i64 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for i64 { fn product<I: Iterator<Item = i64>>(iter: I) -> i64 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a i64> for i64 { fn product<I: Iterator<Item = &'a i64>>(iter: I) -> i64 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for i64 { fn sum<I: Iterator<Item = i64>>(iter: I) -> i64 { crate::iter::sum_from(0 as i64, iter) } }
+impl<'a> Sum<&'a i64> for i64 { fn sum<I: Iterator<Item = &'a i64>>(iter: I) -> i64 { crate::iter::sum_from(0 as i64, iter.copied()) } }
+impl Product for i64 { fn product<I: Iterator<Item = i64>>(iter: I) -> i64 { crate::iter::product_from(1 as i64, iter) } }
+impl<'a> Product<&'a i64> for i64 { fn product<I: Iterator<Item = &'a i64>>(iter: I) -> i64 { crate::iter::product_from(1 as i64, iter.copied()) } }
 impl FromStr for i64 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i64, ParseIntError> { i64::from_str_radix(src, 10) } }
 impl Step for i64 {
     fn steps_between(start: &i64, end: &i64) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u64).wrapping_sub(*start as u64) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: i64, n: usize) -> Option<i64> { if (n as u128) > (u64::MAX as u128) { return None; } let w = start.wrapping_add(n as u64 as i64); if w >= start { Some(w) } else { None } }
-    fn backward_checked(start: i64, n: usize) -> Option<i64> { if (n as u128) > (u64::MAX as u128) { return None; } let w = start.wrapping_sub(n as u64 as i64); if w <= start { Some(w) } else { None } }
+    fn forward_checked(start: i64, n: usize) -> Option<i64> { if false { return None; } let w = start.wrapping_add(n as u64 as i64); if w >= start { Some(w) } else { None } }
+    fn backward_checked(start: i64, n: usize) -> Option<i64> { if false { return None; } let w = start.wrapping_sub(n as u64 as i64); if w <= start { Some(w) } else { None } }
 }
 
 // ---- i128
@@ -930,15 +930,15 @@ impl Not for i128 { type Output = i128; fn not(self) -> i128 { !self } }
 impl<'a> Not for &'a i128 { type Output = i128; fn not(self) -> i128 { !*self } }
 impl Neg for i128 { type Output = i128; fn neg(self) -> i128 { -self } }
 impl<'a> Neg for &'a i128 { type Output = i128; fn neg(self) -> i128 { -*self } }
-impl Sum for i128 { fn sum<I: Iterator<Item = i128>>(iter: I) -> i128 { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a i128> for i128 { fn sum<I: Iterator<Item = &'a i128>>(iter: I) -> i128 { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for i128 { fn product<I: Iterator<Item = i128>>(iter: I) -> i128 { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a i128> for i128 { fn product<I: Iterator<Item = &'a i128>>(iter: I) -> i128 { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for i128 { fn sum<I: Iterator<Item = i128>>(iter: I) -> i128 { crate::iter::sum_from(0 as i128, iter) } }
+impl<'a> Sum<&'a i128> for i128 { fn sum<I: Iterator<Item = &'a i128>>(iter: I) -> i128 { crate::iter::sum_from(0 as i128, iter.copied()) } }
+impl Product for i128 { fn product<I: Iterator<Item = i128>>(iter: I) -> i128 { crate::iter::product_from(1 as i128, iter) } }
+impl<'a> Product<&'a i128> for i128 { fn product<I: Iterator<Item = &'a i128>>(iter: I) -> i128 { crate::iter::product_from(1 as i128, iter.copied()) } }
 impl FromStr for i128 { type Err = ParseIntError; fn from_str(src: &str) -> Result<i128, ParseIntError> { i128::from_str_radix(src, 10) } }
 impl Step for i128 {
     fn steps_between(start: &i128, end: &i128) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as u128).wrapping_sub(*start as u128); if s <= usize::MAX as u128 { (s as usize, Some(s as usize)) } else { (usize::MAX, None) } } else { (0, None) } }
-    fn forward_checked(start: i128, n: usize) -> Option<i128> { if (n as u128) > (u128::MAX as u128) { return None; } let w = start.wrapping_add(n as u128 as i128); if w >= start { Some(w) } else { None } }
-    fn backward_checked(start: i128, n: usize) -> Option<i128> { if (n as u128) > (u128::MAX as u128) { return None; } let w = start.wrapping_sub(n as u128 as i128); if w <= start { Some(w) } else { None } }
+    fn forward_checked(start: i128, n: usize) -> Option<i128> { if false { return None; } let w = start.wrapping_add(n as u128 as i128); if w >= start { Some(w) } else { None } }
+    fn backward_checked(start: i128, n: usize) -> Option<i128> { if false { return None; } let w = start.wrapping_sub(n as u128 as i128); if w <= start { Some(w) } else { None } }
 }
 
 // ---- isize
@@ -1017,15 +1017,15 @@ impl Not for isize { type Output = isize; fn not(self) -> isize { !self } }
 impl<'a> Not for &'a isize { type Output = isize; fn not(self) -> isize { !*self } }
 impl Neg for isize { type Output = isize; fn neg(self) -> isize { -self } }
 impl<'a> Neg for &'a isize { type Output = isize; fn neg(self) -> isize { -*self } }
-impl Sum for isize { fn sum<I: Iterator<Item = isize>>(iter: I) -> isize { crate::iter::sum_from(0, iter) } }
-impl<'a> Sum<&'a isize> for isize { fn sum<I: Iterator<Item = &'a isize>>(iter: I) -> isize { crate::iter::sum_from(0, iter.copied()) } }
-impl Product for isize { fn product<I: Iterator<Item = isize>>(iter: I) -> isize { crate::iter::product_from(1, iter) } }
-impl<'a> Product<&'a isize> for isize { fn product<I: Iterator<Item = &'a isize>>(iter: I) -> isize { crate::iter::product_from(1, iter.copied()) } }
+impl Sum for isize { fn sum<I: Iterator<Item = isize>>(iter: I) -> isize { crate::iter::sum_from(0 as isize, iter) } }
+impl<'a> Sum<&'a isize> for isize { fn sum<I: Iterator<Item = &'a isize>>(iter: I) -> isize { crate::iter::sum_from(0 as isize, iter.copied()) } }
+impl Product for isize { fn product<I: Iterator<Item = isize>>(iter: I) -> isize { crate::iter::product_from(1 as isize, iter) } }
+impl<'a> Product<&'a isize> for isize { fn product<I: Iterator<Item = &'a isize>>(iter: I) -> isize { crate::iter::product_from(1 as isize, iter.copied()) } }
 impl FromStr for isize { type Err = ParseIntError; fn from_str(src: &str) -> Result<isize, ParseIntError> { isize::from_str_radix(src, 10) } }
 impl Step for isize {
     fn steps_between(start: &isize, end: &isize) -> (usize, Option<usize>) { if *start <= *end { let s = (*end as usize).wrapping_sub(*start as usize) as usize; (s, Some(s)) } else { (0, None) } }
-    fn forward_checked(start: isize, n: usize) -> Option<isize> { if (n as u128) > (usize::MAX as u128) { return None; } let w = start.wrapping_add(n as usize as isize); if w >= start { Some(w) } else { None } }
-    fn backward_checked(start: isize, n: usize) -> Option<isize> { if (n as u128) > (usize::MAX as u128) { return None; } let w = start.wrapping_sub(n as usize as isize); if w <= start { Some(w) } else { None } }
+    fn forward_checked(start: isize, n: usize) -> Option<isize> { if false { return None; } let w = start.wrapping_add(n as usize as isize); if w >= start { Some(w) } else { None } }
+    fn backward_checked(start: isize, n: usize) -> Option<isize> { if false { return None; } let w = start.wrapping_sub(n as usize as isize); if w <= start { Some(w) } else { None } }
 }
 
 // ---- f32
@@ -1066,10 +1066,10 @@ impl RemAssign for f32 { fn rem_assign(&mut self, rhs: f32) { *self = *self % rh
 impl<'a> RemAssign<&'a f32> for f32 { fn rem_assign(&mut self, rhs: &'a f32) { *self = *self % *rhs; } }
 impl Neg for f32 { type Output = f32; fn neg(self) -> f32 { -self } }
 impl<'a> Neg for &'a f32 { type Output = f32; fn neg(self) -> f32 { -*self } }
-impl Sum for f32 { fn sum<I: Iterator<Item = f32>>(iter: I) -> f32 { crate::iter::sum_from(-0.0, iter) } }
-impl<'a> Sum<&'a f32> for f32 { fn sum<I: Iterator<Item = &'a f32>>(iter: I) -> f32 { crate::iter::sum_from(-0.0, iter.copied()) } }
-impl Product for f32 { fn product<I: Iterator<Item = f32>>(iter: I) -> f32 { crate::iter::product_from(1.0, iter) } }
-impl<'a> Product<&'a f32> for f32 { fn product<I: Iterator<Item = &'a f32>>(iter: I) -> f32 { crate::iter::product_from(1.0, iter.copied()) } }
+impl Sum for f32 { fn sum<I: Iterator<Item = f32>>(iter: I) -> f32 { crate::iter::sum_from(-0.0 as f32, iter) } }
+impl<'a> Sum<&'a f32> for f32 { fn sum<I: Iterator<Item = &'a f32>>(iter: I) -> f32 { crate::iter::sum_from(-0.0 as f32, iter.copied()) } }
+impl Product for f32 { fn product<I: Iterator<Item = f32>>(iter: I) -> f32 { crate::iter::product_from(1.0 as f32, iter) } }
+impl<'a> Product<&'a f32> for f32 { fn product<I: Iterator<Item = &'a f32>>(iter: I) -> f32 { crate::iter::product_from(1.0 as f32, iter.copied()) } }
 impl FromStr for f32 { type Err = crate::num::ParseFloatError; fn from_str(src: &str) -> Result<f32, crate::num::ParseFloatError> { crate::num::dec2flt::parse_f32(src) } }
 
 // ---- f64
@@ -1110,10 +1110,10 @@ impl RemAssign for f64 { fn rem_assign(&mut self, rhs: f64) { *self = *self % rh
 impl<'a> RemAssign<&'a f64> for f64 { fn rem_assign(&mut self, rhs: &'a f64) { *self = *self % *rhs; } }
 impl Neg for f64 { type Output = f64; fn neg(self) -> f64 { -self } }
 impl<'a> Neg for &'a f64 { type Output = f64; fn neg(self) -> f64 { -*self } }
-impl Sum for f64 { fn sum<I: Iterator<Item = f64>>(iter: I) -> f64 { crate::iter::sum_from(-0.0, iter) } }
-impl<'a> Sum<&'a f64> for f64 { fn sum<I: Iterator<Item = &'a f64>>(iter: I) -> f64 { crate::iter::sum_from(-0.0, iter.copied()) } }
-impl Product for f64 { fn product<I: Iterator<Item = f64>>(iter: I) -> f64 { crate::iter::product_from(1.0, iter) } }
-impl<'a> Product<&'a f64> for f64 { fn product<I: Iterator<Item = &'a f64>>(iter: I) -> f64 { crate::iter::product_from(1.0, iter.copied()) } }
+impl Sum for f64 { fn sum<I: Iterator<Item = f64>>(iter: I) -> f64 { crate::iter::sum_from(-0.0 as f64, iter) } }
+impl<'a> Sum<&'a f64> for f64 { fn sum<I: Iterator<Item = &'a f64>>(iter: I) -> f64 { crate::iter::sum_from(-0.0 as f64, iter.copied()) } }
+impl Product for f64 { fn product<I: Iterator<Item = f64>>(iter: I) -> f64 { crate::iter::product_from(1.0 as f64, iter) } }
+impl<'a> Product<&'a f64> for f64 { fn product<I: Iterator<Item = &'a f64>>(iter: I) -> f64 { crate::iter::product_from(1.0 as f64, iter.copied()) } }
 impl FromStr for f64 { type Err = crate::num::ParseFloatError; fn from_str(src: &str) -> Result<f64, crate::num::ParseFloatError> { crate::num::dec2flt::parse_f64(src) } }
 
 // ---- bool

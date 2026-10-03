@@ -31,6 +31,7 @@ pub mod panic;
 pub mod panicking;
 pub mod pin;
 pub mod ptr;
+mod ptr_methods;
 pub mod result;
 
 // ---- data

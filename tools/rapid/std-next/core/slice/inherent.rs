@@ -216,14 +216,14 @@ impl<T> [T] {
     where
         T: Ord,
     {
-        super::binary_search_by(self, |p| p.cmp(x))
+        super::binary_search_by(self, |p| T::cmp(p, x))
     }
     pub fn binary_search_by<F: FnMut(&T) -> Ordering>(&self, f: F) -> Result<usize, usize> {
         super::binary_search_by(self, f)
     }
     pub fn binary_search_by_key<B: Ord, F: FnMut(&T) -> B>(&self, b: &B, f: F) -> Result<usize, usize> {
         let mut f = f;
-        super::binary_search_by(self, |k| f(k).cmp(b))
+        super::binary_search_by(self, |k| B::cmp(&f(k), b))
     }
     pub fn partition_point<P: FnMut(&T) -> bool>(&self, pred: P) -> usize {
         super::partition_point(self, pred)
@@ -232,7 +232,7 @@ impl<T> [T] {
     where
         T: Ord,
     {
-        sort::merge_sort(self, &mut |a: &T, b: &T| a.lt(b))
+        sort::merge_sort(self, &mut |a: &T, b: &T| T::lt(a, b))
     }
     pub fn sort_by<F: FnMut(&T, &T) -> Ordering>(&mut self, compare: F) {
         let mut compare = compare;
@@ -240,7 +240,7 @@ impl<T> [T] {
     }
     pub fn sort_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
         let mut f = f;
-        sort::merge_sort(self, &mut |a: &T, b: &T| f(a).lt(&f(b)))
+        sort::merge_sort(self, &mut |a: &T, b: &T| K::lt(&f(a), &f(b)))
     }
     pub fn sort_by_cached_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
         sort::sort_by_cached_key(self, f)
@@ -249,7 +249,7 @@ impl<T> [T] {
     where
         T: Ord,
     {
-        sort::quicksort(self, &mut |a: &T, b: &T| a.lt(b))
+        sort::quicksort(self, &mut |a: &T, b: &T| T::lt(a, b))
     }
     pub fn sort_unstable_by<F: FnMut(&T, &T) -> Ordering>(&mut self, compare: F) {
         let mut compare = compare;
@@ -257,14 +257,14 @@ impl<T> [T] {
     }
     pub fn sort_unstable_by_key<K: Ord, F: FnMut(&T) -> K>(&mut self, f: F) {
         let mut f = f;
-        sort::quicksort(self, &mut |a: &T, b: &T| f(a).lt(&f(b)))
+        sort::quicksort(self, &mut |a: &T, b: &T| K::lt(&f(a), &f(b)))
     }
     #[track_caller]
     pub fn select_nth_unstable(&mut self, index: usize) -> (&mut [T], &mut T, &mut [T])
     where
         T: Ord,
     {
-        sort::select_nth(self, index, &mut |a: &T, b: &T| a.lt(b));
+        sort::select_nth(self, index, &mut |a: &T, b: &T| T::lt(a, b));
         let (left, rest) = super::split_at_mut(self, index);
         let (mid, right) = super::split_at_mut(rest, 1);
         (left, &mut mid[0], right)

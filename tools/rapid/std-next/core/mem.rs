@@ -87,10 +87,10 @@ impl<T> crate::fmt::Debug for Discriminant<T> {
 
 // ---------------------------------------------------------------- ManuallyDrop
 
-/// Inhibits the compiler from calling `T`'s destructor (Rapid knows this type).
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-#[repr(transparent)]
-pub struct ManuallyDrop<T> {
+/// Inhibits the compiler from calling `T`'s destructor: a union, whose fields never get drop
+/// glue (so the compiler needs no special case).
+#[repr(C)]
+pub union ManuallyDrop<T> {
     value: T,
 }
 
@@ -109,15 +109,43 @@ impl<T> ManuallyDrop<T> {
     }
 }
 
+impl<T: Clone> Clone for ManuallyDrop<T> {
+    fn clone(&self) -> ManuallyDrop<T> {
+        ManuallyDrop::new(unsafe { (*(&self.value as *const T)).clone() })
+    }
+}
+impl<T: Copy> Copy for ManuallyDrop<T> {}
+impl<T: Default> Default for ManuallyDrop<T> {
+    fn default() -> ManuallyDrop<T> {
+        ManuallyDrop::new(T::default())
+    }
+}
+impl<T: PartialEq> PartialEq for ManuallyDrop<T> {
+    fn eq(&self, other: &ManuallyDrop<T>) -> bool {
+        unsafe { self.value == other.value }
+    }
+}
+impl<T: Eq> Eq for ManuallyDrop<T> {}
+impl<T: crate::hash::Hash> crate::hash::Hash for ManuallyDrop<T> {
+    fn hash<H: crate::hash::Hasher>(&self, state: &mut H) {
+        unsafe { self.value.hash(state) }
+    }
+}
+impl<T: crate::fmt::Debug> crate::fmt::Debug for ManuallyDrop<T> {
+    fn fmt(&self, f: &mut crate::fmt::Formatter<'_>) -> crate::fmt::Result {
+        f.debug_struct("ManuallyDrop").field("value", unsafe { &self.value }).finish()
+    }
+}
+
 impl<T> crate::ops::Deref for ManuallyDrop<T> {
     type Target = T;
     fn deref(&self) -> &T {
-        &self.value
+        unsafe { &self.value }
     }
 }
 impl<T> crate::ops::DerefMut for ManuallyDrop<T> {
     fn deref_mut(&mut self) -> &mut T {
-        &mut self.value
+        unsafe { &mut self.value }
     }
 }
 

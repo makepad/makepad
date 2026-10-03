@@ -519,10 +519,10 @@ fn gen_int_traits(o: &mut String, t: &Int) {
         let _ = writeln!(o, "impl Neg for {n} {{ type Output = {n}; fn neg(self) -> {n} {{ -self }} }}");
         let _ = writeln!(o, "impl<'a> Neg for &'a {n} {{ type Output = {n}; fn neg(self) -> {n} {{ -*self }} }}");
     }
-    let _ = writeln!(o, "impl Sum for {n} {{ fn sum<I: Iterator<Item = {n}>>(iter: I) -> {n} {{ crate::iter::sum_from(0, iter) }} }}");
-    let _ = writeln!(o, "impl<'a> Sum<&'a {n}> for {n} {{ fn sum<I: Iterator<Item = &'a {n}>>(iter: I) -> {n} {{ crate::iter::sum_from(0, iter.copied()) }} }}");
-    let _ = writeln!(o, "impl Product for {n} {{ fn product<I: Iterator<Item = {n}>>(iter: I) -> {n} {{ crate::iter::product_from(1, iter) }} }}");
-    let _ = writeln!(o, "impl<'a> Product<&'a {n}> for {n} {{ fn product<I: Iterator<Item = &'a {n}>>(iter: I) -> {n} {{ crate::iter::product_from(1, iter.copied()) }} }}");
+    let _ = writeln!(o, "impl Sum for {n} {{ fn sum<I: Iterator<Item = {n}>>(iter: I) -> {n} {{ crate::iter::sum_from(0 as {n}, iter) }} }}");
+    let _ = writeln!(o, "impl<'a> Sum<&'a {n}> for {n} {{ fn sum<I: Iterator<Item = &'a {n}>>(iter: I) -> {n} {{ crate::iter::sum_from(0 as {n}, iter.copied()) }} }}");
+    let _ = writeln!(o, "impl Product for {n} {{ fn product<I: Iterator<Item = {n}>>(iter: I) -> {n} {{ crate::iter::product_from(1 as {n}, iter) }} }}");
+    let _ = writeln!(o, "impl<'a> Product<&'a {n}> for {n} {{ fn product<I: Iterator<Item = &'a {n}>>(iter: I) -> {n} {{ crate::iter::product_from(1 as {n}, iter.copied()) }} }}");
     let _ = writeln!(o, "impl FromStr for {n} {{ type Err = ParseIntError; fn from_str(src: &str) -> Result<{n}, ParseIntError> {{ {n}::from_str_radix(src, 10) }} }}");
     gen_step(o, t);
     o.push('\n');
@@ -539,11 +539,13 @@ fn gen_step(o: &mut String, t: &Int) {
         let _ = writeln!(o, "    fn steps_between(start: &{n}, end: &{n}) -> (usize, Option<usize>) {{ if *start <= *end {{ let s = (*end as {u}).wrapping_sub(*start as {u}); if s <= usize::MAX as {u} {{ (s as usize, Some(s as usize)) }} else {{ (usize::MAX, None) }} }} else {{ (0, None) }} }}");
     }
     if t.signed {
-        let _ = writeln!(o, "    fn forward_checked(start: {n}, n: usize) -> Option<{n}> {{ if (n as u128) > ({u}::MAX as u128) {{ return None; }} let w = start.wrapping_add(n as {u} as {n}); if w >= start {{ Some(w) }} else {{ None }} }}");
-        let _ = writeln!(o, "    fn backward_checked(start: {n}, n: usize) -> Option<{n}> {{ if (n as u128) > ({u}::MAX as u128) {{ return None; }} let w = start.wrapping_sub(n as {u} as {n}); if w <= start {{ Some(w) }} else {{ None }} }}");
+        let fits = if t.bits >= 64 { "false".to_string() } else { format!("n > {u}::MAX as usize") };
+        let _ = writeln!(o, "    fn forward_checked(start: {n}, n: usize) -> Option<{n}> {{ if {fits} {{ return None; }} let w = start.wrapping_add(n as {u} as {n}); if w >= start {{ Some(w) }} else {{ None }} }}");
+        let _ = writeln!(o, "    fn backward_checked(start: {n}, n: usize) -> Option<{n}> {{ if {fits} {{ return None; }} let w = start.wrapping_sub(n as {u} as {n}); if w <= start {{ Some(w) }} else {{ None }} }}");
     } else {
-        let _ = writeln!(o, "    fn forward_checked(start: {n}, n: usize) -> Option<{n}> {{ if (n as u128) > ({n}::MAX as u128) {{ return None; }} start.checked_add(n as {n}) }}");
-        let _ = writeln!(o, "    fn backward_checked(start: {n}, n: usize) -> Option<{n}> {{ if (n as u128) > ({n}::MAX as u128) {{ return None; }} start.checked_sub(n as {n}) }}");
+        let fits = if t.bits >= 64 { "false".to_string() } else { format!("n > {n}::MAX as usize") };
+        let _ = writeln!(o, "    fn forward_checked(start: {n}, n: usize) -> Option<{n}> {{ if {fits} {{ return None; }} start.checked_add(n as {n}) }}");
+        let _ = writeln!(o, "    fn backward_checked(start: {n}, n: usize) -> Option<{n}> {{ if {fits} {{ return None; }} start.checked_sub(n as {n}) }}");
     }
     o.push_str("}\n");
 }
@@ -558,10 +560,10 @@ fn gen_float_traits(o: &mut String, f: &str) {
     op_impls(o, f, &[("Add", "add", "+"), ("Sub", "sub", "-"), ("Mul", "mul", "*"), ("Div", "div", "/"), ("Rem", "rem", "%")]);
     let _ = writeln!(o, "impl Neg for {f} {{ type Output = {f}; fn neg(self) -> {f} {{ -self }} }}");
     let _ = writeln!(o, "impl<'a> Neg for &'a {f} {{ type Output = {f}; fn neg(self) -> {f} {{ -*self }} }}");
-    let _ = writeln!(o, "impl Sum for {f} {{ fn sum<I: Iterator<Item = {f}>>(iter: I) -> {f} {{ crate::iter::sum_from(-0.0, iter) }} }}");
-    let _ = writeln!(o, "impl<'a> Sum<&'a {f}> for {f} {{ fn sum<I: Iterator<Item = &'a {f}>>(iter: I) -> {f} {{ crate::iter::sum_from(-0.0, iter.copied()) }} }}");
-    let _ = writeln!(o, "impl Product for {f} {{ fn product<I: Iterator<Item = {f}>>(iter: I) -> {f} {{ crate::iter::product_from(1.0, iter) }} }}");
-    let _ = writeln!(o, "impl<'a> Product<&'a {f}> for {f} {{ fn product<I: Iterator<Item = &'a {f}>>(iter: I) -> {f} {{ crate::iter::product_from(1.0, iter.copied()) }} }}");
+    let _ = writeln!(o, "impl Sum for {f} {{ fn sum<I: Iterator<Item = {f}>>(iter: I) -> {f} {{ crate::iter::sum_from(-0.0 as {f}, iter) }} }}");
+    let _ = writeln!(o, "impl<'a> Sum<&'a {f}> for {f} {{ fn sum<I: Iterator<Item = &'a {f}>>(iter: I) -> {f} {{ crate::iter::sum_from(-0.0 as {f}, iter.copied()) }} }}");
+    let _ = writeln!(o, "impl Product for {f} {{ fn product<I: Iterator<Item = {f}>>(iter: I) -> {f} {{ crate::iter::product_from(1.0 as {f}, iter) }} }}");
+    let _ = writeln!(o, "impl<'a> Product<&'a {f}> for {f} {{ fn product<I: Iterator<Item = &'a {f}>>(iter: I) -> {f} {{ crate::iter::product_from(1.0 as {f}, iter.copied()) }} }}");
     let _ = writeln!(o, "impl FromStr for {f} {{ type Err = crate::num::ParseFloatError; fn from_str(src: &str) -> Result<{f}, crate::num::ParseFloatError> {{ crate::num::dec2flt::parse_{f}(src) }} }}");
     o.push('\n');
 }

@@ -762,3 +762,21 @@ impl<'a, T, P: FnMut(&T) -> bool> Iterator for RSplitN<'a, T, P> {
         }
     }
 }
+
+#[cfg(not(rapid_check))]
+impl<'a, T> crate::iter::IntoIterator for &'a [T] {
+    type Item = &'a T;
+    type IntoIter = Iter<'a, T>;
+    fn into_iter(self) -> Iter<'a, T> {
+        Iter::new(self)
+    }
+}
+
+#[cfg(not(rapid_check))]
+impl<'a, T> crate::iter::IntoIterator for &'a mut [T] {
+    type Item = &'a mut T;
+    type IntoIter = IterMut<'a, T>;
+    fn into_iter(self) -> IterMut<'a, T> {
+        IterMut::new(self)
+    }
+}
