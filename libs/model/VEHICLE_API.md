@@ -103,3 +103,10 @@ are bound at publish. Put "car", "truck", "van", "bus" or "kart" in the title.
 Optional: `seat_1` (or `seat`) socket at the driver's hips, `seat_2`,
 `seat_3`… at the passengers' (without them the seats are derived from the
 car's size), and a `steering_wheel` pivot.
+
+Lamps: sockets `headlight_left`, `headlight_right` on the nose's lamp
+lenses and `taillight_left`, `taillight_right` on the tail's (+X is left;
+the model faces +Z). The engine hangs two headlight spots and two red
+taillights there, on the body, lit after dark and in fog, the taillights
+brighter while braking. Give the lenses an emissive material so they glow.
+Without the sockets the lamps sit at the corners of the chassis.

@@ -32,19 +32,28 @@ pub fn place_entity_light(owner: &Entity, light: &EntityLight) -> Option<LmLight
 }
 
 pub fn append_entity_lights(world: &World, out: &mut Vec<LmLight>) {
-    append_entity_lights_with_model_headlights(world, out, &[]);
+    append_entity_lights_with_model_headlights(world, out, &[], 1.0);
 }
 
-pub fn append_entity_lights_with_model_headlights(world: &World, out: &mut Vec<LmLight>, model_owners: &[u64]) {
+/// `lamp_level` dims vehicle lamps (`makepad_scene::light::lamp_level`):
+/// headlights and taillights shine only after dark or in fog.
+pub fn append_entity_lights_with_model_headlights(world: &World, out: &mut Vec<LmLight>, model_owners: &[u64], lamp_level: f32) {
     for entity in &world.entities {
         // Hidden chassis still own visible models and fixtures.
         for light in entity.lights.iter().take(MAX_ENTITY_LIGHTS) {
+            let lamp = makepad_scene::light::is_vehicle_lamp(&light.name);
             if matches!(light.name.as_str(), "headlight_left" | "headlight_right")
                 && model_owners.contains(&entity.id)
             {
                 continue;
             }
-            if let Some(placed) = place_entity_light(entity, light) {
+            if lamp && lamp_level < 0.02 {
+                continue;
+            }
+            if let Some(mut placed) = place_entity_light(entity, light) {
+                if lamp {
+                    placed.color = placed.color * lamp_level;
+                }
                 out.push(placed);
             }
         }
@@ -62,12 +71,15 @@ mod tests {
         car.set_light(EntityLight { name: "cabin".into(), ..Default::default() }).unwrap();
         world.push_entity(car).unwrap();
         let mut lights = Vec::new();
-        append_entity_lights_with_model_headlights(&world, &mut lights, &[17]);
-        assert_eq!(lights.len(), 1, "the independent cabin light remains");
+        append_entity_lights_with_model_headlights(&world, &mut lights, &[17], 1.0);
+        assert_eq!(lights.len(), 3, "the independent cabin light and the taillights remain");
         assert!(world.entity(17).unwrap().lights.iter().all(|light| light.enabled));
         lights.clear();
-        append_entity_lights_with_model_headlights(&world, &mut lights, &[]);
-        assert_eq!(lights.len(), 3, "generic headlights return after exterior removal");
+        append_entity_lights_with_model_headlights(&world, &mut lights, &[], 1.0);
+        assert_eq!(lights.len(), 5, "generic headlights return after exterior removal");
+        lights.clear();
+        append_entity_lights_with_model_headlights(&world, &mut lights, &[], 0.0);
+        assert_eq!(lights.len(), 1, "in daylight only the cabin light shines");
     }
     #[test]
     fn lights_follow_translation_yaw_scale_and_hidden_owners() {
