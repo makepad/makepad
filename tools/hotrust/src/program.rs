@@ -8,6 +8,16 @@ use std::collections::HashMap;
 
 pub type Sym = u32;
 
+/// Macros HotRust implements itself (dialect rule R2); importing them is a no-op.
+pub const BUILTIN_MACROS: &[&str] = &[
+    "format", "format_args", "print", "println", "eprint", "eprintln", "write", "writeln", "panic", "vec",
+    "assert", "assert_eq", "assert_ne", "debug_assert", "debug_assert_eq", "debug_assert_ne", "matches",
+    "unreachable", "todo", "unimplemented", "cfg", "concat", "stringify", "line", "file", "column",
+    "module_path", "include_str", "include_bytes", "env", "option_env", "thread_local", "id", "ids",
+    "live_id", "live_id_num", "id_lut", "script_mod", "script", "script_apply_eval", "msg_send", "sel",
+    "class", "log", "error", "warning", "warn", "trace", "debug",
+];
+
 #[derive(Default)]
 pub struct Interner {
     map: HashMap<String, Sym>,
@@ -764,6 +774,14 @@ impl Program {
         for i in 0..self.imports.len() {
             if !self.imports[i].done {
                 let im = &self.imports[i];
+                // `use std::eprintln;` / `use alloc::format;`: built-in macros need no import
+                if !im.glob {
+                    if let Some((_, last)) = im.segs.last() {
+                        if BUILTIN_MACROS.contains(&self.syms.str(*last)) {
+                            continue;
+                        }
+                    }
+                }
                 let mut p = String::new();
                 for (k, s) in &im.segs {
                     if !p.is_empty() {

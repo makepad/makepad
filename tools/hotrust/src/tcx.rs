@@ -73,6 +73,8 @@ pub struct GenEnv {
     pub impl_def: Option<DefId>,
     /// `impl Trait` in argument position: (ast type id, the anonymous generic param it is)
     pub impl_params: Vec<(u32, u32)>,
+    /// trait bounds on generic params (param index, file, trait path): `T::Assoc` lookups
+    pub bounds: Vec<(u32, u32, ast::Path)>,
 }
 
 pub struct Tcx {
@@ -630,6 +632,18 @@ impl Tcx {
                 }
             }
         }
+        // `T::Name` on a generic param: the associated type of one of its bounds
+        if p.qself.is_none() && p.segs.len() == 2 && p.segs[0].kind == SegKind::Ident && p.segs[0].args.is_none() {
+            let pn = prog.syms.get(f.text(p.segs[0].name)).unwrap_or(u32::MAX - 1);
+            if let Some(pi) = env.names.iter().rposition(|n| *n == pn) {
+                let name = prog.syms.get(f.text(p.segs[1].name)).unwrap_or(u32::MAX);
+                if let Some(t) = self.param_assoc(prog, module, env, pi as u32, name) {
+                    return t;
+                }
+                self.err(prog, file, p.lo, format!("no bound of `{}` has an associated type `{}` -- add the bound (T: Trait)", f.text(p.segs[0].name), f.text(p.segs[1].name)));
+                return self.tys.error;
+            }
+        }
         if p.qself.is_none() && p.segs.len() == 1 {
             let seg = &p.segs[0];
             if seg.kind == SegKind::SelfType {
@@ -665,6 +679,29 @@ impl Tcx {
                 self.tys.error
             }
         }
+    }
+
+    /// `<Param(pi) as Bound>::name` for the first bound of param `pi` (or a supertrait of it)
+    /// that declares the associated type `name`.
+    fn param_assoc(&mut self, prog: &Program, module: u32, env: &GenEnv, pi: u32, name: Sym) -> Option<TyId> {
+        let bounds: Vec<(u32, ast::Path)> = env.bounds.iter().filter(|b| b.0 == pi).map(|b| (b.1, b.2.clone())).collect();
+        let pt = self.tys.intern(TyKind::Param(pi));
+        for (bfile, path) in bounds {
+            let td = match self.resolve_type_path_def(prog, bfile, module, &path) {
+                Some(d) if prog.def(d).kind == DefKind::Trait => d,
+                _ => continue,
+            };
+            let ad = match self.trait_assoc(prog, td, name) {
+                Some(a) => a,
+                None => continue,
+            };
+            let owner = prog.def(ad).parent;
+            let explicit = if owner == td { self.lower_generic_args(prog, bfile, module, env, &path) } else { Vec::new() };
+            let mut args = vec![pt];
+            args.extend(self.fill_trait_defaults(prog, owner, pt, explicit));
+            return Some(self.tys.intern(TyKind::Assoc(ad, args)));
+        }
+        None
     }
 
     pub fn alias_ty(&mut self, prog: &Program, d: DefId) -> TyId {
@@ -800,11 +837,37 @@ fn read_repr(prog: &Program, file: u32, attrs: &[ast::Attr], repr_c: &mut bool, 
 pub fn push_generics(prog: &Program, file: u32, g: &ast::Generics, env: &mut GenEnv) {
     let f = &prog.files[file as usize];
     for p in &g.params {
-        match p.kind {
-            GenericParamKind::Type(..) | GenericParamKind::Const(..) => {
+        match &p.kind {
+            GenericParamKind::Type(bounds, _) => {
+                let i = env.names.len() as u32;
+                env.names.push(prog.syms.get(f.text(p.name)).unwrap_or(u32::MAX));
+                for b in bounds {
+                    if let ast::Bound::Trait { path, .. } = b {
+                        env.bounds.push((i, file, path.clone()));
+                    }
+                }
+            }
+            GenericParamKind::Const(..) => {
                 env.names.push(prog.syms.get(f.text(p.name)).unwrap_or(u32::MAX));
             }
             GenericParamKind::Lifetime(_) => {}
+        }
+    }
+    // `where T: Trait` on one of the params
+    for w in &g.where_ {
+        if let ast::WherePred::Bound { ty, bounds, .. } = w {
+            if let ast::Ty::Path(p) = f.ast.ty(*ty) {
+                if p.qself.is_none() && p.segs.len() == 1 && p.segs[0].args.is_none() {
+                    let name = prog.syms.get(f.text(p.segs[0].name)).unwrap_or(u32::MAX - 1);
+                    if let Some(i) = env.names.iter().rposition(|n| *n == name) {
+                        for b in bounds {
+                            if let ast::Bound::Trait { path, .. } = b {
+                                env.bounds.push((i as u32, file, path.clone()));
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

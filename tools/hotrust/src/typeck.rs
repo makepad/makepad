@@ -85,6 +85,10 @@ pub struct Body {
     pub index_derefs: HashMap<u32, u8>,
     /// call expr -> deref steps from the callee expression to the callable
     pub call_derefs: HashMap<u32, u8>,
+    /// match ergonomics: pattern -> references peeled before matching it
+    pub pat_derefs: HashMap<u32, u8>,
+    /// identifier patterns bound by reference through the default binding mode (1 ref, 2 ref mut)
+    pub pat_bind_ref: HashMap<u32, u8>,
     /// `x?` expr -> the error conversion (`From::from` def, [target, source]) when needed
     pub try_conv: HashMap<u32, Option<(DefId, Vec<TyId>)>>,
     pub locals: Vec<Local>,
@@ -139,6 +143,8 @@ pub struct Fcx<'a> {
     cur_binop: u32,
     /// resolve without defaulting `{integer}`/`{float}` (mid-check normalisation)
     keep_literal_vars: bool,
+    /// default binding mode while checking a pattern: 0 move, 1 ref, 2 ref mut
+    bind_mode: u8,
 }
 
 pub fn check_fn(prog: &Program, tcx: &mut Tcx, def: DefId, args: &[TyId]) -> Body {
@@ -193,6 +199,8 @@ pub fn check_fn(prog: &Program, tcx: &mut Tcx, def: DefId, args: &[TyId]) -> Bod
             index_derefs: HashMap::new(),
             call_derefs: HashMap::new(),
             try_conv: HashMap::new(),
+            pat_derefs: HashMap::new(),
+            pat_bind_ref: HashMap::new(),
             locals: Vec::new(),
             param_pats: Vec::new(),
             ret: error,
@@ -210,6 +218,7 @@ pub fn check_fn(prog: &Program, tcx: &mut Tcx, def: DefId, args: &[TyId]) -> Bod
         closure_depth: Vec::new(),
         cur_binop: 0,
         keep_literal_vars: false,
+        bind_mode: 0,
     };
     let mut params = Vec::new();
     for p in &sig.params {
@@ -375,6 +384,13 @@ impl<'a> Fcx<'a> {
                     nb.push((a, self.deep(x)));
                 }
                 self.tcx.tys.intern(TyKind::Dyn(d, n, nb))
+            }
+            TyKind::Assoc(d, v) => {
+                let mut n = Vec::new();
+                for x in v {
+                    n.push(self.deep(x));
+                }
+                self.tcx.tys.intern(TyKind::Assoc(d, n))
             }
             TyKind::Closure(f, e, sig, up, owner) => {
                 let sig = self.deep(sig);
@@ -795,10 +811,54 @@ impl<'a> Fcx<'a> {
 
     pub fn check_pat(&mut self, p: PatId, expected: TyId) {
         let ast = self.ast();
+        // the pattern's type is the matched value's (lowering peels pat_derefs itself)
         let pi = (p.0 - self.b.pat_lo) as usize;
         if pi < self.b.pat_ty.len() {
             self.b.pat_ty[pi] = expected;
         }
+        // match ergonomics: a structural pattern against references matches through them and
+        // switches the default binding mode to `ref` / `ref mut`
+        let structural = matches!(ast.pat(p), Pat::Tuple(_) | Pat::TupleStruct(..) | Pat::Struct(..) | Pat::Slice(_) | Pat::Path(_))
+            || matches!(ast.pat(p), Pat::Ident { sub: None, by_ref: false, mutbl: false, .. } if self.ident_pat_is_path(p));
+        let mut expected = expected;
+        let saved_mode = self.bind_mode;
+        if structural {
+            let mut n = 0u8;
+            loop {
+                let s = self.shallow(expected);
+                match self.tcx.tys.kind(s).clone() {
+                    TyKind::Ref(m, inner) => {
+                        n += 1;
+                        self.bind_mode = if !m || self.bind_mode == 1 { 1 } else { 2 };
+                        expected = inner;
+                    }
+                    _ => break,
+                }
+            }
+            if n > 0 {
+                self.b.pat_derefs.insert(p.0, n);
+            }
+        }
+        if let Pat::Ref(..) = ast.pat(p) {
+            self.bind_mode = 0;
+        }
+        self.check_pat_inner(p, expected);
+        self.bind_mode = saved_mode;
+    }
+
+    /// An identifier pattern naming a unit struct / unit variant / const (not a binding).
+    fn ident_pat_is_path(&self, p: PatId) -> bool {
+        if let Pat::Ident { name, .. } = self.ast().pat(p) {
+            let s = self.sym(*name);
+            if let Some(d) = self.prog.lookup_in_scope(self.module, s, false) {
+                return matches!(self.prog.def(d).kind, DefKind::Const | DefKind::Variant | DefKind::Struct | DefKind::AssocConst);
+            }
+        }
+        false
+    }
+
+    fn check_pat_inner(&mut self, p: PatId, expected: TyId) {
+        let ast = self.ast();
         match ast.pat(p) {
             Pat::Wild | Pat::Rest => {}
             Pat::Ident { by_ref, mutbl, name, sub } => {
@@ -817,6 +877,10 @@ impl<'a> Fcx<'a> {
                 }
                 let ty = if *by_ref {
                     self.tcx.tys.intern(TyKind::Ref(*mutbl, expected))
+                } else if self.bind_mode != 0 {
+                    // bound by reference through the default binding mode
+                    self.b.pat_bind_ref.insert(p.0, self.bind_mode);
+                    self.tcx.tys.intern(TyKind::Ref(self.bind_mode == 2, expected))
                 } else {
                     expected
                 };

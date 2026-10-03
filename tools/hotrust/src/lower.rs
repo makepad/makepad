@@ -293,15 +293,36 @@ impl<'a> Lcx<'a> {
         }
     }
 
-    /// Value as register leaves (loads from memory when needed).
+    /// Value as register leaves (loads from memory when needed). A value of the wrong shape
+    /// (only after an error, or a lowering bug) is padded so lowering never indexes past it;
+    /// a shape bug without an earlier error is reported as one.
     fn to_leaves(&mut self, v: Val, t: TyId) -> Vec<VReg> {
-        match v {
+        let mut r = match v {
             Val::L(r) => r,
             Val::M(b, o) => match self.load_val(b, o, t) {
                 Val::L(r) => r,
                 Val::M(..) => Vec::new(),
             },
+        };
+        let l = self.layout(t);
+        if let Some(leaves) = &l.leaves {
+            if r.len() < leaves.len() {
+                // unreachable code after a diverging expression legitimately has no value
+                if self.errors.is_empty() && self.dead_blk != Some(self.cur) {
+                    let ts = crate::typeck::ty_to_string(&self.u.prog, &self.u.tcx, t);
+                    self.err(self.pos, format!("internal: value of `{}` has {} parts, expected {} -- HotRust bug, report it", ts, r.len(), leaves.len()));
+                }
+                for lf in &leaves[r.len()..] {
+                    let d = self.f.vreg(lf.cls);
+                    match lf.cls {
+                        Cls::I => self.emit(Inst::Iconst(d, 0)),
+                        c => self.emit(Inst::Fconst(d, 0, c == Cls::F64)),
+                    }
+                    r.push(d);
+                }
+            }
         }
+        r
     }
 
     fn read_place(&mut self, p: &Place, t: TyId) -> Val {
@@ -369,7 +390,7 @@ impl<'a> Lcx<'a> {
         let k = self.kind(t);
         let l = self.layout(t);
         let (fty, off, field_tys): (TyId, u32, Vec<TyId>) = match &k {
-            TyKind::Tuple(v) => (v[fi as usize], l.fields.get(fi as usize).copied().unwrap_or(0), v.clone()),
+            TyKind::Tuple(v) if (fi as usize) < v.len() => (v[fi as usize], l.fields.get(fi as usize).copied().unwrap_or(0), v.clone()),
             TyKind::Adt(d, args) => {
                 let adt = self.u.tcx.adts.get(d).cloned().unwrap();
                 let var = &adt.variants[vi as usize];
@@ -378,15 +399,26 @@ impl<'a> Lcx<'a> {
                     fts.push(self.u.tcx.tys.subst(f.ty, args));
                 }
                 let off = if adt.is_enum {
-                    l.variant_fields[vi as usize][fi as usize]
+                    l.variant_fields.get(vi as usize).and_then(|v| v.get(fi as usize)).copied()
                 } else if adt.is_union {
-                    0
+                    Some(0)
                 } else {
-                    l.fields[fi as usize]
+                    l.fields.get(fi as usize).copied()
                 };
-                (fts[fi as usize], off, fts)
+                match (off, fts.get(fi as usize).copied()) {
+                    (Some(off), Some(ft)) => (ft, off, fts),
+                    _ => {
+                        let ts = crate::typeck::ty_to_string(&self.u.prog, &self.u.tcx, t);
+                        self.err(self.pos, format!("internal: no field {} in the layout of `{}` -- HotRust bug, report it", fi, ts));
+                        (self.u.tcx.tys.error, 0, fts)
+                    }
+                }
             }
-            _ => (self.u.tcx.tys.error, 0, Vec::new()),
+            _ => {
+                let ts = crate::typeck::ty_to_string(&self.u.prog, &self.u.tcx, t);
+                self.err(self.pos, format!("internal: field {} of non-aggregate `{}` -- HotRust bug, report it", fi, ts));
+                return (Place::Regs(Vec::new()), self.u.tcx.tys.error);
+            }
         };
         match p {
             Place::Mem(b, o) => (Place::Mem(*b, *o + off as i32), fty),
@@ -1142,7 +1174,7 @@ impl<'a> Lcx<'a> {
     fn bind_pat(&mut self, p: PatId, v: Val, t: TyId) {
         let ast = self.ast();
         match ast.pat(p) {
-            Pat::Ident { sub: None, by_ref: false, .. } if !self.b.pat_res.contains_key(&p.0) => {
+            Pat::Ident { sub: None, by_ref: false, .. } if !self.b.pat_res.contains_key(&p.0) && !self.b.pat_bind_ref.contains_key(&p.0) => {
                 if let Some(&li) = self.b.pat_local.get(&p.0) {
                     // an aggregate rvalue in memory is a fresh temporary (or a by-pointer
                     // parameter copy): the local takes it over instead of copying it
@@ -1171,6 +1203,8 @@ impl<'a> Lcx<'a> {
     /// Binds the variables of an (already tested) pattern from a place.
     fn bind_pat_place(&mut self, p: PatId, place: &Place, t: TyId) {
         let ast = self.ast();
+        let (pd, td) = self.pat_deref(p, place, t);
+        let (place, t) = (&pd, td);
         match ast.pat(p) {
             Pat::Wild | Pat::Rest | Pat::Lit(_) | Pat::Range(..) | Pat::Path(_) => {}
             Pat::Ident { by_ref, sub, .. } => {
@@ -1179,7 +1213,8 @@ impl<'a> Lcx<'a> {
                 }
                 if let Some(&li) = self.b.pat_local.get(&p.0) {
                     let lt = self.b.locals[li as usize].ty;
-                    let v = if *by_ref {
+                    let by_ref = *by_ref || self.b.pat_bind_ref.contains_key(&p.0);
+                    let v = if by_ref {
                         let a = self.place_addr(place, t);
                         Val::L(vec![a])
                     } else {
@@ -1196,7 +1231,7 @@ impl<'a> Lcx<'a> {
                     self.drop_local_before_rebind(li);
                     let pl = self.local_place(li);
                     self.write_place(&pl, lt, v);
-                    if !*by_ref {
+                    if !by_ref {
                         self.own_local(li);
                     }
                 }
@@ -1295,8 +1330,31 @@ impl<'a> Lcx<'a> {
     }
 
     /// Emits the test of a refutable pattern: falls through on match, jumps to `fail` otherwise.
+    /// Match ergonomics: the place a pattern matches after peeling its recorded references.
+    fn pat_deref(&mut self, p: PatId, place: &Place, t: TyId) -> (Place, TyId) {
+        let n = match self.b.pat_derefs.get(&p.0) {
+            Some(n) => *n,
+            None => return (place.clone(), t),
+        };
+        let mut pl = place.clone();
+        let mut pt = t;
+        for _ in 0..n {
+            let inner = match self.kind(pt) {
+                TyKind::Ref(_, i) => i,
+                _ => break,
+            };
+            let v = self.read_place(&pl, pt);
+            let r = self.to_leaves(v, pt);
+            pl = if self.unsized_ty(inner) { Place::Regs(r) } else { Place::Mem(r[0], 0) };
+            pt = inner;
+        }
+        (pl, pt)
+    }
+
     fn test_pat(&mut self, p: PatId, place: &Place, t: TyId, fail: u32) {
         let ast = self.ast();
+        let (pd, td) = self.pat_deref(p, place, t);
+        let (place, t) = (&pd, td);
         match ast.pat(p) {
             Pat::Wild | Pat::Rest => {}
             Pat::Ident { sub, .. } => {
@@ -2277,6 +2335,19 @@ impl<'a> Lcx<'a> {
                 self.emit(Inst::Addr(p, addr));
                 self.read_place(&Place::Mem(p, 0), t)
             }
+            DefKind::ForeignStatic => match self.u.foreign_addr(d) {
+                // `extern { static X: T; }`: the C global's current value
+                Some(addr) => {
+                    let p = self.f.vreg(Cls::I);
+                    self.emit(Inst::Addr(p, addr));
+                    self.read_place(&Place::Mem(p, 0), t)
+                }
+                None => {
+                    let n = self.u.prog.def_path(d);
+                    self.err(self.pos, format!("foreign static `{}` not found in the loaded libraries -- link it (#[link])", n));
+                    self.dummy_val(t)
+                }
+            },
             DefKind::Variant | DefKind::Struct => {
                 // unit variant / unit struct value
                 let vi = if k == DefKind::Variant { self.u.prog.def(d).sub } else { 0 };
@@ -2304,8 +2375,8 @@ impl<'a> Lcx<'a> {
                 self.load_val(p, 0, t)
             }
             None => {
-                self.err(self.pos, format!("could not evaluate constant {}", self.u.prog.def_path(d)));
-                self.unit()
+                self.err(self.pos, format!("could not evaluate constant {} -- see its own error", self.u.prog.def_path(d)));
+                self.dummy_val(t)
             }
         }
     }

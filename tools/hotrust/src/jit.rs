@@ -1728,7 +1728,18 @@ const INLINE_SRC_BYTES: u32 = 600;
 /// Builds a function's RIR. An internal compiler panic becomes this function's compile error
 /// (HotRust itself never goes down on bad input).
 pub unsafe fn build_rir(up: *mut Unit, id: u32) -> Result<(), String> {
+    // record where an internal panic happened (no stderr noise; the report carries it)
+    static ICE_AT: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|info| {
+        if let Some(l) = info.location() {
+            if let Ok(mut g) = ICE_AT.lock() {
+                *g = format!("{}:{}", l.file().rsplit('/').next().unwrap_or(""), l.line());
+            }
+        }
+    }));
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_rir_unguarded(up, id)));
+    std::panic::set_hook(prev);
     match r {
         Ok(r) => r,
         Err(p) => {
@@ -1741,7 +1752,8 @@ pub unsafe fn build_rir(up: *mut Unit, id: u32) -> Result<(), String> {
             };
             let u = &mut *up;
             u.fns[id as usize].building = false;
-            Err(format!("internal compiler error in {}: {}", u.fns[id as usize].name, msg))
+            let at = ICE_AT.lock().map(|g| g.clone()).unwrap_or_default();
+            Err(format!("internal compiler error in {} (hotrust {}): {} -- HotRust bug, report it", u.fns[id as usize].name, at, msg))
         }
     }
 }
@@ -1862,8 +1874,32 @@ unsafe fn build_rir_unguarded(up: *mut Unit, id: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// HOTRUST_TRACE=typeck:<fn substring>,lower:<fn substring>: print each matching phase start
+/// (a debugger-free way to see where the front end is).
+fn trace(phase: &str, name: &str) {
+    static SPEC: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    let spec = SPEC.get_or_init(|| {
+        let mut v = Vec::new();
+        if let Ok(s) = std::env::var("HOTRUST_TRACE") {
+            for part in s.split(',') {
+                if let Some((p, f)) = part.split_once(':') {
+                    v.push((p.to_string(), f.to_string()));
+                }
+            }
+        }
+        v
+    });
+    for (p, f) in spec {
+        if p == phase && name.contains(f.as_str()) {
+            eprintln!("trace: {} {}", phase, name);
+        }
+    }
+}
+
 unsafe fn build_rir_inner(up: *mut Unit, id: u32) -> Result<crate::rir::Func, String> {
     let key = (&*up).fns[id as usize].key.clone();
+    let fname = (&*up).fns[id as usize].name.clone();
+    trace("typeck", &fname);
     if let FnKey::Glue(kind, t) = key {
         let u = &mut *up;
         let t0 = cpu_ns();
@@ -1933,6 +1969,7 @@ unsafe fn build_rir_inner(up: *mut Unit, id: u32) -> Result<crate::rir::Func, St
     let u = &mut *up;
     u.cur_fn = id;
     let name = u.fns[id as usize].name.clone();
+    trace("lower", &name);
     let (func, errors, closures) = {
         let body_ref: &Body = &*(&body as *const Body);
         let mut lcx = Lcx::new(u, body_ref, name);
@@ -1986,6 +2023,8 @@ fn clone_body(b: &Body) -> Body {
         index_derefs: b.index_derefs.clone(),
         call_derefs: b.call_derefs.clone(),
         try_conv: b.try_conv.clone(),
+        pat_derefs: b.pat_derefs.clone(),
+        pat_bind_ref: b.pat_bind_ref.clone(),
         locals: {
             let mut v = Vec::new();
             for l in &b.locals {
