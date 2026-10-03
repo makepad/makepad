@@ -25,7 +25,3 @@ makepad-key-code = {path = "../key_code", version = "0.1.0" }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(makepad_precompiled_shaders)"] }
-
-[dev-dependencies]
-# Validates the WGSL the draw-shader emitter writes (tests/instance_records.rs).
-naga = { path = "../../libs/vulkan/naga", version = "27.0", features = ["wgsl-in"] }

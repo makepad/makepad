@@ -830,31 +830,6 @@ const SOURCE_RETRY_INTERVAL: Duration = Duration::from_secs(1);
 #[cfg(linux_direct)]
 const REACQUIRE_SUPPRESS: Duration = Duration::from_secs(1);
 
-#[cfg(linux_direct)]
-const BLIT_WGSL: &str = r#"
-struct BlitVertex {
-    @builtin(position) position: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vertex_main(@builtin(vertex_index) index: u32) -> BlitVertex {
-    var out: BlitVertex;
-    let uv = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
-    out.uv = uv;
-    out.position = vec4<f32>(uv * 2.0 - 1.0, 0.0, 1.0);
-    return out;
-}
-
-@group(0) @binding(0) var source: texture_2d<f32>;
-@group(0) @binding(1) var source_sampler: sampler;
-
-@fragment
-fn fragment_main(input: BlitVertex) -> @location(0) vec4<f32> {
-    return textureSample(source, source_sampler, input.uv);
-}
-"#;
-
 /// Why the last frame attempt did not present; drives event-loop pacing.
 #[cfg(linux_direct)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2073,40 +2048,6 @@ fn letterbox(source: vk::Extent2D, target: vk::Extent2D) -> (vk::Viewport, vk::R
     )
 }
 
-#[cfg(linux_direct)]
-fn compile_blit_shaders() -> Result<(Vec<u32>, Vec<u32>), String> {
-    use naga::{back::spv, valid};
-    let module = naga::front::wgsl::parse_str(BLIT_WGSL)
-        .map_err(|e| format!("blit shader WGSL parse error: {e}"))?;
-    let info = valid::Validator::new(valid::ValidationFlags::all(), valid::Capabilities::all())
-        .validate(&module)
-        .map_err(|e| format!("blit shader WGSL validation error: {e}"))?;
-    let options = spv::Options {
-        lang_version: (1, 3),
-        flags: spv::WriterFlags::empty(),
-        fake_missing_bindings: true,
-        binding_map: spv::BindingMap::default(),
-        capabilities: None,
-        bounds_check_policies: naga::proc::BoundsCheckPolicies::default(),
-        zero_initialize_workgroup_memory: spv::ZeroInitializeWorkgroupMemoryMode::None,
-        force_loop_bounding: false,
-        use_storage_input_output_16: false,
-        debug_info: None,
-    };
-    let stage = |shader_stage, entry_point: &str| {
-        let pipeline = spv::PipelineOptions {
-            shader_stage,
-            entry_point: entry_point.to_string(),
-        };
-        spv::write_vec(&module, &info, &options, Some(&pipeline))
-            .map_err(|e| format!("blit shader SPIR-V write failed for {entry_point}: {e}"))
-    };
-    Ok((
-        stage(naga::ShaderStage::Vertex, "vertex_main")?,
-        stage(naga::ShaderStage::Fragment, "fragment_main")?,
-    ))
-}
-
 /// Kernel uevent listener: DRM hotplug events wake the connector rescan
 /// immediately and name the affected card/connector; the periodic rescan
 /// covers systems where the socket is unavailable or its buffer overflowed.
@@ -3039,7 +2980,7 @@ impl CxVulkan {
         if direct.blit.is_some() {
             return Ok(());
         }
-        let (vertex_spirv, fragment_spirv) = compile_blit_shaders()?;
+        let (vertex_spirv, fragment_spirv) = crate::makepad_script::shader_spirv::fullscreen_blit_spirv();
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)

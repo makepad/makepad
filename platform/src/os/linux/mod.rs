@@ -51,7 +51,7 @@ pub mod vulkan;
 #[cfg(all(use_vulkan, target_os = "linux"))]
 pub(crate) mod capture_surface;
 #[cfg(use_vulkan)]
-pub mod vulkan_naga;
+pub mod vulkan_spirv;
 
 #[cfg(not(any(target_env = "ohos", target_os = "android")))]
 pub mod dma_buf;

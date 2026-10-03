@@ -36,7 +36,7 @@ use {
 };
 
 #[cfg(use_vulkan)]
-use crate::os::linux::vulkan_naga::CxVulkanShaderBinary;
+use crate::os::linux::vulkan_spirv::CxVulkanShaderBinary;
 
 impl DrawVars {
     pub(crate) fn compile_shader(&mut self, vm: &mut ScriptVm, _apply: &Apply, value: ScriptValue) {
@@ -144,7 +144,7 @@ impl DrawVars {
             #[cfg(use_vulkan)]
             if !cfg!(target_os = "linux") || vm.host.cx().os.vulkan_active() {
                 for (shader_variant, xr_multiview) in [false, true].into_iter().enumerate() {
-                    match crate::os::linux::vulkan_naga::compile_draw_shader_wgsl_to_spirv(
+                    match crate::os::linux::vulkan_spirv::compile_draw_shader_spirv(
                         vm,
                         io_self,
                         &output,

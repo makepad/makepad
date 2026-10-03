@@ -575,7 +575,7 @@ fn sync_tree(repo: &Path, src: &Path, files: &[String]) -> Result<(Vec<PathBuf>,
 /// Whole-second mtimes, one deterministic newest file per package.
 ///
 /// cargo fingerprints the run of a build script that prints no `rerun-if-*`
-/// (ash, naga, pulldown-cmark, makepad-script) by the STRING
+/// (ash, pulldown-cmark, makepad-script) by the STRING
 /// "<mtime>.<9 digits>s (<newest file>)" of its path package
 /// (`PathSource::fingerprint` -> `LocalFingerprint::Precalculated`); the
 /// string is hashed into that unit and, through `deps`, into every unit

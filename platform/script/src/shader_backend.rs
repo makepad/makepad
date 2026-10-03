@@ -163,7 +163,7 @@ mod typed_vertex_tests {
     }
 
     // `if a { f() } else { g() }` as a statement leaves its phi as a value
-    // nothing uses. WGSL rejects `_phi_1;` (naga: "expected assignment or
+    // nothing uses. WGSL rejects `_phi_1;` ("expected assignment or
     // increment/decrement"); the other backends accept a bare expression.
     #[test]
     fn discarded_values_are_phony_assigned_in_wgsl() {

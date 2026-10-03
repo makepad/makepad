@@ -4084,7 +4084,7 @@ impl DrawVars {
 
             // The same shader as the Vulkan / WebGPU backends would compile
             // it, so a WGSL lowering problem can be seen and validated here
-            // without a Linux box (feed the dump to naga).
+            // without a Linux box.
             if crate::makepad_error_log::trace_enabled("shader.wgsl") {
                 let name = vm
                     .bx

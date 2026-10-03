@@ -21,7 +21,7 @@ use super::*;
 use crate::makepad_script::shader::*;
 use crate::makepad_script::shader_backend::*;
 use crate::makepad_script::*;
-use crate::os::linux::vulkan_naga::compile_wgsl_to_spirv;
+use crate::makepad_script::shader_spirv::compile_wgsl_to_spirv;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -486,7 +486,7 @@ fn mrt_attachments_get_their_own_formats_blend_and_write_masks() {
 // Hostile shaders.
 
 /// Compile a Splash draw shader (one `vec4f` output, `u_n` a uniform the GPU
-/// reads as 0) to the WGSL the Vulkan backend feeds naga.
+/// reads as 0) to the module the Vulkan backend compiles to SPIR-V.
 fn splash_wgsl(fragment_body: &str, extra: &str) -> String {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     let mut vm = ScriptVm { host, bx: Box::new(ScriptVmBase::new()) };
@@ -531,19 +531,18 @@ fn run_splash(gpu: &Gpu, fragment_body: &str, extra: &str) -> ([f32; 4], Duratio
     let fragment = fragment.expect("fragment_main");
     // One zeroed buffer per binding the module declares (the uniforms all
     // read as 0).
-    let module = naga::front::wgsl::parse_str(&wgsl).unwrap();
+    let module = crate::makepad_script::shader_spirv_parse::Parser::parse(&wgsl).unwrap();
     let mut bindings = Vec::new();
-    for (_, g) in module.global_variables.iter() {
-        let Some(b) = &g.binding else { continue };
-        let ty = match g.space {
-            naga::AddressSpace::Uniform => vk::DescriptorType::UNIFORM_BUFFER,
-            naga::AddressSpace::Storage { .. } => vk::DescriptorType::STORAGE_BUFFER,
+    for g in &module.globals {
+        let Some(binding) = g.attrs.binding else { continue };
+        let ty = match g.space.as_str() {
+            "uniform" => vk::DescriptorType::UNIFORM_BUFFER,
+            "storage" => vk::DescriptorType::STORAGE_BUFFER,
             // Textures and samplers (the XR depth texture is always declared):
             // no shader here samples one, so the entry point does not use it.
-            naga::AddressSpace::Handle => continue,
-            other => panic!("the hostile suite does not bind {other:?} (binding {}, {:?}, {:?})", b.binding, g.name, module.types[g.ty]),
+            _ => continue,
         };
-        bindings.push((b.binding, ty));
+        bindings.push((binding, ty));
     }
     unsafe {
         let layout_bindings: Vec<_> = bindings

@@ -80,10 +80,13 @@ fn wgsl_reads_the_record_from_a_storage_buffer_and_validates() {
         "{src}\nstruct MpTestPass {{ camera_projection: mat4x4f, camera_view: mat4x4f, depth_projection: mat4x4f, depth_view: mat4x4f, camera_inv: mat4x4f }}\n\
          @group(1) @binding(0) var<uniform> unibuf_draw_pass: MpTestPass;\n"
     );
-    let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}\n{src}", e.emit_to_string(&src)));
-    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-        .validate(&module)
-        .unwrap_or_else(|e| panic!("{e:?}\n{src}"));
+    let (vertex, fragment) =
+        makepad_script::shader_spirv::compile_wgsl_to_spirv(&src).unwrap_or_else(|e| panic!("{e}\n{src}"));
+    for words in [vertex.expect("vertex_main"), fragment.expect("fragment_main")] {
+        if let Some(Err(e)) = makepad_script::shader_spirv::spirv_val(&words) {
+            panic!("spirv-val: {e}\n{src}");
+        }
+    }
 }
 
 #[test]

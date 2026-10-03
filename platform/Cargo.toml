@@ -100,13 +100,11 @@ makepad-apple-sys = { path = "../libs/apple_sys", version = "1.0.0" }
 wayland-client = { path = "../libs/linux/wayland-client" }
 wayland-protocols = { path = "../libs/linux/wayland-protocols", features = ["client", "unstable", "staging"] }
 wayland-egl = { path = "../libs/linux/wayland-egl" }
-naga = { path = "../libs/vulkan/naga", version = "27.0", features = ["wgsl-in", "spv-out"]}
 
 [target.x86_64-unknown-linux-gnu.dependencies]
 wayland-client = { path = "../libs/linux/wayland-client" }
 wayland-protocols = { path = "../libs/linux/wayland-protocols", features = ["client", "unstable", "staging"] }
 wayland-egl = { path = "../libs/linux/wayland-egl" }
-naga = { path = "../libs/vulkan/naga", version = "27.0", features = ["wgsl-in", "spv-out"]}
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ash = { path = "../libs/vulkan/ash", version = "0.38" }
@@ -116,7 +114,6 @@ ash = { path = "../libs/vulkan/ash", version = "0.38" }
 ## in order to guarantee that only one instance of each crate exists in the app binary.
 makepad-jni-sys = {version = "0.4.0"}
 makepad-android-state = {version = "0.1.0"}
-naga = { path = "../libs/vulkan/naga", version = "27.0", features = ["wgsl-in", "spv-out"]}
 ash = { path = "../libs/vulkan/ash", version = "0.38" }
 # A hosted child process (android_hosted.rs) has no AssetManager: it reads
 # its assets from the APK file itself.
