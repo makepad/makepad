@@ -1894,9 +1894,7 @@ impl<'a> Gen<'a> {
                 self.a.blr(IP0);
             }
             Callee::Indirect(_) => self.a.blr(IP0),
-            // HostVariadic: compiler lane added the variant; Darwin stack placement of the
-            // variadic args is the arm64 lane's A3 (treated as a plain host call for now)
-            Callee::Host(addr) | Callee::HostVariadic(addr, _) => {
+            Callee::Host(addr) => {
                 self.a.mov_imm(IP0, *addr as i64);
                 self.a.blr(IP0);
             }

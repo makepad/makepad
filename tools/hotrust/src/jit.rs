@@ -350,6 +350,36 @@ thread_local! {
     static PANIC: std::cell::RefCell<Option<PanicInfo>> = const { std::cell::RefCell::new(None) };
 }
 
+thread_local! {
+    /// source location of the last panic caught inside the compiler (one-line diagnostics)
+    static ICE_LOC: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// Installs (once) a panic hook that stays silent for panics inside the compiler (they
+/// become compile errors) and records their location; other panics print as usual.
+fn install_ice_hook() {
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let prev = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if in_compile() {
+            if let Some(l) = info.location() {
+                let s = format!(" (at {}:{})", l.file(), l.line());
+                ICE_LOC.with(|c| *c.borrow_mut() = s);
+            }
+            return;
+        }
+        prev(info);
+    }));
+}
+
+/// " (at src/file.rs:line)" of the last panic caught inside the compiler, once.
+pub fn take_ice_location() -> String {
+    ICE_LOC.with(|c| std::mem::take(&mut *c.borrow_mut()))
+}
+
 /// A fault at or just below the stack pointer: the stack's guard page was hit (frames
 /// over a page probe their pages in order, so the guard is always touched first).
 fn is_stack_fault(fault: u64, sp: u64) -> bool {
@@ -799,6 +829,7 @@ impl Unit {
         u.rt.hang = u.emit_code(&ph);
         u.env.rt_hang = u.rt.hang;
         u.init_tls();
+        install_ice_hook();
         install_signals();
         u
     }
@@ -1442,7 +1473,23 @@ pub unsafe fn compile_slot(up: *mut Unit, id: u32) -> u64 {
         unlock_unit();
         return c;
     }
-    let r = compile_fn(up, id);
+    // an internal compiler panic (front end or code generator) becomes this function's
+    // compile error: the process never goes down for it (rt_compile is extern "C")
+    let r = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compile_fn(up, id))) {
+        Ok(r) => r,
+        Err(p) => {
+            let msg = if let Some(s) = p.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = p.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "panic".to_string()
+            };
+            let u = &mut *up;
+            u.fns[id as usize].building = false;
+            Err(format!("internal compiler error in {}: {}{}", u.fns[id as usize].name, msg, take_ice_location()))
+        }
+    };
     match r {
         Ok((code, map)) => {
             let u = &mut *up;
@@ -1453,7 +1500,7 @@ pub unsafe fn compile_slot(up: *mut Unit, id: u32) -> u64 {
         Err(e) => {
             let u = &mut *up;
             let name = u.fns[id as usize].name.clone();
-            u.errors.push(format!("compile error in {}:\n{}", name, e));
+            u.errors.push(format!("compile error in {}: {}", name, e));
             // a body that failed to compile panics when called
             let msg = format!("compile error in {}", name);
             let code = error_stub(u, &msg);

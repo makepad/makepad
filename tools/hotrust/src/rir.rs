@@ -95,11 +95,8 @@ pub enum Callee {
     /// through the function table slot (live mode) / direct (AOT)
     Fn(u32),
     Indirect(VReg),
-    /// host runtime function by absolute address
+    /// HotRust runtime function by absolute address (scalar arguments and results only)
     Host(u64),
-    /// variadic C function: (address, number of fixed ABI arguments). Darwin arm64 passes
-    /// the variadic ones on the stack; SysV x64 sets al = number of vector registers used.
-    HostVariadic(u64, u32),
     /// foreign (C ABI) function by absolute address
     CHost(u64, Box<CSig>),
     /// call through an `extern "C" fn` pointer

@@ -2012,7 +2012,7 @@ impl<'a> Gen<'a> {
                 self.a.call_mem(RAX, 0);
             }
             Callee::Indirect(_) => self.a.call_r(R11),
-            Callee::Host(addr) | Callee::HostVariadic(addr, _) => {
+            Callee::Host(addr) => {
                 self.a.mov_ri(R11, *addr as i64);
                 self.a.mov_ri(RAX, nf as i64);
                 self.a.call_r(R11);

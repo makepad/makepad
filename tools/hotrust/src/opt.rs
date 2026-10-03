@@ -119,7 +119,7 @@ fn callee_shape(f: &Func, callee_id: u32) -> (usize, bool, bool) {
         n += b.insts.len();
         for i in &b.insts {
             match i {
-                Inst::Call(Callee::Host(_), _, _) | Inst::Call(Callee::HostVariadic(..), _, _) | Inst::Call(Callee::CHost(..), _, _) => {}
+                Inst::Call(Callee::Host(_), _, _) | Inst::Call(Callee::CHost(..), _, _) => {}
                 Inst::Call(Callee::Fn(c), _, _) => {
                     leaf = false;
                     if *c == callee_id {
@@ -275,7 +275,6 @@ fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
                 Callee::Indirect(v) => Callee::Indirect(m(*v)),
                 Callee::Fn(i) => Callee::Fn(*i),
                 Callee::Host(h) => Callee::Host(*h),
-                Callee::HostVariadic(h, n) => Callee::HostVariadic(*h, *n),
                 Callee::CHost(h, sig) => Callee::CHost(*h, sig.clone()),
                 Callee::CIndirect(v, sig) => Callee::CIndirect(m(*v), sig.clone()),
                 Callee::CFn(i, sig) => Callee::CFn(*i, sig.clone()),
