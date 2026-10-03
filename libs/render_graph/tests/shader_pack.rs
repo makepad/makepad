@@ -25,6 +25,8 @@ fn kit_passes_round_trip_through_a_pack() {
     let mut cx = Cx::new(Box::new(|_, _| {}));
     cx.with_vm(|vm| {
         makepad_draw::script_mod(vm);
+        // The passes' shared stdlib (`use mod.shared.*` in program and accum).
+        makepad_render_graph::pass_stdlib(vm);
         makepad_render_graph::program::script_mod(vm);
         makepad_render_graph::accum::script_mod(vm);
         let m = vm.new_module(LiveId::from_str("gtest"));
