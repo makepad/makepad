@@ -85,6 +85,8 @@ pub struct Lcx<'a> {
     /// locals owned by the enclosing function (captured by the closure being lowered):
     /// the closure neither drops them nor tracks their drop flags
     foreign: Vec<bool>,
+    /// the unreachable block opened after the last diverging expression
+    dead_blk: Option<u32>,
 }
 
 pub fn fn_name(u: &Unit, key: &FnKey) -> String {
@@ -122,6 +124,7 @@ impl<'a> Lcx<'a> {
             match_root: None,
             want_mut: false,
             foreign: vec![false; n],
+            dead_blk: None,
         }
     }
 
@@ -163,6 +166,7 @@ impl<'a> Lcx<'a> {
     fn dead(&mut self) {
         let b = self.f.block();
         self.switch(b);
+        self.dead_blk = Some(b);
     }
     fn iconst(&mut self, v: i64) -> VReg {
         let d = self.f.vreg(Cls::I);
@@ -202,6 +206,31 @@ impl<'a> Lcx<'a> {
     /// str, slices and trait objects: places of them are fat pointers (Place::Regs)
     fn unsized_ty(&self, t: TyId) -> bool {
         matches!(self.u.tcx.tys.kind(t), TyKind::Str | TyKind::Slice(_) | TyKind::Dyn(..))
+    }
+    fn is_wide(&self, t: TyId) -> bool {
+        matches!(self.u.tcx.tys.kind(t), TyKind::Int(Prim::I128) | TyKind::Int(Prim::U128))
+    }
+    /// A placeholder value of type `t` after an error (keeps lowering going without panics).
+    fn dummy_val(&mut self, t: TyId) -> Val {
+        let l = self.layout(t);
+        match l.leaves {
+            Some(leaves) => {
+                let mut v = Vec::new();
+                for lf in &leaves {
+                    let d = self.f.vreg(lf.cls);
+                    match lf.cls {
+                        Cls::I => self.emit(Inst::Iconst(d, 0)),
+                        c => self.emit(Inst::Fconst(d, 0, c == Cls::F64)),
+                    }
+                    v.push(d);
+                }
+                Val::L(v)
+            }
+            None => {
+                let a = self.new_slot_for(t);
+                Val::M(a, 0)
+            }
+        }
     }
     fn is_f64(&self, t: TyId) -> bool {
         matches!(self.u.tcx.tys.kind(t), TyKind::Float(Prim::F64))
@@ -416,8 +445,11 @@ impl<'a> Lcx<'a> {
         }
         for i in 0..b.expr_ty.len() {
             let e = ExprId(b.expr_lo + i as u32);
-            if let ExprKind::AddrOf(_, _, x) = &ast.expr(e).kind {
-                self.mark_root(*x);
+            match &ast.expr(e).kind {
+                ExprKind::AddrOf(_, _, x) => self.mark_root(*x),
+                // `a op= b` through an op-assign trait takes `&mut a`
+                ExprKind::AssignOp(_, x, _) if b.binops.contains_key(&e.0) => self.mark_root(*x),
+                _ => {}
             }
         }
         // locals captured by reference live in memory
@@ -537,8 +569,20 @@ impl<'a> Lcx<'a> {
             self.pos = ast.block(bid).lo;
             let v = self.lower_block(bid);
             self.pos = ast.block(bid).hi;
-            self.ret_val(v, ret);
+            // a body without a tail value whose type is not unit diverged on every path
+            // (type checking accepted it): its end is unreachable
+            let blk = ast.block(bid);
+            let has_tail = matches!(blk.stmts.last(), Some(Stmt::Expr(_, false)));
+            if !has_tail && !self.is_unit(ret) {
+                self.term(Term::Unreachable);
+            } else {
+                self.ret_val(v, ret);
+            }
         }
+    }
+
+    fn is_unit(&self, t: TyId) -> bool {
+        matches!(self.u.tcx.tys.kind(t), TyKind::Tuple(v) if v.is_empty())
     }
 
     /// Lowers a non-capturing closure as a function of its own.
@@ -633,6 +677,11 @@ impl<'a> Lcx<'a> {
     }
 
     fn ret_val(&mut self, v: Val, t: TyId) {
+        if self.dead_blk == Some(self.cur) {
+            // after a diverging expression: nothing to return
+            self.term(Term::Unreachable);
+            return;
+        }
         // the return value is computed; every live local is dropped before returning
         let v = match v {
             Val::M(b, o) if self.scopes.iter().any(|s| !s.is_empty()) => {
@@ -651,6 +700,11 @@ impl<'a> Lcx<'a> {
             }
             None => {
                 let r = self.to_leaves(v, t);
+                if r.len() != self.f.rets.len() {
+                    self.err(self.pos, "returned value does not match the return type -- check the tail expression's type".to_string());
+                    self.term(Term::Unreachable);
+                    return;
+                }
                 self.term(Term::Ret(r));
             }
         }
@@ -715,6 +769,9 @@ impl<'a> Lcx<'a> {
                 Stmt::Expr(e, semi) => {
                     self.pos = ast.expr(*e).lo;
                     let v = self.lower_expr(*e);
+                    // a block's tail is a coercion site (`&self.v` as `&[T]`, `self` as `&dyn Tr`)
+                    let et = self.b.ty(*e);
+                    let v = if i == n - 1 && !*semi { self.apply_coercion(*e, v, et) } else { v };
                     if i == n - 1 && !*semi {
                         result = v;
                     } else {
@@ -1344,6 +1401,67 @@ impl<'a> Lcx<'a> {
         }
     }
 
+    /// Variant index of an enum type by name.
+    fn variant_index(&self, t: TyId, name: &str) -> u32 {
+        if let TyKind::Adt(d, _) = self.kind(t) {
+            if let Some(adt) = self.u.tcx.adts.get(&d) {
+                for (i, v) in adt.variants.iter().enumerate() {
+                    if self.u.prog.syms.str(v.name) == name {
+                        return i as u32;
+                    }
+                }
+            }
+        }
+        0
+    }
+
+    /// `x?`: continue with the Some/Ok payload, return None / Err(From::from(e)) otherwise.
+    fn lower_try(&mut self, e: ExprId, x: ExprId, t: TyId) -> Val {
+        let xt = self.b.ty(x);
+        let is_result = matches!(self.kind(xt), TyKind::Adt(d, _) if self.u.prog.name(d) == "Result");
+        let v = self.lower_expr(x);
+        let place = match v {
+            Val::M(b, o) => Place::Mem(b, o),
+            Val::L(r) => {
+                let a = self.new_slot_for(xt);
+                self.store_val(a, 0, xt, Val::L(r));
+                Place::Mem(a, 0)
+            }
+        };
+        let fail = self.f.block();
+        let (ok_name, err_name) = if is_result { ("Ok", "Err") } else { ("Some", "None") };
+        let vi_ok = self.variant_index(xt, ok_name);
+        self.test_tag(&place, xt, vi_ok, fail);
+        let ok_blk = self.cur;
+        // failure path
+        self.switch(fail);
+        let rt = self.ret_ty;
+        let vi_ret = self.variant_index(rt, err_name);
+        let r = if is_result {
+            let vi_err = self.variant_index(xt, "Err");
+            let (ep, et) = self.project(&place, xt, vi_err, 0);
+            let ev = self.read_place(&ep, et);
+            let (ev, et2) = match self.b.try_conv.get(&e.0).cloned().flatten() {
+                Some((fd, args)) => {
+                    let (d, a) = self.u.tcx.resolve_trait_method(&self.u.prog, fd, &args);
+                    let id = self.u.fn_id(FnKey::Inst(d, a));
+                    let target = args[0];
+                    (self.emit_call(Callee::Fn(id), vec![(ev, et)], target), target)
+                }
+                None => (ev, et),
+            };
+            self.build_enum(rt, vi_ret, vec![(ev, et2)])
+        } else {
+            self.build_enum(rt, vi_ret, Vec::new())
+        };
+        self.ret_val(r, rt);
+        // success path
+        self.switch(ok_blk);
+        let (pp, pt) = self.project(&place, xt, vi_ok, 0);
+        let _ = pt;
+        self.read_place(&pp, t)
+    }
+
     fn test_variant(&mut self, p: PatId, place: &Place, t: TyId, fail: u32) {
         if let Some(Res::Def(d)) = self.b.pat_res.get(&p.0).copied() {
             if self.u.prog.def(d).kind == DefKind::Variant {
@@ -1477,6 +1595,34 @@ impl<'a> Lcx<'a> {
                 let _ = target;
                 Val::L(vec![p[0], vt])
             }
+            Some(Coerce::DerefRef(n)) => {
+                let st = self.b.ty(e);
+                let (inner, m) = match self.kind(st) {
+                    TyKind::Ref(m, i) => (i, m),
+                    _ => return v,
+                };
+                let p = self.to_leaves(v, st);
+                let mut pl = if self.unsized_ty(inner) { Place::Regs(p) } else { Place::Mem(p[0], 0) };
+                let mut pt = inner;
+                let saved = self.want_mut;
+                self.want_mut = m;
+                for k in 0..n {
+                    let (a, b) = self.deref_place(e.0 | crate::typeck::DEREF_COERCE_KEY, k, pl, pt);
+                    pl = a;
+                    pt = b;
+                }
+                self.want_mut = saved;
+                let _ = target;
+                if self.unsized_ty(pt) {
+                    match pl {
+                        Place::Regs(r) => Val::L(r),
+                        _ => self.unit(),
+                    }
+                } else {
+                    let a = self.place_addr(&pl, pt);
+                    Val::L(vec![a])
+                }
+            }
             Some(Coerce::ReifyFn) => {
                 let t = self.b.ty(e);
                 if let TyKind::FnDef(d, args) = self.kind(t) {
@@ -1544,6 +1690,16 @@ impl<'a> Lcx<'a> {
     fn lower_expr_inner(&mut self, e: ExprId, t: TyId) -> Val {
         let ast = self.ast();
         let ex = ast.expr(e);
+        // 128-bit integers are memory-only so far: no arithmetic on them
+        let wide = match &ex.kind {
+            ExprKind::Binary(_, a, b) | ExprKind::AssignOp(_, a, b) => self.is_wide(self.b.ty(*a)) || self.is_wide(self.b.ty(*b)),
+            ExprKind::Unary(_, x) | ExprKind::Cast(x, _) => self.is_wide(self.b.ty(*x)) || self.is_wide(t),
+            _ => false,
+        };
+        if wide {
+            self.err(ex.lo, "128-bit integer arithmetic is not supported yet -- use u64 (or a (hi, lo) pair)".to_string());
+            return self.dummy_val(t);
+        }
         match &ex.kind {
             ExprKind::Lit(k) => self.lower_lit(e, *k, t),
             ExprKind::Paren(x) => self.lower_expr(*x),
@@ -1636,6 +1792,21 @@ impl<'a> Lcx<'a> {
                     return self.unit();
                 }
                 self.write_place(&pl, pt, v);
+                self.unit()
+            }
+            ExprKind::AssignOp(_, a, b) if self.b.binops.contains_key(&e.0) => {
+                // `a op= b` through <A as OpAssign<B>>::op_assign(&mut a, b)
+                let m = self.b.binops[&e.0].clone();
+                self.want_mut = true;
+                let (pl, pt) = self.lower_place(*a);
+                self.want_mut = false;
+                let addr = self.place_addr(&pl, pt);
+                let bt = self.b.ty(*b);
+                let bv = self.lower_expr(*b);
+                let (d, args) = self.u.tcx.resolve_trait_method(&self.u.prog, m.def, &m.args);
+                let id = self.u.fn_id(FnKey::Inst(d, args));
+                let rt = self.u.tcx.tys.intern(TyKind::Ref(true, pt));
+                self.emit_call(Callee::Fn(id), vec![(Val::L(vec![addr]), rt), (bv, bt)], t);
                 self.unit()
             }
             ExprKind::AssignOp(op, a, b) => {
@@ -1764,6 +1935,7 @@ impl<'a> Lcx<'a> {
                 self.dead();
                 self.unit()
             }
+            ExprKind::Try(x) => self.lower_try(e, *x, t),
             ExprKind::Return(x) => {
                 let rt = self.ret_ty;
                 let v = match x {
@@ -1842,8 +2014,8 @@ impl<'a> Lcx<'a> {
             }
             ExprKind::Field(..) | ExprKind::TupleField(..) | ExprKind::Index(..) => {
                 if let ExprKind::Index(a, i) = &ex.kind {
-                    if matches!(self.kind(self.b.ty(*i)), TyKind::Adt(..)) {
-                        return self.lower_slice_range(*a, *i, t);
+                    if self.is_range_index(e, *i) {
+                        return self.lower_slice_range(e, *a, *i, t);
                     }
                 }
                 let (pl, pt) = self.lower_place(e);
@@ -2251,6 +2423,11 @@ impl<'a> Lcx<'a> {
                 }
                 self.project(&pl, pt, 0, fi)
             }
+            ExprKind::Index(a, i) if self.is_range_index(e, *i) => {
+                // `v[a..b]` as a place: the sub-slice's fat pointer
+                let v = self.lower_slice_range(e, *a, *i, t);
+                (self.val_to_place(v), t)
+            }
             ExprKind::Index(a, i) => {
                 let derefs = self.b.index_derefs.get(&e.0).copied().unwrap_or(0);
                 let (mut pl, mut pt) = self.lower_place(*a);
@@ -2300,6 +2477,17 @@ impl<'a> Lcx<'a> {
         }
     }
 
+    /// built-in slicing `x[range]` (not an overloaded Index impl)
+    fn is_range_index(&self, e: ExprId, i: ExprId) -> bool {
+        if self.b.ov_index.contains_key(&e.0) {
+            return false;
+        }
+        match self.kind(self.b.ty(i)) {
+            TyKind::Adt(d, _) => matches!(self.u.prog.name(d), "Range" | "RangeFrom" | "RangeTo" | "RangeFull" | "RangeInclusive" | "RangeToInclusive"),
+            _ => false,
+        }
+    }
+
     fn bounds_check(&mut self, idx: VReg, len: VReg) {
         let c = self.f.vreg(Cls::I);
         self.emit(Inst::ICmp(Cond::Lt, false, c, idx, len));
@@ -2315,10 +2503,17 @@ impl<'a> Lcx<'a> {
         self.switch(ok);
     }
 
-    fn lower_slice_range(&mut self, a: ExprId, i: ExprId, t: TyId) -> Val {
+    fn lower_slice_range(&mut self, e: ExprId, a: ExprId, i: ExprId, t: TyId) -> Val {
         // base[lo..hi] -> fat pointer
         let at = self.b.ty(a);
         let (mut pl, mut pt) = self.lower_place(a);
+        // autoderef recorded by type checking (Vec<T> -> [T], String -> str, &&[T] ..)
+        let derefs = self.b.index_derefs.get(&e.0).copied().unwrap_or(0);
+        for k in 0..derefs {
+            let (a2, b2) = self.deref_place(e.0, k, pl, pt);
+            pl = a2;
+            pt = b2;
+        }
         while let TyKind::Ref(_, inner) = self.kind(pt) {
             let p = self.read_place(&pl, pt);
             let p = self.to_leaves(p, pt);

@@ -1528,7 +1528,28 @@ fn inline_attrs(prog: &crate::program::Program, d: DefId) -> u8 {
 const INLINE_SRC_BYTES: u32 = 600;
 
 /// Type-checks, lowers and optimises a slot's function into `fns[id].rir`.
+/// Builds a function's RIR. An internal compiler panic becomes this function's compile error
+/// (HotRust itself never goes down on bad input).
 pub unsafe fn build_rir(up: *mut Unit, id: u32) -> Result<(), String> {
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build_rir_unguarded(up, id)));
+    match r {
+        Ok(r) => r,
+        Err(p) => {
+            let msg = if let Some(s) = p.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = p.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "panic".to_string()
+            };
+            let u = &mut *up;
+            u.fns[id as usize].building = false;
+            Err(format!("internal compiler error in {}: {}", u.fns[id as usize].name, msg))
+        }
+    }
+}
+
+unsafe fn build_rir_unguarded(up: *mut Unit, id: u32) -> Result<(), String> {
     {
         let u = &mut *up;
         if u.fns[id as usize].rir.is_some() {
@@ -1669,7 +1690,7 @@ unsafe fn build_rir_inner(up: *mut Unit, id: u32) -> Result<crate::rir::Func, St
         FnKey::Glue(..) => return Err("glue".to_string()),
     };
     if !body.errors.is_empty() {
-        return Err(body.errors.join("\n"));
+        return Err(body.errors[0].clone());
     }
     let t1 = cpu_ns();
     // evaluate constants used by the body before lowering (may run JIT code)
@@ -1729,7 +1750,7 @@ unsafe fn build_rir_inner(up: *mut Unit, id: u32) -> Result<crate::rir::Func, St
         (lcx.f, e, c)
     };
     if !errors.is_empty() {
-        return Err(errors.join("\n"));
+        return Err(errors[0].clone());
     }
     if let Err(e) = func.verify() {
         return Err(format!("RIR verify: {}\n{}", e, func.dump()));
@@ -1767,6 +1788,7 @@ fn clone_body(b: &Body) -> Body {
         for_into: b.for_into.clone(),
         index_derefs: b.index_derefs.clone(),
         call_derefs: b.call_derefs.clone(),
+        try_conv: b.try_conv.clone(),
         locals: {
             let mut v = Vec::new();
             for l in &b.locals {

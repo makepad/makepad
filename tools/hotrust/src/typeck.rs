@@ -42,7 +42,12 @@ pub enum Coerce {
     /// pointer to a sized type -> pointer to `dyn Trait` (&T, *T, Box<T>, Rc<T>, ..):
     /// (source pointee, dyn type)
     ToDyn(TyId, TyId),
+    /// `&A -> &B` through n autoderef steps (`&String -> &str`, `&Vec<T> -> &[T]`); overloaded
+    /// steps are recorded in ov_derefs under (expr | DEREF_COERCE_KEY, step)
+    DerefRef(u8),
 }
+
+pub const DEREF_COERCE_KEY: u32 = 0x8000_0000;
 
 pub struct Local {
     pub name: Sym,
@@ -80,6 +85,8 @@ pub struct Body {
     pub index_derefs: HashMap<u32, u8>,
     /// call expr -> deref steps from the callee expression to the callable
     pub call_derefs: HashMap<u32, u8>,
+    /// `x?` expr -> the error conversion (`From::from` def, [target, source]) when needed
+    pub try_conv: HashMap<u32, Option<(DefId, Vec<TyId>)>>,
     pub locals: Vec<Local>,
     pub param_pats: Vec<PatId>,
     pub ret: TyId,
@@ -185,6 +192,7 @@ pub fn check_fn(prog: &Program, tcx: &mut Tcx, def: DefId, args: &[TyId]) -> Bod
             for_into: HashMap::new(),
             index_derefs: HashMap::new(),
             call_derefs: HashMap::new(),
+            try_conv: HashMap::new(),
             locals: Vec::new(),
             param_pats: Vec::new(),
             ret: error,
@@ -210,6 +218,12 @@ pub fn check_fn(prog: &Program, tcx: &mut Tcx, def: DefId, args: &[TyId]) -> Bod
     }
     let ret = fcx.tcx.tys.subst(sig.ret, args);
     let ret = fcx.tcx.normalize(prog, ret);
+    if params.iter().any(|p| fcx.tcx.tys.has_error(*p)) || fcx.tcx.tys.has_error(ret) {
+        // the signature's own error is the root cause; checking the body would only cascade
+        let lo = prog.files[file as usize].ast.item(d.item).lo;
+        fcx.err(lo, "signature has unresolved types -- fix the signature errors first".to_string());
+        return fcx.b;
+    }
     fcx.b.ret = ret;
     fcx.ret_stack.push(ret);
     let ast = &prog.files[file as usize].ast;
@@ -499,6 +513,22 @@ impl<'a> Fcx<'a> {
         None
     }
 
+    fn occurs(&mut self, v: u32, t: TyId, depth: u32) -> bool {
+        if depth > 64 {
+            return true;
+        }
+        let t = self.shallow(t);
+        match self.tcx.tys.kind(t).clone() {
+            TyKind::Infer(w) => w == v,
+            TyKind::Tuple(xs) | TyKind::Adt(_, xs) | TyKind::FnDef(_, xs) | TyKind::Assoc(_, xs) => xs.iter().any(|x| self.occurs(v, *x, depth + 1)),
+            TyKind::Array(e, _) | TyKind::Slice(e) | TyKind::Ref(_, e) | TyKind::Ptr(_, e) => self.occurs(v, e, depth + 1),
+            TyKind::FnPtr(ps, r) => ps.iter().any(|x| self.occurs(v, *x, depth + 1)) || self.occurs(v, r, depth + 1),
+            TyKind::Dyn(_, xs, bs) => xs.iter().any(|x| self.occurs(v, *x, depth + 1)) || bs.iter().any(|x| self.occurs(v, x.1, depth + 1)),
+            TyKind::Closure(_, _, s, u, _) => self.occurs(v, s, depth + 1) || self.occurs(v, u, depth + 1),
+            _ => false,
+        }
+    }
+
     fn has_dyn(&mut self, t: TyId) -> bool {
         let t = self.shallow(t);
         match self.tcx.tys.kind(t).clone() {
@@ -507,6 +537,25 @@ impl<'a> Fcx<'a> {
             TyKind::Ref(_, x) | TyKind::Ptr(_, x) => self.has_dyn(x),
             _ => false,
         }
+    }
+
+    /// Autoderef steps from `a` to `x` (both pointees of references), if any.
+    fn deref_coercion(&mut self, e: ExprId, a: TyId, x: TyId) -> Option<u8> {
+        let xs = self.shallow(x);
+        if matches!(self.tcx.tys.kind(xs), TyKind::Infer(_)) {
+            return None;
+        }
+        let mut cur = self.shallow(a);
+        let key = e.0 | DEREF_COERCE_KEY;
+        for step in 0..8u8 {
+            cur = self.deref_step(key, step, cur)?;
+            let save = self.vars.clone();
+            if self.unify(cur, xs) {
+                return Some(step + 1);
+            }
+            self.vars = save;
+        }
+        None
     }
 
     pub fn is_fn_trait(&self, td: DefId) -> bool {
@@ -520,6 +569,10 @@ impl<'a> Fcx<'a> {
             VarSt::Bound(b) => return self.unify(b, t),
         };
         let tk = self.tcx.tys.kind(t).clone();
+        // occurs check: `?v = Option<?v>` would be an infinite type
+        if !matches!(tk, TyKind::Infer(_)) && self.occurs(v, t, 0) {
+            return false;
+        }
         match tk {
             TyKind::Infer(w) => {
                 let k2 = match self.vars[w as usize] {
@@ -579,6 +632,19 @@ impl<'a> Fcx<'a> {
                 self.b.coerce.insert(e.0, Coerce::ToDyn(src, dy));
             }
             return true;
+        }
+        if let (TyKind::Ref(m1, ia), TyKind::Ref(m2, ix), Some(ex)) = (&ka, &kx, e) {
+            if *m1 || !*m2 {
+                let save = self.vars.clone();
+                if self.unify(*ia, *ix) {
+                    return true;
+                }
+                self.vars = save;
+                if let Some(n) = self.deref_coercion(ex, *ia, *ix) {
+                    self.b.coerce.insert(ex.0, Coerce::DerefRef(n));
+                    return true;
+                }
+            }
         }
         match (&ka, &kx) {
             (TyKind::FnDef(d, args), TyKind::FnPtr(ps, r)) => {
@@ -686,6 +752,13 @@ impl<'a> Fcx<'a> {
                 n.push(self.norm(t));
             }
             self.b.methods.get_mut(&k).unwrap().args = n;
+        }
+        let keys: Vec<u32> = self.b.try_conv.keys().copied().collect();
+        for k in keys {
+            if let Some((d, v)) = self.b.try_conv[&k].clone() {
+                let n: Vec<TyId> = v.iter().map(|t| self.norm(*t)).collect();
+                self.b.try_conv.insert(k, Some((d, n)));
+            }
         }
         let keys: Vec<u32> = self.b.binops.keys().copied().collect();
         for k in keys {
@@ -1513,6 +1586,15 @@ impl<'a> Fcx<'a> {
                     }
                     if is_tail {
                         result = t;
+                        // the tail is a coercion site for the block's expected type
+                        if let Some(x) = expected {
+                            let (st, sx) = (self.shallow(t), self.shallow(x));
+                            if st != sx && !matches!(self.tcx.tys.kind(st), TyKind::Never | TyKind::Infer(_)) && !matches!(self.tcx.tys.kind(sx), TyKind::Infer(_)) {
+                                if self.coerce_or_unify(t, x, Some(*e), ast.expr(*e).lo) {
+                                    result = x;
+                                }
+                            }
+                        }
                     } else if !*semi {
                         // block-like statement without `;` must be unit (or diverge)
                         let st = self.shallow(t);
@@ -1609,10 +1691,17 @@ impl<'a> Fcx<'a> {
             }
             ExprKind::AssignOp(op, a, b) => {
                 let ta = self.check_expr(*a, None);
+                let sa = self.shallow(ta);
+                if matches!(self.tcx.tys.kind(sa), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..)) {
+                    // `a op= b` on a non-primitive: core::ops::<Op>Assign
+                    self.cur_binop = e.0;
+                    self.check_op_trait(*op, sa, *b, lo, true);
+                    return unit;
+                }
                 let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
                 let tb = self.check_expr(*b, if is_shift { None } else { Some(ta) });
                 if !is_shift {
-                    self.unify(ta, tb);
+                    self.coerce_or_unify(tb, ta, Some(*b), lo);
                 }
                 unit
             }
@@ -2056,8 +2145,9 @@ impl<'a> Fcx<'a> {
             }
             ExprKind::Closure { params, ret, body, .. } => self.check_closure(e, params, *ret, *body, expected),
             ExprKind::Mac(m) => self.check_mac(e, m, expected, lo),
-            ExprKind::Try(_) | ExprKind::Await(_) | ExprKind::Async(..) | ExprKind::Yield(_) | ExprKind::Box(_) => {
-                self.err(lo, "unsupported expression (?, async, box)".to_string());
+            ExprKind::Try(x) => self.check_try(e, *x, lo),
+            ExprKind::Await(_) | ExprKind::Async(..) | ExprKind::Yield(_) | ExprKind::Box(_) => {
+                self.err(lo, "unsupported expression (async, box)".to_string());
                 error
             }
             ExprKind::Underscore => self.fresh(0),
@@ -2145,6 +2235,69 @@ impl<'a> Fcx<'a> {
             }
         }
         false
+    }
+
+    /// `x?` on Option / Result: the success payload; the failure returns early (Result errors
+    /// through `From::from` when the error types differ).
+    fn check_try(&mut self, e: ExprId, x: ExprId, lo: u32) -> TyId {
+        let error = self.tcx.tys.error;
+        let t = self.check_expr(x, None);
+        let t = self.shallow(t);
+        let (d, args) = match self.tcx.tys.kind(t).clone() {
+            TyKind::Adt(d, args) if Some(self.prog.def(d).krate) == self.prog.prelude_crate && matches!(self.prog.name(d), "Option" | "Result") => (d, args),
+            TyKind::Error => return error,
+            _ => {
+                let s = self.ty_str(t);
+                self.err(lo, format!("`?` needs an Option or Result, found `{}`", s));
+                return error;
+            }
+        };
+        let is_result = self.prog.name(d) == "Result";
+        let ret = match self.ret_stack.last() {
+            Some(r) => *r,
+            None => return error,
+        };
+        let rs = self.shallow(ret);
+        let mut conv = None;
+        match self.tcx.tys.kind(rs).clone() {
+            TyKind::Infer(_) => {
+                // closure without a declared return type: the same carrier
+                let mut a = vec![self.fresh(0)];
+                if is_result {
+                    a.push(args[1]);
+                }
+                let rt = self.tcx.tys.intern(TyKind::Adt(d, a));
+                self.unify(rs, rt);
+            }
+            TyKind::Adt(rd, rargs) if rd == d => {
+                if is_result {
+                    let (have, want) = (args[1], rargs[1]);
+                    let save = self.vars.clone();
+                    if !self.unify(have, want) {
+                        self.vars = save;
+                        let from = self.lang_item(&["convert", "From"]);
+                        let h = self.deep(have);
+                        let w = self.deep(want);
+                        let ok = match from {
+                            Some(fd) => self.tcx.find_impl(fd, w, &[h]).is_some(),
+                            None => false,
+                        };
+                        if !ok {
+                            let (hs, ws) = (self.ty_str(h), self.ty_str(w));
+                            self.err(lo, format!("`?` cannot convert the error `{}` into `{}` (no From impl)", hs, ws));
+                        } else if let Some(fm) = from.and_then(|fd| self.trait_fn(fd, "from")) {
+                            conv = Some((fm, vec![w, h]));
+                        }
+                    }
+                }
+            }
+            _ => {
+                let s = self.ty_str(rs);
+                self.err(lo, format!("`?` in a function returning `{}`", s));
+            }
+        }
+        self.b.try_conv.insert(e.0, conv);
+        args.first().copied().unwrap_or(error)
     }
 
     pub fn lang_item(&self, path: &[&str]) -> Option<DefId> {
@@ -2261,7 +2414,7 @@ impl<'a> Fcx<'a> {
                 let sa0 = self.shallow(ta);
                 if matches!(self.tcx.tys.kind(sa0), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..)) {
                     self.cur_binop = e.0;
-                    return self.check_op_trait(op, sa0, b, lo);
+                    return self.check_op_trait(op, sa0, b, lo, false);
                 }
                 let tb = self.check_expr(b, Some(ta));
                 let sa = self.shallow(ta);
@@ -2665,8 +2818,9 @@ impl<'a> Fcx<'a> {
     }
 
     /// `a op b` on a non-primitive left operand: core::ops trait call, result `Output`.
-    fn check_op_trait(&mut self, op: BinOp, ta: TyId, b: ExprId, lo: u32) -> TyId {
-        let (tr, m) = match op {
+    /// `a op b` (or `a op= b` with `assign`) through core::ops::<Op>[Assign]
+    fn check_op_trait(&mut self, op: BinOp, ta: TyId, b: ExprId, lo: u32, assign: bool) -> TyId {
+        let (tr0, m0) = match op {
             BinOp::Add => ("Add", "add"),
             BinOp::Sub => ("Sub", "sub"),
             BinOp::Mul => ("Mul", "mul"),
@@ -2679,6 +2833,8 @@ impl<'a> Fcx<'a> {
             BinOp::Shr => ("Shr", "shr"),
             _ => ("", ""),
         };
+        let (trs, ms_) = if assign { (format!("{}Assign", tr0), format!("{}_assign", m0)) } else { (tr0.to_string(), m0.to_string()) };
+        let (tr, m) = (trs.as_str(), ms_.as_str());
         let error = self.tcx.tys.error;
         let me = self.cur_binop;
         let td = match self.lang_item(&["ops", tr]) {
