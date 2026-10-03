@@ -1,14 +1,16 @@
-//! Math-AOT microbenchmark: splash interpreter vs StitchBackend vs
-//! VirInterpBackend vs a native Rust closure, over 1M points.
+//! Splash field microbenchmark: the Splash interpreter vs the field
+//! compiled by the kernel compiler (native code where the host has a
+//! backend, its interpreter elsewhere) vs a native Rust closure, over 1M
+//! points.
 //!
-//!   cargo run -p makepad-script-test --bin mathaot_bench --release
+//!   cargo run -p makepad-csg-sdf --example splash_field_bench --release
 //!
 //! Expressions:
 //! - scalar SDF: sin(x)*cos(z) - y + 0.3*sin(5x)*sin(5y)*sin(5z)
 //! - vector-heavy: two-sphere min with normalize/dot/packed sin,
 //!   in both vec3-parameter (packed) and hand-scalarized forms.
 
-use makepad_script_math_aot::{MathAot, MathAotParam, MathAotValue, MathBackend, VirInterpBackend};
+use makepad_csg_sdf::{SdfSplashExpr, SplashPoint};
 use makepad_script::makepad_math::Vec3f;
 use makepad_script::*;
 use std::time::Instant;
@@ -70,7 +72,6 @@ fn checksum(out: &[f32]) -> f64 {
 
 fn main() {
     let mut vm = test_vm();
-    let aot = MathAot::new(&mut vm);
     let pts = points();
 
     // ---- scalar SDF expression ------------------------------------------
@@ -78,20 +79,12 @@ fn main() {
     let code = "use mod.math.*\nlet f = |x, y, z| sin(x) * cos(z) - y + 0.3 * sin(5 * x) * sin(5 * y) * sin(5 * z)\n(f)";
     let (_root, fn_value) = eval_fn(&mut vm, "bench_scalar", code);
     let t_compile = Instant::now();
-    let virf = aot
-        .to_vir(&vm, fn_value, &[MathAotParam::Scalar; 3], &[])
-        .expect("in subset");
-    let mut compiled = aot
-        .compile(&vm, fn_value, &[MathAotParam::Scalar; 3], &[])
-        .expect("in subset");
-    println!("compile: {:.3} ms ({} VIR ops)", t_compile.elapsed().as_secs_f64() * 1e3, virf.ops.len());
-    let vir_backend = VirInterpBackend;
-    let vir_compiled = vir_backend.compile(&virf).unwrap();
+    let compiled = SdfSplashExpr::compile(&mut vm, fn_value.as_object().unwrap(), SplashPoint::Xyz, &[]).expect("compiles");
+    println!("compile: {:.3} ms", t_compile.elapsed().as_secs_f64() * 1e3);
 
     let mut out = vec![0f32; N];
 
-    // Native closure mirroring the interpreter's semantics (f64 scalar
-    // arithmetic, f32 trig roundtrips).
+    // Native closure (f64 scalar arithmetic, f32 trig roundtrips).
     let native = |x: f64, y: f64, z: f64| -> f64 {
         let s = |v: f64| (v as f32).sin() as f64;
         let c = |v: f64| (v as f32).cos() as f64;
@@ -108,11 +101,8 @@ fn main() {
     });
     println!("native closure:   {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_native * 1e3, t_native / N as f64 * 1e9, checksum(&out));
 
-    let t_stitch = time(|| compiled.eval_batch(&pts, &[], &mut out));
-    println!("stitch AOT:       {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_stitch * 1e3, t_stitch / N as f64 * 1e9, checksum(&out));
-
-    let t_vir = time(|| vir_compiled.eval_batch(&pts, &[], &mut out));
-    println!("VIR interp:       {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_vir * 1e3, t_vir / N as f64 * 1e9, checksum(&out));
+    let t_kernel = time(|| compiled.distance_batch(&pts, &mut out));
+    println!("kernel:           {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_kernel * 1e3, t_kernel / N as f64 * 1e9, checksum(&out));
 
     // Splash interpreter over a subsample (per-point vm.call), scaled.
     let interp_n = 20_000;
@@ -137,9 +127,9 @@ fn main() {
         interp_n
     );
     println!(
-        "ratios: interp/stitch = {:.1}x   stitch/native = {:.2}x   interp/native = {:.0}x",
-        t_interp_scaled / t_stitch,
-        t_stitch / t_native,
+        "ratios: interp/kernel = {:.1}x   kernel/native = {:.2}x   interp/native = {:.0}x",
+        t_interp_scaled / t_kernel,
+        t_kernel / t_native,
         t_interp_scaled / t_native
     );
 
@@ -148,9 +138,7 @@ fn main() {
     println!("== vector-heavy: min(len(p-c1), len(p-c2)) - 0.8 + 0.05*dot(normalize(p), sin(p*4)), {N} points ==");
     let vcode = "use mod.math.*\nuse mod.pod.*\nlet f = |p| min(length(p - vec3(0.5, 0.2, 0.1)), length(p - vec3(0.0 - 0.4, 0.1, 0.0 - 0.3))) - 0.8 + 0.05 * dot(normalize(p), sin(p * 4.0))\n(f)";
     let (_vroot, vfn) = eval_fn(&mut vm, "bench_vec", vcode);
-    let virf_v = aot.to_vir(&vm, vfn, &[MathAotParam::Vec3], &[]).expect("in subset");
-    let mut compiled_v = aot.compile(&vm, vfn, &[MathAotParam::Vec3], &[]).expect("in subset");
-    println!("packed VIR ops: {}", virf_v.ops.len());
+    let compiled_v = SdfSplashExpr::compile(&mut vm, vfn.as_object().unwrap(), SplashPoint::Vec3, &[]).expect("compiles");
 
     // The same expression hand-scalarized (what the compiler would do
     // without packed lanes).
@@ -163,13 +151,7 @@ fn main() {
         let nx = x / ln\nlet ny = y / ln\nlet nz = z / ln\n\
         min(l1, l2) - 0.8 + 0.05 * (nx * sin(x * 4.0) + ny * sin(y * 4.0) + nz * sin(z * 4.0))\n}\n(f)";
     let (_sroot, sfn) = eval_fn(&mut vm, "bench_scalarized", scode);
-    let virf_s = aot
-        .to_vir(&vm, sfn, &[MathAotParam::Scalar; 3], &[])
-        .expect("in subset");
-    let mut compiled_s = aot
-        .compile(&vm, sfn, &[MathAotParam::Scalar; 3], &[])
-        .expect("in subset");
-    println!("scalarized VIR ops: {}", virf_s.ops.len());
+    let compiled_s = SdfSplashExpr::compile(&mut vm, sfn.as_object().unwrap(), SplashPoint::Xyz, &[]).expect("compiles");
 
     let native_v = |x: f32, y: f32, z: f32| -> f64 {
         let l1 = ((x - 0.5) * (x - 0.5) + (y - 0.2) * (y - 0.2) + (z - 0.1) * (z - 0.1)).sqrt();
@@ -185,11 +167,11 @@ fn main() {
     });
     println!("native closure:   {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_native_v * 1e3, t_native_v / N as f64 * 1e9, checksum(&out));
 
-    let t_packed = time(|| compiled_v.eval_batch(&pts, &[], &mut out));
-    println!("stitch packed:    {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_packed * 1e3, t_packed / N as f64 * 1e9, checksum(&out));
+    let t_packed = time(|| compiled_v.distance_batch(&pts, &mut out));
+    println!("kernel vec3:      {:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_packed * 1e3, t_packed / N as f64 * 1e9, checksum(&out));
 
-    let t_scalar = time(|| compiled_s.eval_batch(&pts, &[], &mut out));
-    println!("stitch scalarized:{:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_scalar * 1e3, t_scalar / N as f64 * 1e9, checksum(&out));
+    let t_scalar = time(|| compiled_s.distance_batch(&pts, &mut out));
+    println!("kernel scalarized:{:8.2} ms  ({:6.1} ns/pt)  checksum {:.4}", t_scalar * 1e3, t_scalar / N as f64 * 1e9, checksum(&out));
 
     let interp_n = 10_000;
     let t_interp_v = time(|| {
@@ -212,10 +194,9 @@ fn main() {
         interp_n
     );
     println!(
-        "ratios: interp/packed = {:.1}x   packed/native = {:.2}x   scalarized/packed = {:.2}x",
+        "ratios: interp/vec3 = {:.1}x   vec3/native = {:.2}x   scalarized/vec3 = {:.2}x",
         t_interp_v_scaled / t_packed,
         t_packed / t_native_v,
         t_scalar / t_packed
     );
-    let _ = MathAotValue::Scalar(0.0);
 }

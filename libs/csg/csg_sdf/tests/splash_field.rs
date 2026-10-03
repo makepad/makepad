@@ -1,17 +1,16 @@
 //! Layer: integration (golden).
 //!
-//! The sphere expression `length(p) - 1.0`, compiled by the splash math
-//! AOT and meshed through dual contouring, must produce:
+//! The sphere expression `length(p) - 1.0`, compiled by the kernel
+//! compiler and meshed through dual contouring, must produce:
 //!
-//! 1. EXACTLY the mesh of a native Rust field mirroring the interpreter's
-//!    f32 semantics for that expression (bit-identical vertices) — this
-//!    pins the whole compile+batch pipeline into the mesher.
+//! 1. EXACTLY the mesh of a native Rust field mirroring the kernel's
+//!    portable f32 semantics for that expression (bit-identical vertices) —
+//!    this pins the whole compile+batch pipeline into the mesher.
 //! 2. The analytic (f64) sphere field's mesh within f32 field precision —
 //!    same triangle count, vertices within 1e-4.
 
 use makepad_csg_math::Vec3d;
-use makepad_csg_sdf::{sdf_to_mesh, Sdf3, SdfSphere, SdfSplashExpr};
-use makepad_script_math_aot::{MathAot, MathAotParam, MathAotValue};
+use makepad_csg_sdf::{sdf_to_mesh, Sdf3, SdfSphere, SdfSplashExpr, SplashPoint};
 use makepad_script::*;
 
 fn make_vm() -> ScriptVm<'static> {
@@ -35,16 +34,14 @@ fn compile_sphere_field() -> SdfSplashExpr {
         values: vec![],
     });
     assert!(vm.take_errors().is_empty());
-    let aot = MathAot::new(&mut vm);
-    let compiled = aot
-        .compile(&vm, fn_value, &[MathAotParam::Vec3], &[])
-        .expect("sphere expression must be in the pure-math subset");
-    SdfSplashExpr::new(compiled.into_inner())
+    let f = fn_value.as_object().expect("a fn");
+    let _keep = vm.bx.heap.new_object_ref(f);
+    SdfSplashExpr::compile(&mut vm, f, SplashPoint::Vec3, &[]).unwrap_or_else(|e| panic!("sphere field must compile: {e:?}"))
 }
 
-/// The interpreter's exact semantics for `length(p) - 1.0` on an
+/// The kernel's exact portable semantics for `length(p) - 1.0` on an
 /// f32-rounded point: f32 lane products, left-associated f32 adds, f32
-/// sqrt, promoted to f64, then an f64 subtract.
+/// sqrt and an f32 subtract, promoted to f64.
 struct MirrorSphere;
 
 impl Sdf3 for MirrorSphere {
@@ -53,7 +50,7 @@ impl Sdf3 for MirrorSphere {
         let y = p.y as f32;
         let z = p.z as f32;
         let len = (x * x + y * y + z * z).sqrt();
-        len as f64 - 1.0
+        (len - 1.0) as f64
     }
 }
 
@@ -119,7 +116,6 @@ fn batch_matches_pointwise() {
     let field = field;
     assert!((field.distance(Vec3d::new(2.0, 0.0, 0.0)) - 1.0).abs() < 1e-6);
     assert!((field.distance(Vec3d::new(0.0, 0.0, 0.0)) + 1.0).abs() < 1e-6);
-    let _ = MathAotValue::Scalar(0.0);
 }
 
 
@@ -140,10 +136,9 @@ fn parametric_radius_remesh() {
         values: vec![],
     });
     assert!(vm.take_errors().is_empty());
-    let aot = MathAot::new(&mut vm);
-    let compiled = aot
-        .compile(&vm, fn_value, &[MathAotParam::Vec3], &[MathAotParam::Scalar])
-        .expect("in subset");
+    let f = fn_value.as_object().expect("a fn");
+    let _keep = vm.bx.heap.new_object_ref(f);
+    let field = SdfSplashExpr::compile(&mut vm, f, SplashPoint::Vec3, &[1]).unwrap_or_else(|e| panic!("{e:?}"));
     // One compiled field, shared with the mesher per radius.
     #[derive(Clone)]
     struct Shared(std::sync::Arc<SdfSplashExpr>);
@@ -152,13 +147,13 @@ fn parametric_radius_remesh() {
             self.0.distance(p)
         }
     }
-    let mut shared = std::sync::Arc::new(SdfSplashExpr::new(compiled.into_inner()));
+    let mut shared = std::sync::Arc::new(field);
     let min = Vec3d::new(-1.6, -1.6, -1.6);
     let max = Vec3d::new(1.6, 1.6, 1.6);
     for r in [0.5f64, 1.0] {
         std::sync::Arc::get_mut(&mut shared)
             .expect("mesher clones dropped")
-            .set_uniforms(vec![MathAotValue::Scalar(r)]);
+            .set_uniforms(&[r as f32]);
         assert!((shared.distance(Vec3d::new(0.0, 0.0, 0.0)) + r).abs() < 1e-6);
         let mesh = sdf_to_mesh(Shared(shared.clone()), min, max, 4);
         assert!(mesh.triangle_count() > 50, "r={r}: degenerate mesh");

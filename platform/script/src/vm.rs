@@ -289,10 +289,20 @@ impl ScriptCode {
     /// where the `fn` keyword is. For hosts that take a document's function
     /// as code of their own (a shader pass compiled elsewhere): they keep the
     /// text and report its errors at the document's lines.
+    ///
+    /// A closure (`|a, b| expr`, `|p| { .. }`) gives its own text, from the
+    /// opening `|` through its body (an expression body ends where its
+    /// statement does).
     pub fn fn_text(&self, ip: ScriptIp) -> Option<(ScriptLoc, String)> {
         let bodies = self.bodies.borrow();
         let body = bodies.get(ip.body as usize)?;
         let source_map = &body.parser.source_map;
+        // The body opcode just before `ip` maps to the body's first token;
+        // a closure's parameter list closes with `|` right before it.
+        let body_tok = (ip.index as usize).checked_sub(1).and_then(|s| source_map.get(s).copied().flatten());
+        if let Some(found) = body_tok.and_then(|t| Self::closure_text(body, t as usize)) {
+            return Some(found);
+        }
         let ip_index = (ip.index as usize).min(source_map.len().saturating_sub(1));
         let token_index = (0..=ip_index)
             .rev()
@@ -338,6 +348,80 @@ impl ScriptCode {
         let text: String = chars[start..end].iter().collect();
         // Where the `fn` keyword is written (its first character).
         let (row, col) = body.tokenizer.token_start_row_col(k as u32)?;
+        let loc = match &body.source {
+            ScriptSource::Mod(script_mod) => ScriptLoc { file: script_mod.file.clone(), line: row + script_mod.line as u32, col },
+            _ => ScriptLoc { file: "generated".into(), line: row, col },
+        };
+        Some((loc, text))
+    }
+
+    /// The text of the closure whose body starts at token `body_tok`, or
+    /// `None` when that body is not a closure's.
+    fn closure_text(body: &ScriptBody, body_tok: usize) -> Option<(ScriptLoc, String)> {
+        let tokens = &body.tokenizer.tokens;
+        let mut k = body_tok.checked_sub(1)?;
+        // `|a| -> Type { .. }`
+        if tokens[k].token.is_identifier() && k >= 1 && tokens[k - 1].token.operator() == id!(->) {
+            k = k.checked_sub(2)?;
+        }
+        let open = match tokens[k].token.operator() {
+            o if o == id!(||) => k,
+            o if o == id!(|) => {
+                // Back over the parameters (names, `:` types, `,`) to the
+                // opening `|`.
+                let mut j = k;
+                loop {
+                    j = j.checked_sub(1)?;
+                    let t = &tokens[j].token;
+                    if t.operator() == id!(|) {
+                        break j;
+                    }
+                    if !(t.is_identifier() || t.separator() == id!(,) || t.separator() == id!(:) || t.operator() == id!(:)) {
+                        return None;
+                    }
+                }
+            }
+            _ => return None,
+        };
+        // The body's last token: a block's matching `}`, or an expression's
+        // last token before a statement end at its own depth (a newline not
+        // continuing an operator, `,`, `;`, or a bracket it did not open).
+        let mut depth = 0i32;
+        let mut j = body_tok;
+        let last = loop {
+            let t = &tokens[j];
+            if j > body_tok && depth == 0 && !tokens[body_tok].token.is_open_curly() {
+                let ends = (t.preceded_by_newline && !tokens[j - 1].token.is_operator())
+                    || t.token.separator() == id!(,)
+                    || t.token.separator() == id!(;)
+                    || t.token.is_close_curly()
+                    || t.token.is_close_round()
+                    || t.token.is_close_square();
+                if ends {
+                    break j - 1;
+                }
+            }
+            if t.token.is_open_curly() || t.token.is_open_round() || t.token.is_open_square() {
+                depth += 1;
+            } else if t.token.is_close_curly() || t.token.is_close_round() || t.token.is_close_square() {
+                depth -= 1;
+                if depth == 0 && tokens[body_tok].token.is_open_curly() {
+                    break j;
+                }
+            }
+            if j + 1 >= tokens.len() {
+                break j;
+            }
+            j += 1;
+        };
+        let chars: Vec<char> = body.effective_code.chars().collect();
+        let start = tokens[open].span().start.min(chars.len());
+        let end = tokens[last].span().end.min(chars.len());
+        if start >= end {
+            return None;
+        }
+        let text: String = chars[start..end].iter().collect();
+        let (row, col) = body.tokenizer.token_start_row_col(open as u32)?;
         let loc = match &body.source {
             ScriptSource::Mod(script_mod) => ScriptLoc { file: script_mod.file.clone(), line: row + script_mod.line as u32, col },
             _ => ScriptLoc { file: "generated".into(), line: row, col },

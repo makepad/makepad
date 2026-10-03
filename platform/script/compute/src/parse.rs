@@ -324,6 +324,16 @@ pub struct Expr {
 // Parser
 // =========================================================================
 
+/// The math methods a value takes (`p.length()`, `a.dot(b)`): the method
+/// form of the builtin, with the receiver as its first argument.
+pub const VALUE_METHODS: &[(&str, &str)] =
+    &[("length", "length"), ("dot", "dot"), ("cross", "cross"), ("normalize", "normalize"), ("normalized", "normalize"), ("mix", "mix")];
+
+/// The builtin a value method calls.
+pub fn value_method(name: &str) -> Option<&'static str> {
+    VALUE_METHODS.iter().find(|(m, _)| *m == name).map(|(_, f)| *f)
+}
+
 /// `a` or `a.b.c` (plain names only): the module path of a qualified call.
 fn dotted(e: &Expr) -> Option<String> {
     match &e.kind {
@@ -801,6 +811,25 @@ impl<'a> Parser<'a> {
                         }
                         let span = Span { start, end: self.prev_end() };
                         e = Expr { kind: ExprKind::Call(format!("{}.{}", q, name), args), span };
+                        continue;
+                    }
+                    // `expr.length()`: a value method on a computed value
+                    // (a plain path is a qualified call, resolved in lowering).
+                    if let Some(f) = value_method(&name) {
+                        self.bump();
+                        let mut args = vec![e];
+                        loop {
+                            self.skip_seps();
+                            if self.eat(")") {
+                                break;
+                            }
+                            args.push(self.expr()?);
+                            if !self.is(")") && !self.is(",") {
+                                self.expect(")")?;
+                            }
+                        }
+                        let span = Span { start, end: self.prev_end() };
+                        e = Expr { kind: ExprKind::Call(f.into(), args), span };
                         continue;
                     }
                 }

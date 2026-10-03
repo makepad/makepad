@@ -165,6 +165,16 @@ const KEYWORDS: &[&str] = &[
 fn fn_source(vm: &ScriptVm, f: ScriptObject) -> Option<(ScriptLoc, String)> {
     let Some(ScriptFnPtr::Script(ip)) = vm.bx.heap.as_fn(f) else { return None };
     let (mut loc, text) = vm.bx.code.fn_text(ip)?;
+    // A closure `|a, b| expr` (or `|a| { .. }`) reads as `(a, b) { return
+    // expr }`; its parameters keep their columns.
+    if let Some(after) = text.strip_prefix('|') {
+        let (params, body) = if let Some(b) = after.strip_prefix('|') { ("", b) } else { after.split_once('|')? };
+        let body = body.trim_start();
+        let body = if body.starts_with('{') || body.starts_with("->") { body.to_string() } else { format!("{{ return {body}\n}}") };
+        loc.line += 1;
+        loc.col += 1;
+        return Some((loc, format!("({params}) {body}")));
+    }
     let rest = text.trim_start().strip_prefix("fn")?.trim_start();
     // `fn name(..)` as well as `fn(..)`.
     let rest = rest.trim_start_matches(|c: char| c.is_alphanumeric() || c == '_').trim_start();

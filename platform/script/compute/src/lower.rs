@@ -4000,6 +4000,36 @@ impl Lowerer {
             }
             return self.call(&f, vals, span);
         }
+        // `p.length()` on a plain path that names no module fn: the value
+        // method, the receiver as the first argument.
+        if let Some((recv, method)) = name.rsplit_once('.') {
+            if let Some(f) = crate::parse::value_method(method) {
+                let mut parts = recv.split('.');
+                let mut e = Expr { kind: ExprKind::Ident(parts.next().unwrap_or_default().to_string()), span };
+                for field in parts {
+                    e = Expr { kind: ExprKind::Field(Box::new(e), field.to_string()), span };
+                }
+                let mut full = vec![e];
+                full.extend(args.iter().cloned());
+                return self.call_expr(f, &full, span);
+            }
+        }
+        // Builtins written as other expressions.
+        let num = |v: f64| Expr { kind: ExprKind::Num(v, false), span };
+        let bin = |op, a: &Expr, b: Expr| Expr { kind: ExprKind::Bin(op, Box::new(a.clone()), Box::new(b)), span };
+        let sugar = match (name, args) {
+            ("radians", [x]) => Some(bin(BinOp::Mul, x, num(std::f64::consts::PI / 180.0))),
+            ("degrees", [x]) => Some(bin(BinOp::Mul, x, num(180.0 / std::f64::consts::PI))),
+            ("inverseSqrt", [x]) => {
+                Some(Expr { kind: ExprKind::Bin(BinOp::Div, Box::new(num(1.0)), Box::new(Expr { kind: ExprKind::Call("sqrt".into(), vec![x.clone()]), span })), span })
+            }
+            // Float modulo (`fmod`): the sign of `a`.
+            ("modf", [a, b]) => Some(bin(BinOp::Rem, a, b.clone())),
+            _ => None,
+        };
+        if let Some(e) = sugar {
+            return self.expr(&e);
+        }
         let mut vals = Vec::new();
         for a in args {
             vals.push(self.expr(a)?);

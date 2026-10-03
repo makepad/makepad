@@ -1,8 +1,8 @@
 //! Splash audio shaders: instruments and effects written as small Splash
 //! functions, compiled ahead of time (at edit time, on a worker thread)
-//! into realtime-safe code for the audio thread. The math_aot concept
-//! (platform/script/math_aot/MATH_AOT.md) grown with logic and state; the
-//! plan of record is local/agent_state/edits/design/AUDIO-SHADERS.md.
+//! into realtime-safe code for the audio thread by the Splash compute core
+//! (makepad-script-compute); the plan of record is
+//! local/agent_state/edits/design/AUDIO-SHADERS.md.
 //!
 //! ```text
 //! shader source --[parse]--> AST --[lower: types, inlining, math]--> AIR

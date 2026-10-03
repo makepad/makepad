@@ -212,7 +212,6 @@ workspace.members = [
     "widgets/feedback",
     # === tests ===
     "platform/script/test",
-    "platform/script/math_aot",
     "platform/script/audio_aot",
     "platform/script/compute",
     "platform/remote_core",

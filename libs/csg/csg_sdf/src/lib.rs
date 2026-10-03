@@ -17,4 +17,4 @@ pub use grid::SdfGrid3;
 pub use octree::{sdf_to_mesh, sdf_to_mesh_ref};
 pub use primitives::*;
 pub use sdf::Sdf3;
-pub use splash_field::SdfSplashExpr;
+pub use splash_field::{SdfSplashExpr, SplashPoint};
