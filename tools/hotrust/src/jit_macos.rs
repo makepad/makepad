@@ -88,6 +88,21 @@ pub unsafe fn find_symbol(name: *const u8) -> *mut u8 {
 }
 
 extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
+    // the handler reads the unit's tables: wait out (or, for the watchdog, skip) a compile
+    // on another thread so they are not changing underneath it
+    if sig == SIG_WATCHDOG {
+        if in_compile() || !super::try_lock_unit() {
+            return;
+        }
+    } else {
+        super::lock_unit();
+    }
+    super::ensure_altstack();
+    unsafe { on_signal_locked(sig, info, uc) };
+    super::unlock_unit();
+}
+
+unsafe fn on_signal_locked(sig: i32, info: *mut u8, uc: *mut u8) {
     unsafe {
         // signals can arrive while this thread is in JIT write mode (inside write_code)
         pthread_jit_write_protect_np(1);
@@ -99,7 +114,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         if sig == SIG_WATCHDOG {
             // hang watchdog: act only when JIT code runs and the compiler is not running
             // (added by the compiler lane with the poll-free watchdog; mirrors jit.rs)
-            if UNIT.is_null() || *ctx_ptr() == 0 || in_compile() || (&*UNIT).find_fn(pc).is_none() {
+            if UNIT.is_null() || *ctx_ptr() == 0 || (&*UNIT).find_fn(pc).is_none() {
                 return;
             }
             WATCHDOG_HIT.store(true, Ordering::SeqCst);
@@ -112,7 +127,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
             return;
         }
         if !UNIT.is_null() && *ctx_ptr() == 0 && (&*UNIT).find_fn(pc).is_some() {
-            fatal_report(sig, fault, fp, pc);
+            fatal_report(sig, fault, fp, pc, *reg(SS_SP));
         }
         if UNIT.is_null() || *ctx_ptr() == 0 {
             // not ours: restore the default action and return to crash normally
@@ -139,12 +154,19 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
     }
 }
 
-pub fn install_signals() {
+/// sigaltstack for the calling thread (64 KB)
+pub fn altstack_this_thread() {
     unsafe {
         let size = 1 << 16;
         let stack = os_alloc(size, PROT_RW);
         let ss = StackT { sp: stack as *mut u8, size, flags: 0 };
         sigaltstack(&ss, std::ptr::null_mut());
+    }
+}
+
+pub fn install_signals() {
+    super::ensure_altstack();
+    unsafe {
         for sig in [SIGILL, SIGTRAP, SIGFPE, SIGBUS, SIGSEGV, SIG_WATCHDOG] {
             let act = SigAction { handler: on_signal as *const () as usize, mask: 0, flags: SA_SIGINFO | SA_ONSTACK | SA_NODEFER };
             sigaction(sig, &act, std::ptr::null_mut());

@@ -64,6 +64,9 @@ pub struct Rt {
     pub fmodf: u64,
     /// `panic_impl(msg, msg_len, file, file_len, line, col) -> !` (core::panicking)
     pub panic_impl: u64,
+    /// `thread_run(entry: fn(*mut u8), arg) -> u64`: runs `entry(arg)` under a recovery point
+    /// on the calling thread; 0 = returned, 1 = panicked/faulted (report printed)
+    pub thread_run: u64,
     pub memcpy: u64,
     pub fmt_push: u64,
     pub fmt_pop: u64,
@@ -279,8 +282,23 @@ thread_local! {
     static TLS_BLOCK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+thread_local! {
+    static ALTSTACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Gives the calling thread an alternate signal stack (once), so a stack overflow in JIT
+/// code on a thread the program started is still reported. Called on the thread's first
+/// lazy compile / thread-local block and from the signal handler.
+fn ensure_altstack() {
+    if ALTSTACK.with(|a| a.replace(true)) {
+        return;
+    }
+    os::altstack_this_thread();
+}
+
 /// Allocates the calling thread's thread-local block (called by the TlsAddr slow path).
 extern "C" fn rt_tls_block() -> u64 {
+    ensure_altstack();
     let key = tls_key();
     unsafe {
         let b = pthread_getspecific(key);
@@ -324,6 +342,20 @@ pub fn lock_unit() {
         }
     }
     unsafe { LOCK_DEPTH = 1 };
+}
+
+/// lock_unit unless another thread holds it.
+pub fn try_lock_unit() -> bool {
+    let me = unsafe { pthread_self() } as u64;
+    if LOCK_OWNER.load(Ordering::Acquire) == me {
+        unsafe { LOCK_DEPTH += 1 };
+        return true;
+    }
+    if LOCK_OWNER.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        return false;
+    }
+    unsafe { LOCK_DEPTH = 1 };
+    true
 }
 
 pub fn unlock_unit() {
@@ -389,9 +421,10 @@ fn is_stack_fault(fault: u64, sp: u64) -> bool {
 }
 
 /// A fault in JIT code on a thread without a recovery point: report and abort.
-unsafe fn fatal_report(sig: i32, fault: u64, fp: u64, pc: u64) -> ! {
+unsafe fn fatal_report(sig: i32, fault: u64, fp: u64, pc: u64, sp: u64) -> ! {
     let frames = collect_frames(fp, pc);
-    let info = PanicInfo { kind: "fault".to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault, location: String::new() };
+    let kind = if is_stack_fault(fault, sp) { "stack overflow" } else { "fault" };
+    let info = PanicInfo { kind: kind.to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault, location: String::new() };
     let r = (&*UNIT).report(&info);
     eprintln!("hotrust: fault on a thread without a recovery point, aborting\n  report: {}", r);
     std::process::abort()
@@ -670,12 +703,46 @@ extern "C" fn rt_panic_impl(msg: *const u8, len: u64, file: *const u8, file_len:
     raise("panic", m, u64::MAX, 0, rbp, ret)
 }
 
+/// Entry of a thread the program starts: runs `entry(arg)` (a HotRust fn pointer) with a
+/// recovery point, so a panic or fault ends this thread with a report instead of the process.
+extern "C" fn rt_thread_run(entry: u64, arg: u64) -> u64 {
+    ensure_altstack();
+    let u = unsafe { UNIT };
+    match unsafe { call_jit(u, entry, arg) } {
+        Ok(_) => 0,
+        Err(p) => {
+            lock_unit();
+            let r = unsafe { (&*u).report(&p) };
+            unlock_unit();
+            eprintln!("hotrust: thread {}: {}\n  report: {}", p.kind, p.message, r);
+            1
+        }
+    }
+}
+
 extern "C" fn rt_compile(slot: u64) -> u64 {
+    ensure_altstack();
     unsafe { compile_slot(UNIT, slot as u32) }
 }
 
 #[cfg(target_os = "linux")]
 extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
+    // the handler reads the unit's tables: wait out (or, for the watchdog, skip) a compile
+    // on another thread so they are not changing underneath it
+    if sig == SIG_WATCHDOG {
+        if in_compile() || !try_lock_unit() {
+            return;
+        }
+    } else {
+        lock_unit();
+    }
+    ensure_altstack();
+    unsafe { on_signal_locked(sig, info, uc) };
+    unlock_unit();
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn on_signal_locked(sig: i32, info: *mut u8, uc: *mut u8) {
     unsafe {
         let gregs = uc.add(40) as *mut u64;
         let rip = *gregs.add(16);
@@ -683,7 +750,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         let fault = *(info.add(16) as *const u64);
         if sig == SIG_WATCHDOG {
             // hang watchdog: only act when JIT code is running and not inside the compiler
-            if UNIT.is_null() || *ctx_ptr() == 0 || in_compile() || (&*UNIT).find_fn(rip).is_none() {
+            if UNIT.is_null() || *ctx_ptr() == 0 || (&*UNIT).find_fn(rip).is_none() {
                 return;
             }
             WATCHDOG_HIT.store(true, Ordering::SeqCst);
@@ -697,7 +764,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         }
         let u = &*UNIT;
         if *ctx_ptr() == 0 && u.find_fn(rip).is_some() {
-            fatal_report(sig, fault, rbp, rip);
+            fatal_report(sig, fault, rbp, rip, *gregs.add(15));
         }
         if *ctx_ptr() == 0 {
             // not ours: restore default and return to crash normally
@@ -724,11 +791,21 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
 }
 
 #[cfg(target_os = "linux")]
+mod os {
+    /// sigaltstack for the calling thread (64 KB)
+    pub fn altstack_this_thread() {
+        unsafe {
+            let stack = super::os_alloc(1 << 16, super::PROT_RW);
+            let ss = super::StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: 1 << 16 };
+            super::sigaltstack(&ss, std::ptr::null_mut());
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn install_signals() {
+    ensure_altstack();
     unsafe {
-        let stack = os_alloc(1 << 16, PROT_RW);
-        let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: 1 << 16 };
-        sigaltstack(&ss, std::ptr::null_mut());
         for sig in [4, 7, 8, SIG_WATCHDOG, 11] {
             // SA_SIGINFO | SA_ONSTACK | SA_NODEFER
             let act = SigAction { handler: on_signal as *const () as usize, mask: [0; 16], flags: 4 | 0x0800_0000 | 0x4000_0000, pad: 0, restorer: 0 };
@@ -784,7 +861,7 @@ impl Unit {
             consts: HashMap::new(),
             statics: HashMap::new(),
             sites: Vec::new(),
-            rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, panic_impl: 0, memcpy: 0, fmt_push: 0, fmt_pop: 0 },
+            rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, panic_impl: 0, thread_run: 0, memcpy: 0, fmt_push: 0, fmt_pop: 0 },
             bodies: HashMap::new(),
             drop_cache: HashMap::new(),
             vtables: HashMap::new(),
@@ -832,6 +909,7 @@ impl Unit {
             fmod: rt_fmod as *const () as usize as u64,
             fmodf: rt_fmodf as *const () as usize as u64,
             panic_impl: 0,
+            thread_run: rt_thread_run as *const () as usize as u64,
             memcpy: memcpy as *const () as usize as u64,
             fmt_push: rt_fmt_push as *const () as usize as u64,
             fmt_pop: rt_fmt_pop as *const () as usize as u64,
