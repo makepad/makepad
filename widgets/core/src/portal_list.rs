@@ -18,7 +18,7 @@ use {
         widget_async::CxSplashVmExt,
         widget_tree::CxWidgetExt,
     },
-    std::collections::HashMap,
+    std::{collections::HashMap, ops::Range},
 };
 
 script_mod! {
@@ -93,6 +93,32 @@ const SMOOTH_SCROLL_MAXIMUM_WINDOW: usize = 20;
 /// How many frames a `smooth_scroll_to_end` animation takes, whatever the
 /// distance, so a long list doesn't crawl at a fixed pixels-per-frame rate.
 const SMOOTH_SCROLL_TO_END_FRAMES: f64 = 24.0;
+/// How close (in pixels) a smooth scroll's target has to get to its goal for the scroll to finish.
+///
+/// This keeps float drift from making the scroll creep along forever.
+const SMOOTH_SCROLL_TOLERANCE: f64 = 0.1;
+/// How far past the end of the viewport an item can end and still count as fitting.
+///
+/// This absorbs float drift from adding up item sizes.
+const VIEWPORT_END_TOLERANCE: f64 = 1.0;
+
+/// Returns how far one frame of a smooth scroll moves the list (positive moves the content down).
+///
+/// The step is at most `speed`, and brings the target's `top` toward `goal` without passing it.
+/// Both are measured from the viewport's top. Returns `None` once the target is at `goal`, or if
+/// the list can't scroll any further that way.
+fn smooth_scroll_step(
+    top: f64,
+    goal: f64,
+    speed: f64,
+    at_start: bool,
+    at_end: bool,
+) -> Option<f64> {
+    let remaining = goal - top;
+    let blocked = if remaining > 0.0 { at_start } else { at_end };
+    (remaining.abs() > SMOOTH_SCROLL_TOLERANCE && !blocked)
+        .then(|| remaining.max(-speed).min(speed))
+}
 
 /// The quad one continuation row is drawn with.
 ///
@@ -206,6 +232,11 @@ pub enum ScrollState {
         /// Pixel offset from the top of the viewport where the target item's
         /// top edge should end up once scrolling completes.
         top_offset: f64,
+        /// Whether this scroll goes to the end of the list instead of to the top of `target_id`.
+        ///
+        /// See `smooth_scroll_to_end()`. If the end moves during the scroll (e.g., new items get
+        /// added), the scroll keeps going to the new end.
+        to_end: bool,
     },
     Tailing {
         next_frame: NextFrame,
@@ -231,7 +262,11 @@ enum ListDrawState {
     Up {
         index: usize,
         pos: f64,
-        hit_bottom: bool,
+        /// Where the last drawn item in the range ends, if drawing down ran out of items.
+        ///
+        /// That usually means the list ends above the bottom of the viewport. `end()` then moves
+        /// everything down so that item ends at the bottom of the viewport.
+        list_bottom: Option<f64>,
         viewport: Rect,
     },
     DownAgain {
@@ -273,8 +308,21 @@ impl ListDrawState {
 struct AlignItem {
     align_range: TurtleAlignRange,
     size: Vec2d,
+    /// Where the item is along the list, from the start of the viewport: where it got drawn,
+    /// then where `end()` moved it to.
     shift: f64,
     index: usize,
+}
+
+/// Where an item was in a list's last draw (see [`PortalList::drawn_slot()`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrawnSlot {
+    /// Where the item's slot started along the list, from the start of the viewport.
+    ///
+    /// That's the outer edge of the item's margin, like [`PortalList::set_first_id_and_scroll()`] takes.
+    pub start: f64,
+    /// How much room the item took up along the list, margins included.
+    pub size: f64,
 }
 
 /// Cache for computing average item height
@@ -349,6 +397,55 @@ impl HeightTree {
             default_height,
             measured: vec![false; size],
         }
+    }
+
+    /// Lets `edit` change each item's height and whether it was measured, then sums the tree back up.
+    ///
+    /// This works on the tree in place in O(n), which beats updating lots of items one at a time.
+    fn edit_heights(&mut self, edit: impl FnOnce(&mut [f64], &mut [bool])) {
+        // Undo `sum_up()`: take each node out of the next node up, going down.
+        for i in (1..=self.size).rev() {
+            let parent = i + (i & i.wrapping_neg());
+            if parent <= self.size {
+                self.tree[parent] -= self.tree[i];
+            }
+        }
+        edit(self.tree.get_mut(1..).unwrap_or_default(), &mut self.measured);
+        self.sum_up();
+    }
+
+    /// Starts the tree over with `size` unmeasured items at the default height, which `edit` can then change.
+    ///
+    /// Unlike [`Self::new()`], this reuses the tree's memory.
+    fn reset(&mut self, size: usize, edit: impl FnOnce(&mut [f64], &mut [bool])) {
+        self.tree.clear();
+        self.tree.resize(size + 1, self.default_height);
+        self.tree[0] = 0.0;
+        self.measured.clear();
+        self.measured.resize(size, false);
+        self.size = size;
+        edit(&mut self.tree[1..], &mut self.measured);
+        self.sum_up();
+    }
+
+    /// Turns `tree[1..]` from each item's own height into the sums the tree keeps.
+    fn sum_up(&mut self) {
+        // Each node holds the sum of the items it covers, so add each one into the next node up.
+        for i in 1..=self.size {
+            let parent = i + (i & i.wrapping_neg());
+            if parent <= self.size {
+                self.tree[parent] += self.tree[i];
+            }
+        }
+    }
+
+    /// Forgets the height measured at index `i`, so it's estimated with the default height again.
+    fn forget(&mut self, i: usize) {
+        if i >= self.size || !self.measured[i] {
+            return;
+        }
+        self.update(i, self.default_height);
+        self.measured[i] = false;
     }
 
     /// Get the prefix sum of heights from index 0 to i (inclusive)
@@ -515,6 +612,149 @@ impl HeightTree {
     }
 }
 
+/// The ranges of item ids to skip, in order and not overlapping.
+///
+/// See [`PortalList::set_skipped_ranges()`].
+#[derive(Default)]
+struct SkippedRanges(Vec<Range<usize>>);
+
+impl SkippedRanges {
+    /// Returns the skipped range that item `id` is in, if any.
+    fn range_containing(&self, id: usize) -> Option<&Range<usize>> {
+        let i = self.0.partition_point(|range| range.end <= id);
+        self.0.get(i).filter(|range| range.start <= id)
+    }
+
+    /// Returns the first item after `id` that isn't skipped.
+    fn next_unskipped_after(&self, id: usize) -> usize {
+        let mut next = id + 1;
+        // Ranges can touch, so keep jumping until `next` isn't in any of them.
+        while let Some(range) = self.range_containing(next) {
+            next = range.end;
+        }
+        next
+    }
+
+    /// Returns the last item before `id` that isn't skipped, or item 0 if there isn't one.
+    fn prev_unskipped_before(&self, id: usize) -> usize {
+        let mut prev = id.saturating_sub(1);
+        while let Some(range) = self.range_containing(prev) {
+            let Some(before) = range.start.checked_sub(1) else { return 0 };
+            prev = before;
+        }
+        prev
+    }
+
+    /// Switches to the given ranges and updates `tree` (whose first item is `range_start`) to match.
+    ///
+    /// Newly skipped items take up no space, and items that aren't skipped anymore get an estimated
+    /// height again until they're drawn, since their old measured height wasn't kept.
+    fn set(&mut self, ranges: &[Range<usize>], range_start: usize, tree: Option<&mut HeightTree>) {
+        debug_assert!(
+            ranges.windows(2).all(|pair| pair[0].end <= pair[1].start),
+            "skipped ranges must be in order, with no overlaps: {ranges:?}"
+        );
+        if let Some(tree) = tree {
+            let unskipped = ranges_minus(&self.0, ranges);
+            let newly_skipped = ranges_minus(ranges, &self.0);
+            let num_changed: usize = unskipped.iter().chain(&newly_skipped)
+                .map(|range| tree_indices(range.clone(), range_start, tree.size).len())
+                .sum();
+            // Each item costs O(log n) to update, so once about an eighth of them change at once (like every
+            // range moving after items get added before them), it's quicker to rebuild the tree in O(n).
+            if num_changed > tree.size / 8 {
+                let (size, default_height) = (tree.size, tree.default_height);
+                tree.edit_heights(|heights, measured| {
+                    for range in unskipped {
+                        for index in tree_indices(range, range_start, size) {
+                            heights[index] = default_height;
+                            measured[index] = false;
+                        }
+                    }
+                    for range in newly_skipped {
+                        for index in tree_indices(range, range_start, size) {
+                            heights[index] = 0.0;
+                            measured[index] = true;
+                        }
+                    }
+                });
+            } else {
+                for range in unskipped {
+                    for index in tree_indices(range, range_start, tree.size) {
+                        tree.forget(index);
+                    }
+                }
+                for range in newly_skipped {
+                    for index in tree_indices(range, range_start, tree.size) {
+                        tree.update(index, 0.0);
+                    }
+                }
+            }
+        }
+        self.0.clear();
+        self.0.extend_from_slice(ranges);
+    }
+
+    /// Resizes `tree` (whose first item is `range_start`) to `size` items, keeping skipped items at zero.
+    ///
+    /// Any entries the resize adds or rebuilds start at the default height, so this sets the
+    /// skipped ones among them back to zero.
+    fn resize_tree(&self, tree: &mut HeightTree, range_start: usize, size: usize) {
+        // Growing keeps what's there, but shrinking starts the tree over, like a new one.
+        // Those get built at once, with the skipped items already at zero.
+        if tree.size == 0 || size < tree.size {
+            tree.reset(size, |heights, measured| {
+                for range in &self.0 {
+                    for index in tree_indices(range.clone(), range_start, size) {
+                        heights[index] = 0.0;
+                        measured[index] = true;
+                    }
+                }
+            });
+            return;
+        }
+        let old_size = tree.size;
+        tree.resize(size);
+        for range in &self.0 {
+            let indices = tree_indices(range.clone(), range_start, size);
+            for index in indices.start.max(old_size)..indices.end {
+                tree.update(index, 0.0);
+            }
+        }
+    }
+}
+
+/// Returns the indices of `ids` in a height tree of `size` items whose first item is `range_start`.
+fn tree_indices(ids: Range<usize>, range_start: usize, size: usize) -> Range<usize> {
+    ids.start.saturating_sub(range_start)..ids.end.saturating_sub(range_start).min(size)
+}
+
+/// Returns the parts of `ranges` that aren't in `minus`.
+///
+/// Both must be in order, with no overlaps.
+fn ranges_minus(ranges: &[Range<usize>], minus: &[Range<usize>]) -> Vec<Range<usize>> {
+    let mut remaining = Vec::new();
+    let mut passed = 0;
+    for range in ranges {
+        // A `minus` range that ends before this range can't overlap any later range either,
+        // so skip past it for good.
+        while minus.get(passed).is_some_and(|cut| cut.end <= range.start) {
+            passed += 1;
+        }
+        let mut start = range.start;
+        for cut in minus[passed..].iter().take_while(|cut| cut.start < range.end) {
+            if start < cut.start {
+                remaining.push(start..cut.start);
+            }
+            start = start.max(cut.end);
+        }
+        if start < range.end {
+            remaining.push(start..range.end);
+        }
+    }
+    remaining
+}
+
 #[derive(Script, WidgetRegister, WidgetRef, WidgetSet)]
 pub struct PortalList {
     #[uid]
@@ -677,6 +917,17 @@ pub struct PortalList {
     draw_state: DrawStateWrap<ListDrawState>,
     #[rust]
     draw_align_list: Vec<AlignItem>,
+    /// The items to skip, see [`Self::set_skipped_ranges()`].
+    #[rust]
+    skipped: SkippedRanges,
+    /// The largest item id in the range that was on screen in the last draw.
+    ///
+    /// Skipped items leave gaps in the drawn ids, so `first_id + visible_items` can't be used to find it.
+    #[rust]
+    last_visible_id: Option<usize>,
+    /// Scratch list of the live item ids, for sending events to them in order.
+    #[rust]
+    event_item_ids: Vec<usize>,
     #[rust]
     detect_tail_in_draw: bool,
 
@@ -870,6 +1121,7 @@ impl PortalList {
         let vi = self.vec_index;
         let mut visible_items = 0;
         let mut filler_plan = None;
+        let mut last_visible_id: Option<usize> = None;
 
         if let Some(ListDrawState::End { viewport }) = self.draw_state.get() {
             let list = &mut self.draw_align_list;
@@ -886,16 +1138,12 @@ impl PortalList {
                 let mut last_pos = self.first_scroll;
                 let mut last_item_pos = None;
                 let mut last_drawn_index = None;
-                // The size of that same last row, which is the pitch the
-                // continuation rows take when there are any.
-                let mut last_drawn_size = 0.0;
                 for i in first_index..list.len() {
                     let item = &list[i];
                     last_pos += item.size.index(vi);
                     if item.index < self.range_end {
                         last_item_pos = Some(last_pos);
                         last_drawn_index = Some(item.index);
-                        last_drawn_size = item.size.index(vi);
                     } else {
                         break;
                     }
@@ -965,14 +1213,18 @@ impl PortalList {
 
                     let mut pos = first_pos.min(min);
                     content_shift = pos - first_pos;
-                    for item in list.iter() {
+                    for item in list.iter_mut() {
                         let shift = Vec2d::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(
                             &item.align_range,
                             shift - Vec2d::from_index_pair(vi, item.shift, 0.0),
                         );
+                        item.shift = pos;
                         pos += item.size.index(vi);
                         visible_items += 1;
+                        if item.index < self.range_end {
+                            last_visible_id = last_visible_id.max(Some(item.index));
+                        }
                     }
                     self.first_scroll = first_pos.min(min);
                     self.first_id = self.range_start;
@@ -984,10 +1236,10 @@ impl PortalList {
                             -first_pos
                         } else {
                             let ret = viewport.size.index(vi) - last_item_pos;
-                            // Use a 1px tolerance for floating-point accumulation
+                            // Use a small tolerance for floating-point accumulation
                             // errors across item sizes, and require that the last
                             // item in the range was actually drawn.
-                            self.at_end = ret >= -1.0 && drew_last_item;
+                            self.at_end = ret >= -VIEWPORT_END_TOLERANCE && drew_last_item;
                             if self.bounce_overshoot > 0.0
                                 && self.at_end
                                 && matches!(
@@ -1014,7 +1266,7 @@ impl PortalList {
                     let start_pos = self.first_scroll + shift;
                     let mut pos = start_pos;
                     for i in (0..first_index).rev() {
-                        let item = &list[i];
+                        let item = &mut list[i];
                         let visible = pos > 0.0;
                         pos -= item.size.index(vi);
                         let shift = Vec2d::from_index_pair(vi, pos, 0.0);
@@ -1022,24 +1274,27 @@ impl PortalList {
                             &item.align_range,
                             shift - Vec2d::from_index_pair(vi, item.shift, 0.0),
                         );
+                        item.shift = pos;
                         if visible {
                             self.first_scroll = pos;
                             self.first_id = item.index;
                             first_id_changed = true;
                             if item.index < self.range_end {
                                 visible_items += 1;
+                                last_visible_id = last_visible_id.max(Some(item.index));
                             }
                         }
                     }
 
                     let mut pos = start_pos;
                     for i in first_index..list.len() {
-                        let item = &list[i];
+                        let item = &mut list[i];
                         let shift = Vec2d::from_index_pair(vi, pos, 0.0);
                         cx.shift_align_range(
                             &item.align_range,
                             shift - Vec2d::from_index_pair(vi, item.shift, 0.0),
                         );
+                        item.shift = pos;
                         pos += item.size.index(vi);
                         let invisible = pos < 0.0;
                         if invisible {
@@ -1048,6 +1303,7 @@ impl PortalList {
                             first_id_changed = true;
                         } else if item.index < self.range_end {
                             visible_items += 1;
+                            last_visible_id = last_visible_id.max(Some(item.index));
                         }
                     }
 
@@ -1065,11 +1321,18 @@ impl PortalList {
                         (last_drawn_index, last_item_pos)
                     {
                         let first = &list[0];
-                        let (from_index, pitch) = if self.align_top_when_empty {
-                            (last_index, last_drawn_size)
-                        } else {
-                            (first.index, first.size.index(vi))
+                        // The pitch comes from the drawn row nearest the gap that isn't skipped,
+                        // since skipped rows are drawn at zero size (and the range's first and
+                        // last rows, and `first_id`, get drawn even when they're skipped).
+                        let unskipped = |item: &&AlignItem| {
+                            item.index < self.range_end && self.skipped.range_containing(item.index).is_none()
                         };
+                        let (from_index, pitch_row) = if self.align_top_when_empty {
+                            (last_index, list.iter().rev().find(unskipped))
+                        } else {
+                            (first.index, list.iter().find(unskipped))
+                        };
+                        let pitch = pitch_row.map_or(0.0, |item| item.size.index(vi));
                         filler_plan = filler_band(
                             self.align_top_when_empty,
                             first_pos + content_shift,
@@ -1092,7 +1355,7 @@ impl PortalList {
                         let idx = item.index - self.range_start;
 
                         if let Some(ref mut tree) = self.height_tree {
-                            // Fold the height into the running average only on first
+                            // Add the height to the running average only on first
                             // measurement or a real change; re-recording every visible
                             // item per frame would weight the average by on-screen time.
                             if tree.update(idx, height) {
@@ -1264,6 +1527,7 @@ impl PortalList {
 
         cx.end_turtle_with_area(&mut self.area);
         self.visible_items = visible_items;
+        self.last_visible_id = last_visible_id;
     
         // The coast is over the instant the list is drawn at the edge it was headed
         // toward; the rest of the OS stream (which can outlive the edge by a second
@@ -1314,7 +1578,7 @@ impl PortalList {
         }
         if let Some(margin) = self.reached_end_margin {
             let end_on_screen = self.at_end
-                || self.first_id + self.visible_items + margin as usize >= self.range_end;
+                || self.last_visible_id.map_or(self.first_id, |id| id + 1) + margin as usize >= self.range_end;
             if end_on_screen && !self.told_reached_end {
                 cx.widget_action(self.widget_uid(), PortalListAction::ReachedEnd);
             }
@@ -1449,12 +1713,20 @@ impl PortalList {
                         index,
                     });
 
-                    if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) {
-                        if self.first_id > 0 && !is_down_again {
+                    if !did_draw || pos + rect.size.index(vi) > viewport.size.index(vi) + VIEWPORT_END_TOLERANCE {
+                        if self.first_id > self.range_start && !is_down_again {
+                            let above = self.prev_drawn_before(self.first_id);
+                            // Find the list's bottom like `end()` does, only counting items in the range.
+                            let ran_out = !did_draw || index >= self.range_end;
+                            let list_bottom = (ran_out && self.first_id < self.range_end).then(|| {
+                                self.draw_align_list.iter()
+                                    .filter(|item| item.index < self.range_end)
+                                    .fold(self.first_scroll, |pos, item| pos + item.size.index(vi))
+                            });
                             self.draw_state.set(ListDrawState::Up {
-                                index: self.first_id - 1,
+                                index: above,
                                 pos: self.first_scroll,
-                                hit_bottom: index >= self.range_end,
+                                list_bottom,
                                 viewport,
                             });
                             match vi {
@@ -1483,21 +1755,22 @@ impl PortalList {
                                     );
                                 }
                             }
-                            return Some(self.first_id - 1);
+                            return Some(above);
                         } else {
                             self.draw_state.set(ListDrawState::End { viewport });
                             return None;
                         }
                     }
+                    let next = self.next_drawn_after(index);
                     if is_down_again {
                         self.draw_state.set(ListDrawState::DownAgain {
-                            index: index + 1,
+                            index: next,
                             pos: pos + rect.size.index(vi),
                             viewport,
                         });
                     } else {
                         self.draw_state.set(ListDrawState::Down {
-                            index: index + 1,
+                            index: next,
                             pos: pos + rect.size.index(vi),
                             viewport,
                         });
@@ -1534,12 +1807,12 @@ impl PortalList {
                             );
                         }
                     }
-                    return Some(index + 1);
+                    return Some(next);
                 }
                 ListDrawState::Up {
                     index,
                     pos,
-                    hit_bottom,
+                    list_bottom,
                     viewport,
                 } => {
                     let did_draw = cx.turtle_has_align_items();
@@ -1556,10 +1829,11 @@ impl PortalList {
                             if let Some(last_index) =
                                 self.draw_align_list.iter().map(|v| v.index).max()
                             {
+                                let next = self.next_drawn_after(last_index);
                                 let total_height: f64 =
                                     self.draw_align_list.iter().map(|v| v.size.index(vi)).sum();
                                 self.draw_state.set(ListDrawState::DownAgain {
-                                    index: last_index + 1,
+                                    index: next,
                                     pos: total_height,
                                     viewport,
                                 });
@@ -1597,28 +1871,29 @@ impl PortalList {
                                         layout,
                                     ),
                                 }
-                                return Some(last_index + 1);
+                                return Some(next);
                             }
                         }
                         self.draw_state.set(ListDrawState::End { viewport });
                         return None;
                     }
 
-                    if !did_draw
-                        || pos
-                            < if hit_bottom {
-                                -viewport.size.index(vi)
-                            } else {
-                                0.0
-                            }
-                    {
+                    // If drawing down ran out of items, `end()` moves everything down so the last item ends at
+                    // the viewport's bottom. That move can be more than a viewport's height (e.g., the last item
+                    // just got a lot shorter), so draw enough items above to still fill the viewport afterward.
+                    let stop_above = match list_bottom {
+                        Some(bottom) => bottom.min(0.0) - viewport.size.index(vi),
+                        None => 0.0,
+                    };
+                    if !did_draw || pos < stop_above {
                         self.draw_state.set(ListDrawState::End { viewport });
                         return None;
                     }
 
+                    let above = self.prev_drawn_before(index);
                     self.draw_state.set(ListDrawState::Up {
-                        index: index - 1,
-                        hit_bottom,
+                        index: above,
+                        list_bottom,
                         pos: pos - rect.size.index(vi),
                         viewport,
                     });
@@ -1647,7 +1922,7 @@ impl PortalList {
                         ),
                     }
 
-                    return Some(index - 1);
+                    return Some(above);
                 }
                 _ => (),
             }
@@ -1789,14 +2064,11 @@ impl PortalList {
         if range_changed {
             self.range_end = range_end;
 
-            // Initialize or resize the height tree
+            // Initialize or resize the height tree, where skipped items take up no space.
             let size = range_end.saturating_sub(range_start);
-
-            if let Some(ref mut tree) = self.height_tree {
-                tree.resize(size);
-            } else {
-                self.height_tree = Some(HeightTree::new(size, self.height_cache.average()));
-            }
+            let average = self.height_cache.average();
+            let tree = self.height_tree.get_or_insert_with(|| HeightTree::new(0, average));
+            self.skipped.resize_tree(tree, range_start, size);
 
             if self.tail_range {
                 self.first_id = self.range_end.max(1) - 1;
@@ -2100,8 +2372,10 @@ impl PortalList {
             index,
             self.first_id,
             self.visible_items,
+            self.last_visible_id,
             self.range_start,
             self.keep_visible_lead,
+            |id| self.prev_drawn_before(id),
         ) {
             self.first_id = first_id;
             self.first_scroll = 0.0;
@@ -2124,8 +2398,55 @@ impl PortalList {
         }
     }
 
+    /// Tells the list which items to skip, e.g. the ones in a collapsed group, besides its summary item.
+    ///
+    /// `ranges` are ranges of item ids, which must be in order with no overlaps. The list skips right over
+    /// those items while drawing (so it doesn't keep them around or send them events), and counts
+    /// them as taking up no space for scrolling. Items that aren't skipped anymore get an estimated
+    /// height again until they're drawn.
+    ///
+    /// The list still asks for a skipped item in a few cases: a draw always starts at `first_id`, and
+    /// the list never skips the first or last item in the range, since drawing those is how it knows
+    /// it reached an end. Draw any skipped item it asks for at zero size.
+    ///
+    /// Call this before drawing any items, e.g. right after [`Self::set_item_range()`].
+    /// It's cheap when nothing changed, so it's fine to call it on every draw.
+    pub fn set_skipped_ranges(&mut self, ranges: &[Range<usize>]) {
+        if ranges != self.skipped.0.as_slice() {
+            self.skipped.set(ranges, self.range_start, self.height_tree.as_mut());
+        }
+    }
+
+    /// Returns the item to draw after `index` on the way down.
+    ///
+    /// That's the next one that isn't skipped (see [`Self::set_skipped_ranges()`]), but it never
+    /// skips past the last item in the range.
+    fn next_drawn_after(&self, index: usize) -> usize {
+        self.skipped.next_unskipped_after(index).min(self.range_end.saturating_sub(1)).max(index + 1)
+    }
+
+    /// Returns the item to draw before `index` on the way up.
+    ///
+    /// That's the last one before `index` that isn't skipped, but it never skips past the first
+    /// item in the range.
+    fn prev_drawn_before(&self, index: usize) -> usize {
+        self.skipped.prev_unskipped_before(index).max(self.range_start)
+    }
+
     /// Sets the first visible item and scroll offset.
     pub fn set_first_id_and_scroll(&mut self, first_id: usize, first_scroll: f64) {
+        self.set_first_id_and_scroll_in_place(first_id, first_scroll);
+        // The list was repositioned by code, so showing the start/end now is
+        // news again (e.g. a list re-purposed for other content).
+        self.forget_reached_edges();
+    }
+
+    /// Sets the first visible item and scroll offset to keep showing the same content.
+    ///
+    /// This is for when the items changed but the view shouldn't move, e.g. after items got added
+    /// above the first one. Unlike [`Self::set_first_id_and_scroll()`], a start or end of the list
+    /// that's already on screen doesn't get announced again (see [`PortalListAction::ReachedStart`]).
+    pub fn set_first_id_and_scroll_in_place(&mut self, first_id: usize, first_scroll: f64) {
         self.first_id = first_id;
         // A positive offset on the first item means a gap above the start edge;
         // when that edge doesn't bounce, pin to it rather than letting a
@@ -2135,9 +2456,6 @@ impl PortalList {
         } else {
             first_scroll
         };
-        // The list was repositioned by code, so showing the start/end now is
-        // news again (e.g. a list re-purposed for other content).
-        self.forget_reached_edges();
     }
 
     /// Forget that we already announced the start/end being on screen, so the
@@ -2170,6 +2488,14 @@ impl PortalList {
         self.first_id
     }
 
+    /// Returns the viewport's length along the list, inside its padding.
+    ///
+    /// `end()` uses this same size when it moves the bottom of the list to the bottom of the viewport.
+    fn viewport_size(&self, cx: &Cx) -> f64 {
+        let vi = self.vec_index;
+        (self.area.rect(cx).size.index(vi) - self.layout.padding.size().index(vi)).max(0.0)
+    }
+
     /// Computes the top position of `target_id` relative to the viewport top
     /// using `first_id`, `first_scroll`, and the height tree.
     ///
@@ -2196,10 +2522,11 @@ impl PortalList {
     /// occurs and [`PortalListAction::SmoothScrollReached`] is emitted immediately.
     ///
     /// Otherwise, the list animates until the target item's top edge is positioned at
-    /// `top_offset` pixels below the viewport's top edge. A value of `0.0` places the
-    /// item flush with the viewport top; `20.0` leaves a 20 px margin. Negative values
-    /// are clamped to `0.0`. Animating to any item but the last one also stops the list
-    /// from following its end (see `set_tail_range()`).
+    /// `top_offset` pixels below the viewport's top edge, or as close as the start or end
+    /// of the list lets it get. A value of `0.0` places the item flush with the viewport
+    /// top; `20.0` leaves a 20 px margin. Negative values are clamped to `0.0`.
+    /// This also stops the list from following its end (see `set_tail_range()`). If `auto_tail`
+    /// is on, the list follows its end again once it's scrolled back to the end.
     pub fn smooth_scroll_to(
         &mut self,
         cx: &mut Cx,
@@ -2207,6 +2534,19 @@ impl PortalList {
         speed: f64,
         max_items_to_show: Option<usize>,
         top_offset: f64,
+    ) {
+        self.start_smooth_scroll(cx, target_id, speed, max_items_to_show, top_offset, false);
+    }
+
+    /// Starts a smooth scroll to the top of `target_id`, or to the end of the list if `to_end`.
+    fn start_smooth_scroll(
+        &mut self,
+        cx: &mut Cx,
+        target_id: usize,
+        speed: f64,
+        max_items_to_show: Option<usize>,
+        top_offset: f64,
+        to_end: bool,
     ) {
         if self.items.is_empty() {
             return;
@@ -2219,22 +2559,30 @@ impl PortalList {
         // Compute the target's top position relative to viewport using first_id,
         // first_scroll, and the height_tree — this avoids relying on widget rects
         // which may be clipped for partially-visible items.
-        let vi = self.vec_index;
-        let viewport_size = self.area.rect(cx).size.index(vi);
+        let viewport_size = self.viewport_size(cx);
         let item_top = self.item_top_from_height_tree(target_id);
         if viewport_size > 0.0 {
             if let Some(item_top) = item_top {
-                // Targeting the last item means "go to the bottom", and a tall
-                // last item can have its top on screen with most of it below.
-                let settled = if target_id + 1 >= self.range_end {
+                // A scroll to the end is already done if the list is at its end,
+                // even if the last item is tall and its top is above the viewport.
+                let settled = if to_end {
                     self.at_end
                 } else {
                     item_top >= 0.0 && item_top < viewport_size
                 };
                 if settled {
-                    // Same as arriving under animation: we're at the end, so follow it.
-                    if target_id + 1 >= self.range_end {
-                        self.detect_tail_in_draw = true;
+                    // Stop any earlier smooth scroll that's still heading somewhere else,
+                    // or it'd carry the list right past this target.
+                    if matches!(self.scroll_state, ScrollState::ScrollingTo { target_id: id, to_end: was_to_end, .. }
+                        if id != target_id || was_to_end != to_end)
+                    {
+                        self.scroll_state = ScrollState::Stopped;
+                        self.was_scrolling = false;
+                    }
+                    // The list is already at its end, so follow its end from now on. Don't wait for the
+                    // next draw to check: if new items were just added, that draw won't be at the end.
+                    if self.at_end && self.auto_tail {
+                        self.tail_range = true;
                     }
                     cx.widget_action(self.widget_uid(), PortalListAction::SmoothScrollReached);
                     return;
@@ -2279,21 +2627,26 @@ impl PortalList {
         // leftover fling, bounce, or OS momentum stream can't fight or resume
         // after it finishes.
         self.stop_all_scroll_motion();
-        // Scrolling to any item but the last one also stops following the end,
-        // otherwise each draw would pull the list right back down to it.
-        if target_id + 1 < self.range_end {
+        // Scrolling to anywhere but the end also stops the list from following its end,
+        // otherwise each draw would pull the list right back down to the end.
+        if !to_end {
             self.tail_range = false;
             self.tail_adjustment_needed = 0.0;
+            self.detect_tail_in_draw = false;
         }
         self.scroll_state = ScrollState::ScrollingTo {
             target_id,
             delta: speed.abs() * scroll_direction,
             next_frame: cx.new_next_frame(),
             top_offset,
+            to_end,
         };
     }
 
-    /// Trigger a scrolling animation to the end of the list.
+    /// Triggers a scrolling animation to the end of the list.
+    ///
+    /// The scroll ends with the bottom of the last item at the bottom of the viewport (even if that
+    /// item is taller than the viewport). With `auto_tail`, the list follows its end from then on.
     pub fn smooth_scroll_to_end(
         &mut self,
         cx: &mut Cx,
@@ -2306,26 +2659,40 @@ impl PortalList {
         // `range_end` is exclusive, so the last item is one before it.
         let target_id = self.range_end.saturating_sub(1);
         // `speed` is a per-frame pixel delta. Scale it to the distance so the
-        // animation takes the same time from anywhere in the list.
-        let speed = match self.item_top_from_height_tree(target_id) {
-            Some(item_top) => (item_top.abs() / SMOOTH_SCROLL_TO_END_FRAMES).max(speed),
+        // animation takes the same time from anywhere in the list. Measure from the bottom
+        // of the list to the bottom of the viewport, since that's where this scroll stops.
+        let viewport_size = self.viewport_size(cx);
+        let speed = match self.item_top_from_height_tree(self.range_end) {
+            Some(bottom) => ((bottom - viewport_size).abs() / SMOOTH_SCROLL_TO_END_FRAMES).max(speed),
             None => speed,
         };
-        // Pass an unbounded window so `smooth_scroll_to` doesn't teleport the anchor
-        // to the last few items first; that jump is most of the travel, and it's why
-        // this only looked smooth when you were already near the bottom.
-        self.smooth_scroll_to(
+        // By default, scroll the whole way instead of jumping to within a few items of the end first,
+        // since that jump would be most of the distance and the scroll wouldn't look smooth.
+        self.start_smooth_scroll(
             cx,
             target_id,
             speed,
             max_items_to_show.or(Some(usize::MAX)),
             0.0,
+            true,
         );
     }
 
     /// Returns whether this PortalList is currently filling the viewport.
     pub fn is_filling_viewport(&self) -> bool {
         !self.not_filling_viewport
+    }
+
+    /// Returns where the item `item_id` was in the list's last draw, if it got drawn.
+    ///
+    /// Unlike [`Self::position_of_item()`], this doesn't need a `Cx`, and it goes from the start of the
+    /// viewport like [`Self::first_scroll()`] does. So passing its `start` to [`Self::set_first_id_and_scroll()`]
+    /// puts the item right back where it was drawn, e.g. to keep it in place when items get added above it.
+    pub fn drawn_slot(&self, item_id: usize) -> Option<DrawnSlot> {
+        let vi = self.vec_index;
+        self.draw_align_list.iter()
+            .find(|item| item.index == item_id)
+            .map(|item| DrawnSlot { start: item.shift, size: item.size.index(vi) })
     }
 
     /// Returns the "start" position of the item with the given `entry_id`.
@@ -2650,9 +3017,10 @@ impl WidgetNode for PortalList {
     }
 
     fn cancel_children_impl(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) -> bool {
-        let end = self.first_id.saturating_add(self.visible_items).min(self.range_end);
+        let Some(last) = self.last_visible_id else { return true };
+        let first = self.first_id.max(self.range_start);
         for row in &self.draw_align_list {
-            if row.index >= self.first_id.max(self.range_start) && row.index < end {
+            if (first..=last).contains(&row.index) {
                 if let Some(item) = self.items.get(&row.index) {
                     visit(LiveId(row.index as u64), item.widget.clone());
                 }
@@ -2935,20 +3303,22 @@ impl Widget for PortalList {
         }
 
         if pass_through_to_children {
-            // Iterate in visual order (by item_id) for deterministic event handling
-            // Use keys().min/max to get actual item range without allocation
-            if let (Some(&min_id), Some(&max_id)) =
-                (self.items.keys().min(), self.items.keys().max())
-            {
-                for item_id in min_id..=max_id {
-                    if let Some(item) = self.items.get_mut(&item_id) {
-                        let item_uid = item.widget.widget_uid();
-                        cx.group_widget_actions(uid, item_uid, |cx| {
-                            item.widget.handle_event(cx, event, scope);
-                        });
-                    }
+            // Iterate in visual order (by item_id) for deterministic event handling.
+            // Walk the live ids themselves rather than everything between the smallest and
+            // largest one, which can be far apart with a long skipped range between them.
+            let mut item_ids = std::mem::take(&mut self.event_item_ids);
+            item_ids.clear();
+            item_ids.extend(self.items.keys().copied());
+            item_ids.sort_unstable();
+            for &item_id in &item_ids {
+                if let Some(item) = self.items.get_mut(&item_id) {
+                    let item_uid = item.widget.widget_uid();
+                    cx.group_widget_actions(uid, item_uid, |cx| {
+                        item.widget.handle_event(cx, event, scope);
+                    });
                 }
             }
+            self.event_item_ids = item_ids;
         }
 
         // Handle auto-scroll during selection
@@ -2994,69 +3364,62 @@ impl Widget for PortalList {
                 delta,
                 next_frame,
                 top_offset,
+                to_end,
             } => {
                 if next_frame.is_event(event).is_some() {
                     // Copy values out of the borrow so we can call &self methods.
                     let target_id = *target_id;
                     let delta_val = *delta;
                     let top_offset = *top_offset;
-                    let scrolling_down = delta_val < 0.0;
+                    let to_end = *to_end;
 
-                    // Check if the target item has reached (or passed) the
-                    // desired position using the height tree for accuracy.
-                    let vi = self.vec_index;
-                    let viewport_size = self.area.rect(cx).size.index(vi);
-                    let item_top = self.item_top_from_height_tree(target_id);
-                    let mut target_reached = false;
-
-                    if let Some(item_top) = item_top {
-                        // Clamp: the item must at least reach the viewport (top >= 0).
-                        let effective_target = top_offset.max(0.0);
-                        if scrolling_down {
-                            target_reached = item_top <= effective_target;
-                        } else {
-                            target_reached = item_top >= effective_target;
+                    // Going to the end lines up the bottom of the list with the bottom of the viewport.
+                    let (aligned_id, goal) = if to_end {
+                        (self.range_end, self.viewport_size(cx))
+                    } else {
+                        (target_id, top_offset.max(0.0))
+                    };
+                    let step = match self.item_top_from_height_tree(aligned_id) {
+                        // An empty list has nowhere to scroll, so stop instead of stepping forever.
+                        _ if self.range_start >= self.range_end => None,
+                        // Each frame, head for the goal from whichever side the target is on,
+                        // since items can turn out taller or shorter than estimated once drawn.
+                        Some(aligned_top) => smooth_scroll_step(
+                            aligned_top,
+                            goal,
+                            delta_val.abs(),
+                            self.first_id == self.range_start && self.first_scroll >= 0.0,
+                            self.at_end,
+                        ),
+                        // With no heights to go by, scrolling down stops once it hits the end.
+                        None if delta_val < 0.0 && self.at_end && target_id > self.first_id => None,
+                        None => {
+                            // If first_id has scrolled past target_id, snap it back so the
+                            // item gets drawn.
+                            let distance_to_target = target_id as isize - self.first_id as isize;
+                            if distance_to_target.signum() == delta_val.signum() as isize {
+                                self.first_id = target_id;
+                            }
+                            Some(delta_val)
                         }
+                    };
 
-                        // For boundary conditions (e.g., near list start/end), the
-                        // effective_target may not be reachable. Consider it reached
-                        // if the item's top is visible and we're at a list boundary.
-                        if !target_reached
-                            && item_top >= 0.0
-                            && item_top < viewport_size
-                            && (self.first_id == self.range_start || self.at_end)
-                        {
-                            target_reached = true;
-                        }
-                    }
-
-                    // Fallback: if we're scrolling down and the list has hit
-                    // the end, the target is as visible as it can get.
-                    if scrolling_down && self.at_end && target_id > self.first_id {
-                        target_reached = true;
-                    }
-
-                    if !target_reached {
-                        // Overshoot protection: if first_id has scrolled past
-                        // target_id, snap it back so the item gets drawn.
-                        let distance_to_target = target_id as isize - self.first_id as isize;
-                        let overshot = distance_to_target.signum() == delta_val.signum() as isize;
-                        if overshot {
-                            self.first_id = target_id;
-                        }
-
+                    if let Some(step) = step {
                         if let ScrollState::ScrollingTo { next_frame, .. } = &mut self.scroll_state
                         {
                             *next_frame = cx.new_next_frame();
                         }
-                        self.delta_top_scroll(cx, delta_val, true, false, 0.0, false, false);
+                        self.delta_top_scroll(cx, step, true, false, 0.0, false, false);
                         self.area.redraw(cx);
                     } else {
                         self.was_scrolling = false;
                         self.scroll_state = ScrollState::Stopped;
-                        // Landing on the last item means we're following the end again,
-                        // so let the next draw pick tailing back up.
-                        if target_id + 1 >= self.range_end {
+                        // With `auto_tail`, a list that ended up at its end follows its end again,
+                        // even if the scroll was headed for an earlier item. If a scroll to the end
+                        // or the last item didn't get the list there yet, the next draw checks again.
+                        if self.at_end && self.auto_tail {
+                            self.tail_range = true;
+                        } else if to_end || target_id + 1 >= self.range_end {
                             self.detect_tail_in_draw = true;
                         }
                         cx.widget_action(uid, PortalListAction::SmoothScrollReached);
@@ -3463,7 +3826,7 @@ impl Widget for PortalList {
                         self.area.redraw(cx);
                     }
                     KeyCode::ArrowDown => {
-                        self.first_id += 1;
+                        self.first_id = self.next_drawn_after(self.first_id);
                         if self.first_id >= self.range_end.max(1) {
                             self.first_id = self.range_end.max(1) - 1;
                         }
@@ -3474,10 +3837,7 @@ impl Widget for PortalList {
                     }
                     KeyCode::ArrowUp => {
                         if self.first_id > 0 {
-                            self.first_id -= 1;
-                            if self.first_id < self.range_start {
-                                self.first_id = self.range_start;
-                            }
+                            self.first_id = self.prev_drawn_before(self.first_id);
                             self.first_scroll = 0.0;
                             self.area.redraw(cx);
                             self.tail_range = false;
@@ -3951,10 +4311,24 @@ impl Widget for PortalList {
 }
 
 impl PortalListRef {
+    /// See [`PortalList::set_skipped_ranges()`].
+    pub fn set_skipped_ranges(&self, ranges: &[Range<usize>]) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_skipped_ranges(ranges);
+        }
+    }
+
     /// Sets the first item to be shown and its scroll offset.
     pub fn set_first_id_and_scroll(&self, id: usize, s: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_first_id_and_scroll(id, s);
+        }
+    }
+
+    /// See [`PortalList::set_first_id_and_scroll_in_place()`].
+    pub fn set_first_id_and_scroll_in_place(&self, first_id: usize, first_scroll: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_first_id_and_scroll_in_place(first_id, first_scroll);
         }
     }
 
@@ -4176,6 +4550,11 @@ impl PortalListRef {
         inner.position_of_item(cx, entry_id)
     }
 
+    /// See [`PortalList::drawn_slot()`].
+    pub fn drawn_slot(&self, item_id: usize) -> Option<DrawnSlot> {
+        self.borrow()?.drawn_slot(item_id)
+    }
+
     pub fn items_with_actions(&self, actions: &Actions) -> ItemsWithActions {
         let mut set = Vec::new();
         self.items_with_actions_vec(actions, &mut set);
@@ -4370,13 +4749,16 @@ fn list_keeps_scroll_delta(delta: f64, at_start: bool, at_end: bool, band: bool)
 /// Where a list must sit so the row at `index` is on screen, or `None` when it
 /// already is and the list must not move at all.
 ///
-/// The window is the `visible_items` rows from `first_id`, the stretch the last
-/// draw put on screen. A row that went off the start comes back `lead` rows
-/// down from the start of the window, and one that went off the end comes back
-/// `lead` rows up from the end of it, so the row the host cares about always
-/// has a neighbour beyond it saying the list goes on. Both are clamped so the
-/// row itself stays in the window, which is what a list too short for the lead,
-/// or a row too near the start of the range for it, comes down to.
+/// The window is the stretch the last draw put on screen: ids `first_id` through
+/// `last_visible_id`, holding `visible_items` drawn rows. Skipped items (see
+/// [`PortalList::set_skipped_ranges()`]) leave gaps in those ids, so rows are
+/// counted by stepping back with `prev_drawn_before`, never by subtracting ids.
+/// A row that went off the start comes back `lead` rows down from the start of
+/// the window, and one that went off the end comes back `lead` rows up from the
+/// end of it, so the row the host cares about always has a neighbour beyond it
+/// saying the list goes on. Both are clamped so the row itself stays in the
+/// window, which is what a list too short for the lead, or a row too near the
+/// start of the range for it, comes down to.
 ///
 /// A window of no rows means nothing was drawn, so the row is off screen by
 /// definition and comes back at the start of the window.
@@ -4384,23 +4766,29 @@ fn first_id_keeping_index_visible(
     index: usize,
     first_id: usize,
     visible_items: usize,
+    last_visible_id: Option<usize>,
     range_start: usize,
     lead: usize,
+    prev_drawn_before: impl Fn(usize) -> usize,
 ) -> Option<usize> {
-    if visible_items > 0 && index >= first_id && index < first_id + visible_items {
+    if visible_items > 0 && last_visible_id.is_some_and(|last| (first_id..=last).contains(&index)) {
         return None;
     }
-    if index < first_id || visible_items == 0 {
-        return Some(index.saturating_sub(lead).max(range_start));
+    // How many drawn rows go above the row: the lead when it came back over the
+    // start, or, off the end, enough to put it `lead` rows up from the bottom of
+    // the window, never so many that the row itself goes off the top of it.
+    let rows_above = if index < first_id || visible_items == 0 {
+        lead
+    } else {
+        visible_items.saturating_sub(lead.saturating_add(1))
+    };
+    let mut first = index.max(range_start);
+    for _ in 0..rows_above {
+        if first <= range_start {
+            break;
+        }
+        first = prev_drawn_before(first);
     }
-    // Off the end: put the row `lead` rows up from the bottom of the window,
-    // never so far that the row itself goes off the top of it.
-    let first = index
-        .saturating_add(lead)
-        .saturating_add(1)
-        .saturating_sub(visible_items)
-        .max(range_start)
-        .min(index);
     Some(first)
 }
 
@@ -4579,6 +4967,34 @@ mod tests {
     /// One row of daylight between a recalled row and the edge it came over.
     const LEAD: usize = 1;
 
+    /// [`first_id_keeping_index_visible`] for a list with nothing skipped, whose
+    /// window of `window` rows from `first` ends at row `first + window - 1`.
+    fn keep_without_skips(index: usize, first: usize, window: usize, range_start: usize, lead: usize) -> Option<usize> {
+        let last = (first + window).checked_sub(1).filter(|_| window > 0);
+        first_id_keeping_index_visible(index, first, window, last, range_start, lead, |id| id - 1)
+    }
+
+    /// Skipped items leave gaps in the ids on screen: rows 10, 11, 12, 30, 31 show
+    /// with 13..30 skipped. A row in the gap or after it is showing, and the lead
+    /// and the window are counted in drawn rows, not ids.
+    #[test]
+    fn keeping_a_row_counts_drawn_rows_past_skipped_items() {
+        crate::on_test_cx(|| {
+        let skipped = 13..30;
+        let prev = |id: usize| {
+            let prev = id - 1;
+            if skipped.contains(&prev) { skipped.start - 1 } else { prev }
+        };
+        // Showing, after the gap and inside it.
+        assert_eq!(first_id_keeping_index_visible(31, FIRST, WINDOW, Some(31), 0, LEAD, prev), None);
+        assert_eq!(first_id_keeping_index_visible(20, FIRST, WINDOW, Some(31), 0, LEAD, prev), None);
+        // Off the end, just past the window: 32 lands one row up from the bottom, after 12, 30 and 31.
+        assert_eq!(first_id_keeping_index_visible(32, FIRST, WINDOW, Some(31), 0, LEAD, prev), Some(12));
+        // Off the start, from further down: the lead above 30 is row 12, not skipped row 29.
+        assert_eq!(first_id_keeping_index_visible(30, 40, WINDOW, Some(44), 0, LEAD, prev), Some(12));
+        });
+    }
+
     /// Asking for a row that is already showing is not a scroll request: the
     /// list holds exactly where it is, wherever in the window the row sits.
     #[test]
@@ -4586,7 +5002,7 @@ mod tests {
         crate::on_test_cx(|| {
         for index in FIRST..FIRST + WINDOW {
             assert_eq!(
-                first_id_keeping_index_visible(index, FIRST, WINDOW, 0, LEAD),
+                keep_without_skips(index, FIRST, WINDOW, 0, LEAD),
                 None,
                 "the list moved for row {index}, which was already showing"
             );
@@ -4600,11 +5016,11 @@ mod tests {
     fn a_row_off_the_top_comes_back_short_of_the_top() {
         crate::on_test_cx(|| {
         assert_eq!(
-            first_id_keeping_index_visible(3, FIRST, WINDOW, 0, LEAD),
+            keep_without_skips(3, FIRST, WINDOW, 0, LEAD),
             Some(2)
         );
         assert_eq!(
-            first_id_keeping_index_visible(9, FIRST, WINDOW, 0, 3),
+            keep_without_skips(9, FIRST, WINDOW, 0, 3),
             Some(6)
         );
         });
@@ -4615,7 +5031,7 @@ mod tests {
     #[test]
     fn a_row_off_the_bottom_comes_back_short_of_the_bottom() {
         crate::on_test_cx(|| {
-        let first = first_id_keeping_index_visible(20, FIRST, WINDOW, 0, LEAD).unwrap();
+        let first = keep_without_skips(20, FIRST, WINDOW, 0, LEAD).unwrap();
         assert_eq!(first, 17);
         // 17..22 shows the row with one row after it.
         assert!(first <= 20 && 20 < first + WINDOW);
@@ -4629,11 +5045,11 @@ mod tests {
     fn the_lead_never_runs_past_the_start_of_the_range() {
         crate::on_test_cx(|| {
         assert_eq!(
-            first_id_keeping_index_visible(0, FIRST, WINDOW, 0, LEAD),
+            keep_without_skips(0, FIRST, WINDOW, 0, LEAD),
             Some(0)
         );
         assert_eq!(
-            first_id_keeping_index_visible(5, FIRST, WINDOW, 5, LEAD),
+            keep_without_skips(5, FIRST, WINDOW, 5, LEAD),
             Some(5)
         );
         });
@@ -4645,11 +5061,11 @@ mod tests {
     fn a_window_too_short_for_the_lead_still_shows_the_row() {
         crate::on_test_cx(|| {
         assert_eq!(
-            first_id_keeping_index_visible(20, FIRST, 1, 0, LEAD),
+            keep_without_skips(20, FIRST, 1, 0, LEAD),
             Some(20)
         );
         assert_eq!(
-            first_id_keeping_index_visible(20, FIRST, 2, 0, 4),
+            keep_without_skips(20, FIRST, 2, 0, 4),
             Some(20)
         );
         });
@@ -4661,7 +5077,7 @@ mod tests {
     fn a_list_that_drew_nothing_brings_the_row_to_its_start() {
         crate::on_test_cx(|| {
         assert_eq!(
-            first_id_keeping_index_visible(FIRST, FIRST, 0, 0, LEAD),
+            keep_without_skips(FIRST, FIRST, 0, 0, LEAD),
             Some(FIRST - LEAD)
         );
         });
@@ -5275,7 +5691,7 @@ mod tests {
 
 #[cfg(test)]
 mod height_tree_tests {
-    use super::HeightTree;
+    use super::{ranges_minus, SkippedRanges, HeightTree};
 
     /// Checks every prefix sum against a plain vector of the same heights.
     fn assert_matches(tree: &HeightTree, heights: &[f64]) {
@@ -5286,6 +5702,133 @@ mod height_tree_tests {
             assert!((tree.point_query(i) - h).abs() < 1e-6, "point_query({i})");
         }
         assert!((tree.total() - sum).abs() < 1e-6, "total {} != {sum}", tree.total());
+    }
+
+    #[test]
+    fn forgetting_a_height_goes_back_to_the_default() {
+        let mut tree = HeightTree::new(4, 20.0);
+        tree.update(1, 50.0);
+        tree.forget(1);
+        assert_matches(&tree, &[20.0; 4]);
+        // ...and from then on, item 1 changes along with the default height.
+        tree.update_default_height(30.0);
+        assert_matches(&tree, &[30.0; 4]);
+    }
+
+    #[test]
+    fn drawing_jumps_over_whole_skipped_ranges() {
+        // Ranges can touch, and empty ones don't count.
+        let skipped = SkippedRanges(vec![2..4, 4..6, 8..8, 9..12]);
+        assert_eq!([0, 1, 6, 7, 8, 12].map(|id| skipped.next_unskipped_after(id)), [1, 6, 7, 8, 12, 13]);
+        assert_eq!([1, 2, 6, 9, 12, 13].map(|id| skipped.prev_unskipped_before(id)), [0, 1, 1, 8, 8, 12]);
+        // If every item above is skipped, going up stops at the very first item.
+        let skipped = SkippedRanges(vec![0..3, 5..6]);
+        assert_eq!([3, 6].map(|id| skipped.prev_unskipped_before(id)), [0, 4]);
+    }
+
+    #[test]
+    fn skipped_items_take_up_no_space() {
+        let mut tree = HeightTree::new(8, 20.0);
+        tree.update(2, 50.0);
+        tree.update(5, 40.0);
+        let mut skipped = SkippedRanges::default();
+        skipped.set(&[1..3, 5..7], 0, Some(&mut tree));
+        assert_matches(&tree, &[20.0, 0.0, 0.0, 20.0, 20.0, 0.0, 0.0, 20.0]);
+        // When item 2 stops being skipped, it goes back to the default height, not its old 50...
+        skipped.set(&[1..2, 4..7], 0, Some(&mut tree));
+        assert_matches(&tree, &[20.0, 0.0, 20.0, 20.0, 0.0, 0.0, 0.0, 20.0]);
+        // ...and then changes along with the default height, while skipped items stay at zero.
+        tree.update_default_height(30.0);
+        assert_matches(&tree, &[30.0, 0.0, 30.0, 30.0, 0.0, 0.0, 0.0, 30.0]);
+        // The tree's first item can be a later one in the list.
+        let mut tree = HeightTree::new(4, 20.0);
+        SkippedRanges::default().set(&[1..3, 5..9], 2, Some(&mut tree));
+        assert_matches(&tree, &[0.0, 20.0, 20.0, 0.0]);
+    }
+
+    #[test]
+    fn skipped_items_stay_skipped_as_the_tree_grows_or_shrinks() {
+        // Ranges can be set before the tree has their items.
+        // Those items take up no space once the tree grows to include them.
+        let mut skipped = SkippedRanges::default();
+        skipped.set(&[1..2, 3..6], 0, None);
+        let mut tree = HeightTree::new(0, 20.0);
+        skipped.resize_tree(&mut tree, 0, 4);
+        assert_matches(&tree, &[20.0, 0.0, 20.0, 0.0]);
+        skipped.resize_tree(&mut tree, 0, 8);
+        assert_matches(&tree, &[20.0, 0.0, 20.0, 0.0, 0.0, 0.0, 20.0, 20.0]);
+        // Shrinking starts the tree over, but what's skipped stays skipped...
+        tree.update(2, 50.0);
+        skipped.resize_tree(&mut tree, 0, 5);
+        assert_matches(&tree, &[20.0, 0.0, 20.0, 0.0, 0.0]);
+        // ...and those items still go back to the default height when they stop being skipped.
+        skipped.set(&[0..1, 4..5], 0, Some(&mut tree));
+        assert_matches(&tree, &[0.0, 20.0, 20.0, 20.0, 0.0]);
+    }
+
+    #[test]
+    fn editing_heights_in_place_gives_each_one_and_sums_them_back_up() {
+        let heights: Vec<f64> = (0..37).map(|i| (i * 7 % 13) as f64 * 10.0).collect();
+        let mut tree = HeightTree::new(heights.len(), 20.0);
+        for (i, &height) in heights.iter().enumerate() {
+            tree.update(i, height);
+        }
+        tree.edit_heights(|seen, _| assert!(seen.iter().zip(&heights).all(|(a, b)| (a - b).abs() < 1e-6)));
+        assert_matches(&tree, &heights);
+        // Starting over puts every item at the default height before `edit` changes any.
+        tree.reset(5, |seen, measured| {
+            assert!(seen.iter().all(|&height| height == 20.0) && !measured.contains(&true));
+            seen[1] = 0.0;
+            measured[1] = true;
+        });
+        assert_matches(&tree, &[20.0, 0.0, 20.0, 20.0, 20.0]);
+        HeightTree::new(0, 20.0).edit_heights(|seen, measured| assert!(seen.is_empty() && measured.is_empty()));
+    }
+
+    #[test]
+    fn moving_lots_of_skipped_ranges_rebuilds_the_tree_the_same() {
+        // Like items getting added before every skipped range, which moves them all.
+        let mut heights = vec![20.0; 64];
+        let mut tree = HeightTree::new(64, 20.0);
+        for i in (0..64).step_by(5) {
+            heights[i] = 30.0 + i as f64;
+            tree.update(i, heights[i]);
+        }
+        let old_ranges: Vec<_> = (0..60).step_by(10).map(|start| start + 1..start + 4).collect();
+        let mut skipped = SkippedRanges::default();
+        skipped.set(&old_ranges, 0, Some(&mut tree));
+        for range in &old_ranges {
+            heights[range.clone()].fill(0.0);
+        }
+        assert_matches(&tree, &heights);
+        let new_ranges: Vec<_> = old_ranges.iter().map(|range| range.start + 3..range.end + 3).collect();
+        skipped.set(&new_ranges, 0, Some(&mut tree));
+        // Items that aren't skipped anymore go back to the default height, like when they change one at a time.
+        for range in ranges_minus(&old_ranges, &new_ranges) {
+            heights[range].fill(20.0);
+        }
+        for range in &new_ranges {
+            heights[range.clone()].fill(0.0);
+        }
+        assert_matches(&tree, &heights);
+        tree.update_default_height(40.0);
+        let unmeasured = |i: usize| !i.is_multiple_of(5) && !new_ranges.iter().any(|range| range.contains(&i));
+        for (_, height) in heights.iter_mut().enumerate().filter(|&(i, _)| unmeasured(i)) {
+            *height = 40.0;
+        }
+        assert_matches(&tree, &heights);
+        // A small change updates just those items, the same way.
+        skipped.set(&new_ranges[..new_ranges.len() - 1], 0, Some(&mut tree));
+        heights[new_ranges[new_ranges.len() - 1].clone()].fill(40.0);
+        assert_matches(&tree, &heights);
+    }
+
+    #[test]
+    fn ranges_minus_cuts_out_overlaps() {
+        assert_eq!(ranges_minus(&[0..10, 12..14], &[2..4, 6..7, 13..20]), vec![0..2, 4..6, 7..10, 12..13]);
+        assert_eq!(ranges_minus(&[0..3, 5..8, 10..12], &[2..6, 11..20]), vec![0..2, 6..8, 10..11]);
+        assert!(ranges_minus(&[3..5, 6..7], &[0..10, 11..12]).is_empty());
+        assert_eq!(ranges_minus(&[3..5, 6..7], &[]), vec![3..5, 6..7]);
     }
 
     /// Growing the tree must keep every height measured before the growth.
@@ -5317,5 +5860,264 @@ mod height_tree_tests {
         tree.update(2, 100.0);
         tree.resize(4);
         assert_matches(&tree, &[30.0; 4]);
+    }
+}
+
+#[cfg(test)]
+mod smooth_scroll_tests {
+    use super::{smooth_scroll_step, SMOOTH_SCROLL_TOLERANCE};
+
+    /// Returns the target's top at the start and after each frame of a smooth scroll from `top` to `goal`.
+    fn tops(mut top: f64, goal: f64, speed: f64) -> Vec<f64> {
+        let mut tops = vec![top];
+        while let Some(step) = smooth_scroll_step(top, goal, speed, false, false) {
+            assert!(step.abs() <= speed);
+            top += step;
+            tops.push(top);
+            assert!(tops.len() < 1000, "never got from {} to {goal}", tops[0]);
+        }
+        tops
+    }
+
+    #[test]
+    fn a_smooth_scroll_lands_right_on_its_goal() {
+        // Targets start below their goal (scrolling down the list) or above it (scrolling up).
+        for (start, goal, speed) in [
+            (1234.5, 10.0, 50.0),
+            (60.25, 10.0, 50.0),
+            (-987.3, 10.0, 50.0),
+            (-3.0, 0.0, 90.0),
+            (77.7, 33.3, 13.0),
+        ] {
+            let tops = tops(start, goal, speed);
+            let last = *tops.last().unwrap();
+            assert!((last - goal).abs() < 1e-9, "{start} -> {goal} stopped at {last}");
+            // It never goes past the goal, so it never has to come back.
+            assert!(
+                tops.iter().all(|&top| (top - goal) * (start - goal) >= -1e-9),
+                "{start} -> {goal} went past it: {tops:?}"
+            );
+            assert_eq!(tops.len() - 1, ((start - goal).abs() / speed).ceil() as usize);
+        }
+    }
+
+    #[test]
+    fn a_target_already_there_needs_no_scrolling() {
+        assert_eq!(smooth_scroll_step(10.0, 10.0, 50.0, false, false), None);
+        let close = 10.0 - SMOOTH_SCROLL_TOLERANCE / 2.0;
+        assert_eq!(smooth_scroll_step(close, 10.0, 50.0, false, false), None);
+        // A top that's only off by float drift (from adding up heights) counts as there too.
+        assert_eq!(smooth_scroll_step(9.999999999999986, 10.0, 50.0, false, false), None);
+    }
+
+    #[test]
+    fn a_target_past_its_goal_comes_back() {
+        // E.g., the items scrolled over turned out shorter or taller than estimated.
+        assert_eq!(smooth_scroll_step(-20.0, 10.0, 50.0, false, false), Some(30.0));
+        assert_eq!(smooth_scroll_step(45.5, 10.0, 50.0, false, false), Some(-35.5));
+    }
+
+    #[test]
+    fn the_ends_of_the_list_stop_it_short() {
+        // At the end, a target near the bottom of the list can't come up any further...
+        assert_eq!(smooth_scroll_step(300.0, 10.0, 50.0, false, true), None);
+        // ...but the list can still move away from the end.
+        assert_eq!(smooth_scroll_step(-300.0, 10.0, 50.0, false, true), Some(50.0));
+        // Same at the start, for a target near the top of the list.
+        assert_eq!(smooth_scroll_step(4.0, 10.0, 50.0, true, false), None);
+        assert_eq!(smooth_scroll_step(300.0, 10.0, 50.0, true, false), Some(-50.0));
+    }
+}
+
+#[cfg(test)]
+mod skipped_ranges_draw_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+    use std::ops::Range;
+
+    const PANE: DVec2 = dvec2(300.0, 120.0);
+
+    /// A real list of 20px rows, which draws any skipped row it's asked for at zero size,
+    /// like [`PortalList::set_skipped_ranges()`] says to.
+    struct Rows {
+        root: WidgetRef,
+        pass: DrawPass,
+        draw_list: DrawList2d,
+        len: usize,
+        skipped: Vec<Range<usize>>,
+        /// The rows the last draw asked for, in order.
+        drawn: Vec<usize>,
+    }
+
+    impl Rows {
+        fn new(cx: &mut Cx, len: usize, skipped: Vec<Range<usize>>) -> Self {
+            let root = cx.with_vm(|vm| {
+                let value = crate::script_eval!(vm, {
+                    use mod.prelude.widgets.*
+                    use mod.widgets.*
+                    View{
+                        width: Fill height: Fill flow: Down
+                        list := PortalList{
+                            width: Fill height: Fill flow: Down
+                            selectable: false
+                            Row := View{width: Fill height: 20. show_bg: true}
+                            Skipped := View{width: Fill height: 0.}
+                        }
+                    }
+                });
+                WidgetRef::script_from_value(vm, value)
+            });
+            let mut rows = Rows { root, pass: DrawPass::new(cx), draw_list: DrawList2d::new(cx), len, skipped, drawn: Vec::new() };
+            for _ in 0..3 {
+                rows.draw(cx);
+            }
+            rows
+        }
+
+        fn draw(&mut self, cx: &mut Cx) {
+            self.pass.set_size(cx, PANE);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&self.pass, None);
+            self.draw_list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(PANE, Layout::flow_down());
+            let mut scope = Scope::empty();
+            self.drawn.clear();
+            while let Some(step) = self.root.draw_walk(&mut cx2d, &mut scope, Walk::fill()).step() {
+                if let Some(mut list) = step.borrow_mut::<PortalList>() {
+                    list.set_item_range(&mut cx2d, 0, self.len);
+                    list.set_skipped_ranges(&self.skipped);
+                    while let Some(id) = list.next_visible_item(&mut cx2d) {
+                        if id >= self.len {
+                            continue;
+                        }
+                        let template = if self.skipped.iter().any(|range| range.contains(&id)) { id!(Skipped) } else { id!(Row) };
+                        list.item(&mut cx2d, id, template).draw_all(&mut cx2d, &mut Scope::empty());
+                        self.drawn.push(id);
+                    }
+                }
+            }
+            cx2d.end_pass_sized_turtle();
+            self.draw_list.end(&mut cx2d);
+            cx2d.end_pass(&self.pass);
+        }
+
+        fn list(&self, cx: &Cx) -> PortalListRef {
+            self.root.portal_list(cx, ids!(list))
+        }
+
+        /// Returns the list's first item and scroll offset.
+        fn place(&self, cx: &Cx) -> (usize, f64) {
+            let list = self.list(cx);
+            let list = list.borrow().unwrap();
+            (list.first_id(), list.first_scroll())
+        }
+
+        fn show_filler_rows(&self, cx: &Cx) {
+            self.list(cx).borrow_mut().unwrap().filler_rows = true;
+        }
+
+        /// Returns whether the last draw put down any filler rows.
+        fn drew_filler(&self, cx: &Cx) -> bool {
+            self.list(cx).borrow().unwrap().filler.draw_super.draw_vars.area.is_valid(cx)
+        }
+    }
+
+    /// Asking to keep a row that's already showing holds the list still, even past skipped items,
+    /// and so does asking for a skipped item whose range starts right after a row that's showing.
+    #[test]
+    fn keeping_a_row_on_screen_past_skipped_items_holds_the_list_still() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let mut rows = Rows::new(&mut cx, 40, vec![3..20]);
+            assert_eq!(rows.drawn, [0, 1, 2, 20, 21, 22, 23]);
+            let before = rows.place(&cx);
+            for index in [21, 10] {
+                rows.list(&cx).keep_index_visible(&mut cx, index);
+                rows.draw(&mut cx);
+                rows.draw(&mut cx);
+                assert_eq!(rows.place(&cx), before, "keeping row {index} moved the list");
+            }
+        });
+    }
+
+    /// A row brought back on screen gets its lead in drawn rows, skipping over skipped items.
+    #[test]
+    fn keeping_a_row_off_screen_counts_drawn_rows_past_skipped_items() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            // Over the top: the row above row 20 is row 2, since 3..20 are skipped.
+            let mut rows = Rows::new(&mut cx, 60, vec![3..20]);
+            rows.list(&cx).set_first_id_and_scroll(40, 0.0);
+            rows.draw(&mut cx);
+            rows.draw(&mut cx);
+            rows.list(&cx).keep_index_visible(&mut cx, 20);
+            rows.draw(&mut cx);
+            rows.draw(&mut cx);
+            assert_eq!(rows.place(&cx).0, 2);
+            // Over the bottom: row 50 lands near the bottom, same as it would without anything skipped.
+            let mut rows = Rows::new(&mut cx, 80, vec![30..50]);
+            rows.list(&cx).keep_index_visible(&mut cx, 50);
+            rows.draw(&mut cx);
+            rows.draw(&mut cx);
+            assert_eq!(rows.list(&cx).drawn_slot(50), Some(DrawnSlot { start: 100.0, size: 20.0 }));
+        });
+    }
+
+    /// A short list whose last item is skipped (so drawn at zero size) still gets its filler rows,
+    /// including on the draw where a group at its end collapses under its first item.
+    #[test]
+    fn filler_rows_show_under_a_skipped_last_row() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let mut rows = Rows::new(&mut cx, 4, vec![]);
+            rows.show_filler_rows(&cx);
+            rows.draw(&mut cx);
+            assert!(rows.drew_filler(&cx), "no filler without anything skipped");
+
+            let mut rows = Rows::new(&mut cx, 10, vec![4..10]);
+            rows.show_filler_rows(&cx);
+            rows.draw(&mut cx);
+            assert!(rows.drew_filler(&cx), "no filler under a skipped last row");
+
+            let mut rows = Rows::new(&mut cx, 10, vec![]);
+            rows.show_filler_rows(&cx);
+            rows.list(&cx).set_first_id_and_scroll(5, 0.0);
+            for _ in 0..3 {
+                rows.draw(&mut cx);
+            }
+            rows.skipped = vec![4..10];
+            rows.draw(&mut cx);
+            assert!(rows.drew_filler(&cx), "no filler on the draw where the group collapsed");
+        });
+    }
+
+    /// Each drawn row's slot is where the draw put it, and passing its start back to
+    /// `set_first_id_and_scroll()` keeps the row right there.
+    #[test]
+    fn drawn_slots_are_where_rows_got_drawn() {
+        crate::on_test_cx(|| {
+            let mut cx = crate::checkout_test_cx();
+            let mut rows = Rows::new(&mut cx, 40, vec![3..20]);
+            let list = rows.list(&cx);
+            assert_eq!(list.drawn_slot(2), Some(DrawnSlot { start: 40.0, size: 20.0 }));
+            assert_eq!(list.drawn_slot(10), None, "a skipped item in the middle doesn't get drawn");
+            assert_eq!(list.drawn_slot(20), Some(DrawnSlot { start: 60.0, size: 20.0 }));
+            assert_eq!(list.drawn_slot(30), None, "nothing below the viewport gets drawn");
+
+            list.set_first_id_and_scroll(21, -5.0);
+            rows.draw(&mut cx);
+            let slot = list.drawn_slot(22).unwrap();
+            assert_eq!(slot, DrawnSlot { start: 15.0, size: 20.0 });
+            list.set_first_id_and_scroll(22, slot.start);
+            rows.draw(&mut cx);
+            assert_eq!(list.drawn_slot(22), Some(slot));
+            assert_eq!(list.drawn_slot(21), Some(DrawnSlot { start: -5.0, size: 20.0 }));
+
+            // A skipped item the list still asks for (here, the last one) takes up no room.
+            let rows = Rows::new(&mut cx, 10, vec![4..10]);
+            assert_eq!(rows.list(&cx).drawn_slot(9), Some(DrawnSlot { start: 80.0, size: 0.0 }));
+        });
     }
 }
