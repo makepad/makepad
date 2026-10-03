@@ -2,7 +2,25 @@ use crate::pod::ScriptPodTy;
 use crate::shader::{ShaderIoKind, ShaderOutput, TextureType};
 use crate::vm::ScriptVm;
 use makepad_live_id::{id, LiveId};
+use std::collections::BTreeSet;
 use std::fmt::Write;
+
+/// Registers a vs_5_0 vertex shader reads (its input elements and
+/// system values) and its interface to the pixel stage holds (vs_5_0
+/// outputs, ps_5_0 inputs).
+const HLSL_STAGE_REGISTERS: usize = 32;
+
+/// The declaration of the buffer a vertex shader reads its instance records
+/// from ([`ShaderOutput::hlsl_instances_from_buffer`]); its register follows.
+const HLSL_INSTANCE_BUFFER_DECL: &str = "Buffer<uint> _mp_inst : register(t";
+
+/// The t register of the instance buffer `hlsl` reads its instance records
+/// from, or None when its instances arrive as input elements.
+pub fn hlsl_instance_buffer_register(hlsl: &str) -> Option<u32> {
+    let start = hlsl.find(HLSL_INSTANCE_BUFFER_DECL)? + HLSL_INSTANCE_BUFFER_DECL.len();
+    let end = start + hlsl[start..].find(')')?;
+    hlsl[start..end].parse().ok()
+}
 
 impl ShaderOutput {
     fn hlsl_is_integer_like_input(vm: &ScriptVm, ty: crate::ScriptPodType) -> bool {
@@ -62,6 +80,118 @@ impl ShaderOutput {
         let pod_ty = vm.bx.heap.pod_type_ref(ty);
         let slots = pod_ty.ty.slots();
         slots > 4 || matches!(pod_ty.ty, ScriptPodTy::Struct { .. })
+    }
+
+    /// Input elements `hlsl_create_vertex_input_struct` declares for one field.
+    fn hlsl_input_elements(vm: &ScriptVm, ty: crate::ScriptPodType) -> usize {
+        if Self::hlsl_input_needs_chunks(vm, ty) {
+            Self::hlsl_slot_chunks(vm.bx.heap.pod_type_ref(ty).ty.slots()).len()
+        } else {
+            1
+        }
+    }
+
+    /// Made of 32-bit float lanes only, which the instance layout packs back
+    /// to back.
+    fn hlsl_is_f32_lanes(ty: &ScriptPodTy) -> bool {
+        match ty {
+            ScriptPodTy::F32 | ScriptPodTy::Mat(_) => true,
+            ScriptPodTy::Vec(vec_ty) => matches!(
+                vec_ty,
+                crate::pod::ScriptPodVec::Vec2f
+                    | crate::pod::ScriptPodVec::Vec3f
+                    | crate::pod::ScriptPodVec::Vec4f
+            ),
+            ScriptPodTy::Struct { fields, .. } => {
+                !ty.has_compact_format()
+                    && fields.iter().all(|f| Self::hlsl_is_f32_lanes(&f.ty.data.ty))
+            }
+            _ => false,
+        }
+    }
+
+    fn hlsl_is_instance(kind: &ShaderIoKind) -> bool {
+        matches!(kind, ShaderIoKind::DynInstance | ShaderIoKind::RustInstance)
+    }
+
+    /// The vertex stage reads the instance record from a buffer by
+    /// SV_InstanceID instead of from input elements when one element per
+    /// instance field, the geometry's and the two system values would exceed
+    /// vs_5_0's 32 input registers. Only for records of float lanes: those
+    /// sit back to back in the instance buffer, so a field's offset is the
+    /// sum of the slots before it.
+    pub fn hlsl_instances_from_buffer(&self, vm: &ScriptVm) -> bool {
+        let mut elements = 2;
+        let mut instances = 0;
+        for io in &self.io {
+            if let ShaderIoKind::VertexBuffer = io.kind {
+                elements += Self::hlsl_input_elements(vm, io.ty);
+            } else if Self::hlsl_is_instance(&io.kind) {
+                if !Self::hlsl_is_f32_lanes(&vm.bx.heap.pod_type_ref(io.ty).ty) {
+                    return false;
+                }
+                elements += Self::hlsl_input_elements(vm, io.ty);
+                instances += 1;
+            }
+        }
+        instances > 0 && elements > HLSL_STAGE_REGISTERS
+    }
+
+    /// The instance fields in record order (dyn first, then Rust) with their
+    /// f32 offsets, and the record's stride in f32s.
+    fn hlsl_instance_offsets(&self, vm: &ScriptVm) -> (Vec<(usize, usize)>, usize) {
+        let mut offsets = Vec::new();
+        let mut offset = 0;
+        for rust in [false, true] {
+            for (index, io) in self.io.iter().enumerate() {
+                let wanted = match io.kind {
+                    ShaderIoKind::DynInstance => !rust,
+                    ShaderIoKind::RustInstance => rust,
+                    _ => false,
+                };
+                if wanted {
+                    offsets.push((index, offset));
+                    offset += vm.bx.heap.pod_type_ref(io.ty).ty.slots();
+                }
+            }
+        }
+        (offsets, offset)
+    }
+
+    /// The instance fields the stage interface carries: every one, unless
+    /// that could exceed 32 registers (one per scalar or vector, one per
+    /// matrix column, before the compiler packs them); then only those the
+    /// pixel stage reads (`_mp_iof.v.<field>`), the rule WebGL 2 follows.
+    /// The vertex stage reads instance fields from `_mp_iov.i` and never
+    /// writes them, so a field the pixel stage does not read only cost a
+    /// register. None keeps every field.
+    fn hlsl_varying_instances(&self, vm: &ScriptVm) -> Option<BTreeSet<LiveId>> {
+        let mut registers = 2;
+        for io in &self.io {
+            if Self::hlsl_is_instance(&io.kind) || matches!(io.kind, ShaderIoKind::Varying) {
+                registers += vm.bx.heap.pod_type_ref(io.ty).ty.slots().div_ceil(4).max(1);
+            }
+        }
+        if registers <= HLSL_STAGE_REGISTERS {
+            return None;
+        }
+        let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+        let pixel_reads = |field: &str| {
+            let needle = format!("_mp_iof.v.{}", field);
+            self.functions.iter().any(|f| {
+                f.out.match_indices(&needle).any(|(at, _)| {
+                    !f.out[at + needle.len()..].chars().next().is_some_and(is_ident)
+                })
+            })
+        };
+        Some(
+            self.io
+                .iter()
+                .filter(|io| Self::hlsl_is_instance(&io.kind))
+                .filter(|io| pixel_reads(&self.backend.map_io_name(io.name)))
+                .map(|io| io.name)
+                .collect(),
+        )
     }
 
     fn hlsl_reconstruct_from_scalars(
@@ -275,8 +405,13 @@ impl ShaderOutput {
 
     pub fn hlsl_create_varying_struct(&self, vm: &ScriptVm, out: &mut String) {
         writeln!(out, "struct IoVarying {{").ok();
+        let keep = self.hlsl_varying_instances(vm);
         let mut semantic_idx = 0usize;
         for io in &self.io {
+            let dropped = keep.as_ref().is_some_and(|k| !k.contains(&io.name));
+            if Self::hlsl_is_instance(&io.kind) && dropped {
+                continue;
+            }
             match io.kind {
                 ShaderIoKind::DynInstance | ShaderIoKind::RustInstance | ShaderIoKind::Varying => {
                     write!(out, "    ").ok();
@@ -354,10 +489,12 @@ impl ShaderOutput {
             }
         }
 
-        // Instance fields
+        // Instance fields, unless the vertex stage reads them from the
+        // instance buffer.
+        let from_buffer = self.hlsl_instances_from_buffer(vm);
         semantic_idx = 0;
         // Dyn instance fields first
-        for io in &self.io {
+        for io in self.io.iter().filter(|_| !from_buffer) {
             if let ShaderIoKind::DynInstance = io.kind {
                 let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
                 let slots = pod_ty.ty.slots();
@@ -392,7 +529,7 @@ impl ShaderOutput {
             }
         }
         // Rust instance fields
-        for io in &self.io {
+        for io in self.io.iter().filter(|_| !from_buffer) {
             if let ShaderIoKind::RustInstance = io.kind {
                 let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
                 let slots = pod_ty.ty.slots();
@@ -477,7 +614,7 @@ impl ShaderOutput {
         writeln!(out, "}};").ok();
     }
 
-    pub fn hlsl_create_texture_samplers(&self, _vm: &ScriptVm, out: &mut String) {
+    pub fn hlsl_create_texture_samplers(&self, vm: &ScriptVm, out: &mut String) {
         let mut tex_idx = 0;
         let mut samp_idx = 0;
         for io in &self.io {
@@ -507,6 +644,10 @@ impl ShaderOutput {
                 }
                 _ => (),
             }
+        }
+        // The instance buffer takes the register after the textures.
+        if self.hlsl_instances_from_buffer(vm) {
+            writeln!(out, "{}{});", HLSL_INSTANCE_BUFFER_DECL, tex_idx).ok();
         }
 
         for (idx, sampler) in self.samplers.iter().enumerate() {
@@ -540,19 +681,30 @@ impl ShaderOutput {
                 writeln!(out, "    _mp_iov.vb.{0} = {1};", io_name, expr).ok();
             }
         }
-        for io in &self.io {
-            if let ShaderIoKind::DynInstance = io.kind {
-                let expr = self.hlsl_reconstruct_input_value(vm, io.ty, "i", io.name);
-                let io_name = self.backend.map_io_name(io.name);
-                writeln!(out, "    _mp_iov.i.{0} = {1};", io_name, expr).ok();
-                writeln!(out, "    _mp_iov.v.{0} = _mp_iov.i.{0};", io_name).ok();
-            }
+        let from_buffer = self.hlsl_instances_from_buffer(vm);
+        let keep = self.hlsl_varying_instances(vm);
+        let (offsets, stride) = self.hlsl_instance_offsets(vm);
+        if from_buffer {
+            writeln!(out, "    uint _mp_ib = input.iid * {};", stride).ok();
         }
-        for io in &self.io {
-            if let ShaderIoKind::RustInstance = io.kind {
-                let expr = self.hlsl_reconstruct_input_value(vm, io.ty, "i", io.name);
-                let io_name = self.backend.map_io_name(io.name);
-                writeln!(out, "    _mp_iov.i.{0} = {1};", io_name, expr).ok();
+        for (index, offset) in offsets {
+            let io = &self.io[index];
+            let expr = if from_buffer {
+                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
+                let scalars: Vec<String> = (0..pod_ty.ty.slots())
+                    .map(|slot| format!("asfloat(_mp_inst[_mp_ib + {}])", offset + slot))
+                    .collect();
+                let inline = crate::pod::ScriptPodTypeInline {
+                    self_ref: io.ty,
+                    data: pod_ty.clone(),
+                };
+                self.hlsl_reconstruct_from_scalars(vm, &inline, &scalars, &mut 0)
+            } else {
+                self.hlsl_reconstruct_input_value(vm, io.ty, "i", io.name)
+            };
+            let io_name = self.backend.map_io_name(io.name);
+            writeln!(out, "    _mp_iov.i.{0} = {1};", io_name, expr).ok();
+            if keep.as_ref().is_none_or(|k| k.contains(&io.name)) {
                 writeln!(out, "    _mp_iov.v.{0} = _mp_iov.i.{0};", io_name).ok();
             }
         }

@@ -46,6 +46,7 @@ use crate::{
                     D3D11_BIND_INDEX_BUFFER, D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
                     D3D11_BIND_VERTEX_BUFFER, D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA,
                     D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD, D3D11_BLEND_OP_MAX, D3D11_BOX, D3D11_BUFFER_DESC,
+                    D3D11_BUFFER_SRV, D3D11_BUFFER_SRV_0, D3D11_BUFFER_SRV_1,
                     D3D11_CLEAR_DEPTH, D3D11_CLEAR_STENCIL, D3D11_COLOR_WRITE_ENABLE_ALL,
                     D3D11_COMPARISON_ALWAYS, D3D11_COMPARISON_LESS_EQUAL, D3D11_CPU_ACCESS_WRITE,
                     D3D11_CREATE_DEVICE_FLAG, D3D11_CULL_BACK, D3D11_CULL_NONE,
@@ -341,7 +342,7 @@ impl Cx {
                             };
                             uploaded
                         } else {
-                            draw_item.os.inst_vbuf.update_with_f32_vertex_data(
+                            draw_item.os.inst_vbuf.update_with_f32_instance_data(
                                 d3d11_cx,
                                 draw_item.instances.as_deref().unwrap(),
                             );
@@ -672,6 +673,10 @@ impl Cx {
                                 .VSSetShaderResources(i as u32, Some(&clear_srvs));
                         }
                     }
+                }
+                if let Some(slot) = shp.instance_buffer_slot {
+                    let view = draw_item.os.inst_vbuf.word_view(d3d11_cx);
+                    unsafe { d3d11_cx.context.VSSetShaderResources(slot, Some(&[view])) };
                 }
                 //if self.passes[pass_id].debug{
                 // println!("DRAWING {} {}", geometry.indices.len(), instances);
@@ -2797,6 +2802,8 @@ pub struct CxOsUniformBuffer {
 pub struct D3d11Buffer {
     pub last_size: usize,
     pub buffer: Option<ID3D11Buffer>,
+    /// The buffer as 32-bit words, and the buffer it was made for.
+    pub word_view: Option<(ID3D11Buffer, ID3D11ShaderResourceView)>,
     pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
     pub retained_count: usize,
     pub charge: Option<crate::retained_instances::RetainedAllocation>,
@@ -2834,7 +2841,8 @@ impl D3d11Buffer {
             let desc = D3D11_BUFFER_DESC {
                 Usage: D3D11_USAGE_DEFAULT,
                 ByteWidth: (capacity * 4).try_into().ok()?,
-                BindFlags: D3D11_BIND_VERTEX_BUFFER.0 as u32,
+                // Shader-readable too, for records read by instance id.
+                BindFlags: (D3D11_BIND_VERTEX_BUFFER.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
                 CPUAccessFlags: 0,
                 MiscFlags: 0,
                 StructureByteStride: 0,
@@ -2980,6 +2988,7 @@ impl D3d11Buffer {
         // just let the old buffer go.
         if len_slots == 0 {
             self.buffer = None;
+            self.word_view = None;
             self.last_size = 0;
             self.retained_publication = None;
             return;
@@ -3012,6 +3021,56 @@ impl D3d11Buffer {
             data.len(),
             data.as_ptr() as *const _,
         );
+    }
+
+    /// An instance buffer: a vertex buffer, and shader-readable for the
+    /// vertex shaders that read their records by instance id.
+    pub fn update_with_f32_instance_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
+        self.update_with_data(
+            d3d11_cx,
+            D3D11_BIND_FLAG(D3D11_BIND_VERTEX_BUFFER.0 | D3D11_BIND_SHADER_RESOURCE.0),
+            data.len(),
+            data.as_ptr() as *const _,
+        );
+    }
+
+    /// A view of the buffer as 32-bit words, for a vertex shader that reads
+    /// its instance records from it (`hlsl_instance_buffer_register`). Made
+    /// again when the buffer was replaced.
+    fn word_view(&mut self, d3d11_cx: &D3d11Cx) -> Option<ID3D11ShaderResourceView> {
+        let buffer = self.buffer.as_ref()?;
+        if let Some((viewed, view)) = &self.word_view {
+            if viewed.as_raw() == buffer.as_raw() {
+                return Some(view.clone());
+            }
+        }
+        let mut desc = D3D11_BUFFER_DESC::default();
+        unsafe { buffer.GetDesc(&mut desc) };
+        let view_desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
+            Format: DXGI_FORMAT_R32_UINT,
+            ViewDimension: D3D_SRV_DIMENSION(1), // BUFFER
+            Anonymous: D3D11_SHADER_RESOURCE_VIEW_DESC_0 {
+                Buffer: D3D11_BUFFER_SRV {
+                    Anonymous1: D3D11_BUFFER_SRV_0 { FirstElement: 0 },
+                    Anonymous2: D3D11_BUFFER_SRV_1 {
+                        NumElements: desc.ByteWidth / 4,
+                    },
+                },
+            },
+        };
+        let mut view = None;
+        if let Err(e) = unsafe {
+            d3d11_cx
+                .device
+                .CreateShaderResourceView(buffer, Some(&view_desc), Some(&mut view))
+        } {
+            d3d11_cx.note_error("CreateShaderResourceView(instances)", &e);
+            self.word_view = None;
+            return None;
+        }
+        let view = view?;
+        self.word_view = Some((buffer.clone(), view.clone()));
+        Some(view)
     }
 
     pub fn update_with_f32_constant_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
@@ -4407,6 +4466,9 @@ pub struct CxOsDrawShader {
     pub dyn_uniform_buffer_id: Option<u32>,
     pub custom_uniform_buffer_ids: Vec<u32>,
     pub scope_uniform_buffer_id: Option<u32>,
+    /// The t register the vertex shader reads its instance records from by
+    /// instance id; None when they arrive as input elements.
+    pub instance_buffer_slot: Option<u32>,
 }
 
 impl CxOsDrawShader {
@@ -4616,8 +4678,35 @@ impl CxOsDrawShader {
             geom_sem_index += 1;
         }
 
+        // A record read by instance id has no input elements. The emitter
+        // addresses its fields as f32 lanes back to back; a layout that is
+        // not that would read the wrong words.
+        let instance_buffer_slot = makepad_script::shader_hlsl::hlsl_instance_buffer_register(hlsl);
+        if instance_buffer_slot.is_some() {
+            let mut next = 0;
+            for inst in &mapping.instances.inputs {
+                if !inst.attr_format.is_f32_lane()
+                    || inst.offset != next
+                    || inst.byte_offset != next * 4
+                {
+                    crate::error!(
+                        "instance record read by instance id is not packed f32 lanes: {:?} at slot {} (expected {})",
+                        inst.id,
+                        inst.offset,
+                        next
+                    );
+                    return Err(D3dShaderError::Compile);
+                }
+                next += inst.slots;
+            }
+        }
         let mut inst_sem_index = 0usize;
-        for inst in &mapping.instances.inputs {
+        for inst in mapping
+            .instances
+            .inputs
+            .iter()
+            .filter(|_| instance_buffer_slot.is_none())
+        {
             strings.push(format!("INST{}\0", index_to_semantic(inst_sem_index)));
             let semantic_name = PCSTR(strings.last().unwrap().as_ptr());
             let mut slot_offset = 0usize;
@@ -4759,6 +4848,7 @@ impl CxOsDrawShader {
             dyn_uniform_buffer_id,
             custom_uniform_buffer_ids,
             scope_uniform_buffer_id,
+            instance_buffer_slot,
         })
     }
 }
