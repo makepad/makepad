@@ -1600,6 +1600,35 @@ impl<'a> Gen<'a> {
                 self.fin_i(*d, rd);
             }
             Inst::Call(c, args, rets) => self.call(c, args, rets),
+            Inst::Copy(dst, src, size) if *size > 256 => {
+                // x8 = dst, x17 = src, x16 = 16-byte chunks: ldp/stp post-index loop
+                let rd = self.use_i(*dst, S0);
+                self.a.mov(X8, rd);
+                let rs = self.use_i(*src, S1);
+                self.a.mov(IP1, rs);
+                let size = *size as i64;
+                self.a.mov_imm(IP0, size / 16);
+                let top = self.a.pos();
+                self.a.ldp_post(S0, S1, IP1, 16);
+                // stp x14, x15, [x8], #16
+                self.a.e(0xA880_0000 | (2u32 << 15) | (S1 as u32) << 10 | (X8 as u32) << 5 | S0 as u32);
+                // subs x16, x16, #1 ; b.ne top
+                self.a.e(0xF100_0400 | (IP0 as u32) << 5 | IP0 as u32);
+                let p = self.a.bcond(NE);
+                self.a.patch(p, top);
+                let mut o = 0i64;
+                let rest = size % 16;
+                while o + 8 <= rest {
+                    self.a.ldst(LDRX, 8, S0, IP1, o);
+                    self.a.ldst(STRX, 8, S0, X8, o);
+                    o += 8;
+                }
+                while o < rest {
+                    self.a.ldst(LDRB, 1, S0, IP1, o);
+                    self.a.ldst(STRB, 1, S0, X8, o);
+                    o += 1;
+                }
+            }
             Inst::Copy(dst, src, size) => {
                 let rd = self.use_i(*dst, S0);
                 let rs = self.use_i(*src, S1);

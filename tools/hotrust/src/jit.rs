@@ -350,6 +350,12 @@ thread_local! {
     static PANIC: std::cell::RefCell<Option<PanicInfo>> = const { std::cell::RefCell::new(None) };
 }
 
+/// A fault at or just below the stack pointer: the stack's guard page was hit (frames
+/// over a page probe their pages in order, so the guard is always touched first).
+fn is_stack_fault(fault: u64, sp: u64) -> bool {
+    fault < sp.wrapping_add(4096) && fault.wrapping_add(1 << 20) >= sp
+}
+
 /// A fault in JIT code on a thread without a recovery point: report and abort.
 unsafe fn fatal_report(sig: i32, fault: u64, fp: u64, pc: u64) -> ! {
     let frames = collect_frames(fp, pc);
@@ -660,7 +666,9 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
             sigaction(sig, &act, std::ptr::null_mut());
             return;
         }
+        let rsp = *gregs.add(15);
         let kind = match sig {
+            11 | 7 if is_stack_fault(fault, rsp) => "stack overflow",
             11 => "segfault",
             7 => "bus error",
             4 => "illegal instruction",
@@ -1166,8 +1174,22 @@ impl Unit {
         }
     }
 
+    /// Symbol name of a foreign item: `#[link_name = ".."]` or its own name.
+    fn link_name(&self, d: DefId) -> String {
+        let def = self.prog.def(d);
+        let f = &self.prog.files[def.file as usize];
+        for a in &f.ast.item(def.item).attrs {
+            if a.toks.hi >= a.toks.lo + 3 && f.tok_text(a.toks.lo) == "link_name" && f.tok_text(a.toks.lo + 1) == "=" {
+                return f.tok_text(a.toks.lo + 2).trim_matches('"').to_string();
+            }
+        }
+        self.prog.name(d).to_string()
+    }
+
+    /// Address of a foreign fn or static (dlsym; loads the program's #[link] libraries
+    /// on a miss).
     pub fn foreign_addr(&mut self, d: DefId) -> Option<u64> {
-        let name = format!("{}\0", self.prog.name(d));
+        let name = format!("{}\0", self.link_name(d));
         #[cfg(target_os = "macos")]
         let mut p = unsafe { os::find_symbol(name.as_ptr()) };
         #[cfg(target_os = "macos")]

@@ -278,8 +278,42 @@ impl Func {
         s
     }
 
+    /// C ABI vregs (call arguments or body params) against their CSig.
+    fn check_csig(&self, sig: &CSig, vs: &[VReg], what: &str) -> Result<(), String> {
+        let skip = sig.ret.is_some() as usize;
+        if vs.len() != sig.args.len() + skip {
+            return Err(format!("{}: {} ABI values for a C signature of {} (+{} result address)", what, vs.len(), sig.args.len(), skip));
+        }
+        if skip == 1 && self.vregs[vs[0].0 as usize] != Cls::I {
+            return Err(format!("{}: result address is not an integer vreg", what));
+        }
+        for (k, a) in sig.args.iter().enumerate() {
+            let c = self.vregs[vs[skip + k].0 as usize];
+            let want = match a {
+                CArg::Scalar(Mem::F32) => Cls::F32,
+                CArg::Scalar(Mem::F64) => Cls::F64,
+                _ => Cls::I,
+            };
+            if c != want {
+                return Err(format!("{}: argument {} is {:?}, its C type needs {:?}", what, k, c, want));
+            }
+        }
+        Ok(())
+    }
+
     /// Structural verifier: every use has a class-correct vreg, every target exists.
     pub fn verify(&self) -> Result<(), String> {
+        if let Some(sig) = &self.cabi {
+            for p in &self.params {
+                if p.0 as usize >= self.vregs.len() {
+                    return Err(format!("{}: param vreg out of range", self.name));
+                }
+            }
+            self.check_csig(sig, &self.params, &format!("{}: extern \"C\" params", self.name))?;
+            if sig.ret.is_some() && !self.rets.is_empty() {
+                return Err(format!("{}: aggregate C result and result registers", self.name));
+            }
+        }
         let nb = self.blocks.len() as u32;
         let nv = self.vregs.len() as u32;
         let chk = |v: VReg| -> Result<(), String> {
@@ -351,6 +385,13 @@ impl Func {
                 }
                 for r in regs {
                     chk(r)?;
+                }
+                if let Inst::Call(Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig), a, r) = x {
+                    let what = format!("{}: b{} C call", self.name, bi);
+                    self.check_csig(sig, a, &what)?;
+                    if sig.ret.is_some() && !r.is_empty() {
+                        return Err(format!("{}: aggregate result and result vregs", what));
+                    }
                 }
                 match x {
                     Inst::IBin(_, _, d, a, b) | Inst::ICmp(_, _, d, a, b) => {

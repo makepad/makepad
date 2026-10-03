@@ -7,7 +7,7 @@
 //! call is active) records a report with a frame-pointer backtrace and resumes at
 //! `leave(ctx, 2)`, so the host continues with the next call.
 
-use super::{collect_frames, ctx_ptr, fatal_report, in_compile, PanicInfo, PANIC, SIG_WATCHDOG, UNIT, WATCHDOG_HIT};
+use super::{collect_frames, ctx_ptr, fatal_report, in_compile, is_stack_fault, PanicInfo, PANIC, SIG_WATCHDOG, UNIT, WATCHDOG_HIT};
 use std::sync::atomic::Ordering;
 
 extern "C" {
@@ -60,6 +60,7 @@ const UC_MCONTEXT: usize = 48;
 const SS: usize = 16;
 const SS_FP: usize = SS + 232;
 const SS_PC: usize = SS + 256;
+const SS_SP: usize = SS + 248;
 
 /// Anonymous memory; PROT_RWX requests MAP_JIT memory (executable, writable only
 /// inside `write_code`).
@@ -120,6 +121,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
             return;
         }
         let kind = match sig {
+            SIGSEGV | SIGBUS if is_stack_fault(fault, *reg(SS_SP)) => "stack overflow",
             SIGSEGV => "segfault",
             SIGBUS => "bus error",
             SIGILL => "illegal instruction",
