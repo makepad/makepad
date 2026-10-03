@@ -18,10 +18,14 @@ ROOT=$(cd "$HERE/../.." && pwd)
 WT=$(cd "$ROOT/../.." && pwd)
 T=${OS_DIFF_TMP:-$WT/target-rapid/os_diff}
 mkdir -p "$T"
+status=0
 export CARGO_TARGET_DIR=$WT/target-rapid CARGO_INCREMENTAL=0
 (cd "$ROOT/std-next/check_os" && nice -n 10 cargo build --release -j 4 -q) || exit 1
+if [ "$(uname)" = Darwin ]; then
+  # the backend choice itself: os_sync by default, ulock when forced
+  (cd "$ROOT/std-next/check_os" && nice -n 10 cargo test --release -j 4 -q --test futex_backend >/dev/null 2>&1 && RAPID_FORCE_ULOCK=1 FUTEX_EXPECT=ulock nice -n 10 cargo test --release -j 4 -q --test futex_backend >/dev/null 2>&1) && echo "futex backend: os_sync default, ulock forced -- ok" || { echo "futex backend test FAILED"; status=1; }
+fi
 LIB=$WT/target-rapid/release/librapid_std_os_check.rlib
-status=0
 for f in "$@"; do
   n=$(basename "$f" .rs)
   rustc --edition 2021 -O --test "$f" -o "$T/$n.real" 2>"$T/$n.real.err" || { echo "$n: rustc (real) failed"; head -20 "$T/$n.real.err"; status=1; continue; }
@@ -35,6 +39,12 @@ for f in "$@"; do
   r=$(grep -c . "$T/$n.real.lines")
   if diff "$T/$n.real.lines" "$T/$n.shim.lines" >"$T/$n.shim.diff"; then echo "$n: shim == real ($r lines)"; else echo "$n: shim DIFFERS"; head -20 "$T/$n.shim.diff"; status=1; fi
   grep -E "^test .*FAILED|panicked" "$T/$n.shim.out" | head -5
+  # macOS: the same shim binary again on the __ulock fallback futex (RAPID_FORCE_ULOCK=1)
+  if [ "$(uname)" = Darwin ]; then
+    RAPID_FORCE_ULOCK=1 "$T/$n.shim" --test-threads=1 --nocapture >"$T/$n.ulock.out" 2>&1
+    grep -o '| .*' "$T/$n.ulock.out" >"$T/$n.ulock.lines"
+    if diff "$T/$n.real.lines" "$T/$n.ulock.lines" >"$T/$n.ulock.diff"; then echo "$n: shim (ulock) == real"; else echo "$n: shim (ulock) DIFFERS"; head -20 "$T/$n.ulock.diff"; status=1; fi
+  fi
   if [ $HR = 1 ]; then
     RAPID_STD=${RAPID_STD:-$ROOT/std-next} RAPID_WATCHDOG_MS=5000 nice -n 10 "$WT/target-rapid/release/rapid" test "$f" >"$T/$n.hr.out" 2>&1
     grep -o '| .*' "$T/$n.hr.out" >"$T/$n.hr.lines"

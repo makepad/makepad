@@ -79,7 +79,14 @@ extern "C" {
     fn pthread_join(t: usize, ret: *mut *mut u8) -> i32;
     fn os_sync_wait_on_address(addr: *mut u8, value: u64, size: usize, flags: u32) -> i32;
     fn os_sync_wake_by_address_all(addr: *mut u8, size: usize, flags: u32) -> i32;
+    fn dlsym(handle: *mut u8, symbol: *const u8) -> *mut u8;
+    fn __ulock_wait(operation: u32, addr: *mut u8, value: u64, timeout_us: u32) -> i32;
+    fn __ulock_wake(operation: u32, addr: *mut u8, wake_value: u64) -> i32;
 }
+
+type WaitTimeoutFn = unsafe extern "C" fn(*mut u8, u64, usize, u32, u32, u64) -> i32;
+type WakeFn = unsafe extern "C" fn(*mut u8, usize, u32) -> i32;
+static mut FUTEX2: u32 = 3;
 
 static mut GATE: u32 = 0;
 
@@ -250,5 +257,27 @@ fn a05_threads_futex() {
             println!("| job {} {}", i, jobs[i].out);
             i += 1;
         }
+    }
+}
+
+#[test]
+fn a06_futex_backends() {
+    unsafe {
+        // os_sync looked up at run time and called through C fn pointers (std's default path)
+        let w = dlsym(-2isize as *mut u8, b"os_sync_wait_on_address_with_timeout\0" as *const [u8; 37] as *const u8) as usize;
+        let k = dlsym(-2isize as *mut u8, b"os_sync_wake_by_address_any\0" as *const [u8; 28] as *const u8) as usize;
+        let missing = dlsym(-2isize as *mut u8, b"os_sync_no_such_symbol\0" as *const [u8; 23] as *const u8) as usize;
+        println!("| dlsym {} {} {}", w != 0, k != 0, missing == 0);
+        let addr = &mut FUTEX2 as *mut u32 as *mut u8;
+        let wait: WaitTimeoutFn = core::mem::transmute(w);
+        let wake: WakeFn = core::mem::transmute(k);
+        let r = wait(addr, 3, 4, 0, 32, 1_000_000);
+        println!("| os_sync via ptr {} {} {}", r, errno(), wake(addr, 4, 0));
+        // the __ulock fallback (RAPID_FORCE_ULOCK=1 path)
+        let r1 = __ulock_wait(1, addr, 4, 1000);
+        let r2 = __ulock_wait(1, addr, 3, 2000);
+        let e2 = errno();
+        let r3 = __ulock_wake(1, addr, 0);
+        println!("| ulock {} {} {} {} {}", r1 >= 0, r2, e2, r3, errno());
     }
 }

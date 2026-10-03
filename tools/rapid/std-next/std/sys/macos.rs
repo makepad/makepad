@@ -1,7 +1,8 @@
 //! macOS (arm64 first; x86_64 has the same layouts with the 64-bit-inode ABI) specifics.
 
 use core::ffi::{c_char, c_int, c_void};
-use core::sync::atomic::AtomicU32;
+use core::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use core::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize};
 use core::time::Duration;
 
 pub type clockid_t = u32;
@@ -161,11 +162,10 @@ extern "C" {
     fn _NSGetArgv() -> *mut *const *const c_char;
     fn pthread_threadid_np(thread: usize, id: *mut u64) -> c_int;
     fn arc4random_buf(buf: *mut c_void, n: usize);
-    // <os/os_sync_wait_on_address.h> (macOS 14.4+): the public, App-Store-safe futex.
-    fn os_sync_wait_on_address(addr: *mut c_void, value: u64, size: usize, flags: u32) -> c_int;
-    fn os_sync_wait_on_address_with_timeout(addr: *mut c_void, value: u64, size: usize, flags: u32, clockid: u32, timeout_ns: u64) -> c_int;
-    fn os_sync_wake_by_address_any(addr: *mut c_void, size: usize, flags: u32) -> c_int;
-    fn os_sync_wake_by_address_all(addr: *mut c_void, size: usize, flags: u32) -> c_int;
+    fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+    // Darwin's futex since macOS 10.12 (libSystem, every macOS version Rapid supports).
+    fn __ulock_wait(operation: u32, addr: *mut c_void, value: u64, timeout_us: u32) -> c_int;
+    fn __ulock_wake(operation: u32, addr: *mut c_void, wake_value: u64) -> c_int;
 }
 
 const OS_CLOCK_MACH_ABSOLUTE_TIME: u32 = 32;
@@ -205,49 +205,194 @@ pub fn fill_random(buf: &mut [u8]) {
     unsafe { arc4random_buf(buf.as_mut_ptr() as *mut c_void, buf.len()) }
 }
 
+// ---- futex
+// <os/os_sync_wait_on_address.h> (macOS 14.4+) is used when the running macOS has it; it is
+// looked up with dlsym (no link-time dependency, so the binary still loads on older macOS).
+// Otherwise __ulock_wait/__ulock_wake. The choice is made once and cached;
+// RAPID_FORCE_ULOCK=1 forces the fallback (testing only).
+
+type OsSyncWait = unsafe extern "C" fn(*mut c_void, u64, usize, u32) -> c_int;
+type OsSyncWaitTimeout = unsafe extern "C" fn(*mut c_void, u64, usize, u32, u32, u64) -> c_int;
+type OsSyncWake = unsafe extern "C" fn(*mut c_void, usize, u32) -> c_int;
+
+const RTLD_DEFAULT: *mut c_void = -2isize as *mut c_void;
+const UL_COMPARE_AND_WAIT: u32 = 1;
+const ULF_WAKE_ALL: u32 = 0x100;
+
+const BACKEND_UNKNOWN: u8 = 0;
+const BACKEND_OS_SYNC: u8 = 1;
+const BACKEND_ULOCK: u8 = 2;
+
+static BACKEND: AtomicU8 = AtomicU8::new(BACKEND_UNKNOWN);
+static OS_SYNC_WAIT: AtomicUsize = AtomicUsize::new(0);
+static OS_SYNC_WAIT_TIMEOUT: AtomicUsize = AtomicUsize::new(0);
+static OS_SYNC_WAKE_ANY: AtomicUsize = AtomicUsize::new(0);
+static OS_SYNC_WAKE_ALL: AtomicUsize = AtomicUsize::new(0);
+
+fn lookup(name: &[u8]) -> usize {
+    unsafe { dlsym(RTLD_DEFAULT, name.as_ptr() as *const c_char) as usize }
+}
+
+fn force_ulock() -> bool {
+    unsafe {
+        let v = super::getenv(b"RAPID_FORCE_ULOCK\0".as_ptr() as *const c_char);
+        !v.is_null() && *v == b'1' as c_char && *v.add(1) == 0
+    }
+}
+
+#[cold]
+fn resolve_backend() -> u8 {
+    // Racing first callers resolve the same answer; the pointers are published before the
+    // backend (Release), readers load the backend with Acquire.
+    let mut backend = BACKEND_ULOCK;
+    if !force_ulock() {
+        let w = lookup(b"os_sync_wait_on_address\0");
+        let wt = lookup(b"os_sync_wait_on_address_with_timeout\0");
+        let wa = lookup(b"os_sync_wake_by_address_any\0");
+        let wl = lookup(b"os_sync_wake_by_address_all\0");
+        if w != 0 && wt != 0 && wa != 0 && wl != 0 {
+            OS_SYNC_WAIT.store(w, Relaxed);
+            OS_SYNC_WAIT_TIMEOUT.store(wt, Relaxed);
+            OS_SYNC_WAKE_ANY.store(wa, Relaxed);
+            OS_SYNC_WAKE_ALL.store(wl, Relaxed);
+            backend = BACKEND_OS_SYNC;
+        }
+    }
+    BACKEND.store(backend, Release);
+    backend
+}
+
+fn backend() -> u8 {
+    let b = BACKEND.load(Acquire);
+    if b != BACKEND_UNKNOWN {
+        b
+    } else {
+        resolve_backend()
+    }
+}
+
+/// Which futex the process uses: "os_sync" or "ulock" (for tests).
+pub fn futex_backend() -> &'static str {
+    if backend() == BACKEND_OS_SYNC {
+        "os_sync"
+    } else {
+        "ulock"
+    }
+}
+
+/// One wait call; Err(errno) on failure.
+fn wait_once(addr: *mut c_void, expected: u32, timeout_ns: Option<u64>) -> Result<(), i32> {
+    let r = unsafe {
+        if backend() == BACKEND_OS_SYNC {
+            match timeout_ns {
+                Some(ns) => {
+                    let f: OsSyncWaitTimeout = core::mem::transmute(OS_SYNC_WAIT_TIMEOUT.load(Relaxed));
+                    f(addr, expected as u64, 4, 0, OS_CLOCK_MACH_ABSOLUTE_TIME, ns)
+                }
+                None => {
+                    let f: OsSyncWait = core::mem::transmute(OS_SYNC_WAIT.load(Relaxed));
+                    f(addr, expected as u64, 4, 0)
+                }
+            }
+        } else {
+            // microseconds, 0 = forever: round up, clamp (the caller re-waits until its deadline)
+            let us = match timeout_ns {
+                Some(ns) => {
+                    let us = (ns + 999) / 1000;
+                    if us > u32::MAX as u64 {
+                        u32::MAX
+                    } else if us == 0 {
+                        1
+                    } else {
+                        us as u32
+                    }
+                }
+                None => 0,
+            };
+            __ulock_wait(UL_COMPARE_AND_WAIT, addr, expected as u64, us)
+        }
+    };
+    if r >= 0 {
+        Ok(())
+    } else {
+        Err(super::errno())
+    }
+}
+
 /// Waits while `*futex == expected`. Returns false only on timeout.
 pub fn futex_wait(futex: &AtomicU32, expected: u32, timeout: Option<Duration>) -> bool {
     let addr = futex.as_ptr() as *mut c_void;
+    let deadline = match timeout {
+        Some(d) => match super::time::now(CLOCK_MONOTONIC).checked_add(d) {
+            Some(t) => Some(t),
+            None => None, // overflow: wait forever
+        },
+        None => None,
+    };
     loop {
-        if futex.load(core::sync::atomic::Ordering::Relaxed) != expected {
+        if futex.load(Relaxed) != expected {
             return true;
         }
-        let r = unsafe {
-            match timeout {
-                Some(d) => {
-                    let ns = d.as_nanos();
-                    if ns == 0 {
-                        return false;
-                    }
-                    // relative timeout in nanoseconds, measured on the clock named by clockid
-                    let ns = if ns > u64::MAX as u128 { u64::MAX } else { ns as u64 };
-                    os_sync_wait_on_address_with_timeout(addr, expected as u64, 4, 0, OS_CLOCK_MACH_ABSOLUTE_TIME, ns)
+        let timeout_ns = match deadline {
+            Some(t) => {
+                let left = match t.sub_timespec(&super::time::now(CLOCK_MONOTONIC)) {
+                    Ok(d) => d,
+                    Err(_) => return false,
+                };
+                let ns = left.as_secs().saturating_mul(1_000_000_000).saturating_add(left.subsec_nanos() as u64);
+                if ns == 0 {
+                    return false;
                 }
-                None => os_sync_wait_on_address(addr, expected as u64, 4, 0),
+                Some(ns)
             }
+            None => None,
         };
-        if r >= 0 {
-            return true;
+        match wait_once(addr, expected, timeout_ns) {
+            Ok(()) => return true,
+            Err(e) => {
+                if e == ETIMEDOUT {
+                    // the ulock path may have woken early because of the u32 clamp
+                    match deadline {
+                        Some(t) => {
+                            if super::time::now(CLOCK_MONOTONIC) >= t {
+                                return false;
+                            }
+                        }
+                        None => {}
+                    }
+                    continue;
+                }
+                if e == EINTR {
+                    continue;
+                }
+                return true;
+            }
         }
-        let e = super::errno();
-        if e == ETIMEDOUT {
-            return false;
-        }
-        if e == EINTR {
-            continue;
-        }
-        return true;
     }
 }
 
 /// Wakes one waiter; true if one was woken.
 pub fn futex_wake(futex: &AtomicU32) -> bool {
-    unsafe { os_sync_wake_by_address_any(futex.as_ptr() as *mut c_void, 4, 0) == 0 }
+    let addr = futex.as_ptr() as *mut c_void;
+    unsafe {
+        if backend() == BACKEND_OS_SYNC {
+            let f: OsSyncWake = core::mem::transmute(OS_SYNC_WAKE_ANY.load(Relaxed));
+            f(addr, 4, 0) == 0
+        } else {
+            __ulock_wake(UL_COMPARE_AND_WAIT, addr, 0) == 0
+        }
+    }
 }
 
 pub fn futex_wake_all(futex: &AtomicU32) {
+    let addr = futex.as_ptr() as *mut c_void;
     unsafe {
-        os_sync_wake_by_address_all(futex.as_ptr() as *mut c_void, 4, 0);
+        if backend() == BACKEND_OS_SYNC {
+            let f: OsSyncWake = core::mem::transmute(OS_SYNC_WAKE_ALL.load(Relaxed));
+            f(addr, 4, 0);
+        } else {
+            __ulock_wake(UL_COMPARE_AND_WAIT | ULF_WAKE_ALL, addr, 0);
+        }
     }
 }
 
