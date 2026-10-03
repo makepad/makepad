@@ -192,3 +192,43 @@ pub(crate) fn count(p: &mut Program, work: u8) -> bool {
     p.body = body;
     ok
 }
+
+/// Makes `p` (any program: an audio shader's render, say) count the ops it
+/// runs, as [`count`] does for a kernel's elements, and store the total of
+/// each run in ctx word `ctx_word` (which the caller adds to its region).
+/// Branches count their dearer side, loops each pass, functions their body
+/// on entry; host-buffer accesses [`MEMORY_OPS`].
+pub fn count_runs(p: &mut Program, ctx_word: u32) {
+    let frame_word = p.frame_words;
+    p.frame_words += 1;
+    for g in &mut p.funcs {
+        let mut f = Fresh { vals: &mut g.vals };
+        let n = local(&g.body);
+        loops(&mut g.body, &mut f, Sink::Frame(frame_word));
+        let mut body = add(&mut f, Sink::Frame(frame_word), n);
+        body.append(&mut g.body);
+        g.body = body;
+    }
+    p.vars.push(Ty::I32);
+    let wv = Var(p.vars.len() as u32 - 1);
+    let mut f = Fresh { vals: &mut p.vals };
+    let n = local(&p.body);
+    loops(&mut p.body, &mut f, Sink::Var(wv));
+    let mut start = Vec::new();
+    let c = f.konst(&mut start, n);
+    start.push(Stmt::Set(wv, c));
+    let zero = f.konst(&mut start, 0);
+    start.push(Stmt::Store { region: Region::Frame, base: frame_word, extent: 1, off: None, val: zero });
+    let own = f.val(Ty::I32);
+    let called = f.val(Ty::I32);
+    let total = f.val(Ty::I32);
+    let end = [
+        Stmt::Def(own, Op::Get(wv)),
+        Stmt::Def(called, Op::Load { region: Region::Frame, base: frame_word, extent: 1, off: None }),
+        Stmt::Def(total, Op::Bin(Bin::AddI, own, called)),
+        Stmt::Store { region: Region::Ctx, base: ctx_word, extent: 1, off: None, val: total },
+    ];
+    start.append(&mut p.body);
+    start.extend(end);
+    p.body = start;
+}

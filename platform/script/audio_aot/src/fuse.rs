@@ -47,7 +47,7 @@ fn gerr(msg: String) -> FuseError {
 /// Fuses and compiles a graph.
 pub fn fuse(nodes: &[FuseNode], outputs: &[Port], backend: Backend) -> Result<std::sync::Arc<crate::AudioShader>, FuseError> {
     let (items, bases) = fuse_items(nodes, outputs)?;
-    crate::compile_items(&items, bases.last().map_or(0, |b| b.1 + 64), backend).map_err(|e| {
+    crate::compile_items(&items, bases.last().map_or(0, |b| b.1 + 64), backend, false).map_err(|e| {
         let e = e.into_iter().next().unwrap();
         // Map the span back into its node's code.
         for (k, (start, end)) in bases.iter().enumerate() {

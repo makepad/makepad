@@ -42,6 +42,9 @@ pub struct AudioShader {
     state_vars: Vec<StateVar>,
     shared: Box<[u32]>,
     render: ir::Program,
+    /// A counting build ([`compile_counting`]): the ctx word each run
+    /// stores the ops it counted in.
+    count_word: Option<u32>,
     #[cfg(target_arch = "aarch64")]
     native: Option<arm64::Code>,
     /// [`AudioShader::program_key`], computed on first use.
@@ -58,7 +61,17 @@ pub fn compile(code: &str) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
 pub fn compile_with(code: &str, backend: Backend) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
     let toks = parse::lex(code).map_err(|e| vec![e])?;
     let items = parse::Parser::new(&toks).items().map_err(|e| vec![e])?;
-    compile_items(&items, code.len(), backend)
+    compile_items(&items, code.len(), backend, false)
+}
+
+/// Compiles natively with the render program counting the ops it runs
+/// (`makepad_script_compute::work`): the same samples, and
+/// [`Instance::ops`] says how much work they took, the same on every
+/// machine. For tools ([`check`]); a host plays [`compile`]'s build.
+pub fn compile_counting(code: &str) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
+    let toks = parse::lex(code).map_err(|e| vec![e])?;
+    let items = parse::Parser::new(&toks).items().map_err(|e| vec![e])?;
+    compile_items(&items, code.len(), Backend::Native, true)
 }
 
 /// The prelude: DSP building blocks every shader sees (see prelude.splash).
@@ -69,14 +82,19 @@ fn prelude_items(user_len: usize) -> Vec<parse::Item> {
 }
 
 /// Compiles a parsed shader (also the back half of [`fuse::fuse`]).
-pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Backend) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
+pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Backend, counting: bool) -> Result<Arc<AudioShader>, Vec<ShaderError>> {
     // Prelude items the shader does not redefine come first (a shader's
     // state may be a prelude struct), then the shader's own.
     let names: std::collections::HashSet<String> = items.iter().map(|i| i.name().to_string()).collect();
     let mut all: Vec<parse::Item> = prelude_items(user_len).into_iter().filter(|i| !names.contains(i.name())).collect();
     all.extend(items.iter().cloned());
-    let lowered = lower::lower(&all, user_len + 1).map_err(|e| vec![e])?;
-    let ctx_words = CTX_PARAMS as usize + lowered.params.len();
+    let mut lowered = lower::lower(&all, user_len + 1).map_err(|e| vec![e])?;
+    let mut ctx_words = CTX_PARAMS as usize + lowered.params.len();
+    let count_word = counting.then(|| {
+        makepad_script_compute::work::count_runs(&mut lowered.render, ctx_words as u32);
+        ctx_words += 1;
+        ctx_words as u32 - 1
+    });
     let state_words = lowered.state_init.len();
     let shared_words = lowered.shared_init.len().max(1);
     let regions = |p: &ir::Program, init: bool| ir::Regions {
@@ -134,6 +152,7 @@ pub(crate) fn compile_items(items: &[parse::Item], user_len: usize, backend: Bac
         state_vars: lowered.state_vars,
         shared: shared.into_boxed_slice(),
         render: lowered.render,
+        count_word,
         #[cfg(target_arch = "aarch64")]
         native,
         key: std::sync::OnceLock::new(),
@@ -179,7 +198,7 @@ impl AudioShader {
     }
 
     pub fn ctx_words(&self) -> usize {
-        CTX_PARAMS as usize + self.params.len()
+        CTX_PARAMS as usize + self.params.len() + self.count_word.is_some() as usize
     }
 
     /// Scratch words `run` needs (the interpreter's registers and frame).
@@ -363,6 +382,7 @@ pub struct Instance {
     scratch: Box<[u32]>,
     frame: u32,
     zeros: Box<[f32]>,
+    ops: u64,
 }
 
 impl Instance {
@@ -373,12 +393,25 @@ impl Instance {
             scratch: shader.new_scratch(),
             frame: 0,
             zeros: vec![0.0; MAX_FRAMES as usize].into_boxed_slice(),
+            ops: 0,
             shader,
         }
     }
 
     pub fn frame(&self) -> u32 {
         self.frame
+    }
+
+    /// The ops this instance's runs counted so far (a [`compile_counting`]
+    /// build; 0 otherwise).
+    pub fn ops(&self) -> u64 {
+        self.ops
+    }
+
+    fn counted(&mut self) {
+        if let Some(w) = self.shader.count_word {
+            self.ops += self.ctx[w as usize] as u64;
+        }
     }
 
     pub fn set_param(&mut self, name: &str, value: f32) -> bool {
@@ -408,6 +441,7 @@ impl Instance {
             self.ctx[CTX_FRAME as usize] = self.frame;
             let zeros = &self.zeros[..k];
             self.shader.run(&mut self.ctx, &mut self.state, &mut self.scratch, [zeros, zeros], [&mut l[done..done + k], &mut r[done..done + k]], k);
+            self.counted();
             self.frame = self.frame.wrapping_add(k as u32);
             done += k;
         }
@@ -428,11 +462,18 @@ impl Instance {
                 [&mut out_l[done..done + k], &mut out_r[done..done + k]],
                 k,
             );
+            self.counted();
             self.frame = self.frame.wrapping_add(k as u32);
             done += k;
         }
     }
 }
+
+/// What [`check`] calls expensive: ops a voice (or an effect) runs a frame,
+/// counted, so the same shader is expensive or not on every machine. About
+/// 4% of an Apple M-series core at 48 kHz; the shipped library's dearest
+/// counts 3.2k (drive), its instruments up to 1.8k (techno_kick).
+pub const EXPENSIVE_OPS_PER_FRAME: f64 = 4096.0;
 
 /// What [`check`] found: a compile plus an offline audition of a test
 /// phrase, for the editor and the AI composer's shader tools.
@@ -451,8 +492,9 @@ pub struct CheckReport {
     pub nonfinite: usize,
     /// Share of samples at or above full scale.
     pub clipped: f32,
-    /// Native cost of one instance, ns per frame (48 kHz: 20833 = one core).
-    pub ns_per_frame: f64,
+    /// What one instance runs a frame, in counted ops (the same on every
+    /// machine; see [`EXPENSIVE_OPS_PER_FRAME`]).
+    pub ops_per_frame: f64,
     /// Instruments: seconds from the last release until the voice stopped
     /// or went quiet (-80 dB); None if it never did within 8 s.
     pub tail_secs: Option<f32>,
@@ -465,13 +507,13 @@ pub struct CheckReport {
 /// signal (a saw chord with clicks). Off the audio thread.
 pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
     const RATE: f32 = 48000.0;
-    let shader = compile(code)?;
+    let shader = compile_counting(code)?;
     let secs = 3.0;
     let n = (secs * RATE) as usize;
     let (mut l, mut r) = (vec![0.0f32; n], vec![0.0f32; n]);
     let mut tail_secs = None;
-    let t0 = std::time::Instant::now();
     let mut instance_frames = 0usize;
+    let ops: u64;
     match shader.kind {
         Kind::Instrument => {
             let notes = [48.0f32, 52.0, 55.0];
@@ -515,6 +557,7 @@ pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
                 }
                 at += k;
             }
+            ops = voices.iter().map(Instance::ops).sum();
             let end = stopped_at.unwrap_or(last_loud).max(release_at);
             if end < n - 128 {
                 tail_secs = Some((end - release_at) as f32 / RATE);
@@ -538,9 +581,10 @@ pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
             }
             inst.process(&il, &ir, &mut l, &mut r);
             instance_frames = n;
+            ops = inst.ops();
         }
     }
-    let ns_per_frame = t0.elapsed().as_secs_f64() * 1e9 / instance_frames.max(1) as f64;
+    let ops_per_frame = ops as f64 / instance_frames.max(1) as f64;
     let all = l.iter().chain(r.iter());
     let nonfinite = all.clone().filter(|x| !x.is_finite()).count();
     let finite: Vec<f32> = all.filter(|x| x.is_finite()).copied().collect();
@@ -565,8 +609,8 @@ pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
     if shader.kind == Kind::Instrument && tail_secs.is_none() {
         warnings.push("voices never end after release: fade out on `gate == 0.0` (an adsr() does), or call stop()".into());
     }
-    if ns_per_frame > 2000.0 {
-        warnings.push(format!("expensive: {:.0} ns per frame per voice ({:.1}% of a core at 48 kHz)", ns_per_frame, ns_per_frame * 48000.0 / 1e7));
+    if ops_per_frame > EXPENSIVE_OPS_PER_FRAME {
+        warnings.push(format!("expensive: {:.0} ops per frame per voice (the limit is {:.0})", ops_per_frame, EXPENSIVE_OPS_PER_FRAME));
     }
     Ok(CheckReport {
         kind: shader.kind,
@@ -578,7 +622,7 @@ pub fn check(code: &str) -> Result<CheckReport, Vec<ShaderError>> {
         dc,
         nonfinite,
         clipped,
-        ns_per_frame,
+        ops_per_frame,
         tail_secs,
         warnings,
     })

@@ -733,6 +733,8 @@ const GOLDEN: &[(&str, u64)] = &[
     ("lib/epiano/interp", 0x580aad531bfdd513),
     ("lib/flanger", 0xa207408b506acf19),
     ("lib/flanger/interp", 0xa207408b506acf19),
+    ("lib/gated_verb", 0x19c4947f0605f7ef),
+    ("lib/gated_verb/interp", 0x19c4947f0605f7ef),
     ("lib/modal_bell", 0x628b207e9249e181),
     ("lib/modal_bell/interp", 0x628b207e9249e181),
     ("lib/phaser", 0x3d92343036a714f3),
@@ -911,5 +913,31 @@ fn wasm_host_slicing_matches_the_interpreter() {
         let want = perform(&s, true, &[128], 6000);
         let got = perform_wasm(&s, &[1, 7, 128, 33, 64, 3], 6000);
         assert!(bits(&want.0) == bits(&got.0) && bits(&want.1) == bits(&got.1), "{}: first difference {:?}", name, first_diff(&want.0, &got.0));
+    }
+}
+
+/// A counting build plays the same samples and counts the same ops on
+/// every run: what `check` calls expensive does not depend on the machine.
+#[test]
+fn a_counting_build_plays_the_same_bits_and_counts_the_same_ops() {
+    for name in INSTRUMENTS {
+        let src = shader_src(name);
+        let plain = build(&src, Backend::Native);
+        let play = |s: &Arc<AudioShader>| {
+            let mut i = Instance::new(s.clone(), 48000.0);
+            let (mut l, mut r) = (vec![0.0f32; 9000], vec![0.0f32; 9000]);
+            i.note_on(50.0, 0.9, 3);
+            i.render(&mut l[..6000], &mut r[..6000]);
+            i.note_off();
+            i.render(&mut l[6000..], &mut r[6000..]);
+            (l.iter().chain(&r).map(|x| x.to_bits()).collect::<Vec<_>>(), i.ops())
+        };
+        let counting = makepad_script_audio_aot::compile_counting(&src).unwrap();
+        let (want, none) = play(&plain);
+        let (got, ops) = play(&counting);
+        assert_eq!(none, 0, "{name}: a plain build counts nothing");
+        assert!(got == want, "{name}: counting changed the samples");
+        assert!(ops > 9000, "{name}: {ops} ops");
+        assert_eq!(play(&makepad_script_audio_aot::compile_counting(&src).unwrap()).1, ops, "{name}: the count is the same every run");
     }
 }

@@ -93,9 +93,10 @@ Oversampling: Os4 with os4_up(o, x, k) / os4_push(o, y) / os4_out(o):
 - Leave headroom: peaks around 0.5; add dc_block() after asymmetric
   shaping.
 
-## Cost (native, one voice at 48 kHz)
+## Cost (counted ops per sample, one voice)
 
-A polyBLEP saw + SVF is ~9 ns per sample, 4-op FM ~65 ns, a 4x
-oversampled shaper ~250 ns. 20833 ns per sample is one whole core;
-aim for well under 1000 ns per voice.
+`check` counts the ops a voice runs per sample (the same on every
+machine): a polyBLEP saw + SVF is ~350, 4-op FM ~580, a 4x oversampled
+shaper ~1900. Over 4096 is reported as expensive (about 4% of a core);
+aim for well under 2000 per voice.
 "#;
