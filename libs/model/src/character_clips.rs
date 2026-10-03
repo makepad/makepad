@@ -25,6 +25,9 @@ pub const CLIP_NAMES: &[&str] = &[
     "hit_front", "hit_back", "death", "death_b", "wave", "cheer", "dance", "taunt", "salute",
     "fight_stance", "punch", "jab", "kick", "block", "knocked_down", "dash", "hang", "long_jump",
     "ground_pound", "wall_slide", "backflip", "drive", "sit", "skid", "sideflip",
+    // Water: treading at rest, the front crawl moving (one phase, blended by
+    // speed).
+    "tread", "swim",
     // 8-way locomotion at run and crouch speeds (a shooter's backpedal and
     // strafe blend against the aim); each sorts after its gait word.
     "run_back", "strafe_run_l", "strafe_run_r", "crouch_back", "crouch_strafe_l", "crouch_strafe_r",
@@ -878,6 +881,73 @@ pub fn clip(name: &str, rig: &RigInfo) -> Option<AnimationClip> {
                 p.blink(curve(t, &[(1.0, 0.), (1.08, 1.), (1.16, 0.)]));
             })
         }
+        // Swimming. The host floats the body (it sets the water line on
+        // the skin); the clips pose it: `tread` upright, head up, hands
+        // sculling and legs cycling slowly; `swim` a heads-up front crawl,
+        // the body pitched near level about the hips, the arms pulling
+        // under the body and recovering high over the water, rolling the
+        // body to each pull, with a flutter kick behind. Same phase in both
+        // (one stroke = one cycle), so a host blends them by speed.
+        "tread" => sample(name, rig, 2.0, 15., true, &[], &|t, p| {
+            let ph = t / 2.;
+            let scull = (TAU * ph * 2.).psin();
+            p.shift([0., 0.012 * u * (TAU * ph * 2. + 0.6).psin(), 0.]);
+            p.rot("hips", qx(-6.));
+            p.rot("spine", qx(-3.));
+            p.rot("chest", qmul(qz(1.5 * (TAU * ph).psin()), qx(-2.)));
+            p.look(10. * (TAU * ph).psin(), 10.);
+            // Hands flat just under the surface, sweeping out and in.
+            for side in 0..2 {
+                p.arm(side, 48. + 6. * scull, 52. + 18. * scull, 62. - 10. * scull);
+                p.fingers(side, 0.08, 0.05, 0.15);
+            }
+            // Eggbeater: each foot circles under the hips, knees forward.
+            for side in 0..2 {
+                let x = super::body::sfx(side); let sg = side_sign(side);
+                let a = rig.rest[j(&format!("foot_{x}")) as usize];
+                let hips = p.pos("hips");
+                let c = TAU * (ph * 2. + side as f64 * 0.5);
+                let foot = [a[0] + sg * (0.05 * u + 0.04 * u * c.pcos()), hips[1] - (rig.hips_y - a[1]) + 0.2 * rig.leg_len + 0.08 * rig.leg_len * c.psin(), a[2] - 0.12 * rig.leg_len + 0.1 * rig.leg_len * c.pcos()];
+                p.foot(side, foot, -30. + 12. * c.psin(), 10., sg * 18.);
+            }
+            p.mouth(0.08, 0.1);
+            p.blink(curve(t, &[(1.3, 0.), (1.38, 1.), (1.46, 0.)]));
+        }),
+        "swim" => sample(name, rig, 1.6, 24., true, &[], &|t, p| {
+            let ph = t / 1.6;
+            // Roll toward the pulling arm (left arm pulls first half).
+            let roll = 16. * (TAU * ph).psin();
+            p.shift([0., 0.012 * u * (TAU * ph * 2.).pcos(), 0.]);
+            p.set("hips", qmul(qx(-74.), qy(roll)));
+            p.rot("spine", qx(6.));
+            p.rot("chest", qy(-roll * 0.3));
+            // Head up, eyes forward over the water, steady against the roll.
+            p.look(-roll * 0.8, 58.);
+            for side in 0..2 {
+                let a = (ph + side as f64 * 0.5).rem_euclid(1.);
+                let (fwd, out, elbow) = if a < 0.58 {
+                    // Pull: from the reach ahead, under the body to the hip;
+                    // the elbow bends at the catch and straightens on the push.
+                    let s = a / 0.58;
+                    (mix(172., 4., ease(s)), 14. + 6. * (PI * s).psin(), curve(s, &[(0., 8.), (0.35, 70.), (0.7, 50.), (1., 10.)]))
+                } else {
+                    // Recovery: elbow high, out to the side and over the water.
+                    let s = (a - 0.58) / 0.42;
+                    (mix(4., -188., s), 16. + 30. * (PI * s).psin(), 12. + 90. * (PI * s).psin())
+                };
+                p.arm(side, fwd, out, elbow);
+                p.fingers(side, 0.12, 0.08, 0.2);
+            }
+            // Flutter kick: two beats per leg per stroke, toes pointed.
+            for side in 0..2 {
+                let x = super::body::sfx(side);
+                let k = (TAU * (ph * 2. + side as f64 * 0.5)).psin();
+                p.set(&format!("upper_leg_{x}"), qmul(qx(10. + 14. * k), qz(if side == 0 { 3. } else { -3. })));
+                p.set(&format!("lower_leg_{x}"), qx(-8. - 18. * (k + 0.3).max(0.)));
+                p.set(&format!("foot_{x}"), qx(-45.));
+            }
+            p.mouth(0.12, 0.1);
+        }),
         _ => return None,
     })
 }
