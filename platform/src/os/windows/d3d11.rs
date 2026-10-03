@@ -3913,7 +3913,9 @@ impl CxOsPass {
                     DepthBiasClamp: 0.0,
                     DepthClipEnable: TRUE,
                     FillMode: D3D11_FILL_SOLID,
-                    FrontCounterClockwise: FALSE,
+                    // Counter-clockwise is front, as on Metal, Vulkan and GL and as
+                    // the renderer's geometry and glTF meshes are wound.
+                    FrontCounterClockwise: TRUE,
                     MultisampleEnable: FALSE,
                     ScissorEnable: FALSE,
                     SlopeScaledDepthBias: 0.0,

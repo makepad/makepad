@@ -138,8 +138,8 @@ fn cube_geometry() -> GeometryData {
             ]);
             g.normals.push(n);
         }
-        // Winding outward (cross(b - a, c - a) along n).
-        g.indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        // Counter-clockwise seen from outside: cross(b - a, c - a) along n.
+        g.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
     g
 }
@@ -187,10 +187,10 @@ fn sphere_geometry() -> GeometryData {
     for [a, b, c, d] in quads {
         // A pole quad has two corners on the pole: one triangle.
         if a != b {
-            g.indices.extend_from_slice(&[a, c, b]);
+            g.indices.extend_from_slice(&[a, b, c]);
         }
         if c != d {
-            g.indices.extend_from_slice(&[a, d, c]);
+            g.indices.extend_from_slice(&[a, c, d]);
         }
     }
     g
