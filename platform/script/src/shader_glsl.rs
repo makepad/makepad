@@ -6,13 +6,14 @@ use makepad_live_id::{id, LiveId};
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-/// GLSL ES 3.00's minimum MAX_VERTEX_ATTRIBS: the vertex inputs every
-/// WebGL 2 device takes (see [`ShaderOutput::glsl_webgl2`]).
-pub const WEBGL2_MAX_VERTEX_ATTRIBS: usize = 16;
-/// GLSL ES 3.00's minimum MAX_VARYING_VECTORS.
-pub const WEBGL2_MAX_VARYING_VECTORS: usize = 15;
+/// GLSL ES 3.00's minimum MAX_VERTEX_ATTRIBS: the vertex inputs every GL ES
+/// 3 and WebGL 2 device takes. Instance data past it are read from the
+/// instance data texture (`mp_inst_data`).
+pub const GLSL_MAX_VERTEX_ATTRIBS: usize = 16;
 /// WebGL's largest vertex attribute stride, in bytes.
 pub const WEBGL_MAX_ATTRIB_STRIDE: usize = 255;
+/// GL ES 3.0's minimum MAX_VERTEX_ATTRIB_STRIDE, in bytes.
+pub const GLES_MAX_ATTRIB_STRIDE: usize = 2048;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum GlslPackedFormat {
@@ -284,31 +285,32 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
             .unwrap_or(0)
     }
 
-    /// WebGL 2 (`glsl_webgl2`): the first packed instance vec4 read from
-    /// the instance data texture (`mp_inst_data`) instead of an attribute,
-    /// when the geometry and instance vec4s together are more vertex inputs
-    /// than every WebGL 2 device has. An instance record wider than an
-    /// attribute stride can be is read from the texture whole. `None`: all
-    /// instance data are attributes.
+    /// The first packed instance vec4 read from the instance data texture
+    /// (`mp_inst_data`) instead of an attribute, when the geometry and
+    /// instance vec4s together are more vertex inputs than every GL ES 3 /
+    /// WebGL 2 device has. An instance record wider than an attribute stride
+    /// can be (WebGL's 255 bytes, GL ES's 2048) is read from the texture
+    /// whole. `None`: all instance data are attributes.
     fn glsl_instance_fetch_from(
         &self,
         vm: &ScriptVm,
         geometry_fields: &[GlslPackedField],
         instance_fields: &[GlslPackedField],
     ) -> Option<usize> {
-        if !self.glsl_webgl2 || !self.glsl_vertex_fetch_is_f32(vm) {
+        if !self.glsl_vertex_fetch_is_f32(vm) {
             return None;
         }
         let geometry = Self::glsl_num_packed_vec4s(Self::glsl_packed_slots(geometry_fields));
         let instance_slots = Self::glsl_packed_slots(instance_fields);
         let instance = Self::glsl_num_packed_vec4s(instance_slots);
-        if geometry + instance <= WEBGL2_MAX_VERTEX_ATTRIBS {
+        if geometry + instance <= GLSL_MAX_VERTEX_ATTRIBS {
             return None;
         }
-        if instance_slots * 4 > WEBGL_MAX_ATTRIB_STRIDE {
+        let max_stride = if self.glsl_webgl2 { WEBGL_MAX_ATTRIB_STRIDE } else { GLES_MAX_ATTRIB_STRIDE };
+        if instance_slots * 4 > max_stride {
             return Some(0);
         }
-        Some(WEBGL2_MAX_VERTEX_ATTRIBS.saturating_sub(geometry))
+        Some(GLSL_MAX_VERTEX_ATTRIBS.saturating_sub(geometry))
     }
 
     fn glsl_write_vertex_input_attrs(
@@ -865,15 +867,9 @@ vec4 _mp_unpack4u8(float x){ uint u = floatBitsToUint(x); return vec4(float(u & 
         out
     }
 
-    /// The varyings: every instance field, then the shader's own varyings.
-    /// WebGL 2 (`glsl_webgl2`): when they are more vectors than every WebGL 2
-    /// device has, only the instance fields the fragment stage reads.
+    /// The varyings: the instance fields the fragment stage reads, then the
+    /// shader's own varyings (the rule every emitter follows).
     fn glsl_collect_varying_pack_fields(&self, vm: &ScriptVm) -> Vec<GlslPackedField> {
-        let all = self.glsl_pack_varying_fields(vm, &|_| true);
-        let slots = Self::glsl_packed_slots(&all);
-        if !self.glsl_webgl2 || Self::glsl_num_packed_vec4s(slots) <= WEBGL2_MAX_VARYING_VECTORS {
-            return all;
-        }
         let entry = self.backend.map_function_name("io_fragment");
         let reachable = self.glsl_collect_reachable_functions(&[entry.as_str()]);
         let fragment_reads = |name: &str| {
@@ -1390,11 +1386,12 @@ mod typed_vertex_tests {
         }
     }
 
-    /// WebGL 2: instance data past the vertex inputs every device has are
-    /// read from `mp_inst_data`; a record wider than an attribute stride is
-    /// read whole from it; a shader that fits is emitted unchanged.
+    /// GL ES 3 and WebGL 2: instance data past the vertex inputs every
+    /// device has are read from `mp_inst_data`; a record wider than an
+    /// attribute stride is read whole from it; a shader that fits is
+    /// emitted unchanged.
     #[test]
-    fn webgl2_instance_data_past_the_attribute_limit_comes_from_a_texture() {
+    fn instance_data_past_the_attribute_limit_comes_from_a_texture() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
             host: &mut host,
@@ -1459,11 +1456,13 @@ mod typed_vertex_tests {
         assert!(!source.contains("in vec4 packed_instance_"), "{source}");
         assert!(source.contains("packed_instance_0 = vec4(_mp_inst_word(0)"), "{source}");
 
-        // Native GL: unchanged whatever the size.
+        // Native GL ES: the same rule, with GL ES's 2048-byte stride.
         let native = make(&mut vm, 2, 15, false);
         let (from, source) = emit(&vm, &native);
-        assert_eq!(from, None);
-        assert!(source.contains("in vec4 packed_instance_14;"), "{source}");
+        assert_eq!(from, Some(14));
+        assert!(source.contains("\nvec4 packed_instance_14;"), "{source}");
+        let native_wide = make(&mut vm, 1, 20, false);
+        assert_eq!(emit(&vm, &native_wide).0, Some(15));
     }
 
     #[test]

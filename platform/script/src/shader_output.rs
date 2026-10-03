@@ -225,11 +225,9 @@ pub struct ShaderOutput {
     pub mode: ShaderMode,
     pub backend: ShaderBackend,
     pub use_vulkan: bool,
-    /// GLSL for WebGL 2 (the web backend): the vertex inputs and varyings
-    /// are fitted to what every WebGL 2 device has (GLSL ES 3.00's
-    /// minimums, [`crate::shader_glsl::WEBGL2_MAX_VERTEX_ATTRIBS`] and
-    /// [`crate::shader_glsl::WEBGL2_MAX_VARYING_VECTORS`]). A shader that
-    /// fits is emitted as without it.
+    /// GLSL for WebGL 2 (the web backend): an instance record wider than
+    /// WebGL's 255-byte attribute stride is read whole from the instance
+    /// data texture ([`crate::shader_glsl::WEBGL_MAX_ATTRIB_STRIDE`]).
     pub glsl_webgl2: bool,
     pub io: Vec<ShaderIo>,
     pub recur_block: Vec<ScriptObject>,
@@ -617,6 +615,54 @@ impl ShaderOutput {
         None
     }
 
+    /// The instance record as the draw list writes it (`DrawShaderInputs`
+    /// with attribute packing): dyn instance fields, then Rust instance
+    /// fields, 32-bit words back to back, an integer vector on a 4-word
+    /// boundary with the words after it padded to the next one. Each entry is
+    /// (index into `self.io`, word offset); the second value is the stride in
+    /// words. Every emitter that reads instance records from a buffer
+    /// addresses them by these offsets.
+    pub fn instance_record(&self, vm: &ScriptVm) -> (Vec<(usize, usize)>, usize) {
+        let mut fields = Vec::new();
+        let mut at = 0usize;
+        for rust in [false, true] {
+            for (index, io) in self.io.iter().enumerate() {
+                let wanted = match io.kind {
+                    ShaderIoKind::DynInstance => !rust,
+                    ShaderIoKind::RustInstance => rust,
+                    _ => false,
+                };
+                if !wanted {
+                    continue;
+                }
+                let ty = &vm.bx.heap.pod_type_ref(io.ty).ty;
+                let slots = ty.slots();
+                let int_lanes = slots > 1 && Self::is_integer_word(ty);
+                if int_lanes {
+                    at = at.next_multiple_of(4);
+                }
+                fields.push((index, at));
+                at += slots;
+                if int_lanes {
+                    at = at.next_multiple_of(4);
+                }
+            }
+        }
+        (fields, at)
+    }
+
+    /// Integer scalars and vectors: their words are read as integers.
+    pub fn is_integer_word(ty: &ScriptPodTy) -> bool {
+        match ty {
+            ScriptPodTy::U32 | ScriptPodTy::I32 | ScriptPodTy::Bool | ScriptPodTy::AtomicU32 | ScriptPodTy::AtomicI32 => true,
+            ScriptPodTy::Vec(v) => !matches!(
+                v,
+                ScriptPodVec::Vec2f | ScriptPodVec::Vec3f | ScriptPodVec::Vec4f | ScriptPodVec::Vec2h | ScriptPodVec::Vec3h | ScriptPodVec::Vec4h
+            ),
+            _ => false,
+        }
+    }
+
     pub fn create_struct_defs(&mut self, vm: &ScriptVm, out: &mut String) {
         let mut plain_structs = self.structs.clone();
         let mut raw_logical_structs = BTreeSet::new();
@@ -629,10 +675,10 @@ impl ShaderOutput {
             }
 
             if matches!(self.backend, ShaderBackend::Metal) {
+                // Instance records are decoded word by word into the
+                // logical struct (`_mp_decode_instance`).
                 match io.kind {
-                    ShaderIoKind::UniformBuffer
-                    | ShaderIoKind::RustInstance
-                    | ShaderIoKind::DynInstance => {
+                    ShaderIoKind::UniformBuffer => {
                         packed_only_structs.insert(ty);
                     }
                     ShaderIoKind::VertexBuffer => {

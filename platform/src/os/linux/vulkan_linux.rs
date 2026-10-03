@@ -330,6 +330,10 @@ impl DesktopInit {
                 .limits
                 .min_uniform_buffer_offset_alignment
                 .max(4),
+            min_storage_buffer_offset_alignment: props
+                .limits
+                .min_storage_buffer_offset_alignment
+                .max(4),
             device,
             queue,
             swapchain_loader,

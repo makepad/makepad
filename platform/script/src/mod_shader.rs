@@ -636,11 +636,10 @@ fn define_shader_compile_natives(heap: &mut ScriptHeap, native: &mut ScriptNativ
             let mut out = String::new();
             match backend {
                 ShaderBackend::Metal => {
-                    output.create_struct_defs(vm, &mut out);
-                    output.metal_create_scope_uniform_struct(vm, &mut out);
+                    out.push_str(&output.metal_draw_source(vm));
                 }
                 ShaderBackend::Hlsl => {
-                    output.hlsl_create_scope_uniform_cbuffer(vm, &mut out);
+                    out.push_str(&output.hlsl_draw_source(vm));
                 }
                 ShaderBackend::Glsl => {
                     let mut shared_defs = String::new();
@@ -656,10 +655,7 @@ fn define_shader_compile_natives(heap: &mut ScriptHeap, native: &mut ScriptNativ
                 }
                 _ => {}
             }
-            for f in &output.functions {
-                out.push_str(&f.out);
-                out.push('\n');
-            }
+            // Every backend's source above holds its functions.
             out.script_to_value(vm)
         },
     );

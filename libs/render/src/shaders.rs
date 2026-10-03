@@ -320,10 +320,7 @@ pub struct DrawSceneSkinned {
     /// layer's material; 0 everywhere else draws exactly as before.
     /// y = the PBR lane's shading terms (`makepadShading`), packed as
     /// rim * 255 * 65536 + clearcoat * 255 * 256 + flake * 255 (0 = plain;
-    /// `MaterialSurface::packed_shading`). Packed into this
-    /// spare lane on purpose: the model lanes' instance stream is at the
-    /// vertex-attribute limit (31 on Metal, 32 on common Vulkan GPUs; one
-    /// more vec4 lost the Vulkan device in race).
+    /// `MaterialSurface::packed_shading`).
     #[live(vec2(0.0, 0.0))]
     pub tex_mag: Vec2f,
 }
@@ -1481,13 +1478,11 @@ mod shader_registration_tests {
             let mapping = &cx.draw_shaders[id.index].mapping;
             assert_eq!(mapping.textures[0].id, live_id!(tex));
             assert_eq!(mapping.textures[1].id, live_id!(ao_map));
-            // Vertex attributes: the backends that fetch instances as
-            // attributes pack the geometry and the instance records into
-            // vec4 chunks, one attribute each. Metal allows 31, common Vulkan
-            // GPUs 32; one vec4 over it lost the Vulkan device in race
-            // (2026-09-29). (D3D11 declares one input per field, so these
-            // lanes read their records from the instance buffer there.) New
-            // per-draw data must ride a spare lane, never a new instance field.
+            // Vertex attributes: only the geometry is fetched as vertex
+            // attributes (vec4 chunks); the backends read instance records
+            // from the instance buffer by instance index (GL ES and WebGL 2
+            // read what does not fit their attributes from a texture), so a
+            // record has no attribute limit.
             let lanes = [
                 ("model", DrawSceneSkinned::script_new_with_default(vm).draw_vars.draw_shader_id),
                 ("pbr", DrawScenePbr::script_new_with_default(vm).skinned.draw_vars.draw_shader_id),
@@ -1498,8 +1493,9 @@ mod shader_registration_tests {
             ];
             for (name, id) in lanes {
                 let m = &vm.cx().draw_shaders[id.expect("registered").index].mapping;
-                let n = m.geometries.total_slots.div_ceil(4) + m.instances.total_slots.div_ceil(4);
-                assert!(n <= 31, "{name}: {n} vertex attributes (Metal allows 31)");
+                let n = m.geometries.total_slots.div_ceil(4);
+                let limit = makepad_draw::makepad_platform::draw_shader_layout::MAX_VERTEX_ATTRIBUTES;
+                assert!(n <= limit, "{name}: {n} geometry vertex attributes (the limit is {limit})");
             }
         });
     }

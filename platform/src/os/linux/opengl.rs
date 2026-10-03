@@ -1156,6 +1156,20 @@ impl Cx {
                             gl_bind_sampler(i as u32, sampler);
                         }
                     }
+                    if let Some(loc) = shgl.inst_data.loc {
+                        // Instance records past the vertex attributes, read
+                        // by instance id (`mp_inst_data`), on the unit after
+                        // the shader's textures.
+                        let gl = self.os.gl();
+                        let unit = sh.mapping.textures.len() as u32;
+                        let texture = draw_item.os.inst_vb.word_texture(gl).unwrap_or(0);
+                        (gl.glActiveTexture)(gl_sys::TEXTURE0 + unit);
+                        (gl.glBindTexture)(gl_sys::TEXTURE_2D, texture);
+                        (gl.glUniform1i)(loc, unit as i32);
+                        if let Some(gl_bind_sampler) = gl.glBindSampler {
+                            gl_bind_sampler(unit, 0);
+                        }
+                    }
                     if trace_draw {
                         crate::trace!(
                             "gl.draw",
@@ -1724,6 +1738,9 @@ pub struct GlShader {
     pub textures: Vec<OpenglUniform>,
     pub samplers: Vec<OpenglSampler>,
     pub xr_depth_texture: OpenglUniform,
+    /// `mp_inst_data`: the instance records the shader reads by instance
+    /// id when they do not fit its vertex attributes.
+    pub inst_data: OpenglUniform,
     // all these things need to be uniform buffers
     pub uniforms: GlShaderUniforms,
 }
@@ -2127,6 +2144,7 @@ impl GlShader {
                 textures: Self::opengl_get_texture_slots(gl, program, &mapping.textures),
                 samplers: Self::opengl_create_samplers(gl, mapping),
                 xr_depth_texture: Self::opengl_get_uniform(gl, program, "xr_depth_texture"),
+                inst_data: Self::opengl_get_uniform(gl, program, "mp_inst_data"),
                 uniforms,
             }
         }
@@ -3803,7 +3821,20 @@ pub struct OpenglBuffer {
     pub retained_publication: Option<crate::retained_instances::RetainedInstances>,
     pub retained_count: usize,
     pub charge: Option<crate::retained_instances::RetainedAllocation>,
+    /// Bytes of the last upload and a count of uploads, so a copy of the
+    /// buffer (`word_texture`) knows when it is stale.
+    pub byte_len: usize,
+    pub upload_version: u64,
+    /// The buffer's words as an R32UI texture (`mp_inst_data`), for a vertex
+    /// shader whose instance records do not fit its vertex attributes:
+    /// (texture, rows allocated, upload_version copied).
+    pub word_texture: Option<(u32, usize, u64)>,
 }
+
+/// The width of the `mp_inst_data` texture: GLSL ES 3.00's minimum
+/// MAX_TEXTURE_SIZE, so every device takes it (the shader reads the width
+/// with `textureSize`).
+const GL_WORD_TEXTURE_WIDTH: usize = 2048;
 
 impl OpenglBuffer {
     /// The diff against what this buffer already holds, or `None` when there
@@ -3930,7 +3961,75 @@ impl OpenglBuffer {
             }
         }
         self.retained_publication = Some(publication.clone());
+        self.byte_len = publication.byte_len();
+        self.upload_version += 1;
         Some(uploaded)
+    }
+
+    /// This buffer's words as an R32UI texture, row major at
+    /// `GL_WORD_TEXTURE_WIDTH`, copied on the GPU (PIXEL_UNPACK_BUFFER)
+    /// after each upload. Rows grow to the next power of two.
+    pub fn word_texture(&mut self, gl: &LibGl) -> Option<u32> {
+        let buffer = self.gl_buffer?;
+        if let Some((texture, _, version)) = self.word_texture {
+            if version == self.upload_version {
+                return Some(texture);
+            }
+        }
+        let words = self.byte_len / 4;
+        let width = GL_WORD_TEXTURE_WIDTH;
+        let rows = words.div_ceil(width).max(1);
+        unsafe {
+            let (texture, capacity) = match self.word_texture {
+                Some((texture, capacity, _)) if capacity >= rows => (texture, capacity),
+                previous => {
+                    if let Some((texture, _, _)) = previous {
+                        (gl.glDeleteTextures)(1, &texture);
+                    }
+                    let mut texture = 0;
+                    (gl.glGenTextures)(1, &mut texture);
+                    let capacity = rows.next_power_of_two();
+                    (gl.glBindTexture)(gl_sys::TEXTURE_2D, texture);
+                    (gl.glTexImage2D)(
+                        gl_sys::TEXTURE_2D,
+                        0,
+                        gl_sys::R32UI as i32,
+                        width as i32,
+                        capacity as i32,
+                        0,
+                        gl_sys::RED_INTEGER,
+                        gl_sys::UNSIGNED_INT,
+                        ptr::null(),
+                    );
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MIN_FILTER, gl_sys::NEAREST as i32);
+                    (gl.glTexParameteri)(gl_sys::TEXTURE_2D, gl_sys::TEXTURE_MAG_FILTER, gl_sys::NEAREST as i32);
+                    (texture, capacity)
+                }
+            };
+            (gl.glBindTexture)(gl_sys::TEXTURE_2D, texture);
+            (gl.glBindBuffer)(gl_sys::PIXEL_UNPACK_BUFFER, buffer);
+            let full = words / width;
+            if full > 0 {
+                (gl.glTexSubImage2D)(gl_sys::TEXTURE_2D, 0, 0, 0, width as i32, full as i32, gl_sys::RED_INTEGER, gl_sys::UNSIGNED_INT, ptr::null());
+            }
+            let rest = words % width;
+            if rest > 0 {
+                (gl.glTexSubImage2D)(
+                    gl_sys::TEXTURE_2D,
+                    0,
+                    0,
+                    full as i32,
+                    rest as i32,
+                    1,
+                    gl_sys::RED_INTEGER,
+                    gl_sys::UNSIGNED_INT,
+                    (full * width * 4) as *const _,
+                );
+            }
+            (gl.glBindBuffer)(gl_sys::PIXEL_UNPACK_BUFFER, 0);
+            self.word_texture = Some((texture, capacity, self.upload_version));
+            Some(texture)
+        }
     }
 
     pub fn alloc_gl_buffer(&mut self, gl: &LibGl) {
@@ -3952,6 +4051,8 @@ impl OpenglBuffer {
     pub fn update_array_buffer_bytes(&mut self, gl: &LibGl, data: &[u8]) {
         self.retained_capacity = 0;
         self.retained_publication = None;
+        self.byte_len = data.len();
+        self.upload_version += 1;
         if self.gl_buffer.is_none() {
             self.alloc_gl_buffer(gl);
         }
@@ -4027,6 +4128,9 @@ impl OpenglBuffer {
     pub fn free_resources(&mut self, gl: &LibGl) {
         if let Some(gl_buffer) = self.gl_buffer.take() {
             unsafe { (gl.glDeleteBuffers)(1, &gl_buffer) };
+        }
+        if let Some((texture, _, _)) = self.word_texture.take() {
+            unsafe { (gl.glDeleteTextures)(1, &texture) };
         }
     }
 }

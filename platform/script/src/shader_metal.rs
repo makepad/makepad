@@ -267,110 +267,106 @@ impl ShaderOutput {
         writeln!(out, "}};").ok();
     }
 
+    /// The instance record is read from the instance buffer as 32-bit
+    /// words at the offsets of [`ShaderOutput::instance_record`] (the layout
+    /// the draw list writes), decoded into `IoInstance`.
     pub fn metal_create_instance_struct(&self, vm: &ScriptVm, out: &mut String) {
-        writeln!(out, "struct IoInstanceRaw {{").ok();
-
-        // 1. Output Dyn instance fields first (order doesn't matter, just output as encountered)
-        // Use packed types to match CPU-side repr(C) struct alignment
-        for io in &self.io {
-            if let ShaderIoKind::DynInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    for col in 0..4 {
-                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
-                    }
-                } else {
-                    write!(out, "    ").ok();
-                    if matches!(pod_ty.ty, ScriptPodTy::Struct { .. }) {
-                        self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                    } else {
-                        self.backend
-                            .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                    }
-                    writeln!(out, " {};", io.name).ok();
-                }
-            }
-        }
-
-        // 2. Output Rust instance fields last (already in correct order from pre_collect_rust_instance_io)
-        // Use packed types to match CPU-side repr(C) struct alignment
-        for io in &self.io {
-            if let ShaderIoKind::RustInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    for col in 0..4 {
-                        writeln!(out, "    packed_float4 {}_{};", io.name, col).ok();
-                    }
-                } else {
-                    write!(out, "    ").ok();
-                    if matches!(pod_ty.ty, ScriptPodTy::Struct { .. }) {
-                        self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                    } else {
-                        self.backend
-                            .pod_type_name_packed_from_ty(&vm.bx.heap, io.ty, out);
-                    }
-                    writeln!(out, " {};", io.name).ok();
-                }
-            }
-        }
-
-        writeln!(out, "}};").ok();
-
+        let (fields, stride) = self.instance_record(vm);
         writeln!(out, "struct IoInstance {{").ok();
-        for io in &self.io {
-            if let ShaderIoKind::DynInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " {};", io.name).ok();
-            }
-        }
-        for io in &self.io {
-            if let ShaderIoKind::RustInstance = io.kind {
-                write!(out, "    ").ok();
-                self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
-                writeln!(out, " {};", io.name).ok();
-            }
+        for (index, _) in &fields {
+            let io = &self.io[*index];
+            write!(out, "    ").ok();
+            self.backend.pod_type_name_from_ty(&vm.bx.heap, io.ty, out);
+            writeln!(out, " {};", io.name).ok();
         }
         writeln!(out, "}};").ok();
-
-        writeln!(
-            out,
-            "inline IoInstance _mp_decode_instance(constant IoInstanceRaw &raw) {{"
-        )
-        .ok();
+        writeln!(out, "#define MP_INSTANCE_WORDS {}u", stride.max(1)).ok();
+        writeln!(out, "inline IoInstance _mp_decode_instance(constant uint *w) {{").ok();
         writeln!(out, "    IoInstance out_instance;").ok();
-        for io in &self.io {
-            if let ShaderIoKind::DynInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    writeln!(
-                        out,
-                        "    out_instance.{0} = float4x4(float4(raw.{0}_0), float4(raw.{0}_1), float4(raw.{0}_2), float4(raw.{0}_3));",
-                        io.name
-                    )
-                    .ok();
-                } else {
-                    writeln!(out, "    out_instance.{0} = raw.{0};", io.name).ok();
-                }
-            }
-        }
-        for io in &self.io {
-            if let ShaderIoKind::RustInstance = io.kind {
-                let pod_ty = vm.bx.heap.pod_type_ref(io.ty);
-                if matches!(pod_ty.ty, ScriptPodTy::Mat(ScriptPodMat::Mat4x4f)) {
-                    writeln!(
-                        out,
-                        "    out_instance.{0} = float4x4(float4(raw.{0}_0), float4(raw.{0}_1), float4(raw.{0}_2), float4(raw.{0}_3));",
-                        io.name
-                    )
-                    .ok();
-                } else {
-                    writeln!(out, "    out_instance.{0} = raw.{0};", io.name).ok();
-                }
-            }
+        for (index, offset) in &fields {
+            let io = &self.io[*index];
+            let inline = crate::pod::ScriptPodTypeInline { self_ref: io.ty, data: vm.bx.heap.pod_type_ref(io.ty).clone() };
+            let mut at = *offset;
+            let expr = self.metal_value_from_words(vm, &inline, &mut at);
+            writeln!(out, "    out_instance.{} = {};", io.name, expr).ok();
         }
         writeln!(out, "    return out_instance;").ok();
         writeln!(out, "}}").ok();
+    }
+
+    /// (columns, rows) of a matrix type.
+    fn metal_mat_shape(ty: &ScriptPodTy) -> (usize, usize) {
+        match ty {
+            ScriptPodTy::Mat(m) => match m {
+                ScriptPodMat::Mat2x2f => (2, 2),
+                ScriptPodMat::Mat3x2f => (3, 2),
+                ScriptPodMat::Mat4x2f => (4, 2),
+                ScriptPodMat::Mat2x3f => (2, 3),
+                ScriptPodMat::Mat3x3f => (3, 3),
+                ScriptPodMat::Mat4x3f => (4, 3),
+                ScriptPodMat::Mat2x4f => (2, 4),
+                ScriptPodMat::Mat3x4f => (3, 4),
+                ScriptPodMat::Mat4x4f => (4, 4),
+            },
+            _ => (1, 1),
+        }
+    }
+
+    /// A value of `ty` from the instance words `w[at..]`, tight: scalars
+    /// one word each, a matrix its columns in order, a struct its fields.
+    fn metal_value_from_words(&self, vm: &ScriptVm, ty: &crate::pod::ScriptPodTypeInline, at: &mut usize) -> String {
+        let mut ty_name = String::new();
+        self.backend.pod_type_name(ty, &mut ty_name);
+        match &ty.data.ty {
+            ScriptPodTy::Struct { fields, .. } => {
+                let parts: Vec<String> = fields.iter().map(|f| self.metal_value_from_words(vm, &f.ty, at)).collect();
+                format!("{}{{{}}}", ty_name, parts.join(", "))
+            }
+            ScriptPodTy::Packed(p) => {
+                let w = format!("w[{}]", *at);
+                *at += ty.data.ty.slots();
+                match p {
+                    crate::pod::ScriptPodPacked::F16x2 => format!("float2(as_type<half2>({w}))"),
+                    crate::pod::ScriptPodPacked::F16x4 => format!("float4(as_type<half2>({w}), as_type<half2>(w[{}]))", *at - ty.data.ty.slots() + 1),
+                    crate::pod::ScriptPodPacked::U16x2 => format!("float2(as_type<ushort2>({w}))"),
+                    crate::pod::ScriptPodPacked::I16x2 => format!("float2(as_type<short2>({w}))"),
+                    crate::pod::ScriptPodPacked::U16x2Norm => format!("float2(as_type<ushort2>({w})) / 65535.0"),
+                    crate::pod::ScriptPodPacked::I16x2Norm => format!("max(float2(as_type<short2>({w})) / 32767.0, float2(-1.0))"),
+                    crate::pod::ScriptPodPacked::U8x4Norm => format!("float4(as_type<uchar4>({w})) / 255.0"),
+                    crate::pod::ScriptPodPacked::I8x4Norm => format!("max(float4(as_type<char4>({w})) / 127.0, float4(-1.0))"),
+                }
+            }
+            leaf => {
+                let slots = leaf.slots();
+                let word = |k: usize| -> String {
+                    match leaf {
+                        ScriptPodTy::U32 | ScriptPodTy::AtomicU32 => format!("w[{k}]"),
+                        ScriptPodTy::Bool => format!("(w[{k}] != 0u)"),
+                        ScriptPodTy::I32 | ScriptPodTy::AtomicI32 => format!("as_type<int>(w[{k}])"),
+                        ScriptPodTy::Vec(v) if Self::is_integer_word(leaf) => match v {
+                            crate::pod::ScriptPodVec::Vec2i | crate::pod::ScriptPodVec::Vec3i | crate::pod::ScriptPodVec::Vec4i => format!("as_type<int>(w[{k}])"),
+                            crate::pod::ScriptPodVec::Vec2b | crate::pod::ScriptPodVec::Vec3b | crate::pod::ScriptPodVec::Vec4b => format!("(w[{k}] != 0u)"),
+                            _ => format!("w[{k}]"),
+                        },
+                        _ => format!("as_type<float>(w[{k}])"),
+                    }
+                };
+                let words: Vec<String> = (*at..*at + slots).map(word).collect();
+                *at += slots;
+                if slots == 1 && !matches!(leaf, ScriptPodTy::Vec(_) | ScriptPodTy::Mat(_)) {
+                    words[0].clone()
+                } else if matches!(leaf, ScriptPodTy::Mat(_)) {
+                    // Columns in order, as the CPU writes them (a column
+                    // padded to the record's column stride).
+                    let (cols, rows) = Self::metal_mat_shape(leaf);
+                    let col_stride = (slots / cols).max(rows);
+                    let cols: Vec<String> = words.chunks(col_stride).map(|c| format!("float{}({})", rows, c[..rows.min(c.len())].join(", "))).collect();
+                    format!("{}({})", ty_name, cols.join(", "))
+                } else {
+                    format!("{}({})", ty_name, words.join(", "))
+                }
+            }
+        }
     }
 
     pub fn metal_create_uniform_struct(&self, vm: &ScriptVm, out: &mut String) {
@@ -513,7 +509,7 @@ impl ShaderOutput {
 
         writeln!(out, "vertex IoVarying vertex_main(").ok();
         writeln!(out, "    constant IoVertexBufferRaw *vb [[buffer(0)]],").ok();
-        writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
+        writeln!(out, "    constant uint *i_raw [[buffer(1)]],").ok();
         writeln!(out, "    constant IoUniform *u [[buffer(2)]],").ok();
 
         // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
@@ -593,7 +589,7 @@ impl ShaderOutput {
         }
         writeln!(
             out,
-            "    IoInstance _inst = _mp_decode_instance(i_raw[iid]);"
+            "    IoInstance _inst = _mp_decode_instance(i_raw + iid * MP_INSTANCE_WORDS);"
         )
         .ok();
         writeln!(out, "    constant char *_geom_bytes = (constant char *)vb;").ok();
@@ -679,7 +675,7 @@ impl ShaderOutput {
         }
         writeln!(out, "    IoVarying v [[stage_in]],").ok();
         writeln!(out, "    constant IoVertexBufferRaw *vb [[buffer(0)]],").ok();
-        writeln!(out, "    constant IoInstanceRaw *i_raw [[buffer(1)]],").ok();
+        writeln!(out, "    constant uint *i_raw [[buffer(1)]],").ok();
         write!(out, "    constant IoUniform *u [[buffer(2)]]").ok();
 
         // Use pre-assigned buffer indices from assign_uniform_buffer_indices()
@@ -772,7 +768,7 @@ impl ShaderOutput {
         }
         writeln!(
             out,
-            "    IoInstance _inst = _mp_decode_instance(i_raw[v._iid]);"
+            "    IoInstance _inst = _mp_decode_instance(i_raw + v._iid * MP_INSTANCE_WORDS);"
         )
         .ok();
         writeln!(out, "    _io.vb = vb;").ok();

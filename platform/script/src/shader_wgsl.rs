@@ -14,6 +14,12 @@ use {
     std::fmt::Write,
 };
 
+/// The binding of the instance-record storage buffer: after every other
+/// binding (the XR depth texture is the last of those).
+pub fn wgsl_instance_binding(xr_depth_binding: u32) -> u32 {
+    xr_depth_binding + 1
+}
+
 #[derive(Clone)]
 pub struct WgslDrawShaderSource {
     pub wgsl: String,
@@ -788,6 +794,21 @@ fn _mp_unpack4u8(x: f32) -> vec4<f32> { return unpack4x8unorm(bitcast<u32>(x)); 
         }
     )
     .ok();
+    // The instance records, read by instance index at the word offsets the
+    // draw list writes them (`wgsl_collect_instance_fields`): vertex
+    // attributes never bound a record.
+    let instance_slots = instance_fields
+        .last()
+        .map(|field| field.offset + field.slots)
+        .unwrap_or(0);
+    if instance_slots > 0 {
+        writeln!(
+            out,
+            "@group(0) @binding({}) var<storage, read> _mp_inst: array<u32>;",
+            wgsl_instance_binding(xr_depth_binding)
+        )
+        .ok();
+    }
 
     writeln!(out, "struct VertexMainIn {{").ok();
     writeln!(out, "    @builtin(instance_index) instance_index: u32,").ok();
@@ -799,23 +820,10 @@ fn _mp_unpack4u8(x: f32) -> vec4<f32> { return unpack4x8unorm(bitcast<u32>(x)); 
         .last()
         .map(|field| field.offset + field.slots)
         .unwrap_or(0);
-    let instance_slots = instance_fields
-        .last()
-        .map(|field| field.offset + field.slots)
-        .unwrap_or(0);
     for idx in 0..wgsl_num_packed_vec4s(geometry_slots) {
         writeln!(
             out,
             "    @location({}) packed_geometry_{}: vec4f,",
-            location, idx
-        )
-        .ok();
-        location += 1;
-    }
-    for idx in 0..wgsl_num_packed_vec4s(instance_slots) {
-        writeln!(
-            out,
-            "    @location({}) packed_instance_{}: vec4f,",
             location, idx
         )
         .ok();
@@ -994,12 +1002,27 @@ fn _mp_unpack4u8(x: f32) -> vec4<f32> { return unpack4x8unorm(bitcast<u32>(x)); 
         );
         writeln!(out, "    {} = {};", field.name, value_expr).ok();
     }
+    if instance_slots > 0 {
+        writeln!(out, "    let _mp_ib = in.instance_index * {}u;", instance_slots).ok();
+        for idx in 0..wgsl_num_packed_vec4s(instance_slots) {
+            let words: Vec<String> = (idx * 4..idx * 4 + 4)
+                .map(|slot| {
+                    if slot < instance_slots {
+                        format!("bitcast<f32>(_mp_inst[_mp_ib + {}u])", slot)
+                    } else {
+                        "0.0".to_string()
+                    }
+                })
+                .collect();
+            writeln!(out, "    let packed_instance_{} = vec4f({});", idx, words.join(", ")).ok();
+        }
+    }
     for field in &instance_fields {
         let value_expr = wgsl_unpack_expr_for_field(
             output,
             vm,
             field,
-            "in.packed_instance_",
+            "packed_instance_",
             WgslPackedSource::BitPackedFloat,
         );
         writeln!(out, "    {} = {};", field.name, value_expr).ok();

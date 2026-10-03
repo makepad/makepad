@@ -1325,7 +1325,8 @@ impl CxDrawShaderMapping {
             ShaderIoKind::FragmentOutput(index) if index < 8 => mask | (1 << index),
             _ => mask,
         });
-        // Use attribute packing for instances (they're vertex attributes)
+        // The instance record's word layout (attribute packing), which the
+        // backends read by instance index (`ShaderOutput::instance_record`);
         // instances contains ALL instance fields (dyn first, then rust)
         let mut instances = DrawShaderInputs::new(DrawShaderInputPacking::Attribute);
         // dyn_instances tracks just the dynamic portion for offset calculations

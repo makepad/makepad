@@ -163,6 +163,12 @@ fn splash_metal_source(fragment_body: &str, extra: &str) -> String {
 }
 
 fn splash_metal_source_with(fragment_body: &str, extra: &str, vertex_extra: &str) -> String {
+    splash_metal_compile(fragment_body, extra, vertex_extra).0
+}
+
+/// The Metal source, and the instance record's word offset per field name
+/// and its stride (`ShaderOutput::instance_record`).
+fn splash_metal_compile(fragment_body: &str, extra: &str, vertex_extra: &str) -> (String, Vec<(LiveId, usize)>, usize) {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     let mut vm = ScriptVm { host, bx: Box::new(ScriptVmBase::new()) };
     // `base:` in `extra` splits the members: those before it go on a base
@@ -195,7 +201,9 @@ fn splash_metal_source_with(fragment_body: &str, extra: &str, vertex_extra: &str
     }
     assert!(!output.has_errors, "{}", output.error_report());
     output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
-    output.metal_draw_source(&vm)
+    let (fields, stride) = output.instance_record(&vm);
+    let offsets = fields.iter().map(|(index, offset)| (output.io[*index].name, *offset)).collect();
+    (output.metal_draw_source(&vm), offsets, stride)
 }
 
 /// Run a Splash fragment on a 4x4 RGBA32Float target: the pixel it wrote
@@ -376,4 +384,100 @@ fn mrt_attachments_get_their_own_formats_blend_and_write_masks() {
     assert_eq!(c1, [-2.5, 0.125], "unwritten attachment kept");
     let c2 = Gpu::read(targets[2], 4, 2);
     assert_eq!(u32::from_le_bytes([c2[0], c2[1], c2[2], c2[3]]), 0xDEADBEEF, "unwritten attachment kept");
+}
+
+// ---------------------------------------------------------------------------
+// Instance records read by instance index.
+
+/// A record far over every backend's vertex attributes (40 mat4s, then a
+/// vec3, a vec2i, a u32 and a float: 650 words) is read from the instance
+/// buffer by `[[instance_id]]` at the word offsets the draw list writes
+/// (`DrawShaderInputs`), here the second of two records via baseInstance.
+#[test]
+fn instance_records_past_every_attribute_limit_read_by_instance_index() {
+    let Some(gpu) = Gpu::new() else { return };
+    let mut extra = String::new();
+    let mut sum = String::new();
+    for k in 0..40 {
+        extra.push_str(&format!("m{k}: shader.instance(mat4x4f)\n"));
+        sum.push_str(&format!("{}(self.m{k} * vec4(0.0, 0.0, 0.0, 1.0)).z", if k == 0 { "" } else { " + " }));
+    }
+    extra.push_str("p: shader.instance(vec3f)\nn: shader.instance(vec2i)\nu: shader.instance(u32)\nf: shader.instance(0.5)\nv_s: shader.varying(f32)");
+    let (source, offsets, stride) = splash_metal_compile(
+        "self.pixel = vec4(self.v_s, self.p.z + float(self.n.y), float(self.u), self.f)",
+        &extra,
+        &format!("self.v_s = {sum}"),
+    );
+
+    // The draw list's packing of the same fields agrees.
+    let mut inputs = crate::draw_shader::DrawShaderInputs::new(crate::draw_shader::DrawShaderInputPacking::Attribute);
+    let pod = |name: LiveId| -> crate::makepad_script::pod::ScriptPodTy {
+        use crate::makepad_script::pod::{ScriptPodMat, ScriptPodTy, ScriptPodVec};
+        match name {
+            n if n == id!(p) => ScriptPodTy::Vec(ScriptPodVec::Vec3f),
+            n if n == id!(n) => ScriptPodTy::Vec(ScriptPodVec::Vec2i),
+            n if n == id!(u) => ScriptPodTy::U32,
+            n if n == id!(f) => ScriptPodTy::F32,
+            _ => ScriptPodTy::Mat(ScriptPodMat::Mat4x4f),
+        }
+    };
+    for (name, _) in &offsets {
+        crate::draw_shader::CxDrawShaderMapping::push_pod_fields(&mut inputs, &pod(*name), *name);
+    }
+    inputs.finalize();
+    assert_eq!(inputs.total_slots, stride);
+    for ((name, offset), input) in offsets.iter().zip(&inputs.inputs) {
+        assert_eq!((*name, *offset), (input.id, input.offset));
+    }
+    assert_eq!(stride, 650);
+
+    // Two records; the second one is drawn.
+    let mut words = vec![0u32; stride * 2];
+    for record in 0..2usize {
+        let w = &mut words[record * stride..];
+        let at = |name: LiveId| offsets.iter().find(|(n, _)| *n == name).unwrap().1;
+        for k in 0..40 {
+            // Column 3, row 2 of each matrix.
+            w[at(LiveId::from_str(&format!("m{k}"))) + 14] = ((record as f32 + 1.0) * 0.5).to_bits();
+        }
+        w[at(id!(p)) + 2] = 3.25f32.to_bits();
+        w[at(id!(n)) + 1] = (-7i32) as u32;
+        w[at(id!(u))] = 123456 + record as u32;
+        w[at(id!(f))] = 0.625f32.to_bits();
+    }
+    let library = gpu.library(&source);
+    let descriptor: ObjcId = unsafe { msg_send![class!(MTLRenderPipelineDescriptor), new] };
+    unsafe {
+        let () = msg_send![descriptor, setVertexFunction: Gpu::function(library, "vertex_main")];
+        let () = msg_send![descriptor, setFragmentFunction: Gpu::function(library, "fragment_main")];
+        let attachments: ObjcId = msg_send![descriptor, colorAttachments];
+        let a: ObjcId = msg_send![attachments, objectAtIndexedSubscript: 0u64];
+        let () = msg_send![a, setPixelFormat: MTLPixelFormat::RGBA32Float];
+    }
+    let pipeline = gpu.pipeline(descriptor).unwrap_or_else(|e| panic!("{e}\n{source}"));
+    let triangle: Vec<u8> = [-1.0f32, -1.0, 3.0, -1.0, -1.0, 3.0].iter().flat_map(|f| f.to_le_bytes()).collect();
+    let instance_bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    let buffers = [gpu.buffer(&triangle), gpu.buffer(&instance_bytes), gpu.buffer(&vec![0u8; 4096])];
+    let target = gpu.target(MTLPixelFormat::RGBA32Float, 4);
+    unsafe {
+        let pass: ObjcId = msg_send![class!(MTLRenderPassDescriptor), renderPassDescriptor];
+        let attachments: ObjcId = msg_send![pass, colorAttachments];
+        let a: ObjcId = msg_send![attachments, objectAtIndexedSubscript: 0u64];
+        let () = msg_send![a, setTexture: target];
+        let () = msg_send![a, setStoreAction: MTLStoreAction::Store];
+        let () = msg_send![a, setLoadAction: MTLLoadAction::Clear];
+        let cb: ObjcId = msg_send![gpu.queue, commandBuffer];
+        let enc: ObjcId = msg_send![cb, renderCommandEncoderWithDescriptor: pass];
+        let () = msg_send![enc, setRenderPipelineState: pipeline];
+        for (i, b) in buffers.iter().enumerate() {
+            let () = msg_send![enc, setVertexBuffer: *b offset: 0u64 atIndex: i as u64];
+            let () = msg_send![enc, setFragmentBuffer: *b offset: 0u64 atIndex: i as u64];
+        }
+        let () = msg_send![enc, drawPrimitives: MTLPrimitiveType::Triangle vertexStart: 0u64 vertexCount: 3u64 instanceCount: 1u64 baseInstance: 1u64];
+        let () = msg_send![enc, endEncoding];
+        let () = msg_send![cb, commit];
+        let () = msg_send![cb, waitUntilCompleted];
+    }
+    let px = words_f32(&Gpu::read(target, 16, 4));
+    assert_eq!([px[0], px[1], px[2], px[3]], [40.0, -3.75, 123457.0, 0.625]);
 }

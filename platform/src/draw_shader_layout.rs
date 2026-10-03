@@ -146,8 +146,8 @@ impl std::fmt::Display for LayoutError {
     }
 }
 
-/// Vertex attributes (vec4 each) the backend provides: Metal 31; GL ES 3,
-/// WebGL 2, Vulkan and D3D11 guarantee 16.
+/// Vertex attributes (vec4 each) the backend provides for a geometry
+/// record: Metal 31; GL ES 3, WebGL 2, Vulkan and D3D11 guarantee 16.
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
 pub const MAX_VERTEX_ATTRIBUTES: usize = 31;
 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
@@ -265,11 +265,12 @@ impl CxDrawShaderMapping {
     }
 }
 
-/// Vertex attributes a draw binds: vec4-packed slots, or one per compact
-/// geometry input.
-fn vertex_attributes(instances: &DrawShaderInputs, geometries: &DrawShaderInputs) -> usize {
-    let geometry = if geometries.has_compact() { geometries.inputs.len() } else { geometries.total_slots.div_ceil(4) };
-    geometry + instances.total_slots.div_ceil(4)
+/// Vertex attributes a draw binds: the geometry's vec4-packed slots, or one
+/// per compact geometry input. Instance records are not vertex attributes:
+/// the backends read them from the instance buffer by instance index (GL ES
+/// and WebGL 2 read what does not fit their attributes from a texture).
+fn vertex_attributes(geometries: &DrawShaderInputs) -> usize {
+    if geometries.has_compact() { geometries.inputs.len() } else { geometries.total_slots.div_ceil(4) }
 }
 
 /// `layout_of` over the reflected fields and the draw's own packing of them.
@@ -357,9 +358,8 @@ pub fn layout_from(
             }
         },
     };
-    if packing == LayoutPacking::VertexFetch {
-        // Instance and vertex attributes share the backend's budget.
-        let need = vertex_attributes(instances, geometries);
+    if packing == LayoutPacking::VertexFetch && kind == LayoutKind::Vertex {
+        let need = vertex_attributes(geometries);
         if need > MAX_VERTEX_ATTRIBUTES {
             return Err(LayoutError::TooManyAttributes { need, limit: MAX_VERTEX_ATTRIBUTES });
         }
@@ -526,12 +526,17 @@ mod tests {
     }
 
     #[test]
-    fn backend_limits_are_checked_at_reflection() {
+    fn backend_limits_bind_only_the_geometry() {
+        // Instance records are read by instance index: no attribute limit.
         let many: Vec<(LiveId, ScriptPodTy)> = (0..40).map(|k| (LiveId(k + 1), ScriptPodTy::Mat(ScriptPodMat::Mat4x4f))).collect();
         let (r, i, g) = shader(&many, &[]);
-        assert!(matches!(layout_from(&r, &i, &g, LayoutKind::Instance, LayoutPacking::VertexFetch), Err(LayoutError::TooManyAttributes { .. })));
-        // A storage buffer has no attribute limit.
-        assert!(layout_from(&r, &i, &g, LayoutKind::Instance, LayoutPacking::Storage).is_ok());
+        let l = layout_from(&r, &i, &g, LayoutKind::Instance, LayoutPacking::VertexFetch).unwrap();
+        assert_eq!(l.stride_words, 640);
+        // A geometry record wider than the attributes is refused.
+        let wide = ScriptPodTy::new_struct((0..MAX_VERTEX_ATTRIBUTES as u64 + 1).map(|k| field(LiveId(k + 1), vec(ScriptPodVec::Vec4f))).collect());
+        let (r, i, g) = shader(&[], &[(id!(geom), wide)]);
+        assert!(matches!(layout_from(&r, &i, &g, LayoutKind::Vertex, LayoutPacking::VertexFetch), Err(LayoutError::TooManyAttributes { .. })));
+        assert!(layout_from(&r, &i, &g, LayoutKind::Vertex, LayoutPacking::Storage).is_ok());
     }
 
     #[test]

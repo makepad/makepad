@@ -614,6 +614,8 @@ pub struct CxVulkan {
     physical_device: vk::PhysicalDevice,
     queue_family_index: u32,
     min_uniform_buffer_offset_alignment: vk::DeviceSize,
+    /// Instance records are bound as storage buffers at packet offsets.
+    min_storage_buffer_offset_alignment: vk::DeviceSize,
     device: ash::Device,
     #[cfg(target_os = "android")]
     external_memory_android_hardware_buffer:
@@ -1095,6 +1097,10 @@ impl CxVulkan {
                 .limits
                 .min_uniform_buffer_offset_alignment
                 .max(4),
+            min_storage_buffer_offset_alignment: props
+                .limits
+                .min_storage_buffer_offset_alignment
+                .max(4),
             device,
             external_memory_android_hardware_buffer,
             queue,
@@ -1518,6 +1524,10 @@ impl CxVulkan {
             min_uniform_buffer_offset_alignment: props
                 .limits
                 .min_uniform_buffer_offset_alignment
+                .max(4),
+            min_storage_buffer_offset_alignment: props
+                .limits
+                .min_storage_buffer_offset_alignment
                 .max(4),
             device,
             external_memory_android_hardware_buffer,
@@ -7496,9 +7506,14 @@ impl CxVulkan {
         uniform_uploads.retain(|uniform| uniform.size != 0);
 
         let packet_buffer_usage =
-            vk::BufferUsageFlags::VERTEX_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER;
         let packet_span_size = cursor.max(4);
-        let packet_base_alignment = self.min_uniform_buffer_offset_alignment.max(4);
+        // The instances sit at the slice's start and are bound as a storage
+        // buffer there; the uniforms after them are aligned within it.
+        let packet_base_alignment = self
+            .min_uniform_buffer_offset_alignment
+            .max(self.min_storage_buffer_offset_alignment)
+            .max(4);
         let (packet_buffer, packet_base_offset) = self.alloc_frame_packet_slice(
             packet_buffer_usage,
             packet_span_size,
@@ -7614,7 +7629,11 @@ impl CxVulkan {
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_READ_ONLY_OPTIMAL);
 
         let descriptor_set = if pipeline_has_descriptors {
-            if uniform_uploads.is_empty() && texture_infos.is_empty() && sampler_infos.is_empty() {
+            if uniform_uploads.is_empty()
+                && texture_infos.is_empty()
+                && sampler_infos.is_empty()
+                && vk_shader.instance_binding.is_none()
+            {
                 return Err(format!(
                     "shader {} expects descriptors but no descriptor payloads were built",
                     packet.shader_index
@@ -7622,6 +7641,19 @@ impl CxVulkan {
             }
 
             let descriptor_set = self.alloc_frame_descriptor_set(descriptor_set_layout)?;
+
+            // The instance records: a retained publication's own buffer, else
+            // this packet's instances at the slice's start.
+            let instance_info = match retained_buffer {
+                Some(buffer) => vk::DescriptorBufferInfo::default()
+                    .buffer(buffer.buffer)
+                    .offset(0)
+                    .range(vk::WHOLE_SIZE),
+                None => vk::DescriptorBufferInfo::default()
+                    .buffer(packet_buffer.buffer)
+                    .offset(packet_base_offset + instances_offset)
+                    .range(instances_bytes.max(4)),
+            };
 
             let mut buffer_infos = Vec::with_capacity(uniform_uploads.len());
             for uniform in &uniform_uploads {
@@ -7670,6 +7702,15 @@ impl CxVulkan {
                     .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                     .image_info(std::slice::from_ref(&xr_depth_info)),
             );
+            if let Some(binding) = vk_shader.instance_binding {
+                writes.push(
+                    vk::WriteDescriptorSet::default()
+                        .dst_set(descriptor_set)
+                        .dst_binding(binding)
+                        .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                        .buffer_info(std::slice::from_ref(&instance_info)),
+                );
+            }
             unsafe {
                 self.device.update_descriptor_sets(&writes, &[]);
             }
@@ -7677,11 +7718,8 @@ impl CxVulkan {
         } else {
             None
         };
-        let vertex_buffers = [
-            geometry_resource.vertex_buffer.buffer,
-            retained_buffer.map_or(packet_buffer.buffer, |buffer| buffer.buffer),
-        ];
-        let vertex_offsets = [0, if retained_buffer.is_some() { 0 } else { packet_base_offset + instances_offset }];
+        let vertex_buffers = [geometry_resource.vertex_buffer.buffer];
+        let vertex_offsets = [0];
 
         unsafe {
             self.device.cmd_bind_pipeline(
@@ -7796,7 +7834,8 @@ impl CxVulkan {
             || !sh.mapping.scope_uniforms.inputs.is_empty()
             || !sh.mapping.textures.is_empty()
             || !sh.mapping.samplers.is_empty()
-            || vk_shader.xr_depth_binding != 0;
+            || vk_shader.xr_depth_binding != 0
+            || vk_shader.instance_binding.is_some();
 
         let mut descriptor_bindings: Vec<(u32, vk::DescriptorType)> = Vec::new();
         for (_, idx) in &sh.mapping.uniform_buffer_bindings.bindings {
@@ -7836,6 +7875,9 @@ impl CxVulkan {
             vk_shader.xr_depth_binding,
             vk::DescriptorType::SAMPLED_IMAGE,
         ));
+        if let Some(binding) = vk_shader.instance_binding {
+            descriptor_bindings.push((binding, vk::DescriptorType::STORAGE_BUFFER));
+        }
         descriptor_bindings.sort_by_key(|(binding, _)| *binding);
         descriptor_bindings.dedup_by_key(|(binding, _)| *binding);
 
@@ -7915,10 +7957,10 @@ impl CxVulkan {
         // `stride_bytes` per vertex/instance, one vec4 location per four
         // words (a shorter tail for the remainder). The shader unpacks any
         // compact (f16/i16/unorm8) member from its word itself.
+        // Instance records are read from a storage buffer by instance index
+        // (`instance_binding`): only the geometry is a vertex input.
         let geometry_words = Self::layout_words(&sh.mapping.geometries);
-        let instance_words = Self::layout_words(&sh.mapping.instances);
         let geometry_formats = Self::collect_attribute_chunk_formats(geometry_words);
-        let instance_formats = Self::collect_attribute_chunk_formats(instance_words);
 
         let mut vertex_bindings = Vec::new();
         vertex_bindings.push(
@@ -7926,12 +7968,6 @@ impl CxVulkan {
                 .binding(0)
                 .stride(Self::layout_stride_bytes(&sh.mapping.geometries) as u32)
                 .input_rate(vk::VertexInputRate::VERTEX),
-        );
-        vertex_bindings.push(
-            vk::VertexInputBindingDescription::default()
-                .binding(1)
-                .stride(Self::layout_stride_bytes(&sh.mapping.instances) as u32)
-                .input_rate(vk::VertexInputRate::INSTANCE),
         );
 
         let mut vertex_attributes = Vec::new();
@@ -7948,19 +7984,6 @@ impl CxVulkan {
             );
             location += 1;
         }
-        for (chunk_index, format) in instance_formats.iter().enumerate() {
-            let remaining = instance_words.saturating_sub(chunk_index * 4);
-            let components = remaining.min(4);
-            vertex_attributes.push(
-                vk::VertexInputAttributeDescription::default()
-                    .location(location)
-                    .binding(1)
-                    .format(Self::vk_vertex_format(*format, components))
-                    .offset((chunk_index * 4 * std::mem::size_of::<f32>()) as u32),
-            );
-            location += 1;
-        }
-
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default()
             .vertex_binding_descriptions(&vertex_bindings)
             .vertex_attribute_descriptions(&vertex_attributes);
@@ -8351,7 +8374,7 @@ impl CxVulkan {
             Arc::new(VulkanRetainedAllocation {
                 device: self.device.clone(),
                 buffer: self.create_host_buffer(
-                    vk::BufferUsageFlags::VERTEX_BUFFER
+                    vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::TRANSFER_SRC
                         | vk::BufferUsageFlags::TRANSFER_DST,
                     capacity as u64,
@@ -8710,6 +8733,10 @@ impl CxVulkan {
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::SAMPLED_IMAGE,
                 descriptor_count: 4096,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 2048,
             },
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,

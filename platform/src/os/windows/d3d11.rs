@@ -53,7 +53,7 @@ use crate::{
                     D3D11_DEPTH_STENCILOP_DESC, D3D11_DEPTH_STENCIL_DESC,
                     D3D11_DEPTH_STENCIL_VIEW_DESC, D3D11_DEPTH_WRITE_MASK_ALL,
                     D3D11_DEPTH_WRITE_MASK_ZERO, D3D11_DSV_DIMENSION_TEXTURE2D, D3D11_FILL_SOLID,
-                    D3D11_FILTER, D3D11_INPUT_ELEMENT_DESC, D3D11_INPUT_PER_INSTANCE_DATA,
+                    D3D11_FILTER, D3D11_INPUT_ELEMENT_DESC,
                     D3D11_INPUT_PER_VERTEX_DATA, D3D11_MAP, D3D11_MAPPED_SUBRESOURCE,
                     D3D11_MAP_WRITE_DISCARD, D3D11_QUERY, D3D11_QUERY_DESC, D3D11_QUERY_EVENT,
                     D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC,
@@ -513,17 +513,15 @@ impl Cx {
                         .context
                         .IASetIndexBuffer(geom_ibuf, DXGI_FORMAT_R32_UINT, 0);
 
+                    // Instances are read by the vertex shader from the
+                    // instance buffer's word view (`instance_buffer_slot`).
                     let geom_slots = sh.mapping.geometries.total_slots;
-                    let inst_slots = sh.mapping.instances.total_slots;
-                    let strides = [(geom_slots * 4) as u32, (inst_slots * 4) as u32];
-                    let offsets = [0u32, 0u32];
-                    let buffers = [
-                        Some(geom_vbuf.clone()),
-                        draw_item.os.inst_vbuf.buffer.clone(),
-                    ];
+                    let strides = [(geom_slots * 4) as u32];
+                    let offsets = [0u32];
+                    let buffers = [Some(geom_vbuf.clone())];
                     d3d11_cx.context.IASetVertexBuffers(
                         0,
-                        2,
+                        1,
                         Some(buffers.as_ptr()),
                         Some(strides.as_ptr()),
                         Some(offsets.as_ptr()),
@@ -2847,8 +2845,8 @@ impl D3d11Buffer {
             let desc = D3D11_BUFFER_DESC {
                 Usage: D3D11_USAGE_DEFAULT,
                 ByteWidth: (capacity * 4).try_into().ok()?,
-                // Shader-readable too, for records read by instance id.
-                BindFlags: (D3D11_BIND_VERTEX_BUFFER.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
+                // Read by the vertex shader by instance id.
+                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
                 CPUAccessFlags: 0,
                 MiscFlags: 0,
                 StructureByteStride: 0,
@@ -3029,12 +3027,11 @@ impl D3d11Buffer {
         );
     }
 
-    /// An instance buffer: a vertex buffer, and shader-readable for the
-    /// vertex shaders that read their records by instance id.
+    /// An instance buffer, read by the vertex shader by instance id.
     pub fn update_with_f32_instance_data(&mut self, d3d11_cx: &D3d11Cx, data: &[f32]) {
         self.update_with_data(
             d3d11_cx,
-            D3D11_BIND_FLAG(D3D11_BIND_VERTEX_BUFFER.0 | D3D11_BIND_SHADER_RESOURCE.0),
+            D3D11_BIND_SHADER_RESOURCE,
             data.len(),
             data.as_ptr() as *const _,
         );
@@ -4358,22 +4355,7 @@ impl DrawVars {
             // b0 = live uniforms, b1 = const table, b2 = draw call, b3 = pass, b4 = draw list, b5 = user
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
 
-            let mut out = String::new();
-            output.create_struct_defs(vm, &mut out);
-            output.hlsl_create_uniform_buffer_cbuffers(vm, &mut out);
-            output.hlsl_create_uniform_struct(vm, &mut out);
-            output.hlsl_create_scope_uniform_cbuffer(vm, &mut out);
-            output.hlsl_create_instance_struct(vm, &mut out);
-            output.hlsl_create_varying_struct(vm, &mut out);
-            output.hlsl_create_vertex_buffer_struct(vm, &mut out);
-            output.hlsl_create_vertex_input_struct(vm, &mut out);
-            output.hlsl_create_io_structs(vm, &mut out);
-            output.hlsl_create_fragment_output_struct(vm, &mut out);
-            output.hlsl_create_texture_samplers(vm, &mut out);
-            output.hlsl_create_helpers(vm, &mut out);
-            output.create_functions(&mut out);
-            output.hlsl_create_vertex_fn(vm, &mut out);
-            output.hlsl_create_fragment_fn(vm, &mut out);
+            let out = output.hlsl_draw_source(vm);
 
             let source = vm.bx.heap.new_object_ref(io_self);
 
@@ -4848,15 +4830,8 @@ impl CxOsDrawShader {
             .iter()
             .map(|geom| slot_chunks(geom.slots).len())
             .sum();
-        let inst_desc_count: usize = mapping
-            .instances
-            .inputs
-            .iter()
-            .map(|inst| slot_chunks(inst.slots).len())
-            .sum();
-        let total_desc_count = geom_desc_count + inst_desc_count;
-        layout_desc.reserve(total_desc_count);
-        strings.reserve(mapping.geometries.inputs.len() + mapping.instances.inputs.len());
+        layout_desc.reserve(geom_desc_count);
+        strings.reserve(mapping.geometries.inputs.len());
 
         let mut geom_sem_index = 0usize;
         for geom in &mapping.geometries.inputs {
@@ -4888,62 +4863,11 @@ impl CxOsDrawShader {
             geom_sem_index += 1;
         }
 
-        // A record read by instance id has no input elements. The emitter
-        // addresses its fields as f32 lanes back to back; a layout that is
-        // not that would read the wrong words.
+        // Instance records have no input elements: the vertex shader reads
+        // them by instance id from the instance buffer at the word offsets
+        // of `ShaderOutput::instance_record`, the layout the draw list
+        // writes (`DrawShaderInputs`).
         let instance_buffer_slot = makepad_script::shader_hlsl::hlsl_instance_buffer_register(hlsl);
-        if instance_buffer_slot.is_some() {
-            let mut next = 0;
-            for inst in &mapping.instances.inputs {
-                if !inst.attr_format.is_f32_lane()
-                    || inst.offset != next
-                    || inst.byte_offset != next * 4
-                {
-                    crate::error!(
-                        "instance record read by instance id is not packed f32 lanes: {:?} at slot {} (expected {})",
-                        inst.id,
-                        inst.offset,
-                        next
-                    );
-                    return Err(D3dShaderError::Compile);
-                }
-                next += inst.slots;
-            }
-        }
-        let mut inst_sem_index = 0usize;
-        for inst in mapping
-            .instances
-            .inputs
-            .iter()
-            .filter(|_| instance_buffer_slot.is_none())
-        {
-            strings.push(format!("INST{}\0", index_to_semantic(inst_sem_index)));
-            let semantic_name = PCSTR(strings.last().unwrap().as_ptr());
-            let mut slot_offset = 0usize;
-            for (semantic_chunk_index, chunk_slots) in
-                slot_chunks(inst.slots).into_iter().enumerate()
-            {
-                layout_desc.push(D3D11_INPUT_ELEMENT_DESC {
-                    SemanticName: semantic_name,
-                    SemanticIndex: semantic_chunk_index as u32,
-                    Format: slots_to_dxgi_format(chunk_slots, inst.attr_format),
-                    InputSlot: 1,
-                    AlignedByteOffset: (inst.byte_offset + slot_offset * 4) as u32,
-                    InputSlotClass: D3D11_INPUT_PER_INSTANCE_DATA,
-                    InstanceDataStepRate: 1,
-                });
-                layout_debug.push(format!(
-                    "{}{} slot={} slots={} byte_off={}",
-                    strings.last().unwrap().trim_end_matches('\0'),
-                    semantic_chunk_index,
-                    1,
-                    chunk_slots,
-                    (inst.offset + slot_offset) * 4
-                ));
-                slot_offset += chunk_slots;
-            }
-            inst_sem_index += 1;
-        }
 
         if mapping.flags.debug_layout {
             crate::log!(
