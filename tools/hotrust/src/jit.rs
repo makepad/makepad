@@ -80,7 +80,8 @@ pub struct Site {
     pub msg: String,
 }
 
-const TABLE_CAP: usize = 1 << 16;
+/// function slots (instances incl. generics and closures; virtual memory only)
+const TABLE_CAP: usize = 1 << 18;
 #[cfg(not(target_arch = "aarch64"))]
 const THUNK_SIZE: usize = 16;
 #[cfg(not(target_arch = "aarch64"))]
@@ -880,15 +881,15 @@ fn panic_tramp(target: u64) -> Vec<u8> {
 
 impl Unit {
     pub fn new(prog: Program, tcx: Tcx, core_crate: u32) -> Box<Unit> {
-        let exec_size: u64 = 256 << 20;
+        let exec_size: u64 = 1 << 30;
         let exec_base = os_alloc(exec_size as usize, PROT_RWX);
         let table_base = os_alloc(TABLE_CAP * 8, PROT_RW);
         let thunk_base = exec_base;
         let stub_base = thunk_base + (TABLE_CAP * THUNK_SIZE) as u64;
         let misc = stub_base + (TABLE_CAP * STUB_SIZE) as u64;
-        let data_size: u64 = 256 << 20;
+        let data_size: u64 = 1 << 30;
         let data_base = os_alloc(data_size as usize, PROT_RW);
-        let rw_size: u64 = 64 << 20;
+        let rw_size: u64 = 256 << 20;
         let rw_base = os_alloc(rw_size as usize, PROT_RW);
         let mut u = Box::new(Unit {
             prog,
