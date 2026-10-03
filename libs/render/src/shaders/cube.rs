@@ -264,7 +264,7 @@ script_mod! {
             let gi=self.gi_ambient(self.v_dl_pos,self.v_dl_nrm,ambient)-ambient
             let c = self.lit_color.xyz + self.v_albedo*gi + self.v_direct * self.sun_filled(sun_vis, local)
                 + self.v_albedo * local
-            let fogged = mix(c, self.fog_color, self.scene_fog(self.v_fog, self.v_dl_pos, self.fog_density))
+            let fogged = self.scene_fogged(c, self.v_fog, self.v_dl_pos, self.fog_density)
             return self.csm_debug_view(self.gi_display(vec4(fogged, self.lit_color.w),self.v_dl_pos,self.v_dl_nrm),self.v_dl_pos,self.v_dl_nrm)
         }
     }

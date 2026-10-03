@@ -6,7 +6,7 @@ use super::*;
 /// Preetham luminance at the legacy 0.1 exposure sits near a sunlit white
 /// wall; a clear sky is a few times dimmer than that, and keeping it there
 /// is what keeps its blue through the tone map.
-const HDR_SKY_GAIN: f32 = 0.4;
+pub(super) const HDR_SKY_GAIN: f32 = 0.4;
 /// HDR lane height fog: the base height the game's fog density applies at,
 /// and the scale height it thins over (e^-1 every this many metres up).
 const HDR_FOG_BASE: f32 = 0.0;
@@ -350,6 +350,27 @@ impl Renderer {
             (true, makepad_scene::Fog::Linear { start, end, .. }) if world.environment.validate().is_ok() => [*start, *end, 1.0, 1.0],
             (true, makepad_scene::Fog::Exp2 { .. }) if world.environment.validate().is_ok() => [0.0, 0.0, 2.0, 1.0],
             (true, _) => [HDR_FOG_BASE, 1.0 / HDR_FOG_SCALE_HEIGHT, 0.0, 1.0],
+        };
+        // Under water: every shader already fogs, so the whole view turns
+        // into the water's colour by swapping the fog for the water's own
+        // (exp2, as far as the water is clear) — no extra pass.
+        let underwater = world.water.as_deref()
+            .filter(|_| shows_environment)
+            .and_then(|w| super::water::eye_under_water(w, camera_pos, world.water_time));
+        let (fog_color, fog_density) = match underwater {
+            Some(v) => {
+                let c = super::water::in_scatter(&v.look, &sun);
+                if self.hdr_output {
+                    self.clustered.fog_ctl = [0.0, 0.0, 2.0, 1.0];
+                }
+                (c, 0.6 / v.look.clarity.max(0.5))
+            }
+            None => (fog_color, fog_density),
+        };
+        self.clustered.uw = if shows_environment {
+            super::water::water_column(world.water.as_deref(), camera_pos, world.water_time, &sun)
+        } else {
+            [[0.0; 4]; 3]
         };
         self.clustered.fog_eye = [camera_pos.x, camera_pos.y, camera_pos.z, 0.0];
         apply_sun(cx.cx, draws, &sun, fog_color);
@@ -1393,7 +1414,7 @@ impl Renderer {
         // when a host lends no models_draw: the sky lane owns its shader.
         self.draw_sky_faces(cx, camera_pos, frustum, &mut stats);
 
-        self.draw_water(cx, draws, world, &sun, (fog_color, fog_density), frustum, shows_environment, camera_pos);
+        self.draw_water(cx, draws, world, &sun, sky_frame.as_ref(), (fog_color, fog_density), frustum, shows_environment, camera_pos);
 
         // 4. Alpha pass, one batch per shape: static sensors from the slab,
         // then blob shadows (box batch) and dynamic sensors — drawn after all

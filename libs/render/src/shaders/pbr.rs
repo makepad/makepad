@@ -460,7 +460,7 @@ script_mod! {
             }
             let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf_w,step(1.5,self.alpha_mode))))
             let coverage=fin.w
-            return self.csm_debug_view(self.gi_display(vec4(mix(fin.xyz, self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
+            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(fin.xyz, self.v_fog, self.v_csm.xyz, self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
         }
 
         // shade for a program whose composition reads no light (Unlit,
@@ -495,7 +495,7 @@ script_mod! {
             let lit = self.fur_shade(self.mat_compose(albedo, 0.0, none, none, none, none, none, none, n, l, v, none, none, 0.0), n, self.eye.xyz-self.v_csm.xyz) + emission
             let fin=self.mat_finish(vec4(self.to_display(lit),mix(1.0,surf_w,step(1.5,self.alpha_mode))))
             let coverage=fin.w
-            return self.csm_debug_view(self.gi_display(vec4(mix(fin.xyz, self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density))*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
+            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(fin.xyz, self.v_fog, self.v_csm.xyz, self.fog_density)*coverage,coverage),self.v_csm.xyz,n),self.v_csm.xyz,n)
         }
 
         // Re-declared rather than inherited so the depth-clip wrapper is

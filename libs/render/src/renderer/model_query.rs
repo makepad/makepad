@@ -193,6 +193,16 @@ impl Renderer {
             .map(|p| p.def.as_ref())
     }
 
+    /// A loaded level's liquid surfaces (water, slime, lava), which the
+    /// model does not draw: the host gives them to the water renderer.
+    pub fn model_liquids(&self, id: &str) -> Vec<crate::model::LiquidSurface> {
+        self.static_models
+            .iter()
+            .find(|(k, _)| k == id)
+            .map(|(_, m)| m.liquids.as_ref().clone())
+            .unwrap_or_default()
+    }
+
     /// Every part name a loaded model exposes, in file order.
     pub fn model_anim_part_names(&self, id: &str) -> Vec<String> {
         self.static_models

@@ -49,7 +49,7 @@ script_mod! {
             let ambient = mix(self.sun_ground, self.sun_sky, clamp(n.y * 0.5 + 0.5, 0.0, 1.0)) * (ao * sao)
             let lit = albedo * (ambient + self.sun_color * ((wrap + through) * vis * mix(1.0, ao, 0.5)))
                 + self.to_scene(self.emissive_map.sample_repeat(self.v_uv).xyz) * self.emissive
-            return self.csm_debug_view(vec4(mix(self.to_display(lit), self.fog_color, self.scene_fog(self.v_fog, wp, self.fog_density)), 1.0), wp, n)
+            return self.csm_debug_view(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, wp, self.fog_density), 1.0), wp, n)
         }
 
         fragment: fn() {

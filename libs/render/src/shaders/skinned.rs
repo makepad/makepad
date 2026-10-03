@@ -715,7 +715,7 @@ script_mod! {
                     1.0
                 )
             }
-            return self.csm_debug_view(self.gi_display(vec4(mix(self.to_display(lit), self.fog_color, self.scene_fog(self.v_fog, self.v_csm.xyz, self.fog_density)), 1.0),self.v_csm.xyz,self.v_csm_n),self.v_csm.xyz,self.v_csm_n)
+            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, self.v_csm.xyz, self.fog_density), 1.0),self.v_csm.xyz,self.v_csm_n),self.v_csm.xyz,self.v_csm_n)
         }
 
         fragment: fn() {

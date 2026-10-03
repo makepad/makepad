@@ -305,7 +305,7 @@ script_mod! {
                     lit = lit + glow * min(1.0, cap / max(glow.x, 0.0001))
                 }
             }
-            return self.csm_debug_view(self.gi_display(vec4(mix(self.to_display(lit), self.fog_color, self.scene_fog(self.v_fog, pos, self.fog_density)), 1.0), pos, n), pos, n)
+            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, pos, self.fog_density), 1.0), pos, n), pos, n)
         }
 
         fragment: fn() {

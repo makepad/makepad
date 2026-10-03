@@ -1,4 +1,4 @@
-//! Frame helpers: light selection, frustum/chunk culling, terrain/water tiles, sun and sky uniforms.
+//! Frame helpers: light selection, frustum/chunk culling, terrain tiles, sun and sky uniforms.
 
 use super::*;
 
@@ -480,110 +480,6 @@ pub(super) struct VoxelTile {
     pub(super) max: Vec3f,
     pub(super) geometry: Geometry,
     pub(super) shadow_geometry: Option<Geometry>,
-}
-
-/// One `game.water` volume's flat sheet grid plus its packed wave uniforms.
-/// The grid is built at the STILL level; every displacement happens in the
-/// vertex shader, so the bounds carry the amplitude headroom for culling.
-pub(super) struct WaterTile {
-    pub(super) min: Vec3f,
-    pub(super) max: Vec3f,
-    pub(super) geometry: Geometry,
-    pub(super) waves_a: [[f32; 4]; MAX_WAVES],
-    pub(super) waves_b: [[f32; 4]; MAX_WAVES],
-    /// Grid spacing of the sheet (metres): waves shorter than a few cells
-    /// cannot be displaced per vertex without aliasing into stripes.
-    pub(super) cell: f32,
-}
-
-/// Pack a volume's wave list into the shader's uniform slots — the RAW
-/// WaterWave fields, bit-for-bit, no unit conversion: this function being
-/// trivial IS the CPU/GPU agreement story (the pin test below holds the
-/// shader to the same expression over these same numbers). Unused slots are
-/// zero; a zero amplitude contributes nothing in the shader.
-pub fn pack_wave_uniforms(
-    volume: &WaterSurface,
-) -> ([[f32; 4]; MAX_WAVES], [[f32; 4]; MAX_WAVES]) {
-    let mut a = [[0.0f32; 4]; MAX_WAVES];
-    let mut b = [[0.0f32; 4]; MAX_WAVES];
-    for (i, w) in volume.waves.iter().take(MAX_WAVES).enumerate() {
-        a[i] = [w.dir_x, w.dir_z, w.k, w.omega];
-        b[i] = [w.amp, w.phase, w.group, 0.0];
-    }
-    (a, b)
-}
-
-/// Build one volume's sheet grid (PbrVertex layout, indexed). Resolution
-/// follows the shortest wavelength — eight cells per wave is enough for the
-/// crest to read as a curve — clamped so a huge bay stays a few thousand
-/// triangles.
-/// The sheet's grid: cells along x and z. A cell is an eighth of the
-/// shortest wavelength (0.5..16 m), and at most 128 per side.
-fn water_sheet_grid(volume: &WaterSurface) -> (usize, usize) {
-    let span_x = (volume.max.x - volume.min.x).max(0.01);
-    let span_z = (volume.max.z - volume.min.z).max(0.01);
-    let shortest = volume
-        .waves
-        .iter()
-        .map(|w| std::f32::consts::TAU / w.k.max(1.0e-3))
-        .fold(f32::MAX, f32::min);
-    let target = if shortest == f32::MAX {
-        // Still water: a coarse sheet is enough.
-        span_x.max(span_z) / 8.0
-    } else {
-        shortest / 8.0
-    }
-    .clamp(0.5, 16.0);
-    let nx = ((span_x / target).ceil() as usize).clamp(1, 128);
-    let nz = ((span_z / target).ceil() as usize).clamp(1, 128);
-    (nx, nz)
-}
-
-/// The sheet's grid spacing in metres (the longer cell side). On a sea many
-/// kilometres wide it is far longer than the waves.
-pub(super) fn water_sheet_cell(volume: &WaterSurface) -> f32 {
-    let (nx, nz) = water_sheet_grid(volume);
-    let span_x = (volume.max.x - volume.min.x).max(0.01);
-    let span_z = (volume.max.z - volume.min.z).max(0.01);
-    (span_x / nx as f32).max(span_z / nz as f32)
-}
-
-pub(super) fn water_sheet_data(volume: &WaterSurface) -> (Vec<f32>, Vec<u32>, Vec3f, Vec3f) {
-    let span_x = (volume.max.x - volume.min.x).max(0.01);
-    let span_z = (volume.max.z - volume.min.z).max(0.01);
-    let (nx, nz) = water_sheet_grid(volume);
-    let level = volume.level();
-    let color = volume.color;
-    let mut vertices: Vec<f32> = Vec::with_capacity((nx + 1) * (nz + 1) * 16);
-    for gz in 0..=nz {
-        for gx in 0..=nx {
-            let x = volume.min.x + span_x * (gx as f32 / nx as f32);
-            let z = volume.min.z + span_z * (gz as f32 / nz as f32);
-            // PbrVertex: pos_nx, ny_nz_uv, color, tangent — 16 floats. The
-            // normal here is a placeholder; the vertex shader replaces it
-            // with the analytic wave normal.
-            vertices.extend_from_slice(&[
-                x, level, z, 0.0, 1.0, 0.0, 0.0, 0.0, color.x, color.y, color.z, color.w,
-                1.0, 0.0, 0.0, 1.0,
-            ]);
-        }
-    }
-    let stride = (nx + 1) as u32;
-    let mut indices: Vec<u32> = Vec::with_capacity(nx * nz * 6);
-    for gz in 0..nz as u32 {
-        for gx in 0..nx as u32 {
-            let a = gz * stride + gx;
-            let b = a + 1;
-            let c = a + stride;
-            let d = c + 1;
-            // Same diagonal split as the terrain, CCW seen from +y.
-            indices.extend_from_slice(&[a, c, b, b, c, d]);
-        }
-    }
-    let headroom = volume.amp_sum() + 0.5;
-    let min = vec3f(volume.min.x, level - headroom, volume.min.z);
-    let max = vec3f(volume.max.x, level + headroom, volume.max.z);
-    (vertices, indices, min, max)
 }
 
 /// Emit terrain triangles for grid cells [gx0..gx1) x [gz0..gz1) — exactly

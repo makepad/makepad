@@ -121,7 +121,7 @@ script_mod! {
             let back = max(dot(v * (0.0 - 1.0), l), 0.0)
             let through = back * back * back * 0.45 * self.v_tint.w
             let lit = albedo * (ambient + self.sun_color * ((ndl * 0.85 + 0.15) * vis + through * vis))
-            return self.csm_debug_view(self.gi_display(vec4(mix(self.to_display(lit), self.fog_color, self.scene_fog(self.v_fog, wp, self.fog_density)), 1.0), wp, n), wp, n)
+            return self.csm_debug_view(self.gi_display(vec4(self.scene_fogged(self.to_display(lit), self.v_fog, wp, self.fog_density), 1.0), wp, n), wp, n)
         }
 
         fragment: fn() {

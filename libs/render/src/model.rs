@@ -78,10 +78,51 @@ pub struct StaticModel {
     /// direction-mapped. `None` for anything with no `extras.kind == "sky"`
     /// node — again, every model that existed before this lane.
     pub sky: Option<SkyPart>,
+    /// The map's liquid surfaces (water, slime, lava), drawn by the water
+    /// renderer instead of the model shader. Their triangles stay in the
+    /// static stream (collision and every triangle count a level walk
+    /// checks still see them; a nukage floor is still a floor) and are
+    /// copied here; the DRAWN stream leaves them out (`liquid_ranges`, and
+    /// split layers skip their spans). Empty for anything without an
+    /// `extras.liquid` node.
+    pub liquids: Vec<LiquidSurface>,
+    /// Index ranges of `indices` that are liquid triangles (not drawn).
+    pub liquid_ranges: Vec<(usize, usize)>,
     /// The metallic-roughness half of the material the merged single-layer
     /// stream draws with — the counterpart of `texture_png`, read from the
     /// same primitive. Split models carry theirs per [`StaticDrawLayer`].
     pub pbr: PbrMaterial,
+}
+
+/// One liquid node of a level (`extras.liquid: true`): its name (the
+/// source flat/texture, which says water, slime or lava), the damage it
+/// declares, and its triangles in model space.
+#[derive(Clone, Debug, Default)]
+pub struct LiquidSurface {
+    pub name: String,
+    pub damage: f32,
+    pub positions: Vec<[f32; 3]>,
+    pub indices: Vec<u32>,
+    pub min: Vec3f,
+    pub max: Vec3f,
+}
+
+/// A node's liquid declaration: (name, damage) when `extras.liquid` is true.
+fn liquid_of(node: &Val) -> Option<(String, f32)> {
+    let extras = node.get("extras")?;
+    let liquid = matches!(extras.get("liquid"), Some(Val::Bool(true)))
+        || extras.get("liquid").and_then(Val::f64).unwrap_or(0.0) > 0.0;
+    if !liquid {
+        return None;
+    }
+    let name = extras
+        .get("flat")
+        .and_then(Val::str)
+        .or_else(|| node.get("name").and_then(Val::str))
+        .unwrap_or("water")
+        .to_string();
+    let damage = extras.get("damage").and_then(Val::f64).unwrap_or(0.0) as f32;
+    Some((name, damage))
 }
 
 /// One textured subset of a [`StaticModel`]. Positions live in the packed
@@ -1125,6 +1166,9 @@ impl StaticModel {
             Vec::new()
         };
 
+        // Liquid nodes: their primitives' triangle spans, by surface.
+        let liquid_nodes: Vec<Option<(String, f32)>> = node_vals.iter().map(liquid_of).collect();
+        let mut liquid_spans: Vec<(usize, usize, usize)> = Vec::new();
         let mut vertices: Vec<f32> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
         let mut min = Vec3f {
@@ -1333,6 +1377,9 @@ impl StaticModel {
                     indices.extend((0..count as u32).map(|i| base + i));
                 }
                 vert_total += count;
+                if count > 0 && liquid_nodes[node_index].is_some() {
+                    liquid_spans.push((node_index, prim_i0, indices.len()));
+                }
                 if count > 0 {
                     parts.push((pmin, pmax));
                     prim_spans.push(PrimSpan {
@@ -1347,6 +1394,7 @@ impl StaticModel {
                         v1: vert_total,
                         i0: prim_i0,
                         i1: indices.len(),
+                        liquid: false,
                     });
                 }
             }
@@ -1523,6 +1571,39 @@ impl StaticModel {
             .unwrap_or_else(|| gltf_used_material_image(&json));
         let texture_png = gltf_embedded_png(&json, bin_chunk, image_index);
 
+        // Liquids are drawn by the water renderer; one surface per liquid
+        // node, the triangles copied (the stream keeps them for collision).
+        let mut liquids: Vec<LiquidSurface> = Vec::new();
+        let mut liquid_of_node: BTreeMap<usize, usize> = BTreeMap::new();
+        for &(node_index, i0, i1) in &liquid_spans {
+            let Some((name, damage)) = liquid_nodes[node_index].clone() else { continue };
+            let at = *liquid_of_node.entry(node_index).or_insert_with(|| {
+                liquids.push(LiquidSurface {
+                    name,
+                    damage,
+                    min: Vec3f { x: f32::MAX, y: f32::MAX, z: f32::MAX },
+                    max: Vec3f { x: f32::MIN, y: f32::MIN, z: f32::MIN },
+                    ..Default::default()
+                });
+                liquids.len() - 1
+            });
+            let surface = &mut liquids[at];
+            for tri in indices[i0..i1].chunks_exact(3) {
+                for &v in tri.iter() {
+                    let o = v as usize * MODEL_VERTEX_FLOATS;
+                    let q = [vertices[o], vertices[o + 1], vertices[o + 2]];
+                    surface.min = Vec3f { x: surface.min.x.min(q[0]), y: surface.min.y.min(q[1]), z: surface.min.z.min(q[2]) };
+                    surface.max = Vec3f { x: surface.max.x.max(q[0]), y: surface.max.y.max(q[1]), z: surface.max.z.max(q[2]) };
+                    surface.indices.push(surface.positions.len() as u32);
+                    surface.positions.push(q);
+                }
+            }
+        }
+        let liquid_ranges: Vec<(usize, usize)> = liquid_spans.iter().map(|(_, i0, i1)| (*i0, *i1)).collect();
+        for span in prim_spans.iter_mut() {
+            span.liquid = liquid_ranges.contains(&(span.i0, span.i1));
+        }
+
         // Split by embedded image so a world GLB (one PNG per tile) draws
         // every surface instead of smearing image 0. AO bake un-indexes the
         // whole mesh into one atlas, so that path stays a single layer.
@@ -1551,6 +1632,8 @@ impl StaticModel {
             anim_parts,
             driven_parts,
             sky,
+            liquids,
+            liquid_ranges,
             pbr,
         })
     }
@@ -1572,6 +1655,8 @@ struct PrimSpan {
     v1: usize,
     i0: usize,
     i1: usize,
+    /// A liquid node's primitive: drawn by the water renderer, not here.
+    liquid: bool,
 }
 
 pub(crate) fn gltf_material_is_surface(json:&Val,index:usize)->bool {
@@ -2278,6 +2363,7 @@ fn pack_node_stream(
                 v1: out.vert_total,
                 i0: prim_i0,
                 i1: out.indices.len(),
+                liquid: false,
             });
         }
     }
@@ -2758,8 +2844,9 @@ fn split_draw_layers(
     };
     let mut by_img: BTreeMap<LayerKey, (Vec<f32>, Vec<u32>, Vec<[f32; 2]>, PrimSpan)> =
         BTreeMap::new();
+    let has_liquid = prim_spans.iter().any(|s| s.liquid);
     for span in prim_spans {
-        if span.v1 <= span.v0 || span.i1 <= span.i0 {
+        if span.v1 <= span.v0 || span.i1 <= span.i0 || span.liquid {
             continue;
         }
         let v_end = (span.v1 * MODEL_VERTEX_FLOATS).min(vertices.len());
@@ -2779,7 +2866,9 @@ fn split_draw_layers(
             dest.1.push(idx - span.v0 as u32 + base);
         }
     }
-    if by_img.len() <= 1 {
+    // One layer draws as the merged stream — unless liquids must be left
+    // out of it, which only the split layers do.
+    if by_img.len() <= 1 && !has_liquid {
         return Vec::new();
     }
     let mut layers = Vec::with_capacity(by_img.len());
@@ -3167,6 +3256,8 @@ impl StaticModel {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             pbr: PbrMaterial::default(),
         })
     }
@@ -3181,6 +3272,8 @@ mod sidecar_tests {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             vertices: (0..MODEL_VERTEX_FLOATS as u32 * 3).map(|i| i as f32 * 0.25).collect(),
             indices: vec![0, 1, 2],
             texture_uri: Some("Textures/colormap.png".into()),
@@ -4091,6 +4184,8 @@ pub(crate) mod tests {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             vertices: Vec::new(),
             indices: Vec::new(),
             texture_uri: None,
@@ -4129,6 +4224,8 @@ pub(crate) mod tests {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             vertices: Vec::new(),
             indices: Vec::new(),
             texture_uri: None,
@@ -4169,6 +4266,8 @@ pub(crate) mod tests {
             anim_parts: Vec::new(),
             driven_parts: Vec::new(),
             sky: None,
+            liquids: Vec::new(),
+            liquid_ranges: Vec::new(),
             vertices: Vec::new(),
             indices: Vec::new(),
             texture_uri: None,

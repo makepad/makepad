@@ -341,7 +341,7 @@ pub fn pack_scene(scene: &Scene, ao: Option<&[f32]>) -> StaticModel {
         prelit: false,
         anim_parts: Vec::new(),
         driven_parts: Vec::new(),
-        sky: None,
+        sky: None, liquids: Vec::new(), liquid_ranges: Vec::new(),
         pbr: model_pbr,
     }
 }

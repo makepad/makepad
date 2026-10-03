@@ -121,7 +121,7 @@ fn prepared_from_stream(mut mesh: StreamMesh, merge: bool) -> Result<(PreparedSt
         // the layers.
         mesh_indices: std::sync::Arc::new(vec![0; triangles * 3]),
         authored_collisions: Default::default(), collider_parts: Default::default(), occluder_parts: Default::default(),
-        anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None, min: mesh.min, max: mesh.max, prelit: false,
+        anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None, liquids: Default::default(), min: mesh.min, max: mesh.max, prelit: false,
     }, casts, scene, merged_bytes))
 }
 

@@ -10,7 +10,7 @@ fn triangle() -> StaticModel {
         min: vec3f(0.0, 0.0, 0.0), max: vec3f(1.0, 0.0, 1.0),
         parts: vec![(vec3f(0.0, 0.0, 0.0), vec3f(1.0, 0.0, 1.0))],
         ground_ao: None, draw_layers: Vec::new(), detail_png: None, detail_scale: [1.0, 1.0],
-        prelit: false, anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None,
+        prelit: false, anim_parts: Vec::new(), driven_parts: Vec::new(), sky: None, liquids: Vec::new(), liquid_ranges: Vec::new(),
         pbr: Default::default(),
     }
 }
