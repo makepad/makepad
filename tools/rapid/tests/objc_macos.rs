@@ -140,11 +140,11 @@ fn foundation_and_coregraphics() {
         let ns_value = objc_getClass(cstr("NSValue\0"));
         let v = send_value_with_rect(ns_value, sel_registerName(cstr("valueWithRect:\0")), r);
         p(send_rect(v, sel_registerName(cstr("rectValue\0"))));
-        let s = send_str(objc_getClass(cstr("NSString\0")), sel_registerName(cstr("stringWithUTF8String:\0")), cstr("Rapid\u{e9}\0"));
+        let s = send_str(objc_getClass(cstr("NSString\0")), sel_registerName(cstr("stringWithUTF8String:\0")), cstr("Kernel\u{e9}\0"));
         let len = send_u64(s, sel_registerName(cstr("length\0")));
-        let c = send_char_at(s, sel_registerName(cstr("characterAtIndex:\0")), 7);
-        let sub = send_substr(s, sel_registerName(cstr("substringWithRange:\0")), Range { location: 3, length: 4 });
-        println!("nsstring len {} char7 {} sub len {}", len, c, send_u64(sub, sel_registerName(cstr("length\0"))));
+        let c = send_char_at(s, sel_registerName(cstr("characterAtIndex:\0")), 6);
+        let sub = send_substr(s, sel_registerName(cstr("substringWithRange:\0")), Range { location: 2, length: 4 });
+        println!("nsstring len {} char6 {} sub len {}", len, c, send_u64(sub, sel_registerName(cstr("length\0"))));
         p(CGRectInset(r, 5.0, 7.5));
         p(CGRectIntersection(r, Rect { origin: Point { x: 100.0, y: 0.0 }, size: Point { x: 400.0, y: 50.0 } }));
         println!("contains {} {}", CGRectContainsPoint(r, Point { x: 11.0, y: 21.0 }), CGRectContainsPoint(r, Point { x: 9.0, y: 21.0 }));
