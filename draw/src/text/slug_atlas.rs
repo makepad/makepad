@@ -71,7 +71,7 @@ pub struct SlugAtlas {
 
 impl SlugAtlas {
     pub fn new(cx: &mut Cx) -> Self {
-        Self {
+        let atlas = Self {
             curve_data: Vec::new(),
             band_data: Vec::new(),
             curve_texture: Texture::new_with_format(
@@ -101,7 +101,11 @@ impl SlugAtlas {
             cached_glyphs: FxHashMap::default(),
             missing_glyphs: FxHashSet::default(),
             needs_reset: false,
-        }
+        };
+        // Both grow by appended rows and are addressed by absolute texel.
+        atlas.curve_texture.set_append_rows(cx, true);
+        atlas.band_texture.set_append_rows(cx, true);
+        atlas
     }
 
     /// If a reset was requested (the curve buffer exceeded its cap), clear all cached glyph
@@ -250,8 +254,9 @@ impl SlugAtlas {
         // so a height GROWTH leaves all existing rows in place and only the appended rows are
         // dirty. Backends that must physically reallocate on a height change (GL `glTexImage2D`,
         // Metal `replaceRegion`) re-upload everything regardless of the `Partial` flag; the D3D11
-        // backend keeps spare height capacity and honors `Partial`, uploading only the new rows
-        // via `UpdateSubresource` instead of recreating the (up to ~16 MB) texture every frame.
+        // and desktop GL backends keep spare height capacity for these textures (`append_rows`)
+        // and honor `Partial`, uploading only the new rows instead of recreating the (up to
+        // ~16 MB) texture every frame.
         let width_changed = *width != new_width;
         let mut texture_data = data.take().unwrap_or_default();
         let had_texture_data = !texture_data.is_empty();

@@ -3313,7 +3313,10 @@ impl CxTexture {
             let can_reuse = self.os.texture.is_some()
                 && self.os.vec_alloc_width == width
                 && self.os.vec_alloc_dxgi == dxgi_format.0
-                && self.os.vec_alloc_height >= height
+                // Only an append-rows texture keeps spare rows; every other
+                // texture stays exactly its size, so size() is what was uploaded.
+                && (self.os.vec_alloc_height == height
+                    || (self.append_rows && self.os.vec_alloc_height > height))
                 && safe_to_reuse;
 
             if can_reuse {
@@ -3345,10 +3348,11 @@ impl CxTexture {
                 return;
             }
 
-            // (Re)allocate. For the append-only glyph atlases (RGBAf32), add ~1.5x height headroom
-            // (rounded up) so subsequent growth reuses the texture instead of recreating it. Other
-            // formats (images/data) are sampled by normalized UV, so they MUST be exact-sized.
-            let cap_height = if matches!(dxgi_format, DXGI_FORMAT_R32G32B32A32_FLOAT) {
+            // (Re)allocate. An append-rows texture (the SLUG glyph atlas) gets height headroom so
+            // subsequent growth reuses the texture instead of recreating it. Every other texture
+            // (images, data textures, other RGBA f32 tables) is sampled by normalized UV or by
+            // size(), so it MUST be exact-sized.
+            let cap_height = if self.append_rows {
                 // Generous headroom for the append-only glyph atlas: 3x the needed height with a
                 // sizable minimum, rounded up. This makes the texture large enough to hold a
                 // typical room's full glyph set after the first allocation, so growth-driven
