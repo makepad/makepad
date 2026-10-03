@@ -1,0 +1,3 @@
+# Rapid-only items in shared std files are gated #[cfg(not(rapid_check))].
+[build]
+rustflags = ["--cfg", "rapid_check"]

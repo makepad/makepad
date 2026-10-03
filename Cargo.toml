@@ -206,7 +206,7 @@ workspace.members = [
     "tools/service_host",
     "tools/agents",
     "tools/ci",
-    "tools/hotrust",
+    "tools/rapid",
     "libs/system_speech",
     # Send feedback: caption icon + panel (Amp, Scope)
     "widgets/feedback",

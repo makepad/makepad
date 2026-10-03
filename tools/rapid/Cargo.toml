@@ -1,0 +1,13 @@
+[package]
+name = "makepad-rapid"
+version = "0.1.0"
+edition = "2021"
+description = "Rapid: makepad's live compiler and runtime for a strict, safe Rust dialect"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[[bin]]
+name = "rapid"
+path = "src/main.rs"
+
+[dependencies]

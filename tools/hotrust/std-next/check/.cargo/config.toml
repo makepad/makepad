@@ -1,3 +1,0 @@
-# HotRust-only items in shared std files are gated #[cfg(not(hotrust_check))].
-[build]
-rustflags = ["--cfg", "hotrust_check"]

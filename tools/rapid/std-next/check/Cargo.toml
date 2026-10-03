@@ -1,0 +1,24 @@
+# rustc-side half of Rapid's std tests: builds the std's implementation modules against real
+# std (lang items, Option, Box, closures stay real) so their behaviour is checked differentially
+# before Rapid can compile them. Not a workspace member.
+[package]
+name = "rapid-std-check"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[[bin]]
+name = "rapid-std-gen"
+path = "src/gen.rs"
+
+[workspace]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(rapid_check)'] }
+
+[profile.release]
+debug = false
