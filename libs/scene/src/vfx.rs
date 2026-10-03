@@ -284,11 +284,15 @@ pub enum VfxDecalKind {
     Crack,
     Energy,
     Wet,
+    /// A shoe pressed into soft ground (sand, snow): toe along `dir`.
+    Footprint,
+    /// A tyre's rut through soft ground, chained like a skid.
+    Track,
 }
 
 impl VfxDecalKind {
     pub const NAMES: &'static [&'static str] =
-        &["bullet", "scorch", "blood", "dirt", "skid", "crack", "energy", "wet"];
+        &["bullet", "scorch", "blood", "dirt", "skid", "crack", "energy", "wet", "footprint", "track"];
 
     pub fn parse(name: &str) -> Option<Self> {
         Some(match name {
@@ -300,6 +304,8 @@ impl VfxDecalKind {
             "crack" => Self::Crack,
             "energy" | "plasma" => Self::Energy,
             "wet" | "water" => Self::Wet,
+            "footprint" | "foot" | "print" => Self::Footprint,
+            "track" | "rut" | "tyre_track" | "tire_track" => Self::Track,
             _ => return None,
         })
     }
@@ -319,6 +325,8 @@ impl VfxDecalKind {
             Self::Crack => (0.5, 40.0),
             Self::Energy => (0.18, 20.0),
             Self::Wet => (0.8, 12.0),
+            Self::Footprint => (0.3, 30.0),
+            Self::Track => (0.24, 30.0),
         }
     }
 }

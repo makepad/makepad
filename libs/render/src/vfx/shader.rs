@@ -371,6 +371,8 @@ script_mod! {
         depth_write: false
         // Ambient + sun reaching a surface, in the lane's units.
         decal_light: uniform(vec3(1.0, 1.0, 1.0))
+        // Toward the sun (unit), for marks pressed into the ground.
+        decal_sun: uniform(vec3(0.3, 0.8, 0.2))
         lin_ctl: uniform(vec4(0.0, 1.0, 1.0, 1.0))
 
         vertex: fn() {
@@ -397,6 +399,29 @@ script_mod! {
             let c = self.hash2(i + vec2(0.0, 1.0))
             let e = self.hash2(i + vec2(1.0, 1.0))
             return mix(mix(a, b, u.x), mix(c, e, u.x), u.y)
+        }
+        // Pressed marks as height fields over the decal's square (-1..1,
+        // x along the toe / travel), < 0 pressed in, > 0 the pushed-up rim.
+        print_h: fn(q: vec2) -> float {
+            let sole = length(vec2((q.x - 0.22) / 0.58, q.y / 0.34))
+            let heel = length(vec2((q.x + 0.58) / 0.3, q.y / 0.28))
+            let d = min(sole, heel)
+            let inside = 1.0 - smoothstep(0.55, 1.0, d)
+            let rim = smoothstep(0.8, 1.05, d) * (1.0 - smoothstep(1.05, 1.5, d))
+            return -inside * (1.0 + 0.14 * sin(q.x * 24.0)) + rim * 0.3
+        }
+        track_h: fn(q: vec2, len: float) -> float {
+            let ay = abs(q.y)
+            let inside = 1.0 - smoothstep(0.6, 0.78, ay)
+            let rim = smoothstep(0.7, 0.86, ay) * (1.0 - smoothstep(0.9, 1.0, ay))
+            let lugs = 0.22 * sin(q.x * len * 26.0 + ay * 5.0)
+            return -inside * (1.0 + lugs) + rim * 0.35
+        }
+        mark_h: fn(q: vec2, kind: float, len: float) -> float {
+            if kind < 8.5 {
+                return self.print_h(q)
+            }
+            return self.track_h(q, len)
         }
         fbm2: fn(q: vec2) -> float {
             return self.noise2(q) * 0.55 + self.noise2(q * 2.1 + vec2(5.2, 1.3)) * 0.3 + self.noise2(q * 4.3 + vec2(1.7, 9.2)) * 0.15
@@ -448,11 +473,42 @@ script_mod! {
                 let rim = smoothstep(0.28, 0.76, d)
                 rgb = mix(vec3(0.008, 0.008, 0.009), self.d_color.xyz * 0.48, rim)
                 a = (1.0 - smoothstep(0.68, 1.0, d)) * mix(0.94, 0.66, rim)
-            } else {
+            } else if kind < 7.5 {
                 // Wet patch: darkens whatever it lies on.
                 let r = d + (nz - 0.5) * 0.6
                 a = (1.0 - smoothstep(0.4, 1.0, r)) * 0.4
                 rgb = vec3(0.0, 0.0, 0.0)
+            } else {
+                // Footprint / tyre track: the ground pressed in. The height
+                // field's slope tilts the surface normal (a few cm deep), lit
+                // by the sun against the flat ground around it: the sun side
+                // of the dent falls into shade, the far wall and the rim
+                // catch light, and the packed floor is a little darker. The
+                // tint is the ground's own lit colour (sand, snow).
+                let half_len = max(self.d_pos.w, 0.001)
+                let half_w = max(self.d_normal.w, 0.001)
+                let e = 0.035
+                let h = self.mark_h(p, kind, half_len)
+                let gx = (self.mark_h(p + vec2(e, 0.0), kind, half_len) - self.mark_h(p - vec2(e, 0.0), kind, half_len)) / (2.0 * e * half_len)
+                let gy = (self.mark_h(p + vec2(0.0, e), kind, half_len) - self.mark_h(p - vec2(0.0, e), kind, half_len)) / (2.0 * e * half_w)
+                let depth = 0.03
+                let up = normalize(self.d_normal.xyz)
+                let along = normalize(self.d_dir.xyz)
+                let across = cross(up, along)
+                let n = normalize(up - along * (gx * depth) - across * (gy * depth))
+                let sun = normalize(self.decal_sun + vec3(0.0, 0.001, 0.0))
+                let flat = 0.45 + 0.55 * max(dot(up, sun), 0.0)
+                let shade = (0.45 + 0.55 * max(dot(n, sun), 0.0)) / flat * (1.0 - 0.3 * clamp(-h, 0.0, 1.0))
+                if shade < 1.0 {
+                    rgb = vec3(0.0, 0.0, 0.0)
+                    a = min((1.0 - shade) * 1.6, 0.85)
+                } else {
+                    rgb = vec3(1.0, 1.0, 1.0)
+                    a = min((shade - 1.0) * 1.2, 0.5)
+                }
+                // Feathered at the square's edge (a track's ends join the next link).
+                let edge = mix(max(abs(p.x), abs(p.y)), abs(p.y), step(8.5, kind))
+                a = a * (1.0 - smoothstep(0.92, 1.0, edge))
             }
             if kind < 5.5 || kind > 6.5 {
                 rgb = rgb * self.d_color.xyz

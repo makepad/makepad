@@ -90,6 +90,7 @@ impl Renderer {
         // albedo is lit by.
         let lit = light.sky + light.sun * (light.dir.y.max(0.0) * 0.8);
         d.draw_vars.set_uniform(cx.cx, live_id!(decal_light), &[lit.x, lit.y, lit.z]);
+        d.draw_vars.set_uniform(cx.cx, live_id!(decal_sun), &[light.dir.x, light.dir.y, light.dir.z]);
         d.draw_vars.set_uniform(cx.cx, live_id!(lin_ctl), &light.lin);
         for m in &self.vfx.decals {
             if let Some(f) = frustum {
