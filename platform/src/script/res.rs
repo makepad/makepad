@@ -816,7 +816,9 @@ fn normalize_manifest_relative_path(path: &Path) -> Option<String> {
 #[cfg(any(test, target_arch = "wasm32"))]
 fn normalize_manifest_join(manifest_path: &str, file_path: &str) -> Option<String> {
     let joined = Path::new(manifest_path).join(file_path);
-    normalize_path(&joined.to_string_lossy()).map(|path| path.to_string_lossy().into_owned())
+    // A Windows host's PathBuf joins with `\` again; the dependency paths
+    // compared against this are `/`-separated wherever it runs.
+    normalize_path(&joined.to_string_lossy()).map(|path| path.to_string_lossy().replace('\\', "/"))
 }
 
 #[cfg(any(test, target_arch = "wasm32"))]

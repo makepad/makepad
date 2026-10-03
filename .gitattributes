@@ -94,6 +94,8 @@ Cargo.lock text
 
 # Text files where line endings should be preserved
 *.patch    -text
+# Fixtures a test compares byte for byte (include_bytes!)
+platform/tests/fixtures/*.txt text eol=lf
 
 #
 # Exclude files from exporting

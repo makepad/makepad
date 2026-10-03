@@ -124,7 +124,12 @@ impl std::error::Error for ReadbackError {}
 pub(crate) enum ReadbackChannelOrder { Bgra, Rgba }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReadbackOrigin { TopLeft, BottomLeft }
+pub(crate) enum ReadbackOrigin {
+    /// Metal's raw window grab (`remote::deliver_grab_pixels`).
+    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
+    TopLeft,
+    BottomLeft,
+}
 
 /// The attachment's UNORM8 pixels as RGBA, rows top to bottom, packed
 /// (`width * 4` bytes a row) on every backend; the alpha convention is the
