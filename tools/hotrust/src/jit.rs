@@ -983,7 +983,14 @@ pub unsafe fn compile_fn(up: *mut Unit, id: u32) -> Result<(Vec<u8>, Vec<(u32, u
     build_rir(up, id)?;
     let u = &mut *up;
     let t0 = cpu_ns();
-    let func: &crate::rir::Func = u.fns[id as usize].rir.as_ref().unwrap();
+    let mut cg = (**u.fns[id as usize].rir.as_ref().unwrap()).clone();
+    if u.opt.fold {
+        crate::opt::addr_modes(&mut cg);
+    }
+    if u.opt.layout {
+        crate::opt::rotate_loops(&mut cg);
+    }
+    let func = &cg;
     let c = x64::compile(func, &u.env)?;
     if let Ok(want) = std::env::var("HOTRUST_DUMP") {
         if u.fns[id as usize].name.ends_with(&want) {
@@ -1123,6 +1130,9 @@ pub unsafe fn build_rir(up: *mut Unit, id: u32) -> Result<(), String> {
     if cfg.fold {
         crate::opt::simplify(&mut func, u.ro_range(), cfg.imm, cfg.cse);
         if cfg.sroa && crate::opt::sroa(&mut func) {
+            crate::opt::simplify(&mut func, u.ro_range(), cfg.imm, cfg.cse);
+        }
+        if cfg.licm && crate::opt::licm(&mut func) {
             crate::opt::simplify(&mut func, u.ro_range(), cfg.imm, cfg.cse);
         }
     }

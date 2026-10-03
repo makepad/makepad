@@ -623,6 +623,16 @@ impl<'a> Lcx<'a> {
         match ast.pat(p) {
             Pat::Ident { sub: None, by_ref: false, .. } if !self.b.pat_res.contains_key(&p.0) => {
                 if let Some(&li) = self.b.pat_local.get(&p.0) {
+                    // an aggregate rvalue in memory is a fresh temporary (or a by-pointer
+                    // parameter copy): the local takes it over instead of copying it
+                    if let (Val::M(base, off), None) = (&v, &self.locals[li as usize]) {
+                        let l = self.layout(t);
+                        if l.leaves.is_none() {
+                            let a = self.addr_add(*base, *off);
+                            self.locals[li as usize] = Some(LocalSt::Slot(a));
+                            return;
+                        }
+                    }
                     let pl = self.local_place(li);
                     self.write_place(&pl, t, v);
                 }

@@ -81,6 +81,16 @@ pub fn uses_defs(i: &Inst, uses: &mut Vec<VReg>, defs: &mut Vec<VReg>) {
             uses.push(*b);
             uses.push(*s);
         }
+        Inst::LoadX(_, d, b, x, _, _) => {
+            uses.push(*b);
+            uses.push(*x);
+            defs.push(*d);
+        }
+        Inst::StoreX(_, b, x, _, _, s) => {
+            uses.push(*b);
+            uses.push(*x);
+            uses.push(*s);
+        }
         Inst::Call(c, a, r) => {
             if let Callee::Indirect(v) = c {
                 uses.push(*v);

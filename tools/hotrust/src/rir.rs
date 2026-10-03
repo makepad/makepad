@@ -120,6 +120,11 @@ pub enum Inst {
     Conv(Conv, VReg, VReg),
     Load(Mem, VReg, VReg, i32),  // d, base, offset
     Store(Mem, VReg, i32, VReg), // base, offset, src
+    /// backend-only (made by `opt::addr_modes` just before codegen):
+    /// d = [base + (idx << shift) + offset]
+    LoadX(Mem, VReg, VReg, VReg, u8, i32),
+    /// [base + (idx << shift) + offset] = src
+    StoreX(Mem, VReg, VReg, u8, i32, VReg),
     SlotAddr(VReg, u32),
     /// absolute address constant (data, function table, host object)
     Addr(VReg, u64),
@@ -148,11 +153,13 @@ pub struct Block {
     pub term_pos: u64,
 }
 
+#[derive(Clone)]
 pub struct Slot {
     pub size: u32,
     pub align: u32,
 }
 
+#[derive(Clone)]
 pub struct Func {
     pub name: String,
     pub blocks: Vec<Block>,
@@ -228,6 +235,16 @@ impl Func {
                     }
                     Inst::Store(_, b, _, s) => {
                         regs.push(*b);
+                        regs.push(*s);
+                    }
+                    Inst::LoadX(_, d, b, x, _, _) => {
+                        regs.push(*d);
+                        regs.push(*b);
+                        regs.push(*x);
+                    }
+                    Inst::StoreX(_, b, x, _, _, s) => {
+                        regs.push(*b);
+                        regs.push(*x);
                         regs.push(*s);
                     }
                     Inst::Call(c, a, r) => {

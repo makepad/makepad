@@ -54,6 +54,8 @@ pub struct Env {
 
 struct Asm {
     b: Vec<u8>,
+    /// pending scaled index (index reg, shift) for the next memory operand
+    sib: Option<(u8, u8)>,
 }
 
 impl Asm {
@@ -71,6 +73,10 @@ impl Asm {
     }
 
     fn rex(&mut self, w: bool, r: u8, x: u8, b: u8, force: bool) {
+        let x = match self.sib {
+            Some((ix, _)) => ix,
+            None => x,
+        };
         let v = 0x40 | ((w as u8) << 3) | (((r >> 3) & 1) << 2) | (((x >> 3) & 1) << 1) | ((b >> 3) & 1);
         if v != 0x40 || force {
             self.byte(v);
@@ -84,6 +90,24 @@ impl Asm {
 
     /// ModRM + SIB + disp for [base + disp].
     fn modrm_mem(&mut self, reg: u8, base: u8, disp: i32) {
+        if let Some((ix, sh)) = self.sib.take() {
+            // [base + index << sh + disp]: rm = 100, SIB follows
+            let r = (reg & 7) << 3;
+            let sib = (sh << 6) | ((ix & 7) << 3) | (base & 7);
+            if disp == 0 && base & 7 != 5 {
+                self.byte(r | 4);
+                self.byte(sib);
+            } else if (-128..128).contains(&disp) {
+                self.byte(0x40 | r | 4);
+                self.byte(sib);
+                self.byte(disp as i8 as u8);
+            } else {
+                self.byte(0x80 | r | 4);
+                self.byte(sib);
+                self.u32(disp as u32);
+            }
+            return;
+        }
         let r = (reg & 7) << 3;
         let bb = base & 7;
         if disp == 0 && bb != 5 {
@@ -1018,6 +1042,52 @@ impl<'a> Gen<'a> {
                 self.fin_i(*d, rd);
             }
             Inst::Conv(c, d, s) => self.conv(*c, *d, *s),
+            Inst::LoadX(m, d, base, idx, sh, off) => {
+                let ri = self.use_i(*idx, R10);
+                let ri = if ri == R10 {
+                    self.a.mov_rr(RAX, R10);
+                    RAX
+                } else {
+                    ri
+                };
+                let rb = self.use_i(*base, R11);
+                match m {
+                    Mem::Int(n, signed) => {
+                        let rd = self.def_i(*d, R10);
+                        self.a.sib = Some((ri, *sh));
+                        self.a.load_ext(rd, rb, *off, *n, *signed);
+                        self.fin_i(*d, rd);
+                    }
+                    Mem::F32 | Mem::F64 => {
+                        let xd = self.def_f(*d, XS);
+                        self.a.sib = Some((ri, *sh));
+                        self.a.loadf(*m == Mem::F64, xd, rb, *off);
+                        self.fin_f(*d, xd);
+                    }
+                }
+            }
+            Inst::StoreX(m, base, idx, sh, off, src) => {
+                let ri = self.use_i(*idx, R10);
+                let ri = if ri == R10 {
+                    self.a.mov_rr(RAX, R10);
+                    RAX
+                } else {
+                    ri
+                };
+                let rb = self.use_i(*base, R11);
+                match m {
+                    Mem::Int(n, _) => {
+                        let rs = self.use_i(*src, R10);
+                        self.a.sib = Some((ri, *sh));
+                        self.a.store_n(rb, *off, rs, *n);
+                    }
+                    Mem::F32 | Mem::F64 => {
+                        let xs = self.use_f(*src, XS);
+                        self.a.sib = Some((ri, *sh));
+                        self.a.storef(*m == Mem::F64, rb, *off, xs);
+                    }
+                }
+            }
             Inst::Load(m, d, base, off) => {
                 let rb = self.use_i(*base, R11);
                 match m {
@@ -1067,6 +1137,22 @@ impl<'a> Gen<'a> {
             Inst::Copy(dst, src, size) => {
                 let rd = self.use_i(*dst, R10);
                 let rs = self.use_i(*src, R11);
+                if *size > 128 {
+                    // rep movsb (fast-string copy) with rdi/rsi/rcx preserved
+                    self.a.push(RSI);
+                    self.a.push(RDI);
+                    self.a.push(RCX);
+                    self.a.mov_rr(RAX, rs);
+                    self.a.mov_rr(RDI, rd);
+                    self.a.mov_rr(RSI, RAX);
+                    self.a.mov_ri(RCX, *size as i64);
+                    self.a.byte(0xf3);
+                    self.a.byte(0xa4);
+                    self.a.pop(RCX);
+                    self.a.pop(RDI);
+                    self.a.pop(RSI);
+                    return;
+                }
                 let mut o = 0i32;
                 let size = *size as i32;
                 while o + 8 <= size {
@@ -1477,7 +1563,7 @@ pub fn compile(f: &Func, env: &Env) -> Result<Compiled, String> {
     }
     let al = regalloc::allocate(f, &cfg);
     let mut g = Gen {
-        a: Asm { b: Vec::with_capacity(256) },
+        a: Asm { b: Vec::with_capacity(256), sib: None },
         f,
         al,
         env,
@@ -1505,7 +1591,7 @@ pub fn compile(f: &Func, env: &Env) -> Result<Compiled, String> {
 /// `compile_fn(slot) -> code address`, restores them and jumps to the code.
 /// On entry rax holds the slot index.
 pub fn lazy_entry(host_compile: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::new() };
+    let mut a = Asm { b: Vec::new(), sib: None };
     a.push(RBP);
     a.mov_rr(RBP, RSP);
     // save rdi rsi rdx rcx r8 r9 + xmm0-7: 6*8 + 8*8 = 112, plus 8 to align -> 120? keep 16-aligned
@@ -1538,7 +1624,7 @@ pub fn lazy_entry(host_compile: u64) -> Vec<u8> {
 
 /// Per-slot thunk: `jmp [table + slot*8]` (the permanent address of a function).
 pub fn thunk(slot_addr: u64, size: usize) -> Vec<u8> {
-    let mut a = Asm { b: Vec::new() };
+    let mut a = Asm { b: Vec::new(), sib: None };
     a.mov_ri(RAX, slot_addr as i64);
     a.jmp_mem(RAX, 0);
     while a.b.len() < size {
@@ -1549,7 +1635,7 @@ pub fn thunk(slot_addr: u64, size: usize) -> Vec<u8> {
 
 /// Per-slot stub: `mov eax, slot; jmp lazy_entry` (absolute via r11).
 pub fn stub(slot: u32, lazy: u64) -> Vec<u8> {
-    let mut a = Asm { b: Vec::new() };
+    let mut a = Asm { b: Vec::new(), sib: None };
     a.mov_ri(RAX, slot as i64);
     a.mov_ri(R11, lazy as i64);
     a.rex(false, 0, 0, R11, false);
@@ -1562,7 +1648,7 @@ pub fn stub(slot: u32, lazy: u64) -> Vec<u8> {
 /// Returns 0 normally. `leave_with(ctx, code)` restores them and returns `code`
 /// from enter (used by panics, faults and hangs to get back to the host).
 pub fn enter_leave() -> (Vec<u8>, usize) {
-    let mut a = Asm { b: Vec::new() };
+    let mut a = Asm { b: Vec::new(), sib: None };
     // enter: rdi = fn, rsi = arg, rdx = ctx
     a.push(RBP);
     a.mov_rr(RBP, RSP);

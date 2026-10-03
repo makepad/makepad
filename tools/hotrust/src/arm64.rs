@@ -969,6 +969,54 @@ impl<'a> Gen<'a> {
                 self.fin_i(*d, rd);
             }
             Inst::Conv(c, d, s) => self.conv(*c, *d, *s),
+            Inst::LoadX(m, d, base, idx, sh, off) => {
+                // ip1 = base + (idx << sh), then the plain load
+                let ri = self.use_i(*idx, S0);
+                let rb = self.use_i(*base, S1);
+                self.a.e(0x8B00_0000 | ((*sh as u32) << 10) | ((ri as u32) << 16) | ((rb as u32) << 5) | IP1 as u32);
+                // ldst's large-offset form needs ip1 itself: fold big offsets in first
+                let off = &if (*off as i64).abs() >= 256 {
+                    self.a.add_any(IP1, IP1, *off as i64);
+                    0
+                } else {
+                    *off
+                };
+                let (op, size) = mem_op(*m, true);
+                match m {
+                    Mem::Int(..) => {
+                        let rd = self.def_i(*d, S0);
+                        self.a.ldst(op, size, rd, IP1, *off as i64);
+                        self.fin_i(*d, rd);
+                    }
+                    _ => {
+                        let xd = self.def_f(*d, FS0);
+                        self.a.ldst(op, size, xd, IP1, *off as i64);
+                        self.fin_f(*d, xd);
+                    }
+                }
+            }
+            Inst::StoreX(m, base, idx, sh, off, src) => {
+                let ri = self.use_i(*idx, S0);
+                let rb = self.use_i(*base, S1);
+                self.a.e(0x8B00_0000 | ((*sh as u32) << 10) | ((ri as u32) << 16) | ((rb as u32) << 5) | IP1 as u32);
+                let off = &if (*off as i64).abs() >= 256 {
+                    self.a.add_any(IP1, IP1, *off as i64);
+                    0
+                } else {
+                    *off
+                };
+                let (op, size) = mem_op(*m, false);
+                match m {
+                    Mem::Int(..) => {
+                        let rs = self.use_i(*src, S0);
+                        self.a.ldst(op, size, rs, IP1, *off as i64);
+                    }
+                    _ => {
+                        let xs = self.use_f(*src, FS0);
+                        self.a.ldst(op, size, xs, IP1, *off as i64);
+                    }
+                }
+            }
             Inst::Load(m, d, base, off) => {
                 let rb = self.use_i(*base, S1);
                 let (op, size) = mem_op(*m, true);

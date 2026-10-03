@@ -48,6 +48,7 @@ pub struct OptCfg {
     pub fold: bool,
     pub cse: bool,
     pub sroa: bool,
+    pub licm: bool,
     pub imm: bool,
     pub layout: bool,
 }
@@ -55,10 +56,10 @@ pub struct OptCfg {
 impl OptCfg {
     /// `HOTRUST_OPT=none` or a comma list of passes to disable (`-inline,-fold`).
     pub fn from_env() -> OptCfg {
-        let mut c = OptCfg { inline: true, inline_all: true, fold: true, cse: true, sroa: true, imm: true, layout: true };
+        let mut c = OptCfg { inline: true, inline_all: true, fold: true, cse: true, sroa: true, licm: true, imm: true, layout: true };
         if let Ok(v) = std::env::var("HOTRUST_OPT") {
             if v == "none" {
-                c = OptCfg { inline: false, inline_all: false, fold: false, cse: false, sroa: false, imm: false, layout: false };
+                c = OptCfg { inline: false, inline_all: false, fold: false, cse: false, sroa: false, licm: false, imm: false, layout: false };
             }
             for part in v.split(',') {
                 match part {
@@ -66,6 +67,7 @@ impl OptCfg {
                     "-fold" => c.fold = false,
                     "-cse" => c.cse = false,
                     "-sroa" => c.sroa = false,
+                    "-licm" => c.licm = false,
                     "-imm" => c.imm = false,
                     "-layout" => c.layout = false,
                     "+inline_all" => c.inline_all = true,
@@ -268,6 +270,8 @@ fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
         }
         Inst::Copy(a, b, n) => Inst::Copy(m(*a), m(*b), *n),
         Inst::Poll => Inst::Poll,
+        Inst::LoadX(k, d, b, x, sh, o) => Inst::LoadX(*k, m(*d), m(*b), m(*x), *sh, *o),
+        Inst::StoreX(k, b, x, sh, o, v) => Inst::StoreX(*k, m(*b), m(*x), *sh, *o, m(*v)),
     }
 }
 
@@ -464,7 +468,7 @@ fn swap_cond(c: Cond) -> Cond {
 }
 
 fn is_pure(i: &Inst) -> bool {
-    !matches!(i, Inst::Call(..) | Inst::Store(..) | Inst::Copy(..) | Inst::Poll)
+    !matches!(i, Inst::Call(..) | Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::Poll)
 }
 
 fn const_inst(d: VReg, k: K) -> Inst {
@@ -568,6 +572,8 @@ pub fn simplify(f: &mut Func, ro: (u64, u64), imm: bool, cse: bool) {
                     Inst::IBinI(op, it, d, x, q) => match kv(*x, &kn) {
                         Some(K::I(p)) => fold_ibin(*op, *it, p, *q).map(|r| (*d, K::I(r))),
                         Some(K::A(p)) if *op == IOp::Add => Some((*d, K::A(p.wrapping_add(*q as u64)))),
+                        // x & 0, x * 0
+                        _ if *q == 0 && matches!(op, IOp::And | IOp::Mul) => Some((*d, K::I(0))),
                         _ => None,
                     },
                     Inst::INeg(it, d, x) => match kv(*x, &kn) {
@@ -682,6 +688,26 @@ pub fn simplify(f: &mut Func, ro: (u64, u64), imm: bool, cse: bool) {
                         }
                         other => other,
                     };
+                    if let Inst::IBinI(op, it, d, x, k) = new {
+                        let ident = match op {
+                            IOp::Add | IOp::Sub | IOp::Or | IOp::Xor | IOp::Shl | IOp::Shr => k == 0,
+                            IOp::Mul | IOp::Div => k == 1,
+                            _ => false,
+                        };
+                        // narrow types: the operand is already extended by its type
+                        if k == 0 && matches!(op, IOp::And | IOp::Mul) {
+                            new = Inst::Iconst(d, 0);
+                            if single(d, &ndef) {
+                                kn[d.0 as usize] = Some(K::I(0));
+                            }
+                        } else if ident {
+                            new = Inst::Mov(d, x);
+                        } else if op == IOp::And && k == -1 {
+                            new = Inst::Mov(d, x);
+                        } else if op == IOp::Mul && k > 1 && (k & (k - 1)) == 0 && k < (1 << 30) {
+                            new = Inst::IBinI(IOp::Shl, it, d, x, k.trailing_zeros() as i64);
+                        }
+                    }
                     if let Inst::IBinI(IOp::Add, _, d, x, k) = new {
                         if single(d, &ndef) && single(x, &ndef) {
                             def_inst[d.0 as usize] = Some((IOp::Add, x, k));
@@ -719,7 +745,7 @@ pub fn simplify(f: &mut Func, ro: (u64, u64), imm: bool, cse: bool) {
         changed |= local_copy_prop(f);
         pass_time(2, t);
         let t = pass_clock();
-        if cse && _round < 2 {
+        if cse {
             changed |= local_cse(f);
         }
         pass_time(1, t);
@@ -1291,6 +1317,8 @@ struct CseState {
     facts: Vec<(VReg, i64)>,
     /// unsigned upper bounds: vreg <u bound
     ubound: Vec<(VReg, i64)>,
+    /// unsigned lower bounds: vreg >u bound
+    lbound: Vec<(VReg, i64)>,
     copies: Vec<(VReg, VReg)>,
 }
 
@@ -1341,6 +1369,148 @@ fn local_cse(f: &mut Func) -> bool {
         }
     }
     let single = |v: VReg| ndef[v.0 as usize] == 1;
+    // pointer roots of single-def address vregs: 1+slot for stack slots, 1<<40|vreg for
+    // noalias params, 0 unknown
+    let mut root = vec![0u64; nv];
+    for p in &f.noalias {
+        if ndef[p.0 as usize] == 1 {
+            root[p.0 as usize] = (1u64 << 40) | p.0 as u64;
+        }
+    }
+    // defs in order of appearance in reverse postorder approximated by block order
+    for _ in 0..2 {
+        for b in &f.blocks {
+            for i in &b.insts {
+                match i {
+                    Inst::SlotAddr(d, sl) if single(*d) => root[d.0 as usize] = 1 + *sl as u64,
+                    Inst::Mov(d, x) | Inst::IBinI(IOp::Add | IOp::Sub, _, d, x, _) if single(*d) => root[d.0 as usize] = root[x.0 as usize],
+                    Inst::IBin(IOp::Add, _, d, x, y) if single(*d) => {
+                        let (rx, ry) = (root[x.0 as usize], root[y.0 as usize]);
+                        root[d.0 as usize] = if rx != 0 && ry == 0 { rx } else if ry != 0 && rx == 0 { ry } else { 0 };
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    let may_alias = |a: VReg, b: VReg| -> bool {
+        if a == b {
+            return true;
+        }
+        let (ra, rb) = (root[a.0 as usize], root[b.0 as usize]);
+        !(ra != 0 && rb != 0 && ra != rb)
+    };
+    // definition blocks per vreg (for multi-def vregs crossing joins)
+    let mut def_blocks: Vec<Vec<u32>> = vec![Vec::new(); nv];
+    let mut def_sites: Vec<Vec<(u32, u32)>> = vec![Vec::new(); nv];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for (k, i) in b.insts.iter().enumerate() {
+            uses_defs(i, &mut uses, &mut defs);
+            for d in &defs {
+                if ndef[d.0 as usize] > 1 {
+                    if !def_blocks[d.0 as usize].contains(&(bi as u32)) {
+                        def_blocks[d.0 as usize].push(bi as u32);
+                    }
+                    def_sites[d.0 as usize].push((bi as u32, k as u32));
+                }
+            }
+        }
+    }
+    let dominates = |a: u32, b: u32| -> bool {
+        let mut x = b;
+        let mut guard = 0;
+        loop {
+            if x == a {
+                return true;
+            }
+            let p = idom[x as usize];
+            if p == u32::MAX || p == x || guard > 10000 {
+                return false;
+            }
+            x = p;
+            guard += 1;
+        }
+    };
+    // loop headers: blocks with a predecessor they dominate
+    let mut is_header = vec![false; n];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if idom[bi] == u32::MAX {
+            continue;
+        }
+        let mut succ = Vec::new();
+        match b.term {
+            Term::Jump(t) => succ.push(t),
+            Term::Branch(_, t, e) => {
+                succ.push(t);
+                succ.push(e);
+            }
+            _ => {}
+        }
+        for t in succ {
+            if dominates(t, bi as u32) {
+                is_header[t as usize] = true;
+            }
+        }
+    }
+    // Loop header `h` entered from `d`: is `v` only ever decreased inside the loop (each
+    // in-loop definition is `v = w` with `w = v - c`, c > 0, guarded by `v > c-1`)? Then an
+    // upper bound known when entering the loop holds at the header on every iteration.
+    let blocks_ptr: *const Vec<Block> = &f.blocks;
+    let non_increasing = |v: VReg, d: u32, h: u32| -> bool {
+        let blocks = unsafe { &*blocks_ptr };
+        for &(db, dk) in &def_sites[v.0 as usize] {
+            if dominates(db, d) {
+                continue;
+            }
+            if !dominates(h, db) {
+                return false;
+            }
+            let w = match blocks[db as usize].insts[dk as usize] {
+                Inst::Mov(_, w) => w,
+                _ => return false,
+            };
+            // find w's definition: `w = v - c` with a guard on v dominating it
+            let mut ok = false;
+            'search: for (bi2, b2) in blocks.iter().enumerate() {
+                for i2 in &b2.insts {
+                    if let Inst::IBinI(IOp::Sub, it, wd, x, c) = i2 {
+                        if *wd == w && *x == v && !it.signed && *c > 0 {
+                            // a block on the dominator chain of bi2 entered by the true edge
+                            // of `v > k` (k >= c-1) or `v != 0` (c == 1)
+                            let mut xb = bi2 as u32;
+                            let mut guard = 0;
+                            while xb != h && guard < 1000 {
+                                let p = idom[xb as usize];
+                                if p == u32::MAX || p == xb {
+                                    break;
+                                }
+                                if npred[xb as usize] == 1 {
+                                    if let Term::Branch(cv, tt, _) = blocks[p as usize].term {
+                                        if tt == xb {
+                                            for i3 in &blocks[p as usize].insts {
+                                                match i3 {
+                                                    Inst::ICmpI(Cond::Gt, false, cd, cx, k) if *cd == cv && *cx == v && *k >= *c - 1 => ok = true,
+                                                    Inst::ICmpI(Cond::Ne, _, cd, cx, 0) if *cd == cv && *cx == v && *c == 1 => ok = true,
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                xb = p;
+                                guard += 1;
+                            }
+                            break 'search;
+                        }
+                    }
+                }
+            }
+            if !ok {
+                return false;
+            }
+        }
+        true
+    };
     let mut changed = false;
     let mut stack: Vec<(u32, CseState)> = vec![(0, CseState::default())];
     while let Some((bi, mut st)) = stack.pop() {
@@ -1430,8 +1600,34 @@ fn local_cse(f: &mut Func) -> bool {
                     }
                 }
             }
-            if matches!(i, Inst::Store(..) | Inst::Call(..) | Inst::Copy(..)) {
-                st.avail.retain(|x| !x.3);
+            match &i {
+                Inst::Call(..) | Inst::Copy(..) => st.avail.retain(|x| !x.3),
+                Inst::Store(m, base, off, v) => {
+                    let (base, off, v, m) = (*base, *off as i64, *v, *m);
+                    let sz = mem_size(m) as i64;
+                    st.avail.retain(|x| {
+                        if !x.3 {
+                            return true;
+                        }
+                        let lb = x.2[0];
+                        if !may_alias(lb, base) {
+                            return true;
+                        }
+                        if lb == base {
+                            // same base: disjoint byte ranges survive
+                            let lo = x.0[2] as i64;
+                            let lsz = load_key_size(x.0[0]);
+                            return lo + lsz <= off || off + sz <= lo;
+                        }
+                        false
+                    });
+                    // forward the stored value to later loads of the same cell
+                    if st.avail.len() < 48 {
+                        let key = cse_key(&Inst::Load(m, VReg(0), base, off as i32)).unwrap();
+                        st.avail.push((key, v, [base, v], true));
+                    }
+                }
+                _ => {}
             }
             uses_defs(&b.insts[k], &mut uses, &mut defs);
             for d in &defs {
@@ -1439,7 +1635,29 @@ fn local_cse(f: &mut Func) -> bool {
                 st.avail.retain(|(_, e, ops, _)| *e != d && ops[0] != d && ops[1] != d);
                 st.facts.retain(|(v, _)| *v != d);
                 st.ubound.retain(|(v, _)| *v != d);
+                st.lbound.retain(|(v, _)| *v != d);
                 st.copies.retain(|(x, y)| *x != d && *y != d);
+            }
+            if let Inst::IBinI(IOp::Sub, it, d, x, c) = b.insts[k] {
+                if !it.signed && c > 0 {
+                    let mut lb_ok = false;
+                    for (v, lb) in &st.lbound {
+                        if *v == x && *lb >= c - 1 {
+                            lb_ok = true;
+                        }
+                    }
+                    if lb_ok {
+                        let mut ub = None;
+                        for (v, bnd) in &st.ubound {
+                            if *v == x {
+                                ub = Some(*bnd);
+                            }
+                        }
+                        if let Some(bnd) = ub {
+                            st.ubound.push((d, bnd));
+                        }
+                    }
+                }
             }
             if let Inst::Mov(d, s2) = b.insts[k] {
                 if d != s2 {
@@ -1497,6 +1715,7 @@ fn local_cse(f: &mut Func) -> bool {
             }
         }
         // the compare behind a branch condition, for edge bounds
+        // compare behind the branch condition (unsigned compares give range facts)
         let mut cmp_of_cond: Option<(Cond, VReg, i64)> = None;
         if let Term::Branch(c, _, _) = b.term {
             // the compare defining `c` in this block
@@ -1528,28 +1747,65 @@ fn local_cse(f: &mut Func) -> bool {
                             if (cc == Cond::Lt && val == 1) || (cc == Cond::Ge && val == 0) {
                                 cs.ubound.push((x, k));
                             }
+                            if (cc == Cond::Le && val == 1) || (cc == Cond::Gt && val == 0) {
+                                cs.ubound.push((x, k.wrapping_add(1)));
+                            }
+                            // x >u k on the true edge of `x > k`, the false edge of `x <= k`
+                            if (cc == Cond::Gt && val == 1) || (cc == Cond::Le && val == 0) {
+                                cs.lbound.push((x, k));
+                            }
+                            if cc == Cond::Ne && val == 1 && k == 0 {
+                                cs.lbound.push((x, 0));
+                            }
                         }
                     }
                 }
             } else {
                 cs = CseState::default();
+                let header = is_header[ch as usize];
+                // a value is unchanged on every path from this block to the join when it
+                // has one definition, or (non-loop joins) each of its definitions either
+                // dominates this block or comes after the join
+                let stable = |v: VReg| -> bool {
+                    if v.0 == u32::MAX || single(v) {
+                        return true;
+                    }
+                    if header {
+                        return false;
+                    }
+                    let blocks = unsafe { &*blocks_ptr };
+                    for &db in &def_blocks[v.0 as usize] {
+                        // a latch that only jumps back to this block redefines v before the
+                        // next pass through here: the last pass to the join sees no def
+                        let latch_to_here = matches!(blocks[db as usize].term, Term::Jump(t) if t == bi as u32);
+                        if !(dominates(db, bi as u32) || dominates(ch, db) || latch_to_here) {
+                            return false;
+                        }
+                    }
+                    true
+                };
                 for e in &base.avail {
-                    if !e.3 && single(e.1) && (e.2[0].0 == u32::MAX || single(e.2[0])) && (e.2[1].0 == u32::MAX || single(e.2[1])) {
+                    if !e.3 && stable(e.1) && stable(e.2[0]) && stable(e.2[1]) {
                         cs.avail.push(*e);
                     }
                 }
                 for x in &base.facts {
-                    if single(x.0) {
+                    if stable(x.0) {
                         cs.facts.push(*x);
                     }
                 }
                 for x in &base.ubound {
-                    if single(x.0) {
+                    if stable(x.0) || (header && non_increasing(x.0, bi as u32, ch)) {
                         cs.ubound.push(*x);
                     }
                 }
+                for x in &base.lbound {
+                    if stable(x.0) {
+                        cs.lbound.push(*x);
+                    }
+                }
                 for x in &base.copies {
-                    if single(x.0) && single(x.1) {
+                    if stable(x.0) && stable(x.1) {
                         cs.copies.push(*x);
                     }
                 }
@@ -1561,6 +1817,18 @@ fn local_cse(f: &mut Func) -> bool {
 }
 
 /// Compact CSE key of a pure single-result instruction (dest excluded).
+/// Byte size of the load encoded in a `cse_key` tag word.
+fn load_key_size(k0: u64) -> i64 {
+    let mk = k0 >> 8;
+    if mk & (1 << 16) != 0 {
+        4
+    } else if mk & (2 << 16) != 0 {
+        8
+    } else {
+        (mk & 0xff) as i64
+    }
+}
+
 fn cse_key(i: &Inst) -> Option<[u64; 3]> {
     fn it(t: &IntTy) -> u64 {
         t.bits as u64 | ((t.signed as u64) << 8)
@@ -1769,5 +2037,450 @@ fn mem_size(m: Mem) -> i32 {
         Mem::Int(n, _) => n as i32,
         Mem::F32 => 4,
         Mem::F64 => 8,
+    }
+}
+
+/// Loop-invariant code motion: pure, non-trapping, single-definition instructions inside a
+/// natural loop whose operands come from outside it (or from other hoisted instructions)
+/// move to the end of the loop's preheader (its single outside predecessor ending in a
+/// jump to the header). Loads stay (stores/calls in the loop), integer div/rem stay (trap).
+pub fn licm(f: &mut Func) -> bool {
+    let n = f.blocks.len();
+    let idom = idoms(f);
+    let dominates = |a: u32, b: u32| -> bool {
+        let mut x = b;
+        let mut guard = 0;
+        loop {
+            if x == a {
+                return true;
+            }
+            let p = idom[x as usize];
+            if p == u32::MAX || p == x || guard > 10000 {
+                return false;
+            }
+            x = p;
+            guard += 1;
+        }
+    };
+    let mut preds: Vec<Vec<u32>> = vec![Vec::new(); n];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        if idom[bi] == u32::MAX {
+            continue;
+        }
+        match b.term {
+            Term::Jump(t) => preds[t as usize].push(bi as u32),
+            Term::Branch(_, t, e) => {
+                preds[t as usize].push(bi as u32);
+                if e != t {
+                    preds[e as usize].push(bi as u32);
+                }
+            }
+            _ => {}
+        }
+    }
+    // natural loops per header
+    let mut loops: Vec<(u32, Vec<bool>)> = Vec::new();
+    for h in 0..n {
+        let mut latches = Vec::new();
+        for &p in &preds[h] {
+            if dominates(h as u32, p) {
+                latches.push(p);
+            }
+        }
+        if latches.is_empty() {
+            continue;
+        }
+        let mut body = vec![false; n];
+        body[h] = true;
+        let mut stack = latches.clone();
+        while let Some(x) = stack.pop() {
+            if body[x as usize] {
+                continue;
+            }
+            body[x as usize] = true;
+            for &p in &preds[x as usize] {
+                stack.push(p);
+            }
+        }
+        loops.push((h as u32, body));
+    }
+    // inner loops first
+    loops.sort_by_key(|l| l.1.iter().filter(|x| **x).count());
+    let nv = f.vregs.len();
+    let mut uses = Vec::new();
+    let mut defs = Vec::new();
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    let mut def_block = vec![u32::MAX; nv];
+    for (bi, b) in f.blocks.iter().enumerate() {
+        for i in &b.insts {
+            uses_defs(i, &mut uses, &mut defs);
+            for d in &defs {
+                ndef[d.0 as usize] += 1;
+                def_block[d.0 as usize] = bi as u32;
+            }
+        }
+    }
+    let mut changed = false;
+    for (h, body) in &loops {
+        let outside: Vec<u32> = preds[*h as usize].iter().copied().filter(|p| !body[*p as usize]).collect();
+        if outside.len() != 1 {
+            continue;
+        }
+        let pre = outside[0];
+        if !matches!(f.blocks[pre as usize].term, Term::Jump(t) if t == *h) {
+            continue;
+        }
+        let mut hoisted: Vec<(Inst, u64)> = Vec::new();
+        let mut progress = true;
+        while progress {
+            progress = false;
+            for bi in 0..n {
+                if !body[bi] {
+                    continue;
+                }
+                let mut k = 0;
+                while k < f.blocks[bi].insts.len() {
+                    let i = &f.blocks[bi].insts[k];
+                    let pure = match i {
+                        Inst::IBin(IOp::Div | IOp::Rem, ..) | Inst::IBinI(IOp::Div | IOp::Rem, ..) => false,
+                        Inst::Load(..) | Inst::Store(..) | Inst::Call(..) | Inst::Copy(..) | Inst::Poll | Inst::Mov(..) => false,
+                        _ => true,
+                    };
+                    if !pure {
+                        k += 1;
+                        continue;
+                    }
+                    uses_defs(i, &mut uses, &mut defs);
+                    let mut inv = defs.len() == 1 && ndef[defs[0].0 as usize] == 1;
+                    for u in &uses {
+                        let db = def_block[u.0 as usize];
+                        let in_loop = db != u32::MAX && body[db as usize];
+                        if in_loop || (ndef[u.0 as usize] > 1 && db != u32::MAX && body[db as usize]) {
+                            inv = false;
+                        }
+                        // multi-def operands are invariant only if no definition is in the loop
+                        if ndef[u.0 as usize] > 1 {
+                            for b2 in 0..n {
+                                if body[b2] {
+                                    for i2 in &f.blocks[b2].insts {
+                                        let mut u3 = Vec::new();
+                                        let mut d3 = Vec::new();
+                                        uses_defs(i2, &mut u3, &mut d3);
+                                        if d3.contains(u) {
+                                            inv = false;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // bare constants are not worth a register across the loop on their own
+                    let is_const = matches!(i, Inst::Iconst(..) | Inst::Fconst(..) | Inst::Addr(..) | Inst::FnAddr(..) | Inst::SlotAddr(..));
+                    if inv && is_const {
+                        // hoisted only when some invariant user needs it (next round)
+                        let d = defs[0];
+                        let mut needed = false;
+                        for b2 in 0..n {
+                            if !body[b2] {
+                                continue;
+                            }
+                            for i2 in &f.blocks[b2].insts {
+                                let mut u3 = Vec::new();
+                                let mut d3 = Vec::new();
+                                uses_defs(i2, &mut u3, &mut d3);
+                                if u3.contains(&d) && !matches!(i2, Inst::Load(..) | Inst::Store(..) | Inst::Call(..) | Inst::Copy(..) | Inst::Mov(..)) {
+                                    let mut others_inv = true;
+                                    for u in &u3 {
+                                        if *u != d {
+                                            let db = def_block[u.0 as usize];
+                                            if db != u32::MAX && body[db as usize] {
+                                                others_inv = false;
+                                            }
+                                        }
+                                    }
+                                    if others_inv && d3.len() == 1 && ndef[d3[0].0 as usize] == 1 {
+                                        needed = true;
+                                    }
+                                }
+                            }
+                        }
+                        inv = needed;
+                    }
+                    if inv {
+                        let i = f.blocks[bi].insts.remove(k);
+                        let p = f.blocks[bi].pos.remove(k);
+                        def_block[defs[0].0 as usize] = pre;
+                        hoisted.push((i, p));
+                        progress = true;
+                        changed = true;
+                    } else {
+                        k += 1;
+                    }
+                }
+            }
+        }
+        for (i, p) in hoisted {
+            f.blocks[pre as usize].insts.push(i);
+            f.blocks[pre as usize].pos.push(p);
+        }
+    }
+    changed
+}
+
+/// Backend address modes (run on the codegen copy only, after every IR pass): a load or
+/// store whose base is `p + (i << k)` (k <= 3) or `p + i`, computed in the same block for
+/// this access only, becomes LoadX/StoreX and the address arithmetic disappears.
+pub fn addr_modes(f: &mut Func) {
+    let nv = f.vregs.len();
+    let mut uses = Vec::new();
+    let mut defs = Vec::new();
+    let mut nuse = vec![0u32; nv];
+    let mut ndef = vec![0u32; nv];
+    for p in &f.params {
+        ndef[p.0 as usize] += 1;
+    }
+    for b in &f.blocks {
+        for i in &b.insts {
+            uses_defs(i, &mut uses, &mut defs);
+            for u in &uses {
+                nuse[u.0 as usize] += 1;
+            }
+            for d in &defs {
+                ndef[d.0 as usize] += 1;
+            }
+        }
+        term_uses(&b.term, &mut uses);
+        for u in &uses {
+            nuse[u.0 as usize] += 1;
+        }
+    }
+    for b in &mut f.blocks {
+        let n = b.insts.len();
+        // index of the defining inst in this block for single-def vregs
+        let mut def_at: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        let mut dead = vec![false; n];
+        for k in 0..n {
+            let (m, base, off) = match &b.insts[k] {
+                Inst::Load(m, _, base, off) => (*m, *base, *off),
+                Inst::Store(m, base, off, _) => (*m, *base, *off),
+                i => {
+                    uses_defs(i, &mut uses, &mut defs);
+                    for d in &defs {
+                        if ndef[d.0 as usize] == 1 {
+                            def_at.insert(d.0, k);
+                        }
+                    }
+                    continue;
+                }
+            };
+            let _ = m;
+            let ai = match def_at.get(&base.0) {
+                Some(&ai) if nuse[base.0 as usize] == 1 && !dead[ai] => ai,
+                _ => continue,
+            };
+            let (p, q) = match b.insts[ai] {
+                Inst::IBin(IOp::Add, it, _, p, q) if it.bits == 64 => (p, q),
+                _ => continue,
+            };
+            // which operand is the scaled index
+            let mut found: Option<(VReg, VReg, u8, Option<usize>)> = None;
+            for (pp, qq) in [(p, q), (q, p)] {
+                if let Some(&si) = def_at.get(&qq.0) {
+                    if nuse[qq.0 as usize] == 1 && !dead[si] {
+                        if let Inst::IBinI(IOp::Shl, it, _, idx, sh) = b.insts[si] {
+                            if it.bits == 64 && sh <= 3 {
+                                found = Some((pp, idx, sh as u8, Some(si)));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            let (pp, idx, sh, si) = match found {
+                Some(x) => x,
+                None => (p, q, 0, None),
+            };
+            // `idx = x +- c` computed in this block: index by x, fold c into the offset
+            let mut idx = idx;
+            let mut extra: i64 = 0;
+            if let Some(&ii) = def_at.get(&idx.0) {
+                match b.insts[ii] {
+                    Inst::IBinI(IOp::Add, it, _, x, c) if it.bits == 64 && c.abs() < (1 << 20) => {
+                        let mut ok2 = true;
+                        for j in ii + 1..k {
+                            uses_defs(&b.insts[j], &mut uses, &mut defs);
+                            if defs.contains(&x) {
+                                ok2 = false;
+                            }
+                        }
+                        if ok2 {
+                            idx = x;
+                            extra = c << sh;
+                        }
+                    }
+                    Inst::IBinI(IOp::Sub, it, _, x, c) if it.bits == 64 && c.abs() < (1 << 20) => {
+                        let mut ok2 = true;
+                        for j in ii + 1..k {
+                            uses_defs(&b.insts[j], &mut uses, &mut defs);
+                            if defs.contains(&x) {
+                                ok2 = false;
+                            }
+                        }
+                        if ok2 {
+                            idx = x;
+                            extra = -(c << sh);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // operands must not be redefined between their use in the arithmetic and here
+            let from = match si {
+                Some(si) => si.min(ai),
+                None => ai,
+            };
+            let mut clobbered = false;
+            for j in from + 1..k {
+                uses_defs(&b.insts[j], &mut uses, &mut defs);
+                if defs.contains(&pp) || defs.contains(&idx) {
+                    clobbered = true;
+                }
+            }
+            if clobbered {
+                continue;
+            }
+            b.insts[k] = match b.insts[k] {
+                Inst::Load(m, d, _, off2) => Inst::LoadX(m, d, pp, idx, sh, off2 + extra as i32),
+                Inst::Store(m, _, off2, v) => Inst::StoreX(m, pp, idx, sh, off2 + extra as i32, v),
+                ref other => other.clone(),
+            };
+            let _ = off;
+            dead[ai] = true;
+            if let Some(si) = si {
+                dead[si] = true;
+            }
+        }
+        if dead.iter().any(|x| *x) {
+            let mut k = 0;
+            let mut j = 0;
+            b.insts.retain(|_| {
+                let keep = !dead[k];
+                k += 1;
+                keep
+            });
+            b.pos.retain(|_| {
+                let keep = !dead[j];
+                j += 1;
+                keep
+            });
+        }
+    }
+}
+
+/// Loop rotation on the codegen copy: a latch ending in `jump H` to a loop header whose
+/// block is only a short compare-and-branch gets a copy of that test, so each iteration
+/// runs one conditional branch at the bottom instead of a jump plus the header test.
+pub fn rotate_loops(f: &mut Func) {
+    let n = f.blocks.len();
+    let idom = idoms(f);
+    let dominates = |a: u32, b: u32| -> bool {
+        let mut x = b;
+        let mut guard = 0;
+        loop {
+            if x == a {
+                return true;
+            }
+            let p = idom[x as usize];
+            if p == u32::MAX || p == x || guard > 10000 {
+                return false;
+            }
+            x = p;
+            guard += 1;
+        }
+    };
+    let mut uses = Vec::new();
+    let mut defs = Vec::new();
+    let mut nuse = vec![0u32; f.vregs.len()];
+    for b in &f.blocks {
+        for i in &b.insts {
+            uses_defs(i, &mut uses, &mut defs);
+            for u in &uses {
+                nuse[u.0 as usize] += 1;
+            }
+        }
+        term_uses(&b.term, &mut uses);
+        for u in &uses {
+            nuse[u.0 as usize] += 1;
+        }
+    }
+    for l in 0..n {
+        let h = match f.blocks[l].term {
+            Term::Jump(h) if idom[l] != u32::MAX && dominates(h, l as u32) => h as usize,
+            _ => continue,
+        };
+        let hb = f.blocks[h].clone();
+        if hb.insts.len() > 4 || !matches!(hb.term, Term::Branch(..)) {
+            continue;
+        }
+        // header defs must be used only inside the header (they get fresh copies)
+        let mut ok = true;
+        let mut local_uses = vec![0u32; f.vregs.len()];
+        for i in &hb.insts {
+            match i {
+                Inst::Iconst(..) | Inst::Fconst(..) | Inst::ICmp(..) | Inst::ICmpI(..) | Inst::FCmp(..) | Inst::IBinI(..) | Inst::IBin(..) | Inst::Mov(..) | Inst::Conv(..) => {}
+                _ => ok = false,
+            }
+            uses_defs(i, &mut uses, &mut defs);
+            for u in &uses {
+                local_uses[u.0 as usize] += 1;
+            }
+        }
+        term_uses(&hb.term, &mut uses);
+        for u in &uses {
+            local_uses[u.0 as usize] += 1;
+        }
+        let mut map: Vec<(VReg, VReg)> = Vec::new();
+        for i in &hb.insts {
+            uses_defs(i, &mut uses, &mut defs);
+            for d in &defs {
+                if nuse[d.0 as usize] != local_uses[d.0 as usize] {
+                    ok = false;
+                }
+                if matches!(i, Inst::IBin(IOp::Div | IOp::Rem, ..)) {
+                    ok = false;
+                }
+                let c = f.vregs[d.0 as usize];
+                map.push((*d, VReg(u32::MAX)));
+                let _ = c;
+            }
+        }
+        if !ok {
+            continue;
+        }
+        for m in map.iter_mut() {
+            let c = f.vregs[m.0 .0 as usize];
+            m.1 = f.vreg(c);
+        }
+        let look = |v: VReg| -> VReg {
+            for (a, b) in &map {
+                if *a == v {
+                    return *b;
+                }
+            }
+            v
+        };
+        for (k, i) in hb.insts.iter().enumerate() {
+            let ni = map_inst(i, &look, 0);
+            f.blocks[l].insts.push(ni);
+            f.blocks[l].pos.push(hb.pos[k]);
+        }
+        f.blocks[l].term = match hb.term {
+            Term::Branch(c, t, e) => Term::Branch(look(c), t, e),
+            t => t,
+        };
+        f.blocks[l].term_pos = hb.term_pos;
     }
 }
