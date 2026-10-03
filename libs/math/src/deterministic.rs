@@ -368,18 +368,21 @@ mod tests {
 
     // ---- accuracy vs std (tolerances cover std's own cross-platform ulp) --
 
-    fn sweep(n: usize, lo: f32, hi: f32) -> impl Iterator<Item = f32> {
+    /// The `i`-th of `n` evenly spaced samples in [lo, hi).
+    fn sweep_at(i: usize, n: usize, lo: f32, hi: f32) -> f32 {
         let step = ((hi - lo) as f64) / (n as f64);
-        (0..n).map(move |i| (lo as f64 + step * i as f64) as f32)
+        (lo as f64 + step * i as f64) as f32
     }
 
     #[test]
     fn sin_cos_match_std_within_tolerance() {
-        for x in sweep(200_000, -1000.0, 1000.0) {
+        for i_x in 0..200_000 {
+            let x = sweep_at(i_x, 200_000, -1000.0, 1000.0);
             assert!((sin(x) - x.sin()).abs() < 1e-5, "sin({x})");
             assert!((cos(x) - x.cos()).abs() < 1e-5, "cos({x})");
         }
-        for x in sweep(100_000, -0.1, 0.1) {
+        for i_x in 0..100_000 {
+            let x = sweep_at(i_x, 100_000, -0.1, 0.1);
             assert!((sin(x) - x.sin()).abs() < 1e-7, "sin({x})");
             assert!((cos(x) - x.cos()).abs() < 1e-7, "cos({x})");
         }
@@ -387,7 +390,8 @@ mod tests {
 
     #[test]
     fn sincos_identity_and_quadrants() {
-        for x in sweep(100_000, -50.0, 50.0) {
+        for i_x in 0..100_000 {
+            let x = sweep_at(i_x, 100_000, -50.0, 50.0);
             let (s, c) = sincos(x);
             assert_eq!(s, sin(x));
             assert_eq!(c, cos(x));
@@ -399,11 +403,14 @@ mod tests {
 
     #[test]
     fn atan_atan2_match_std() {
-        for x in sweep(200_000, -100.0, 100.0) {
+        for i_x in 0..200_000 {
+            let x = sweep_at(i_x, 200_000, -100.0, 100.0);
             assert!((atan(x) - x.atan()).abs() < 1e-6, "atan({x})");
         }
-        for y in sweep(450, -10.0, 10.0) {
-            for x in sweep(450, -10.0, 10.0) {
+        for i_y in 0..450 {
+            let y = sweep_at(i_y, 450, -10.0, 10.0);
+            for i_x in 0..450 {
+                let x = sweep_at(i_x, 450, -10.0, 10.0);
                 let got = atan2(y, x);
                 let want = y.atan2(x);
                 // std atan2(±0, -x) returns ±π; we return +π at y == 0 exactly
@@ -419,7 +426,8 @@ mod tests {
 
     #[test]
     fn asin_acos_match_std() {
-        for x in sweep(100_000, -1.0, 1.0) {
+        for i_x in 0..100_000 {
+            let x = sweep_at(i_x, 100_000, -1.0, 1.0);
             assert!((asin(x) - x.asin()).abs() < 1e-6, "asin({x})");
             assert!((acos(x) - x.acos()).abs() < 1e-6, "acos({x})");
         }
@@ -429,19 +437,23 @@ mod tests {
 
     #[test]
     fn exp_ln_pow_match_std() {
-        for x in sweep(100_000, -80.0, 80.0) {
+        for i_x in 0..100_000 {
+            let x = sweep_at(i_x, 100_000, -80.0, 80.0);
             let got = exp(x);
             let want = x.exp();
             let rel = ((got - want) / want).abs();
             assert!(rel < 1e-6, "exp({x}) {got} {want}");
         }
-        for x in sweep(100_000, 1e-4, 1e4) {
+        for i_x in 0..100_000 {
+            let x = sweep_at(i_x, 100_000, 1e-4, 1e4);
             let got = ln(x);
             let want = x.ln();
             assert!((got - want).abs() < 1e-5, "ln({x}) {got} {want}");
         }
-        for x in sweep(300, 0.01, 40.0) {
-            for y in sweep(300, -8.0, 8.0) {
+        for i_x in 0..300 {
+            let x = sweep_at(i_x, 300, 0.01, 40.0);
+            for i_y in 0..300 {
+                let y = sweep_at(i_y, 300, -8.0, 8.0);
                 let got = pow(x, y);
                 let want = x.powf(y);
                 let rel = ((got - want) / want).abs();
@@ -543,7 +555,10 @@ mod tests {
             ("pow", 0x9a53615fa6888cc0),
             ("hypot", 0x1602cd23e5fd4803),
         ];
-        for ((name, got), (gname, want)) in parity_hashes().iter().zip(GOLDEN.iter()) {
+        let hashes = parity_hashes();
+        for i in 0..GOLDEN.len() {
+            let (name, got) = hashes[i];
+            let (gname, want) = GOLDEN[i];
             assert_eq!(name, gname);
             assert_eq!(
                 got, want,

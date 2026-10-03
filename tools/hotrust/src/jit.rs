@@ -1,0 +1,1299 @@
+//! The live image: executable memory, the per-function patch table with lazy
+//! stubs, the host runtime (formatting, panics, faults, hang watchdog) and the
+//! compile-on-first-call path.
+
+use crate::lower::{fn_name, Lcx};
+use crate::program::{DefId, DefKind, Program};
+use crate::tcx::Tcx;
+use crate::typeck::{Body, Res};
+use crate::types::TyId;
+// arch backend and OS runtime dispatch (arm64 lane): both backends expose the same API
+#[cfg(target_arch = "aarch64")]
+use crate::arm64 as x64;
+#[cfg(target_os = "macos")]
+#[path = "jit_macos.rs"]
+mod os;
+#[cfg(target_os = "macos")]
+use os::{install_signals, os_alloc, write_code, PROT_RW, PROT_RWX};
+#[cfg(not(target_arch = "aarch64"))]
+use crate::x64;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum FnKey {
+    Inst(DefId, Vec<TyId>),
+    /// (file, closure expr, parent fn slot)
+    Closure(u32, u32, u32),
+}
+
+pub struct FnEntry {
+    pub key: FnKey,
+    pub name: String,
+    pub code: u64,
+    pub code_len: u32,
+    pub pc_map: Vec<(u32, u64)>,
+    pub file: u32,
+    /// previous code versions (for rollback), newest last
+    pub prev: Vec<(u64, u32, Vec<(u32, u64)>, u32)>,
+    pub compiled: bool,
+    pub patch_gen: u32,
+    /// optimised RIR (input to inlining into callers, tier-up, recompiles)
+    pub rir: Option<Box<crate::rir::Func>>,
+    pub building: bool,
+    /// slots that inlined this function (recompiled when it is patched)
+    pub inlined_into: Vec<u32>,
+}
+
+pub struct Rt {
+    pub fmt_str: u64,
+    pub fmt_int: u64,
+    pub fmt_float: u64,
+    pub fmt_print: u64,
+    pub panic_site: u64,
+    pub panic_bounds: u64,
+    pub str_eq: u64,
+    pub fmod: u64,
+    pub fmodf: u64,
+    pub hang: u64,
+}
+
+pub struct Site {
+    pub file: u32,
+    pub pos: u32,
+    pub msg: String,
+}
+
+const TABLE_CAP: usize = 1 << 16;
+#[cfg(not(target_arch = "aarch64"))]
+const THUNK_SIZE: usize = 16;
+#[cfg(not(target_arch = "aarch64"))]
+const STUB_SIZE: usize = 32;
+#[cfg(target_arch = "aarch64")]
+const THUNK_SIZE: usize = x64::THUNK_SIZE;
+#[cfg(target_arch = "aarch64")]
+const STUB_SIZE: usize = x64::STUB_SIZE;
+
+pub struct Unit {
+    pub prog: Program,
+    pub tcx: Tcx,
+    pub lay: crate::layout::Layouts,
+    pub fns: Vec<FnEntry>,
+    pub fn_map: HashMap<FnKey, u32>,
+    pub consts: HashMap<(DefId, Vec<TyId>), u64>,
+    pub statics: HashMap<DefId, u64>,
+    pub sites: Vec<Site>,
+    pub rt: Rt,
+    pub bodies: HashMap<u32, Body>,
+    pub cur_fn: u32,
+    pub errors: Vec<String>,
+    pub core_crate: u32,
+    // memory
+    exec_base: u64,
+    exec_size: u64,
+    pub table_base: u64,
+    thunk_base: u64,
+    stub_base: u64,
+    lazy_entry: u64,
+    pub enter: u64,
+    pub leave: u64,
+    code_next: u64,
+    data_next: u64,
+    data_end: u64,
+    /// immutable data range (consts, literals): loads from it fold at compile time
+    pub ro_base: u64,
+    rw_next: u64,
+    rw_end: u64,
+    pub opt: crate::opt::OptCfg,
+    pub env: x64::Env,
+    pub stats: Stats,
+    pub patch_log: Vec<(u32, u32)>, // (slot, generation)
+    pub patch_gen: u32,
+}
+
+#[derive(Default)]
+pub struct Stats {
+    pub inline_rules: [u32; 3],
+    pub compiled: u32,
+    pub opt_ns: u64,
+    pub rir_insts: u64,
+    pub typeck_ns: u64,
+    pub lower_ns: u64,
+    pub codegen_ns: u64,
+    pub code_bytes: u64,
+}
+
+// ------------------------------------------------------------ OS memory
+
+extern "C" {
+    fn pthread_self() -> usize;
+    fn pthread_kill(t: usize, sig: i32) -> i32;
+}
+
+#[repr(C)]
+struct Timespec {
+    sec: i64,
+    nsec: i64,
+}
+
+extern "C" {
+    fn clock_gettime(clk: i32, ts: *mut Timespec) -> i32;
+}
+
+#[cfg(target_os = "linux")]
+const CLOCK_THREAD_CPUTIME_ID: i32 = 3;
+#[cfg(target_os = "macos")]
+const CLOCK_THREAD_CPUTIME_ID: i32 = 16;
+
+/// CPU time of the calling thread in ns (compile-time stats are robust to machine load).
+pub fn cpu_ns() -> u64 {
+    let mut ts = Timespec { sec: 0, nsec: 0 };
+    unsafe {
+        clock_gettime(CLOCK_THREAD_CPUTIME_ID, &mut ts);
+    }
+    ts.sec as u64 * 1_000_000_000 + ts.nsec as u64
+}
+
+/// SIGUSR1: the hang watchdog's signal
+#[cfg(target_os = "linux")]
+const SIG_WATCHDOG: i32 = 10;
+#[cfg(target_os = "macos")]
+const SIG_WATCHDOG: i32 = 30;
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
+    fn dlsym(handle: *mut u8, name: *const u8) -> *mut u8;
+    fn dlopen(name: *const u8, flags: i32) -> *mut u8;
+    fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
+    fn sigaltstack(ss: *const StackT, old: *mut StackT) -> i32;
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct SigAction {
+    handler: usize,
+    mask: [u64; 16],
+    flags: i32,
+    pad: i32,
+    restorer: usize,
+}
+
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct StackT {
+    sp: *mut u8,
+    flags: i32,
+    pad: i32,
+    size: usize,
+}
+
+#[cfg(target_os = "linux")]
+const PROT_RWX: i32 = 7;
+#[cfg(target_os = "linux")]
+const PROT_RW: i32 = 3;
+#[cfg(target_os = "linux")]
+const MAP_PRIVATE_ANON: i32 = 0x22;
+
+#[cfg(target_os = "linux")]
+fn os_alloc(size: usize, prot: i32) -> u64 {
+    let p = unsafe { mmap(std::ptr::null_mut(), size, prot, MAP_PRIVATE_ANON, -1, 0) };
+    if p as isize == -1 {
+        panic!("mmap failed");
+    }
+    p as u64
+}
+
+unsafe fn write_bytes(addr: u64, b: &[u8]) {
+    std::ptr::copy_nonoverlapping(b.as_ptr(), addr as *mut u8, b.len());
+}
+
+/// Writes machine code (macOS: W^X flip + icache flush in jit_macos.rs).
+#[cfg(target_os = "linux")]
+unsafe fn write_code(addr: u64, b: &[u8]) {
+    write_bytes(addr, b)
+}
+
+// ------------------------------------------------------------ global runtime state
+
+/// The unit reached by the lazy-compile entry and the runtime. Set to the
+/// currently borrowed unit around every call into JIT code.
+static mut UNIT: *mut Unit = std::ptr::null_mut();
+/// Saved host context of the innermost `enter` (rsp).
+static mut CTX: [u64; 2] = [0; 2];
+/// Frame of the JIT caller of the last panic trampoline: (rbp, return address).
+static mut PANIC_FRAME: [u64; 2] = [0; 2];
+pub static POLL_FLAG: AtomicBool = AtomicBool::new(false);
+static WATCHDOG_HIT: AtomicBool = AtomicBool::new(false);
+/// set while the compiler runs (signals must not inspect half-updated tables)
+static IN_COMPILE: AtomicBool = AtomicBool::new(false);
+static RUN_GEN: AtomicU64 = AtomicU64::new(0);
+
+thread_local! {
+    static FMT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    static PANIC: std::cell::RefCell<Option<PanicInfo>> = const { std::cell::RefCell::new(None) };
+}
+
+#[derive(Clone)]
+pub struct PanicInfo {
+    pub kind: String,
+    pub message: String,
+    pub site: u64,
+    pub frames: Vec<u64>,
+    pub fault_addr: u64,
+}
+
+// ------------------------------------------------------------ host runtime functions
+
+fn spec_pad(body: String, spec: u64, numeric: bool) -> String {
+    let width = (spec & 0xffff) as usize;
+    let align = ((spec >> 33) & 3) as u8;
+    let zero = (spec >> 37) & 1 != 0;
+    let fill = char::from_u32(((spec >> 48) & 0xffff) as u32).unwrap_or(' ');
+    let n = body.chars().count();
+    if n >= width {
+        return body;
+    }
+    let pad = width - n;
+    if zero && numeric {
+        // zeros after sign / 0x prefix
+        let (sign, rest) = if body.starts_with('-') || body.starts_with('+') { (body[..1].to_string(), body[1..].to_string()) } else { (String::new(), body.clone()) };
+        let (pfx, digits) = if rest.starts_with("0x") || rest.starts_with("0b") || rest.starts_with("0o") { (rest[..2].to_string(), rest[2..].to_string()) } else { (String::new(), rest) };
+        return format!("{}{}{}{}", sign, pfx, "0".repeat(pad), digits);
+    }
+    let fill_s = |k: usize| -> String {
+        let mut s = String::new();
+        for _ in 0..k {
+            s.push(fill);
+        }
+        s
+    };
+    let align = if align == 0 { if numeric { 3 } else { 1 } } else { align };
+    match align {
+        1 => format!("{}{}", body, fill_s(pad)),
+        2 => format!("{}{}{}", fill_s(pad / 2), body, fill_s(pad - pad / 2)),
+        _ => format!("{}{}", fill_s(pad), body),
+    }
+}
+
+extern "C" fn rt_fmt_str(p: *const u8, len: u64, spec: u64) {
+    let s = unsafe { std::slice::from_raw_parts(p, len as usize) };
+    let s = String::from_utf8_lossy(s).into_owned();
+    let ty = ((spec >> 40) & 0xff) as u8;
+    let body = if ty == b'?' { format!("{:?}", s) } else { s };
+    let out = if spec & 0xffff != 0 { spec_pad(body, spec, false) } else { body };
+    FMT.with(|f| f.borrow_mut().push_str(&out));
+}
+
+extern "C" fn rt_fmt_int(v: u64, kind: u64, spec: u64) {
+    let bits = (kind >> 8) as u32;
+    let k = kind & 0xff;
+    let ty = ((spec >> 40) & 0xff) as u8;
+    let alt = (spec >> 36) & 1 != 0;
+    let plus = (spec >> 35) & 1 != 0;
+    let mask: u64 = if bits >= 64 { u64::MAX } else { (1u64 << bits) - 1 };
+    let body = match k {
+        3 => (if v != 0 { "true" } else { "false" }).to_string(),
+        4 => {
+            let c = char::from_u32(v as u32).unwrap_or('?');
+            if ty == b'?' {
+                format!("{:?}", c)
+            } else {
+                c.to_string()
+            }
+        }
+        _ => match ty {
+            b'x' => {
+                if alt {
+                    format!("{:#x}", v & mask)
+                } else {
+                    format!("{:x}", v & mask)
+                }
+            }
+            b'X' => format!("{:X}", v & mask),
+            b'b' => format!("{:b}", v & mask),
+            b'o' => format!("{:o}", v & mask),
+            _ => {
+                let s = if k == 1 { format!("{}", v as i64) } else { format!("{}", v) };
+                if plus && !s.starts_with('-') {
+                    format!("+{}", s)
+                } else {
+                    s
+                }
+            }
+        },
+    };
+    let out = spec_pad(body, spec, k == 1 || k == 2);
+    FMT.with(|f| f.borrow_mut().push_str(&out));
+}
+
+extern "C" fn rt_fmt_float(v: f64, is64: u64, spec: u64) {
+    let ty = ((spec >> 40) & 0xff) as u8;
+    let has_prec = (spec >> 32) & 1 != 0;
+    let prec = ((spec >> 16) & 0xffff) as usize;
+    let plus = (spec >> 35) & 1 != 0;
+    let body = if is64 != 0 {
+        match (ty, has_prec) {
+            (b'?', false) => format!("{:?}", v),
+            (b'e', _) => format!("{:e}", v),
+            (_, true) => format!("{:.*}", prec, v),
+            _ => format!("{}", v),
+        }
+    } else {
+        let x = v as f32;
+        match (ty, has_prec) {
+            (b'?', false) => format!("{:?}", x),
+            (b'e', _) => format!("{:e}", x),
+            (_, true) => format!("{:.*}", prec, x),
+            _ => format!("{}", x),
+        }
+    };
+    let body = if plus && !body.starts_with('-') { format!("+{}", body) } else { body };
+    let out = spec_pad(body, spec, true);
+    FMT.with(|f| f.borrow_mut().push_str(&out));
+}
+
+extern "C" fn rt_fmt_print(stream: u64) {
+    let s = FMT.with(|f| std::mem::take(&mut *f.borrow_mut()));
+    use std::io::Write;
+    if stream == 2 {
+        let _ = std::io::stderr().write_all(s.as_bytes());
+    } else {
+        let _ = std::io::stdout().write_all(s.as_bytes());
+    }
+}
+
+extern "C" fn rt_str_eq(p1: *const u8, l1: u64, p2: *const u8, l2: u64) -> u64 {
+    if l1 != l2 {
+        return 0;
+    }
+    let a = unsafe { std::slice::from_raw_parts(p1, l1 as usize) };
+    let b = unsafe { std::slice::from_raw_parts(p2, l2 as usize) };
+    (a == b) as u64
+}
+
+extern "C" fn rt_fmod(a: f64, b: f64) -> f64 {
+    a % b
+}
+extern "C" fn rt_fmodf(a: f32, b: f32) -> f32 {
+    a % b
+}
+
+fn collect_frames(rbp: u64, ret: u64) -> Vec<u64> {
+    let mut frames = vec![ret];
+    let mut bp = rbp;
+    let u = unsafe { &*UNIT };
+    for _ in 0..64 {
+        if bp == 0 || bp & 7 != 0 {
+            break;
+        }
+        let ra = unsafe { *((bp + 8) as *const u64) };
+        if u.find_fn(ra).is_none() {
+            break;
+        }
+        frames.push(ra);
+        bp = unsafe { *(bp as *const u64) };
+    }
+    frames
+}
+
+fn raise(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret: u64) -> ! {
+    let frames = collect_frames(rbp, ret);
+    PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message, site, frames, fault_addr: fault }));
+    FMT.with(|f| f.borrow_mut().clear());
+    unsafe {
+        let leave: extern "C" fn(*mut u64, u64) -> ! = std::mem::transmute((&*UNIT).leave as usize);
+        leave(std::ptr::addr_of_mut!(CTX) as *mut u64, 1)
+    }
+}
+
+extern "C" fn rt_panic_site(site: u64) {
+    let mut msg = FMT.with(|f| std::mem::take(&mut *f.borrow_mut()));
+    if msg.is_empty() {
+        let u = unsafe { &*UNIT };
+        if (site as usize) < u.sites.len() {
+            msg = u.sites[site as usize].msg.clone();
+        }
+    }
+    let (rbp, ret) = unsafe { (PANIC_FRAME[0], PANIC_FRAME[1]) };
+    raise("panic", msg, site, 0, rbp, ret)
+}
+
+extern "C" fn rt_panic_bounds(idx: u64, len: u64, site: u64) {
+    let msg = format!("index out of bounds: the len is {} but the index is {}", len, idx);
+    let (rbp, ret) = unsafe { (PANIC_FRAME[0], PANIC_FRAME[1]) };
+    raise("panic", msg, site, 0, rbp, ret)
+}
+
+extern "C" fn rt_hang() {
+    if !POLL_FLAG.swap(false, Ordering::SeqCst) {
+        return;
+    }
+    let (rbp, ret) = unsafe { (PANIC_FRAME[0], PANIC_FRAME[1]) };
+    raise("hang", "watchdog: the call did not return in time".to_string(), u64::MAX, 0, rbp, ret)
+}
+
+extern "C" fn rt_compile(slot: u64) -> u64 {
+    unsafe { compile_slot(UNIT, slot as u32) }
+}
+
+#[cfg(target_os = "linux")]
+extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
+    unsafe {
+        let gregs = uc.add(40) as *mut u64;
+        let rip = *gregs.add(16);
+        let rbp = *gregs.add(10);
+        let fault = *(info.add(16) as *const u64);
+        if sig == SIG_WATCHDOG {
+            // hang watchdog: only act when JIT code is running and not inside the compiler
+            if UNIT.is_null() || CTX[0] == 0 || IN_COMPILE.load(Ordering::SeqCst) || (&*UNIT).find_fn(rip).is_none() {
+                return;
+            }
+            WATCHDOG_HIT.store(true, Ordering::SeqCst);
+            let u = &*UNIT;
+            let frames = collect_frames(rbp, rip);
+            PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: "hang".to_string(), message: "watchdog: the call did not return in time".to_string(), site: u64::MAX, frames, fault_addr: 0 }));
+            *gregs.add(16) = u.leave;
+            *gregs.add(8) = std::ptr::addr_of_mut!(CTX) as u64;
+            *gregs.add(9) = 3;
+            return;
+        }
+        let u = &*UNIT;
+        if u.find_fn(rip).is_none() && CTX[0] == 0 {
+            // not ours: restore default and return to crash normally
+            let act = SigAction { handler: 0, mask: [0; 16], flags: 0, pad: 0, restorer: 0 };
+            sigaction(sig, &act, std::ptr::null_mut());
+            return;
+        }
+        let kind = match sig {
+            11 => "segfault",
+            7 => "bus error",
+            4 => "illegal instruction",
+            8 => "arithmetic fault",
+            _ => "signal",
+        };
+        let frames = collect_frames(rbp, rip);
+        PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault }));
+        // resume at `leave(ctx, 2)`
+        *gregs.add(16) = u.leave;
+        *gregs.add(8) = std::ptr::addr_of_mut!(CTX) as u64;
+        *gregs.add(9) = 2;
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn install_signals() {
+    unsafe {
+        let stack = os_alloc(1 << 16, PROT_RW);
+        let ss = StackT { sp: stack as *mut u8, flags: 0, pad: 0, size: 1 << 16 };
+        sigaltstack(&ss, std::ptr::null_mut());
+        for sig in [4, 7, 8, SIG_WATCHDOG, 11] {
+            // SA_SIGINFO | SA_ONSTACK | SA_NODEFER
+            let act = SigAction { handler: on_signal as *const () as usize, mask: [0; 16], flags: 4 | 0x0800_0000 | 0x4000_0000, pad: 0, restorer: 0 };
+            sigaction(sig, &act, std::ptr::null_mut());
+        }
+    }
+}
+
+/// JIT trampoline in front of a host panic function: records the caller's frame.
+#[cfg(target_arch = "aarch64")]
+fn panic_tramp(target: u64) -> Vec<u8> {
+    x64::panic_tramp(std::ptr::addr_of_mut!(PANIC_FRAME) as u64, target)
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn panic_tramp(target: u64) -> Vec<u8> {
+    let frame = std::ptr::addr_of_mut!(PANIC_FRAME) as u64;
+    let mut b = Vec::new();
+    // mov r10, imm64(frame)
+    b.extend_from_slice(&[0x49, 0xba]);
+    b.extend_from_slice(&frame.to_le_bytes());
+    // mov [r10], rbp
+    b.extend_from_slice(&[0x49, 0x89, 0x2a]);
+    // mov rax, [rsp]
+    b.extend_from_slice(&[0x48, 0x8b, 0x04, 0x24]);
+    // mov [r10+8], rax
+    b.extend_from_slice(&[0x49, 0x89, 0x42, 0x08]);
+    // mov r11, imm64(target); jmp r11
+    b.extend_from_slice(&[0x49, 0xbb]);
+    b.extend_from_slice(&target.to_le_bytes());
+    b.extend_from_slice(&[0x41, 0xff, 0xe3]);
+    b
+}
+
+// ------------------------------------------------------------ the unit
+
+impl Unit {
+    pub fn new(prog: Program, tcx: Tcx, core_crate: u32) -> Box<Unit> {
+        let exec_size: u64 = 256 << 20;
+        let exec_base = os_alloc(exec_size as usize, PROT_RWX);
+        let table_base = os_alloc(TABLE_CAP * 8, PROT_RW);
+        let thunk_base = exec_base;
+        let stub_base = thunk_base + (TABLE_CAP * THUNK_SIZE) as u64;
+        let misc = stub_base + (TABLE_CAP * STUB_SIZE) as u64;
+        let data_size: u64 = 256 << 20;
+        let data_base = os_alloc(data_size as usize, PROT_RW);
+        let rw_size: u64 = 64 << 20;
+        let rw_base = os_alloc(rw_size as usize, PROT_RW);
+        let mut u = Box::new(Unit {
+            prog,
+            tcx,
+            lay: crate::layout::Layouts::new(),
+            fns: Vec::new(),
+            fn_map: HashMap::new(),
+            consts: HashMap::new(),
+            statics: HashMap::new(),
+            sites: Vec::new(),
+            rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, hang: 0 },
+            bodies: HashMap::new(),
+            cur_fn: u32::MAX,
+            errors: Vec::new(),
+            core_crate,
+            exec_base,
+            exec_size,
+            table_base,
+            thunk_base,
+            stub_base,
+            lazy_entry: 0,
+            enter: 0,
+            leave: 0,
+            code_next: misc,
+            data_next: data_base,
+            data_end: data_base + data_size,
+            ro_base: data_base,
+            rw_next: rw_base,
+            rw_end: rw_base + rw_size,
+            opt: crate::opt::OptCfg::from_env(),
+            env: x64::Env { table_base, thunk_base, thunk_size: THUNK_SIZE as u64, poll_flag: POLL_FLAG.as_ptr() as u64, rt_hang: 0 },
+            stats: Stats::default(),
+            patch_log: Vec::new(),
+            patch_gen: 0,
+        });
+        let lazy = x64::lazy_entry(rt_compile as *const () as usize as u64);
+        u.lazy_entry = u.emit_code(&lazy);
+        let (el, leave_off) = x64::enter_leave();
+        u.enter = u.emit_code(&el);
+        u.leave = u.enter + leave_off as u64;
+        let ps = panic_tramp(rt_panic_site as *const () as usize as u64);
+        let pb = panic_tramp(rt_panic_bounds as *const () as usize as u64);
+        let ph = panic_tramp(rt_hang as *const () as usize as u64);
+        u.rt = Rt {
+            fmt_str: rt_fmt_str as *const () as usize as u64,
+            fmt_int: rt_fmt_int as *const () as usize as u64,
+            fmt_float: rt_fmt_float as *const () as usize as u64,
+            fmt_print: rt_fmt_print as *const () as usize as u64,
+            panic_site: 0,
+            panic_bounds: 0,
+            str_eq: rt_str_eq as *const () as usize as u64,
+            fmod: rt_fmod as *const () as usize as u64,
+            fmodf: rt_fmodf as *const () as usize as u64,
+            hang: 0,
+        };
+        u.rt.panic_site = u.emit_code(&ps);
+        u.rt.panic_bounds = u.emit_code(&pb);
+        u.rt.hang = u.emit_code(&ph);
+        u.env.rt_hang = u.rt.hang;
+        install_signals();
+        u
+    }
+
+    fn emit_code(&mut self, b: &[u8]) -> u64 {
+        let at = (self.code_next + 15) & !15;
+        if at + b.len() as u64 > self.exec_base + self.exec_size {
+            panic!("out of code memory");
+        }
+        unsafe { write_code(at, b) };
+        self.code_next = at + b.len() as u64;
+        at
+    }
+
+    /// Copies bytes into the data area; returns their address.
+    pub fn data(&mut self, b: &[u8], align: u64) -> u64 {
+        let a = align.max(1);
+        let at = (self.data_next + a - 1) / a * a;
+        if at + b.len() as u64 > self.data_end {
+            panic!("out of data memory");
+        }
+        unsafe { write_bytes(at, b) };
+        self.data_next = at + b.len() as u64;
+        at
+    }
+
+    /// Mutable data (statics).
+    pub fn rw_data(&mut self, size: u64, align: u64) -> u64 {
+        let a = align.max(1);
+        let at = (self.rw_next + a - 1) / a * a;
+        if at + size > self.rw_end {
+            panic!("out of static memory");
+        }
+        self.rw_next = at + size;
+        at
+    }
+
+    pub fn ro_range(&self) -> (u64, u64) {
+        (self.ro_base, self.data_next)
+    }
+
+    pub fn site(&mut self, file: u32, pos: u32, msg: &str) -> u64 {
+        self.sites.push(Site { file, pos, msg: msg.to_string() });
+        self.sites.len() as u64 - 1
+    }
+
+    /// Slot of a function instance (created with a lazy stub on first use).
+    pub fn fn_id(&mut self, key: FnKey) -> u32 {
+        if let Some(&id) = self.fn_map.get(&key) {
+            return id;
+        }
+        let id = self.fns.len() as u32;
+        if id as usize >= TABLE_CAP {
+            panic!("function table full");
+        }
+        let name = fn_name(self, &key);
+        let file = match &key {
+            FnKey::Inst(d, _) => self.prog.def(*d).file,
+            FnKey::Closure(f, _, _) => *f,
+        };
+        let stub_addr = self.stub_base + id as u64 * STUB_SIZE as u64;
+        let stub = x64::stub(id, self.lazy_entry);
+        let slot_addr = self.table_base + id as u64 * 8;
+        let thunk = x64::thunk(slot_addr, THUNK_SIZE);
+        unsafe {
+            write_code(stub_addr, &stub);
+            write_code(self.thunk_base + id as u64 * THUNK_SIZE as u64, &thunk);
+            *(slot_addr as *mut u64) = stub_addr;
+        }
+        self.fns.push(FnEntry { key: key.clone(), name, code: stub_addr, code_len: stub.len() as u32, pc_map: Vec::new(), file, prev: Vec::new(), compiled: false, patch_gen: 0, rir: None, building: false, inlined_into: Vec::new() });
+        self.fn_map.insert(key, id);
+        id
+    }
+
+    /// Permanent callable address of a slot (survives patching).
+    pub fn entry(&self, id: u32) -> u64 {
+        self.thunk_base + id as u64 * THUNK_SIZE as u64
+    }
+
+    pub fn find_fn(&self, pc: u64) -> Option<u32> {
+        for (i, f) in self.fns.iter().enumerate() {
+            if f.compiled && pc >= f.code && pc < f.code + f.code_len as u64 {
+                return Some(i as u32);
+            }
+            for (c, l, _, _) in &f.prev {
+                if pc >= *c && pc < *c + *l as u64 {
+                    return Some(i as u32);
+                }
+            }
+        }
+        None
+    }
+
+    /// Foreign fns declared in HotRust core's `intrinsics*` modules become instructions.
+    pub fn is_intrinsic(&self, d: DefId) -> bool {
+        let def = self.prog.def(d);
+        def.krate == self.core_crate && self.prog.name(def.parent).starts_with("intrinsics")
+    }
+
+    pub fn foreign_addr(&mut self, d: DefId) -> Option<u64> {
+        let name = format!("{}\0", self.prog.name(d));
+        #[cfg(target_os = "macos")]
+        let p = unsafe { os::find_symbol(name.as_ptr()) };
+        #[cfg(target_os = "linux")]
+        let mut p = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
+        #[cfg(target_os = "linux")]
+        if p.is_null() {
+            // the C math library is not necessarily loaded into the host
+            for lib in ["libm.so.6\0", "libc.so.6\0"] {
+                let h = unsafe { dlopen(lib.as_ptr(), 2) };
+                if !h.is_null() {
+                    p = unsafe { dlsym(h, name.as_ptr()) };
+                    if !p.is_null() {
+                        break;
+                    }
+                }
+            }
+        }
+        if p.is_null() {
+            None
+        } else {
+            Some(p as u64)
+        }
+    }
+
+    /// Address of a constant's value (evaluated by running its initializer once).
+    pub fn const_addr(&mut self, d: DefId, args: Vec<TyId>) -> Option<u64> {
+        if let Some(&a) = self.consts.get(&(d, args.clone())) {
+            return Some(a);
+        }
+        let a = self.eval_init(d, args.clone(), false)?;
+        self.consts.insert((d, args), a);
+        Some(a)
+    }
+
+    pub fn static_addr(&mut self, d: DefId) -> u64 {
+        if let Some(&a) = self.statics.get(&d) {
+            return a;
+        }
+        let a = self.eval_init(d, Vec::new(), true).unwrap_or(0);
+        self.statics.insert(d, a);
+        a
+    }
+
+    fn eval_init(&mut self, d: DefId, args: Vec<TyId>, mutable: bool) -> Option<u64> {
+        let t = *self.tcx.const_tys.get(&d)?;
+        let t = self.tcx.tys.subst(t, &args);
+        let l = self.lay.of(&mut self.tcx, t);
+        let buf = if mutable {
+            self.rw_data(l.size.max(1) as u64, l.align.max(8) as u64)
+        } else {
+            self.data(&vec![0u8; l.size.max(1) as usize], l.align.max(8) as u64)
+        };
+        let id = self.fn_id(FnKey::Inst(d, args));
+        let entry = self.entry(id);
+        let r = unsafe { call_jit(self as *mut Unit, entry, buf) };
+        match r {
+            Ok(_) => Some(buf),
+            Err(p) => {
+                let m = format!("constant {} panicked: {}", self.prog.def_path(d), p.message);
+                self.errors.push(m);
+                None
+            }
+        }
+    }
+
+    /// Source position -> "file:line:col".
+    pub fn pos_str(&self, file: u32, pos: u32) -> String {
+        let (l, c) = crate::lexer::line_col(&self.prog.files[file as usize].src, pos);
+        format!("{}:{}:{}", self.prog.file_paths[file as usize], l, c)
+    }
+
+    /// PC -> (fn slot, source position)
+    pub fn pc_to_src(&self, pc: u64) -> Option<(u32, String)> {
+        let id = self.find_fn(pc)?;
+        let f = &self.fns[id as usize];
+        let (base, map) = if pc >= f.code && pc < f.code + f.code_len as u64 {
+            (f.code, &f.pc_map)
+        } else {
+            let mut found = (f.code, &f.pc_map);
+            for (c, l, m, _) in &f.prev {
+                if pc >= *c && pc < *c + *l as u64 {
+                    found = (*c, m);
+                }
+            }
+            found
+        };
+        let off = (pc - base) as u32;
+        let mut pos = (f.file as u64) << 32;
+        for (o, p) in map {
+            if *o < off {
+                pos = *p;
+            } else {
+                break;
+            }
+        }
+        Some((id, self.pos_str((pos >> 32) as u32, pos as u32)))
+    }
+
+    /// Structured JSON crash report for a panic/fault/hang.
+    pub fn report(&self, p: &PanicInfo) -> String {
+        let mut s = String::from("{");
+        s.push_str(&format!("\"kind\":{:?},\"message\":{:?}", p.kind, p.message));
+        if (p.site as usize) < self.sites.len() {
+            let st = &self.sites[p.site as usize];
+            s.push_str(&format!(",\"location\":{:?}", self.pos_str(st.file, st.pos)));
+        }
+        s.push_str(",\"backtrace\":[");
+        for (i, f) in p.frames.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            match self.pc_to_src(f.wrapping_sub(if i == 0 { 0 } else { 1 })) {
+                Some((id, loc)) => s.push_str(&format!("{{\"fn\":{:?},\"at\":{:?},\"patch_gen\":{}}}", self.fns[id as usize].name, loc, self.fns[id as usize].patch_gen)),
+                None => s.push_str(&format!("{{\"pc\":\"{:#x}\"}}", f)),
+            }
+        }
+        s.push_str("],\"recent_patches\":[");
+        let n = self.patch_log.len();
+        let from = n.saturating_sub(5);
+        for (i, (slot, gen)) in self.patch_log[from..].iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&format!("{{\"fn\":{:?},\"gen\":{}}}", self.fns[*slot as usize].name, gen));
+        }
+        s.push_str("]}");
+        s
+    }
+
+    /// Starts a patch group (one edit); its installs roll back together.
+    pub fn begin_patch(&mut self) -> u32 {
+        self.patch_gen += 1;
+        self.patch_gen
+    }
+
+    /// Installs new code for a slot, keeping the previous version for rollback.
+    /// `gen` > 0 marks the install as part of patch group `gen`.
+    pub fn install(&mut self, id: u32, code: &[u8], pc_map: Vec<(u32, u64)>, gen: u32) -> u64 {
+        let at = self.emit_code(code);
+        let f = &mut self.fns[id as usize];
+        if f.compiled {
+            let old_map = std::mem::take(&mut f.pc_map);
+            f.prev.push((f.code, f.code_len, old_map, f.patch_gen));
+        }
+        f.code = at;
+        f.code_len = code.len() as u32;
+        f.pc_map = pc_map;
+        f.compiled = true;
+        if gen > 0 {
+            f.patch_gen = gen;
+            self.patch_log.push((id, gen));
+        }
+        unsafe {
+            let slot = (self.table_base + id as u64 * 8) as *const AtomicU64;
+            (*slot).store(at, Ordering::SeqCst);
+        }
+        self.stats.code_bytes += code.len() as u64;
+        at
+    }
+
+    /// Rolls back every slot installed by patch group `gen`. Their cached RIR is dropped,
+    /// so later inlining recompiles them from source (the agent's next edit).
+    pub fn rollback_gen(&mut self, gen: u32) -> Vec<u32> {
+        let mut out = Vec::new();
+        for id in 0..self.fns.len() {
+            if self.fns[id].patch_gen != gen || gen == 0 {
+                continue;
+            }
+            let f = &mut self.fns[id];
+            let prev = match f.prev.pop() {
+                Some(p) => p,
+                None => continue,
+            };
+            f.code = prev.0;
+            f.code_len = prev.1;
+            f.pc_map = prev.2;
+            f.patch_gen = prev.3;
+            f.rir = None;
+            unsafe {
+                let slot = (self.table_base + id as u64 * 8) as *const AtomicU64;
+                (*slot).store(prev.0, Ordering::SeqCst);
+            }
+            out.push(id as u32);
+        }
+        out
+    }
+}
+
+/// Calls JIT code `entry(arg)` under a fresh recovery context. No Rust borrow of the
+/// unit may be alive across this call; `u` becomes the runtime's unit pointer.
+pub unsafe fn call_jit(u: *mut Unit, entry: u64, arg: u64) -> Result<u64, PanicInfo> {
+    let saved_unit = UNIT;
+    let saved_ctx = CTX;
+    UNIT = u;
+    let enter: extern "C" fn(u64, u64, *mut u64) -> u64 = std::mem::transmute((&*u).enter as usize);
+    let r = enter(entry, arg, std::ptr::addr_of_mut!(CTX) as *mut u64);
+    UNIT = saved_unit;
+    CTX = saved_ctx;
+    if r == 0 {
+        Ok(0)
+    } else {
+        let p = PANIC.with(|p| p.borrow_mut().take());
+        Err(p.unwrap_or(PanicInfo { kind: "unknown".to_string(), message: String::new(), site: u64::MAX, frames: Vec::new(), fault_addr: 0 }))
+    }
+}
+
+/// Starts a watchdog that sets the poll flag if the current run takes longer than `ms`.
+/// Arms the hang watchdog for the calling thread: after `ms`, SIGUSR1 is sent to it
+/// every 5 ms until a signal lands in JIT code, which then unwinds with a "hang" report.
+/// No polling instructions in compiled code.
+pub fn watchdog(ms: u64) -> u64 {
+    let gen = RUN_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    POLL_FLAG.store(false, Ordering::SeqCst);
+    WATCHDOG_HIT.store(false, Ordering::SeqCst);
+    let target = unsafe { pthread_self() };
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        while RUN_GEN.load(Ordering::SeqCst) == gen && !WATCHDOG_HIT.load(Ordering::SeqCst) {
+            unsafe {
+                pthread_kill(target, SIG_WATCHDOG);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+    gen
+}
+
+pub fn watchdog_done() {
+    RUN_GEN.fetch_add(1, Ordering::SeqCst);
+    POLL_FLAG.store(false, Ordering::SeqCst);
+}
+
+/// Compiles one slot (type check, lower, optimise, codegen) and installs it. Called
+/// from the lazy stub on first call, and directly for eager compilation and patches.
+pub unsafe fn compile_slot(up: *mut Unit, id: u32) -> u64 {
+    let u = &mut *up;
+    if u.fns[id as usize].compiled {
+        return u.fns[id as usize].code;
+    }
+    let was = IN_COMPILE.swap(true, Ordering::SeqCst);
+    let r = compile_fn(up, id);
+    match r {
+        Ok((code, map)) => {
+            let u = &mut *up;
+            let a = u.install(id, &code, map, 0);
+            IN_COMPILE.store(was, Ordering::SeqCst);
+            a
+        }
+        Err(e) => {
+            let u = &mut *up;
+            let name = u.fns[id as usize].name.clone();
+            u.errors.push(format!("compile error in {}:\n{}", name, e));
+            // a body that failed to compile panics when called
+            let msg = format!("compile error in {}", name);
+            let code = error_stub(u, &msg);
+            let a = u.install(id, &code, Vec::new(), 0);
+            IN_COMPILE.store(was, Ordering::SeqCst);
+            a
+        }
+    }
+}
+
+fn error_stub(u: &mut Unit, msg: &str) -> Vec<u8> {
+    let mut f = crate::rir::Func::new("error".to_string(), 0);
+    let b = f.block();
+    let addr = u.data(msg.as_bytes(), 1);
+    let p = f.vreg(crate::rir::Cls::I);
+    let l = f.vreg(crate::rir::Cls::I);
+    let z = f.vreg(crate::rir::Cls::I);
+    let s = f.vreg(crate::rir::Cls::I);
+    let blk = &mut f.blocks[b as usize];
+    blk.insts.push(crate::rir::Inst::Addr(p, addr));
+    blk.insts.push(crate::rir::Inst::Iconst(l, msg.len() as i64));
+    blk.insts.push(crate::rir::Inst::Iconst(z, 0));
+    blk.insts.push(crate::rir::Inst::Call(crate::rir::Callee::Host(u.rt.fmt_str), vec![p, l, z], Vec::new()));
+    blk.insts.push(crate::rir::Inst::Iconst(s, u64::MAX as i64));
+    blk.insts.push(crate::rir::Inst::Call(crate::rir::Callee::Host(u.rt.panic_site), vec![s], Vec::new()));
+    for _ in 0..blk.insts.len() {
+        blk.pos.push(0);
+    }
+    blk.term = crate::rir::Term::Unreachable;
+    x64::compile(&f, &u.env).map(|c| c.code).unwrap_or_default()
+}
+
+/// Builds (or reuses) a slot's optimised RIR, then generates machine code.
+pub unsafe fn compile_fn(up: *mut Unit, id: u32) -> Result<(Vec<u8>, Vec<(u32, u64)>), String> {
+    build_rir(up, id)?;
+    let u = &mut *up;
+    let t0 = cpu_ns();
+    let func: &crate::rir::Func = u.fns[id as usize].rir.as_ref().unwrap();
+    let c = x64::compile(func, &u.env)?;
+    if let Ok(want) = std::env::var("HOTRUST_DUMP") {
+        if u.fns[id as usize].name.ends_with(&want) {
+            let base = format!("/tmp/hotrust_dump_{}", want.replace("::", "_"));
+            let _ = std::fs::write(format!("{}.bin", base), &c.code[..c.text_len as usize]);
+            let _ = std::fs::write(format!("{}.rir", base), func.dump());
+        }
+    }
+    u.stats.codegen_ns += cpu_ns() - t0;
+    u.stats.compiled += 1;
+    Ok((c.code, c.pc_map))
+}
+
+/// Source size of a slot's function in bytes (cheap pre-filter for inlining).
+fn src_size(u: &Unit, id: u32) -> u32 {
+    match &u.fns[id as usize].key {
+        FnKey::Inst(d, _) => {
+            let def = u.prog.def(*d);
+            if !matches!(def.kind, DefKind::Fn | DefKind::AssocFn) {
+                return u32::MAX;
+            }
+            let it = u.prog.files[def.file as usize].ast.item(def.item);
+            it.hi - it.lo
+        }
+        FnKey::Closure(..) => u32::MAX,
+    }
+}
+
+/// `#[inline(always)]` -> ATTR_ALWAYS, `#[inline]` -> ATTR_HINT.
+fn inline_attrs(prog: &crate::program::Program, d: DefId) -> u8 {
+    let def = prog.def(d);
+    let f = &prog.files[def.file as usize];
+    let it = f.ast.item(def.item);
+    let mut r = 0;
+    for a in &it.attrs {
+        if a.toks.hi > a.toks.lo && f.tok_text(a.toks.lo) == "inline" {
+            r |= crate::opt::ATTR_HINT;
+            for i in a.toks.lo..a.toks.hi {
+                if f.tok_text(i) == "always" {
+                    r |= crate::opt::ATTR_ALWAYS;
+                }
+            }
+        }
+    }
+    r
+}
+
+/// Source bytes below which a callee's RIR is built so it can be considered for inlining.
+const INLINE_SRC_BYTES: u32 = 600;
+
+/// Type-checks, lowers and optimises a slot's function into `fns[id].rir`.
+pub unsafe fn build_rir(up: *mut Unit, id: u32) -> Result<(), String> {
+    {
+        let u = &mut *up;
+        if u.fns[id as usize].rir.is_some() {
+            return Ok(());
+        }
+        if u.fns[id as usize].building {
+            return Err("recursive build".to_string());
+        }
+        u.fns[id as usize].building = true;
+    }
+    let r = build_rir_inner(up, id);
+    (&mut *up).fns[id as usize].building = false;
+    let mut func = r?;
+    let u = &mut *up;
+    let cfg = u.opt;
+    let mut nested_ns = 0u64;
+    let t0 = cpu_ns();
+    if cfg.inline {
+        // callees small enough in source get their RIR built (bottom-up)
+        let mut callees = Vec::new();
+        for b in &func.blocks {
+            for i in &b.insts {
+                if let crate::rir::Inst::Call(crate::rir::Callee::Fn(c), _, _) = i {
+                    if *c != id && !callees.contains(c) {
+                        callees.push(*c);
+                    }
+                }
+            }
+        }
+        for c in &callees {
+            let u = &mut *up;
+            // tier 0 inlines only builtins (functions of HotRust's core); user code is left
+            // to tier 1 (profile-driven) unless the tier-1 preview flag is set
+            let builtin = match &u.fns[*c as usize].key {
+                FnKey::Inst(d, _) => u.prog.def(*d).krate == u.core_crate,
+                FnKey::Closure(..) => false,
+            };
+            if !builtin && !cfg.inline_all {
+                continue;
+            }
+            let attr = match &u.fns[*c as usize].key {
+                FnKey::Inst(d, _) => inline_attrs(&u.prog, *d),
+                FnKey::Closure(..) => 0,
+            };
+            if u.fns[*c as usize].rir.is_none() && !u.fns[*c as usize].building && (src_size(u, *c) <= INLINE_SRC_BYTES || attr & crate::opt::ATTR_ALWAYS != 0) {
+                let saved = u.cur_fn;
+                let tn = cpu_ns();
+                let _ = build_rir(up, *c);
+                nested_ns += cpu_ns() - tn;
+                (&mut *up).cur_fn = saved;
+            }
+        }
+        let u = &mut *up;
+        let fns_ptr: *const Vec<FnEntry> = &u.fns;
+        let core_crate = u.core_crate;
+        let prog_ptr: *const crate::program::Program = &u.prog;
+        let inline_all = cfg.inline_all;
+        let get = |c: u32| -> Option<(*const crate::rir::Func, u8)> {
+            let fns = &*fns_ptr;
+            let prog = &*prog_ptr;
+            let d = match &fns[c as usize].key {
+                FnKey::Inst(d, _) => *d,
+                FnKey::Closure(..) => return None,
+            };
+            if !inline_all && prog.def(d).krate != core_crate {
+                return None;
+            }
+            let attrs = inline_attrs(prog, d);
+            match &fns[c as usize].rir {
+                Some(f) => Some((&**f as *const crate::rir::Func, attrs)),
+                None => None,
+            }
+        };
+        let ti = crate::opt::pass_clock();
+        let inlined = crate::opt::inline_calls(&mut func, id, &get);
+        crate::opt::pass_time(5, ti);
+        for (c, rule) in inlined {
+            u.stats.inline_rules[rule] += 1;
+            if !u.fns[c as usize].inlined_into.contains(&id) {
+                u.fns[c as usize].inlined_into.push(id);
+            }
+        }
+    }
+    let u = &mut *up;
+    if cfg.fold {
+        crate::opt::simplify(&mut func, u.ro_range(), cfg.imm, cfg.cse);
+        if cfg.sroa && crate::opt::sroa(&mut func) {
+            crate::opt::simplify(&mut func, u.ro_range(), cfg.imm, cfg.cse);
+        }
+    }
+    let ts = crate::opt::pass_clock();
+    if cfg.fold {
+        crate::opt::sink_consts(&mut func);
+    }
+    crate::opt::pass_time(6, ts);
+    let ts = crate::opt::pass_clock();
+    if cfg.layout {
+        crate::opt::relayout(&mut func);
+    }
+    crate::opt::pass_time(7, ts);
+    if let Err(e) = func.verify() {
+        return Err(format!("RIR verify after opt: {}\n{}", e, func.dump()));
+    }
+    u.stats.opt_ns += (cpu_ns() - t0).saturating_sub(nested_ns);
+    u.stats.rir_insts += crate::opt::inst_count(&func) as u64;
+    u.fns[id as usize].rir = Some(Box::new(func));
+    Ok(())
+}
+
+unsafe fn build_rir_inner(up: *mut Unit, id: u32) -> Result<crate::rir::Func, String> {
+    let key = (&*up).fns[id as usize].key.clone();
+    let t0 = cpu_ns();
+    let body = match &key {
+        FnKey::Inst(d, args) => {
+            let u = &mut *up;
+            crate::typeck::check_fn(&u.prog, &mut u.tcx, *d, args)
+        }
+        FnKey::Closure(_, _, parent) => {
+            let u = &mut *up;
+            match u.bodies.get(parent) {
+                Some(b) => clone_body(b),
+                None => return Err("closure parent body missing".to_string()),
+            }
+        }
+    };
+    if !body.errors.is_empty() {
+        return Err(body.errors.join("\n"));
+    }
+    let t1 = cpu_ns();
+    // evaluate constants used by the body before lowering (may run JIT code)
+    let mut const_uses = Vec::new();
+    for (k, r) in &body.res {
+        if let Res::Def(d) = r {
+            let kind = (&*up).prog.def(*d).kind;
+            if matches!(kind, DefKind::Const | DefKind::AssocConst | DefKind::Static) {
+                let args = body.res_args.get(k).cloned().unwrap_or_default();
+                const_uses.push((*d, args, kind));
+            }
+        }
+    }
+    for r in body.pat_res.values() {
+        if let Res::Def(d) = r {
+            let kind = (&*up).prog.def(*d).kind;
+            if matches!(kind, DefKind::Const | DefKind::AssocConst) {
+                const_uses.push((*d, Vec::new(), kind));
+            }
+        }
+    }
+    for r in body.fmt_named.values() {
+        if let Res::Def(d) = r {
+            let kind = (&*up).prog.def(*d).kind;
+            if matches!(kind, DefKind::Const | DefKind::AssocConst) {
+                const_uses.push((*d, Vec::new(), kind));
+            }
+        }
+    }
+    for (d, args, kind) in const_uses {
+        // a const used inside its own initializer is an error rustc already reports
+        if let FnKey::Inst(me, _) = &key {
+            if *me == d {
+                continue;
+            }
+        }
+        if kind == DefKind::Static {
+            (&mut *up).static_addr(d);
+        } else {
+            (&mut *up).const_addr(d, args);
+        }
+    }
+    let u = &mut *up;
+    u.cur_fn = id;
+    let name = u.fns[id as usize].name.clone();
+    let (func, errors, closures) = {
+        let body_ref: &Body = &*(&body as *const Body);
+        let mut lcx = Lcx::new(u, body_ref, name);
+        match &key {
+            FnKey::Inst(d, _) => lcx.lower_fn_body(*d),
+            FnKey::Closure(_, ce, _) => lcx.lower_closure_body(*ce),
+        }
+        let e = std::mem::take(&mut lcx.errors);
+        let c = std::mem::take(&mut lcx.new_closures);
+        (lcx.f, e, c)
+    };
+    if !errors.is_empty() {
+        return Err(errors.join("\n"));
+    }
+    if let Err(e) = func.verify() {
+        return Err(format!("RIR verify: {}\n{}", e, func.dump()));
+    }
+    let u = &mut *up;
+    u.stats.typeck_ns += t1 - t0;
+    u.stats.lower_ns += cpu_ns() - t1;
+    // closures are lowered from their parent's body (looked up by the parent slot)
+    if !closures.is_empty() {
+        u.bodies.insert(id, clone_body(&body));
+    }
+    Ok(func)
+}
+
+fn clone_body(b: &Body) -> Body {
+    Body {
+        def: b.def,
+        args: b.args.clone(),
+        file: b.file,
+        expr_lo: b.expr_lo,
+        expr_ty: b.expr_ty.clone(),
+        pat_lo: b.pat_lo,
+        pat_ty: b.pat_ty.clone(),
+        res: b.res.clone(),
+        res_args: b.res_args.clone(),
+        pat_res: b.pat_res.clone(),
+        pat_local: b.pat_local.clone(),
+        methods: b.methods.clone(),
+        binops: b.binops.clone(),
+        coerce: b.coerce.clone(),
+        field_idx: b.field_idx.clone(),
+        index_derefs: b.index_derefs.clone(),
+        locals: {
+            let mut v = Vec::new();
+            for l in &b.locals {
+                v.push(crate::typeck::Local { name: l.name, ty: l.ty, mutable: l.mutable, pat: l.pat });
+            }
+            v
+        },
+        param_pats: b.param_pats.clone(),
+        ret: b.ret,
+        body: b.body,
+        fmt_named: b.fmt_named.clone(),
+        closures: b.closures.clone(),
+        closure_locals: b.closure_locals.clone(),
+        errors: Vec::new(),
+    }
+}
+
+/// Finds `#[test]` functions of a crate.
+pub fn find_tests(prog: &Program, krate: u32) -> Vec<DefId> {
+    let mut out = Vec::new();
+    for (i, d) in prog.defs.iter().enumerate() {
+        if d.krate != krate || d.kind != DefKind::Fn {
+            continue;
+        }
+        let it = prog.files[d.file as usize].ast.item(d.item);
+        let mut is_test = false;
+        let mut ignored = false;
+        for a in &it.attrs {
+            if a.toks.hi > a.toks.lo {
+                let n = prog.files[d.file as usize].tok_text(a.toks.lo);
+                if n == "test" && a.toks.hi == a.toks.lo + 1 {
+                    is_test = true;
+                }
+                if n == "ignore" {
+                    ignored = true;
+                }
+            }
+        }
+        if is_test && !ignored {
+            out.push(DefId(i as u32));
+        }
+    }
+    out
+}
