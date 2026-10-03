@@ -14,6 +14,12 @@ struct ReloadEnumHolderTest {
 }
 
 #[derive(Debug, Script, ScriptHook)]
+struct ReloadDeclaredDefaultTest {
+    #[live(ReloadEnumTest::Fixed)]
+    value: ReloadEnumTest,
+}
+
+#[derive(Debug, Script, ScriptHook)]
 struct ReloadObjectInnerTest {
     #[live(1.0)]
     value: f64,
@@ -93,4 +99,24 @@ fn reload_missing_object_field_with_type_default_refreshes_from_type_default() {
     outer.script_apply(vm, &Apply::Reload, &mut Scope::empty(), outer_value.into());
     assert_eq!(outer.inner.value, 42.0);
     assert_eq!(outer.inner.rust_value, 99);
+}
+
+#[test]
+fn reload_missing_field_with_declared_default_goes_back_to_it() {
+    let vm = &mut test_vm();
+
+    let enum_api = ReloadEnumTest::script_api(vm);
+    let enum_default = vm.bx.heap.new_with_proto(enum_api);
+    assert!(vm.bx.heap.set_type_default(enum_default));
+
+    let holder_api = ReloadDeclaredDefaultTest::script_api(vm);
+    let holder_value = vm.bx.heap.new_with_proto(holder_api);
+    // A new one starts out with the field's own default...
+    let mut holder = ReloadDeclaredDefaultTest::script_new(vm);
+    assert_eq!(holder.value, ReloadEnumTest::Fixed);
+
+    // ...and a reload that doesn't set the field goes back to that, not to the type's default.
+    holder.value = ReloadEnumTest::Fill;
+    holder.script_apply(vm, &Apply::Reload, &mut Scope::empty(), holder_value.into());
+    assert_eq!(holder.value, ReloadEnumTest::Fixed);
 }

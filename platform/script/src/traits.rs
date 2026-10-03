@@ -327,6 +327,29 @@ impl ScriptVm<'_> {
         }
     }
 
+    /// Like [`Self::script_derive_apply_field`], but for a `#[live(expr)]`
+    /// field: when a reload falls back to a default, the field gets its own
+    /// `declared_default` back (the same as a new one gets), not the type's.
+    #[doc(hidden)]
+    #[inline(never)]
+    pub fn script_derive_apply_field_or_default<T: ScriptNew>(
+        &mut self,
+        apply: &Apply,
+        scope: &mut Scope,
+        value: ScriptValue,
+        id: LiveId,
+        field: &mut T,
+        declared_default: fn() -> T,
+    ) {
+        match self.bx.heap.value_for_apply(value, id.into(), apply) {
+            Some(v) => <T as ScriptApply>::script_apply(field, self, apply, scope, v),
+            None if apply.is_reload() && !<T as ScriptNew>::script_reload_default(self).is_nil() => {
+                *field = declared_default();
+            }
+            None => {}
+        }
+    }
+
     /// A `#[live]` / `#[apply_default]` field of `script_to_value_props`.
     #[doc(hidden)]
     #[inline(never)]
