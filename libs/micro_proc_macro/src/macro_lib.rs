@@ -321,6 +321,11 @@ impl TokenBuilder {
     pub fn suf_u64(&mut self, val: u64) -> &mut Self {
         self.extend(TokenTree::from(Literal::u64_suffixed(val)))
     }
+    /// `LiveId(<hash>)` with the hash computed here, what `id!(name)` expands to.
+    pub fn live_id(&mut self, name: &str) -> &mut Self {
+        let id = LiveId::from_str(name);
+        self.add("LiveId (").suf_u64(id.0).add(")")
+    }
     pub fn unsuf_f32(&mut self, val: f32) -> &mut Self {
         self.extend(TokenTree::from(Literal::f32_unsuffixed(val)))
     }

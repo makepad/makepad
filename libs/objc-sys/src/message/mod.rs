@@ -249,6 +249,89 @@ where
     verify_message_signature::<A, R>(superclass, sel)
         .and_then(|_| send_super_unverified(obj, superclass, sel, args))
 }
+/// `send_message`, panicking with the error's text when it fails: what every
+/// `msg_send!` site does, kept in one place instead of being expanded per site.
+#[doc(hidden)]
+#[inline]
+#[track_caller]
+#[cfg(not(feature = "verify_message"))]
+pub unsafe fn send_message_or_panic<T, A, R>(obj: *const T, sel: Sel, args: A) -> R
+where
+    T: Message,
+    A: MessageArguments,
+    R: Any,
+{
+    match send_message(obj, sel, args) {
+        Ok(r) => r,
+        Err(err) => message_failed(err),
+    }
+}
+
+#[doc(hidden)]
+#[inline]
+#[track_caller]
+#[cfg(feature = "verify_message")]
+pub unsafe fn send_message_or_panic<T, A, R>(obj: *const T, sel: Sel, args: A) -> R
+where
+    T: Message,
+    A: MessageArguments + EncodeArguments,
+    R: Any + Encode,
+{
+    match send_message(obj, sel, args) {
+        Ok(r) => r,
+        Err(err) => message_failed(err),
+    }
+}
+
+#[doc(hidden)]
+#[inline]
+#[track_caller]
+#[cfg(not(feature = "verify_message"))]
+pub unsafe fn send_super_message_or_panic<T, A, R>(
+    obj: *const T,
+    superclass: &Class,
+    sel: Sel,
+    args: A,
+) -> R
+where
+    T: Message,
+    A: MessageArguments,
+    R: Any,
+{
+    match send_super_message(obj, superclass, sel, args) {
+        Ok(r) => r,
+        Err(err) => message_failed(err),
+    }
+}
+
+#[doc(hidden)]
+#[inline]
+#[track_caller]
+#[cfg(feature = "verify_message")]
+pub unsafe fn send_super_message_or_panic<T, A, R>(
+    obj: *const T,
+    superclass: &Class,
+    sel: Sel,
+    args: A,
+) -> R
+where
+    T: Message,
+    A: MessageArguments + EncodeArguments,
+    R: Any + Encode,
+{
+    match send_super_message(obj, superclass, sel, args) {
+        Ok(r) => r,
+        Err(err) => message_failed(err),
+    }
+}
+
+#[cold]
+#[inline(never)]
+#[track_caller]
+fn message_failed(err: MessageError) -> ! {
+    panic!("{}", err)
+}
+
 /*
 #[cfg(test)]
 mod tests {
