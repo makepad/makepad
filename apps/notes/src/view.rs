@@ -928,10 +928,9 @@ impl NotesView {
             surface.invalidate_layout();
         }
         let duration = if self.reduced_motion { 0.0 } else { 0.26 };
-        let offset = size.x + 1.0;
         for id in [live_id!(list_view), live_id!(editor_view)] {
             let mut page = self.view.widget(cx, &[live_id!(compact), id]);
-            script_apply_eval!(cx,page,{use mod.prelude.widgets.* animator +: {slide: {hide: {from:{all:Play.Forward{duration:#(duration)}} apply:{offset:#(offset)}} show:{from:{all:Play.Forward{duration:#(duration)}}}}}});
+            script_apply_eval!(cx,page,{use mod.prelude.widgets.* animator +: {slide: {hide: {from:{all:Play.Forward{duration:#(duration)}}} show:{from:{all:Play.Forward{duration:#(duration)}}}}}});
         }
         if old.family != decision.family {
             self.list(cx)
@@ -1815,7 +1814,7 @@ mod tests {
             let page_ref = nav.view_by_id(&mut cx, page);
             page_ref
                 .as_stack_navigation_view()
-                .show_at_rest(&mut cx, size.x);
+                .show_at_rest(&mut cx);
             let actions = cx.capture_actions(|cx| {
                 cx.widget_action(
                     page_ref.widget_uid(),

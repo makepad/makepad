@@ -80,7 +80,7 @@ script_mod! {
 
         header := mod.widgets.StackViewHeader{}
 
-        offset: 4000.0
+        slide: 1.0
 
         animator: Animator{
             slide: {
@@ -88,15 +88,15 @@ script_mod! {
                 hide: AnimatorState{
                     redraw: true
                     ease: Ease.ExpDecay{d1: 0.80 d2: 0.97}
-                    from: {all: Play.Forward{duration: 5.0}}
-                    apply: {offset: 4000.0}
+                    from: {all: Play.Forward{duration: 0.35}}
+                    apply: {slide: 1.0}
                 }
 
                 show: AnimatorState{
                     redraw: true
-                    ease: Ease.ExpDecay{d1: 0.82 d2: 0.95}
-                    from: {all: Play.Forward{duration: 0.5}}
-                    apply: {offset: 0.0}
+                    ease: Ease.ExpDecay{d1: 0.80 d2: 0.97}
+                    from: {all: Play.Forward{duration: 0.35}}
+                    apply: {slide: 0.0}
                 }
             }
         }
@@ -150,13 +150,10 @@ pub struct StackNavigationView {
     #[deref]
     view: View,
 
-    /// The offset of the stack view from the left edge of the parent view.
+    /// How far this view has slid out to the right, as a fraction of its width:
+    /// 0 when it's fully shown and 1 when it's fully hidden.
     #[live]
-    offset: f64,
-
-    /// The offset of the stack view from the left edge of the parent view when it is fully hidden.
-    #[rust(10000.0)]
-    offset_to_hide: f64,
+    slide: f64,
 
     #[apply_default]
     animator: Animator,
@@ -271,7 +268,7 @@ impl Widget for StackNavigationView {
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
         let parent_rect = cx.peek_walk_turtle(walk);
         let abs_pos = Vec2d {
-            x: parent_rect.pos.x + self.offset,
+            x: parent_rect.pos.x + self.slide * parent_rect.size.x,
             y: parent_rect.pos.y,
         };
 
@@ -332,41 +329,35 @@ impl StackNavigationView {
     fn finish_closure_animation_if_done(&mut self, cx: &mut Cx) {
         if self.state == StackNavigationViewState::Active
             && self.animator.in_state(cx, ids!(slide.hide))
+            && !self.is_animating()
         {
-            if self.offset >= self.offset_to_hide || !self.is_animating() {
-                self.view.visible = false;
-                self.redraw(cx);
-                // The animator's fixed target may be smaller than a wide window.
-                // Completion still hides the view and must release its scope,
-                // including standalone views with no parent to notify.
-                self.animator_cut(cx, ids!(slide.hide));
-                self.set_nav_state(cx, StackNavigationViewState::Inactive);
+            self.view.visible = false;
+            self.redraw(cx);
+            // Release the scope even for standalone views with no parent to notify.
+            self.set_nav_state(cx, StackNavigationViewState::Inactive);
 
-                // Dispatch HideEnd with the parent navigation's UID
-                let hide_end_action = if let Some(parent_uid) = self.parent_navigation_uid {
-                    StackNavigationTransitionAction::HideEnd(parent_uid)
-                } else {
-                    error!(
-                        "No parent navigation UID found for stack view {:?}",
-                        self.widget_uid()
-                    );
-                    return;
-                };
+            // Dispatch HideEnd with the parent navigation's UID
+            let hide_end_action = if let Some(parent_uid) = self.parent_navigation_uid {
+                StackNavigationTransitionAction::HideEnd(parent_uid)
+            } else {
+                error!(
+                    "No parent navigation UID found for stack view {:?}",
+                    self.widget_uid()
+                );
+                return;
+            };
 
-                cx.widget_action(self.widget_uid(), hide_end_action);
-            }
+            cx.widget_action(self.widget_uid(), hide_end_action);
         }
     }
 
     fn trigger_action_post_opening_if_done(&mut self, cx: &mut Cx) {
         if self.state == StackNavigationViewState::Inactive
             && self.animator.in_state(cx, ids!(slide.show))
+            && !self.is_animating()
         {
-            const OPENING_OFFSET_THRESHOLD: f64 = 0.5;
-            if self.offset < OPENING_OFFSET_THRESHOLD {
-                cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
-                self.set_nav_state(cx, StackNavigationViewState::Active);
-            }
+            cx.widget_action(self.widget_uid(), StackNavigationTransitionAction::ShowDone);
+            self.set_nav_state(cx, StackNavigationViewState::Active);
         }
     }
 
@@ -394,20 +385,16 @@ impl StackNavigationView {
 }
 
 impl StackNavigationViewRef {
-    pub fn show(&self, cx: &mut Cx, view_width: f64) {
+    pub fn show(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.view.visible = true;
-            inner.offset_to_hide = view_width;
+            inner.slide = 1.0;
             inner.set_nav_state(cx, StackNavigationViewState::Inactive);
             inner.cancel_scope = Some(inner.begin_cancel_scope_for(cx, CancelScopeKind::Back));
 
-            // Force-reset the animator by cutting to show (offset=0) first,
-            // then cutting to hide, then playing show. This ensures the animator
-            // always sees a state change regardless of its current state.
-            inner.animator_cut(cx, ids!(slide.show)); // force to show state
-            inner.animator_cut(cx, ids!(slide.hide)); // then to hide state
-            inner.offset = view_width; // set actual start offset
-            inner.animator_play(cx, ids!(slide.show)); // now animate hide -> show
+            // Always slide in from fully hidden, wherever an earlier slide left off.
+            inner.animator_cut(cx, ids!(slide.hide));
+            inner.animator_play(cx, ids!(slide.show));
             inner.redraw(cx);
         }
     }
@@ -428,36 +415,28 @@ impl StackNavigationViewRef {
         }
     }
 
-    pub fn set_offset_to_hide(&self, offset_to_hide: f64) {
-        if let Some(mut inner) = self.borrow_mut() {
-            inner.offset_to_hide = offset_to_hide;
-        }
-    }
-
     pub fn hide(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.hide_stack_view(cx);
         }
     }
 
-    pub fn show_at_rest(&self, cx: &mut Cx, view_width: f64) {
+    pub fn show_at_rest(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.view.visible = true;
-            inner.offset_to_hide = view_width;
-            inner.offset = 0.0;
+            inner.slide = 0.0;
             inner.set_nav_state(cx, StackNavigationViewState::Active);
             inner.animator_cut(cx, ids!(slide.show));
             inner.redraw(cx);
         }
     }
 
-    pub fn hide_immediately(&self, cx: &mut Cx, view_width: f64) {
+    pub fn hide_immediately(&self, cx: &mut Cx) {
         if let Some(mut inner) = self.borrow_mut() {
             if inner.view.visible {
                 inner.dismiss_transient_children(cx);
             }
-            inner.offset_to_hide = view_width;
-            inner.offset = view_width;
+            inner.slide = 1.0;
             inner.view.visible = false;
             inner.set_nav_state(cx, StackNavigationViewState::Inactive);
             inner.animator_cut(cx, ids!(slide.hide));
@@ -495,9 +474,6 @@ pub struct StackNavigation {
     /// the stack at runtime.
     #[live]
     stack_templates: ScriptObjectRef,
-
-    #[rust]
-    view_width: f64,
 
     #[rust]
     current_view: Option<LiveId>,
@@ -589,9 +565,6 @@ impl Widget for StackNavigation {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        let parent_rect = cx.peek_walk_turtle(walk);
-        self.update_view_width(cx.cx, parent_rect.size.x);
-
         for (_id, widget_ref) in self.get_visible_views(cx.cx).iter() {
             widget_ref.draw_walk(cx, scope, walk)?;
         }
@@ -679,18 +652,6 @@ impl WidgetMatchEvent for StackNavigation {
 }
 
 impl StackNavigation {
-    fn update_view_width(&mut self, cx: &mut Cx, view_width: f64) {
-        if view_width <= 0.0 || (self.view_width - view_width).abs() <= f64::EPSILON {
-            return;
-        }
-
-        self.view_width = view_width;
-        for view_id in self.visible_view_ids() {
-            let stack_view_ref = self.stack_view_ref(cx, view_id);
-            stack_view_ref.set_offset_to_hide(view_width);
-        }
-    }
-
     fn collect_stack_templates(&mut self, vm: &mut ScriptVm) {
         if self.stack_templates.is_zero() {
             return;
@@ -851,7 +812,7 @@ impl StackNavigation {
 
     fn release_view(&mut self, cx: &mut Cx, view_id: LiveId) {
         let stack_view_ref = self.stack_view_ref(cx, view_id);
-        stack_view_ref.hide_immediately(cx, self.view_width);
+        stack_view_ref.hide_immediately(cx);
         cx.widget_action(
             self.widget_uid(),
             StackNavigationTransitionAction::ViewReleased(view_id),
@@ -879,15 +840,14 @@ impl StackNavigation {
         for view_id in dynamic_view_ids {
             let stack_view_ref = self.stack_view_ref(cx, view_id);
             if Some(view_id) == active {
-                stack_view_ref.show_at_rest(cx, self.view_width);
+                stack_view_ref.show_at_rest(cx);
             } else {
-                stack_view_ref.hide_immediately(cx, self.view_width);
+                stack_view_ref.hide_immediately(cx);
             }
         }
         if let Some(view_id) = active {
             if !self.dynamic_views.contains_key(&view_id) {
-                self.stack_view_ref(cx, view_id)
-                    .show_at_rest(cx, self.view_width);
+                self.stack_view_ref(cx, view_id).show_at_rest(cx);
             }
         }
     }
@@ -905,7 +865,7 @@ impl StackNavigation {
 
         let stack_view_ref = self.stack_view_ref(cx, view_id);
         stack_view_ref.set_parent_navigation_uid(self.widget_uid());
-        stack_view_ref.show(cx, self.view_width);
+        stack_view_ref.show(cx);
 
         cx.widget_action(
             stack_view_ref.widget_uid(),
@@ -929,7 +889,7 @@ impl StackNavigation {
         if let Some(incoming) = view_id {
             let incoming_view_ref = self.stack_view_ref(cx, incoming);
             incoming_view_ref.set_parent_navigation_uid(self.widget_uid());
-            incoming_view_ref.show_at_rest(cx, self.view_width);
+            incoming_view_ref.show_at_rest(cx);
         }
 
         self.transition = Some(StackNavigationTransition::Pop {
@@ -958,8 +918,7 @@ impl StackNavigation {
 
         self.transition = None;
         self.current_view = Some(incoming);
-        self.stack_view_ref(cx, incoming)
-            .show_at_rest(cx, self.view_width);
+        self.stack_view_ref(cx, incoming).show_at_rest(cx);
         if let Some(outgoing) = outgoing {
             self.release_view(cx, outgoing);
         }
@@ -985,8 +944,7 @@ impl StackNavigation {
         self.current_view = incoming;
         self.release_view(cx, outgoing);
         if let Some(incoming) = incoming {
-            self.stack_view_ref(cx, incoming)
-                .show_at_rest(cx, self.view_width);
+            self.stack_view_ref(cx, incoming).show_at_rest(cx);
         }
         self.redraw(cx);
     }
