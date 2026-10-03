@@ -41,6 +41,50 @@ pub fn kit(kind: &str) -> Option<&'static KitDef> {
     KITS.iter().find(|k| k.kind == kind || k.name == kind)
 }
 
+/// A kit parameter's numbers as an editor offers them: the range a control
+/// spans (a soft range: code may write past it), its step, and whether it
+/// is a whole number (a mode, a count). A parameter not listed here is not
+/// a number (a colour, a choice, a texture name).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KitParam {
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+    pub whole: bool,
+}
+
+const fn num(min: f64, max: f64, step: f64) -> KitParam {
+    KitParam { min, max, step, whole: false }
+}
+
+const fn whole(min: f64, max: f64) -> KitParam {
+    KitParam { min, max, step: 1.0, whole: true }
+}
+
+/// Each kit's numeric parameters (by the kit's type name), as the kits'
+/// Splash reads them (see each kit's comment above its template).
+const PARAMS: &[(&str, &[(&str, KitParam)])] = &[
+    ("Glow", &[("strength", num(0.0, 2.0, 0.01)), ("radius", num(0.0, 1.0, 0.01)), ("threshold", num(0.0, 2.0, 0.01)), ("gate", whole(0.0, 1.0))]),
+    ("Bloom", &[("strength", num(0.0, 2.0, 0.01)), ("threshold", num(0.0, 2.0, 0.01)), ("knee", num(0.0, 1.0, 0.01)), ("radius", num(0.0, 2.0, 0.01)), ("halation", num(0.0, 1.0, 0.01)), ("compress", num(0.0, 1.0, 0.01))]),
+    ("Shoulder", &[("knee", num(0.0, 1.0, 0.01)), ("white_from", num(0.0, 8.0, 0.1)), ("white_to", num(0.0, 32.0, 0.1)), ("white", num(0.0, 1.0, 0.01))]),
+    ("Halation", &[("strength", num(0.0, 1.0, 0.01)), ("threshold", num(0.0, 2.0, 0.01))]),
+    ("Aberration", &[("amount", num(0.0, 12.0, 0.1)), ("falloff", whole(1.0, 2.0))]),
+    ("Grain", &[("amount", num(0.0, 0.3, 0.005)), ("size", num(0.5, 4.0, 0.1))]),
+    ("Vignette", &[("amount", num(0.0, 1.0, 0.01)), ("softness", num(0.0, 1.0, 0.01)), ("mode", whole(0.0, 1.0))]),
+    ("FramePost", &[("shake", num(0.0, 0.1, 0.001)), ("zoom", num(0.5, 2.0, 0.01)), ("flash", num(0.0, 1.0, 0.01)), ("fade", num(0.0, 1.0, 0.01)), ("invert", num(0.0, 1.0, 0.01)), ("mode", whole(0.0, 1.0))]),
+    ("Lut", &[("amount", num(0.0, 1.0, 0.01)), ("size", whole(2.0, 64.0))]),
+    ("DepthOfField", &[("focus", num(0.0, 50.0, 0.1)), ("aperture", num(0.0, 32.0, 0.1)), ("max_blur", num(0.0, 64.0, 0.5))]),
+    ("Outline", &[("thickness", num(0.0, 8.0, 0.1)), ("threshold", num(0.0, 0.5, 0.005)), ("mode", whole(0.0, 1.0))]),
+    ("Upsample", &[("guide_view", whole(0.0, 1.0)), ("sigma", num(0.0, 0.5, 0.005))]),
+    ("VelocityBlur", &[("amount", num(0.0, 2.0, 0.01)), ("samples", whole(2.0, 32.0))]),
+];
+
+/// The numbers of parameter `param` of kit `kit` (its type name or kind).
+pub fn param(kit: &str, param: &str) -> Option<KitParam> {
+    let name = self::kit(kit)?.name;
+    PARAMS.iter().find(|(k, _)| *k == name)?.1.iter().find(|(p, _)| *p == param).map(|(_, info)| *info)
+}
+
 /// The kits' Splash source for the host module `module` (for example
 /// `mod.m3`), setting defaults on `module.<Name>` and defining
 /// `module.kit_<kind>`: all of them, or only the kinds in `only` (a host
@@ -647,3 +691,19 @@ $M.kit_velocity_blur = fn(p) {
 }
 "##),
 ];
+
+#[cfg(test)]
+mod param_tests {
+    #[test]
+    fn every_listed_param_is_the_kits_and_its_default_is_in_range() {
+        for (kit, params) in super::PARAMS {
+            let def = super::kit(kit).expect("a kit");
+            for (name, info) in *params {
+                assert!(def.params.contains(name), "{kit}.{name} is no parameter of the kit");
+                assert!(info.min < info.max && info.step > 0.0, "{kit}.{name}");
+            }
+        }
+        assert!(!super::param("bloom", "strength").unwrap().whole);
+        assert!(super::param("Vignette", "mode").unwrap().whole);
+    }
+}
