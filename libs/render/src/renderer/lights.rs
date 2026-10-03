@@ -273,6 +273,9 @@ impl Renderer {
             Ok(())=>self.asset_light_error=None,
         }
         budget_authored_lights(&mut self.frame_lights, authored_start, self.light_eye, crate::asset_lights::MAX_ASSET_FRAME_LIGHTS);
+        // The streamed city's own lights (street lamps, stand-in cars'
+        // headlights) that survived the budget, for the host's cost report.
+        self.frame_stream_lights = self.stream_light_count.min(self.frame_lights.len() - authored_start);
         self.frame_lights.append(&mut self.host_lights);
     }
 

@@ -529,6 +529,12 @@ impl Renderer {
     /// tail fades (`budget_authored_lights`). Also sets the night factor the
     /// window glow reads. Call before `build_frame_lights`.
     pub(super) fn stream_lights(&mut self, eye: Vec3f, sun_dir_y: f32) {
+        let before = self.host_asset_lights.len();
+        self.stream_lights_inner(eye, sun_dir_y);
+        self.stream_light_count = self.host_asset_lights.len() - before;
+    }
+
+    fn stream_lights_inner(&mut self, eye: Vec3f, sun_dir_y: f32) {
         let Some(st) = self.stream.as_mut() else { return };
         let t = ((0.22 - sun_dir_y) / 0.3).clamp(0.0, 1.0);
         st.night = t * t * (3.0 - 2.0 * t);

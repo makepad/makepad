@@ -115,6 +115,13 @@ pub struct ScreenInstance {
 /// Per-frame render counters, handed back for the host's profiler.
 #[derive(Default, Clone, Copy)]
 pub struct RenderStats {
+    /// Vehicle lamps (headlights, taillights) lit this frame: only the
+    /// nearest cars' after dark (`entity_lights`).
+    pub vehicle_lamps: usize,
+    /// Lights the streamed city brings itself (street lamps, the stand-in
+    /// cars' headlights), near the camera after dark, budgeted by the
+    /// renderer (`stream_lights`, `MAX_ASSET_FRAME_LIGHTS`).
+    pub stream_lights: usize,
     /// Extra triangles actually submitted for material fur this frame.
     pub fur_triangles: usize,
     /// Grass patches drawn (one instance each) and their blade budget.
@@ -507,6 +514,12 @@ pub struct Renderer {
     host_asset_lights:Vec<crate::lightmap::LmLight>,
     /// Cars whose installed exterior supplies its own punctual fixtures.
     model_headlight_owners: Vec<u64>,
+    /// The vehicle-lamp radius, eased between frames (`entity_lights`).
+    vehicle_lamp_radius: f32,
+    /// Lights `stream_lights` queued this frame, and how many of them the
+    /// frame budget kept.
+    stream_light_count: usize,
+    frame_stream_lights: usize,
     asset_light_error:Option<String>,
     /// This frame's eye, for ranking lights past the authored budget.
     light_eye: Vec3f,
@@ -760,6 +773,9 @@ impl Default for Renderer {
             host_lights: Vec::new(),
             host_asset_lights:Vec::new(),asset_light_error:None,light_eye:Vec3f::default(),camera_relative:false,
             model_headlight_owners: Vec::new(),
+            vehicle_lamp_radius: 0.0,
+            stream_light_count: 0,
+            frame_stream_lights: 0,
             lamp_cache: Vec::new(),
             lamp_cache_rev: None,
             light_grid: LightGrid::default(),

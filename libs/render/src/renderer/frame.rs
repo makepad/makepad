@@ -130,8 +130,9 @@ impl Renderer {
         self.stream_lights(camera_pos, sun.dir.y);
         self.build_frame_lights(&sun);
         let lamps = makepad_scene::light::lamp_level(sun.dir.y, world.sky.as_ref().map_or(0.0, |s| s.fog));
-        crate::entity_lights::append_entity_lights_with_model_headlights(
-            world, &mut self.frame_lights, &self.model_headlight_owners, lamps,
+        stats.stream_lights = self.frame_stream_lights;
+        stats.vehicle_lamps = crate::entity_lights::append_entity_lights_with_model_headlights(
+            world, &mut self.frame_lights, &self.model_headlight_owners, lamps, camera_pos, &mut self.vehicle_lamp_radius,
         );
         // HDR output: every light below (sun, fill, lamps, fog) switches to
         // linear scene-referred values here, once, so shaders, the cluster
