@@ -84,6 +84,24 @@ pub const INLINE_MAX_INSTS: usize = 40;
 pub const INLINE_MAX_BLOCKS: usize = 8;
 pub const INLINE_BUDGET: usize = 600;
 
+/// Leaf-inlining budget (insts, blocks); HOTRUST_INLINE_LEAF=insts,blocks overrides.
+pub fn leaf_budget() -> (usize, usize) {
+    thread_local! {
+        static B: (usize, usize) = {
+            match std::env::var("HOTRUST_INLINE_LEAF") {
+                Ok(v) => {
+                    let mut it = v.split(',');
+                    let a = it.next().and_then(|x| x.parse().ok()).unwrap_or(INLINE_MAX_INSTS);
+                    let b = it.next().and_then(|x| x.parse().ok()).unwrap_or(INLINE_MAX_BLOCKS);
+                    (a, b)
+                }
+                Err(_) => (INLINE_MAX_INSTS, INLINE_MAX_BLOCKS),
+            }
+        };
+    }
+    B.with(|b| *b)
+}
+
 /// Inlining rules (tier 0, fixed and cheap; counted per rule in the stats):
 pub const RULE_TINY: usize = 0; // body no bigger than the call sequence it replaces
 pub const RULE_ALWAYS: usize = 1; // #[inline(always)], or #[inline] and small
@@ -131,7 +149,8 @@ pub fn inline_rule(f: &Func, callee_id: u32, nargs: usize, nrets: usize, attrs: 
     if attrs & ATTR_HINT != 0 && n <= 60 && leaf {
         return Some(RULE_ALWAYS);
     }
-    if leaf && n <= INLINE_MAX_INSTS && f.blocks.len() <= INLINE_MAX_BLOCKS {
+    let (max_insts, max_blocks) = leaf_budget();
+    if leaf && n <= max_insts && f.blocks.len() <= max_blocks {
         return Some(RULE_SMALL_LEAF);
     }
     None
@@ -509,6 +528,21 @@ pub fn simplify(f: &mut Func, ro: (u64, u64), imm: bool, cse: bool) {
         let mut kn: Vec<Option<K>> = vec![None; nv];
         let mut alias: Vec<u32> = (0..nv as u32).collect();
         let mut def_inst: Vec<Option<(IOp, VReg, i64)>> = vec![None; nv];
+        // single-def integer compares: (cond, signed, a, b-or-imm, is_imm); operands must be
+        // single-def too so the copy reads the same values
+        let mut cmp_def: Vec<Option<(Cond, bool, VReg, i64, bool)>> = vec![None; nv];
+        for (bi, b) in f.blocks.iter().enumerate() {
+            if !reach[bi] {
+                continue;
+            }
+            for i in &b.insts {
+                match i {
+                    Inst::ICmpI(c, sg, d, a, k) if single(*d, &ndef) && single(*a, &ndef) => cmp_def[d.0 as usize] = Some((*c, *sg, *a, *k, true)),
+                    Inst::ICmp(c, sg, d, a, b2) if single(*d, &ndef) && single(*a, &ndef) && single(*b2, &ndef) => cmp_def[d.0 as usize] = Some((*c, *sg, *a, b2.0 as i64, false)),
+                    _ => {}
+                }
+            }
+        }
         for (bi, b) in f.blocks.iter().enumerate() {
             if !reach[bi] {
                 continue;
@@ -688,6 +722,22 @@ pub fn simplify(f: &mut Func, ro: (u64, u64), imm: bool, cse: bool) {
                         }
                         other => other,
                     };
+                    if let Inst::IBinI(IOp::Xor, _, d, x, 1) = new {
+                        // !cmp -> the inverted integer compare
+                        if single(x, &ndef) {
+                            if let Some((c, sg, a, kk, is_imm)) = cmp_def[x.0 as usize] {
+                                let inv = match c {
+                                    Cond::Eq => Cond::Ne,
+                                    Cond::Ne => Cond::Eq,
+                                    Cond::Lt => Cond::Ge,
+                                    Cond::Ge => Cond::Lt,
+                                    Cond::Le => Cond::Gt,
+                                    Cond::Gt => Cond::Le,
+                                };
+                                new = if is_imm { Inst::ICmpI(inv, sg, d, a, kk) } else { Inst::ICmp(inv, sg, d, a, VReg(kk as u32)) };
+                            }
+                        }
+                    }
                     if let Inst::IBinI(op, it, d, x, k) = new {
                         let ident = match op {
                             IOp::Add | IOp::Sub | IOp::Or | IOp::Xor | IOp::Shl | IOp::Shr => k == 0,

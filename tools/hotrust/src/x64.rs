@@ -1336,6 +1336,30 @@ impl<'a> Gen<'a> {
 
     /// Saturating f64 (in XS2) -> int, Rust `as` semantics: NaN -> 0, clamp to range.
     fn f_to_int(&mut self, rd: u8, it: IntTy) {
+        if it.signed && it.bits == 64 {
+            // fast path: cvttsd2si gives 0x8000.. only for NaN / out of range; `cmp rax, 1`
+            // overflows exactly for that value, then the exact saturating path runs
+            self.a.sse_rr(0xf2, 0x2c, RAX, XS2, true);
+            self.a.rex(true, 0, 0, RAX, false);
+            self.a.byte(0x83);
+            self.a.modrm_rr(7, RAX);
+            self.a.byte(1);
+            let p = self.a.jcc32(CC_O);
+            let done = self.a.jmp32();
+            let slow = self.a.pos();
+            self.a.patch(p, slow);
+            self.f_to_int_slow(it);
+            let end = self.a.pos();
+            self.a.patch(done, end);
+            self.a.mov_rr(rd, RAX);
+            return;
+        }
+        self.f_to_int_slow(it);
+        self.a.mov_rr(rd, RAX);
+    }
+
+    /// Saturating f64 (in XS2) -> int in rax, Rust `as` semantics.
+    fn f_to_int_slow(&mut self, it: IntTy) {
         let bits = it.bits as i32;
         let (lo_f, hi_f, min_v, max_v): (f64, f64, i64, i64) = if it.signed {
             let hi = (2f64).powi(bits - 1);
@@ -1382,8 +1406,6 @@ impl<'a> Gen<'a> {
         for p in done {
             self.a.patch(p, end);
         }
-        self.a.mov_rr(rd, RAX);
-        let _ = CC_O;
     }
 
     fn call(&mut self, c: &Callee, args: &[VReg], rets: &[VReg]) {
@@ -1578,7 +1600,8 @@ pub fn compile(f: &Func, env: &Env) -> Result<Compiled, String> {
         frame: 0,
         text_len: 0,
         mem_const: None,
-        // off: measured 2x slower on the parity test (node 165), cause not found yet
+        // off: pinned on node 165 it costs 12% on the parity test and nothing elsewhere; code/pool
+        // cache-line separation does not change that (tested). Cause not proven.
         memconst: std::env::var("HOTRUST_MEMCONST").is_ok(),
     };
     g.gen();
