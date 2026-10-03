@@ -1746,6 +1746,15 @@ impl<'a> Parser<'a> {
             return Ok(Stmt::Empty);
         }
         let attrs = self.outer_attrs()?;
+        let s = self.stmt_after_attrs(attrs.clone())?;
+        if !attrs.is_empty() && matches!(s, Stmt::Expr(..)) {
+            // kept for cfg stripping at load
+            return Ok(Stmt::Attrs(attrs, Box::new(s)));
+        }
+        Ok(s)
+    }
+
+    fn stmt_after_attrs(&mut self, attrs: Vec<Attr>) -> PResult<Stmt> {
         if self.kind() == T::KwLet {
             self.pos += 1;
             let pat = self.pat_top()?;

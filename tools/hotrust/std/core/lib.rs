@@ -56,7 +56,73 @@ pub mod libm {
     }
 }
 
+pub mod mem;
+pub mod option;
+pub mod boxed;
+pub mod vec;
+pub mod string;
+pub mod char_utf8;
+pub mod iter;
+pub mod fmt;
+pub mod slice;
+
+pub mod clone {
+    pub trait Clone {
+        fn clone(&self) -> Self;
+    }
+}
+
+pub mod default {
+    pub trait Default {
+        fn default() -> Self;
+    }
+}
+
+pub mod cmp {
+    pub trait PartialEq<Rhs = Self> {
+        fn eq(&self, other: &Rhs) -> bool;
+        fn ne(&self, other: &Rhs) -> bool {
+            !self.eq(other)
+        }
+    }
+    pub trait Eq {}
+}
+
+pub mod marker {
+    pub trait Copy {}
+    pub trait Send {}
+    pub trait Sync {}
+    pub trait Sized {}
+}
+
 pub mod ops {
+    pub trait FnOnce<Args> {
+        type Output;
+        fn call_once(self, args: Args) -> Self::Output;
+    }
+    pub trait FnMut<Args>: FnOnce<Args> {
+        fn call_mut(&mut self, args: Args) -> Self::Output;
+    }
+    pub trait Fn<Args>: FnMut<Args> {
+        fn call(&self, args: Args) -> Self::Output;
+    }
+    pub trait Drop {
+        fn drop(&mut self);
+    }
+    pub trait Deref {
+        type Target;
+        fn deref(&self) -> &Self::Target;
+    }
+    pub trait DerefMut: Deref {
+        fn deref_mut(&mut self) -> &mut Self::Target;
+    }
+    pub trait Index<Idx> {
+        type Output;
+        fn index(&self, index: Idx) -> &Self::Output;
+    }
+    pub trait IndexMut<Idx>: Index<Idx> {
+        fn index_mut(&mut self, index: Idx) -> &mut Self::Output;
+    }
     pub trait Add<Rhs = Self> {
         type Output;
         fn add(self, rhs: Rhs) -> Self::Output;
@@ -494,6 +560,9 @@ mod num_impls {
         pub fn len(&self) -> usize {
             unsafe { crate::intrinsics_str::slice_len(self) }
         }
+        pub fn iter(&self) -> crate::slice::Iter<'_, T> {
+            crate::slice::iter(self)
+        }
         pub fn is_empty(&self) -> bool {
             self.len() == 0
         }
@@ -507,4 +576,23 @@ pub mod intrinsics_str {
     }
 }
 
-pub mod prelude {}
+pub mod prelude {
+    pub use crate::boxed::Box;
+    pub use crate::clone::Clone;
+    pub use crate::cmp::PartialEq;
+    pub use crate::default::Default;
+    pub use crate::mem::drop;
+    pub use crate::ops::Drop;
+    pub use crate::ops::{Fn, FnMut, FnOnce};
+    pub use crate::option::Option;
+    pub use crate::option::Option::None;
+    pub use crate::option::Option::Some;
+    pub use crate::option::Result;
+    pub use crate::option::Result::Err;
+    pub use crate::option::Result::Ok;
+    pub use crate::string::String;
+    pub use crate::string::ToString;
+    pub use crate::vec::Vec;
+    pub use crate::iter::Iterator;
+    pub use crate::iter::IntoIterator;
+}

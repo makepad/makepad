@@ -30,6 +30,9 @@ pub enum FnKey {
 }
 
 pub const GLUE_DROP: u8 = 0;
+/// `dyn Fn` entry for a callable without state (fn item, fn pointer, capture-free closure):
+/// `fn(env, args..) -> R` forwarding to it
+pub const GLUE_CALL_SHIM: u8 = 1;
 
 pub struct FnEntry {
     pub key: FnKey,
@@ -93,6 +96,8 @@ pub struct Unit {
     pub rt: Rt,
     pub bodies: HashMap<u32, Body>,
     pub drop_cache: HashMap<TyId, bool>,
+    /// (concrete type, dyn type) -> vtable address
+    pub vtables: HashMap<(TyId, TyId), u64>,
     pub lang_cache: HashMap<String, Option<DefId>>,
     pub cur_fn: u32,
     pub errors: Vec<String>,
@@ -612,6 +617,7 @@ impl Unit {
             rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, hang: 0, memcpy: 0, fmt_push: 0, fmt_pop: 0 },
             bodies: HashMap::new(),
             drop_cache: HashMap::new(),
+            vtables: HashMap::new(),
             lang_cache: HashMap::new(),
             cur_fn: u32::MAX,
             errors: Vec::new(),
@@ -774,10 +780,109 @@ impl Unit {
                 any
             }
             TyKind::Array(e, n) => n > 0 && self.needs_drop(e),
+            TyKind::Closure(_, _, _, up, _) => self.needs_drop(up),
+            TyKind::Dyn(..) => true,
             _ => false,
         };
         self.drop_cache.insert(t, r);
         r
+    }
+
+    /// Methods of a trait object's vtable in slot order: the trait's methods with a `self`
+    /// receiver in declaration order, then each supertrait's.
+    pub fn dyn_methods(&self, td: DefId) -> Vec<DefId> {
+        let mut out = Vec::new();
+        let mut seen = Vec::new();
+        self.dyn_methods_into(td, &mut out, &mut seen);
+        out
+    }
+
+    fn dyn_methods_into(&self, td: DefId, out: &mut Vec<DefId>, seen: &mut Vec<DefId>) {
+        if seen.contains(&td) {
+            return;
+        }
+        seen.push(td);
+        for &it in &self.prog.traits[self.prog.def(td).sub as usize] {
+            if let Some(sig) = self.tcx.sigs.get(&it) {
+                if sig.self_kind != 0 {
+                    out.push(it);
+                }
+            }
+        }
+        for sup in self.tcx.trait_supers(&self.prog, td) {
+            self.dyn_methods_into(sup, out, seen);
+        }
+    }
+
+    /// The function of a closure type (its body is lowered from the owner instance's).
+    pub fn closure_fn_id(&mut self, t: TyId) -> Option<u32> {
+        if let TyKind::Closure(file, ce, _, _, owner) = self.tcx.tys.kind(t).clone() {
+            if let TyKind::FnDef(d, args) = self.tcx.tys.kind(owner).clone() {
+                let parent = self.fn_id(FnKey::Inst(d, args));
+                return Some(self.fn_id(FnKey::Closure(file, ce, parent)));
+            }
+        }
+        None
+    }
+
+    /// vtable of `src` as `dy` (built once): [drop, size, align, methods...]
+    pub fn vtable(&mut self, src: TyId, dy: TyId) -> Result<u64, String> {
+        if let Some(&a) = self.vtables.get(&(src, dy)) {
+            return Ok(a);
+        }
+        let (td, targs) = match self.tcx.tys.kind(dy).clone() {
+            TyKind::Dyn(td, targs, _) => (td, targs),
+            _ => return Err("vtable for a non-dyn type".to_string()),
+        };
+        let l = self.lay.of(&mut self.tcx, src);
+        let mut words: Vec<u64> = Vec::new();
+        let drop = if self.needs_drop(src) {
+            let id = self.fn_id(FnKey::Glue(GLUE_DROP, src));
+            self.entry(id)
+        } else {
+            0
+        };
+        words.push(drop);
+        words.push(crate::layout::round_up(l.size, l.align) as u64);
+        words.push(l.align as u64);
+        let is_fn = {
+            let d = self.prog.def(td);
+            Some(d.krate) == self.prog.prelude_crate && matches!(self.prog.name(td), "Fn" | "FnMut" | "FnOnce")
+        };
+        if is_fn {
+            let captures = match self.tcx.tys.kind(src).clone() {
+                TyKind::Closure(_, _, _, up, _) => !matches!(self.tcx.tys.kind(up), TyKind::Tuple(v) if v.is_empty()),
+                _ => false,
+            };
+            let id = if captures {
+                self.closure_fn_id(src).unwrap()
+            } else {
+                self.fn_id(FnKey::Glue(GLUE_CALL_SHIM, src))
+            };
+            words.push(self.entry(id));
+        } else {
+            let mut margs = vec![src];
+            margs.extend(targs.iter().copied());
+            for m in self.dyn_methods(td) {
+                // supertrait methods take the supertrait's args; Self is what matters here
+                let n = self.tcx.sigs.get(&m).map_or(0, |s| s.n_parent_generics) as usize;
+                let mut a = margs.clone();
+                a.truncate(n.max(1));
+                while a.len() < n {
+                    a.push(self.tcx.tys.error);
+                }
+                let (d, a) = self.tcx.resolve_trait_method(&self.prog, m, &a);
+                let id = self.fn_id(FnKey::Inst(d, a));
+                words.push(self.entry(id));
+            }
+        }
+        let mut bytes = Vec::with_capacity(words.len() * 8);
+        for w in &words {
+            bytes.extend_from_slice(&w.to_le_bytes());
+        }
+        let a = self.data(&bytes, 8);
+        self.vtables.insert((src, dy), a);
+        Ok(a)
     }
 
     /// Slot of a function instance (created with a lazy stub on first use).
@@ -1422,6 +1527,7 @@ fn clone_body(b: &Body) -> Body {
         for_next: b.for_next.clone(),
         for_into: b.for_into.clone(),
         index_derefs: b.index_derefs.clone(),
+        call_derefs: b.call_derefs.clone(),
         locals: {
             let mut v = Vec::new();
             for l in &b.locals {

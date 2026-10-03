@@ -683,6 +683,11 @@ impl<'p, 'a> Walker<'p, 'a> {
                 }
                 Stmt::Item(i) => self.item(*i, false),
                 Stmt::Expr(e, _) => self.expr(*e),
+                Stmt::Attrs(_, s) => {
+                    if let Stmt::Expr(e, _) = &**s {
+                        self.expr(*e);
+                    }
+                }
                 Stmt::Empty => {}
             }
         }

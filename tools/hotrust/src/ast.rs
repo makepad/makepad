@@ -362,6 +362,9 @@ pub enum Stmt {
     },
     Item(ItemId),
     Expr(ExprId, bool),
+    /// an expression statement with outer attributes; program loading strips it by its
+    /// `#[cfg]` (keeping the inner statement or dropping it), so later passes never see it
+    Attrs(Vec<Attr>, Box<Stmt>),
     Empty,
 }
 

@@ -11,6 +11,12 @@ use crate::typeck::{Body, Coerce, Res};
 use crate::types::{TyId, TyKind};
 use std::collections::HashMap;
 
+/// vtable layout: [drop_in_place (0 when no drop), size, align, methods...]
+pub const VT_DROP: u32 = 0;
+pub const VT_SIZE: u32 = 1;
+pub const VT_ALIGN: u32 = 2;
+pub const VT_METHODS: u32 = 3;
+
 #[derive(Clone)]
 pub enum Val {
     /// scalar leaves in registers
@@ -76,6 +82,9 @@ pub struct Lcx<'a> {
     match_root: Option<MatchRoot>,
     /// the place being lowered is written or mutably borrowed (DerefMut / IndexMut)
     want_mut: bool,
+    /// locals owned by the enclosing function (captured by the closure being lowered):
+    /// the closure neither drops them nor tracks their drop flags
+    foreign: Vec<bool>,
 }
 
 pub fn fn_name(u: &Unit, key: &FnKey) -> String {
@@ -112,6 +121,7 @@ impl<'a> Lcx<'a> {
             stmt_temps: Vec::new(),
             match_root: None,
             want_mut: false,
+            foreign: vec![false; n],
         }
     }
 
@@ -188,6 +198,10 @@ impl<'a> Lcx<'a> {
             TyKind::Char => IntTy { bits: 32, signed: false },
             _ => U64,
         }
+    }
+    /// str, slices and trait objects: places of them are fat pointers (Place::Regs)
+    fn unsized_ty(&self, t: TyId) -> bool {
+        matches!(self.u.tcx.tys.kind(t), TyKind::Str | TyKind::Slice(_) | TyKind::Dyn(..))
     }
     fn is_f64(&self, t: TyId) -> bool {
         matches!(self.u.tcx.tys.kind(t), TyKind::Float(Prim::F64))
@@ -406,6 +420,14 @@ impl<'a> Lcx<'a> {
                 self.mark_root(*x);
             }
         }
+        // locals captured by reference live in memory
+        for (ce, caps) in &b.closure_locals {
+            if !matches!(ast.expr(ExprId(*ce)).kind, ExprKind::Closure { is_move: true, .. }) {
+                for li in caps {
+                    self.addr_taken[*li as usize] = true;
+                }
+            }
+        }
         // pattern bindings by reference
         for (p, li) in &b.pat_local {
             if let Pat::Ident { by_ref: true, .. } = ast.pat(PatId(*p)) {
@@ -544,6 +566,32 @@ impl<'a> Lcx<'a> {
             self.f.params.push(p);
             self.sret = Some(p);
         }
+        // captured state: by-value captures live in the state, by-reference ones point at
+        // the owner's locals
+        let caps = self.b.closure_locals.get(&ce).cloned().unwrap_or_default();
+        if !caps.is_empty() {
+            let env = self.f.vreg(Cls::I);
+            self.f.params.push(env);
+            let is_move = matches!(ast.expr(ExprId(ce)).kind, ExprKind::Closure { is_move: true, .. });
+            let ct = self.b.ty(ExprId(ce));
+            let up = match self.kind(ct) {
+                TyKind::Closure(_, _, _, up, _) => up,
+                _ => self.u.tcx.tys.unit,
+            };
+            let ul = self.layout(up);
+            for (i, li) in caps.iter().enumerate() {
+                let off = ul.fields.get(i).copied().unwrap_or(0) as i32;
+                let a = if is_move {
+                    self.addr_add(env, off)
+                } else {
+                    let d = self.f.vreg(Cls::I);
+                    self.emit(Inst::Load(Mem::Int(8, false), d, env, off));
+                    d
+                };
+                self.locals[*li as usize] = Some(LocalSt::Slot(a));
+                self.foreign[*li as usize] = true;
+            }
+        }
         let mut pv = Vec::new();
         for p in &params {
             let t = self.b.pty(p.pat);
@@ -568,7 +616,7 @@ impl<'a> Lcx<'a> {
                     self.f.params.push(*r);
                 }
                 if let TyKind::Ref(true, inner) = self.kind(t) {
-                    if !matches!(self.kind(inner), TyKind::Str | TyKind::Slice(_)) && regs.len() == 1 {
+                    if !self.unsized_ty(inner) && regs.len() == 1 {
                         self.f.noalias.push(regs[0]);
                     }
                 }
@@ -662,7 +710,8 @@ impl<'a> Lcx<'a> {
                         }
                     }
                 }
-                Stmt::Item(_) | Stmt::Empty => {}
+                // stripped at load (program::strip_cfg_stmts)
+                Stmt::Item(_) | Stmt::Empty | Stmt::Attrs(..) => {}
                 Stmt::Expr(e, semi) => {
                     self.pos = ast.expr(*e).lo;
                     let v = self.lower_expr(*e);
@@ -706,7 +755,7 @@ impl<'a> Lcx<'a> {
         };
         let p = self.read_place(&pl, pt);
         let p = self.to_leaves(p, pt);
-        if matches!(self.kind(inner), TyKind::Slice(_) | TyKind::Str) {
+        if self.unsized_ty(inner) {
             (Place::Regs(p), inner)
         } else {
             (Place::Mem(p[0], 0), inner)
@@ -747,7 +796,7 @@ impl<'a> Lcx<'a> {
         let ret_t = self.u.tcx.tys.intern(TyKind::Ref(mutbl, target));
         let r = self.emit_call(Callee::Fn(id), vec![(Val::L(vec![addr]), self_t)], ret_t);
         let r = self.to_leaves(r, ret_t);
-        if matches!(self.kind(target), TyKind::Slice(_) | TyKind::Str) {
+        if self.unsized_ty(target) {
             (Place::Regs(r), target)
         } else {
             (Place::Mem(r[0], 0), target)
@@ -851,7 +900,7 @@ impl<'a> Lcx<'a> {
         let ret_t = self.u.tcx.tys.intern(TyKind::Ref(mutbl, t));
         let r = self.emit_call(Callee::Fn(id), vec![(Val::L(vec![addr]), self_t), (iv, it)], ret_t);
         let r = self.to_leaves(r, ret_t);
-        if matches!(self.kind(t), TyKind::Slice(_) | TyKind::Str) {
+        if self.unsized_ty(t) {
             (Place::Regs(r), t)
         } else {
             (Place::Mem(r[0], 0), t)
@@ -897,6 +946,9 @@ impl<'a> Lcx<'a> {
     /// A local now owns a value: drop a previous one still owned (rebinding in loops),
     /// then set its flag.
     fn own_local(&mut self, li: u32) {
+        if self.foreign[li as usize] {
+            return;
+        }
         let lt = self.b.locals[li as usize].ty;
         if !self.needs_drop(lt) {
             return;
@@ -914,6 +966,9 @@ impl<'a> Lcx<'a> {
     }
 
     fn moved_local(&mut self, li: u32) {
+        if self.foreign[li as usize] {
+            return;
+        }
         let lt = self.b.locals[li as usize].ty;
         if self.needs_drop(lt) {
             let f = self.flag_of(li);
@@ -1402,6 +1457,26 @@ impl<'a> Lcx<'a> {
                 let _ = target;
                 Val::L(vec![p[0], l])
             }
+            Some(Coerce::ToDyn(src, dy)) => {
+                // thin pointer (alone in its wrapper) -> (data, vtable)
+                let st = self.b.ty(e);
+                let p = self.to_leaves(v, st);
+                if p.len() != 1 {
+                    self.err(self.pos, "unsizing to `dyn` needs a single-pointer value".to_string());
+                    return self.unit();
+                }
+                let addr = match self.u.vtable(src, dy) {
+                    Ok(a) => a,
+                    Err(m) => {
+                        self.err(self.pos, m);
+                        return self.unit();
+                    }
+                };
+                let vt = self.f.vreg(Cls::I);
+                self.emit(Inst::Addr(vt, addr));
+                let _ = target;
+                Val::L(vec![p[0], vt])
+            }
             Some(Coerce::ReifyFn) => {
                 let t = self.b.ty(e);
                 if let TyKind::FnDef(d, args) = self.kind(t) {
@@ -1430,14 +1505,24 @@ impl<'a> Lcx<'a> {
                 _ => break,
             }
         }
-        if let Some(caps) = self.b.closure_locals.get(&ce.0) {
-            if !caps.is_empty() {
-                self.err(self.ast().expr(ce).lo, "capturing closures are not supported yet".to_string());
-            }
+        let t = self.b.ty(ce);
+        self.closure_fn_of(t)
+    }
+
+    /// The function of a closure type (lowered from its owner's body).
+    fn closure_fn_of(&mut self, t: TyId) -> u32 {
+        let (file, ce, owner) = match self.kind(t) {
+            TyKind::Closure(file, ce, _, _, owner) => (file, ce, owner),
+            _ => return 0,
+        };
+        let parent = match self.kind(owner) {
+            TyKind::FnDef(d, args) => self.u.fn_id(FnKey::Inst(d, args)),
+            _ => self.u.cur_fn,
+        };
+        let id = self.u.fn_id(FnKey::Closure(file, ce, parent));
+        if self.b.file == file && parent == self.u.fn_id(FnKey::Inst(self.b.def, self.b.args.clone())) {
+            self.new_closures.push((ce, id));
         }
-        let parent = self.u.cur_fn;
-        let id = self.u.fn_id(FnKey::Closure(self.b.file, ce.0, parent));
-        self.new_closures.push((ce.0, id));
         id
     }
 
@@ -1770,7 +1855,7 @@ impl<'a> Lcx<'a> {
                 self.want_mut = *m;
                 let (pl, pt) = self.lower_place(*x);
                 self.want_mut = saved;
-                if matches!(self.kind(pt), TyKind::Str | TyKind::Slice(_)) {
+                if self.unsized_ty(pt) {
                     // reborrow of an unsized place: the fat pointer itself
                     if let Place::Regs(r) = pl {
                         return Val::L(r);
@@ -1803,9 +1888,33 @@ impl<'a> Lcx<'a> {
                 }
                 self.build_record(t, 0, vals)
             }
-            ExprKind::Closure { .. } => {
-                // a closure value of closure type is zero-sized; calls go to its function
-                self.unit()
+            ExprKind::Closure { is_move, .. } => {
+                // the closure value is its captured state; its code is a function of its own
+                let is_move = *is_move;
+                self.closure_fn(e);
+                let caps = self.b.closure_locals.get(&e.0).cloned().unwrap_or_default();
+                if caps.is_empty() {
+                    return self.unit();
+                }
+                let up = match self.kind(t) {
+                    TyKind::Closure(_, _, _, up, _) => up,
+                    _ => return self.unit(),
+                };
+                let mut vals = Vec::new();
+                for li in caps {
+                    let lt = self.b.locals[li as usize].ty;
+                    let pl = self.local_place(li);
+                    if is_move {
+                        let v = self.read_place(&pl, lt);
+                        self.moved_local(li);
+                        vals.push((v, lt));
+                    } else {
+                        let a = self.place_addr(&pl, lt);
+                        let pt = self.u.tcx.tys.intern(TyKind::Ptr(true, lt));
+                        vals.push((Val::L(vec![a]), pt));
+                    }
+                }
+                self.build_record(up, 0, vals)
             }
             ExprKind::Mac(m) => self.lower_mac(e, m, t),
             _ => {
@@ -2124,7 +2233,7 @@ impl<'a> Lcx<'a> {
                 let xt = self.b.ty(*x);
                 let p = self.lower_expr(*x);
                 let p = self.to_leaves(p, xt);
-                if matches!(self.kind(t), TyKind::Str | TyKind::Slice(_)) {
+                if self.unsized_ty(t) {
                     return (Place::Regs(p), t);
                 }
                 (Place::Mem(p[0], 0), t)
@@ -2213,7 +2322,7 @@ impl<'a> Lcx<'a> {
         while let TyKind::Ref(_, inner) = self.kind(pt) {
             let p = self.read_place(&pl, pt);
             let p = self.to_leaves(p, pt);
-            pl = if matches!(self.kind(inner), TyKind::Slice(_) | TyKind::Str) { Place::Regs(p) } else { Place::Mem(p[0], 0) };
+            pl = if self.unsized_ty(inner) { Place::Regs(p) } else { Place::Mem(p[0], 0) };
             pt = inner;
         }
         let _ = at;
@@ -2510,7 +2619,14 @@ impl<'a> Lcx<'a> {
                 self.emit(Inst::Conv(Conv::IntToInt(it), d, x));
                 Val::L(vec![d])
             }
-            (TyKind::Ref(..), TyKind::Ptr(..)) | (TyKind::Ptr(..), TyKind::Ptr(..)) | (TyKind::FnPtr(..), _) | (TyKind::Int(_), TyKind::Ptr(..)) => Val::L(v),
+            (TyKind::Ref(..), TyKind::Ptr(..)) | (TyKind::Ptr(..), TyKind::Ptr(..)) => {
+                // fat -> thin keeps the data pointer
+                let n = self.layout(to).leaves.map_or(1, |l| l.len());
+                let mut v = v;
+                v.truncate(n);
+                Val::L(v)
+            }
+            (TyKind::FnPtr(..), _) | (TyKind::Int(_), TyKind::Ptr(..)) => Val::L(v),
             _ => Val::L(v),
         }
     }
@@ -2902,7 +3018,53 @@ impl<'a> Lcx<'a> {
 
     fn lower_call(&mut self, e: ExprId, f: ExprId, args: &[ExprId], t: TyId) -> Val {
         let ft = self.b.ty(f);
-        let _ = e;
+        if let Some(n) = self.b.call_derefs.get(&e.0).copied() {
+            // the callable is behind references / smart pointers
+            let (mut pl, mut pt) = self.lower_place(f);
+            for k in 0..n {
+                let (a, b) = self.deref_place(e.0, k, pl, pt);
+                pl = a;
+                pt = b;
+            }
+            return match self.kind(pt) {
+                TyKind::Closure(..) => {
+                    let env = self.place_addr(&pl, pt);
+                    self.call_closure_at(env, pt, args, t)
+                }
+                TyKind::Dyn(_, targs, _) => {
+                    let r = match pl {
+                        Place::Regs(r) => r,
+                        _ => return self.unit(),
+                    };
+                    let ps = match targs.first().map(|x| self.kind(*x)) {
+                        Some(TyKind::FnPtr(ps, _)) => ps,
+                        _ => Vec::new(),
+                    };
+                    let fp = self.f.vreg(Cls::I);
+                    self.emit(Inst::Load(Mem::Int(8, false), fp, r[1], (VT_METHODS * 8) as i32));
+                    let mut vals = vec![(Val::L(vec![r[0]]), self.u.tcx.tys.usize_)];
+                    for (i, a) in args.iter().enumerate() {
+                        let pt = ps.get(i).copied().unwrap_or_else(|| self.b.ty(*a));
+                        vals.push((self.lower_expr_coerced(*a, pt), pt));
+                    }
+                    self.emit_call(Callee::Indirect(fp), vals, t)
+                }
+                TyKind::FnPtr(ps, _) => {
+                    let fv = self.read_place(&pl, pt);
+                    let fv = self.to_leaves(fv, pt);
+                    let mut vals = Vec::new();
+                    for (i, a) in args.iter().enumerate() {
+                        let p = ps.get(i).copied().unwrap_or(self.u.tcx.tys.error);
+                        vals.push((self.lower_expr_coerced(*a, p), p));
+                    }
+                    self.emit_call(Callee::Indirect(fv[0]), vals, t)
+                }
+                _ => {
+                    self.err(self.pos, "unsupported call through a pointer".to_string());
+                    self.unit()
+                }
+            };
+        }
         match self.kind(ft) {
             TyKind::FnDef(d0, gargs0) => {
                 let (d, gargs) = self.u.tcx.resolve_trait_method(&self.u.prog, d0, &gargs0);
@@ -2981,14 +3143,10 @@ impl<'a> Lcx<'a> {
                 }
                 self.emit_call(Callee::Indirect(fv[0]), vals, t)
             }
-            TyKind::Closure(_, ce) => {
-                let id = self.closure_fn(ExprId(ce));
-                let mut vals = Vec::new();
-                for a in args {
-                    let at = self.b.ty(*a);
-                    vals.push((self.lower_expr(*a), at));
-                }
-                self.emit_call(Callee::Fn(id), vals, t)
+            TyKind::Closure(..) => {
+                let (pl, _) = self.lower_place(f);
+                let env = self.place_addr(&pl, ft);
+                self.call_closure_at(env, ft, args, t)
             }
             _ => {
                 self.err(self.pos, "unsupported call".to_string());
@@ -2997,14 +3155,45 @@ impl<'a> Lcx<'a> {
         }
     }
 
+    /// Calls the closure whose state is at `env` (closures with captured state take a
+    /// pointer to it as their first argument).
+    fn call_closure_at(&mut self, env: VReg, ct: TyId, args: &[ExprId], t: TyId) -> Val {
+        let id = self.closure_fn_of(ct);
+        let (sig, up) = match self.kind(ct) {
+            TyKind::Closure(_, _, sig, up, _) => (sig, up),
+            _ => return self.unit(),
+        };
+        let ps = match self.kind(sig) {
+            TyKind::FnPtr(ps, _) => ps,
+            _ => Vec::new(),
+        };
+        let mut vals = Vec::new();
+        if !matches!(self.kind(up), TyKind::Tuple(v) if v.is_empty()) {
+            let pt = self.u.tcx.tys.intern(TyKind::Ptr(true, up));
+            vals.push((Val::L(vec![env]), pt));
+        }
+        for (i, a) in args.iter().enumerate() {
+            let pt = ps.get(i).copied().unwrap_or_else(|| self.b.ty(*a));
+            vals.push((self.lower_expr_coerced(*a, pt), pt));
+        }
+        self.emit_call(Callee::Fn(id), vals, t)
+    }
+
     fn lower_method(&mut self, e: ExprId, recv: ExprId, args: &[ExprId], t: TyId) -> Val {
         let mut m = match self.b.methods.get(&e.0) {
             Some(m) => m.clone(),
             None => return self.unit(),
         };
-        let (rd, ra) = self.u.tcx.resolve_trait_method(&self.u.prog, m.def, &m.args);
-        m.def = rd;
-        m.args = ra;
+        // trait object receiver: dispatched through the vtable
+        let virt = match m.args.first().map(|t| self.kind(*t)) {
+            Some(TyKind::Dyn(td, ..)) => Some((td, m.def)),
+            _ => None,
+        };
+        if virt.is_none() {
+            let (rd, ra) = self.u.tcx.resolve_trait_method(&self.u.prog, m.def, &m.args);
+            m.def = rd;
+            m.args = ra;
+        }
         let sig = match self.u.tcx.sigs.get(&m.def).cloned() {
             Some(s) => s,
             None => return self.unit(),
@@ -3028,7 +3217,7 @@ impl<'a> Lcx<'a> {
                 pt = b2;
             }
             self.want_mut = saved;
-            if matches!(self.kind(pt), TyKind::Slice(_) | TyKind::Str) {
+            if self.unsized_ty(pt) {
                 match pl {
                     Place::Regs(r) => Val::L(r),
                     _ => self.unit(),
@@ -3070,6 +3259,27 @@ impl<'a> Lcx<'a> {
                 self.b.ty(*a)
             };
             vals.push((self.lower_expr_coerced(*a, pt), pt));
+        }
+        if let Some((td, md)) = virt {
+            let idx = match self.u.dyn_methods(td).iter().position(|x| *x == md) {
+                Some(i) => i as u32,
+                None => {
+                    self.err(self.pos, "method is not in the trait object's vtable".to_string());
+                    return self.unit();
+                }
+            };
+            if sig.self_kind < 2 {
+                self.err(self.pos, "by-value `self` methods on trait objects are not supported".to_string());
+                return self.unit();
+            }
+            let r = self.to_leaves(vals[0].0.clone(), vals[0].1);
+            if r.len() != 2 {
+                return self.unit();
+            }
+            let fp = self.f.vreg(Cls::I);
+            self.emit(Inst::Load(Mem::Int(8, false), fp, r[1], ((VT_METHODS + idx) * 8) as i32));
+            vals[0] = (Val::L(vec![r[0]]), self.u.tcx.tys.usize_);
+            return self.emit_call(Callee::Indirect(fp), vals, t);
         }
         if let Some(v) = self.intrinsic(m.def, &m.args, &vals, t) {
             return v;
@@ -3114,9 +3324,57 @@ impl<'a> Lcx<'a> {
             "drop_in_place" => {
                 let p = leaf(self, 0);
                 if let Some(g) = g0 {
-                    self.drop_at(p[0], g);
+                    if let TyKind::Dyn(..) = self.kind(g) {
+                        // through the vtable's drop entry (0 when the type has no drop)
+                        let fp = self.f.vreg(Cls::I);
+                        self.emit(Inst::Load(Mem::Int(8, false), fp, p[1], (VT_DROP * 8) as i32));
+                        let yes = self.f.block();
+                        let join = self.f.block();
+                        self.term(Term::Branch(fp, yes, join));
+                        self.switch(yes);
+                        self.emit(Inst::Call(Callee::Indirect(fp), vec![p[0]], Vec::new()));
+                        self.goto(join);
+                        self.switch(join);
+                    } else {
+                        self.drop_at(p[0], g);
+                    }
                 }
                 self.unit()
+            }
+            "size_of_val" | "align_of_val" => {
+                // of the value behind a (possibly fat) pointer
+                let p = leaf(self, 0);
+                let g = match g0 {
+                    Some(g) => g,
+                    None => return Some(self.unit()),
+                };
+                let size = name == "size_of_val";
+                let r = match self.kind(g) {
+                    TyKind::Dyn(..) => {
+                        let d = self.f.vreg(Cls::I);
+                        let w = if size { VT_SIZE } else { VT_ALIGN };
+                        self.emit(Inst::Load(Mem::Int(8, false), d, p[1], (w * 8) as i32));
+                        d
+                    }
+                    TyKind::Slice(e) if size => {
+                        let el = self.layout(e);
+                        let k = self.iconst(crate::layout::round_up(el.size, el.align) as i64);
+                        let d = self.f.vreg(Cls::I);
+                        self.emit(Inst::IBin(IOp::Mul, U64, d, p[1], k));
+                        d
+                    }
+                    TyKind::Str if size => p[1],
+                    TyKind::Slice(e) => {
+                        let el = self.layout(e);
+                        self.iconst(el.align as i64)
+                    }
+                    TyKind::Str => self.iconst(1),
+                    _ => {
+                        let l = self.layout(g);
+                        self.iconst(if size { crate::layout::round_up(l.size, l.align) } else { l.align } as i64)
+                    }
+                };
+                Val::L(vec![r])
             }
             "ptr_read" => {
                 let p = leaf(self, 0);
@@ -3365,7 +3623,7 @@ impl<'a> Lcx<'a> {
         let mut b = b;
         let mut t = t;
         while let TyKind::Ref(_, inner) = self.kind(t) {
-            if matches!(self.kind(inner), TyKind::Str | TyKind::Slice(_)) {
+            if self.unsized_ty(inner) {
                 break;
             }
             let pa = self.to_leaves(a, t);
@@ -3853,6 +4111,9 @@ pub fn closure_map(_b: &Body) -> HashMap<u32, u32> {
 /// Compiler-generated helper functions per type. GLUE_DROP: `fn(p: *mut T)` runs T's Drop
 /// impl (if any) and then drops every field that needs it, in declaration order.
 pub fn glue_func(u: &mut Unit, kind: u8, t: TyId) -> Func {
+    if kind == crate::jit::GLUE_CALL_SHIM {
+        return call_shim(u, t);
+    }
     let name = fn_name(u, &FnKey::Glue(kind, t));
     let mut f = Func::new(name, 0);
     let entry = f.block();
@@ -3868,6 +4129,82 @@ pub fn glue_func(u: &mut Unit, kind: u8, t: TyId) -> Func {
             b.pos.push(0);
         }
     }
+    f
+}
+
+/// `dyn Fn` entry for a stateless callable: `fn([sret,] env, args..)` calling it with the
+/// same arguments (the ABI of the arguments is the same on both sides, so they pass through).
+fn call_shim(u: &mut Unit, t: TyId) -> Func {
+    let name = fn_name(u, &FnKey::Glue(crate::jit::GLUE_CALL_SHIM, t));
+    let mut f = Func::new(name, 0);
+    let b = f.block();
+    let (callee_sig, target) = match u.tcx.tys.kind(t).clone() {
+        TyKind::Closure(_, _, sig, _, _) => (sig, u.closure_fn_id(t).map(Callee::Fn)),
+        TyKind::FnDef(d, args) => {
+            let (d2, a2) = u.tcx.resolve_trait_method(&u.prog, d, &args);
+            let sig = match u.tcx.sigs.get(&d).cloned() {
+                Some(s) => {
+                    let ps: Vec<TyId> = s.params.iter().map(|p| u.tcx.tys.subst(*p, &args)).collect();
+                    let r = u.tcx.tys.subst(s.ret, &args);
+                    u.tcx.tys.intern(TyKind::FnPtr(ps, r))
+                }
+                None => u.tcx.tys.error,
+            };
+            (sig, Some(Callee::Fn(u.fn_id(FnKey::Inst(d2, a2)))))
+        }
+        TyKind::FnPtr(..) => (t, None),
+        _ => (u.tcx.tys.error, None),
+    };
+    let (ps, ret) = match u.tcx.tys.kind(callee_sig).clone() {
+        TyKind::FnPtr(ps, r) => (ps, r),
+        _ => (Vec::new(), u.tcx.tys.unit),
+    };
+    let mut fwd = Vec::new();
+    let mut rets = Vec::new();
+    let rl = u.lay.of(&mut u.tcx, ret);
+    match &rl.leaves {
+        Some(l) if ret_fits(l) => {
+            for lf in l {
+                f.rets.push(lf.cls);
+                rets.push(f.vreg(lf.cls));
+            }
+        }
+        _ => {
+            let p = f.vreg(Cls::I);
+            f.params.push(p);
+            fwd.push(p);
+        }
+    }
+    let env = f.vreg(Cls::I);
+    f.params.push(env);
+    for p in ps {
+        let l = u.lay.of(&mut u.tcx, p);
+        match &l.leaves {
+            Some(leaves) => {
+                for lf in leaves {
+                    let r = f.vreg(lf.cls);
+                    f.params.push(r);
+                    fwd.push(r);
+                }
+            }
+            None => {
+                let r = f.vreg(Cls::I);
+                f.params.push(r);
+                fwd.push(r);
+            }
+        }
+    }
+    let callee = match target {
+        Some(c) => c,
+        None => {
+            // fn pointer: env points at it
+            let fp = f.vreg(Cls::I);
+            push(&mut f, b, Inst::Load(Mem::Int(8, false), fp, env, 0));
+            Callee::Indirect(fp)
+        }
+    };
+    push(&mut f, b, Inst::Call(callee, fwd, rets.clone()));
+    f.blocks[b as usize].term = Term::Ret(rets);
     f
 }
 

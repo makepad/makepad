@@ -39,6 +39,9 @@ pub enum Coerce {
     MutToConst,
     /// `!` -> any
     Never,
+    /// pointer to a sized type -> pointer to `dyn Trait` (&T, *T, Box<T>, Rc<T>, ..):
+    /// (source pointee, dyn type)
+    ToDyn(TyId, TyId),
 }
 
 pub struct Local {
@@ -75,6 +78,8 @@ pub struct Body {
     /// `for` over an IntoIterator: iterator expr -> (`into_iter`, [Self], iterator type)
     pub for_into: HashMap<u32, (DefId, Vec<TyId>, TyId)>,
     pub index_derefs: HashMap<u32, u8>,
+    /// call expr -> deref steps from the callee expression to the callable
+    pub call_derefs: HashMap<u32, u8>,
     pub locals: Vec<Local>,
     pub param_pats: Vec<PatId>,
     pub ret: TyId,
@@ -125,6 +130,8 @@ pub struct Fcx<'a> {
     ret_stack: Vec<TyId>,
     closure_depth: Vec<(u32, usize)>, // (closure expr, scope depth at entry)
     cur_binop: u32,
+    /// resolve without defaulting `{integer}`/`{float}` (mid-check normalisation)
+    keep_literal_vars: bool,
 }
 
 pub fn check_fn(prog: &Program, tcx: &mut Tcx, def: DefId, args: &[TyId]) -> Body {
@@ -177,6 +184,7 @@ pub fn check_fn(prog: &Program, tcx: &mut Tcx, def: DefId, args: &[TyId]) -> Bod
             for_next: HashMap::new(),
             for_into: HashMap::new(),
             index_derefs: HashMap::new(),
+            call_derefs: HashMap::new(),
             locals: Vec::new(),
             param_pats: Vec::new(),
             ret: error,
@@ -193,6 +201,7 @@ pub fn check_fn(prog: &Program, tcx: &mut Tcx, def: DefId, args: &[TyId]) -> Bod
         ret_stack: Vec::new(),
         closure_depth: Vec::new(),
         cur_binop: 0,
+        keep_literal_vars: false,
     };
     let mut params = Vec::new();
     for p in &sig.params {
@@ -293,8 +302,8 @@ impl<'a> Fcx<'a> {
         let k = self.tcx.tys.kind(t).clone();
         match k {
             TyKind::Infer(v) => match self.vars[v as usize] {
-                VarSt::Free(1) => self.tcx.tys.i32_,
-                VarSt::Free(2) => self.tcx.tys.f64_,
+                VarSt::Free(1) if !self.keep_literal_vars => self.tcx.tys.i32_,
+                VarSt::Free(2) if !self.keep_literal_vars => self.tcx.tys.f64_,
                 _ => t,
             },
             TyKind::Tuple(v) => {
@@ -341,6 +350,22 @@ impl<'a> Fcx<'a> {
                     n.push(self.deep(x));
                 }
                 self.tcx.tys.intern(TyKind::FnDef(d, n))
+            }
+            TyKind::Dyn(d, v, bs) => {
+                let mut n = Vec::new();
+                for x in v {
+                    n.push(self.deep(x));
+                }
+                let mut nb = Vec::new();
+                for (a, x) in bs {
+                    nb.push((a, self.deep(x)));
+                }
+                self.tcx.tys.intern(TyKind::Dyn(d, n, nb))
+            }
+            TyKind::Closure(f, e, sig, up, owner) => {
+                let sig = self.deep(sig);
+                let up = self.deep(up);
+                self.tcx.tys.intern(TyKind::Closure(f, e, sig, up, owner))
             }
             _ => t,
         }
@@ -395,8 +420,98 @@ impl<'a> Fcx<'a> {
                 }
                 self.unify(*r1, *r2)
             }
+            (TyKind::Dyn(d1, x, b1), TyKind::Dyn(d2, y, b2)) => {
+                if d1 != d2 || x.len() != y.len() || b1.len() != b2.len() {
+                    return false;
+                }
+                for i in 0..x.len() {
+                    if !self.unify(x[i], y[i]) {
+                        return false;
+                    }
+                }
+                for i in 0..b1.len() {
+                    if b1[i].0 != b2[i].0 || !self.unify(b1[i].1, b2[i].1) {
+                        return false;
+                    }
+                }
+                true
+            }
             _ => false,
         }
+    }
+
+    /// `&T -> &dyn Tr`, `*T -> *dyn Tr`, `P<T> -> P<dyn Tr>` when T implements Tr.
+    fn dyn_coercion(&mut self, ka: &TyKind, kx: &TyKind) -> Option<(TyId, TyId)> {
+        let (src, dy) = match (ka, kx) {
+            (TyKind::Ref(m1, a), TyKind::Ref(m2, d)) | (TyKind::Ptr(m1, a), TyKind::Ptr(m2, d)) if *m1 || !*m2 => (*a, *d),
+            (TyKind::Adt(d1, xs), TyKind::Adt(d2, ys)) if d1 == d2 && xs.len() == ys.len() => {
+                let mut found = None;
+                for i in 0..xs.len() {
+                    let y = self.shallow(ys[i]);
+                    if matches!(self.tcx.tys.kind(y), TyKind::Dyn(..)) {
+                        let x = self.shallow(xs[i]);
+                        if !matches!(self.tcx.tys.kind(x), TyKind::Dyn(..)) {
+                            found = Some(i);
+                        }
+                    }
+                }
+                let i = found?;
+                for j in 0..xs.len() {
+                    if j != i && !self.unify(xs[j], ys[j]) {
+                        return None;
+                    }
+                }
+                (xs[i], ys[i])
+            }
+            _ => return None,
+        };
+        let src = self.shallow(src);
+        let dy = self.shallow(dy);
+        let (td, targs) = match self.tcx.tys.kind(dy).clone() {
+            TyKind::Dyn(td, targs, _) => (td, targs),
+            _ => return None,
+        };
+        if matches!(self.tcx.tys.kind(src), TyKind::Dyn(..) | TyKind::Infer(_)) {
+            return None;
+        }
+        if self.is_fn_trait(td) {
+            let want = targs.first().copied()?;
+            let have = match self.tcx.tys.kind(src).clone() {
+                TyKind::Closure(_, _, sig, _, _) => sig,
+                TyKind::FnPtr(..) => src,
+                TyKind::FnDef(fd, fargs) => {
+                    let sig = self.tcx.sigs.get(&fd).cloned()?;
+                    let mut ps = Vec::new();
+                    for p in &sig.params {
+                        ps.push(self.tcx.tys.subst(*p, &fargs));
+                    }
+                    let r = self.tcx.tys.subst(sig.ret, &fargs);
+                    self.tcx.tys.intern(TyKind::FnPtr(ps, r))
+                }
+                _ => return None,
+            };
+            return if self.unify(have, want) { Some((src, dy)) } else { None };
+        }
+        let s2 = self.deep(src);
+        if self.tcx.find_impl(td, s2, &targs).is_some() {
+            return Some((src, dy));
+        }
+        None
+    }
+
+    fn has_dyn(&mut self, t: TyId) -> bool {
+        let t = self.shallow(t);
+        match self.tcx.tys.kind(t).clone() {
+            TyKind::Dyn(..) => true,
+            TyKind::Adt(_, v) | TyKind::Tuple(v) => v.iter().any(|x| self.has_dyn(*x)),
+            TyKind::Ref(_, x) | TyKind::Ptr(_, x) => self.has_dyn(x),
+            _ => false,
+        }
+    }
+
+    pub fn is_fn_trait(&self, td: DefId) -> bool {
+        let d = self.prog.def(td);
+        Some(d.krate) == self.prog.prelude_crate && matches!(self.prog.name(td), "Fn" | "FnMut" | "FnOnce")
     }
 
     fn bind(&mut self, v: u32, t: TyId) -> bool {
@@ -459,6 +574,12 @@ impl<'a> Fcx<'a> {
             }
             return true;
         }
+        if let Some((src, dy)) = self.dyn_coercion(&ka, &kx) {
+            if let Some(e) = e {
+                self.b.coerce.insert(e.0, Coerce::ToDyn(src, dy));
+            }
+            return true;
+        }
         match (&ka, &kx) {
             (TyKind::FnDef(d, args), TyKind::FnPtr(ps, r)) => {
                 if let Some(sig) = self.tcx.sigs.get(d).cloned() {
@@ -480,13 +601,18 @@ impl<'a> Fcx<'a> {
                     }
                 }
             }
-            (TyKind::Closure(_, ce), TyKind::FnPtr(..)) => {
-                // closure type was checked against the fn pointer's signature already
-                if let Some(e) = e {
-                    self.b.coerce.insert(e.0, Coerce::ClosureFn);
+            (TyKind::Closure(_, _, sig, up, _), TyKind::FnPtr(..)) => {
+                // only closures without captured state are plain functions
+                let captures = match self.tcx.tys.kind(*up) {
+                    TyKind::Tuple(v) => !v.is_empty(),
+                    _ => true,
+                };
+                if !captures && self.unify(*sig, x) {
+                    if let Some(e) = e {
+                        self.b.coerce.insert(e.0, Coerce::ClosureFn);
+                    }
+                    return true;
                 }
-                let _ = ce;
-                return true;
             }
             (TyKind::Ref(m1, ia), TyKind::Ref(m2, ix)) => {
                 let ia = self.shallow(*ia);
@@ -857,15 +983,14 @@ impl<'a> Fcx<'a> {
             self.err(path.lo, format!("unresolved struct `{}`", crate::tcx::path_str(prog, self.file, path)));
             return Res::Err;
         }
-        // Enum::Variant / Self::Variant / module::Struct
-        let (r, _) = self.resolve_value_path(path, u32::MAX, false);
-        if let Res::Def(_) = r {
-            return r;
-        }
+        // module::Struct, then Enum::Variant / Self::Variant
         if let Some(d) = self.tcx.resolve_type_path_def(prog, self.file, self.module, path) {
-            return Res::Def(d);
+            if matches!(prog.def(d).kind, DefKind::Struct | DefKind::Union | DefKind::Variant) {
+                return Res::Def(d);
+            }
         }
-        Res::Err
+        let (r, _) = self.resolve_value_path(path, u32::MAX, false);
+        r
     }
 
     /// Type of a value def used as an expression (fn items get fresh generic args).
@@ -1093,7 +1218,45 @@ impl<'a> Fcx<'a> {
 
     /// Generic args [Self, trait args.., own..] to call trait method `item` (found through
     /// impl `imp`) on receiver type `t`.
+    /// A method named `s` of trait `td` or its supertraits (methods of a trait object).
+    fn dyn_method(&self, td: DefId, s: Sym) -> Option<DefId> {
+        for &it in &self.prog.traits[self.prog.def(td).sub as usize] {
+            if self.prog.def(it).name == s && self.prog.def(it).kind == DefKind::AssocFn {
+                return Some(it);
+            }
+        }
+        for sup in self.tcx.trait_supers(self.prog, td) {
+            if let Some(m) = self.dyn_method(sup, s) {
+                return Some(m);
+            }
+        }
+        None
+    }
+
     fn trait_call_args(&mut self, item: DefId, imp: DefId, t: TyId, explicit_own: &[TyId]) -> Vec<TyId> {
+        if imp == crate::program::NO_DEF {
+            // trait object receiver: [dyn, the principal's args when the method is its own, own..]
+            let mut args = vec![t];
+            if let TyKind::Dyn(td, targs, _) = self.tcx.tys.kind(t).clone() {
+                if self.prog.def(item).parent == td {
+                    args.extend(targs);
+                }
+            }
+            let sig = self.tcx.sigs.get(&item).cloned();
+            let np = sig.as_ref().map_or(1, |s| s.n_parent_generics) as usize;
+            while args.len() < np {
+                args.push(self.fresh(0));
+            }
+            let own = sig.map_or(0, |s| s.n_generics - s.n_parent_generics);
+            for i in 0..own as usize {
+                if i < explicit_own.len() {
+                    args.push(explicit_own[i]);
+                } else {
+                    args.push(self.fresh(0));
+                }
+            }
+            return args;
+        }
         let impl_args = self.match_impl_args(imp, t);
         let targs = self.tcx.impl_trait_args.get(&imp).cloned().unwrap_or_default();
         let mut args = vec![t];
@@ -1271,16 +1434,22 @@ impl<'a> Fcx<'a> {
     }
 
     fn note_capture(&mut self, li: u32) {
-        // a local declared outside the innermost closure is a capture
-        if let Some(&(ce, depth)) = self.closure_depth.last() {
+        // a local declared outside a closure is captured by it (and by every closure between
+        // it and the local's scope, so nested closures can reach it)
+        for k in (0..self.closure_depth.len()).rev() {
+            let (ce, depth) = self.closure_depth[k];
             let mut declared_inside = false;
             for i in depth..self.scopes.len() {
                 if self.scopes[i].1 == li {
                     declared_inside = true;
                 }
             }
-            if !declared_inside {
-                self.b.closure_locals.entry(ce).or_default().push(li);
+            if declared_inside {
+                break;
+            }
+            let caps = self.b.closure_locals.entry(ce).or_default();
+            if !caps.contains(&li) {
+                caps.push(li);
             }
         }
     }
@@ -1334,7 +1503,8 @@ impl<'a> Fcx<'a> {
                     }
                     self.check_pat(*pat, t);
                 }
-                Stmt::Item(_) => {}
+                // stripped at load (program::strip_cfg_stmts)
+                Stmt::Item(_) | Stmt::Attrs(..) => {}
                 Stmt::Expr(e, semi) => {
                     let is_tail = i == n - 1 && !*semi;
                     let t = self.check_expr(*e, if is_tail { expected } else { None });
@@ -2227,8 +2397,27 @@ impl<'a> Fcx<'a> {
 
     fn check_call(&mut self, e: ExprId, f: ExprId, args: &[ExprId], expected: Option<TyId>, lo: u32) -> TyId {
         let ft = self.check_expr(f, None);
-        let fs = self.shallow(ft);
+        let mut fs = self.shallow(ft);
+        // calls through references / smart pointers to callables (`&F`, `Box<dyn Fn()>`)
+        let mut steps = 0u8;
+        loop {
+            match self.tcx.tys.kind(fs) {
+                TyKind::FnDef(..) | TyKind::FnPtr(..) | TyKind::Closure(..) | TyKind::Dyn(..) | TyKind::Error | TyKind::Infer(_) => break,
+                _ => {}
+            }
+            match self.deref_step(e.0, steps, fs) {
+                Some(n) => {
+                    fs = n;
+                    steps += 1;
+                }
+                None => break,
+            }
+        }
+        if steps > 0 {
+            self.b.call_derefs.insert(e.0, steps);
+        }
         let error = self.tcx.tys.error;
+        let mut bounded: Option<(DefId, Vec<TyId>, Vec<TyId>)> = None;
         let (params, ret) = match self.tcx.tys.kind(fs).clone() {
             TyKind::FnDef(d, gargs) => match self.tcx.sigs.get(&d).cloned() {
                 Some(sig) => {
@@ -2237,6 +2426,9 @@ impl<'a> Fcx<'a> {
                         ps.push(self.tcx.tys.subst(*p, &gargs));
                     }
                     let r = self.tcx.tys.subst(sig.ret, &gargs);
+                    if self.tcx.fn_bounds.contains_key(&d) {
+                        bounded = Some((d, gargs.clone(), sig.params.clone()));
+                    }
                     if sig.variadic {
                         for (i, a) in args.iter().enumerate() {
                             if i < ps.len() {
@@ -2253,10 +2445,14 @@ impl<'a> Fcx<'a> {
                 None => (Vec::new(), error),
             },
             TyKind::FnPtr(ps, r) => (ps, r),
-            TyKind::Closure(_, ce) => {
-                let (ps, r) = self.closure_sig(ce);
-                (ps, r)
-            }
+            TyKind::Closure(_, _, sig, _, _) => match self.tcx.tys.kind(sig).clone() {
+                TyKind::FnPtr(ps, r) => (ps, r),
+                _ => (Vec::new(), error),
+            },
+            TyKind::Dyn(td, targs, _) if self.is_fn_trait(td) => match targs.first().map(|t| self.tcx.tys.kind(*t).clone()) {
+                Some(TyKind::FnPtr(ps, r)) => (ps, r),
+                _ => (Vec::new(), error),
+            },
             TyKind::Error => {
                 for a in args {
                     self.check_expr(*a, None);
@@ -2277,7 +2473,8 @@ impl<'a> Fcx<'a> {
             let rs = self.shallow(ret);
             if matches!(self.tcx.tys.kind(rs), TyKind::Adt(..)) {
                 let xs = self.shallow(x);
-                if matches!(self.tcx.tys.kind(xs), TyKind::Adt(..)) {
+                // not into `P<dyn Tr>`: the argument coerces to it instead
+                if matches!(self.tcx.tys.kind(xs), TyKind::Adt(..)) && !self.has_dyn(xs) {
                     let save = self.vars.clone();
                     if !self.unify(rs, xs) {
                         self.vars = save;
@@ -2287,25 +2484,18 @@ impl<'a> Fcx<'a> {
         }
         for (i, a) in args.iter().enumerate() {
             let pt = if i < params.len() { self.norm(params[i]) } else { error };
-            let t = self.check_expr(*a, Some(pt));
+            let xt = match &bounded {
+                Some((d, gargs, raw)) if i < raw.len() => self.closure_expect(*d, gargs, raw[i], *a, pt),
+                _ => pt,
+            };
+            let t = self.check_expr(*a, Some(xt));
             self.coerce_or_unify(t, pt, Some(*a), self.ast().expr(*a).lo);
+        }
+        if let Some((d, gargs, _)) = &bounded {
+            self.apply_fn_bounds(*d, gargs, lo);
         }
         let _ = e;
         self.norm(ret)
-    }
-
-    fn closure_sig(&mut self, ce: u32) -> (Vec<TyId>, TyId) {
-        let ast = self.ast();
-        if let ExprKind::Closure { params, body, .. } = &ast.expr(ExprId(ce)).kind {
-            let mut ps = Vec::new();
-            for p in params {
-                let pi = (p.pat.0 - self.b.pat_lo) as usize;
-                ps.push(self.b.pat_ty[pi]);
-            }
-            let r = self.b.expr_ty[(body.0 - self.b.expr_lo) as usize];
-            return (ps, r);
-        }
-        (Vec::new(), self.tcx.tys.error)
     }
 
     fn check_closure(&mut self, e: ExprId, params: &[ClosureParam], ret: Option<crate::ast::TyId>, body: ExprId, expected: Option<TyId>) -> TyId {
@@ -2349,7 +2539,21 @@ impl<'a> Fcx<'a> {
         self.scopes.truncate(saved);
         self.diverges = false;
         self.b.closures.push(e.0);
-        self.tcx.tys.intern(TyKind::Closure(self.file, e.0))
+        let mut ps = Vec::new();
+        for p in params {
+            ps.push(self.b.pat_ty[(p.pat.0 - self.b.pat_lo) as usize]);
+        }
+        let sig = self.tcx.tys.intern(TyKind::FnPtr(ps, rt));
+        // captured state: `move` closures own their captures, others point at them
+        let is_move = matches!(self.ast().expr(e).kind, ExprKind::Closure { is_move: true, .. });
+        let mut up = Vec::new();
+        for li in self.b.closure_locals.get(&e.0).cloned().unwrap_or_default() {
+            let lt = self.b.locals[li as usize].ty;
+            up.push(if is_move { lt } else { self.tcx.tys.intern(TyKind::Ptr(true, lt)) });
+        }
+        let up = self.tcx.tys.intern(TyKind::Tuple(up));
+        let owner = self.tcx.tys.intern(TyKind::FnDef(self.b.def, self.b.args.clone()));
+        self.tcx.tys.intern(TyKind::Closure(self.file, e.0, sig, up, owner))
     }
 
     fn check_method(&mut self, e: ExprId, recv: ExprId, name: Ident, turbofish: &Option<Box<GenericArgs>>, args: &[ExprId], lo: u32) -> TyId {
@@ -2364,6 +2568,13 @@ impl<'a> Fcx<'a> {
             if let Some((item, imp)) = self.tcx.inherent_item(self.prog, cur, s) {
                 if self.prog.def(item).kind == DefKind::AssocFn {
                     found = Some((item, imp, cur));
+                    break;
+                }
+            }
+            if let TyKind::Dyn(td, ..) = self.tcx.tys.kind(cur).clone() {
+                if let Some(item) = self.dyn_method(td, s) {
+                    // virtual call: no impl (NO_DEF), dispatched through the vtable
+                    trait_found = Some((item, crate::program::NO_DEF, cur));
                     break;
                 }
             }
@@ -2445,9 +2656,11 @@ impl<'a> Fcx<'a> {
         }
         for (i, a) in args.iter().enumerate() {
             let pt = if i + 1 < ps.len() { ps[i + 1] } else { error };
-            let t = self.check_expr(*a, Some(pt));
+            let xt = if i + 1 < sig.params.len() { self.closure_expect(item, &gargs, sig.params[i + 1], *a, pt) } else { pt };
+            let t = self.check_expr(*a, Some(xt));
             self.coerce_or_unify(t, pt, Some(*a), self.ast().expr(*a).lo);
         }
+        self.apply_fn_bounds(item, &gargs, lo);
         ret
     }
 
@@ -2557,11 +2770,85 @@ impl<'a> Fcx<'a> {
         }
         for (i, a) in args.iter().enumerate() {
             let pt = if i + 1 < ps.len() { ps[i + 1] } else { error };
-            let t = self.check_expr(*a, Some(pt));
+            let xt = if i + 1 < sig.params.len() { self.closure_expect(item, &gargs, sig.params[i + 1], *a, pt) } else { pt };
+            let t = self.check_expr(*a, Some(xt));
             self.coerce_or_unify(t, pt, Some(*a), self.ast().expr(*a).lo);
         }
+        self.apply_fn_bounds(item, &gargs, lo);
         let r = self.tcx.tys.subst(sig.ret, &gargs);
         self.norm(r)
+    }
+
+    /// Expected type for a call argument: a closure literal passed for a generic param
+    /// bounded by `Fn(..)` is checked against the bound's signature (so its parameter types
+    /// are known inside its body).
+    fn closure_expect(&mut self, d: DefId, gargs: &[TyId], raw: TyId, a: ExprId, pt: TyId) -> TyId {
+        let k = match self.tcx.tys.kind(raw) {
+            TyKind::Param(k) => *k,
+            _ => return pt,
+        };
+        let mut x = a;
+        while let ExprKind::Paren(y) = &self.ast().expr(x).kind {
+            x = *y;
+        }
+        if !matches!(self.ast().expr(x).kind, ExprKind::Closure { .. }) {
+            return pt;
+        }
+        let b = match self.tcx.fn_bounds.get(&d).and_then(|v| v.iter().find(|b| b.0 == k)) {
+            Some(b) => b.1,
+            None => return pt,
+        };
+        let st = self.tcx.tys.subst(b, gargs);
+        self.norm_keep(st)
+    }
+
+    /// `norm` that leaves unresolved literal variables open.
+    fn norm_keep(&mut self, t: TyId) -> TyId {
+        self.keep_literal_vars = true;
+        let r = self.norm(t);
+        self.keep_literal_vars = false;
+        r
+    }
+
+    /// After the arguments are checked: callables bound to `F: Fn(A) -> R` params must
+    /// have that signature (infers `R`-like generic args from closures and fn items).
+    fn apply_fn_bounds(&mut self, d: DefId, gargs: &[TyId], lo: u32) {
+        let bounds = match self.tcx.fn_bounds.get(&d) {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        for (k, b) in bounds {
+            let k = k as usize;
+            if k >= gargs.len() {
+                continue;
+            }
+            let want = self.tcx.tys.subst(b, gargs);
+            let want = self.norm_keep(want);
+            let mut a = self.shallow(gargs[k]);
+            while let TyKind::Ref(_, inner) = self.tcx.tys.kind(a).clone() {
+                a = self.shallow(inner);
+            }
+            let have = match self.tcx.tys.kind(a).clone() {
+                TyKind::Closure(_, _, sig, _, _) => sig,
+                TyKind::FnPtr(..) => a,
+                TyKind::FnDef(fd, fargs) => match self.tcx.sigs.get(&fd).cloned() {
+                    Some(sig) => {
+                        let mut ps = Vec::new();
+                        for p in &sig.params {
+                            ps.push(self.tcx.tys.subst(*p, &fargs));
+                        }
+                        let r = self.tcx.tys.subst(sig.ret, &fargs);
+                        self.tcx.tys.intern(TyKind::FnPtr(ps, r))
+                    }
+                    None => continue,
+                },
+                _ => continue,
+            };
+            if !self.unify(have, want) {
+                let (hs, ws) = (self.ty_str(have), self.ty_str(want));
+                self.err(lo, format!("expected a callable `{}`, found `{}`", ws, hs));
+            }
+        }
     }
 
     // ------------------------------------------------------------ macros
@@ -2730,7 +3017,21 @@ pub fn ty_to_string(prog: &Program, tcx: &Tcx, t: TyId) -> String {
         TyKind::FnDef(d, _) => format!("fn item {}", prog.def_path(*d)),
         TyKind::Param(i) => format!("T{}", i),
         TyKind::Infer(v) => format!("?{}", v),
-        TyKind::Closure(_, e) => format!("closure#{}", e),
+        TyKind::Closure(_, e, ..) => format!("closure#{}", e),
+        TyKind::Dyn(d, args, _) => {
+            let mut s = format!("dyn {}", prog.def_path(*d));
+            if !args.is_empty() {
+                s.push('<');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        s.push_str(", ");
+                    }
+                    s.push_str(&ty_to_string(prog, tcx, *a));
+                }
+                s.push('>');
+            }
+            s
+        }
         TyKind::Assoc(d, args) => {
             let st = match args.first() {
                 Some(t) => ty_to_string(prog, tcx, *t),
