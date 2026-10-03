@@ -73,14 +73,20 @@ impl Renderer {
         let baked = aomesh
             .and_then(StaticModel::from_aomesh)
             .or_else(|| Self::load_aomesh(id));
+        let has = |needle: &[u8]| glb.windows(needle.len()).any(|w| w == needle);
         let model = match baked {
-            Some(mut body) if glb.windows(b"vehicle_wheel".len()).any(|w| w == b"vehicle_wheel") => {
+            Some(mut body) if has(b"vehicle_wheel") || has(b"emissiveTexture") => {
                 // The AO sidecar intentionally serializes only the flattened
                 // body stream. Driven parts stay in the original GLB because
                 // their per-frame pose makes baked AO invalid. Reattach those
-                // definitions without giving up the body's baked chart.
+                // definitions without giving up the body's baked chart; the
+                // GLB's material maps (a car's glowing lamp lenses) come
+                // along, sampled through the same base UVs the bake kept.
                 let mut source = StaticModel::parse_glb(glb)?;
                 body.driven_parts = std::mem::take(&mut source.driven_parts);
+                if body.pbr.surface.is_none() && source.pbr.surface.is_some() {
+                    body.pbr = source.pbr.clone();
+                }
                 body
             }
             Some(body) => body,
