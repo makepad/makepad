@@ -553,6 +553,18 @@ pub(crate) fn trs_to_mat4(trs: &NodeTrs) -> Mat4f {
     }
 }
 
+/// Samples per cycle of a walk clip's support-foot track.
+const SUPPORT_STEPS: usize = 48;
+
+/// One sampled cycle of a walk clip's support foot
+/// ([`SkinnedModel::support_track`]): the lowest lower-body probe at each
+/// sample (node, mesh-space point), `dt` apart, on a skeleton `height` tall.
+struct SupportTrack {
+    height: f32,
+    dt: f32,
+    samples: Vec<Option<(usize, Vec3f)>>,
+}
+
 pub(crate) fn mat4_mul_point(m: &Mat4f, p: Vec3f) -> Vec3f {
     Vec3f {
         x: m.v[0] * p.x + m.v[4] * p.y + m.v[8] * p.z + m.v[12],
@@ -2820,6 +2832,124 @@ impl SkinnedModel {
     /// lower-body node or the measurement is degenerate — callers keep
     /// their heuristic.
     pub fn walk_clip_ground_speed(&self, clip_index: usize) -> Option<f32> {
+        let track = self.support_track(clip_index)?;
+        let mut speeds: Vec<(f32, f32)> = Vec::new();
+        for pair in track.samples.windows(2) {
+            if let [Some((prev_node, pp)), Some((node, p))] = pair {
+                if prev_node == node {
+                    let (dx, dz) = (p.x - pp.x, p.z - pp.z);
+                    speeds.push(((dx * dx + dz * dz).sqrt() / track.dt, p.y.max(pp.y)));
+                }
+            }
+        }
+        if speeds.len() < SUPPORT_STEPS / 4 {
+            return None;
+        }
+        // Only a foot on the ground carries the body: a bounding sprint's
+        // flight phase (both feet up, the lower one swinging forward) must
+        // not count as support.
+        let floor = speeds.iter().map(|s| s.1).fold(f32::MAX, f32::min);
+        let planted: Vec<f32> = speeds.iter().filter(|s| s.1 <= floor + track.height * 0.03).map(|s| s.0).collect();
+        let median = |mut v: Vec<f32>| { v.sort_by(|a, b| a.total_cmp(b)); v[v.len() / 2] };
+        let all = median(speeds.iter().map(|s| s.0).collect());
+        let v = if planted.len() >= SUPPORT_STEPS / 8 { all.max(median(planted)) } else { all };
+        (v > 1.0e-3).then_some(v)
+    }
+
+    /// The way the walk `clip` carries its body, as a unit planar direction
+    /// in the model's own space: which way the rig FACES when it walks.
+    ///
+    /// A walk cycle says it with its feet: a planted foot holds the ground
+    /// while the body passes over it, so in a cycle played on the spot the
+    /// support foot slides BACK under the body, and in a clip with root
+    /// travel the root moves forward over a still foot. Travel is the root's
+    /// displacement over the cycle minus the planted foot's slide (the same
+    /// support probe as [`Self::walk_clip_ground_speed`]), which reads both
+    /// kinds and any mix. This is an asset fact, measured once per rig: a
+    /// pack's +Z-front walker and a -Z-front one built here differ only in
+    /// which way their feet push. `None` for a rig without a skeleton
+    /// hierarchy, when the clip animates no lower body, or when the cycle
+    /// carries the body less than 5% of its height.
+    pub fn walk_clip_forward(&self, clip_index: usize) -> Option<Vec3f> {
+        // Only a skeleton walks with feet. A vertex-animated import (Quake's
+        // models) has a flat "joint" per vertex: its lowest vertex hops from
+        // one to another and read both ways round on models that face alike.
+        if !self.joint_nodes.iter().any(|&n| self.nodes[n].parent.is_some_and(|p| self.joint_nodes.contains(&p))) {
+            return None;
+        }
+        let track = self.support_track(clip_index)?;
+        let floor = track.samples.iter().flatten().map(|(_, p)| p.y).fold(f32::MAX, f32::min);
+        let mut slide = Vec3f::default();
+        let mut planted = 0;
+        for pair in track.samples.windows(2) {
+            if let [Some((prev_node, pp)), Some((node, p))] = pair {
+                if prev_node == node && p.y.max(pp.y) <= floor + track.height * 0.03 {
+                    slide.x += p.x - pp.x;
+                    slide.z += p.z - pp.z;
+                    planted += 1;
+                }
+            }
+        }
+        // Root travel: the skeleton root's origin at the cycle's end against
+        // its start (zero for a cycle played on the spot). Only a root that
+        // carries a skeleton counts: a vertex-animated import's "joints" are
+        // its vertices, flat, and one of them moving says nothing.
+        let root = self.joint_nodes.iter().copied().find(|&n| {
+            self.nodes[n].parent.map_or(true, |p| !self.joint_nodes.contains(&p))
+                && self.joint_nodes.iter().any(|&c| self.nodes[c].parent == Some(n))
+        });
+        let mut travel = Vec3f::default();
+        if let Some(root) = root {
+            let mut pose = self.rest_pose();
+            let at = |pose: &PoseBuffer| self.node_mesh_transform(pose, root).map(|m| Vec3f { x: m.v[12], y: 0.0, z: m.v[14] });
+            self.sample_clip_clamped(clip_index, 0.0, &mut pose);
+            let from = at(&pose);
+            let duration = self.clips[clip_index].duration;
+            self.sample_clip_clamped(clip_index, duration, &mut pose);
+            if let (Some(from), Some(to)) = (from, at(&pose)) {
+                travel = Vec3f { x: to.x - from.x, y: 0.0, z: to.z - from.z };
+            }
+        }
+        if planted < SUPPORT_STEPS / 8 && travel.length() < 1.0e-6 {
+            return None;
+        }
+        let carried = Vec3f { x: travel.x - slide.x, y: 0.0, z: travel.z - slide.z };
+        let length = carried.length();
+        (length > track.height * 0.05).then(|| carried.scale(1.0 / length))
+    }
+
+    /// The way the rig's toes point in its rest pose, as a unit planar
+    /// direction in the model's own space: from each joint named for a toe
+    /// to its parent (the foot), the two feet averaged. The face of a rig
+    /// with feet but no walk to read (a kart driver, a seated pose).
+    /// `None` without toe joints or when they point nowhere along the ground.
+    pub fn rest_toes_forward(&self) -> Option<Vec3f> {
+        let rest = self.rest_pose();
+        let at = |n: usize| self.node_mesh_transform(&rest, n).map(|m| Vec3f { x: m.v[12], y: 0.0, z: m.v[14] });
+        let mut sum = Vec3f::default();
+        let mut feet = 0;
+        for &toe in &self.joint_nodes {
+            if !self.nodes[toe].name.to_ascii_lowercase().contains("toe") {
+                continue;
+            }
+            let Some(foot) = self.nodes[toe].parent else { continue };
+            if let (Some(t), Some(f)) = (at(toe), at(foot)) {
+                sum.x += t.x - f.x;
+                sum.z += t.z - f.z;
+                feet += 1;
+            }
+        }
+        let length = sum.length();
+        (feet > 0 && length > 1.0e-4).then(|| sum.scale(1.0 / length))
+    }
+
+    /// One sampled cycle of the walk `clip`'s support foot, whatever the rig
+    /// calls it. Candidates are the clip-animated nodes whose rest origin
+    /// sits in the lower body; each carries a probe at its rest ground
+    /// reach, so a hip-pivoted block leg (kenney mini rigs have no foot
+    /// bones) measures exactly like a real foot bone. At each of
+    /// [`SUPPORT_STEPS`] + 1 samples the lowest probe is the support.
+    fn support_track(&self, clip_index: usize) -> Option<SupportTrack> {
         let clip = self.clips.get(clip_index)?;
         if clip.duration <= 1.0e-3 {
             return None;
@@ -2864,12 +2994,10 @@ impl SkinnedModel {
         if candidates.is_empty() {
             return None;
         }
-        const STEPS: usize = 48;
-        let dt = clip.duration / STEPS as f32;
+        let dt = clip.duration / SUPPORT_STEPS as f32;
         let mut pose = self.rest_pose();
-        let mut prev: Option<(usize, Vec3f)> = None;
-        let mut speeds: Vec<(f32, f32)> = Vec::new();
-        for s in 0..=STEPS {
+        let mut samples = Vec::with_capacity(SUPPORT_STEPS + 1);
+        for s in 0..=SUPPORT_STEPS {
             self.sample_clip(clip_index, s as f32 * dt, &mut pose);
             let mut support: Option<(usize, Vec3f)> = None;
             for (node, reach) in &candidates {
@@ -2881,27 +3009,9 @@ impl SkinnedModel {
                     support = Some((*node, p));
                 }
             }
-            let Some((node, p)) = support else { continue };
-            if let Some((prev_node, pp)) = prev {
-                if prev_node == node {
-                    let (dx, dz) = (p.x - pp.x, p.z - pp.z);
-                    speeds.push(((dx * dx + dz * dz).sqrt() / dt, p.y.max(pp.y)));
-                }
-            }
-            prev = Some((node, p));
+            samples.push(support);
         }
-        if speeds.len() < STEPS / 4 {
-            return None;
-        }
-        // Only a foot on the ground carries the body: a bounding sprint's
-        // flight phase (both feet up, the lower one swinging forward) must
-        // not count as support.
-        let floor = speeds.iter().map(|s| s.1).fold(f32::MAX, f32::min);
-        let planted: Vec<f32> = speeds.iter().filter(|s| s.1 <= floor + height * 0.03).map(|s| s.0).collect();
-        let median = |mut v: Vec<f32>| { v.sort_by(|a, b| a.total_cmp(b)); v[v.len() / 2] };
-        let all = median(speeds.iter().map(|s| s.0).collect());
-        let v = if planted.len() >= STEPS / 8 { all.max(median(planted)) } else { all };
-        (v > 1.0e-3).then_some(v)
+        Some(SupportTrack { height, dt, samples })
     }
 
     /// Reset translation on every skeleton root to its rest value while
@@ -3785,6 +3895,78 @@ mod tests {
             ragdoll: None,
             soft_body: None,
         }
+    }
+
+    /// Two block legs under a hips joint, walking on the spot: each planted
+    /// foot slides `-slide` along Z for half the cycle, then lifts and swings
+    /// back. `slide` > 0 (feet pushed back toward -Z) walks toward +Z.
+    fn walking_legs(slide: f32) -> SkinnedModel {
+        let at = |x: f32, y: f32, z: f32| NodeTrs { t: Vec3f { x, y, z }, ..NodeTrs::default() };
+        let mut model = SkinnedModel::from_nodes(vec![
+            ("mesh".into(), None, NodeTrs::default()),
+            ("hips".into(), Some(0), at(0.0, 1.0, 0.0)),
+            ("foot_l".into(), Some(1), at(-0.1, -0.9, 0.0)),
+            ("foot_r".into(), Some(1), at(0.1, -0.9, 0.0)),
+            ("head".into(), Some(1), at(0.0, 0.8, 0.0)),
+        ], 0);
+        model.joint_nodes = vec![1, 2, 3, 4];
+        let half = slide * 0.5;
+        // Planted (y -0.9) from +half to -half, then lifted (y -0.75) back.
+        let foot = |node: usize, x: f32, phase: f32| {
+            let keys: Vec<(f32, [f32; 3])> = (0..=8)
+                .map(|k| {
+                    let t = k as f32 / 8.0;
+                    let u = (t + phase).fract();
+                    let (y, z) = if u < 0.5 {
+                        (-0.9, half - slide * (u / 0.5))
+                    } else {
+                        (-0.75, -half + slide * ((u - 0.5) / 0.5))
+                    };
+                    (t, [x, y, z])
+                })
+                .collect();
+            Channel {
+                step: false,
+                node,
+                path: ChannelPath::Translation,
+                times: keys.iter().map(|k| k.0).collect(),
+                values: keys.iter().flat_map(|k| k.1).collect(),
+            }
+        };
+        model.clips.push(AnimClip { name: "walk".into(), duration: 1.0, channels: vec![foot(2, -0.1, 0.0), foot(3, 0.1, 0.5)] });
+        model
+    }
+
+    #[test]
+    fn a_walk_cycle_faces_away_from_where_its_planted_foot_slides() {
+        // Feet sliding back toward -Z carry the body toward +Z (a glTF pack
+        // walker), and the mirror image walks toward -Z (a rig built here).
+        let pos_z = walking_legs(0.6).walk_clip_forward(0).expect("a stride");
+        assert!(pos_z.z > 0.95, "{pos_z:?}");
+        let neg_z = walking_legs(-0.6).walk_clip_forward(0).expect("a stride");
+        assert!(neg_z.z < -0.95, "{neg_z:?}");
+        // A cycle that carries nothing says nothing.
+        assert!(walking_legs(0.0).walk_clip_forward(0).is_none());
+    }
+
+    #[test]
+    fn a_rest_pose_faces_where_its_toes_point() {
+        let at = |x: f32, y: f32, z: f32| NodeTrs { t: Vec3f { x, y, z }, ..NodeTrs::default() };
+        let feet = |z: f32| {
+            let mut model = SkinnedModel::from_nodes(vec![
+                ("mesh".into(), None, NodeTrs::default()),
+                ("hips".into(), Some(0), at(0.0, 1.0, 0.0)),
+                ("foot_l".into(), Some(1), at(-0.1, -0.9, 0.0)),
+                ("toe_l".into(), Some(2), at(0.0, -0.05, z)),
+                ("foot_r".into(), Some(1), at(0.1, -0.9, 0.0)),
+                ("toe_r".into(), Some(4), at(0.0, -0.05, z)),
+            ], 0);
+            model.joint_nodes = vec![1, 2, 3, 4, 5];
+            model.rest_toes_forward()
+        };
+        assert!(feet(-0.12).is_some_and(|f| f.z < -0.99));
+        assert!(feet(0.12).is_some_and(|f| f.z > 0.99));
+        assert!(walking_legs(0.6).rest_toes_forward().is_none(), "no toes, no answer");
     }
 
     #[test]
