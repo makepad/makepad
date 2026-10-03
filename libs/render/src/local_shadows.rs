@@ -1019,7 +1019,10 @@ pub(crate) mod sampling {
             local_shadow_fetch: fn(at: float) -> vec4 {
                 let row=floor(at*self.local_shadow_tex.x)
                 let col=at-row/self.local_shadow_tex.x
-                return self.local_shadow_data.sample_nearest(vec2((col+0.5)*self.local_shadow_tex.x,(row+0.5)*self.local_shadow_tex.y))
+                // Rows count from the top of the allocation size() reports,
+                // which a backend may make taller than the rows uploaded.
+                let size=self.local_shadow_data.size()
+                return self.local_shadow_data.sample_nearest(vec2((col+0.5)/size.x,(row+0.5)/size.y))
             }
             local_shadow_compare: fn(uv:vec2,lo:vec2,hi:vec2,depth:float)->float {
                 // Bilinear PCF at an arbitrary sub-texel position. Filtering

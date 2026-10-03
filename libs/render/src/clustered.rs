@@ -740,7 +740,10 @@ script_mod! {
         cluster_fetch: fn(at: float) -> vec4 {
             let row = floor(at * self.cluster_tex.x)
             let col = at - row / self.cluster_tex.x
-            return self.cluster_data.sample_nearest(vec2((col+0.5)*self.cluster_tex.x,(row+0.5)*self.cluster_tex.y))
+            // Rows count from the top of the allocation size() reports,
+            // which a backend may make taller than the rows uploaded.
+            let size = self.cluster_data.size()
+            return self.cluster_data.sample_nearest(vec2((col+0.5)/size.x,(row+0.5)/size.y))
         }
         // One light's contribution at `wp` (index into the light texels).
         // `view`, `f0` and `dalb` (the diffuse albedo over pi) and `pa`
