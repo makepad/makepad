@@ -67,6 +67,8 @@ pub struct Rt {
     /// `thread_run(entry: fn(*mut u8), arg) -> u64`: runs `entry(arg)` under a recovery point
     /// on the calling thread; 0 = returned, 1 = panicked/faulted (report printed)
     pub thread_run: u64,
+    /// `args() -> (argc, argv)`: the program's C argv (NUL-terminated strings, argv[argc] = null)
+    pub args: u64,
     pub memcpy: u64,
     pub fmt_push: u64,
     pub fmt_pop: u64,
@@ -703,6 +705,42 @@ extern "C" fn rt_panic_impl(msg: *const u8, len: u64, file: *const u8, file_len:
     raise("panic", m, u64::MAX, 0, rbp, ret)
 }
 
+static PROGRAM_ARGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+static ARGV: std::sync::OnceLock<(usize, usize)> = std::sync::OnceLock::new();
+
+/// Sets the program's argv (argv[0] first) before it starts; default: this process's args.
+pub fn set_program_args(args: Vec<String>) {
+    if let Ok(mut a) = PROGRAM_ARGS.lock() {
+        *a = args;
+    }
+}
+
+#[repr(C)]
+pub struct ArgsRet {
+    argc: u64,
+    argv: u64,
+}
+
+/// (argc, argv) as C sees them, built once (the strings and the array live forever).
+extern "C" fn rt_args() -> ArgsRet {
+    let (argc, argv) = *ARGV.get_or_init(|| {
+        let mut v = PROGRAM_ARGS.lock().map(|a| a.clone()).unwrap_or_default();
+        if v.is_empty() {
+            v = std::env::args().collect();
+        }
+        let mut ptrs: Vec<*const u8> = Vec::new();
+        for a in &v {
+            let mut b = a.clone().into_bytes();
+            b.push(0);
+            ptrs.push(Box::leak(b.into_boxed_slice()).as_ptr());
+        }
+        let n = ptrs.len();
+        ptrs.push(std::ptr::null());
+        (n, Box::leak(ptrs.into_boxed_slice()).as_ptr() as usize)
+    });
+    ArgsRet { argc: argc as u64, argv: argv as u64 }
+}
+
 /// Entry of a thread the program starts: runs `entry(arg)` (a HotRust fn pointer) with a
 /// recovery point, so a panic or fault ends this thread with a report instead of the process.
 extern "C" fn rt_thread_run(entry: u64, arg: u64) -> u64 {
@@ -861,7 +899,7 @@ impl Unit {
             consts: HashMap::new(),
             statics: HashMap::new(),
             sites: Vec::new(),
-            rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, panic_impl: 0, thread_run: 0, memcpy: 0, fmt_push: 0, fmt_pop: 0 },
+            rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, panic_impl: 0, thread_run: 0, args: 0, memcpy: 0, fmt_push: 0, fmt_pop: 0 },
             bodies: HashMap::new(),
             drop_cache: HashMap::new(),
             vtables: HashMap::new(),
@@ -910,6 +948,7 @@ impl Unit {
             fmodf: rt_fmodf as *const () as usize as u64,
             panic_impl: 0,
             thread_run: rt_thread_run as *const () as usize as u64,
+            args: rt_args as *const () as usize as u64,
             memcpy: memcpy as *const () as usize as u64,
             fmt_push: rt_fmt_push as *const () as usize as u64,
             fmt_pop: rt_fmt_pop as *const () as usize as u64,
