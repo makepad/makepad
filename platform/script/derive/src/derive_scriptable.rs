@@ -12,6 +12,37 @@ pub fn derive_script_impl(input: TokenStream) -> TokenStream {
     }
 }
 
+/// The default a `#[live(expr)]` field declares for itself, if it does.
+fn declared_default(field: &StructField) -> Option<TokenStream> {
+    field
+        .attrs
+        .iter()
+        .find(|a| a.name == "live")
+        .and_then(|a| a.args.clone())
+        .filter(|args| !args.is_empty())
+}
+
+/// Adds the expression for a field's declared default (`args`), converted to its type.
+fn add_declared_default(tb: &mut TokenBuilder, field: &StructField, args: TokenStream) {
+    // for primitive numeric fields, cast instead of .into() -
+    // unsuffixed literals like #[live(1.0)] on an f32 field
+    // otherwise hit the deprecated f64->f32 inference fallback
+    let ty = field.ty.to_string().replace(' ', "");
+    if matches!(
+        ty.as_str(),
+        "f32" | "f64"
+            | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+    ) {
+        tb.add("(")
+            .stream(Some(args))
+            .add(") as ")
+            .stream(Some(field.ty.clone()));
+    } else {
+        tb.add("(").stream(Some(args)).add(").into()");
+    }
+}
+
 fn derive_script_impl_inner(
     parser: &mut TokenParser,
     tb: &mut TokenBuilder,
@@ -157,12 +188,26 @@ fn derive_script_impl_inner(
                 // One call into a helper generic over the field type: it
                 // looks the field up in `value` (prototype chain included),
                 // falls back to the type's registered default on a reload,
-                // and applies what it found to the field.
-                tb.add("vm.script_derive_apply_field(apply, scope, value, id!(")
-                    .ident(&field.name)
-                    .add("), &mut self.")
-                    .ident(&field.name)
-                    .add(");");
+                // and applies what it found to the field. A field with a
+                // default of its own (`#[live(expr)]`) falls back to that
+                // instead, the same as a new one gets; e.g. a Label's
+                // `#[live(Flow::right_wrap())] flow` would otherwise stop
+                // wrapping after a reload.
+                if let Some(args) = declared_default(field) {
+                    tb.add("vm.script_derive_apply_field_or_default(apply, scope, value, id!(")
+                        .ident(&field.name)
+                        .add("), &mut self.")
+                        .ident(&field.name)
+                        .add(", || ");
+                    add_declared_default(tb, field, args);
+                    tb.add(");");
+                } else {
+                    tb.add("vm.script_derive_apply_field(apply, scope, value, id!(")
+                        .ident(&field.name)
+                        .add("), &mut self.")
+                        .ident(&field.name)
+                        .add(");");
+                }
                 if preserve_state || imperative {
                     tb.add("}");
                 }
@@ -342,23 +387,7 @@ fn derive_script_impl_inner(
                         tb.add("Default::default()");
                     }
                 } else {
-                    // for primitive numeric fields, cast instead of .into() -
-                    // unsuffixed literals like #[live(1.0)] on an f32 field
-                    // otherwise hit the deprecated f64->f32 inference fallback
-                    let ty = field.ty.to_string().replace(' ', "");
-                    if matches!(
-                        ty.as_str(),
-                        "f32" | "f64"
-                            | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
-                            | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
-                    ) {
-                        tb.add("(")
-                            .stream(attr.args.clone())
-                            .add(") as ")
-                            .stream(Some(field.ty.clone()));
-                    } else {
-                        tb.add("(").stream(attr.args.clone()).add(").into()");
-                    }
+                    add_declared_default(tb, field, attr.args.clone().unwrap());
                 }
             } else {
                 tb.add("Default::default()");
