@@ -126,7 +126,7 @@ fn callee_shape(f: &Func, callee_id: u32) -> (usize, bool, bool) {
                         rec = true;
                     }
                 }
-                Inst::Call(..) | Inst::Poll => leaf = false,
+                Inst::Call(..) => leaf = false,
                 _ => {}
             }
         }
@@ -290,7 +290,6 @@ fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
             Inst::Call(c2, a2, r2)
         }
         Inst::Copy(a, b, n) => Inst::Copy(m(*a), m(*b), *n),
-        Inst::Poll => Inst::Poll,
         Inst::LoadX(k, d, b, x, sh, o) => Inst::LoadX(*k, m(*d), m(*b), m(*x), *sh, *o),
         Inst::StoreX(k, b, x, sh, o, v) => Inst::StoreX(*k, m(*b), m(*x), *sh, *o, m(*v)),
         Inst::AtomicLoad(k, o, d, a) => Inst::AtomicLoad(*k, *o, m(*d), m(*a)),
@@ -500,7 +499,7 @@ fn is_pure(i: &Inst) -> bool {
 
 /// Instructions with effects beyond their result vregs (memory writes, calls, ordering).
 fn is_mem_effect(i: &Inst) -> bool {
-    matches!(i, Inst::Call(..) | Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::Poll | Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..))
+    matches!(i, Inst::Call(..) | Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..))
 }
 
 fn const_inst(d: VReg, k: K) -> Inst {

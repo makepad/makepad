@@ -49,8 +49,6 @@ pub struct Env {
     pub table_base: u64,
     pub thunk_base: u64,
     pub thunk_size: u64,
-    pub poll_flag: u64,
-    pub rt_hang: u64,
     /// fs-relative offset of the runtime's per-thread block pointer
     pub tls_key: u64,
     /// glue that allocates the calling thread's block: returns it in r11, preserves all else
@@ -1709,20 +1707,6 @@ impl<'a> Gen<'a> {
                     self.a.store_n(rd, o, RAX, 1);
                     o += 1;
                 }
-            }
-            Inst::Poll => {
-                // cmp byte [flag], 0 ; je skip ; call rt_hang (never returns)
-                self.a.mov_ri(RAX, self.env.poll_flag as i64);
-                self.a.byte(0x80);
-                self.a.modrm_mem(7, RAX, 0);
-                self.a.byte(0);
-                self.a.byte(0x74); // je rel8
-                let p = self.a.pos();
-                self.a.byte(0);
-                self.a.mov_ri(R11, self.env.rt_hang as i64);
-                self.a.call_r(R11);
-                let skip = self.a.pos();
-                self.a.b[p] = (skip - p - 1) as u8;
             }
         }
     }

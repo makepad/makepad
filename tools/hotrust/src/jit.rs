@@ -62,7 +62,8 @@ pub struct Rt {
     pub str_eq: u64,
     pub fmod: u64,
     pub fmodf: u64,
-    pub hang: u64,
+    /// `panic_impl(msg, msg_len, file, file_len, line, col) -> !` (core::panicking)
+    pub panic_impl: u64,
     pub memcpy: u64,
     pub fmt_push: u64,
     pub fmt_pop: u64,
@@ -299,7 +300,6 @@ extern "C" fn rt_tls_block() -> u64 {
 /// The unit reached by the lazy-compile entry and the runtime: set by `call_jit` and
 /// kept afterwards, so threads that JIT code started keep reaching it.
 static mut UNIT: *mut Unit = std::ptr::null_mut();
-pub static POLL_FLAG: AtomicBool = AtomicBool::new(false);
 static WATCHDOG_HIT: AtomicBool = AtomicBool::new(false);
 static RUN_GEN: AtomicU64 = AtomicU64::new(0);
 
@@ -348,6 +348,8 @@ thread_local! {
     /// the last popped buffer (valid until the next pop)
     static FMT_POPPED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     static PANIC: std::cell::RefCell<Option<PanicInfo>> = const { std::cell::RefCell::new(None) };
+    /// "file:line:col" of a panic raised through panic_impl (std's own panics)
+    static PANIC_LOC: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
 }
 
 thread_local! {
@@ -389,7 +391,7 @@ fn is_stack_fault(fault: u64, sp: u64) -> bool {
 /// A fault in JIT code on a thread without a recovery point: report and abort.
 unsafe fn fatal_report(sig: i32, fault: u64, fp: u64, pc: u64) -> ! {
     let frames = collect_frames(fp, pc);
-    let info = PanicInfo { kind: "fault".to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault };
+    let info = PanicInfo { kind: "fault".to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault, location: String::new() };
     let r = (&*UNIT).report(&info);
     eprintln!("hotrust: fault on a thread without a recovery point, aborting\n  report: {}", r);
     std::process::abort()
@@ -407,6 +409,8 @@ pub struct PanicInfo {
     pub site: u64,
     pub frames: Vec<u64>,
     pub fault_addr: u64,
+    /// "file:line:col" when the panic did not come from a compiler-known site
+    pub location: String,
 }
 
 // ------------------------------------------------------------ host runtime functions
@@ -614,7 +618,8 @@ fn collect_frames(rbp: u64, ret: u64) -> Vec<u64> {
 fn raise(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret: u64) -> ! {
     lock_unit();
     let frames = collect_frames(rbp, ret);
-    let info = PanicInfo { kind: kind.to_string(), message, site, frames, fault_addr: fault };
+    let location = PANIC_LOC.with(|l| std::mem::take(&mut *l.borrow_mut()));
+    let info = PanicInfo { kind: kind.to_string(), message, site, frames, fault_addr: fault, location };
     if unsafe { *ctx_ptr() } == 0 {
         // no recovery point on this thread (a thread JIT code started, or a C callback on
         // a foreign thread): report and abort, as panic=abort does
@@ -636,9 +641,11 @@ fn raise(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret: u64)
 }
 
 // Panic entries are reached through `panic_tramp`, which passes the JIT caller's frame
-// (frame pointer, return address) as arguments 4 and 5.
+// (frame pointer, return address) as arguments 6 and 7 (x6/x7 on arm64, the first two
+// stack arguments on x86-64), so entries keep up to six arguments of their own.
 
-extern "C" fn rt_panic_site(site: u64, _a1: u64, _a2: u64, _a3: u64, rbp: u64, ret: u64) {
+#[allow(clippy::too_many_arguments)]
+extern "C" fn rt_panic_site(site: u64, _a1: u64, _a2: u64, _a3: u64, _a4: u64, _a5: u64, rbp: u64, ret: u64) {
     let mut msg = fmt_take_top();
     if msg.is_empty() {
         let u = unsafe { &*UNIT };
@@ -649,16 +656,18 @@ extern "C" fn rt_panic_site(site: u64, _a1: u64, _a2: u64, _a3: u64, rbp: u64, r
     raise("panic", msg, site, 0, rbp, ret)
 }
 
-extern "C" fn rt_panic_bounds(idx: u64, len: u64, site: u64, _a3: u64, rbp: u64, ret: u64) {
+#[allow(clippy::too_many_arguments)]
+extern "C" fn rt_panic_bounds(idx: u64, len: u64, site: u64, _a3: u64, _a4: u64, _a5: u64, rbp: u64, ret: u64) {
     let msg = format!("index out of bounds: the len is {} but the index is {}", len, idx);
     raise("panic", msg, site, 0, rbp, ret)
 }
 
-extern "C" fn rt_hang(_a0: u64, _a1: u64, _a2: u64, _a3: u64, rbp: u64, ret: u64) {
-    if !POLL_FLAG.swap(false, Ordering::SeqCst) {
-        return;
-    }
-    raise("hang", "watchdog: the call did not return in time".to_string(), u64::MAX, 0, rbp, ret)
+#[allow(clippy::too_many_arguments)]
+extern "C" fn rt_panic_impl(msg: *const u8, len: u64, file: *const u8, file_len: u64, line: u64, col: u64, rbp: u64, ret: u64) {
+    let m = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(msg, len as usize)).into_owned() };
+    let f = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(file, file_len as usize)).into_owned() };
+    PANIC_LOC.with(|l| *l.borrow_mut() = format!("{}:{}:{}", f, line as u32, col as u32));
+    raise("panic", m, u64::MAX, 0, rbp, ret)
 }
 
 extern "C" fn rt_compile(slot: u64) -> u64 {
@@ -680,7 +689,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
             WATCHDOG_HIT.store(true, Ordering::SeqCst);
             let u = &*UNIT;
             let frames = collect_frames(rbp, rip);
-            PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: "hang".to_string(), message: "watchdog: the call did not return in time".to_string(), site: u64::MAX, frames, fault_addr: 0 }));
+            PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: "hang".to_string(), message: "watchdog: the call did not return in time".to_string(), site: u64::MAX, frames, fault_addr: 0, location: String::new() }));
             *gregs.add(16) = u.leave;
             *gregs.add(8) = ctx_ptr() as u64;
             *gregs.add(9) = 3;
@@ -706,7 +715,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
             _ => "signal",
         };
         let frames = collect_frames(rbp, rip);
-        PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault }));
+        PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault, location: String::new() }));
         // resume at `leave(ctx, 2)`
         *gregs.add(16) = u.leave;
         *gregs.add(8) = ctx_ptr() as u64;
@@ -728,8 +737,8 @@ fn install_signals() {
     }
 }
 
-/// JIT trampoline in front of a host panic function: passes the caller's frame
-/// (frame pointer, return address) as arguments 4 and 5 (thread-safe, no globals).
+/// JIT trampoline in front of a (never returning) host panic function: passes the caller's
+/// frame (frame pointer, return address) as arguments 6 and 7 (thread-safe, no globals).
 #[cfg(target_arch = "aarch64")]
 fn panic_tramp(target: u64) -> Vec<u8> {
     x64::panic_tramp(target)
@@ -738,10 +747,13 @@ fn panic_tramp(target: u64) -> Vec<u8> {
 #[cfg(not(target_arch = "aarch64"))]
 fn panic_tramp(target: u64) -> Vec<u8> {
     let mut b = Vec::new();
-    // mov r8, rbp
-    b.extend_from_slice(&[0x49, 0x89, 0xe8]);
-    // mov r9, [rsp]
-    b.extend_from_slice(&[0x4c, 0x8b, 0x0c, 0x24]);
+    // SysV: arguments 7 and 8 are the first stack arguments. Entered by `call` (rsp = 8 mod
+    // 16); the target sees [rsp] = return slot, [rsp+8] = rbp, [rsp+16] = JIT return
+    // address, with rsp = 8 mod 16 as after a call. The target never returns.
+    // mov r10, [rsp]
+    b.extend_from_slice(&[0x4c, 0x8b, 0x14, 0x24]);
+    // sub rsp, 8 ; push r10 ; push rbp ; push r10
+    b.extend_from_slice(&[0x48, 0x83, 0xec, 0x08, 0x41, 0x52, 0x55, 0x41, 0x52]);
     // mov r11, imm64(target); jmp r11
     b.extend_from_slice(&[0x49, 0xbb]);
     b.extend_from_slice(&target.to_le_bytes());
@@ -772,7 +784,7 @@ impl Unit {
             consts: HashMap::new(),
             statics: HashMap::new(),
             sites: Vec::new(),
-            rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, hang: 0, memcpy: 0, fmt_push: 0, fmt_pop: 0 },
+            rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, panic_impl: 0, memcpy: 0, fmt_push: 0, fmt_pop: 0 },
             bodies: HashMap::new(),
             drop_cache: HashMap::new(),
             vtables: HashMap::new(),
@@ -795,7 +807,7 @@ impl Unit {
             rw_next: rw_base,
             rw_end: rw_base + rw_size,
             opt: crate::opt::OptCfg::from_env(),
-            env: x64::Env { table_base, thunk_base, thunk_size: THUNK_SIZE as u64, poll_flag: POLL_FLAG.as_ptr() as u64, rt_hang: 0, tls_key: 0, tls_slow: 0 },
+            env: x64::Env { table_base, thunk_base, thunk_size: THUNK_SIZE as u64, tls_key: 0, tls_slow: 0 },
             stats: Stats::default(),
             patch_log: Vec::new(),
             patch_gen: 0,
@@ -808,7 +820,7 @@ impl Unit {
         u.leave = u.enter + leave_off as u64;
         let ps = panic_tramp(rt_panic_site as *const () as usize as u64);
         let pb = panic_tramp(rt_panic_bounds as *const () as usize as u64);
-        let ph = panic_tramp(rt_hang as *const () as usize as u64);
+        let pi = panic_tramp(rt_panic_impl as *const () as usize as u64);
         u.rt = Rt {
             fmt_str: rt_fmt_str as *const () as usize as u64,
             fmt_int: rt_fmt_int as *const () as usize as u64,
@@ -819,15 +831,14 @@ impl Unit {
             str_eq: rt_str_eq as *const () as usize as u64,
             fmod: rt_fmod as *const () as usize as u64,
             fmodf: rt_fmodf as *const () as usize as u64,
-            hang: 0,
+            panic_impl: 0,
             memcpy: memcpy as *const () as usize as u64,
             fmt_push: rt_fmt_push as *const () as usize as u64,
             fmt_pop: rt_fmt_pop as *const () as usize as u64,
         };
         u.rt.panic_site = u.emit_code(&ps);
         u.rt.panic_bounds = u.emit_code(&pb);
-        u.rt.hang = u.emit_code(&ph);
-        u.env.rt_hang = u.rt.hang;
+        u.rt.panic_impl = u.emit_code(&pi);
         u.init_tls();
         install_ice_hook();
         install_signals();
@@ -1336,6 +1347,8 @@ impl Unit {
         if (p.site as usize) < self.sites.len() {
             let st = &self.sites[p.site as usize];
             s.push_str(&format!(",\"location\":{:?}", self.pos_str(st.file, st.pos)));
+        } else if !p.location.is_empty() {
+            s.push_str(&format!(",\"location\":{:?}", p.location));
         }
         s.push_str(",\"backtrace\":[");
         for (i, f) in p.frames.iter().enumerate() {
@@ -1433,17 +1446,15 @@ pub unsafe fn call_jit(u: *mut Unit, entry: u64, arg: u64) -> Result<u64, PanicI
         Ok(0)
     } else {
         let p = PANIC.with(|p| p.borrow_mut().take());
-        Err(p.unwrap_or(PanicInfo { kind: "unknown".to_string(), message: String::new(), site: u64::MAX, frames: Vec::new(), fault_addr: 0 }))
+        Err(p.unwrap_or(PanicInfo { kind: "unknown".to_string(), message: String::new(), site: u64::MAX, frames: Vec::new(), fault_addr: 0, location: String::new() }))
     }
 }
 
-/// Starts a watchdog that sets the poll flag if the current run takes longer than `ms`.
 /// Arms the hang watchdog for the calling thread: after `ms`, SIGUSR1 is sent to it
 /// every 5 ms until a signal lands in JIT code, which then unwinds with a "hang" report.
 /// No polling instructions in compiled code.
 pub fn watchdog(ms: u64) -> u64 {
     let gen = RUN_GEN.fetch_add(1, Ordering::SeqCst) + 1;
-    POLL_FLAG.store(false, Ordering::SeqCst);
     WATCHDOG_HIT.store(false, Ordering::SeqCst);
     let target = unsafe { pthread_self() };
     std::thread::spawn(move || {
@@ -1460,7 +1471,6 @@ pub fn watchdog(ms: u64) -> u64 {
 
 pub fn watchdog_done() {
     RUN_GEN.fetch_add(1, Ordering::SeqCst);
-    POLL_FLAG.store(false, Ordering::SeqCst);
 }
 
 /// Compiles one slot (type check, lower, optimise, codegen) and installs it. Called

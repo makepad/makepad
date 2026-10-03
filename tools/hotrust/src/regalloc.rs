@@ -102,7 +102,7 @@ pub fn uses_defs(i: &Inst, uses: &mut Vec<VReg>, defs: &mut Vec<VReg>) {
             uses.push(*a);
             uses.push(*b);
         }
-        Inst::Poll | Inst::Fence(..) => {}
+        Inst::Fence(..) => {}
         Inst::TlsAddr(d, _) => defs.push(*d),
         Inst::AtomicLoad(_, _, d, a) => {
             uses.push(*a);

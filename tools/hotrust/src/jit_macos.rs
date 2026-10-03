@@ -105,7 +105,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
             WATCHDOG_HIT.store(true, Ordering::SeqCst);
             let u = &*UNIT;
             let frames = collect_frames(fp, pc);
-            PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: "hang".to_string(), message: "watchdog: the call did not return in time".to_string(), site: u64::MAX, frames, fault_addr: 0 }));
+            PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: "hang".to_string(), message: "watchdog: the call did not return in time".to_string(), site: u64::MAX, frames, fault_addr: 0, location: String::new() }));
             *reg(SS_PC) = u.leave;
             *reg(SS) = ctx_ptr() as u64;
             *reg(SS + 8) = 3;
@@ -131,7 +131,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         };
         let u = &*UNIT;
         let frames = collect_frames(fp, pc);
-        PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault }));
+        PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault, location: String::new() }));
         // resume at `leave(ctx, 2)`
         *reg(SS_PC) = u.leave;
         *reg(SS) = ctx_ptr() as u64;

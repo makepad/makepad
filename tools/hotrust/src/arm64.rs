@@ -12,7 +12,8 @@
 //! Frame (fp = x29 after the prologue):
 //!   [fp + 8]  return address, [fp] caller's fp
 //!   [fp - 8 * k]  callee-saved registers (ints then floats)
-//!   below: spill area, stack slots, poll save area; sp = fp - frame (16-aligned)
+//!   below: spill area, stack slots, C ABI buffers/staging cells, outgoing stack arguments;
+//!   sp = fp - frame (16-aligned)
 //! The body addresses the frame through sp with positive offsets.
 //!
 //! Encodings follow the hand-written encoders of platform/script/compute/src/arm64.rs,
@@ -86,8 +87,6 @@ pub struct Env {
     pub table_base: u64,
     pub thunk_base: u64,
     pub thunk_size: u64,
-    pub poll_flag: u64,
-    pub rt_hang: u64,
     /// pthread TSD slot holding this thread's thread-local block (0 = none yet)
     pub tls_key: u64,
     /// glue that allocates the calling thread's block: returns it in x16, preserves all else
@@ -470,9 +469,6 @@ struct Gen<'a> {
     /// bytes of callee-saved registers below fp
     saved: i64,
     slot_off: Vec<i64>,
-    /// sp offset of the poll save area and the caller-saved registers it covers
-    poll_area: i64,
-    poll_regs: Vec<Loc>,
     block_pos: Vec<usize>,
     next_block: Vec<u32>,
     fixups: Vec<(usize, u32)>,
@@ -589,32 +585,6 @@ impl<'a> Gen<'a> {
             off = (off + al - 1) / al * al;
             slot_fp.push(off);
         }
-        // poll save area: caller-saved registers in use, if the function polls
-        let mut polls = false;
-        for b in &self.f.blocks {
-            for i in &b.insts {
-                if let Inst::Poll = i {
-                    polls = true;
-                }
-            }
-        }
-        if polls {
-            let cfg = reg_config();
-            let mut seen: Vec<Loc> = Vec::new();
-            for l in &self.al.loc {
-                let caller = match l {
-                    Loc::Reg(r) => cfg.int_caller.contains(r),
-                    Loc::Flt(x) => cfg.flt_caller.contains(x),
-                    _ => false,
-                };
-                if caller && !seen.contains(l) {
-                    seen.push(*l);
-                }
-            }
-            off += 8 * seen.len() as i64;
-            self.poll_regs = seen;
-        }
-        let poll_fp = off;
         // C ABI body: buffers that rebuild aggregate params from their registers, and the
         // buffer an aggregate result is written to before Ret loads it into registers
         let mut cbuf_fp: Vec<i64> = Vec::new();
@@ -674,7 +644,6 @@ impl<'a> Gen<'a> {
         for x in slot_fp {
             self.slot_off.push(frame - x);
         }
-        self.poll_area = frame - poll_fp;
         for x in cbuf_fp {
             self.cbuf.push(if x < 0 { -1 } else { frame - x });
         }
@@ -1650,38 +1619,9 @@ impl<'a> Gen<'a> {
                     o += 1;
                 }
             }
-            Inst::Poll => self.poll(),
             Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) => self.atomic(i),
             Inst::TlsAddr(d, off) => self.tls_addr(*d, *off),
         }
-    }
-
-    /// Hang-watchdog poll: `ldrb w16, [flag]; cbz w16, skip; <save>; bl rt_hang; <restore>`.
-    /// rt_hang does not return when the flag is set; the save covers the race where it does.
-    fn poll(&mut self) {
-        self.a.mov_imm(IP0, self.env.poll_flag as i64);
-        self.a.ldst(LDRB, 1, IP0, IP0, 0);
-        let p = self.a.cbz(IP0);
-        let regs = self.poll_regs.clone();
-        let base = self.poll_area;
-        for (k, l) in regs.iter().enumerate() {
-            match l {
-                Loc::Reg(r) => self.a.ldst(STRX, 8, *r, SP, base + 8 * k as i64),
-                Loc::Flt(x) => self.a.ldst(STRD, 8, *x, SP, base + 8 * k as i64),
-                _ => {}
-            }
-        }
-        self.a.mov_imm(IP0, self.env.rt_hang as i64);
-        self.a.blr(IP0);
-        for (k, l) in regs.iter().enumerate() {
-            match l {
-                Loc::Reg(r) => self.a.ldst(LDRX, 8, *r, SP, base + 8 * k as i64),
-                Loc::Flt(x) => self.a.ldst(LDRD, 8, *x, SP, base + 8 * k as i64),
-                _ => {}
-            }
-        }
-        let skip = self.a.pos();
-        self.a.patch(p, skip);
     }
 
     fn ibin_rr(&mut self, op: IOp, it: IntTy, rd: u8, ra: u8, rb: u8) {
@@ -1969,8 +1909,6 @@ pub fn compile(f: &Func, env: &Env) -> Result<Compiled, String> {
         frame: 0,
         saved: 0,
         slot_off: Vec::new(),
-        poll_area: 0,
-        poll_regs: Vec::new(),
         block_pos: Vec::new(),
         next_block: Vec::new(),
         fixups: Vec::new(),
@@ -2086,11 +2024,11 @@ pub fn enter_leave() -> (Vec<u8>, usize) {
 }
 
 /// JIT trampoline in front of a host panic function: passes the caller's frame
-/// (fp, return address) as arguments 4 and 5 (x4, x5), then tail-jumps to `target`.
+/// (fp, return address) as arguments 6 and 7 (x6, x7), then tail-jumps to `target`.
 pub fn panic_tramp(target: u64) -> Vec<u8> {
     let mut a = Asm { w: Vec::new() };
-    a.mov(4, FP);
-    a.mov(5, LR);
+    a.mov(6, FP);
+    a.mov(7, LR);
     a.mov_imm64_fixed(IP0, target);
     a.br(IP0);
     words_to_bytes(&a.w)

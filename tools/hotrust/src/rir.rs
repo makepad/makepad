@@ -189,8 +189,6 @@ pub enum Inst {
     Call(Callee, Vec<VReg>, Vec<VReg>),
     /// memcpy of a constant size
     Copy(VReg, VReg, u32),
-    /// hang-watchdog poll on loop back-edges (live mode)
-    Poll,
     /// atomic load (Mem::Int only; the value is extended by signedness)
     AtomicLoad(Mem, AtomOrd, VReg, VReg), // d, addr
     AtomicStore(Mem, AtomOrd, VReg, VReg), // addr, src
@@ -362,7 +360,7 @@ impl Func {
                         regs.push(*a);
                         regs.push(*b);
                     }
-                    Inst::Poll | Inst::Fence(..) => {}
+                    Inst::Fence(..) => {}
                     Inst::TlsAddr(d, _) => regs.push(*d),
                     Inst::AtomicLoad(_, _, d, a) | Inst::AtomicStore(_, _, d, a) => {
                         regs.push(*d);
