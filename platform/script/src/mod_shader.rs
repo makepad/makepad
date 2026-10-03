@@ -597,6 +597,9 @@ fn define_shader_compile_natives(heap: &mut ScriptHeap, native: &mut ScriptNativ
                 "hlsl" => ShaderBackend::Hlsl,
                 "glsl" => ShaderBackend::Glsl,
                 "wgsl" => ShaderBackend::Wgsl,
+                // SPIR-V through the shader IR: the layout compile is GLSL,
+                // as the Vulkan renderer's.
+                "spirv" => ShaderBackend::Glsl,
                 other => {
                     return format!("unknown backend {}", other).script_to_value(vm);
                 }
@@ -634,6 +637,23 @@ fn define_shader_compile_natives(heap: &mut ScriptHeap, native: &mut ScriptNativ
             }
             output.assign_uniform_buffer_indices(&vm.bx.heap, 3);
             let mut out = String::new();
+            if backend_name == "spirv" {
+                // The window variant's words, `v:` and `f:` lines of hex.
+                match crate::shader_ir_draw::compile_draw_shader_spirv(vm, io_self, &output) {
+                    Ok([window, _]) => {
+                        out.push_str("v:");
+                        for w in &window.vertex {
+                            out.push_str(&format!("{:08x}", w));
+                        }
+                        out.push_str("\nf:");
+                        for w in &window.fragment {
+                            out.push_str(&format!("{:08x}", w));
+                        }
+                        return out.script_to_value(vm);
+                    }
+                    Err(e) => return format!("ERRORS: {}", e).script_to_value(vm),
+                }
+            }
             match backend {
                 ShaderBackend::Metal => {
                     out.push_str(&output.metal_draw_source(vm));

@@ -1,14 +1,14 @@
 //! Every draw shader of the widget library (the `mod.draw` and `mod.widgets`
 //! trees with the default families) compiles to SPIR-V through the path the
-//! Vulkan backend takes (layout compile, WGSL lowering, the shader
-//! compiler's SPIR-V backend), window and XR variants, and each stage passes
-//! `spirv-val` when it is installed.
+//! Vulkan backend takes (layout compile, the shader IR, its SPIR-V printer),
+//! window and XR variants, and each stage passes `spirv-val` when it is
+//! installed.
 
 use makepad_widgets::makepad_script::{
     shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType},
     shader_backend::ShaderBackend,
-    shader_spirv::{compile_wgsl_to_spirv, spirv_val},
-    shader_wgsl::compile_draw_shader_wgsl_source,
+    shader_ir_draw::compile_draw_shader_spirv,
+    shader_ir_spirv::spirv_val,
     trap::NoTrap,
     value::ScriptObject,
 };
@@ -43,9 +43,10 @@ fn walk(vm: &ScriptVm, obj: ScriptObject, visited: &mut HashSet<ScriptObject>, f
     }
 }
 
-/// The module the Vulkan backend compiles, or None when the shader does not
-/// compile at all (an abstract base without its pixel function, ...).
-fn vulkan_module(vm: &mut ScriptVm, io_self: ScriptObject, xr: bool) -> Option<Result<String, String>> {
+/// The layout compile the Vulkan renderer does first, or None when the
+/// shader does not compile at all (an abstract base without its pixel
+/// function, ...).
+fn layout_compile(vm: &mut ScriptVm, io_self: ScriptObject) -> Option<ShaderOutput> {
     let mut layout = ShaderOutput::default();
     layout.backend = ShaderBackend::Glsl;
     layout.use_vulkan = true;
@@ -60,7 +61,7 @@ fn vulkan_module(vm: &mut ScriptVm, io_self: ScriptObject, xr: bool) -> Option<R
         return None;
     }
     layout.assign_uniform_buffer_indices(&vm.bx.heap, 3);
-    Some(compile_draw_shader_wgsl_source(vm, io_self, &layout, xr).map(|s| s.wgsl))
+    Some(layout)
 }
 
 #[test]
@@ -81,27 +82,23 @@ fn every_library_draw_shader_compiles_to_valid_spirv() {
         let (mut skipped, mut lowering_failed, mut validated) = (0, 0, 0);
         let mut failures = Vec::new();
         for obj in &found {
-            for xr in [false, true] {
-                let wgsl = match vulkan_module(vm, *obj, xr) {
-                    None => {
-                        skipped += 1;
-                        continue;
-                    }
-                    Some(Err(_)) => {
-                        lowering_failed += 1;
-                        continue;
-                    }
-                    Some(Ok(wgsl)) => wgsl,
-                };
-                if !modules.insert(wgsl.clone()) {
-                    continue;
+            let Some(layout) = layout_compile(vm, *obj) else {
+                skipped += 1;
+                continue;
+            };
+            match compile_draw_shader_spirv(vm, *obj, &layout) {
+                Err(e) => {
+                    lowering_failed += 1;
+                    failures.push(format!("{:?}: {e}", vm.bx.heap.object_type_name_in_chain(*obj)));
                 }
-                match compile_wgsl_to_spirv(&wgsl) {
-                    Err(e) => failures.push(format!("{e}\n{wgsl}")),
-                    Ok((vertex, fragment)) => {
-                        for words in [vertex, fragment].into_iter().flatten() {
+                Ok(variants) => {
+                    for v in variants {
+                        for words in [v.vertex, v.fragment] {
+                            if !modules.insert(words.clone()) {
+                                continue;
+                            }
                             match spirv_val(&words) {
-                                Some(Err(e)) => failures.push(format!("spirv-val: {e}\n{wgsl}")),
+                                Some(Err(e)) => failures.push(format!("{:?}: spirv-val: {e}", vm.bx.heap.object_type_name_in_chain(*obj))),
                                 Some(Ok(())) => validated += 1,
                                 None => {}
                             }
@@ -112,7 +109,7 @@ fn every_library_draw_shader_compiles_to_valid_spirv() {
         }
         vm.bx.captured_errors = None;
         eprintln!(
-            "{} draw shader objects, {} distinct modules, {} stages passed spirv-val, {} did not compile, {} failed WGSL lowering",
+            "{} draw shader objects, {} distinct stages, {} passed spirv-val, {} did not compile, {} failed IR/SPIR-V",
             found.len(),
             modules.len(),
             validated,
@@ -120,6 +117,6 @@ fn every_library_draw_shader_compiles_to_valid_spirv() {
             lowering_failed
         );
         assert!(modules.len() > 50, "the walk found only {} modules", modules.len());
-        assert!(failures.is_empty(), "{} of {} modules failed:\n{}", failures.len(), modules.len(), failures[0]);
+        assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
     });
 }

@@ -21,7 +21,8 @@ use super::*;
 use crate::makepad_script::shader::*;
 use crate::makepad_script::shader_backend::*;
 use crate::makepad_script::*;
-use crate::makepad_script::shader_spirv::compile_wgsl_to_spirv;
+use crate::makepad_script::shader_ir::*;
+use crate::makepad_script::shader_ir_spirv::ir_to_spirv;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -243,8 +244,7 @@ impl Gpu {
         blend: &[vk::PipelineColorBlendAttachmentState],
         size: u32,
     ) -> vk::Pipeline {
-        let (vertex, _) = compile_wgsl_to_spirv(TRIANGLE_WGSL).unwrap();
-        let vertex = self.shader_module(&vertex.unwrap());
+        let vertex = self.shader_module(&triangle_vertex());
         let fragment = self.shader_module(fragment);
         let stages = [
             vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vertex).name(c"vertex_main"),
@@ -397,34 +397,73 @@ fn clear_u(c: [u32; 4]) -> vk::ClearValue {
     vk::ClearValue { color: vk::ClearColorValue { uint32: c } }
 }
 
-const TRIANGLE_WGSL: &str = "
-@vertex fn vertex_main(@builtin(vertex_index) vid: u32) -> @builtin(position) vec4<f32> {
-    var p = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
-    return vec4<f32>(p[vid], 0.0, 1.0);
+/// A full-screen triangle placed by `vertex_index`, as IR.
+fn triangle_vertex() -> Vec<u32> {
+    let mut m = IrModule::new();
+    let v2 = m.vec_ty(2, IrScalar::F32);
+    let v4 = m.vec_ty(4, IrScalar::F32);
+    let arr = m.ty(IrTy::Array(v2, 3));
+    let mut f = IrFunction::new("vertex_main".to_string(), TY_VOID);
+    f.entry = Some(IrEntry {
+        stage: IrStage::Vertex,
+        inputs: vec![IrEntryIo { name: "vid".into(), ty: TY_U32, binding: IrIoBinding::Builtin(IrBuiltinIo::VertexIndex) }],
+        outputs: vec![IrEntryIo { name: "position".into(), ty: v4, binding: IrIoBinding::Builtin(IrBuiltinIo::Position) }],
+    });
+    let mut corners = Vec::new();
+    for (x, y) in [(-1.0, -1.0), (3.0, -1.0), (-1.0, 3.0)] {
+        let x = f.expr(ExprKind::Lit(IrLit::F32(x)), TY_F32);
+        let y = f.expr(ExprKind::Lit(IrLit::F32(y)), TY_F32);
+        corners.push(f.expr(ExprKind::Construct(vec![x, y]), v2));
+    }
+    let p = f.expr(ExprKind::Construct(corners), arr);
+    let local = f.local(LiveId(0), 0, arr, true, LocalKind::Temp);
+    f.body.push(Stmt::Local(local, p));
+    let vid = f.expr(ExprKind::EntryIn(0), TY_U32);
+    let l = f.expr(ExprKind::Local(local), arr);
+    let corner = f.expr(ExprKind::Index(l, vid), v2);
+    let z = f.expr(ExprKind::Lit(IrLit::F32(0.0)), TY_F32);
+    let w = f.expr(ExprKind::Lit(IrLit::F32(1.0)), TY_F32);
+    let pos = f.expr(ExprKind::Construct(vec![corner, z, w]), v4);
+    let out = f.expr(ExprKind::EntryOut(0), v4);
+    f.body.push(Stmt::Assign(out, pos));
+    m.functions.push(f);
+    ir_to_spirv(&m, 0, false).unwrap()
 }
-";
+
+/// A fragment shader writing constants to its outputs (location = index).
+fn const_fragment(outputs: &[(IrTy, Vec<IrLit>)]) -> Vec<u32> {
+    let mut m = IrModule::new();
+    let mut f = IrFunction::new("fragment_main".to_string(), TY_VOID);
+    let mut ios = Vec::new();
+    for (i, (ty, _)) in outputs.iter().enumerate() {
+        let t = m.ty(ty.clone());
+        ios.push(IrEntryIo { name: format!("c{i}"), ty: t, binding: IrIoBinding::Location(i as u32) });
+    }
+    for (i, (_, lits)) in outputs.iter().enumerate() {
+        let t = ios[i].ty;
+        let mut parts = Vec::new();
+        for l in lits {
+            let lt = match l {
+                IrLit::U32(_) => TY_U32,
+                _ => TY_F32,
+            };
+            parts.push(f.expr(ExprKind::Lit(*l), lt));
+        }
+        let v = if parts.len() == 1 { parts[0] } else { f.expr(ExprKind::Construct(parts), t) };
+        let out = f.expr(ExprKind::EntryOut(i as u32), t);
+        f.body.push(Stmt::Assign(out, v));
+    }
+    f.entry = Some(IrEntry { stage: IrStage::Fragment, inputs: Vec::new(), outputs: ios });
+    m.functions.push(f);
+    ir_to_spirv(&m, 0, false).unwrap()
+}
+
+fn rgba(c: [f32; 4]) -> (IrTy, Vec<IrLit>) {
+    (IrTy::Vec(4, IrScalar::F32), c.iter().map(|v| IrLit::F32(*v)).collect())
+}
 
 // ---------------------------------------------------------------------------
 // MRT.
-
-const MRT_WGSL: &str = "
-struct Out3 {
-    @location(0) c0: vec4<f32>,
-    @location(1) c1: vec2<f32>,
-    @location(2) c2: u32,
-};
-@fragment fn fragment_main() -> Out3 {
-    var o: Out3;
-    o.c0 = vec4<f32>(0.25, 0.5, 0.75, 0.5);
-    o.c1 = vec2<f32>(-2.5, 0.125);
-    o.c2 = 0xDEADBEEFu;
-    return o;
-}
-";
-
-const ONE_WGSL: &str = "
-@fragment fn fragment_main() -> @location(0) vec4<f32> { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }
-";
 
 #[test]
 fn mrt_blend_state_follows_format_and_declared_outputs() {
@@ -456,8 +495,12 @@ fn mrt_attachments_get_their_own_formats_blend_and_write_masks() {
     let layout = unsafe { gpu.device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None).unwrap() };
     let clear_pass = gpu.render_pass(&refs, false);
     let load_pass = gpu.render_pass(&refs, true);
-    let (three, _) = (compile_wgsl_to_spirv(MRT_WGSL).unwrap().1.unwrap(), ());
-    let one = compile_wgsl_to_spirv(ONE_WGSL).unwrap().1.unwrap();
+    let three = const_fragment(&[
+        rgba([0.25, 0.5, 0.75, 0.5]),
+        (IrTy::Vec(2, IrScalar::F32), vec![IrLit::F32(-2.5), IrLit::F32(0.125)]),
+        (IrTy::Scalar(IrScalar::U32), vec![IrLit::U32(0xDEADBEEF)]),
+    ]);
+    let one = const_fragment(&[rgba([1.0, 0.0, 0.0, 1.0])]);
 
     // Blending on: only the RGBA16F attachment blends; the RG16F and R32Uint
     // ones write raw. Outputs 0..2 are declared.
@@ -486,8 +529,8 @@ fn mrt_attachments_get_their_own_formats_blend_and_write_masks() {
 // Hostile shaders.
 
 /// Compile a Splash draw shader (one `vec4f` output, `u_n` a uniform the GPU
-/// reads as 0) to the module the Vulkan backend compiles to SPIR-V.
-fn splash_wgsl(fragment_body: &str, extra: &str) -> String {
+/// reads as 0) to SPIR-V through the shader IR, as the Vulkan backend does.
+fn splash_spirv(fragment_body: &str, extra: &str) -> (Vec<u32>, Vec<(u32, vk::DescriptorType)>) {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
     let mut vm = ScriptVm { host, bx: Box::new(ScriptVmBase::new()) };
     let code = format!(
@@ -514,36 +557,30 @@ fn splash_wgsl(fragment_body: &str, extra: &str) -> String {
     }
     assert!(!layout.has_errors, "{}", layout.error_report());
     layout.assign_uniform_buffer_indices(&vm.bx.heap, 3);
-    let wgsl = crate::makepad_script::shader_wgsl::compile_draw_shader_wgsl_source(&mut vm, io_self, &layout, false).expect("WGSL").wgsl;
-    // The pass uniforms every draw shader declares (`draw.DrawPassUniforms`,
-    // registered by the draw crate); this bare VM has no such type, so the
-    // block the emitted helpers read is declared here.
-    let pass = "struct TestPassUniforms { camera_projection: mat4x4f, camera_view: mat4x4f, depth_projection: mat4x4f, depth_view: mat4x4f, camera_inv: mat4x4f }\n\
-                @group(0) @binding(20) var<uniform> unibuf_draw_pass: TestPassUniforms;\n";
-    format!("{pass}{wgsl}")
+    let output = crate::makepad_script::shader_ir_draw::compile_draw_shader_ir(&mut vm, io_self, &layout).expect("IR");
+    let mut ir = output.ir.clone();
+    crate::makepad_script::shader_ir_draw::build_draw_entries(&output, &mut ir, &vm, false);
+    let f = ir.function_by_name("fragment_main").expect("fragment_main");
+    let fragment = ir_to_spirv(&ir, f, false).unwrap_or_else(|e| panic!("{e}"));
+    // One zeroed buffer per buffer binding (the uniforms all read as 0).
+    let mut bindings = Vec::new();
+    for g in &ir.globals {
+        let ty = match g.kind {
+            IrGlobalKind::Io(IrIo::UniformBuffer) | IrGlobalKind::DynUniformBlock | IrGlobalKind::ScopeUniformBlock => vk::DescriptorType::UNIFORM_BUFFER,
+            IrGlobalKind::InstanceBuffer => vk::DescriptorType::STORAGE_BUFFER,
+            _ => continue,
+        };
+        if let Some(b) = g.binding {
+            bindings.push((b, ty));
+        }
+    }
+    (fragment, bindings)
 }
 
 /// Run a Splash fragment on a 4x4 RGBA32Float target: the pixel it wrote and
 /// the GPU time.
 fn run_splash(gpu: &Gpu, fragment_body: &str, extra: &str) -> ([f32; 4], Duration) {
-    let wgsl = splash_wgsl(fragment_body, extra);
-    let (_, fragment) = compile_wgsl_to_spirv(&wgsl).unwrap_or_else(|e| panic!("{e}\n{wgsl}"));
-    let fragment = fragment.expect("fragment_main");
-    // One zeroed buffer per binding the module declares (the uniforms all
-    // read as 0).
-    let module = crate::makepad_script::shader_spirv_parse::Parser::parse(&wgsl).unwrap();
-    let mut bindings = Vec::new();
-    for g in &module.globals {
-        let Some(binding) = g.attrs.binding else { continue };
-        let ty = match g.space.as_str() {
-            "uniform" => vk::DescriptorType::UNIFORM_BUFFER,
-            "storage" => vk::DescriptorType::STORAGE_BUFFER,
-            // Textures and samplers (the XR depth texture is always declared):
-            // no shader here samples one, so the entry point does not use it.
-            _ => continue,
-        };
-        bindings.push((binding, ty));
-    }
+    let (fragment, bindings) = splash_spirv(fragment_body, extra);
     unsafe {
         let layout_bindings: Vec<_> = bindings
             .iter()
@@ -637,14 +674,13 @@ fn max_blend_takes_the_per_channel_maximum_on_rgba16f() {
     let layout = unsafe { gpu.device.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default(), None).unwrap() };
     let clear_pass = gpu.render_pass(&refs, false);
     let load_pass = gpu.render_pass(&refs, true);
-    let fragment = |color: &str| {
-        let wgsl = format!("@fragment fn fragment_main() -> @location(0) vec4<f32> {{ return vec4<f32>({color}); }}");
-        compile_wgsl_to_spirv(&wgsl).unwrap().1.unwrap()
+    let fragment = |color: [f32; 4]| {
+        const_fragment(&[rgba(color)])
     };
     let blend = mrt_blend_attachments(&[format], 1, true, true);
     assert_eq!(blend[0].color_blend_op, vk::BlendOp::MAX);
-    let a = gpu.pipeline(clear_pass, layout, &fragment("0.8, 0.2, 0.0, 1.0"), &blend, 2);
-    let b = gpu.pipeline(load_pass, layout, &fragment("0.3, 0.6, 0.0, 1.0"), &blend, 2);
+    let a = gpu.pipeline(clear_pass, layout, &fragment([0.8, 0.2, 0.0, 1.0]), &blend, 2);
+    let b = gpu.pipeline(load_pass, layout, &fragment([0.3, 0.6, 0.0, 1.0]), &blend, 2);
     gpu.draw(&refs, &[clear_f([0.0; 4])], a, clear_pass, layout, None);
     assert_eq!(halves(&gpu.read(&target, 8))[..4], [f16_to_f32(0x3A66), f16_to_f32(0x3266), 0.0, 1.0], "first draw over the clear");
     gpu.draw(&refs, &[], b, load_pass, layout, None);

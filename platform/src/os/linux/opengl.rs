@@ -143,34 +143,25 @@ impl DrawVars {
             // below instead. Android and Quest have no such fallback.
             #[cfg(use_vulkan)]
             if !cfg!(target_os = "linux") || vm.host.cx().os.vulkan_active() {
-                for (shader_variant, xr_multiview) in [false, true].into_iter().enumerate() {
-                    match crate::os::linux::vulkan_spirv::compile_draw_shader_spirv(
-                        vm,
-                        io_self,
-                        &output,
-                        xr_multiview,
-                    ) {
-                        Ok(vk_shader) => compiled_vulkan_shader[shader_variant] = Some(vk_shader),
-                        Err(err) => {
-                            use std::sync::atomic::{AtomicUsize, Ordering};
-                            static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
-                            const MAX_ERROR_LOGS: usize = 2;
-                            let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
-                            // Tracing the WGSL asks for every failure, not the first two.
-                            let tracing = crate::makepad_error_log::trace_enabled("shader.wgsl");
-                            if index < MAX_ERROR_LOGS || tracing {
-                                let variant_name = if xr_multiview { "xr" } else { "window" };
-                                crate::error!(
-                                    "Vulkan WGSL/SPIR-V compilation failed for {} variant: {}",
-                                    variant_name,
-                                    err
-                                );
-                            } else if index == MAX_ERROR_LOGS {
-                                crate::warning!(
-                                    "Suppressing further Vulkan WGSL/SPIR-V compilation logs after {} errors",
-                                    MAX_ERROR_LOGS
-                                );
-                            }
+                match crate::os::linux::vulkan_spirv::compile_draw_shader_spirv(vm, io_self, &output) {
+                    Ok([window, xr]) => {
+                        compiled_vulkan_shader[0] = Some(window);
+                        compiled_vulkan_shader[1] = Some(xr);
+                    }
+                    Err(err) => {
+                        use std::sync::atomic::{AtomicUsize, Ordering};
+                        static ERROR_COUNT: AtomicUsize = AtomicUsize::new(0);
+                        const MAX_ERROR_LOGS: usize = 2;
+                        let index = ERROR_COUNT.fetch_add(1, Ordering::Relaxed);
+                        // Tracing asks for every failure, not the first two.
+                        let tracing = crate::makepad_error_log::trace_enabled("shader.spirv");
+                        if index < MAX_ERROR_LOGS || tracing {
+                            crate::error!("Vulkan SPIR-V compilation failed: {}", err);
+                        } else if index == MAX_ERROR_LOGS {
+                            crate::warning!(
+                                "Suppressing further Vulkan SPIR-V compilation logs after {} errors",
+                                MAX_ERROR_LOGS
+                            );
                         }
                     }
                 }

@@ -69,22 +69,25 @@ fn hlsl_reads_the_record_from_a_buffer_and_carries_only_what_the_pixel_stage_rea
 }
 
 #[test]
-fn wgsl_reads_the_record_from_a_storage_buffer_and_validates() {
+fn wgsl_reads_the_record_from_a_storage_buffer() {
     let src = compile("wgsl");
     assert!(src.contains("var<storage, read> _mp_inst: array<u32>;"), "{src}");
     assert!(!src.contains("packed_instance_0: vec4f"), "{src}");
     assert!(src.contains("let _mp_ib = in.instance_index * 650u;"), "{src}");
-    // The emitter's pass helpers read the draw pass's uniform buffer, which
-    // every real draw shader declares (DrawPassUniforms); this one stands in.
-    let src = format!(
-        "{src}\nstruct MpTestPass {{ camera_projection: mat4x4f, camera_view: mat4x4f, depth_projection: mat4x4f, depth_view: mat4x4f, camera_inv: mat4x4f }}\n\
-         @group(1) @binding(0) var<uniform> unibuf_draw_pass: MpTestPass;\n"
-    );
-    let (vertex, fragment) =
-        makepad_script::shader_spirv::compile_wgsl_to_spirv(&src).unwrap_or_else(|e| panic!("{e}\n{src}"));
-    for words in [vertex.expect("vertex_main"), fragment.expect("fragment_main")] {
-        if let Some(Err(e)) = makepad_script::shader_spirv::spirv_val(&words) {
-            panic!("spirv-val: {e}\n{src}");
+}
+
+#[test]
+fn spirv_reads_the_record_from_a_storage_buffer_and_validates() {
+    let src = compile("spirv");
+    for line in src.lines() {
+        let hex = &line[2..];
+        let mut words = Vec::new();
+        for k in 0..hex.len() / 8 {
+            words.push(u32::from_str_radix(&hex[k * 8..k * 8 + 8], 16).unwrap());
+        }
+        assert!(words.len() > 5, "{line}");
+        if let Some(Err(e)) = makepad_script::shader_ir_spirv::spirv_val(&words) {
+            panic!("spirv-val ({}): {e}", &line[..1]);
         }
     }
 }

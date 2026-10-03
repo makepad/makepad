@@ -81,7 +81,7 @@ impl ShaderStorageFlags {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TextureType {
     Texture1d,
     Texture1dArray,
@@ -308,6 +308,8 @@ pub struct ShaderOutput {
     /// style reload), which made the same shader's source text differ and
     /// the GPU compile it again; the order of first use does not change.
     pub scope_prefixes: Vec<usize>,
+    /// The shader as IR (shader_ir.rs), when compiled by the IR lowering.
+    pub ir: crate::shader_ir::IrModule,
 }
 
 /// Ceiling on total emitted shader source. Real shaders here run to tens of

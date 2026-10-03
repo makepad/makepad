@@ -2,7 +2,7 @@
 
 ## naga (SPIR-V lowering rules)
 
-`src/shader_spirv.rs` ports a few lowering rules from the SPIR-V backend of
+`src/shader_ir_spirv.rs` ports a few lowering rules from the SPIR-V backend of
 naga 27 (<https://github.com/gfx-rs/wgpu/tree/trunk/naga>), Copyright (c)
 2025 The gfx-rs developers, used under the MIT license (naga is dual
 MIT/Apache-2.0):

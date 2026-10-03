@@ -2980,7 +2980,7 @@ impl CxVulkan {
         if direct.blit.is_some() {
             return Ok(());
         }
-        let (vertex_spirv, fragment_spirv) = crate::makepad_script::shader_spirv::fullscreen_blit_spirv();
+        let (vertex_spirv, fragment_spirv) = crate::makepad_script::shader_ir_spirv::fullscreen_blit_spirv();
         let sampler_info = vk::SamplerCreateInfo::default()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)

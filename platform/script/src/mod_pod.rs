@@ -19,7 +19,7 @@ macro_rules! script_pod_def {
     }};
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ScriptPodBuiltins {
     pub pod_void: ScriptPodType,
     pub pod_struct: ScriptPodType,

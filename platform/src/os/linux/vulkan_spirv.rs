@@ -1,7 +1,6 @@
 use crate::makepad_script::{
     shader::ShaderOutput,
-    shader_spirv::compile_wgsl_to_spirv,
-    shader_wgsl::{compile_draw_shader_wgsl_source, wgsl_instance_binding},
+    shader_ir_draw::{compile_draw_shader_spirv as compile_ir_spirv, IrDrawSpirv},
     value::ScriptObject,
     vm::ScriptVm,
 };
@@ -21,34 +20,30 @@ pub struct CxVulkanShaderBinary {
     pub instance_slots: usize,
 }
 
-/// A draw shader as Vulkan runs it: the module the WGSL emitter writes (the
-/// one WebGPU runs), compiled to SPIR-V by the shader compiler's own
-/// backend (`makepad_script::shader_spirv`).
+impl CxVulkanShaderBinary {
+    fn from_ir(s: IrDrawSpirv) -> Self {
+        CxVulkanShaderBinary {
+            vertex_spirv: Some(s.vertex),
+            fragment_spirv: Some(s.fragment),
+            dyn_uniform_binding: s.info.dyn_uniform_binding,
+            texture_binding_base: s.info.texture_binding_base,
+            sampler_binding_base: s.info.sampler_binding_base,
+            xr_depth_binding: s.info.xr_depth_binding,
+            instance_binding: s.info.instance_binding,
+            geometry_slots: s.info.geometry_slots,
+            instance_slots: s.info.instance_slots,
+        }
+    }
+}
+
+/// A draw shader as Vulkan runs it: lowered to the shader IR once and
+/// printed as SPIR-V for the window and the XR variant
+/// (`makepad_script::shader_ir_spirv`).
 pub(crate) fn compile_draw_shader_spirv(
     vm: &mut ScriptVm,
     io_self: ScriptObject,
     layout_source: &ShaderOutput,
-    xr_multiview: bool,
-) -> Result<CxVulkanShaderBinary, String> {
-    let source = compile_draw_shader_wgsl_source(vm, io_self, layout_source, xr_multiview)?;
-
-    if crate::makepad_error_log::trace_enabled("shader.wgsl") {
-        let variant = if xr_multiview { "xr" } else { "window" };
-        crate::trace!("shader.wgsl", "---- Vulkan WGSL ({}) ----\n{}", variant, source.wgsl);
-    }
-
-    let (vertex_spirv, fragment_spirv) = compile_wgsl_to_spirv(&source.wgsl)
-        .map_err(|err| format!("{err}\nSet MAKEPAD_TRACE=shader.wgsl to dump the shader module."))?;
-
-    Ok(CxVulkanShaderBinary {
-        vertex_spirv,
-        fragment_spirv,
-        dyn_uniform_binding: source.dyn_uniform_binding,
-        texture_binding_base: source.texture_binding_base,
-        sampler_binding_base: source.sampler_binding_base,
-        xr_depth_binding: source.xr_depth_binding,
-        instance_binding: (source.instance_slots > 0).then(|| wgsl_instance_binding(source.xr_depth_binding)),
-        geometry_slots: source.geometry_slots,
-        instance_slots: source.instance_slots,
-    })
+) -> Result<[CxVulkanShaderBinary; 2], String> {
+    let [window, xr] = compile_ir_spirv(vm, io_self, layout_source)?;
+    Ok([CxVulkanShaderBinary::from_ir(window), CxVulkanShaderBinary::from_ir(xr)])
 }
