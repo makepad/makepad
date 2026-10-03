@@ -1481,11 +1481,13 @@ mod shader_registration_tests {
             let mapping = &cx.draw_shaders[id.index].mapping;
             assert_eq!(mapping.textures[0].id, live_id!(tex));
             assert_eq!(mapping.textures[1].id, live_id!(ao_map));
-            // Vertex attributes: every backend packs the geometry and the
-            // instance records into vec4 chunks, one attribute each. Metal
-            // allows 31, common Vulkan GPUs 32; one vec4 over it lost the
-            // Vulkan device in race (2026-09-29). New per-draw data must ride
-            // a spare lane, never a new instance field.
+            // Vertex attributes: the backends that fetch instances as
+            // attributes pack the geometry and the instance records into
+            // vec4 chunks, one attribute each. Metal allows 31, common Vulkan
+            // GPUs 32; one vec4 over it lost the Vulkan device in race
+            // (2026-09-29). (D3D11 declares one input per field, so these
+            // lanes read their records from the instance buffer there.) New
+            // per-draw data must ride a spare lane, never a new instance field.
             let lanes = [
                 ("model", DrawSceneSkinned::script_new_with_default(vm).draw_vars.draw_shader_id),
                 ("pbr", DrawScenePbr::script_new_with_default(vm).skinned.draw_vars.draw_shader_id),
