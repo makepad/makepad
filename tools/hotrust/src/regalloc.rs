@@ -92,7 +92,7 @@ pub fn uses_defs(i: &Inst, uses: &mut Vec<VReg>, defs: &mut Vec<VReg>) {
             uses.push(*s);
         }
         Inst::Call(c, a, r) => {
-            if let Callee::Indirect(v) = c {
+            if let Callee::Indirect(v) | Callee::CIndirect(v, _) = c {
                 uses.push(*v);
             }
             uses.extend_from_slice(a);
@@ -102,7 +102,27 @@ pub fn uses_defs(i: &Inst, uses: &mut Vec<VReg>, defs: &mut Vec<VReg>) {
             uses.push(*a);
             uses.push(*b);
         }
-        Inst::Poll => {}
+        Inst::Poll | Inst::Fence(..) => {}
+        Inst::TlsAddr(d, _) => defs.push(*d),
+        Inst::AtomicLoad(_, _, d, a) => {
+            uses.push(*a);
+            defs.push(*d);
+        }
+        Inst::AtomicStore(_, _, a, s) => {
+            uses.push(*a);
+            uses.push(*s);
+        }
+        Inst::AtomicRmw(_, _, _, d, a, s) => {
+            uses.push(*a);
+            uses.push(*s);
+            defs.push(*d);
+        }
+        Inst::AtomicCas(_, _, _, d, a, e, n) => {
+            uses.push(*a);
+            uses.push(*e);
+            uses.push(*n);
+            defs.push(*d);
+        }
     }
 }
 

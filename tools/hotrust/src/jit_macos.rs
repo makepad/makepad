@@ -7,7 +7,7 @@
 //! call is active) records a report with a frame-pointer backtrace and resumes at
 //! `leave(ctx, 2)`, so the host continues with the next call.
 
-use super::{collect_frames, PanicInfo, CTX, IN_COMPILE, PANIC, SIG_WATCHDOG, UNIT, WATCHDOG_HIT};
+use super::{collect_frames, ctx_ptr, fatal_report, in_compile, PanicInfo, PANIC, SIG_WATCHDOG, UNIT, WATCHDOG_HIT};
 use std::sync::atomic::Ordering;
 
 extern "C" {
@@ -98,7 +98,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         if sig == SIG_WATCHDOG {
             // hang watchdog: act only when JIT code runs and the compiler is not running
             // (added by the compiler lane with the poll-free watchdog; mirrors jit.rs)
-            if UNIT.is_null() || CTX[0] == 0 || IN_COMPILE.load(Ordering::SeqCst) || (&*UNIT).find_fn(pc).is_none() {
+            if UNIT.is_null() || *ctx_ptr() == 0 || in_compile() || (&*UNIT).find_fn(pc).is_none() {
                 return;
             }
             WATCHDOG_HIT.store(true, Ordering::SeqCst);
@@ -106,11 +106,14 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
             let frames = collect_frames(fp, pc);
             PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: "hang".to_string(), message: "watchdog: the call did not return in time".to_string(), site: u64::MAX, frames, fault_addr: 0 }));
             *reg(SS_PC) = u.leave;
-            *reg(SS) = std::ptr::addr_of_mut!(CTX) as u64;
+            *reg(SS) = ctx_ptr() as u64;
             *reg(SS + 8) = 3;
             return;
         }
-        if UNIT.is_null() || ((&*UNIT).find_fn(pc).is_none() && CTX[0] == 0) {
+        if !UNIT.is_null() && *ctx_ptr() == 0 && (&*UNIT).find_fn(pc).is_some() {
+            fatal_report(sig, fault, fp, pc);
+        }
+        if UNIT.is_null() || *ctx_ptr() == 0 {
             // not ours: restore the default action and return to crash normally
             let act = SigAction { handler: 0, mask: 0, flags: 0 };
             sigaction(sig, &act, std::ptr::null_mut());
@@ -129,7 +132,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault }));
         // resume at `leave(ctx, 2)`
         *reg(SS_PC) = u.leave;
-        *reg(SS) = std::ptr::addr_of_mut!(CTX) as u64;
+        *reg(SS) = ctx_ptr() as u64;
         *reg(SS + 8) = 2;
     }
 }

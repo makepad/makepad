@@ -119,7 +119,7 @@ fn callee_shape(f: &Func, callee_id: u32) -> (usize, bool, bool) {
         n += b.insts.len();
         for i in &b.insts {
             match i {
-                Inst::Call(Callee::Host(_), _, _) | Inst::Call(Callee::HostVariadic(..), _, _) => {}
+                Inst::Call(Callee::Host(_), _, _) | Inst::Call(Callee::HostVariadic(..), _, _) | Inst::Call(Callee::CHost(..), _, _) => {}
                 Inst::Call(Callee::Fn(c), _, _) => {
                     leaf = false;
                     if *c == callee_id {
@@ -276,6 +276,9 @@ fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
                 Callee::Fn(i) => Callee::Fn(*i),
                 Callee::Host(h) => Callee::Host(*h),
                 Callee::HostVariadic(h, n) => Callee::HostVariadic(*h, *n),
+                Callee::CHost(h, sig) => Callee::CHost(*h, sig.clone()),
+                Callee::CIndirect(v, sig) => Callee::CIndirect(m(*v), sig.clone()),
+                Callee::CFn(i, sig) => Callee::CFn(*i, sig.clone()),
             };
             let mut a2 = Vec::new();
             for v in a {
@@ -291,6 +294,12 @@ fn map_inst(x: &Inst, m: &dyn Fn(VReg) -> VReg, slot_base: u32) -> Inst {
         Inst::Poll => Inst::Poll,
         Inst::LoadX(k, d, b, x, sh, o) => Inst::LoadX(*k, m(*d), m(*b), m(*x), *sh, *o),
         Inst::StoreX(k, b, x, sh, o, v) => Inst::StoreX(*k, m(*b), m(*x), *sh, *o, m(*v)),
+        Inst::AtomicLoad(k, o, d, a) => Inst::AtomicLoad(*k, *o, m(*d), m(*a)),
+        Inst::AtomicStore(k, o, a, v) => Inst::AtomicStore(*k, *o, m(*a), m(*v)),
+        Inst::AtomicRmw(op, k, o, d, a, v) => Inst::AtomicRmw(*op, *k, *o, m(*d), m(*a), m(*v)),
+        Inst::AtomicCas(k, o1, o2, d, a, e, n) => Inst::AtomicCas(*k, *o1, *o2, m(*d), m(*a), m(*e), m(*n)),
+        Inst::Fence(o, st) => Inst::Fence(*o, *st),
+        Inst::TlsAddr(d, off) => Inst::TlsAddr(m(*d), *off),
     }
 }
 
@@ -487,7 +496,12 @@ fn swap_cond(c: Cond) -> Cond {
 }
 
 fn is_pure(i: &Inst) -> bool {
-    !matches!(i, Inst::Call(..) | Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::Poll)
+    !is_mem_effect(i)
+}
+
+/// Instructions with effects beyond their result vregs (memory writes, calls, ordering).
+fn is_mem_effect(i: &Inst) -> bool {
+    matches!(i, Inst::Call(..) | Inst::Store(..) | Inst::StoreX(..) | Inst::Copy(..) | Inst::Poll | Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..))
 }
 
 fn const_inst(d: VReg, k: K) -> Inst {
@@ -835,6 +849,7 @@ fn rename(i: &Inst, a: &dyn Fn(VReg) -> VReg) -> Inst {
         Inst::Call(c, args, r) => {
             let c2 = match c {
                 Callee::Indirect(v) => Callee::Indirect(a(*v)),
+                Callee::CIndirect(v, sig) => Callee::CIndirect(a(*v), sig.clone()),
                 x => x.clone(),
             };
             let mut n = Vec::new();
@@ -844,6 +859,10 @@ fn rename(i: &Inst, a: &dyn Fn(VReg) -> VReg) -> Inst {
             Inst::Call(c2, n, r.clone())
         }
         Inst::Copy(x, y, n) => Inst::Copy(a(*x), a(*y), *n),
+        Inst::AtomicLoad(k, o, d, x) => Inst::AtomicLoad(*k, *o, *d, a(*x)),
+        Inst::AtomicStore(k, o, x, v) => Inst::AtomicStore(*k, *o, a(*x), a(*v)),
+        Inst::AtomicRmw(op, k, o, d, x, v) => Inst::AtomicRmw(*op, *k, *o, *d, a(*x), a(*v)),
+        Inst::AtomicCas(k, o1, o2, d, x, e, n) => Inst::AtomicCas(*k, *o1, *o2, *d, a(*x), a(*e), a(*n)),
         other => other.clone(),
     }
 }
@@ -1610,7 +1629,8 @@ fn local_cse(f: &mut Func) -> bool {
             }
             let i = b.insts[k].clone();
             let cand = match &i {
-                Inst::Mov(..) | Inst::Call(..) | Inst::Store(..) | Inst::Copy(..) | Inst::Poll | Inst::SlotAddr(..) => None,
+                Inst::Mov(..) | Inst::SlotAddr(..) => None,
+                i if is_mem_effect(i) => None,
                 _ => {
                     uses_defs(&i, &mut uses, &mut defs);
                     if defs.len() == 1 && !uses.contains(&defs[0]) {
@@ -1651,7 +1671,7 @@ fn local_cse(f: &mut Func) -> bool {
                 }
             }
             match &i {
-                Inst::Call(..) | Inst::Copy(..) => st.avail.retain(|x| !x.3),
+                Inst::Call(..) | Inst::Copy(..) | Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) => st.avail.retain(|x| !x.3),
                 Inst::Store(m, base, off, v) => {
                     let (base, off, v, m) = (*base, *off as i64, *v, *m);
                     let sz = mem_size(m) as i64;
@@ -2196,7 +2216,8 @@ pub fn licm(f: &mut Func) -> bool {
                     let i = &f.blocks[bi].insts[k];
                     let pure = match i {
                         Inst::IBin(IOp::Div | IOp::Rem, ..) | Inst::IBinI(IOp::Div | IOp::Rem, ..) => false,
-                        Inst::Load(..) | Inst::Store(..) | Inst::Call(..) | Inst::Copy(..) | Inst::Poll | Inst::Mov(..) => false,
+                        Inst::Load(..) | Inst::Mov(..) => false,
+                        i if is_mem_effect(i) => false,
                         _ => true,
                     };
                     if !pure {

@@ -123,6 +123,8 @@ pub struct Unit {
     pub stats: Stats,
     pub patch_log: Vec<(u32, u32)>, // (slot, generation)
     pub patch_gen: u32,
+    /// bytes of the per-thread block handed out by `tls_alloc`
+    pub tls_next: u32,
 }
 
 #[derive(Default)]
@@ -179,7 +181,6 @@ const SIG_WATCHDOG: i32 = 30;
 extern "C" {
     fn mmap(addr: *mut u8, len: usize, prot: i32, flags: i32, fd: i32, off: i64) -> *mut u8;
     fn dlsym(handle: *mut u8, name: *const u8) -> *mut u8;
-    fn dlopen(name: *const u8, flags: i32) -> *mut u8;
     fn sigaction(sig: i32, act: *const SigAction, old: *mut SigAction) -> i32;
     fn sigaltstack(ss: *const StackT, old: *mut StackT) -> i32;
 }
@@ -229,27 +230,138 @@ unsafe fn write_code(addr: u64, b: &[u8]) {
     write_bytes(addr, b)
 }
 
+// ------------------------------------------------------------ thread-local blocks
+
+/// Size of each thread's thread-local block (virtual; pages are touched on use).
+const TLS_CAP: usize = 1 << 20;
+static TLS_KEY: AtomicU64 = AtomicU64::new(u64::MAX);
+
+extern "C" {
+    fn dlopen(name: *const u8, flags: i32) -> *mut u8;
+    fn pthread_key_create(key: *mut PthreadKey, dtor: Option<extern "C" fn(*mut u8)>) -> i32;
+    fn pthread_getspecific(key: PthreadKey) -> *mut u8;
+    fn pthread_setspecific(key: PthreadKey, v: *mut u8) -> i32;
+    fn munmap(addr: *mut u8, len: usize) -> i32;
+}
+
+#[cfg(target_os = "macos")]
+type PthreadKey = usize;
+#[cfg(target_os = "linux")]
+type PthreadKey = u32;
+
+extern "C" fn tls_dtor(p: *mut u8) {
+    unsafe {
+        munmap(p, TLS_CAP);
+    }
+}
+
+fn tls_key() -> PthreadKey {
+    let k = TLS_KEY.load(Ordering::Acquire);
+    if k != u64::MAX {
+        return k as PthreadKey;
+    }
+    lock_unit();
+    let mut key: PthreadKey = 0;
+    if TLS_KEY.load(Ordering::Acquire) == u64::MAX {
+        unsafe {
+            pthread_key_create(&mut key, Some(tls_dtor));
+        }
+        TLS_KEY.store(key as u64, Ordering::Release);
+    }
+    unlock_unit();
+    TLS_KEY.load(Ordering::Acquire) as PthreadKey
+}
+
+#[cfg(target_os = "linux")]
+thread_local! {
+    /// this thread's block (static TLS: JIT code reads it at fs:[env.tls_key])
+    static TLS_BLOCK: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Allocates the calling thread's thread-local block (called by the TlsAddr slow path).
+extern "C" fn rt_tls_block() -> u64 {
+    let key = tls_key();
+    unsafe {
+        let b = pthread_getspecific(key);
+        if !b.is_null() {
+            return b as u64;
+        }
+        let b = os_alloc(TLS_CAP, PROT_RW);
+        pthread_setspecific(key, b as *mut u8);
+        #[cfg(target_os = "linux")]
+        TLS_BLOCK.with(|c| c.set(b));
+        b
+    }
+}
+
 // ------------------------------------------------------------ global runtime state
 
-/// The unit reached by the lazy-compile entry and the runtime. Set to the
-/// currently borrowed unit around every call into JIT code.
+/// The unit reached by the lazy-compile entry and the runtime: set by `call_jit` and
+/// kept afterwards, so threads that JIT code started keep reaching it.
 static mut UNIT: *mut Unit = std::ptr::null_mut();
-/// Saved host context of the innermost `enter` (rsp).
-static mut CTX: [u64; 2] = [0; 2];
-/// Frame of the JIT caller of the last panic trampoline: (rbp, return address).
-static mut PANIC_FRAME: [u64; 2] = [0; 2];
 pub static POLL_FLAG: AtomicBool = AtomicBool::new(false);
 static WATCHDOG_HIT: AtomicBool = AtomicBool::new(false);
-/// set while the compiler runs (signals must not inspect half-updated tables)
-static IN_COMPILE: AtomicBool = AtomicBool::new(false);
 static RUN_GEN: AtomicU64 = AtomicU64::new(0);
 
+/// Re-entrant lock around everything that changes the unit (lazy compiles, patches,
+/// const evaluation): JIT code on any thread may hit a lazy stub. Owner = pthread_self.
+static LOCK_OWNER: AtomicU64 = AtomicU64::new(0);
+static mut LOCK_DEPTH: u32 = 0;
+
+pub fn lock_unit() {
+    let me = unsafe { pthread_self() } as u64;
+    if LOCK_OWNER.load(Ordering::Acquire) == me {
+        unsafe { LOCK_DEPTH += 1 };
+        return;
+    }
+    let mut spins = 0u32;
+    while LOCK_OWNER.compare_exchange(0, me, Ordering::Acquire, Ordering::Relaxed).is_err() {
+        spins += 1;
+        if spins > 64 {
+            std::thread::yield_now();
+        } else {
+            std::hint::spin_loop();
+        }
+    }
+    unsafe { LOCK_DEPTH = 1 };
+}
+
+pub fn unlock_unit() {
+    unsafe {
+        LOCK_DEPTH -= 1;
+        if LOCK_DEPTH == 0 {
+            LOCK_OWNER.store(0, Ordering::Release);
+        }
+    }
+}
+
+/// Does the calling thread hold the unit lock (i.e. is it inside the compiler)?
+fn in_compile() -> bool {
+    LOCK_OWNER.load(Ordering::Relaxed) == unsafe { pthread_self() } as u64
+}
+
 thread_local! {
+    /// saved host context of this thread's innermost `enter` (sp); 0 = no recovery point
+    static CTX: std::cell::UnsafeCell<[u64; 2]> = const { std::cell::UnsafeCell::new([0; 2]) };
     /// stack of format buffers: format!/write! to non-Formatter targets push one
     static FMT: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(vec![String::new()]);
     /// the last popped buffer (valid until the next pop)
     static FMT_POPPED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     static PANIC: std::cell::RefCell<Option<PanicInfo>> = const { std::cell::RefCell::new(None) };
+}
+
+/// A fault in JIT code on a thread without a recovery point: report and abort.
+unsafe fn fatal_report(sig: i32, fault: u64, fp: u64, pc: u64) -> ! {
+    let frames = collect_frames(fp, pc);
+    let info = PanicInfo { kind: "fault".to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault };
+    let r = (&*UNIT).report(&info);
+    eprintln!("hotrust: fault on a thread without a recovery point, aborting\n  report: {}", r);
+    std::process::abort()
+}
+
+/// This thread's recovery context (stable address for the thread's lifetime).
+fn ctx_ptr() -> *mut u64 {
+    CTX.with(|c| c.get() as *mut u64)
 }
 
 #[derive(Clone)]
@@ -464,8 +576,18 @@ fn collect_frames(rbp: u64, ret: u64) -> Vec<u64> {
 }
 
 fn raise(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret: u64) -> ! {
+    lock_unit();
     let frames = collect_frames(rbp, ret);
-    PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message, site, frames, fault_addr: fault }));
+    let info = PanicInfo { kind: kind.to_string(), message, site, frames, fault_addr: fault };
+    if unsafe { *ctx_ptr() } == 0 {
+        // no recovery point on this thread (a thread JIT code started, or a C callback on
+        // a foreign thread): report and abort, as panic=abort does
+        let r = unsafe { (&*UNIT).report(&info) };
+        eprintln!("hotrust: {} on a thread without a recovery point, aborting\n  report: {}", kind, r);
+        std::process::abort();
+    }
+    unlock_unit();
+    PANIC.with(|p| *p.borrow_mut() = Some(info));
     FMT.with(|f| {
         let mut v = f.borrow_mut();
         v.clear();
@@ -473,11 +595,14 @@ fn raise(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret: u64)
     });
     unsafe {
         let leave: extern "C" fn(*mut u64, u64) -> ! = std::mem::transmute((&*UNIT).leave as usize);
-        leave(std::ptr::addr_of_mut!(CTX) as *mut u64, 1)
+        leave(ctx_ptr(), 1)
     }
 }
 
-extern "C" fn rt_panic_site(site: u64) {
+// Panic entries are reached through `panic_tramp`, which passes the JIT caller's frame
+// (frame pointer, return address) as arguments 4 and 5.
+
+extern "C" fn rt_panic_site(site: u64, _a1: u64, _a2: u64, _a3: u64, rbp: u64, ret: u64) {
     let mut msg = fmt_take_top();
     if msg.is_empty() {
         let u = unsafe { &*UNIT };
@@ -485,21 +610,18 @@ extern "C" fn rt_panic_site(site: u64) {
             msg = u.sites[site as usize].msg.clone();
         }
     }
-    let (rbp, ret) = unsafe { (PANIC_FRAME[0], PANIC_FRAME[1]) };
     raise("panic", msg, site, 0, rbp, ret)
 }
 
-extern "C" fn rt_panic_bounds(idx: u64, len: u64, site: u64) {
+extern "C" fn rt_panic_bounds(idx: u64, len: u64, site: u64, _a3: u64, rbp: u64, ret: u64) {
     let msg = format!("index out of bounds: the len is {} but the index is {}", len, idx);
-    let (rbp, ret) = unsafe { (PANIC_FRAME[0], PANIC_FRAME[1]) };
     raise("panic", msg, site, 0, rbp, ret)
 }
 
-extern "C" fn rt_hang() {
+extern "C" fn rt_hang(_a0: u64, _a1: u64, _a2: u64, _a3: u64, rbp: u64, ret: u64) {
     if !POLL_FLAG.swap(false, Ordering::SeqCst) {
         return;
     }
-    let (rbp, ret) = unsafe { (PANIC_FRAME[0], PANIC_FRAME[1]) };
     raise("hang", "watchdog: the call did not return in time".to_string(), u64::MAX, 0, rbp, ret)
 }
 
@@ -516,7 +638,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         let fault = *(info.add(16) as *const u64);
         if sig == SIG_WATCHDOG {
             // hang watchdog: only act when JIT code is running and not inside the compiler
-            if UNIT.is_null() || CTX[0] == 0 || IN_COMPILE.load(Ordering::SeqCst) || (&*UNIT).find_fn(rip).is_none() {
+            if UNIT.is_null() || *ctx_ptr() == 0 || in_compile() || (&*UNIT).find_fn(rip).is_none() {
                 return;
             }
             WATCHDOG_HIT.store(true, Ordering::SeqCst);
@@ -524,12 +646,15 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
             let frames = collect_frames(rbp, rip);
             PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: "hang".to_string(), message: "watchdog: the call did not return in time".to_string(), site: u64::MAX, frames, fault_addr: 0 }));
             *gregs.add(16) = u.leave;
-            *gregs.add(8) = std::ptr::addr_of_mut!(CTX) as u64;
+            *gregs.add(8) = ctx_ptr() as u64;
             *gregs.add(9) = 3;
             return;
         }
         let u = &*UNIT;
-        if u.find_fn(rip).is_none() && CTX[0] == 0 {
+        if *ctx_ptr() == 0 && u.find_fn(rip).is_some() {
+            fatal_report(sig, fault, rbp, rip);
+        }
+        if *ctx_ptr() == 0 {
             // not ours: restore default and return to crash normally
             let act = SigAction { handler: 0, mask: [0; 16], flags: 0, pad: 0, restorer: 0 };
             sigaction(sig, &act, std::ptr::null_mut());
@@ -546,7 +671,7 @@ extern "C" fn on_signal(sig: i32, info: *mut u8, uc: *mut u8) {
         PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message: format!("signal {} at {:#x}", sig, fault), site: u64::MAX, frames, fault_addr: fault }));
         // resume at `leave(ctx, 2)`
         *gregs.add(16) = u.leave;
-        *gregs.add(8) = std::ptr::addr_of_mut!(CTX) as u64;
+        *gregs.add(8) = ctx_ptr() as u64;
         *gregs.add(9) = 2;
     }
 }
@@ -565,25 +690,20 @@ fn install_signals() {
     }
 }
 
-/// JIT trampoline in front of a host panic function: records the caller's frame.
+/// JIT trampoline in front of a host panic function: passes the caller's frame
+/// (frame pointer, return address) as arguments 4 and 5 (thread-safe, no globals).
 #[cfg(target_arch = "aarch64")]
 fn panic_tramp(target: u64) -> Vec<u8> {
-    x64::panic_tramp(std::ptr::addr_of_mut!(PANIC_FRAME) as u64, target)
+    x64::panic_tramp(target)
 }
 
 #[cfg(not(target_arch = "aarch64"))]
 fn panic_tramp(target: u64) -> Vec<u8> {
-    let frame = std::ptr::addr_of_mut!(PANIC_FRAME) as u64;
     let mut b = Vec::new();
-    // mov r10, imm64(frame)
-    b.extend_from_slice(&[0x49, 0xba]);
-    b.extend_from_slice(&frame.to_le_bytes());
-    // mov [r10], rbp
-    b.extend_from_slice(&[0x49, 0x89, 0x2a]);
-    // mov rax, [rsp]
-    b.extend_from_slice(&[0x48, 0x8b, 0x04, 0x24]);
-    // mov [r10+8], rax
-    b.extend_from_slice(&[0x49, 0x89, 0x42, 0x08]);
+    // mov r8, rbp
+    b.extend_from_slice(&[0x49, 0x89, 0xe8]);
+    // mov r9, [rsp]
+    b.extend_from_slice(&[0x4c, 0x8b, 0x0c, 0x24]);
     // mov r11, imm64(target); jmp r11
     b.extend_from_slice(&[0x49, 0xbb]);
     b.extend_from_slice(&target.to_le_bytes());
@@ -637,10 +757,11 @@ impl Unit {
             rw_next: rw_base,
             rw_end: rw_base + rw_size,
             opt: crate::opt::OptCfg::from_env(),
-            env: x64::Env { table_base, thunk_base, thunk_size: THUNK_SIZE as u64, poll_flag: POLL_FLAG.as_ptr() as u64, rt_hang: 0 },
+            env: x64::Env { table_base, thunk_base, thunk_size: THUNK_SIZE as u64, poll_flag: POLL_FLAG.as_ptr() as u64, rt_hang: 0, tls_key: 0, tls_slow: 0 },
             stats: Stats::default(),
             patch_log: Vec::new(),
             patch_gen: 0,
+            tls_next: 0,
         });
         let lazy = x64::lazy_entry(rt_compile as *const () as usize as u64);
         u.lazy_entry = u.emit_code(&lazy);
@@ -669,6 +790,7 @@ impl Unit {
         u.rt.panic_bounds = u.emit_code(&pb);
         u.rt.hang = u.emit_code(&ph);
         u.env.rt_hang = u.rt.hang;
+        u.init_tls();
         install_signals();
         u
     }
@@ -708,6 +830,54 @@ impl Unit {
 
     pub fn ro_range(&self) -> (u64, u64) {
         (self.ro_base, self.data_next)
+    }
+
+    /// Reserves `size` bytes of every thread's thread-local block (zeroed per thread on
+    /// first use); returns the offset for `Inst::TlsAddr`.
+    pub fn tls_alloc(&mut self, size: u32, align: u32) -> u32 {
+        let a = align.max(1);
+        let at = (self.tls_next + a - 1) / a * a;
+        if (at + size) as usize > TLS_CAP {
+            panic!("thread-local block full");
+        }
+        self.tls_next = at + size;
+        at
+    }
+
+    /// Thread-local blocks: one pthread key per process holds each thread's block.
+    #[cfg(target_os = "macos")]
+    fn init_tls(&mut self) {
+        let key = tls_key();
+        let reader = self.emit_code(&x64::tsd_reader());
+        let read: extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(reader as usize) };
+        // the inline fast path reads the TSD slot directly: check it sees pthread's value
+        unsafe {
+            let old = pthread_getspecific(key);
+            pthread_setspecific(key, 0x5a5a_0000 as *mut u8);
+            let seen = read(key as u64);
+            pthread_setspecific(key, old);
+            if seen != 0x5a5a_0000 {
+                panic!("thread-local fast path: TSD slot {} reads {:#x}", key, seen);
+            }
+        }
+        self.env.tls_key = key as u64;
+        self.env.tls_slow = self.emit_code(&x64::tls_slow(rt_tls_block as *const () as usize as u64));
+    }
+
+    /// Linux x86-64: the block pointer lives in a static-TLS cell of this (executable)
+    /// runtime, at a fixed offset from the thread pointer that JIT code reads via fs.
+    #[cfg(target_os = "linux")]
+    fn init_tls(&mut self) {
+        let _ = tls_key();
+        let reader = self.emit_code(&x64::fs_reader());
+        let fs_base: extern "C" fn() -> u64 = unsafe { std::mem::transmute(reader as usize) };
+        let cell = TLS_BLOCK.with(|c| c as *const std::cell::Cell<u64> as u64);
+        let off = cell.wrapping_sub(fs_base()) as i64;
+        if off < i32::MIN as i64 || off > i32::MAX as i64 {
+            panic!("thread-local block cell is not in static TLS (offset {:#x})", off);
+        }
+        self.env.tls_key = off as u64;
+        self.env.tls_slow = self.emit_code(&x64::tls_slow(rt_tls_block as *const () as usize as u64));
     }
 
     pub fn site(&mut self, file: u32, pos: u32, msg: &str) -> u64 {
@@ -939,12 +1109,79 @@ impl Unit {
         def.krate == self.core_crate && self.prog.name(def.parent).starts_with("intrinsics")
     }
 
+    /// Loads every library the program's extern blocks name with `#[link(name = ..)]`
+    /// (frameworks on macOS), once: what the system linker would have linked.
+    fn load_link_libs(&self) {
+        static DONE: AtomicBool = AtomicBool::new(false);
+        if DONE.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        for (fi, f) in self.prog.files.iter().enumerate() {
+            for it in &f.ast.items {
+                // active blocks (cfg) are the ones whose items got definitions
+                let active = match &it.kind {
+                    // an empty block (link-only) counts unless it has a cfg we cannot see here
+                    crate::ast::ItemKind::ForeignMod(_, items) if items.is_empty() => !it.attrs.iter().any(|a| a.toks.hi > a.toks.lo && f.tok_text(a.toks.lo).starts_with("cfg")),
+                    crate::ast::ItemKind::ForeignMod(_, items) => items.iter().any(|si| self.prog.item_defs.contains_key(&(fi as u32, si.0))),
+                    _ => false,
+                };
+                if !active {
+                    continue;
+                }
+                for a in &it.attrs {
+                    if a.toks.hi <= a.toks.lo || f.tok_text(a.toks.lo) != "link" {
+                        continue;
+                    }
+                    let mut name = String::new();
+                    let mut framework = false;
+                    let mut k = a.toks.lo;
+                    while k + 2 < a.toks.hi {
+                        let key = f.tok_text(k);
+                        if f.tok_text(k + 1) == "=" {
+                            let v = f.tok_text(k + 2).trim_matches('"').to_string();
+                            if key == "name" {
+                                name = v;
+                            } else if key == "kind" && v == "framework" {
+                                framework = true;
+                            }
+                        }
+                        k += 1;
+                    }
+                    if name.is_empty() {
+                        continue;
+                    }
+                    let path = if framework {
+                        format!("/System/Library/Frameworks/{}.framework/{}\0", name, name)
+                    } else if cfg!(target_os = "macos") {
+                        format!("lib{}.dylib\0", name)
+                    } else {
+                        format!("lib{}.so\0", name)
+                    };
+                    unsafe {
+                        // RTLD_NOW | RTLD_GLOBAL
+                        dlopen(path.as_ptr(), 2 | if cfg!(target_os = "macos") { 8 } else { 0x100 });
+                    }
+                }
+            }
+        }
+    }
+
     pub fn foreign_addr(&mut self, d: DefId) -> Option<u64> {
         let name = format!("{}\0", self.prog.name(d));
         #[cfg(target_os = "macos")]
-        let p = unsafe { os::find_symbol(name.as_ptr()) };
+        let mut p = unsafe { os::find_symbol(name.as_ptr()) };
+        #[cfg(target_os = "macos")]
+        if p.is_null() {
+            self.load_link_libs();
+            p = unsafe { os::find_symbol(name.as_ptr()) };
+        }
         #[cfg(target_os = "linux")]
         let mut p = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
+        #[cfg(target_os = "linux")]
+        if p.is_null() {
+            self.load_link_libs();
+            p = unsafe { dlsym(std::ptr::null_mut(), name.as_ptr()) };
+        }
         #[cfg(target_os = "linux")]
         if p.is_null() {
             // the C math library is not necessarily loaded into the host
@@ -1132,13 +1369,13 @@ impl Unit {
 /// Calls JIT code `entry(arg)` under a fresh recovery context. No Rust borrow of the
 /// unit may be alive across this call; `u` becomes the runtime's unit pointer.
 pub unsafe fn call_jit(u: *mut Unit, entry: u64, arg: u64) -> Result<u64, PanicInfo> {
-    let saved_unit = UNIT;
-    let saved_ctx = CTX;
     UNIT = u;
+    let ctx = ctx_ptr();
+    let saved_ctx = [*ctx, *ctx.add(1)];
     let enter: extern "C" fn(u64, u64, *mut u64) -> u64 = std::mem::transmute((&*u).enter as usize);
-    let r = enter(entry, arg, std::ptr::addr_of_mut!(CTX) as *mut u64);
-    UNIT = saved_unit;
-    CTX = saved_ctx;
+    let r = enter(entry, arg, ctx);
+    *ctx = saved_ctx[0];
+    *ctx.add(1) = saved_ctx[1];
     if r == 0 {
         Ok(0)
     } else {
@@ -1176,17 +1413,19 @@ pub fn watchdog_done() {
 /// Compiles one slot (type check, lower, optimise, codegen) and installs it. Called
 /// from the lazy stub on first call, and directly for eager compilation and patches.
 pub unsafe fn compile_slot(up: *mut Unit, id: u32) -> u64 {
+    lock_unit();
     let u = &mut *up;
     if u.fns[id as usize].compiled {
-        return u.fns[id as usize].code;
+        let c = u.fns[id as usize].code;
+        unlock_unit();
+        return c;
     }
-    let was = IN_COMPILE.swap(true, Ordering::SeqCst);
     let r = compile_fn(up, id);
     match r {
         Ok((code, map)) => {
             let u = &mut *up;
             let a = u.install(id, &code, map, 0);
-            IN_COMPILE.store(was, Ordering::SeqCst);
+            unlock_unit();
             a
         }
         Err(e) => {
@@ -1197,7 +1436,7 @@ pub unsafe fn compile_slot(up: *mut Unit, id: u32) -> u64 {
             let msg = format!("compile error in {}", name);
             let code = error_stub(u, &msg);
             let a = u.install(id, &code, Vec::new(), 0);
-            IN_COMPILE.store(was, Ordering::SeqCst);
+            unlock_unit();
             a
         }
     }

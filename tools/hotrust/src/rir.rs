@@ -100,6 +100,66 @@ pub enum Callee {
     /// variadic C function: (address, number of fixed ABI arguments). Darwin arm64 passes
     /// the variadic ones on the stack; SysV x64 sets al = number of vector registers used.
     HostVariadic(u64, u32),
+    /// foreign (C ABI) function by absolute address
+    CHost(u64, Box<CSig>),
+    /// call through an `extern "C" fn` pointer
+    CIndirect(VReg, Box<CSig>),
+    /// direct call of a HotRust `extern "C" fn` (function table slot)
+    CFn(u32, Box<CSig>),
+}
+
+/// An aggregate passed or returned by value under the C ABI.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CAgg {
+    pub size: u32,
+    pub align: u32,
+    /// scalar fields in offset order (nested structs and arrays flattened); empty when
+    /// unknown or very large (the aggregate is then classified as memory)
+    pub fields: Vec<(u32, Mem)>,
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum CArg {
+    /// the vreg holds the value (integers extended to 64 bits as everywhere in RIR)
+    Scalar(Mem),
+    /// the vreg holds the address of a private copy of the aggregate
+    Agg(CAgg),
+}
+
+/// C ABI shape of a call or of an `extern "C"` function body; the backend lowers it.
+/// ABI argument vregs: [result address if `ret` is Some] then one per `args` entry.
+/// With an aggregate return the result is written through that address and the call
+/// has no result vregs; scalar results come back in the call's result vregs as usual.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CSig {
+    pub args: Vec<CArg>,
+    pub ret: Option<CAgg>,
+    /// variadic: the number of fixed arguments in `args`; u32::MAX when not variadic
+    pub n_fixed: u32,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AtomOrd {
+    Relaxed,
+    Acquire,
+    Release,
+    AcqRel,
+    SeqCst,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RmwOp {
+    Xchg,
+    Add,
+    Sub,
+    And,
+    Nand,
+    Or,
+    Xor,
+    Max,
+    Min,
+    UMax,
+    UMin,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -134,6 +194,17 @@ pub enum Inst {
     Copy(VReg, VReg, u32),
     /// hang-watchdog poll on loop back-edges (live mode)
     Poll,
+    /// atomic load (Mem::Int only; the value is extended by signedness)
+    AtomicLoad(Mem, AtomOrd, VReg, VReg), // d, addr
+    AtomicStore(Mem, AtomOrd, VReg, VReg), // addr, src
+    /// d = old value; [addr] = old op src
+    AtomicRmw(RmwOp, Mem, AtomOrd, VReg, VReg, VReg), // d, addr, src
+    /// compare-exchange: d = old value; stores `new` iff old == expected
+    AtomicCas(Mem, AtomOrd, AtomOrd, VReg, VReg, VReg, VReg), // ok ord, fail ord, d, addr, expected, new
+    /// memory fence; `true` = compiler-only (single-thread) fence
+    Fence(AtomOrd, bool),
+    /// d = address of this thread's copy of the thread-local block at `offset`
+    TlsAddr(VReg, u32),
 }
 
 #[derive(Clone, Debug)]
@@ -173,11 +244,13 @@ pub struct Func {
     /// parameters holding pointers no other pointer of this function aliases
     /// (`&mut T` params, by-pointer aggregate copies); used by load/store forwarding
     pub noalias: Vec<VReg>,
+    /// Some for an `extern "C" fn` body: params/returns follow the C ABI (see CSig)
+    pub cabi: Option<Box<CSig>>,
 }
 
 impl Func {
     pub fn new(name: String, file: u32) -> Func {
-        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new() }
+        Func { name, blocks: Vec::new(), vregs: Vec::new(), slots: Vec::new(), params: Vec::new(), rets: Vec::new(), file, noalias: Vec::new(), cabi: None }
     }
     pub fn vreg(&mut self, c: Cls) -> VReg {
         self.vregs.push(c);
@@ -248,7 +321,7 @@ impl Func {
                         regs.push(*s);
                     }
                     Inst::Call(c, a, r) => {
-                        if let Callee::Indirect(v) = c {
+                        if let Callee::Indirect(v) | Callee::CIndirect(v, _) = c {
                             regs.push(*v);
                         }
                         regs.extend_from_slice(a);
@@ -258,7 +331,23 @@ impl Func {
                         regs.push(*a);
                         regs.push(*b);
                     }
-                    Inst::Poll => {}
+                    Inst::Poll | Inst::Fence(..) => {}
+                    Inst::TlsAddr(d, _) => regs.push(*d),
+                    Inst::AtomicLoad(_, _, d, a) | Inst::AtomicStore(_, _, d, a) => {
+                        regs.push(*d);
+                        regs.push(*a);
+                    }
+                    Inst::AtomicRmw(_, _, _, d, a, b) => {
+                        regs.push(*d);
+                        regs.push(*a);
+                        regs.push(*b);
+                    }
+                    Inst::AtomicCas(_, _, _, d, a, b, c) => {
+                        regs.push(*d);
+                        regs.push(*a);
+                        regs.push(*b);
+                        regs.push(*c);
+                    }
                 }
                 for r in regs {
                     chk(r)?;

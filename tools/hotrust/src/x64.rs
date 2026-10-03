@@ -7,6 +7,7 @@
 //! float args xmm0-7, int returns rax rdx, float returns xmm0 xmm1. Callee-saved
 //! rbx rbp r12-r15. Reserved scratch: rax rcx rdx r10 r11, xmm0 xmm1 xmm14 xmm15.
 
+use crate::cabi::{self, ArgPlan, PLoc, Plan, RetPlan};
 use crate::regalloc::{self, Alloc, Loc, MLoc, RegConfig};
 use crate::rir::*;
 
@@ -50,6 +51,10 @@ pub struct Env {
     pub thunk_size: u64,
     pub poll_flag: u64,
     pub rt_hang: u64,
+    /// fs-relative offset of the runtime's per-thread block pointer
+    pub tls_key: u64,
+    /// glue that allocates the calling thread's block: returns it in r11, preserves all else
+    pub tls_slow: u64,
 }
 
 struct Asm {
@@ -481,6 +486,14 @@ struct Gen<'a> {
     /// a single-use float constant whose use (the next FBin) reads it from the pool
     mem_const: Option<(VReg, u64)>,
     memconst: bool,
+    /// C ABI body: its plan, per-argument buffer (rbp disp, 0 = none), result buffer,
+    /// the cell keeping an indirect result address for rax
+    cplan: Option<Plan>,
+    cbuf: Vec<i32>,
+    cret_buf: i32,
+    cret_ptr: i32,
+    /// rbp disp of the C call staging cells (8 bytes each, ascending)
+    stage: i32,
 }
 
 impl<'a> Gen<'a> {
@@ -583,14 +596,71 @@ impl<'a> Gen<'a> {
             off = (off + al - 1) / al * al;
             self.slot_off.push(off);
         }
+        off = (off + 7) / 8 * 8;
+        // C ABI body: buffers rebuilding aggregate params from registers, the result buffer
+        if let Some(sig) = &self.f.cabi {
+            let plan = cabi::plan(sig, cabi::Target::SysV);
+            for (k, a) in plan.args.iter().enumerate() {
+                match (a, &sig.args[k]) {
+                    (ArgPlan::Parts(_), CArg::Agg(ag)) => {
+                        off += ((ag.size as i32 + 7) & !7) + 8;
+                        self.cbuf.push(-(self.saved + off));
+                    }
+                    _ => self.cbuf.push(0),
+                }
+            }
+            match (&plan.ret, &sig.ret) {
+                (RetPlan::Parts(_), Some(ag)) => {
+                    off += ((ag.size as i32 + 7) & !7) + 8;
+                    self.cret_buf = -(self.saved + off);
+                }
+                (RetPlan::Indirect, Some(_)) => {
+                    off += 8;
+                    self.cret_ptr = -(self.saved + off);
+                }
+                _ => {}
+            }
+            self.cplan = Some(plan);
+        }
+        // staging cells for C calls (cell 0: the result address; then aggregate pieces)
+        let mut cells = 0i32;
+        for b in &self.f.blocks {
+            for i in &b.insts {
+                if let Inst::Call(Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig), _, _) = i {
+                    let plan = cabi::plan(sig, cabi::Target::SysV);
+                    let mut n = 0i32;
+                    for ap in &plan.args {
+                        if let ArgPlan::Parts(ps) = ap {
+                            n += ps.len() as i32;
+                        }
+                    }
+                    if let RetPlan::Parts(ps) = &plan.ret {
+                        n = n.max(ps.len() as i32);
+                    }
+                    cells = cells.max(1 + n);
+                }
+            }
+        }
+        off += 8 * cells;
+        self.stage = -(self.saved + off);
         let mut frame = (off + 7) / 8 * 8;
         // keep rsp 16-aligned at calls
         while (self.saved + frame) % 16 != 0 {
             frame += 8;
         }
         self.frame = frame;
+        self.stack_probe(frame);
         self.a.sub_rsp(frame as u32);
-        // parameters: ABI registers -> allocated locations (parallel move)
+        if self.cplan.is_some() {
+            self.c_prologue();
+        } else {
+            self.params_prologue();
+        }
+        self.blocks_and_pool(reach);
+    }
+
+    /// HotRust ABI params: ABI registers -> allocated locations (parallel move).
+    fn params_prologue(&mut self) {
         let mut ni = 0;
         let mut nf = 0;
         let mut nstack = 0;
@@ -618,6 +688,9 @@ impl<'a> Gen<'a> {
         for (d, s2) in regalloc::seq_moves(&moves, R10, XS) {
             self.mv(d, s2);
         }
+    }
+
+    fn blocks_and_pool(&mut self, reach: Vec<bool>) {
         // blocks in order, skipping unreachable ones
         let nb = self.f.blocks.len();
         self.block_pos = vec![usize::MAX; nb];
@@ -699,6 +772,469 @@ impl<'a> Gen<'a> {
                 self.a.patch(at, addr);
             }
         }
+    }
+
+    /// Prologue of an `extern "C"` body (SysV): aggregate params are rebuilt in frame
+    /// buffers (their address is the param), memory-class ones are addressed in the
+    /// caller's argument area, an indirect result pointer is kept for rax.
+    fn c_prologue(&mut self) {
+        let plan = self.cplan.clone().unwrap();
+        let sig = self.f.cabi.clone().unwrap();
+        let params = self.f.params.clone();
+        let has_ret = sig.ret.is_some();
+        let pargs: Vec<VReg> = if has_ret { params[1..].to_vec() } else { params.clone() };
+        for (k, ap) in plan.args.iter().enumerate() {
+            if let ArgPlan::Parts(parts) = ap {
+                let buf = self.cbuf[k];
+                for pt in parts {
+                    match pt.loc {
+                        PLoc::Int(r) => self.a.store64(RBP, buf + pt.off as i32, INT_ARGS[r as usize]),
+                        PLoc::Flt(x) => self.a.storef(true, RBP, buf + pt.off as i32, x),
+                        PLoc::Stack(_) => {}
+                    }
+                }
+            }
+        }
+        let mut moves = Vec::new();
+        if let (RetPlan::Indirect, true) = (&plan.ret, has_ret) {
+            self.a.store64(RBP, self.cret_ptr, RDI);
+            if let Some(d) = self.mloc(params[0]) {
+                moves.push((d, MLoc::R(RDI)));
+            }
+        }
+        for (k, ap) in plan.args.iter().enumerate() {
+            let d = match self.mloc(pargs[k]) {
+                Some(d) => d,
+                None => continue,
+            };
+            match ap {
+                ArgPlan::Scalar(PLoc::Int(r), _) | ArgPlan::ByRef(PLoc::Int(r)) => moves.push((d, MLoc::R(INT_ARGS[*r as usize]))),
+                ArgPlan::Scalar(PLoc::Flt(x), _) => moves.push((d, MLoc::F(*x))),
+                _ => {}
+            }
+        }
+        for (d, s2) in regalloc::seq_moves(&moves, R10, XS) {
+            self.mv(d, s2);
+        }
+        for (k, ap) in plan.args.iter().enumerate() {
+            let p = pargs[k];
+            if self.al.loc[p.0 as usize] == Loc::None {
+                continue;
+            }
+            let m = match &sig.args[k] {
+                CArg::Scalar(m) => *m,
+                CArg::Agg(_) => Mem::Int(8, false),
+            };
+            match ap {
+                ArgPlan::Scalar(PLoc::Stack(o), _) | ArgPlan::ByRef(PLoc::Stack(o)) => {
+                    let disp = 16 + *o as i32;
+                    match m {
+                        Mem::Int(n, sg) => {
+                            let rd = self.def_i(p, R10);
+                            self.a.load_ext(rd, RBP, disp, n, sg);
+                            self.fin_i(p, rd);
+                        }
+                        _ => {
+                            let xd = self.def_f(p, XS);
+                            self.a.loadf(m == Mem::F64, xd, RBP, disp);
+                            self.fin_f(p, xd);
+                        }
+                    }
+                }
+                ArgPlan::Parts(_) => {
+                    let rd = self.def_i(p, R10);
+                    self.a.lea(rd, RBP, self.cbuf[k]);
+                    self.fin_i(p, rd);
+                }
+                ArgPlan::Stack(o, _) => {
+                    let rd = self.def_i(p, R10);
+                    self.a.lea(rd, RBP, 16 + *o as i32);
+                    self.fin_i(p, rd);
+                }
+                ArgPlan::Scalar(PLoc::Int(_), _) => {
+                    // C leaves the upper bits of narrow integer arguments undefined
+                    if let Mem::Int(n, sg) = m {
+                        if n < 8 {
+                            let r = self.use_i(p, R10);
+                            self.a.extend(r, n * 8, sg);
+                            self.fin_i(p, r);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let (RetPlan::Parts(_), true) = (&plan.ret, has_ret) {
+            if self.al.loc[params[0].0 as usize] != Loc::None {
+                let rd = self.def_i(params[0], R10);
+                self.a.lea(rd, RBP, self.cret_buf);
+                self.fin_i(params[0], rd);
+            }
+        }
+    }
+
+    /// Ret of an `extern "C"` body: an aggregate result into rax/rdx/xmm0/xmm1, or the
+    /// indirect result address into rax.
+    fn c_ret(&mut self) {
+        let plan = match &self.cplan {
+            Some(p) => p.clone(),
+            None => return,
+        };
+        match &plan.ret {
+            RetPlan::Parts(parts) => {
+                for pt in parts {
+                    let disp = self.cret_buf + pt.off as i32;
+                    match pt.loc {
+                        PLoc::Int(r) => self.a.load64(if r == 0 { RAX } else { RDX }, RBP, disp),
+                        PLoc::Flt(x) => self.a.loadf(true, x, RBP, disp),
+                        PLoc::Stack(_) => {}
+                    }
+                }
+            }
+            RetPlan::Indirect if self.f.cabi.as_ref().map(|s| s.ret.is_some()).unwrap_or(false) => self.a.load64(RAX, RBP, self.cret_ptr),
+            _ => {}
+        }
+    }
+
+    /// Touches every page of a frame larger than a page, top down (guard page first).
+    fn stack_probe(&mut self, frame: i32) {
+        const PAGE: i32 = 4096;
+        if frame <= PAGE {
+            return;
+        }
+        // mov r11, rsp
+        self.a.mov_rr(R11, RSP);
+        let n = frame / PAGE;
+        let body = |a: &mut Asm| {
+            // sub r11, 4096 ; or byte [r11], 0
+            a.b.extend_from_slice(&[0x49, 0x81, 0xeb, 0x00, 0x10, 0x00, 0x00]);
+            a.b.extend_from_slice(&[0x41, 0x80, 0x0b, 0x00]);
+        };
+        if n <= 16 {
+            for _ in 0..n {
+                body(&mut self.a);
+            }
+            return;
+        }
+        self.a.mov_ri(RAX, n as i64);
+        let top = self.a.pos();
+        body(&mut self.a);
+        // dec rax ; jnz top
+        self.a.b.extend_from_slice(&[0x48, 0xff, 0xc8]);
+        let p = self.a.jcc32(CC_NE);
+        self.a.patch(p, top);
+    }
+
+    /// Copies `size` bytes [src + so] -> [dst + do_] through rax.
+    fn copy_bytes(&mut self, dst: u8, do_: i32, src: u8, so: i32, size: u32) {
+        let mut o = 0i32;
+        let size = size as i32;
+        while o < size {
+            let n = if size - o >= 8 {
+                8
+            } else if size - o >= 4 {
+                4
+            } else if size - o >= 2 {
+                2
+            } else {
+                1
+            };
+            self.a.load_ext(RAX, src, so + o, n as u8, false);
+            self.a.store_n(dst, do_ + o, RAX, n as u8);
+            o += n;
+        }
+    }
+
+    /// A call under the C ABI (SysV).
+    fn c_call(&mut self, c: &Callee, sig: &CSig, args: &[VReg], rets: &[VReg]) {
+        let plan = cabi::plan(sig, cabi::Target::SysV);
+        let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
+        for (v, slot) in &saves {
+            let d = self.spill_disp(*slot);
+            if let Some(src) = self.mloc(*v) {
+                self.mv(MLoc::M(d), src);
+            }
+        }
+        let has_ret = sig.ret.is_some();
+        let cargs: Vec<VReg> = if has_ret { args[1..].to_vec() } else { args.to_vec() };
+        let st = self.stage;
+        if has_ret {
+            let r = self.use_i(args[0], R10);
+            self.a.store64(RBP, st, r);
+        }
+        if let Callee::CIndirect(v, _) = c {
+            let r = self.use_i(*v, R11);
+            self.a.mov_rr(R11, r);
+        }
+        let stack_bytes = plan.stack_bytes;
+        if stack_bytes > 0 {
+            self.a.sub_rsp(stack_bytes);
+        }
+        let mut moves = Vec::new();
+        let mut cell = 1i32;
+        for (k, ap) in plan.args.iter().enumerate() {
+            let v = cargs[k];
+            match ap {
+                ArgPlan::Scalar(PLoc::Int(r), _) | ArgPlan::ByRef(PLoc::Int(r)) => {
+                    if let Some(s2) = self.mloc(v) {
+                        moves.push((MLoc::R(INT_ARGS[*r as usize]), s2));
+                    }
+                }
+                ArgPlan::Scalar(PLoc::Flt(x), _) => {
+                    if let Some(s2) = self.mloc(v) {
+                        moves.push((MLoc::F(*x), s2));
+                    }
+                }
+                ArgPlan::Scalar(PLoc::Stack(o), _) | ArgPlan::ByRef(PLoc::Stack(o)) => {
+                    if self.f.vregs[v.0 as usize] == Cls::I {
+                        let r = self.use_i(v, R10);
+                        self.a.store64(RSP, *o as i32, r);
+                    } else {
+                        let x = self.use_f(v, XS);
+                        self.a.storef(true, RSP, *o as i32, x);
+                    }
+                }
+                ArgPlan::ByRef(PLoc::Flt(_)) => {}
+                ArgPlan::Parts(parts) => {
+                    let ra = self.use_i(v, R10);
+                    for pt in parts {
+                        let cd = st + 8 * cell;
+                        self.copy_bytes(RBP, cd, ra, pt.off as i32, pt.size);
+                        match pt.loc {
+                            PLoc::Int(r) => moves.push((MLoc::R(INT_ARGS[r as usize]), MLoc::M(cd))),
+                            PLoc::Flt(x) => moves.push((MLoc::F(x), MLoc::M(cd))),
+                            PLoc::Stack(_) => {}
+                        }
+                        cell += 1;
+                    }
+                }
+                ArgPlan::Stack(o, size) => {
+                    let ra = self.use_i(v, R10);
+                    self.copy_bytes(RSP, *o as i32, ra, 0, *size);
+                }
+            }
+        }
+        if let (RetPlan::Indirect, true) = (&plan.ret, has_ret) {
+            moves.push((MLoc::R(RDI), MLoc::M(st)));
+        }
+        for (d, s2) in regalloc::seq_moves(&moves, R10, XS) {
+            self.mv(d, s2);
+        }
+        match c {
+            Callee::CFn(id, _) => {
+                let slot = self.env.table_base + *id as u64 * 8;
+                self.a.mov_ri(RAX, slot as i64);
+                self.a.call_mem(RAX, 0);
+            }
+            Callee::CHost(addr, _) => {
+                self.a.mov_ri(R11, *addr as i64);
+                self.a.mov_ri(RAX, plan.n_flt as i64);
+                self.a.call_r(R11);
+            }
+            _ => {
+                self.a.mov_ri(RAX, plan.n_flt as i64);
+                self.a.call_r(R11);
+            }
+        }
+        if stack_bytes > 0 {
+            // add rsp, imm32
+            self.a.byte(0x48);
+            self.a.byte(0x81);
+            self.a.modrm_rr(0, RSP);
+            self.a.u32(stack_bytes);
+        }
+        if let RetPlan::Parts(parts) = &plan.ret {
+            for (j, pt) in parts.iter().enumerate() {
+                let cd = st + 8 * (1 + j as i32);
+                match pt.loc {
+                    PLoc::Int(r) => self.a.store64(RBP, cd, if r == 0 { RAX } else { RDX }),
+                    PLoc::Flt(x) => self.a.storef(true, RBP, cd, x),
+                    PLoc::Stack(_) => {}
+                }
+            }
+        }
+        let mut ri = 0;
+        let mut rf = 0;
+        let mut ret_moves = Vec::new();
+        for r in rets {
+            let src = match self.f.vregs[r.0 as usize] {
+                Cls::I => {
+                    ri += 1;
+                    MLoc::R(if ri == 1 { RAX } else { RDX })
+                }
+                _ => {
+                    rf += 1;
+                    MLoc::F(rf as u8 - 1)
+                }
+            };
+            if let Some(d) = self.mloc(*r) {
+                ret_moves.push((d, src));
+            }
+        }
+        for (d, s2) in regalloc::seq_moves(&ret_moves, R10, XS) {
+            self.mv(d, s2);
+        }
+        for (v, slot) in &saves {
+            let sd = self.spill_disp(*slot);
+            if let Some(dst) = self.mloc(*v) {
+                self.mv(dst, MLoc::M(sd));
+            }
+        }
+        if let RetPlan::Parts(parts) = &plan.ret {
+            self.a.load64(R10, RBP, st);
+            for (j, pt) in parts.iter().enumerate() {
+                let cd = st + 8 * (1 + j as i32);
+                self.copy_bytes(R10, pt.off as i32, RBP, cd, pt.size);
+            }
+        }
+    }
+
+    /// `[lock] op [base], reg` with the operand width of `bytes` (0F-prefixed when `ext`).
+    fn mem_rw(&mut self, lock: bool, ext: bool, op8: u8, bytes: u8, reg: u8, base: u8) {
+        if lock {
+            self.a.byte(0xf0);
+        }
+        if bytes == 2 {
+            self.a.byte(0x66);
+        }
+        self.a.rex(bytes == 8, reg, 0, base, bytes == 1 && reg >= 4);
+        if ext {
+            self.a.byte(0x0f);
+        }
+        self.a.byte(if bytes == 1 { op8 } else { op8 + 1 });
+        self.a.modrm_mem(reg, base, 0);
+    }
+
+    fn atomic(&mut self, i: &Inst) {
+        let width = |m: &Mem| -> (u8, bool) {
+            match m {
+                Mem::Int(n, s) => (*n, *s),
+                _ => (8, false),
+            }
+        };
+        match i {
+            Inst::AtomicLoad(m, _, d, a) => {
+                // x86 loads are acquire; SeqCst stores are xchg, so a plain load suffices
+                let (n, sg) = width(m);
+                let rb = self.use_i(*a, R11);
+                let rd = self.def_i(*d, R10);
+                self.a.load_ext(rd, rb, 0, n, sg);
+                self.fin_i(*d, rd);
+            }
+            Inst::AtomicStore(m, o, a, v) => {
+                let (n, _) = width(m);
+                let rb = self.use_i(*a, R11);
+                let rv = self.use_i(*v, R10);
+                if *o == AtomOrd::SeqCst {
+                    self.a.mov_rr(RAX, rv);
+                    // xchg [rb], rax (locked implicitly)
+                    self.mem_rw(false, false, 0x86, n, RAX, rb);
+                } else {
+                    self.a.store_n(rb, 0, rv, n);
+                }
+            }
+            Inst::AtomicRmw(op, m, _, d, a, v) => {
+                let (n, sg) = width(m);
+                let bits = n * 8;
+                let ra = self.use_i(*a, R11);
+                let rv = self.use_i(*v, R10);
+                match op {
+                    RmwOp::Xchg => {
+                        self.a.mov_rr(RAX, rv);
+                        self.mem_rw(false, false, 0x86, n, RAX, ra);
+                    }
+                    RmwOp::Add | RmwOp::Sub => {
+                        self.a.mov_rr(RAX, rv);
+                        if *op == RmwOp::Sub {
+                            self.a.grp3(3, RAX);
+                        }
+                        // lock xadd [ra], rax
+                        self.mem_rw(true, true, 0xc0, n, RAX, ra);
+                    }
+                    _ => {
+                        // rax = old; loop { rcx = f(rax, v); lock cmpxchg [ra], rcx }
+                        self.a.load_ext(RAX, ra, 0, n, false);
+                        let top = self.a.pos();
+                        self.a.mov_rr(RCX, RAX);
+                        match op {
+                            RmwOp::And => self.a.alu_rr(0x21, RCX, rv),
+                            RmwOp::Or => self.a.alu_rr(0x09, RCX, rv),
+                            RmwOp::Xor => self.a.alu_rr(0x31, RCX, rv),
+                            RmwOp::Nand => {
+                                self.a.alu_rr(0x21, RCX, rv);
+                                self.a.grp3(2, RCX);
+                            }
+                            _ => {
+                                // max/min: compare the extended old value with v, cmov v in
+                                let signed = matches!(op, RmwOp::Max | RmwOp::Min);
+                                if bits < 64 {
+                                    self.a.extend(RCX, bits, signed);
+                                }
+                                self.a.alu_rr(0x39, RCX, rv);
+                                let cc = match op {
+                                    RmwOp::Max => CC_L,
+                                    RmwOp::Min => CC_G,
+                                    RmwOp::UMax => CC_B,
+                                    _ => CC_A,
+                                };
+                                // cmovcc rcx, rv
+                                self.a.rex(true, RCX, 0, rv, false);
+                                self.a.byte(0x0f);
+                                self.a.byte(0x40 | cc);
+                                self.a.modrm_rr(RCX, rv);
+                            }
+                        }
+                        self.mem_rw(true, true, 0xb0, n, RCX, ra);
+                        let p = self.a.jcc32(CC_NE);
+                        self.a.patch(p, top);
+                    }
+                }
+                if bits < 64 {
+                    self.a.extend(RAX, bits, sg);
+                }
+                let rd = self.def_i(*d, R10);
+                self.a.mov_rr(rd, RAX);
+                self.fin_i(*d, rd);
+            }
+            Inst::AtomicCas(m, _, _, d, a, e, nw) => {
+                let (n, sg) = width(m);
+                let ra = self.use_i(*a, R11);
+                let re = self.use_i(*e, R10);
+                let rn = self.use_i(*nw, RDX);
+                self.a.mov_rr(RAX, re);
+                self.mem_rw(true, true, 0xb0, n, rn, ra);
+                if n < 8 {
+                    self.a.extend(RAX, n * 8, sg);
+                }
+                let rd = self.def_i(*d, R10);
+                self.a.mov_rr(rd, RAX);
+                self.fin_i(*d, rd);
+            }
+            Inst::Fence(o, single) => {
+                if !*single && *o == AtomOrd::SeqCst {
+                    // mfence
+                    self.a.b.extend_from_slice(&[0x0f, 0xae, 0xf0]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// d = this thread's thread-local block + off: `mov r11, fs:[key]` (the runtime's
+    /// static-TLS block pointer), slow path `tls_slow` when it is still null.
+    fn tls_addr(&mut self, d: VReg, off: u32) {
+        let k = self.env.tls_key as i64 as i32;
+        self.a.b.extend_from_slice(&[0x64, 0x4c, 0x8b, 0x1c, 0x25]);
+        self.a.u32(k as u32);
+        self.a.test_rr(R11, R11);
+        let p = self.a.jcc32(CC_NE);
+        self.a.mov_ri(RAX, self.env.tls_slow as i64);
+        self.a.call_r(RAX);
+        let skip = self.a.pos();
+        self.a.patch(p, skip);
+        let rd = self.def_i(d, R10);
+        self.a.lea(rd, R11, off as i32);
+        self.fin_i(d, rd);
     }
 
     fn epilogue(&mut self) {
@@ -801,6 +1337,7 @@ impl<'a> Gen<'a> {
                 }
             }
             Term::Ret(vals) => {
+                self.c_ret();
                 let mut ni = 0;
                 let mut nf = 0;
                 let mut moves = Vec::new();
@@ -830,6 +1367,8 @@ impl<'a> Gen<'a> {
 
     fn inst(&mut self, i: &Inst) {
         match i {
+            Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) => self.atomic(i),
+            Inst::TlsAddr(d, off) => self.tls_addr(*d, *off),
             Inst::IBinI(op, it, d, a, k) => self.ibin_imm(*op, *it, *d, *a, *k),
             Inst::ICmpI(c, signed, d, a, k) => {
                 let ra = self.use_i(*a, R10);
@@ -1409,6 +1948,9 @@ impl<'a> Gen<'a> {
     }
 
     fn call(&mut self, c: &Callee, args: &[VReg], rets: &[VReg]) {
+        if let Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig) = c {
+            return self.c_call(c, sig, args, rets);
+        }
         // values in caller-saved registers that live across this call
         let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
         for (v, slot) in &saves {
@@ -1475,6 +2017,7 @@ impl<'a> Gen<'a> {
                 self.a.mov_ri(RAX, nf as i64);
                 self.a.call_r(R11);
             }
+            Callee::CHost(..) | Callee::CIndirect(..) | Callee::CFn(..) => {}
         }
         if stack_bytes > 0 {
             // add rsp, imm32
@@ -1575,6 +2118,8 @@ pub fn compile(f: &Func, env: &Env) -> Result<Compiled, String> {
         for i in &b.insts {
             match i {
                 Inst::IBin(IOp::Div | IOp::Rem | IOp::Shl | IOp::Shr, _, _, _, _) | Inst::Conv(..) => uses_rcx_rdx = true,
+                // cmpxchg loops use rax/rcx
+                Inst::AtomicRmw(..) | Inst::AtomicCas(..) => uses_rcx_rdx = true,
                 _ => {}
             }
         }
@@ -1603,11 +2148,57 @@ pub fn compile(f: &Func, env: &Env) -> Result<Compiled, String> {
         // off: pinned on node 165 it costs 12% on the parity test and nothing elsewhere; code/pool
         // cache-line separation does not change that (tested). Cause not proven.
         memconst: std::env::var("HOTRUST_MEMCONST").is_ok(),
+        cplan: None,
+        cbuf: Vec::new(),
+        cret_buf: 0,
+        cret_ptr: 0,
+        stage: 0,
     };
     g.gen();
     let frame = g.frame as u32;
     let text_len = g.text_len;
     Ok(Compiled { code: g.a.b, pc_map: g.pc_map, frame_size: frame, text_len })
+}
+
+/// Slow path of `TlsAddr`: calls `host() -> block` and returns it in r11, preserving
+/// every other register JIT code may hold. Entered with rsp = 8 mod 16.
+pub fn tls_slow(host: u64) -> Vec<u8> {
+    let mut a = Asm { b: Vec::new(), sib: None };
+    a.push(RBP);
+    a.mov_rr(RBP, RSP);
+    let regs = [RCX, RDX, RSI, RDI, R8, R9, R10];
+    for r in regs {
+        a.push(r);
+    }
+    // 16 xmm registers + 8 bytes to realign
+    a.sub_rsp(136);
+    for x in 0..16u8 {
+        a.storef(true, RSP, 8 * x as i32, x);
+    }
+    a.mov_ri(RAX, host as i64);
+    a.call_r(RAX);
+    a.mov_rr(R11, RAX);
+    for x in 0..16u8 {
+        a.loadf(true, x, RSP, 8 * x as i32);
+    }
+    a.byte(0x48);
+    a.byte(0x81);
+    a.modrm_rr(0, RSP);
+    a.u32(136);
+    let mut i = regs.len();
+    while i > 0 {
+        i -= 1;
+        a.pop(regs[i]);
+    }
+    a.pop(RBP);
+    a.ret();
+    a.b
+}
+
+/// `fs_base() -> u64`: the thread pointer (fs:0 holds it on x86-64 Linux).
+pub fn fs_reader() -> Vec<u8> {
+    // mov rax, fs:[0] ; ret
+    vec![0x64, 0x48, 0x8b, 0x04, 0x25, 0, 0, 0, 0, 0xc3]
 }
 
 /// The lazy-compile entry shared by all stubs: saves argument registers, calls
