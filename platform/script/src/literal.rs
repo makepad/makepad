@@ -270,6 +270,61 @@ pub struct LoadTrace {
     /// away. (The record by where it was made: the record itself may be
     /// collected after the load.)
     pub field_reads: std::collections::HashSet<(crate::value::ScriptIp, crate::makepad_live_id::LiveId, u16, u32)>,
+    /// The sites `ran` has (a load's loops run the same literals over and
+    /// over: a bit test instead of hashing each run).
+    pub(crate) ran_seen: SiteSeen,
+}
+
+/// Sites (body, instruction) seen while tracing a load: one bit each.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SiteSeen {
+    bodies: Vec<Vec<u64>>,
+}
+
+impl SiteSeen {
+    /// Whether this is the first time the site is seen (and marks it).
+    #[inline]
+    pub(crate) fn first(&mut self, body: u16, index: u32) -> bool {
+        let (body, index) = (body as usize, index as usize);
+        if body >= self.bodies.len() {
+            self.bodies.resize_with(body + 1, Vec::new);
+        }
+        let words = &mut self.bodies[body];
+        let (word, bit) = (index / 64, 1u64 << (index % 64));
+        if word >= words.len() {
+            words.resize(word + 1, 0);
+        }
+        let first = words[word] & bit == 0;
+        words[word] |= bit;
+        first
+    }
+}
+
+/// The names a load read, and where, as the thread records them: the set,
+/// and per site the name last recorded there (a site read again for the
+/// same name is not hashed again).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NameReads {
+    pub(crate) set: std::collections::HashSet<(crate::makepad_live_id::LiveId, u16, u32)>,
+    last: Vec<Vec<crate::makepad_live_id::LiveId>>,
+}
+
+impl NameReads {
+    #[inline]
+    pub(crate) fn record(&mut self, id: crate::makepad_live_id::LiveId, body: u16, index: u32) {
+        let (b, i) = (body as usize, index as usize);
+        if b >= self.last.len() {
+            self.last.resize_with(b + 1, Vec::new);
+        }
+        let sites = &mut self.last[b];
+        if i >= sites.len() {
+            sites.resize(i + 1, crate::makepad_live_id::LiveId(0));
+        }
+        if sites[i] != id {
+            sites[i] = id;
+            self.set.insert((id, body, index));
+        }
+    }
 }
 
 impl crate::vm::ScriptVm<'_> {
@@ -284,7 +339,7 @@ impl crate::vm::ScriptVm<'_> {
     pub fn end_literal_trace(&mut self) -> Option<LoadTrace> {
         let mut trace = *self.bx.literal_trace.take()?;
         if let Some(reads) = self.bx.threads.cur().name_reads.take() {
-            trace.name_reads = *reads;
+            trace.name_reads = reads.set;
         }
         Some(trace)
     }

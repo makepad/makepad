@@ -134,7 +134,7 @@ pub struct ScriptThread {
     pub(crate) thread_id: ScriptThreadId,
     /// Edit mode, while a program loads: the names read and where (see
     /// `crate::literal::LoadTrace::name_reads`). None otherwise.
-    pub(crate) name_reads: Option<Box<std::collections::HashSet<(LiveId, u16, u32)>>>,
+    pub(crate) name_reads: Option<Box<crate::literal::NameReads>>,
 }
 
 impl ScriptThread {
@@ -417,7 +417,7 @@ impl ScriptThread {
     #[inline]
     pub fn scope_value(&mut self, heap: &ScriptHeap, id: LiveId) -> ScriptValue {
         if let Some(reads) = &mut self.name_reads {
-            reads.insert((id, self.trap.ip.body, self.trap.ip.index));
+            reads.record(id, self.trap.ip.body, self.trap.ip.index);
         }
         heap.scope_value(*self.scopes.last().unwrap(), id.into(), self.trap.pass())
     }

@@ -262,47 +262,47 @@ impl ShaderBackend {
                         }
                         SHADER_IO_TEXTURE_1D => (
                             ShaderIoKind::Texture(TextureType::Texture1d),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_1D_ARRAY => (
                             ShaderIoKind::Texture(TextureType::Texture1dArray),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_2D => (
                             ShaderIoKind::Texture(TextureType::Texture2d),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_2D_ARRAY => (
                             ShaderIoKind::Texture(TextureType::Texture2dArray),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_3D => (
                             ShaderIoKind::Texture(TextureType::Texture3d),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_3D_ARRAY => (
                             ShaderIoKind::Texture(TextureType::Texture3dArray),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_CUBE => (
                             ShaderIoKind::Texture(TextureType::TextureCube),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_CUBE_ARRAY => (
                             ShaderIoKind::Texture(TextureType::TextureCubeArray),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_DEPTH => (
                             ShaderIoKind::Texture(TextureType::TextureDepth),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_DEPTH_ARRAY => (
                             ShaderIoKind::Texture(TextureType::TextureDepthArray),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_TEXTURE_VIDEO => (
                             ShaderIoKind::Texture(TextureType::TextureVideo),
-                            ShaderIoPrefix::Prefix("_io."),
+                            ShaderIoPrefix::Prefix("_io.t_"),
                         ),
                         SHADER_IO_SAMPLER => (
                             ShaderIoKind::Sampler(ShaderSamplerOptions::default()),
@@ -350,47 +350,47 @@ impl ShaderBackend {
                             ),
                             SHADER_IO_TEXTURE_1D => (
                                 ShaderIoKind::Texture(TextureType::Texture1d),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_1D_ARRAY => (
                                 ShaderIoKind::Texture(TextureType::Texture1dArray),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_2D => (
                                 ShaderIoKind::Texture(TextureType::Texture2d),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_2D_ARRAY => (
                                 ShaderIoKind::Texture(TextureType::Texture2dArray),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_3D => (
                                 ShaderIoKind::Texture(TextureType::Texture3d),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_3D_ARRAY => (
                                 ShaderIoKind::Texture(TextureType::Texture3dArray),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_CUBE => (
                                 ShaderIoKind::Texture(TextureType::TextureCube),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_CUBE_ARRAY => (
                                 ShaderIoKind::Texture(TextureType::TextureCubeArray),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_DEPTH => (
                                 ShaderIoKind::Texture(TextureType::TextureDepth),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_DEPTH_ARRAY => (
                                 ShaderIoKind::Texture(TextureType::TextureDepthArray),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_TEXTURE_VIDEO => (
                                 ShaderIoKind::Texture(TextureType::TextureVideo),
-                                ShaderIoPrefix::Prefix("_io."),
+                                ShaderIoPrefix::Prefix("_io.t_"),
                             ),
                             SHADER_IO_SAMPLER => (
                                 ShaderIoKind::Sampler(ShaderSamplerOptions::default()),

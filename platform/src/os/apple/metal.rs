@@ -2867,6 +2867,11 @@ impl MetalCx {
     fn submitter(&self) -> &crate::makepad_network::mpsc::SyncSender<MetalSubmission> {
         self.submitter.as_ref().expect("the submit thread lives as long as the context")
     }
+    /// The largest buffer the device allocates (`maxBufferLength`).
+    pub fn max_buffer_length(&self) -> u64 {
+        unsafe { msg_send![self.device, maxBufferLength] }
+    }
+
     fn allocator(&self) -> &crate::makepad_network::mpsc::SyncSender<MetalAllocationRequest> {
         self.allocator.as_ref().expect("the allocator thread lives as long as the context")
     }
@@ -3814,6 +3819,7 @@ impl MetalCx {
         // set (half of RAM where Metal does not report one).
         crate::gpu_admission::GpuLedger::global()
             .set_device_bytes(if recommended != 0 { recommended } else { physical / 2 });
+        crate::gpu_info::set_gpu_working_set_bytes(if recommended != 0 { recommended } else { physical / 2 });
         crate::trace!("gpu.upload", "retained-upload budgets: recommended_working_set_bytes={} physical_memory_bytes={} unified={} allocation_limit={} fraction=1/4 pool_fraction=1/16 residency_high_fraction=3/4 residency_low_fraction=5/8 source={}", recommended, physical, unified, envelope,
             if !unified && recommended != 0 { "recommendedMaxWorkingSetSize" } else { "physicalMemory/2" });
         let in_flight: InFlightQueue = Arc::new(Mutex::new(VecDeque::new()));

@@ -699,6 +699,7 @@ impl Cx {
             let (bc7, astc) = metal_cx.borrow().texture_compression();
             let mut cx = cx.borrow_mut();
             cx.gpu_info.texture_bc7 = bc7;
+            crate::gpu_info::set_max_gpu_buffer_bytes(metal_cx.borrow().max_buffer_length());
             cx.gpu_info.texture_astc4x4 = astc;
         }
         cx.borrow_mut().publish_metal_device_for_media();

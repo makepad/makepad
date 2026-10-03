@@ -795,13 +795,13 @@ impl ShaderOutput {
     /// A 2D texture's sample as emitted: itself, or with pick variants
     /// ([`Self::pick`]) through `_MP_PS(bit, twin, sample, coord)` (`bit`
     /// the texture's index among the shader's textures, `twin` its pick
-    /// twin in `Io`). Only a texture of the shader's own (`_io.name`) has
+    /// twin in `Io`). Only a texture of the shader's own (`_io.t_name`) has
     /// a twin.
     pub fn pick_sample(&self, texture_expr: &str, tex_type: TextureType, sample: String, coord: &str) -> String {
         if !self.pick || !matches!(self.backend, ShaderBackend::Metal) || !matches!(tex_type, TextureType::Texture2d) {
             return sample;
         }
-        let Some(name) = texture_expr.strip_prefix("_io.") else { return sample };
+        let Some(name) = texture_expr.strip_prefix("_io.t_") else { return sample };
         let textures = self.io.iter().filter(|io| matches!(io.kind, ShaderIoKind::Texture(_)));
         let Some(bit) = textures.map(|io| io.name.to_string()).position(|n| n == name) else { return sample };
         if bit >= 32 {

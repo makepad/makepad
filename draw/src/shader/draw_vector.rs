@@ -345,6 +345,11 @@ pub struct DrawVector {
     pub acc_verts: Vec<f32>,
     #[rust]
     pub acc_indices: Vec<u32>,
+    /// The session asked for more mesh than memory gave or one GPU buffer
+    /// holds: what it asked for in all. The shapes past that point were not
+    /// added (the mesh is what fit); see [`Self::geometry_full`].
+    #[rust]
+    full: Option<GeometryFull>,
     // current paint state
     #[rust]
     pub cur_paint: VectorPaint,
@@ -453,6 +458,7 @@ impl DrawVector {
     pub fn begin(&mut self) {
         self.acc_verts.clear();
         self.acc_indices.clear();
+        self.full = None;
         self.gradient_texture_data.clear();
         self.gradient_row_count = 0;
         self.cur_gradient_row_v = -1.0; // sentinel: no gradient texture row
@@ -607,7 +613,19 @@ impl DrawVector {
         let x1 = cx + hx + pad;
         let y1 = cy + hy + pad;
         let color = self.cur_paint.color_at(cx, cy);
-        let base = (self.acc_verts.len() / VECTOR_FLOATS_PER_VERTEX) as u32;
+        if self.over(4, 6) {
+            return;
+        }
+        let had = self.acc_verts.len() / VECTOR_FLOATS_PER_VERTEX;
+        let full = GeometryFull { vertices: had + 4, indices: self.acc_indices.len() + 6 };
+        if !vector_mesh_fits(full.vertices, full.indices)
+            || self.acc_verts.try_reserve(4 * VECTOR_FLOATS_PER_VERTEX).is_err()
+            || self.acc_indices.try_reserve(6).is_err()
+        {
+            self.full = Some(full);
+            return;
+        }
+        let base = had as u32;
         // emit 4 corner verts for the shadow quad
         let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
         for &(vx, vy) in &corners {
@@ -642,8 +660,27 @@ impl DrawVector {
         self.acc_indices.push(base + 3);
     }
 
+    /// Whether this session (since [`Self::begin`]) asked for more mesh than
+    /// can be made: what it asked for in all. The shapes before that point
+    /// draw; a host says the rest did not.
+    pub fn geometry_full(&self) -> Option<GeometryFull> {
+        self.full
+    }
+
+    /// Past what fits: counted, not added.
+    fn over(&mut self, vertices: usize, indices: usize) -> bool {
+        match &mut self.full {
+            Some(full) => {
+                full.vertices += vertices;
+                full.indices += indices;
+                true
+            }
+            None => false,
+        }
+    }
+
     fn append_geometry(&mut self, verts: &[VVertex], indices: &[u32]) {
-        if verts.is_empty() || indices.is_empty() {
+        if verts.is_empty() || indices.is_empty() || self.over(verts.len(), indices.len()) {
             return;
         }
         // compute gradient params and color from current paint
@@ -683,7 +720,7 @@ impl DrawVector {
                 (2.0, [*cx, *cy, *rx, *ry], c0)
             }
         };
-        append_tessellated_geometry(
+        let appended = append_tessellated_geometry(
             verts,
             indices,
             &mut self.acc_verts,
@@ -703,6 +740,10 @@ impl DrawVector {
                 zbias: self.cur_zbias,
             },
         );
+        if let Err(full) = appended {
+            self.full = Some(full);
+            return;
+        }
         self.cur_zbias += VECTOR_ZBIAS_STEP;
     }
 
@@ -712,9 +753,9 @@ impl DrawVector {
             return;
         }
         self.finish_gradient_texture(cx);
+        let Some((mut indices, mut packed)) = self.pack_geometry() else { return };
         let slot = self.acquire_geometry_slot(cx);
         let geometry_id = self.geometry_pool[slot].geometry_id();
-        let (mut indices, mut packed) = self.pack_geometry();
         self.geometry_pool[slot].update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
         self.geometry = Some(geometry_id);
         self.geometry_slot = Some(slot);
@@ -733,7 +774,7 @@ impl DrawVector {
             return;
         }
         self.finish_gradient_texture(cx);
-        let (mut indices, mut packed) = self.pack_geometry();
+        let Some((mut indices, mut packed)) = self.pack_geometry() else { return };
         geometry.update_with_recycled_buffers(cx.cx.cx, &mut indices, &mut packed);
         self.submit_geometry(cx, geometry.geometry_id());
     }
@@ -756,8 +797,18 @@ impl DrawVector {
 
     /// The accumulated vertices packed for the GPU, and the index list, as
     /// the buffers a `Geometry` swaps in.
-    fn pack_geometry(&self) -> (Vec<u32>, Vec<f32>) {
-        (self.acc_indices.clone(), crate::vector::pack_vector_vertices(&self.acc_verts))
+    /// `None` (and the session [`Self::geometry_full`]) when memory for
+    /// them is refused: nothing is drawn.
+    fn pack_geometry(&mut self) -> Option<(Vec<u32>, Vec<f32>)> {
+        let mut indices = Vec::new();
+        let packed = indices.try_reserve_exact(self.acc_indices.len()).ok().and_then(|_| crate::vector::try_pack_vector_vertices(&self.acc_verts));
+        let Some(packed) = packed else {
+            let full = GeometryFull { vertices: self.acc_verts.len() / VECTOR_FLOATS_PER_VERTEX, indices: self.acc_indices.len() };
+            self.full = Some(self.full.map_or(full, |f| GeometryFull { vertices: f.vertices.max(full.vertices), indices: f.indices.max(full.indices) }));
+            return None;
+        };
+        indices.extend_from_slice(&self.acc_indices);
+        Some((indices, packed))
     }
 
     /// Uploads the gradient rows this session rasterized (one texture per
