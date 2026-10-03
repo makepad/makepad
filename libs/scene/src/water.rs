@@ -346,7 +346,9 @@ impl WaterMesh {
             }
             let u = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d;
             let v = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d;
-            u >= 0.0 && v >= 0.0 && u + v <= 1.0
+            // Edges and corners count (a point on the waterline is in it).
+            const E: f32 = 1.0e-4;
+            u >= -E && v >= -E && u + v <= 1.0 + E
         })
     }
 }
