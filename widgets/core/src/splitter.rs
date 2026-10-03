@@ -1034,6 +1034,13 @@ impl Splitter {
         self.answer_at_once();
     }
 
+    /// The two panes trade places (a column whose panes the person flips:
+    /// what was first is drawn second). The bar stays where it was asked
+    /// for, so the host flips the align too when it wants the same sizes.
+    pub fn swap_panes(&mut self) {
+        std::mem::swap(&mut self.a, &mut self.b);
+    }
+
     /// Under the law a host that wrote an ask can read what it got without
     /// waiting for a draw. Otherwise the position is the layout pass's to
     /// set and nobody else's, as it always was.
@@ -1138,6 +1145,13 @@ impl SplitterRef {
     pub fn set_align(&self, cx: &mut Cx, align: SplitterAlign) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_align(align);
+            inner.redraw(cx);
+        }
+    }
+
+    pub fn swap_panes(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.swap_panes();
             inner.redraw(cx);
         }
     }
