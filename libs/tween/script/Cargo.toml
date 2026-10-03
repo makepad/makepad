@@ -1,0 +1,10 @@
+[package]
+name = "makepad-tween-script"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "The tween eases as Splash natives: ease(@name, u) and ease_id(@name) in mod.shared"
+
+[dependencies]
+makepad-script = { path = "../../../platform/script", version = "1.0.0" }
+makepad-tween = { path = "..", version = "0.1.0" }

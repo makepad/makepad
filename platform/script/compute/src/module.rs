@@ -612,12 +612,16 @@ fn item_names(it: &Item, out: &mut HashSet<String>) {
 /// call each other unqualified. Once per VM: a VM that has `mod.shared`
 /// already keeps it. The `vm` feature (this crate is otherwise
 /// dependency-free).
+///
+/// True when this call registered it: the host then installs the engine's
+/// natives into it (`makepad_tween_script::install_ease` for `ease` and
+/// `ease_id`, which raise an error until then).
 #[cfg(feature = "vm")]
-pub fn register_shared_std(vm: &mut makepad_script::ScriptVm) {
+pub fn register_shared_std(vm: &mut makepad_script::ScriptVm) -> bool {
     use makepad_script::*;
     let modules = vm.bx.heap.modules;
     if vm.bx.heap.value(modules, id!(shared).into(), NoTrap).as_object().is_some() {
-        return;
+        return false;
     }
     let exports: String = SHARED_STD
         .lines()
@@ -652,56 +656,24 @@ pub fn register_shared_std(vm: &mut makepad_script::ScriptVm) {
             let num = |k: LiveId| vm.bx.heap.value(args, k.into(), NoTrap).as_number().unwrap_or(0.0);
             crate::rand::vnoise(num(id!(x)), num(id!(y)), num(id!(seed))).into()
         });
-        install_ease(vm, shared);
+        install_ease_placeholder(vm, shared);
         vm.bx.heap.set_value(modules, id!(shared).into(), value, NoTrap);
+        return true;
     }
+    false
 }
 
-/// `ease(name, u)`: an ease by name, `ease(@ease_out_cubic, prog(t, 1.0, 1.6))`,
-/// the same table a Motion Tween's or key's `ease:` reads (libs/tween's
-/// `named::Ease`), so one name is one curve everywhere; f64, `u` clamped to
-/// 0..1, one native call however many curves there are. `ease_id(name)`:
-/// the ease's number in the kernels' `std.ease.apply_d`.
+/// `ease` and `ease_id` until the host installs the real ones
+/// (`makepad_tween_script::install_ease`, which reads libs/tween's table):
+/// a document calling them before that gets this error, not a silent nil.
 #[cfg(feature = "vm")]
-fn install_ease(vm: &mut makepad_script::ScriptVm, shared: makepad_script::ScriptObject) {
+fn install_ease_placeholder(vm: &mut makepad_script::ScriptVm, shared: makepad_script::ScriptObject) {
     use makepad_script::*;
-    use makepad_tween::named::{Curve, Ease};
-    const CURVES: [Curve; 10] = [Curve::Quad, Curve::Cubic, Curve::Quart, Curve::Quint, Curve::Sine, Curve::Expo, Curve::Circ, Curve::Back, Curve::Elastic, Curve::Bounce];
-    fn named(vm: &mut ScriptVm, name: ScriptValue) -> Result<Ease, ScriptValue> {
-        let id = name.as_id().and_then(|id| id.as_string(|s| s.map(str::to_string)));
-        match id.as_deref().and_then(Ease::from_id) {
-            Some(ease) => Ok(ease),
-            None => {
-                let shown = id.map_or_else(|| "ease(name, u) takes an ease's @name first".to_string(), |n| format!("@{n} is not an ease"));
-                Err(script_err_invalid_args!(
-                    vm.bx.threads.cur_ref().trap,
-                    "{shown}: @linear, @hold, @ease_in, @ease_out, @ease_in_out, @ease_{{in,out,in_out}}_{{quad,cubic,quart,quint,sine,expo,circ,back,elastic,bounce}}"
-                ))
-            }
-        }
+    for name in [id_lut!(ease), id_lut!(ease_id)] {
+        vm.add_method(shared, name, script_args!(name = NIL, u = 0.0), |vm, _args| {
+            script_err_not_impl!(vm.bx.threads.cur_ref().trap, "ease() needs the host to call makepad_tween_script::install_ease(vm) after register_shared_std")
+        });
     }
-    let curve = |c: Curve| CURVES.iter().position(|k| *k == c).unwrap_or(0);
-    vm.add_method(shared, id_lut!(ease), script_args!(name = NIL, u = 0.0), |vm, args| {
-        let name = vm.bx.heap.value(args, id!(name).into(), NoTrap);
-        let u = vm.bx.heap.value(args, id!(u).into(), NoTrap).as_number().unwrap_or(0.0);
-        match named(vm, name) {
-            Ok(ease) => ease.apply(u, 0.0).into(),
-            Err(e) => e,
-        }
-    });
-    vm.add_method(shared, id_lut!(ease_id), script_args!(name = NIL), move |vm, args| {
-        let name = vm.bx.heap.value(args, id!(name).into(), NoTrap);
-        let id = match named(vm, name) {
-            Ok(Ease::Linear) => 0,
-            Ok(Ease::Hold) => 1,
-            Ok(Ease::In(c)) => 2 + 3 * curve(c),
-            Ok(Ease::Out(c)) => 3 + 3 * curve(c),
-            Ok(Ease::InOut(c)) => 4 + 3 * curve(c),
-            Ok(_) => return script_err_invalid_args!(vm.bx.threads.cur_ref().trap, "ease_id takes a named ease, not a spring or a bezier"),
-            Err(e) => return e,
-        };
-        (id as f64).into()
-    });
 }
 
 #[cfg(all(test, feature = "vm"))]

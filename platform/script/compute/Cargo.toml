@@ -12,12 +12,10 @@ repository = "https://github.com/makepad/makepad/"
 # `module::register_shared_std`: the shared stdlib registered in a Splash VM
 # (effect and Motion documents, runtime-compiled shaders). Off by default,
 # so the compiler itself stays dependency-free.
-vm = ["dep:makepad-script", "dep:makepad-tween"]
+vm = ["dep:makepad-script"]
 
 [dependencies]
 makepad-script = { path = "..", optional = true }
-# `ease(@name, u)` in the registered stdlib reads Motion's ease table.
-makepad-tween = { path = "../../../libs/tween", optional = true }
 
 [dev-dependencies]
 makepad-csg-math = { path = "../../../libs/csg/csg_math" }

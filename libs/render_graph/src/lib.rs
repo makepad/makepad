@@ -103,7 +103,9 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
 /// The shared Splash stdlib (`mod.shared`) every pass's code has in scope:
 /// registered once per VM, before a pass compiles.
 pub fn pass_stdlib(vm: &mut ScriptVm) -> ScriptValue {
-    makepad_script_compute::module::register_shared_std(vm);
+    if makepad_script_compute::module::register_shared_std(vm) {
+        makepad_tween_script::install_ease(vm);
+    }
     NIL
 }
 

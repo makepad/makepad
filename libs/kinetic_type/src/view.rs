@@ -92,7 +92,9 @@ fn members(vm: &ScriptVm, kit: &Kit, backdrop: bool) -> Vec<(LiveId, ScriptValue
 /// Register the draw shaders and the kit module (after `makepad_draw::script_mod`
 /// and `makepad_render_graph::script_mod_passes`).
 pub fn script_mod(vm: &mut ScriptVm) {
-    makepad_script_compute::module::register_shared_std(vm);
+    if makepad_script_compute::module::register_shared_std(vm) {
+        makepad_tween_script::install_ease(vm);
+    }
     // The bundled fonts the 3D letters name (`FontSource::Bundled`) are in
     // the widget library's resources, wherever this VM's widgets put them.
     if let Some(dir) = vm.bx.code.crate_manifests.borrow().get("makepad_widgets") {
