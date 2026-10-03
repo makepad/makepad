@@ -50,8 +50,8 @@ pub const CHARACTER_JOINTS: [(&str, Option<usize>); 44] = [
 /// Bumped whenever generated geometry, materials or clips change, so
 /// content-addressed caches of script characters rebuild. 42: portable
 /// transcendentals (`makepad_csg_math::portable`), the same bits on every
-/// platform.
-pub const CHARACTER_GENERATOR_VERSION: i64 = 42;
+/// platform. 43: the `tread` and `swim` clips.
+pub const CHARACTER_GENERATOR_VERSION: i64 = 43;
 
 pub fn joint_index(name: &str) -> u32 { CHARACTER_JOINTS.iter().position(|j| j.0 == name).unwrap_or_else(|| panic!("joint {name}")) as u32 }
 pub(crate) fn j(name: &str) -> u32 { joint_index(name) }

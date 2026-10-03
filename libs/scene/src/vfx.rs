@@ -790,6 +790,14 @@ fn build_library() -> Vec<(&'static str, Arc<VfxPreset>)> {
             looping: true,
         }),
         ("water_splash", water_splash(1.0)),
+        // A swimmer's hand going in: a few drops and a small ring, no mark.
+        ("swim_stroke", one(vec![
+            VfxLayer { spread: 0.55, life: (0.3, 0.6), ..droplets(9.0, 0xe2f0ff, 0.75, 0.045, (1.2, 2.6)) },
+            ring((0.15, 0.9), 0.6, 0xeaf4ff, 0.45, 0.6, true),
+        ], None)),
+        // The ripple a body leaves on the surface (a swimmer, a wading
+        // walker): one flat ring spreading slowly, emitted along the way.
+        ("wake", one(vec![ring((0.5, 2.2), 1.6, 0xeaf4ff, 0.3, 0.5, true)], None)),
         ("magic", one(vec![
             VfxLayer { sprite: VfxSprite::Star, count: 26.0, life: (0.6, 1.2), speed: (0.5, 2.2), size: (0.16, 0.02),
                 color: rgb(0xd8a0ff, 1.0), color_end: rgb(0x6030ff, 0.0), intensity: 6.0, spread: PI, gravity: -1.0,
@@ -948,7 +956,7 @@ mod tests {
     fn the_library_has_every_effect_games_ask_for() {
         for name in [
             "hit_spark", "muzzle_flash", "shell_smoke", "impact_metal", "impact_dirt", "impact_flesh", "explosion",
-            "tyre_smoke", "skid", "dust_trail", "water_splash", "magic", "energy", "fire", "rain", "snow", "cloud",
+            "tyre_smoke", "skid", "dust_trail", "water_splash", "swim_stroke", "wake", "magic", "energy", "fire", "rain", "snow", "cloud",
         ] {
             assert!(vfx_preset(name).is_some(), "missing preset {name}");
         }
