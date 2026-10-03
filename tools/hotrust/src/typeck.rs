@@ -3018,6 +3018,9 @@ impl<'a> Fcx<'a> {
         let unit = self.tcx.tys.unit;
         let never = self.tcx.tys.never;
         let bool_ = self.tcx.tys.bool_;
+        if name == "cfg" {
+            return bool_;
+        }
         if m.args == NO_MAC_ARGS {
             self.err(lo, format!("macro `{}!` is not supported", name));
             return self.tcx.tys.error;

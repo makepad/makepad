@@ -523,34 +523,8 @@ impl<'a> Lcx<'a> {
         };
         let ret = self.b.ret;
         let rl = self.layout(ret);
-        // self param: local 0 when present
-        let mut li_self = None;
-        if fsig.self_param.is_some() {
-            li_self = Some(0u32);
-        }
-        // `extern "C" fn` bodies follow the C ABI (C code calls them: callbacks, IMPs)
-        let c_abi = match self.u.tcx.sigs.get(&def) {
-            Some(s) => s.c_abi && self.u.prog.def(def).kind != DefKind::ForeignFn,
-            None => false,
-        };
-        if c_abi {
-            let mut ptys = Vec::new();
-            if let Some(li) = li_self {
-                ptys.push(self.b.locals[li as usize].ty);
-            }
-            for p in &self.b.param_pats.clone() {
-                ptys.push(self.b.pty(*p));
-            }
-            let cs = crate::cabi::c_sig(self.u, &ptys, ret, None);
-            self.f.cabi = Some(Box::new(cs));
-        }
-        let c_agg_ret = match &self.f.cabi {
-            Some(cs) => Some(cs.ret.is_some()),
-            None => None,
-        };
         let ret_regs = match &rl.leaves {
-            _ if c_agg_ret == Some(true) => false,
-            Some(l) if c_agg_ret == Some(false) || ret_fits(l) => {
+            Some(l) if ret_fits(l) => {
                 for lf in l {
                     self.f.rets.push(lf.cls);
                 }
@@ -563,15 +537,20 @@ impl<'a> Lcx<'a> {
             self.f.params.push(p);
             self.sret = Some(p);
         }
+        // self param: local 0 when present
+        let mut li_self = None;
+        if fsig.self_param.is_some() {
+            li_self = Some(0u32);
+        }
         let mut param_vals: Vec<(Option<u32>, Option<PatId>, TyId, Vec<VReg>, bool)> = Vec::new();
         if let Some(li) = li_self {
             let t = self.b.locals[li as usize].ty;
-            let (regs, by_ptr) = self.abi_param_c(t, c_abi);
+            let (regs, by_ptr) = self.abi_param(t);
             param_vals.push((Some(li), None, t, regs, by_ptr));
         }
-        for p in &self.b.param_pats.clone() {
+        for p in &self.b.param_pats {
             let t = self.b.pty(*p);
-            let (regs, by_ptr) = self.abi_param_c(t, c_abi);
+            let (regs, by_ptr) = self.abi_param(t);
             param_vals.push((None, Some(*p), t, regs, by_ptr));
         }
         for (li, pat, t, regs, by_ptr) in param_vals {
@@ -670,19 +649,6 @@ impl<'a> Lcx<'a> {
         self.pos = ast.expr(body).lo;
         let v = self.lower_expr(body);
         self.ret_val(v, ret);
-    }
-
-    /// A parameter of an `extern "C"` body (`c`): aggregates arrive by address.
-    fn abi_param_c(&mut self, t: TyId, c: bool) -> (Vec<VReg>, bool) {
-        if c && self.layout(t).size > 0 {
-            if let crate::rir::CArg::Agg(_) = crate::cabi::c_arg(self.u, t) {
-                let p = self.f.vreg(Cls::I);
-                self.f.params.push(p);
-                self.f.noalias.push(p);
-                return (vec![p], true);
-            }
-        }
-        self.abi_param(t)
     }
 
     fn abi_param(&mut self, t: TyId) -> (Vec<VReg>, bool) {
@@ -3186,27 +3152,12 @@ impl<'a> Lcx<'a> {
 
     /// Emits a call with HotRust's ABI. Returns the result value.
     fn emit_call(&mut self, callee: Callee, args: Vec<(Val, TyId)>, ret: TyId) -> Val {
-        // C ABI calls: every aggregate goes by pointer to a private copy, an aggregate
-        // result through a result slot; the backend does the C placement (CSig)
-        let csig = match &callee {
-            Callee::CHost(_, s) | Callee::CIndirect(_, s) | Callee::CFn(_, s) => Some((**s).clone()),
-            _ => None,
-        };
         let rl = self.layout(ret);
         let mut abi_args = Vec::new();
         let mut rets = Vec::new();
         let mut sret = None;
-        let c_agg_ret = match &csig {
-            Some(s) => Some(s.ret.is_some()),
-            None => None,
-        };
         match &rl.leaves {
-            _ if c_agg_ret == Some(true) => {
-                let a = self.new_slot_for(ret);
-                abi_args.push(a);
-                sret = Some(a);
-            }
-            Some(l) if c_agg_ret == Some(false) || ret_fits(l) => {
+            Some(l) if ret_fits(l) => {
                 for lf in l {
                     rets.push(self.f.vreg(lf.cls));
                 }
@@ -3217,15 +3168,22 @@ impl<'a> Lcx<'a> {
                 sret = Some(a);
             }
         }
-        for (v, t) in args.into_iter() {
+        let n_fixed_src = match &callee {
+            Callee::HostVariadic(_, n) => *n as usize,
+            _ => usize::MAX,
+        };
+        let mut n_fixed_abi = u32::MAX;
+        for (k, (v, t)) in args.into_iter().enumerate() {
+            if k == n_fixed_src {
+                n_fixed_abi = abi_args.len() as u32;
+            }
             let l = self.layout(t);
-            let c_agg = csig.is_some() && l.size > 0 && matches!(crate::cabi::c_arg(self.u, t), crate::rir::CArg::Agg(_));
             match l.leaves {
-                Some(_) if !c_agg => {
+                Some(_) => {
                     let r = self.to_leaves(v, t);
                     abi_args.extend(r);
                 }
-                _ => {
+                None => {
                     // by pointer to a private copy
                     let tmp = self.new_slot_for(t);
                     self.store_val(tmp, 0, t, v);
@@ -3233,6 +3191,14 @@ impl<'a> Lcx<'a> {
                 }
             }
         }
+        let callee = match callee {
+            Callee::HostVariadic(a, _) => {
+                // no variadic arguments passed: all are fixed
+                let n = if n_fixed_abi == u32::MAX { abi_args.len() as u32 } else { n_fixed_abi };
+                Callee::HostVariadic(a, n)
+            }
+            c => c,
+        };
         self.emit(Inst::Call(callee, abi_args, rets.clone()));
         if self.is_never(ret) {
             self.term(Term::Unreachable);
@@ -3316,26 +3282,16 @@ impl<'a> Lcx<'a> {
                     return v;
                 }
                 let foreign = self.u.prog.def(d).kind == DefKind::ForeignFn;
-                let mut ptys = Vec::new();
-                for (_, pt) in &vals {
-                    ptys.push(*pt);
-                }
                 let callee = if foreign {
                     match self.u.foreign_addr(d) {
-                        Some(a) => {
-                            let n_fixed = if sig.variadic { Some(sig.params.len()) } else { None };
-                            let cs = crate::cabi::c_sig(self.u, &ptys, t, n_fixed);
-                            Callee::CHost(a, Box::new(cs))
-                        }
+                        Some(a) if sig.variadic => Callee::HostVariadic(a, sig.params.len() as u32),
+                        Some(a) => Callee::Host(a),
                         None => {
                             let n = self.u.prog.name(d).to_string();
                             self.err(self.pos, format!("unknown foreign function `{}`", n));
                             return self.unit();
                         }
                     }
-                } else if sig.c_abi {
-                    let cs = crate::cabi::c_sig(self.u, &ptys, t, None);
-                    Callee::CFn(self.u.fn_id(FnKey::Inst(d, gargs)), Box::new(cs))
                 } else {
                     Callee::Fn(self.u.fn_id(FnKey::Inst(d, gargs)))
                 };
@@ -3529,113 +3485,6 @@ impl<'a> Lcx<'a> {
 
     /// Calls to `extern "hotrust-intrinsic"` functions in HotRust's core become instructions.
     /// Memory intrinsics of core::mem::intrinsics_mem (generic over T = gargs[0]).
-    /// `core::intrinsics_atomic::*`. Orderings are `Ordering as u8` (0 Relaxed, 1 Release,
-    /// 2 Acquire, 3 AcqRel, 4 SeqCst); one that is not a constant here becomes SeqCst.
-    fn atomic_intrinsic(&mut self, name: &str, gargs: &[TyId], vals: &[(Val, TyId)]) -> Val {
-        use crate::rir::{AtomOrd, RmwOp};
-        let mut a: Vec<VReg> = Vec::new();
-        for (v, ty) in vals {
-            let r = self.to_leaves(v.clone(), *ty);
-            a.extend(r);
-        }
-        let ord_at = |s: &Self, k: usize| -> AtomOrd {
-            let v = match a.get(k) {
-                Some(v) => *v,
-                None => return AtomOrd::SeqCst,
-            };
-            let mut c = None;
-            for i in &s.f.blocks[s.cur as usize].insts {
-                if let Inst::Iconst(d, x) = i {
-                    if *d == v {
-                        c = Some(*x);
-                    }
-                }
-            }
-            match c {
-                Some(0) => AtomOrd::Relaxed,
-                Some(1) => AtomOrd::Release,
-                Some(2) => AtomOrd::Acquire,
-                Some(3) => AtomOrd::AcqRel,
-                _ => AtomOrd::SeqCst,
-            }
-        };
-        let m = match gargs.first() {
-            Some(g) => {
-                let g = *g;
-                match self.kind(g) {
-                    TyKind::Int(_) | TyKind::Bool | TyKind::Char => {
-                        let it = self.int_ty(g);
-                        Mem::Int(it.bits / 8, it.signed)
-                    }
-                    _ => Mem::Int(8, false),
-                }
-            }
-            None => Mem::Int(8, false),
-        };
-        let rmw = |n: &str| -> Option<RmwOp> {
-            Some(match n {
-                "atomic_swap" => RmwOp::Xchg,
-                "atomic_fetch_add" => RmwOp::Add,
-                "atomic_fetch_sub" => RmwOp::Sub,
-                "atomic_fetch_and" => RmwOp::And,
-                "atomic_fetch_nand" => RmwOp::Nand,
-                "atomic_fetch_or" => RmwOp::Or,
-                "atomic_fetch_xor" => RmwOp::Xor,
-                "atomic_fetch_max" => RmwOp::Max,
-                "atomic_fetch_min" => RmwOp::Min,
-                _ => return None,
-            })
-        };
-        match name {
-            "atomic_load" => {
-                let o = ord_at(self, 1);
-                let d = self.f.vreg(Cls::I);
-                self.emit(Inst::AtomicLoad(m, o, d, a[0]));
-                Val::L(vec![d])
-            }
-            "atomic_store" => {
-                let o = ord_at(self, 2);
-                self.emit(Inst::AtomicStore(m, o, a[0], a[1]));
-                self.unit()
-            }
-            "atomic_cxchg" | "atomic_cxchg_weak" => {
-                let ok = ord_at(self, 3);
-                let fail = ord_at(self, 4);
-                let d = self.f.vreg(Cls::I);
-                self.emit(Inst::AtomicCas(m, ok, fail, d, a[0], a[1], a[2]));
-                let b = self.f.vreg(Cls::I);
-                self.emit(Inst::ICmp(Cond::Eq, false, b, d, a[1]));
-                Val::L(vec![d, b])
-            }
-            "atomic_fence" | "atomic_compiler_fence" => {
-                let o = ord_at(self, 0);
-                self.emit(Inst::Fence(o, name == "atomic_compiler_fence"));
-                self.unit()
-            }
-            "spin_loop_hint" => self.unit(),
-            n => {
-                let mut op = match rmw(n) {
-                    Some(op) => op,
-                    None => {
-                        self.err(self.pos, format!("unknown atomic intrinsic `{}`", n));
-                        return self.unit();
-                    }
-                };
-                if let Mem::Int(_, false) = m {
-                    op = match op {
-                        RmwOp::Max => RmwOp::UMax,
-                        RmwOp::Min => RmwOp::UMin,
-                        o => o,
-                    };
-                }
-                let o = ord_at(self, 2);
-                let d = self.f.vreg(Cls::I);
-                self.emit(Inst::AtomicRmw(op, m, o, d, a[0], a[1]));
-                Val::L(vec![d])
-            }
-        }
-    }
-
     fn mem_intrinsic(&mut self, name: &str, gargs: &[TyId], vals: &[(Val, TyId)], t: TyId) -> Option<Val> {
         let g0 = gargs.first().copied();
         let elem = |s: &mut Self| -> (u32, u32) {
@@ -3781,9 +3630,6 @@ impl<'a> Lcx<'a> {
             return None;
         }
         let name = self.u.prog.name(d).to_string();
-        if name.starts_with("atomic_") || name == "spin_loop_hint" {
-            return Some(self.atomic_intrinsic(&name, gargs, vals));
-        }
         if let Some(v) = self.mem_intrinsic(&name, gargs, vals, t) {
             return Some(v);
         }

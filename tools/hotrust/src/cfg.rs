@@ -181,6 +181,12 @@ pub fn active(p: Src, attrs: &[Attr], cfg: &CfgSet) -> bool {
     true
 }
 
+/// `cfg!(pred)`: the predicate in tokens [lo, hi).
+pub fn eval_tokens(p: Src, lo: usize, hi: usize, cfg: &CfgSet) -> bool {
+    let mut i = lo;
+    pred(p, &mut i, hi, cfg)
+}
+
 /// Is `#[test]` among the attributes (tests are inactive in a normal build)?
 pub fn is_test(p: Src, attrs: &[Attr]) -> bool {
     for a in attrs {
