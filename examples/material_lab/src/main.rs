@@ -27,6 +27,7 @@ use makepad_render::makepad_render_material::{Hook, HookMask, HookSet, MaterialD
 use makepad_render::{
     preview_scene_state, set_pass_camera, CustomMaterialInstance, DrawSceneAlpha, DrawSceneCube, DrawSceneCustom,
     DrawSceneSkinned, DrawSceneSky, DrawSceneTerrain, ModelInstance, PreviewLook, PreviewStage, Renderer, SceneDraws,
+    TransformTint,
 };
 use makepad_render_graph::DrawSceneTexture;
 use makepad_widgets::*;
@@ -162,21 +163,19 @@ fn items_world(scene: Scene) -> World {
     w.items.push(Item::new(ItemKind::Mesh { geometry: cube, material: MaterialId(2), transform: at(2) }));
     // Two half-size cubes, one Instances item, tinted red through an
     // Unlit material (so they show in the dark).
-    let mut data = Vec::new();
-    for dy in [0.0f32, 0.55] {
+    let records = [0.0f32, 0.55].map(|dy| {
         let mut m = Mat4f::identity();
         m.v[0] = 0.45;
         m.v[5] = 0.45;
         m.v[10] = 0.45;
         m.v[12] = column_x(3);
         m.v[13] = dy;
-        data.extend_from_slice(&m.v);
-        data.extend_from_slice(&[1.0, 0.0, 0.0, 1.0]);
-    }
+        TransformTint { transform: m, tint: vec4(1.0, 0.0, 0.0, 1.0), glow: 0.0 }
+    });
     w.items.push(Item::new(ItemKind::Instances {
         geometry: cube,
         material: MaterialId(4),
-        source: InstanceSource::Packed { data: data.into(), layout: makepad_render::LAYOUT_TRANSFORM_TINT },
+        source: InstanceSource::Packed { data: TransformTint::floats(&records).into(), layout: makepad_render::LAYOUT_TRANSFORM_TINT },
         count: 2,
     }));
     w.set_material(MaterialFrame { id: MaterialId(4), kind: MaterialKind::Unlit(UnlitParams { color: vec4(1.0, 1.0, 1.0, 1.0), intensity: 1.0, map: None }), ..Default::default() });
@@ -389,8 +388,10 @@ impl Widget for MaterialLab {
         cx.end_pass(&self.pass);
         self.draw_bg.draw_vars.set_texture(0, &self.color_texture);
         self.draw_bg.draw_abs(cx, rect);
+        // The pass keeps its own size: its texture is a fixed PASS_W x
+        // PASS_H, so the viewport must be too (an area-placed pass would
+        // follow the window and draw past the texture).
         self.area = self.draw_bg.area();
-        cx.set_pass_area(&self.pass, self.area);
         // Metal compiles pipelines asynchronously: keep drawing until every
         // material's pipeline is ready (the lanes fall back to stock until
         // then), and say so once for the test.
