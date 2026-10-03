@@ -75,6 +75,40 @@ extern "C" {
     fn sysconf(name: i32) -> i64;
     fn getpid() -> i32;
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn pthread_create(t: *mut usize, attr: *const u8, f: extern "C" fn(*mut u8) -> *mut u8, arg: *mut u8) -> i32;
+    fn pthread_join(t: usize, ret: *mut *mut u8) -> i32;
+    fn os_sync_wait_on_address(addr: *mut u8, value: u64, size: usize, flags: u32) -> i32;
+    fn os_sync_wake_by_address_all(addr: *mut u8, size: usize, flags: u32) -> i32;
+}
+
+static mut GATE: u32 = 0;
+
+struct Job {
+    n: u64,
+    out: u64,
+}
+
+fn work(n: u64) -> u64 {
+    let mut s = 0u64;
+    let mut i = 0;
+    while i < n {
+        s = s.wrapping_mul(31).wrapping_add(i);
+        i += 1;
+    }
+    s
+}
+
+/// Worker: blocks on the futex until the main thread opens GATE, then computes.
+extern "C" fn worker(p: *mut u8) -> *mut u8 {
+    unsafe {
+        let gate = &mut GATE as *mut u32 as *mut u8;
+        while GATE == 0 {
+            os_sync_wait_on_address(gate, 0, 4, 0);
+        }
+        let j = p as *mut Job;
+        (*j).out = work((*j).n);
+    }
+    0 as *mut u8
 }
 
 static mut FUTEX: u32 = 7;
@@ -193,5 +227,28 @@ fn a04_futex_tls_env() {
         println!("| env {}", c_text(v));
         println!("| cpus {} pid {}", sysconf(58) >= 1, getpid() > 0);
         println!("| dtor runs so far {}", DTOR_RUNS);
+    }
+}
+
+#[test]
+fn a05_threads_futex() {
+    let mut jobs = [Job { n: 1000, out: 0 }, Job { n: 2000, out: 0 }, Job { n: 3000, out: 0 }, Job { n: 4000, out: 0 }];
+    let mut ts = [0usize; 4];
+    let mut i = 0;
+    unsafe {
+        while i < 4 {
+            pthread_create(&mut ts[i] as *mut usize, 0 as *const u8, worker, &mut jobs[i] as *mut Job as *mut u8);
+            i += 1;
+        }
+        let req = Timespec { tv_sec: 0, tv_nsec: 2_000_000 };
+        nanosleep(&req as *const Timespec, 0 as *mut Timespec);
+        GATE = 1;
+        os_sync_wake_by_address_all(&mut GATE as *mut u32 as *mut u8, 4, 0);
+        i = 0;
+        while i < 4 {
+            pthread_join(ts[i], 0 as *mut *mut u8);
+            println!("| job {} {}", i, jobs[i].out);
+            i += 1;
+        }
     }
 }
