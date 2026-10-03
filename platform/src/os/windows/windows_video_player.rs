@@ -14,7 +14,6 @@ use {
         video_decode::software_video::PlaybackSessionHandle,
         video_decode::yuv::YuvPlaneData,
         windows::{
-            core::Interface,
             Win32::Graphics::{
                 Direct3D11::{
                     ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11ShaderResourceView,
@@ -159,7 +158,7 @@ impl D3d11YuvCpuCache {
             let Some(texture) = texture else {
                 return;
             };
-            let Ok(resource) = texture.cast::<ID3D11Resource>() else {
+            let Ok(resource) = (unsafe { ID3D11Resource::query(texture.as_raw()) }) else {
                 return;
             };
             let mut srv = None;
@@ -193,7 +192,7 @@ impl D3d11YuvCpuCache {
             bottom: height,
             back: 1,
         };
-        let resource: ID3D11Resource = match plane.texture.cast() {
+        let resource: ID3D11Resource = match unsafe { ID3D11Resource::query(plane.texture.as_raw()) } {
             Ok(r) => r,
             Err(_) => return,
         };

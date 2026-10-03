@@ -29,7 +29,7 @@ struct MonitorInfo {
 const MONITORINFOF_PRIMARY: u32 = 1;
 
 type MonitorEnumProc =
-    unsafe extern "system" fn(HMONITOR, HDC, *mut RECT, LPARAM) -> windows_core::BOOL;
+    unsafe extern "system" fn(HMONITOR, HDC, *mut RECT, LPARAM) -> windows::core::BOOL;
 
 #[inline]
 unsafe fn EnumDisplayMonitors(
@@ -37,14 +37,14 @@ unsafe fn EnumDisplayMonitors(
     clip: *const RECT,
     callback: MonitorEnumProc,
     data: LPARAM,
-) -> windows_core::BOOL {
-    windows_core::link!("user32.dll" "system" fn EnumDisplayMonitors(hdc : HDC, clip : *const RECT, callback : MonitorEnumProc, data : LPARAM) -> windows_core::BOOL);
+) -> windows::core::BOOL {
+    #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn EnumDisplayMonitors(hdc : HDC, clip : *const RECT, callback : MonitorEnumProc, data : LPARAM) -> windows::core::BOOL; }
     unsafe { EnumDisplayMonitors(hdc, clip, callback, data) }
 }
 
 #[inline]
-unsafe fn GetMonitorInfoW(monitor: HMONITOR, info: *mut MonitorInfo) -> windows_core::BOOL {
-    windows_core::link!("user32.dll" "system" fn GetMonitorInfoW(monitor : HMONITOR, info : *mut MonitorInfo) -> windows_core::BOOL);
+unsafe fn GetMonitorInfoW(monitor: HMONITOR, info: *mut MonitorInfo) -> windows::core::BOOL {
+    #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn GetMonitorInfoW(monitor : HMONITOR, info : *mut MonitorInfo) -> windows::core::BOOL; }
     unsafe { GetMonitorInfoW(monitor, info) }
 }
 
@@ -64,7 +64,7 @@ pub fn win32_screens() -> Vec<ScreenGeom> {
         _hdc: HDC,
         _clip: *mut RECT,
         data: LPARAM,
-    ) -> windows_core::BOOL {
+    ) -> windows::core::BOOL {
         let screens = unsafe { &mut *(data.0 as *mut Vec<ScreenGeom>) };
         let mut info = MonitorInfo {
             cb_size: size_of::<MonitorInfo>() as u32,
@@ -78,7 +78,7 @@ pub fn win32_screens() -> Vec<ScreenGeom> {
             });
         }
         // Keep enumerating; a display whose info could not be read is simply skipped.
-        windows_core::BOOL(1)
+        windows::core::BOOL(1)
     }
 
     let mut screens = Vec::new();

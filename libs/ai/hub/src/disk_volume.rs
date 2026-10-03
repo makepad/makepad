@@ -82,25 +82,21 @@ fn volume_info(path: &Path) -> io::Result<(String, u64)> {
 fn volume_info(path: &Path) -> io::Result<(String, u64)> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-    unsafe extern "system" {
-        fn GetVolumePathNameW(
-            file_name: *const u16,
-            volume_path_name: *mut u16,
-            volume_path_name_size: u32,
-        ) -> i32;
-        fn GetDiskFreeSpaceExW(
-            directory_name: *const u16,
-            available: *mut u64,
-            total: *mut u64,
-            free: *mut u64,
-        ) -> i32;
-    }
+    use makepad_windows_sys::{
+        core::{PCWSTR, PWSTR},
+        Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumePathNameW},
+    };
 
     let input: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut volume = vec![0u16; 32_768];
     if unsafe {
-        GetVolumePathNameW(input.as_ptr(), volume.as_mut_ptr(), volume.len() as u32)
-    } == 0
+        GetVolumePathNameW(
+            PCWSTR(input.as_ptr()),
+            PWSTR(volume.as_mut_ptr()),
+            volume.len() as u32,
+        )
+    }
+    .is_err()
     {
         return Err(io::Error::last_os_error());
     }
@@ -123,12 +119,13 @@ fn volume_info(path: &Path) -> io::Result<(String, u64)> {
     let mut free = 0;
     if unsafe {
         GetDiskFreeSpaceExW(
-            volume_units.as_ptr(),
-            &mut available,
-            &mut total,
-            &mut free,
+            Some(PCWSTR(volume_units.as_ptr())),
+            Some(&mut available),
+            Some(&mut total),
+            Some(&mut free),
         )
-    } == 0
+    }
+    .is_err()
     {
         return Err(io::Error::last_os_error());
     }

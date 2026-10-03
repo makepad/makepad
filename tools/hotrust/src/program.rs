@@ -639,6 +639,7 @@ impl Program {
     }
 
     fn collect_block_items(&mut self, file: u32, b: BlockId, module: u32) -> Result<(), String> {
+        self.strip_cfg_stmts(file, b);
         // items directly in this block
         let mut items = Vec::new();
         let mut sub_blocks = Vec::new();
@@ -657,7 +658,7 @@ impl Program {
                             sub_blocks.push(*eb);
                         }
                     }
-                    Stmt::Empty => {}
+                    Stmt::Empty | Stmt::Attrs(..) => {}
                 }
             }
         }
@@ -673,6 +674,33 @@ impl Program {
             self.collect_block_items(file, sb, inner)?;
         }
         Ok(())
+    }
+
+    /// cfg-strips the statements of a fn-body block (like rustc before type checking):
+    /// inactive `let`/expression statements are removed, active ones lose the wrapper.
+    fn strip_cfg_stmts(&mut self, file: u32, b: BlockId) {
+        let krate = self.file_crate[file as usize];
+        let ast = &self.files[file as usize].ast;
+        let blk = ast.block(b);
+        let needs = blk.stmts.iter().any(|s| matches!(s, Stmt::Attrs(..)) || matches!(s, Stmt::Let { attrs, .. } if !attrs.is_empty()));
+        if !needs {
+            return;
+        }
+        let src = self.src(file);
+        let cfg = &self.crates[krate as usize].cfg;
+        let mut out = Vec::with_capacity(blk.stmts.len());
+        for s in &blk.stmts {
+            match s {
+                Stmt::Attrs(attrs, inner) => {
+                    if crate::cfg::active(src, attrs, cfg) {
+                        out.push((**inner).clone());
+                    }
+                }
+                Stmt::Let { attrs, .. } if !attrs.is_empty() && !crate::cfg::active(src, attrs, cfg) => {}
+                s => out.push(s.clone()),
+            }
+        }
+        self.files[file as usize].ast.blocks[b.0 as usize].stmts = out;
     }
 
     #[allow(clippy::too_many_arguments)]

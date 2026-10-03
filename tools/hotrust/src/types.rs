@@ -26,10 +26,15 @@ pub enum TyKind {
     Param(u32),
     /// inference variable (only inside one body's type check)
     Infer(u32),
-    /// a closure expression (file, expr id)
-    Closure(u32, u32),
+    /// a closure expression: (file, expr id, signature as FnPtr, captured state as a Tuple
+    /// (by-reference captures are pointers), owner fn instance as FnDef). The owner names the
+    /// type-checked body the closure's code is lowered from.
+    Closure(u32, u32, TyId, TyId, TyId),
     /// associated type projection: (trait's assoc type def, [Self, trait args...])
     Assoc(DefId, Vec<TyId>),
+    /// trait object `dyn Trait<Args, Assoc = T>`: (principal trait, its generic args without
+    /// Self, associated type bindings). `dyn Fn(A) -> R` is (Fn, [fn(A) -> R], []).
+    Dyn(DefId, Vec<TyId>, Vec<(DefId, TyId)>),
     Error,
 }
 
@@ -193,6 +198,23 @@ impl Types {
                 }
                 self.intern(TyKind::Assoc(d, n))
             }
+            TyKind::Dyn(d, v, bs) => {
+                let mut n = Vec::new();
+                for x in v {
+                    n.push(self.subst(x, args));
+                }
+                let mut nb = Vec::new();
+                for (a, x) in bs {
+                    nb.push((a, self.subst(x, args)));
+                }
+                self.intern(TyKind::Dyn(d, n, nb))
+            }
+            TyKind::Closure(f, e, sig, up, owner) => {
+                let sig = self.subst(sig, args);
+                let up = self.subst(up, args);
+                let owner = self.subst(owner, args);
+                self.intern(TyKind::Closure(f, e, sig, up, owner))
+            }
             _ => t,
         }
     }
@@ -238,6 +260,8 @@ impl Types {
                 true
             }
             TyKind::Array(e, _) | TyKind::Slice(e) | TyKind::Ref(_, e) | TyKind::Ptr(_, e) => self.is_concrete(*e),
+            TyKind::Closure(_, _, sig, up, _) => self.is_concrete(*sig) && self.is_concrete(*up),
+            TyKind::Dyn(_, v, bs) => v.iter().all(|x| self.is_concrete(*x)) && bs.iter().all(|x| self.is_concrete(x.1)),
             TyKind::FnPtr(ps, r) => {
                 for x in ps {
                     if !self.is_concrete(*x) {

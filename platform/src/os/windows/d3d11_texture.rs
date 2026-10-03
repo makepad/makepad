@@ -1,10 +1,9 @@
 //! Thin D3D11 texture helpers for cross-platform GPU texture code.
 //!
-//! COM method call sites live here so `windows_strip` (which scans
-//! `os/windows/*.rs`) keeps the corresponding vendored methods.
+//! Calls use the concrete, metadata-generated platform interfaces.
 
 use windows::{
-    core::Result as WinResult,
+    core::HRESULT,
     Win32::Graphics::Direct3D11::{
         ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11ShaderResourceView,
         ID3D11Texture2D, D3D11_BOX, D3D11_SHADER_RESOURCE_VIEW_DESC, D3D11_SUBRESOURCE_DATA,
@@ -44,7 +43,7 @@ pub unsafe fn create_texture_2d(
     desc: &D3D11_TEXTURE2D_DESC,
     initial_data: Option<*const D3D11_SUBRESOURCE_DATA>,
     texture_out: Option<*mut Option<ID3D11Texture2D>>,
-) -> WinResult<()> {
+) -> Result<(), HRESULT> {
     device.CreateTexture2D(desc, initial_data, texture_out)
 }
 
@@ -53,12 +52,12 @@ pub unsafe fn create_shader_resource_view(
     resource: &ID3D11Resource,
     desc: Option<*const D3D11_SHADER_RESOURCE_VIEW_DESC>,
     srv_out: Option<*mut Option<ID3D11ShaderResourceView>>,
-) -> WinResult<()> {
+) -> Result<(), HRESULT> {
     device.CreateShaderResourceView(resource, desc, srv_out)
 }
 
 pub unsafe fn device_get_immediate_context(
     device: &ID3D11Device,
-) -> WinResult<ID3D11DeviceContext> {
+) -> Result<ID3D11DeviceContext, HRESULT> {
     device.GetImmediateContext()
 }

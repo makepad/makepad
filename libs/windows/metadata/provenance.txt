@@ -1,0 +1,19 @@
+Inputs for tools/winbind. The .winmd files themselves are not committed: put
+them in this directory before regenerating, and check them against the SHA-256
+list below.
+
+Windows.Win32.winmd: Microsoft.Windows.SDK.Win32Metadata 71.0.26-preview
+Source: https://api.nuget.org/v3-flatcontainer/microsoft.windows.sdk.win32metadata/71.0.26-preview/microsoft.windows.sdk.win32metadata.71.0.26-preview.nupkg
+The package includes sdk_license.txt, preserved verbatim. The upstream generator repository's LICENSE.win32metadata is also preserved; it explicitly does not relicense Windows SDK artifacts.
+WinRT inputs: copied from DESKTOP-1 C:\Windows\System32\WinMetadata (Windows installation). The OS-provided WinRT inputs retain their original applicable terms; sdk_license.txt is the license shipped with the Win32Metadata package, not a relicensing of those OS files.
+Format specification: ECMA-335, Partition II, https://ecma-international.org/publications-and-standards/standards/ecma-335/
+
+Input SHA-256 (phase 2):
+4f6c0e4c98ad3e795ce25e712b17d5a12fab1bbb65c5d144105d06c51c846b6f  Windows.Devices.winmd
+d8c071caaf83d619898dc579218fb933037182c884c4c3816fcba8e2413cb990  Windows.Foundation.winmd
+078dc9ed18b7e1d504cfb25e4a0c69a88261d96a2b9076fcc2d207b18e89ec95  Windows.Globalization.winmd
+55aa089a0ef6666b82b84c09e2c6e63efe328b60ce1d9abb9657629e02c5eebf  Windows.Media.winmd
+162c16fda92fd9d7708b4192312f8d49f443d4a72073e79551d5897a9d951457  Windows.Networking.winmd
+6a45b97e1316ff584345773c65eec3a7212ba58c587842f8da13bf5b18a07bb3  Windows.Security.winmd
+21f4e900ef68c7d40ce64af23277adcb8297b2e77514bcfd848fc81fa163b345  Windows.Storage.winmd
+0c0e5f11543fd654f9fad44c1952494bf407d6b067d93c2e5eef4fcf5d42edde  Windows.Win32.winmd

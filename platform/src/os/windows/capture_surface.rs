@@ -18,7 +18,6 @@ use {
         os::windows::d3d11::D3d11Cx,
         screen_capture::{ScreenCaptureSurface, SurfaceInner},
         windows::{
-            core::Interface,
             Win32::Graphics::{
                 Direct3D11::{
                     ID3D11Device, ID3D11Multithread, ID3D11Resource, ID3D11Texture2D,
@@ -80,7 +79,7 @@ pub(crate) fn encode_capture_surface(
         }
         let ring = ring.get_or_insert_with(|| {
             // Media Foundation reads these textures from its own threads.
-            if let Ok(multithread) = d3d11_cx.device.cast::<ID3D11Multithread>() {
+            if let Ok(multithread) = unsafe { ID3D11Multithread::query(d3d11_cx.device.as_raw()) } {
                 let _ = unsafe { multithread.SetMultithreadProtected(true) };
             }
             Ring { device: d3d11_cx.device.clone(), size: (width, height), textures: Vec::new() }
@@ -90,7 +89,7 @@ pub(crate) fn encode_capture_surface(
         SKIPPED.fetch_add(1, Ordering::Relaxed);
         return;
     };
-    let (Ok(destination), Ok(source)) = (texture.cast::<ID3D11Resource>(), back_buffer.cast::<ID3D11Resource>()) else {
+    let (Ok(destination), Ok(source)) = (unsafe { ID3D11Resource::query(texture.as_raw()) }, unsafe { ID3D11Resource::query(back_buffer.as_raw()) }) else {
         return;
     };
     let region = D3D11_BOX { left: 0, top: 0, front: 0, right: width, bottom: height, back: 1 };
@@ -189,7 +188,7 @@ pub(crate) fn read_texture_rgba(surface: &ScreenCaptureSurface, out: &mut Vec<u8
         if device.CreateTexture2D(&desc, None, Some(&mut staging)).is_err() {
             return false;
         }
-        let (Some(Ok(staging)), Ok(source)) = (staging.map(|s| s.cast::<ID3D11Resource>()), texture.cast::<ID3D11Resource>()) else {
+        let (Some(Ok(staging)), Ok(source)) = (staging.map(|s| ID3D11Resource::query(s.as_raw())), ID3D11Resource::query(texture.as_raw())) else {
             return false;
         };
         context.CopyResource(&staging, &source);

@@ -118,17 +118,6 @@ pub fn init_win32_app_global(event_callback: Box<dyn FnMut(Win32Event) -> EventF
         *app.borrow_mut() = Some(Win32App::new(event_callback));
     });
 }
-/*
-// copied from Microsoft so it refers to the right IDataObject
-#[allow(non_snake_case)]
-pub unsafe fn DoDragDrop<P0, P1>(pdataobj: P0, pdropsource: P1, dwokeffects: DROPEFFECT, pdweffect: *mut DROPEFFECT) -> HRESULT
-where
-P0: IntoParam<IDataObject>,
-P1: IntoParam<IDropSource>,
-{
-    ::windows_link::link!("ole32.dll" "system" fn DoDragDrop(pdataobj: *mut::core::ffi::c_void, pdropsource: *mut::core::ffi::c_void, dwokeffects: DROPEFFECT, pdweffect: *mut DROPEFFECT) -> HRESULT);
-    DoDragDrop(pdataobj.into_param().abi(), pdropsource.into_param().abi(), dwokeffects, pdweffect)
-}*/
 
 /// Coalesce a run of consecutive `WM_MOUSEMOVE` messages for the same window
 /// into just the latest one.
@@ -234,13 +223,13 @@ const WAIT_FAILED_U32: u32 = 0xFFFF_FFFF;
 /// (we peek without removing while coalescing) would be ignored until the next
 /// one arrived.
 unsafe fn msg_wait_for_beat_or_input(handles: &[HANDLE], timeout_ms: u32) -> u32 {
-    windows_core::link!("user32.dll" "system" fn MsgWaitForMultipleObjectsEx(
+    #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn MsgWaitForMultipleObjectsEx(
         n_count: u32,
         p_handles: *const HANDLE,
         dw_milliseconds: u32,
         dw_wake_mask: u32,
         dw_flags: u32
-    ) -> u32);
+    ) -> u32; }
     unsafe {
         MsgWaitForMultipleObjectsEx(
             handles.len() as u32,
@@ -410,7 +399,7 @@ impl Win32App {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_OWNDC,
             lpfnWndProc: Some(Win32Window::window_class_proc),
-            hInstance: unsafe { GetModuleHandleW(None).unwrap().into() },
+            hInstance: unsafe { windows::Win32::Foundation::HINSTANCE(GetModuleHandleW(None).unwrap().0) },
             hIcon: hicon_big,
             hIconSm: hicon_small,
             hCursor: unsafe { LoadCursorW(None, IDC_ARROW).unwrap_or_default() },
@@ -424,7 +413,7 @@ impl Win32App {
             let _ = IsGUIThread(true);
 
             // initialize COM using OleInitialize to allow Drag&Drop and other shell features
-            OleInitialize(None).unwrap();
+            OleInitialize(std::ptr::null()).unwrap();
         }
 
         let win32_app = Win32App {
@@ -469,7 +458,7 @@ impl Win32App {
         let and_stride = ((width + 15) / 16) * 2;
         let and_mask = vec![0u8; (and_stride * height) as usize];
 
-        windows_core::link!("user32.dll" "system" fn CreateIcon(
+        #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn CreateIcon(
             hinstance: *mut core::ffi::c_void,
             n_width: i32,
             n_height: i32,
@@ -477,7 +466,7 @@ impl Win32App {
             c_bits_pixel: u8,
             lp_and_bits: *const u8,
             lp_xor_bits: *const u8
-        ) -> HICON);
+        ) -> HICON; }
 
         unsafe {
             let hicon = CreateIcon(
@@ -507,7 +496,7 @@ impl Win32App {
         let load_exe_or_default = |cx: SYSTEM_METRICS_INDEX, cy: SYSTEM_METRICS_INDEX| unsafe {
             let from_exe = GetModuleHandleW(None).ok().and_then(|h| {
                 LoadImageW(
-                    Some(h.into()),
+                    Some(windows::Win32::Foundation::HINSTANCE(h.0)),
                     PCWSTR(1 as *const u16),
                     IMAGE_ICON,
                     GetSystemMetrics(cx),
@@ -928,14 +917,13 @@ impl Win32App {
                     // only drag if something is there
                     if (path.len() > 0) || internal_id.is_some() {
                         // create COM IDataObject that hosts the drag item
-                        let data_object: IDataObject = DragItemWindows(DragItem::FilePath {
+                        let data_object: IDataObject = IDataObject::implement(Box::new(DragItemWindows(DragItem::FilePath {
                             path: path.clone(),
                             internal_id: internal_id.clone(),
-                        })
-                        .into();
+                        })));
 
                         // create COM IDropSource to indicate when to stop dragging
-                        let drop_source: IDropSource = DropSource {}.into();
+                        let drop_source: IDropSource = IDropSource::implement(Box::new(DropSource {}));
 
                         with_win32_app(|app| app.is_dragging_internal.replace(true));
                         let mut effect = DROPEFFECT(0);
@@ -947,8 +935,8 @@ impl Win32App {
                                 &mut effect,
                             )
                         } {
-                            DRAGDROP_S_DROP => { /*log!("DoDragDrop: succesful")*/ }
-                            DRAGDROP_S_CANCEL => { /*log!("DoDragDrop: canceled")*/ }
+                            value if value == DRAGDROP_S_DROP => { /*log!("DoDragDrop: succesful")*/ }
+                            value if value == DRAGDROP_S_CANCEL => { /*log!("DoDragDrop: canceled")*/ }
                             _ => {
                                 log!("DoDragDrop: failed for some reason")
                             }
@@ -1033,7 +1021,7 @@ impl Win32App {
             };
             self.current_cursor = Some(cursor);
             unsafe {
-                if win32_cursor == PCWSTR::null() {
+                if win32_cursor.is_null() {
                     ShowCursor(false);
                 } else {
                     SetCursor(Some(LoadCursorW(None, win32_cursor).unwrap()));
@@ -1157,7 +1145,7 @@ impl DpiFunctions {
                 set_process_dpi_awareness(PROCESS_PER_MONITOR_DPI_AWARE).unwrap();
             } else if let Some(set_process_dpi_aware) = self.set_process_dpi_aware {
                 // We are on Vista or later.
-                set_process_dpi_aware().unwrap();
+                set_process_dpi_aware().ok().unwrap();
             }
         }
     }

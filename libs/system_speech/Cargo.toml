@@ -13,34 +13,11 @@ license = "MIT"
 makepad-jni-sys = { version = "0.4.0" }
 makepad-android-state = { version = "0.1.0" }
 
-[target.'cfg(windows)'.dependencies.windows-core]
-path = "../windows/windows-core"
-version = "0.62.2"
-
-## `IAsyncOperation` / `IAsyncAction` are named directly by the blocking waits
-## in `platform/windows.rs`; the `windows` crate returns them but re-exports
-## neither.
-[target.'cfg(windows)'.dependencies.windows-future]
-path = "../windows/windows-future"
-version = "0.3.2"
-default-features = false
-
-[target.'cfg(windows)'.dependencies.windows]
-path = "../windows/windows-rs"
-version = "0.62.2"
-features = [
-    "Foundation",
-    "Foundation_Collections",
-    "Globalization",
-    ## `SpeechSynthesisStream` is gated on Media_Core: it is an IMediaSource.
-    "Media_Core",
-    "Media_SpeechSynthesis",
-    "Media_SpeechRecognition",
-    "Storage_Streams",
-    "Win32_Foundation",
-    "Win32_System_WinRT",
-]
-
 [[bin]]
 name = "system-speech-test"
 path = "src/bin/system_speech_test.rs"
+
+[target.'cfg(windows)'.dependencies.windows]
+package = "makepad-windows-sys"
+path = "../windows/sys"
+version = "0.1.0"

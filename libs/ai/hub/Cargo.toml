@@ -183,3 +183,6 @@ required-features = ["local"]
 [[bin]]
 name = "ai-fleet"
 path = "src/bin/ai_fleet.rs"
+
+[target.'cfg(windows)'.dependencies]
+makepad-windows-sys = {path = "../../windows/sys", version = "0.1.0"}

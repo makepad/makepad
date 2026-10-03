@@ -38,3 +38,6 @@ makepad-micro-serde = { path = "../../micro_serde" }
 makepad-strict-json = { path = "../../strict_json" }
 makepad-bounded-http = { path = "../../bounded_http" }
 makepad-ai-hub = { path = "../hub", default-features = false, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+makepad-windows-sys = {path = "../../windows/sys", version = "0.1.0"}

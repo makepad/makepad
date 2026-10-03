@@ -26,7 +26,7 @@ use {
         gpu_texture::with_media_d3d11_lock,
         thread::SignalToUI,
         windows::{
-            core::{Interface, BSTR, IUnknown},
+            core::{BSTR, IUnknown},
             Win32::{
                 Foundation::RECT,
                 Graphics::{
@@ -64,6 +64,7 @@ use {
     },
 };
 
+use std::sync::Arc;
 use super::windows_media_engine_notify::{
     drain_notify_events, new_media_engine_notify, MediaEngineNotifyState,
 };
@@ -229,7 +230,7 @@ fn post(cmd: MfCmd) {
 
 struct WorkerSession {
     engine: IMFMediaEngine,
-    _notify: windows::core::ComObject<MediaEngineNotifyState>,
+    _notify: Arc<MediaEngineNotifyState>,
     _dxgi_manager: IMFDXGIDeviceManager,
     device: ID3D11Device,
     /// Prefer NV12 `TransferVideoFrame` + plane SRV sampling (skips BGRA convert).
@@ -446,7 +447,7 @@ fn mf_worker_main(rx: Receiver<MfCmd>) {
 }
 
 fn enable_d3d11_multithread(device: &ID3D11Device) {
-    if let Ok(mt) = device.cast::<ID3D11Multithread>() {
+    if let Ok(mt) = unsafe { ID3D11Multithread::query(device.as_raw()) } {
         let _ = unsafe { mt.SetMultithreadProtected(true) };
     }
 }
@@ -484,7 +485,7 @@ fn create_session(
         unsafe { MFCreateDXGIDeviceManager(&mut reset_token, &mut dxgi_manager) }
             .map_err(|e| format!("MFCreateDXGIDeviceManager: {e:?}"))?;
         let dxgi_manager = dxgi_manager.ok_or_else(|| "null DXGI manager".to_string())?;
-        unsafe { dxgi_manager.ResetDevice(&device, reset_token) }
+        unsafe { dxgi_manager.ResetDevice(device.as_IUnknown(), reset_token) }
             .map_err(|e| format!("ResetDevice: {e:?}"))?;
 
         let mut attrs = None;
@@ -492,11 +493,11 @@ fn create_session(
             .map_err(|e| format!("MFCreateAttributes: {e:?}"))?;
         let attributes = attrs.ok_or_else(|| "null attributes".to_string())?;
 
-        let notify_com = new_media_engine_notify();
-        let notify_unk: IUnknown = notify_com.clone().into_interface();
+        let (notify_interface, notify_com) = new_media_engine_notify();
+        let notify_unk = notify_interface.as_IUnknown();
         unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_CALLBACK, &notify_unk) }
             .map_err(|e| format!("SetUnknown(CALLBACK): {e:?}"))?;
-        unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_DXGI_MANAGER, &dxgi_manager) }
+        unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_DXGI_MANAGER, dxgi_manager.as_IUnknown()) }
             .map_err(|e| format!("SetUnknown(DXGI_MANAGER): {e:?}"))?;
 
         // Prefer NV12 Transfer so UI can sample Y/UV planes (skip BGRA convert).
@@ -514,11 +515,7 @@ fn create_session(
         };
 
         let factory: IMFMediaEngineClassFactory = unsafe {
-            CoCreateInstance(
-                &CLSID_MFMediaEngineClassFactory,
-                None,
-                CLSCTX_INPROC_SERVER,
-            )
+            CoCreateInstance(&CLSID_MFMediaEngineClassFactory, None, CLSCTX_INPROC_SERVER, &IMFMediaEngineClassFactory::IID).and_then(|raw| IMFMediaEngineClassFactory::from_raw(raw))
         }
         .map_err(|e| {
             format!(
@@ -531,8 +528,8 @@ fn create_session(
             .map_err(|e| format!("CreateInstance(engine): {e:?}"))?;
         let _ = unsafe { engine.SetLoop(is_looping) };
 
-        let bstr = BSTR::from(url.as_str());
-        unsafe { engine.SetSource(&bstr) }.map_err(|e| format!("SetSource: {e:?}"))?;
+        let bstr = BSTR::from_str(url.as_str()).map_err(|e| format!("source URL: {e:?}"))?;
+        unsafe { engine.SetSource(bstr.0) }.map_err(|e| format!("SetSource: {e:?}"))?;
 
         if output_nv12 {
             static LOGGED: AtomicBool = AtomicBool::new(false);
@@ -710,7 +707,7 @@ fn create_bgra_render_target(
         return None;
     }
     let texture = texture?;
-    let resource = texture.cast::<ID3D11Resource>().ok()?;
+    let resource = unsafe { ID3D11Resource::query(texture.as_raw()) }.ok()?;
     let mut srv = None;
     if unsafe {
         device.CreateShaderResourceView(&resource, None, Some(&mut srv))
@@ -792,7 +789,7 @@ fn media_engine_error_message(engine: &IMFMediaEngine) -> String {
 }
 
 fn tick_session(session: u64, s: &mut WorkerSession) {
-    let events = drain_notify_events(s._notify.get());
+    let events = drain_notify_events(&s._notify);
     for event in events {
         if event == MF_MEDIA_ENGINE_EVENT_CANPLAY.0 as u32 {
             s.prepared = true;
@@ -861,7 +858,7 @@ fn tick_session(session: u64, s: &mut WorkerSession) {
                 height: h,
                 duration_ms,
                 has_audio: unsafe {
-                    (Interface::vtable(&s.engine).HasAudio)(Interface::as_raw(&s.engine))
+                    (s.engine.vtable().HasAudio)(s.engine.as_raw())
                 }
                 .as_bool(),
             });
@@ -906,7 +903,7 @@ fn tick_session(session: u64, s: &mut WorkerSession) {
             rgbRed: 0,
             rgbAlpha: 0,
         };
-        let unk: IUnknown = texture.cast().unwrap();
+        let unk: IUnknown = unsafe { IUnknown::query(texture.as_raw()) }.unwrap();
         if unsafe {
             s.engine
                 .TransferVideoFrame(&unk, None, &dst, Some(&border))
@@ -958,17 +955,17 @@ fn fallback_session_to_bgra(s: &mut WorkerSession) -> Result<(), String> {
     unsafe { MFCreateDXGIDeviceManager(&mut reset_token, &mut dxgi_manager) }
         .map_err(|e| format!("MFCreateDXGIDeviceManager: {e:?}"))?;
     let dxgi_manager = dxgi_manager.ok_or_else(|| "null DXGI manager".to_string())?;
-    unsafe { dxgi_manager.ResetDevice(&s.device, reset_token) }
+    unsafe { dxgi_manager.ResetDevice(s.device.as_IUnknown(), reset_token) }
         .map_err(|e| format!("ResetDevice: {e:?}"))?;
 
     let mut attrs = None;
     unsafe { MFCreateAttributes(&mut attrs, 4) }.map_err(|e| format!("MFCreateAttributes: {e:?}"))?;
     let attributes = attrs.ok_or_else(|| "null attributes".to_string())?;
-    let notify_com = new_media_engine_notify();
-    let notify_unk: IUnknown = notify_com.clone().into_interface();
+    let (notify_interface, notify_com) = new_media_engine_notify();
+    let notify_unk = notify_interface.as_IUnknown();
     unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_CALLBACK, &notify_unk) }
         .map_err(|e| format!("SetUnknown(CALLBACK): {e:?}"))?;
-    unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_DXGI_MANAGER, &dxgi_manager) }
+    unsafe { attributes.SetUnknown(&MF_MEDIA_ENGINE_DXGI_MANAGER, dxgi_manager.as_IUnknown()) }
         .map_err(|e| format!("SetUnknown(DXGI_MANAGER): {e:?}"))?;
     let _ = unsafe {
         attributes.SetUINT32(
@@ -978,18 +975,14 @@ fn fallback_session_to_bgra(s: &mut WorkerSession) -> Result<(), String> {
     };
 
     let factory: IMFMediaEngineClassFactory = unsafe {
-        CoCreateInstance(
-            &CLSID_MFMediaEngineClassFactory,
-            None,
-            CLSCTX_INPROC_SERVER,
-        )
+        CoCreateInstance(&CLSID_MFMediaEngineClassFactory, None, CLSCTX_INPROC_SERVER, &IMFMediaEngineClassFactory::IID).and_then(|raw| IMFMediaEngineClassFactory::from_raw(raw))
     }
     .map_err(|e| format!("CoCreateInstance(MFMediaEngineClassFactory): {e:?}"))?;
     let engine = unsafe { factory.CreateInstance(0, &attributes) }
         .map_err(|e| format!("CreateInstance(engine): {e:?}"))?;
     let _ = unsafe { engine.SetLoop(s.is_looping) };
-    let bstr = BSTR::from(s.source_url.as_str());
-    unsafe { engine.SetSource(&bstr) }.map_err(|e| format!("SetSource: {e:?}"))?;
+    let bstr = BSTR::from_str(s.source_url.as_str()).map_err(|e| format!("source URL: {e:?}"))?;
+    unsafe { engine.SetSource(bstr.0) }.map_err(|e| format!("SetSource: {e:?}"))?;
 
     s.engine = engine;
     s._notify = notify_com;

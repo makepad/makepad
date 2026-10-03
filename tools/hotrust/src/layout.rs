@@ -82,7 +82,8 @@ impl Layouts {
                 }
             }
             TyKind::FnPtr(..) => scalar(8, ptr, Cls::I),
-            TyKind::FnDef(..) | TyKind::Never | TyKind::Closure(..) => {
+            TyKind::Closure(_, _, _, up, _) => self.of(tcx, up),
+            TyKind::FnDef(..) | TyKind::Never => {
                 Layout { size: 0, align: 1, fields: Vec::new(), tag: None, variant_fields: Vec::new(), leaves: Some(Vec::new()) }
             }
             TyKind::Tuple(v) => self.record(tcx, &v),
@@ -202,7 +203,7 @@ impl Layouts {
     }
 
     pub fn is_unsized(&mut self, tcx: &Tcx, t: TyId) -> bool {
-        matches!(tcx.tys.kind(t), TyKind::Str | TyKind::Slice(_))
+        matches!(tcx.tys.kind(t), TyKind::Str | TyKind::Slice(_) | TyKind::Dyn(..))
     }
 }
 

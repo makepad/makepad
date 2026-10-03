@@ -71,6 +71,8 @@ pub struct GenEnv {
     pub trait_def: Option<DefId>,
     /// inside an impl (its items see `Self::Assoc` as the impl's own types)
     pub impl_def: Option<DefId>,
+    /// `impl Trait` in argument position: (ast type id, the anonymous generic param it is)
+    pub impl_params: Vec<(u32, u32)>,
 }
 
 pub struct Tcx {
@@ -88,6 +90,9 @@ pub struct Tcx {
     /// trait arguments of each trait impl (in the impl's generic environment, defaults filled)
     pub impl_trait_args: HashMap<DefId, Vec<TyId>>,
     pub alias_tys: HashMap<DefId, TyId>,
+    /// per fn: generic params bounded by Fn/FnMut/FnOnce, with the bound's signature as a
+    /// FnPtr over the fn's generics (guides closure inference, checks callee signatures)
+    pub fn_bounds: HashMap<DefId, Vec<(u32, TyId)>>,
     pub errors: Vec<String>,
 }
 
@@ -123,6 +128,7 @@ impl Tcx {
             impls_by_key: HashMap::new(),
             impl_trait_args: HashMap::new(),
             alias_tys: HashMap::new(),
+            fn_bounds: HashMap::new(),
             errors: Vec::new(),
         }
     }
@@ -214,7 +220,24 @@ impl Tcx {
         let ast = &prog.files[def.file as usize].ast;
         let it = ast.item(def.item);
         match &it.kind {
-            ItemKind::Fn(sig, _, _) => push_generics(prog, def.file, &sig.generics, &mut env),
+            ItemKind::Fn(sig, _, _) => {
+                push_generics(prog, def.file, &sig.generics, &mut env);
+                // each `impl Trait` parameter type is an anonymous generic param
+                for p in &sig.params {
+                    let mut t = p.ty;
+                    loop {
+                        match ast.ty(t) {
+                            ast::Ty::Ref(_, _, x) | ast::Ty::Paren(x) | ast::Ty::Ptr(_, x) => t = *x,
+                            ast::Ty::ImplTrait(_) => {
+                                env.impl_params.push((t.0, env.names.len() as u32));
+                                env.names.push(u32::MAX);
+                                break;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
+            }
             ItemKind::Struct(g, _) | ItemKind::Enum(g, _) | ItemKind::Union(g, _) => push_generics(prog, def.file, g, &mut env),
             ItemKind::TypeAlias { generics, .. } => push_generics(prog, def.file, generics, &mut env),
             _ => {}
@@ -343,6 +366,10 @@ impl Tcx {
             Some(r) => self.lower_ty(prog, file, module, &env, r),
             None => self.tys.unit,
         };
+        let bounds = self.collect_fn_bounds(prog, file, module, &env, sig, n_parent);
+        if !bounds.is_empty() {
+            self.fn_bounds.insert(d, bounds);
+        }
         let c_abi = def.kind == DefKind::ForeignFn || matches!(sig.abi, Some(Some(_)));
         self.sigs.insert(
             d,
@@ -357,6 +384,73 @@ impl Tcx {
                 variadic: sig.variadic,
             },
         );
+    }
+
+    /// Fn-family bounds on a fn's own generic params (inline, `where`, and `impl Fn(..)`).
+    fn collect_fn_bounds(&mut self, prog: &Program, file: u32, module: u32, env: &GenEnv, sig: &ast::FnSig, n_parent: u32) -> Vec<(u32, TyId)> {
+        let ast = &prog.files[file as usize].ast;
+        let f = &prog.files[file as usize];
+        let mut pending: Vec<(u32, &ast::Bound)> = Vec::new();
+        let mut k = n_parent;
+        for gp in &sig.generics.params {
+            match &gp.kind {
+                GenericParamKind::Type(bs, _) => {
+                    for b in bs {
+                        pending.push((k, b));
+                    }
+                    k += 1;
+                }
+                GenericParamKind::Const(..) => k += 1,
+                GenericParamKind::Lifetime(_) => {}
+            }
+        }
+        for w in &sig.generics.where_ {
+            if let ast::WherePred::Bound { ty, bounds, .. } = w {
+                if let ast::Ty::Path(p) = ast.ty(*ty) {
+                    if p.segs.len() == 1 && p.segs[0].args.is_none() {
+                        let name = prog.syms.get(f.text(p.segs[0].name)).unwrap_or(u32::MAX - 1);
+                        if let Some(i) = env.names.iter().rposition(|n| *n == name) {
+                            if i as u32 >= n_parent {
+                                for b in bounds {
+                                    pending.push((i as u32, b));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for &(t, i) in &env.impl_params {
+            if let ast::Ty::ImplTrait(bs) = ast.ty(ast::TyId(t)) {
+                for b in bs {
+                    pending.push((i, b));
+                }
+            }
+        }
+        let mut out = Vec::new();
+        for (i, b) in pending {
+            if let ast::Bound::Trait { path, .. } = b {
+                if let Some(last) = path.segs.last() {
+                    let n = f.text(last.name);
+                    if n == "Fn" || n == "FnMut" || n == "FnOnce" {
+                        if let Some(a) = &last.args {
+                            if let GenericArgs::Paren(ps, r) = &**a {
+                                let mut pts = Vec::new();
+                                for x in ps {
+                                    pts.push(self.lower_ty(prog, file, module, env, *x));
+                                }
+                                let rt = match r {
+                                    Some(r) => self.lower_ty(prog, file, module, env, *r),
+                                    None => self.tys.unit,
+                                };
+                                out.push((i, self.tys.intern(TyKind::FnPtr(pts, rt))));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     fn collect_const(&mut self, prog: &Program, d: DefId) {
@@ -425,6 +519,11 @@ impl Tcx {
             }
             ast::Ty::Infer => self.tys.error,
             ast::Ty::Path(p) => self.lower_path_ty(prog, file, module, env, p),
+            ast::Ty::DynTrait(bounds, _) => self.lower_dyn(prog, file, module, env, bounds, 0),
+            ast::Ty::ImplTrait(_) if env.impl_params.iter().any(|x| x.0 == t.0) => {
+                let i = env.impl_params.iter().find(|x| x.0 == t.0).unwrap().1;
+                self.tys.intern(TyKind::Param(i))
+            }
             _ => {
                 let lo = match ast.ty(t) {
                     _ => 0,
@@ -433,6 +532,65 @@ impl Tcx {
                 self.tys.error
             }
         }
+    }
+
+    /// `dyn Principal<..> + AutoTraits + 'a`
+    fn lower_dyn(&mut self, prog: &Program, file: u32, module: u32, env: &GenEnv, bounds: &[ast::Bound], lo: u32) -> TyId {
+        let f = &prog.files[file as usize];
+        for b in bounds {
+            let path = match b {
+                ast::Bound::Trait { path, .. } => path,
+                _ => continue,
+            };
+            let td = match self.resolve_type_path_def(prog, file, module, path) {
+                Some(d) if prog.def(d).kind == DefKind::Trait => d,
+                _ => continue,
+            };
+            let name = prog.name(td);
+            if matches!(name, "Send" | "Sync" | "Sized" | "Unpin" | "UnwindSafe" | "RefUnwindSafe") && prog.def(td).krate == self.core_crate(prog) {
+                continue;
+            }
+            let last = path.segs.last().unwrap();
+            let mut args = Vec::new();
+            let mut binds = Vec::new();
+            match last.args.as_deref() {
+                Some(GenericArgs::Paren(ps, r)) => {
+                    let mut pts = Vec::new();
+                    for x in ps {
+                        pts.push(self.lower_ty(prog, file, module, env, *x));
+                    }
+                    let rt = match r {
+                        Some(r) => self.lower_ty(prog, file, module, env, *r),
+                        None => self.tys.unit,
+                    };
+                    args.push(self.tys.intern(TyKind::FnPtr(pts, rt)));
+                }
+                Some(GenericArgs::Angle(v)) => {
+                    for g in v {
+                        match g {
+                            GenericArg::Type(t) => args.push(self.lower_ty(prog, file, module, env, *t)),
+                            GenericArg::Binding(n, _, t) => {
+                                let sym = prog.syms.get(f.text(*n)).unwrap_or(u32::MAX);
+                                if let Some(ad) = self.trait_assoc(prog, td, sym) {
+                                    let bt = self.lower_ty(prog, file, module, env, *t);
+                                    binds.push((ad, bt));
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                None => {}
+            }
+            binds.sort_by_key(|b| b.0 .0);
+            return self.tys.intern(TyKind::Dyn(td, args, binds));
+        }
+        self.err(prog, file, lo, "trait object without a principal trait".to_string());
+        self.tys.error
+    }
+
+    fn core_crate(&self, prog: &Program) -> u32 {
+        prog.prelude_crate.unwrap_or(u32::MAX)
     }
 
     pub fn lower_path_ty(&mut self, prog: &Program, file: u32, module: u32, env: &GenEnv, p: &ast::Path) -> TyId {
@@ -729,6 +887,7 @@ impl Tcx {
         out
     }
 
+    /// Associated type `name` of trait `td` or (transitively) its supertraits.
     pub fn trait_assoc(&self, prog: &Program, td: DefId, name: Sym) -> Option<DefId> {
         for &it in &prog.traits[prog.def(td).sub as usize] {
             let d = prog.def(it);
@@ -736,7 +895,33 @@ impl Tcx {
                 return Some(it);
             }
         }
+        for sup in self.trait_supers(prog, td) {
+            if sup != td {
+                if let Some(x) = self.trait_assoc(prog, sup, name) {
+                    return Some(x);
+                }
+            }
+        }
         None
+    }
+
+    /// Direct supertraits of a trait (resolved from its `: A + B` bounds).
+    pub fn trait_supers(&self, prog: &Program, td: DefId) -> Vec<DefId> {
+        let pd = prog.def(td);
+        let ast = &prog.files[pd.file as usize].ast;
+        let mut out = Vec::new();
+        if let ItemKind::Trait { supers, .. } = &ast.item(pd.item).kind {
+            for b in supers {
+                if let ast::Bound::Trait { path, .. } = b {
+                    if let Some(d) = self.resolve_type_path_def(prog, pd.file, pd.scope, path) {
+                        if prog.def(d).kind == DefKind::Trait {
+                            out.push(d);
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// An impl's `type Name = T;` lowered in the impl's environment.
@@ -844,6 +1029,11 @@ impl Tcx {
                 for x in &args {
                     n.push(self.normalize(prog, *x));
                 }
+                if let Some(TyKind::Dyn(_, _, bs)) = n.first().map(|x| self.tys.kind(*x).clone()) {
+                    if let Some(b) = bs.iter().find(|b| b.0 == ad) {
+                        return b.1;
+                    }
+                }
                 if !n.is_empty() && self.tys.is_concrete(n[0]) {
                     let td = prog.def(ad).parent;
                     if let Some((imp, iargs)) = self.find_impl(td, n[0], &n[1..]) {
@@ -885,6 +1075,17 @@ impl Tcx {
             TyKind::Array(e, l) => {
                 let e = self.normalize(prog, e);
                 self.tys.intern(TyKind::Array(e, l))
+            }
+            TyKind::Dyn(d, v, bs) => {
+                let mut n = Vec::new();
+                for x in v {
+                    n.push(self.normalize(prog, x));
+                }
+                let mut nb = Vec::new();
+                for (a, x) in bs {
+                    nb.push((a, self.normalize(prog, x)));
+                }
+                self.tys.intern(TyKind::Dyn(d, n, nb))
             }
             _ => t,
         }

@@ -317,7 +317,6 @@ mod windows_api {
     use super::*;
     use crate::os::windows::d3d11_texture;
     use windows::{
-        core::Interface,
         Win32::Graphics::{
             Direct3D::D3D_SRV_DIMENSION,
             Direct3D11::{
@@ -378,32 +377,9 @@ mod windows_api {
 
     /// Same QI path as Media Foundation video playback (`windows_video_playback`).
     fn enable_d3d11_multithread_protected(device: &ID3D11Device) {
-        use std::ffi::c_void;
-        use windows::core::{GUID, HRESULT, Interface};
-
-        unsafe {
-            let raw = Interface::as_raw(device);
-            // IID_ID3D11Multithread
-            let iid = GUID::from_u128(0x9B7E4E00_342C_4106_A19F_4F2704F689F0u128);
-            let mut mt: *mut c_void = std::ptr::null_mut();
-            let vtbl = *(raw as *const *const usize);
-            let qi: unsafe extern "system" fn(
-                *mut c_void,
-                *const GUID,
-                *mut *mut c_void,
-            ) -> HRESULT = std::mem::transmute(*vtbl);
-            let hr = qi(raw, &iid, &mut mt);
-            if hr.is_ok() && !mt.is_null() {
-                // ID3D11Multithread::SetMultithreadProtected is vtable index 4.
-                let mt_vtbl = *(mt as *const *const usize);
-                let set_protected: unsafe extern "system" fn(*mut c_void, i32) -> i32 =
-                    std::mem::transmute(*mt_vtbl.add(4));
-                set_protected(mt, 1);
-                // Release the QI'd interface.
-                let release: unsafe extern "system" fn(*mut c_void) -> u32 =
-                    std::mem::transmute(*mt_vtbl.add(2));
-                release(mt);
-            }
+        use windows::Win32::Graphics::Direct3D11::ID3D11Multithread;
+        if let Ok(multithread) = unsafe { ID3D11Multithread::query(device.as_raw()) } {
+            unsafe { multithread.SetMultithreadProtected(true); }
         }
     }
 
@@ -433,8 +409,7 @@ mod windows_api {
             let srv = match srv {
                 Some(s) => s,
                 None => {
-                    let resource: ID3D11Resource = texture
-                        .cast()
+                    let resource: ID3D11Resource = unsafe { ID3D11Resource::query(texture.as_raw()) }
                         .map_err(|e| format!("adopt_d3d11_bgra: cast to resource failed: {e}"))?;
                     let mut out: Option<ID3D11ShaderResourceView> = None;
                     unsafe {
@@ -547,8 +522,7 @@ mod windows_api {
             ));
         }
 
-        let resource: ID3D11Resource = texture
-            .cast()
+        let resource: ID3D11Resource = unsafe { ID3D11Resource::query(texture.as_raw()) }
             .map_err(|e| format!("NV12 plane SRV: cast failed: {e}"))?;
 
         let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
@@ -606,8 +580,7 @@ mod windows_api {
             ));
         }
 
-        let resource: ID3D11Resource = texture
-            .cast()
+        let resource: ID3D11Resource = unsafe { ID3D11Resource::query(texture.as_raw()) }
             .map_err(|e| format!("NV12 array SRV: cast failed: {e}"))?;
 
         let desc = D3D11_SHADER_RESOURCE_VIEW_DESC {
@@ -728,14 +701,11 @@ mod windows_api {
         let context = unsafe { d3d11_texture::device_get_immediate_context(device) }
             .map_err(|e| format!("NV12 present: GetImmediateContext failed: {e:?}"))?;
 
-        let src_res: ID3D11Resource = src
-            .cast()
+        let src_res: ID3D11Resource = unsafe { ID3D11Resource::query(src.as_raw()) }
             .map_err(|e| format!("NV12 present: src cast failed: {e}"))?;
-        let y_res: ID3D11Resource = y_tex
-            .cast()
+        let y_res: ID3D11Resource = unsafe { ID3D11Resource::query(y_tex.as_raw()) }
             .map_err(|e| format!("NV12 present: y cast failed: {e}"))?;
-        let uv_res: ID3D11Resource = uv_tex
-            .cast()
+        let uv_res: ID3D11Resource = unsafe { ID3D11Resource::query(uv_tex.as_raw()) }
             .map_err(|e| format!("NV12 present: uv cast failed: {e}"))?;
 
         let src_box = D3D11_BOX {

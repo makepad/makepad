@@ -1,0 +1,3 @@
+# The .winmd inputs are not committed (about 26 MB of binaries that every clone
+# would carry). Fetch them as provenance.txt describes before regenerating.
+*.winmd

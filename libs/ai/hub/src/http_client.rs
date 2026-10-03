@@ -302,78 +302,10 @@ const WINHTTP_QUERY_FLAG_NUMBER: u32 = 0x2000_0000;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 
 #[cfg(target_os = "windows")]
-#[link(name = "winhttp")]
-unsafe extern "system" {
-    fn WinHttpOpen(
-        user_agent: *const u16,
-        access_type: u32,
-        proxy_name: *const u16,
-        proxy_bypass: *const u16,
-        flags: u32,
-    ) -> *mut std::ffi::c_void;
-    fn WinHttpConnect(
-        session: *mut std::ffi::c_void,
-        server_name: *const u16,
-        server_port: u16,
-        reserved: u32,
-    ) -> *mut std::ffi::c_void;
-    fn WinHttpOpenRequest(
-        connect: *mut std::ffi::c_void,
-        verb: *const u16,
-        object_name: *const u16,
-        version: *const u16,
-        referrer: *const u16,
-        accept_types: *const *const u16,
-        flags: u32,
-    ) -> *mut std::ffi::c_void;
-    fn WinHttpSetTimeouts(
-        handle: *mut std::ffi::c_void,
-        resolve_timeout: i32,
-        connect_timeout: i32,
-        send_timeout: i32,
-        receive_timeout: i32,
-    ) -> i32;
-    fn WinHttpSetOption(
-        handle: *mut std::ffi::c_void,
-        option: u32,
-        buffer: *mut std::ffi::c_void,
-        buffer_len: u32,
-    ) -> i32;
-    fn WinHttpSendRequest(
-        request: *mut std::ffi::c_void,
-        headers: *const u16,
-        headers_len: u32,
-        optional: *mut std::ffi::c_void,
-        optional_len: u32,
-        total_len: u32,
-        context: usize,
-    ) -> i32;
-    fn WinHttpReceiveResponse(
-        request: *mut std::ffi::c_void,
-        reserved: *mut std::ffi::c_void,
-    ) -> i32;
-    fn WinHttpQueryHeaders(
-        request: *mut std::ffi::c_void,
-        info_level: u32,
-        name: *const u16,
-        buffer: *mut std::ffi::c_void,
-        buffer_len: *mut u32,
-        index: *mut u32,
-    ) -> i32;
-    fn WinHttpReadData(
-        request: *mut std::ffi::c_void,
-        buffer: *mut std::ffi::c_void,
-        bytes_to_read: u32,
-        bytes_read: *mut u32,
-    ) -> i32;
-    fn WinHttpCloseHandle(handle: *mut std::ffi::c_void) -> i32;
-}
+use makepad_windows_sys::Win32::Networking::WinHttp::*;
 
 #[cfg(target_os = "windows")]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn GetLastError() -> u32;
-}
+use makepad_windows_sys::Win32::Foundation::GetLastError_raw;
 
 #[cfg(target_os = "windows")]
 fn wide_null(value: &str) -> Vec<u16> {
@@ -382,7 +314,7 @@ fn wide_null(value: &str) -> Vec<u16> {
 
 #[cfg(target_os = "windows")]
 fn winhttp_last_error(operation: &str) -> AssetAiError {
-    let code = unsafe { GetLastError() };
+    let code = unsafe { GetLastError_raw().0 };
     AssetAiError::Http(format!(
         "{operation}: {} (code {code})",
         std::io::Error::from_raw_os_error(code as i32)
@@ -404,15 +336,16 @@ impl Read for WinHttpBody {
         }
         let mut read = 0u32;
         let ok = unsafe {
-            WinHttpReadData(
+            WinHttpReadData_raw(
                 self.request,
                 buf.as_mut_ptr().cast::<std::ffi::c_void>(),
                 buf.len().min(u32::MAX as usize) as u32,
                 &mut read,
             )
+            .0
         };
         if ok == 0 {
-            let code = unsafe { GetLastError() };
+            let code = unsafe { GetLastError_raw().0 };
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!(
@@ -430,13 +363,13 @@ impl Drop for WinHttpBody {
     fn drop(&mut self) {
         unsafe {
             if !self.request.is_null() {
-                let _ = WinHttpCloseHandle(self.request);
+                let _ = WinHttpCloseHandle_raw(self.request).0;
             }
             if !self.connect.is_null() {
-                let _ = WinHttpCloseHandle(self.connect);
+                let _ = WinHttpCloseHandle_raw(self.connect).0;
             }
             if !self.session.is_null() {
-                let _ = WinHttpCloseHandle(self.session);
+                let _ = WinHttpCloseHandle_raw(self.session).0;
             }
         }
     }
@@ -446,17 +379,18 @@ impl Drop for WinHttpBody {
 fn winhttp_raw_headers(request: *mut std::ffi::c_void) -> Result<String, AssetAiError> {
     let mut byte_len = 0u32;
     let first = unsafe {
-        WinHttpQueryHeaders(
+        WinHttpQueryHeaders_raw(
             request,
             WINHTTP_QUERY_RAW_HEADERS_CRLF,
-            std::ptr::null(),
+            makepad_windows_sys::core::PCWSTR(std::ptr::null()),
             std::ptr::null_mut(),
             &mut byte_len,
             std::ptr::null_mut(),
         )
+        .0
     };
     if first == 0 {
-        let code = unsafe { GetLastError() };
+        let code = unsafe { GetLastError_raw().0 };
         if code != ERROR_INSUFFICIENT_BUFFER {
             return Err(winhttp_last_error("WinHttpQueryHeaders(size) failed"));
         }
@@ -468,14 +402,15 @@ fn winhttp_raw_headers(request: *mut std::ffi::c_void) -> Result<String, AssetAi
     }
     let mut wide = vec![0u16; (byte_len as usize + 1) / 2];
     let ok = unsafe {
-        WinHttpQueryHeaders(
+        WinHttpQueryHeaders_raw(
             request,
             WINHTTP_QUERY_RAW_HEADERS_CRLF,
-            std::ptr::null(),
+            makepad_windows_sys::core::PCWSTR(std::ptr::null()),
             wide.as_mut_ptr().cast::<std::ffi::c_void>(),
             &mut byte_len,
             std::ptr::null_mut(),
         )
+        .0
     };
     if ok == 0 {
         return Err(winhttp_last_error("WinHttpQueryHeaders(raw) failed"));
@@ -501,11 +436,13 @@ fn winhttp_fetch_once(
         crate::SERVICE_VERSION
     ));
     let session = unsafe {
-        WinHttpOpen(
-            user_agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_NO_PROXY,
-            std::ptr::null(),
-            std::ptr::null(),
+        WinHttpOpen_raw(
+            makepad_windows_sys::core::PCWSTR(user_agent.as_ptr()),
+            makepad_windows_sys::Win32::Networking::WinHttp::WINHTTP_ACCESS_TYPE(
+                WINHTTP_ACCESS_TYPE_NO_PROXY,
+            ),
+            makepad_windows_sys::core::PCWSTR(std::ptr::null()),
+            makepad_windows_sys::core::PCWSTR(std::ptr::null()),
             0,
         )
     };
@@ -519,20 +456,28 @@ fn winhttp_fetch_once(
     };
     let timeout_ms = IO_TIMEOUT.as_millis().min(i32::MAX as u128) as i32;
     if unsafe {
-        WinHttpSetTimeouts(
+        WinHttpSetTimeouts_raw(
             handles.session,
             timeout_ms,
             timeout_ms,
             timeout_ms,
             timeout_ms,
         )
+        .0
     } == 0
     {
         return Err(winhttp_last_error("WinHttpSetTimeouts failed"));
     }
 
     let host = wide_null(&url.host);
-    handles.connect = unsafe { WinHttpConnect(handles.session, host.as_ptr(), url.port, 0) };
+    handles.connect = unsafe {
+        WinHttpConnect_raw(
+            handles.session,
+            makepad_windows_sys::core::PCWSTR(host.as_ptr()),
+            url.port,
+            0,
+        )
+    };
     if handles.connect.is_null() {
         return Err(winhttp_last_error("WinHttpConnect failed"));
     }
@@ -540,14 +485,16 @@ fn winhttp_fetch_once(
     let verb = wide_null(method);
     let target = wide_null(&url.target);
     handles.request = unsafe {
-        WinHttpOpenRequest(
+        WinHttpOpenRequest_raw(
             handles.connect,
-            verb.as_ptr(),
-            target.as_ptr(),
+            makepad_windows_sys::core::PCWSTR(verb.as_ptr()),
+            makepad_windows_sys::core::PCWSTR(target.as_ptr()),
+            makepad_windows_sys::core::PCWSTR(std::ptr::null()),
+            makepad_windows_sys::core::PCWSTR(std::ptr::null()),
             std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            if url.https { WINHTTP_FLAG_SECURE } else { 0 },
+            makepad_windows_sys::Win32::Networking::WinHttp::WINHTTP_OPEN_REQUEST_FLAGS(
+                if url.https { WINHTTP_FLAG_SECURE } else { 0 },
+            ),
         )
     };
     if handles.request.is_null() {
@@ -555,12 +502,13 @@ fn winhttp_fetch_once(
     }
     let mut disabled = WINHTTP_DISABLE_REDIRECTS;
     if unsafe {
-        WinHttpSetOption(
+        WinHttpSetOption_raw(
             handles.request,
             WINHTTP_OPTION_DISABLE_FEATURE,
             (&mut disabled as *mut u32).cast::<std::ffi::c_void>(),
             std::mem::size_of::<u32>() as u32,
         )
+        .0
     } == 0
     {
         return Err(winhttp_last_error(
@@ -608,34 +556,36 @@ fn winhttp_fetch_once(
         body_bytes.as_ptr() as *mut std::ffi::c_void
     };
     let ok = unsafe {
-        WinHttpSendRequest(
+        WinHttpSendRequest_raw(
             handles.request,
-            headers.as_ptr(),
+            makepad_windows_sys::core::PCWSTR(headers.as_ptr()),
             u32::MAX,
             body_ptr,
             body_len,
             body_len,
             0,
         )
+        .0
     };
     if ok == 0 {
         return Err(winhttp_last_error("WinHttpSendRequest failed"));
     }
-    if unsafe { WinHttpReceiveResponse(handles.request, std::ptr::null_mut()) } == 0 {
+    if unsafe { WinHttpReceiveResponse_raw(handles.request, std::ptr::null_mut()).0 } == 0 {
         return Err(winhttp_last_error("WinHttpReceiveResponse failed"));
     }
 
     let mut status = 0u32;
     let mut status_len = std::mem::size_of::<u32>() as u32;
     if unsafe {
-        WinHttpQueryHeaders(
+        WinHttpQueryHeaders_raw(
             handles.request,
             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-            std::ptr::null(),
+            makepad_windows_sys::core::PCWSTR(std::ptr::null()),
             (&mut status as *mut u32).cast::<std::ffi::c_void>(),
             &mut status_len,
             std::ptr::null_mut(),
         )
+        .0
     } == 0
     {
         return Err(winhttp_last_error("WinHttpQueryHeaders(status) failed"));

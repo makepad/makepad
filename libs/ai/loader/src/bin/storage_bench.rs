@@ -355,67 +355,11 @@ mod platform {
     /// volume-sector multiples. 4096 covers 512e and 4Kn NVMe alike.
     const SECTOR: u64 = 4096;
 
-    #[repr(C)]
-    struct Overlapped {
-        internal: usize,
-        internal_high: usize,
-        offset: u32,
-        offset_high: u32,
-        h_event: Handle,
-    }
-
-    extern "system" {
-        fn CreateFileW(
-            name: *const u16,
-            access: u32,
-            share: u32,
-            security: *mut c_void,
-            disposition: u32,
-            flags: u32,
-            template: Handle,
-        ) -> Handle;
-        fn ReadFile(
-            file: Handle,
-            buffer: *mut c_void,
-            count: u32,
-            read: *mut u32,
-            overlapped: *mut Overlapped,
-        ) -> i32;
-        fn CloseHandle(handle: Handle) -> i32;
-        fn GetLastError() -> u32;
-        fn SetFilePointerEx(file: Handle, distance: i64, new: *mut i64, method: u32) -> i32;
-        fn CreateIoCompletionPort(
-            file: Handle,
-            existing: Handle,
-            key: usize,
-            threads: u32,
-        ) -> Handle;
-        fn GetQueuedCompletionStatus(
-            port: Handle,
-            bytes: *mut u32,
-            key: *mut usize,
-            overlapped: *mut *mut Overlapped,
-            timeout: u32,
-        ) -> i32;
-        fn VirtualAlloc(address: *mut c_void, size: usize, kind: u32, protect: u32) -> *mut c_void;
-        fn VirtualFree(address: *mut c_void, size: usize, kind: u32) -> i32;
-        fn CreateFileMappingW(
-            file: Handle,
-            security: *mut c_void,
-            protect: u32,
-            high: u32,
-            low: u32,
-            name: *const u16,
-        ) -> Handle;
-        fn MapViewOfFile(
-            mapping: Handle,
-            access: u32,
-            offset_high: u32,
-            offset_low: u32,
-            bytes: usize,
-        ) -> *mut c_void;
-        fn UnmapViewOfFile(address: *const c_void) -> i32;
-    }
+    use makepad_windows_sys::Win32::{
+        Foundation::*,
+        Storage::FileSystem::*,
+        System::{Memory::*, IO::*},
+    };
 
     fn wide(path: &Path) -> Vec<u16> {
         path.as_os_str().encode_wide().chain(Some(0)).collect()
@@ -424,18 +368,23 @@ mod platform {
     fn open(path: &Path, flags: u32) -> Result<Handle, String> {
         let name = wide(path);
         let handle = unsafe {
-            CreateFileW(
-                name.as_ptr(),
+            CreateFileW_raw(
+                makepad_windows_sys::core::PCWSTR(name.as_ptr()),
                 GENERIC_READ,
-                FILE_SHARE_READ,
+                makepad_windows_sys::Win32::Storage::FileSystem::FILE_SHARE_MODE(FILE_SHARE_READ),
                 std::ptr::null_mut(),
-                OPEN_EXISTING,
-                flags,
-                std::ptr::null_mut(),
+                makepad_windows_sys::Win32::Storage::FileSystem::FILE_CREATION_DISPOSITION(
+                    OPEN_EXISTING,
+                ),
+                makepad_windows_sys::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(flags),
+                makepad_windows_sys::Win32::Foundation::HANDLE(std::ptr::null_mut()),
             )
+            .0
         };
         if handle == INVALID_HANDLE_VALUE {
-            return Err(format!("CreateFileW failed: {}", unsafe { GetLastError() }));
+            return Err(format!("CreateFileW failed: {}", unsafe {
+                GetLastError_raw().0
+            }));
         }
         Ok(handle)
     }
@@ -449,16 +398,20 @@ mod platform {
     impl Aligned {
         fn new(len: usize) -> Result<Self, String> {
             let ptr = unsafe {
-                VirtualAlloc(
+                VirtualAlloc_raw(
                     std::ptr::null_mut(),
                     len,
-                    MEM_COMMIT | MEM_RESERVE,
-                    PAGE_READWRITE,
+                    makepad_windows_sys::Win32::System::Memory::VIRTUAL_ALLOCATION_TYPE(
+                        MEM_COMMIT | MEM_RESERVE,
+                    ),
+                    makepad_windows_sys::Win32::System::Memory::PAGE_PROTECTION_FLAGS(
+                        PAGE_READWRITE,
+                    ),
                 )
             };
             if ptr.is_null() {
                 return Err(format!("VirtualAlloc({}) failed: {}", len, unsafe {
-                    GetLastError()
+                    GetLastError_raw().0
                 }));
             }
             Ok(Self {
@@ -470,7 +423,12 @@ mod platform {
     impl Drop for Aligned {
         fn drop(&mut self) {
             unsafe {
-                VirtualFree(self.ptr.cast::<c_void>(), 0, MEM_RELEASE);
+                VirtualFree_raw(
+                    self.ptr.cast::<c_void>(),
+                    0,
+                    makepad_windows_sys::Win32::System::Memory::VIRTUAL_FREE_TYPE(MEM_RELEASE),
+                )
+                .0;
             }
         }
     }
@@ -521,17 +479,20 @@ mod platform {
             };
             let mut read = 0u32;
             let ok = unsafe {
-                ReadFile(
-                    handle,
-                    dst.cast::<c_void>(),
+                ReadFile_raw(
+                    makepad_windows_sys::Win32::Foundation::HANDLE(handle),
+                    (dst.cast::<c_void>()) as *mut u8,
                     want,
                     &mut read,
                     std::ptr::null_mut(),
                 )
+                .0
             };
             if ok == 0 {
-                let err = unsafe { GetLastError() };
-                unsafe { CloseHandle(handle) };
+                let err = unsafe { GetLastError_raw().0 };
+                unsafe {
+                    CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0
+                };
                 return Err(format!("ReadFile failed: {}", err));
             }
             if read == 0 {
@@ -542,7 +503,7 @@ mod platform {
                 break;
             }
         }
-        unsafe { CloseHandle(handle) };
+        unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
         Ok(done)
     }
 
@@ -560,11 +521,19 @@ mod platform {
             path,
             FILE_FLAG_NO_BUFFERING | FILE_FLAG_OVERLAPPED | FILE_FLAG_SEQUENTIAL_SCAN,
         )?;
-        let port = unsafe { CreateIoCompletionPort(handle, std::ptr::null_mut(), 0, 0) };
+        let port = unsafe {
+            CreateIoCompletionPort_raw(
+                makepad_windows_sys::Win32::Foundation::HANDLE(handle),
+                makepad_windows_sys::Win32::Foundation::HANDLE(std::ptr::null_mut()),
+                0,
+                0,
+            )
+            .0
+        };
         if port.is_null() {
-            unsafe { CloseHandle(handle) };
+            unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
             return Err(format!("CreateIoCompletionPort failed: {}", unsafe {
-                GetLastError()
+                GetLastError_raw().0
             }));
         }
         let chunk = align_up(chunk as u64, SECTOR);
@@ -583,52 +552,43 @@ mod platform {
         }
         // Boxed so the addresses handed to the kernel stay put.
         let mut slots = (0..depth)
-            .map(|_| {
-                Box::new(Overlapped {
-                    internal: 0,
-                    internal_high: 0,
-                    offset: 0,
-                    offset_high: 0,
-                    h_event: std::ptr::null_mut(),
-                })
-            })
+            .map(|_| Box::new(OVERLAPPED::default()))
             .collect::<Vec<_>>();
 
         let mut next_offset = 0u64;
         let mut inflight = 0usize;
         let mut done = 0u64;
 
-        let issue = |slot: &mut Overlapped,
-                     buf: *mut u8,
-                     offset: u64,
-                     len: u32|
-         -> Result<bool, String> {
-            slot.internal = 0;
-            slot.internal_high = 0;
-            slot.offset = (offset & 0xFFFF_FFFF) as u32;
-            slot.offset_high = (offset >> 32) as u32;
-            slot.h_event = std::ptr::null_mut();
-            let mut read = 0u32;
-            let ok = unsafe {
-                ReadFile(
-                    handle,
-                    buf.cast::<c_void>(),
-                    len,
-                    &mut read,
-                    slot as *mut Overlapped,
-                )
+        let issue =
+            |slot: &mut OVERLAPPED, buf: *mut u8, offset: u64, len: u32| -> Result<bool, String> {
+                slot.Internal = 0;
+                slot.InternalHigh = 0;
+                slot.Anonymous.Anonymous.Offset = (offset & 0xFFFF_FFFF) as u32;
+                slot.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
+                slot.hEvent = HANDLE(std::ptr::null_mut());
+                let mut read = 0u32;
+                let ok = unsafe {
+                    ReadFile_raw(
+                        makepad_windows_sys::Win32::Foundation::HANDLE(handle),
+                        (buf.cast::<c_void>()) as *mut u8,
+                        len,
+                        &mut read,
+                        (slot as *mut OVERLAPPED)
+                            as *mut makepad_windows_sys::Win32::System::IO::OVERLAPPED,
+                    )
+                    .0
+                };
+                if ok != 0 {
+                    // Completed inline; the port still queues a packet.
+                    return Ok(true);
+                }
+                let err = unsafe { GetLastError_raw().0 };
+                if err == ERROR_IO_PENDING {
+                    Ok(true)
+                } else {
+                    Err(format!("ReadFile(overlapped) failed: {}", err))
+                }
             };
-            if ok != 0 {
-                // Completed inline; the port still queues a packet.
-                return Ok(true);
-            }
-            let err = unsafe { GetLastError() };
-            if err == ERROR_IO_PENDING {
-                Ok(true)
-            } else {
-                Err(format!("ReadFile(overlapped) failed: {}", err))
-            }
-        };
 
         for index in 0..depth {
             if next_offset >= bytes {
@@ -647,20 +607,24 @@ mod platform {
         while inflight > 0 {
             let mut transferred = 0u32;
             let mut key = 0usize;
-            let mut completed: *mut Overlapped = std::ptr::null_mut();
+            let mut completed: *mut OVERLAPPED = std::ptr::null_mut();
             let ok = unsafe {
-                GetQueuedCompletionStatus(
-                    port,
+                GetQueuedCompletionStatus_raw(
+                    makepad_windows_sys::Win32::Foundation::HANDLE(port),
                     &mut transferred,
-                    &mut key,
-                    &mut completed,
+                    (&mut key) as *mut usize,
+                    (&mut completed)
+                        as *mut *mut makepad_windows_sys::Win32::System::IO::OVERLAPPED,
                     60_000,
                 )
+                .0
             };
             if ok == 0 && completed.is_null() {
-                let err = unsafe { GetLastError() };
-                unsafe { CloseHandle(handle) };
-                unsafe { CloseHandle(port) };
+                let err = unsafe { GetLastError_raw().0 };
+                unsafe {
+                    CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0
+                };
+                unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(port)).0 };
                 return Err(format!("GetQueuedCompletionStatus failed: {}", err));
             }
             inflight -= 1;
@@ -671,7 +635,7 @@ mod platform {
             // Reissue this slot at the next offset.
             let index = slots
                 .iter()
-                .position(|slot| std::ptr::eq(slot.as_ref() as *const Overlapped, completed))
+                .position(|slot| std::ptr::eq(slot.as_ref() as *const OVERLAPPED, completed))
                 .ok_or_else(|| "completion for unknown slot".to_string())?;
             let len = chunk.min(align_up(bytes - next_offset, SECTOR)) as u32;
             let buf = match &arena_buf {
@@ -683,8 +647,8 @@ mod platform {
             inflight += 1;
         }
 
-        unsafe { CloseHandle(handle) };
-        unsafe { CloseHandle(port) };
+        unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
+        unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(port)).0 };
         Ok(done.min(bytes))
     }
 
@@ -773,9 +737,9 @@ mod platform {
             handles.push(std::thread::spawn(move || -> Result<u64, String> {
                 let handle = open(&path, flags)?;
                 let mut moved = 0i64;
-                if unsafe { SetFilePointerEx(handle, start as i64, &mut moved, 0) } == 0 {
-                    let err = unsafe { GetLastError() };
-                    unsafe { CloseHandle(handle) };
+                if unsafe { SetFilePointerEx_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle), start as i64, &mut moved, makepad_windows_sys::Win32::Storage::FileSystem::SET_FILE_POINTER_MOVE_METHOD(0)).0 } == 0 {
+                    let err = unsafe { GetLastError_raw().0 };
+                    unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
                     return Err(format!("SetFilePointerEx failed: {}", err));
                 }
                 let chunk = align_up(chunk as u64, SECTOR) as usize;
@@ -793,17 +757,11 @@ mod platform {
                         (None, None) => return Err("threaded: no destination".to_string()),
                     };
                     let ok = unsafe {
-                        ReadFile(
-                            handle,
-                            buf.cast::<c_void>(),
-                            want,
-                            &mut read,
-                            std::ptr::null_mut(),
-                        )
+                        ReadFile_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle), (buf.cast::<c_void>()) as *mut u8, want, &mut read, std::ptr::null_mut()).0
                     };
                     if ok == 0 {
-                        let err = unsafe { GetLastError() };
-                        unsafe { CloseHandle(handle) };
+                        let err = unsafe { GetLastError_raw().0 };
+                        unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
                         return Err(format!("ReadFile failed: {}", err));
                     }
                     if read == 0 {
@@ -814,7 +772,7 @@ mod platform {
                         break;
                     }
                 }
-                unsafe { CloseHandle(handle) };
+                unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
                 Ok(done)
             }));
         }
@@ -866,9 +824,9 @@ mod platform {
                 let end = align_up(last, SECTOR);
 
                 let mut moved = 0i64;
-                if unsafe { SetFilePointerEx(handle, first as i64, &mut moved, 0) } == 0 {
-                    let err = unsafe { GetLastError() };
-                    unsafe { CloseHandle(handle) };
+                if unsafe { SetFilePointerEx_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle), first as i64, &mut moved, makepad_windows_sys::Win32::Storage::FileSystem::SET_FILE_POINTER_MOVE_METHOD(0)).0 } == 0 {
+                    let err = unsafe { GetLastError_raw().0 };
+                    unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
                     return Err(format!("SetFilePointerEx failed: {}", err));
                 }
 
@@ -879,17 +837,11 @@ mod platform {
                     let want = (chunk as u64).min(end - window) as u32;
                     let mut read = 0u32;
                     let ok = unsafe {
-                        ReadFile(
-                            handle,
-                            staging.ptr.cast::<c_void>(),
-                            want,
-                            &mut read,
-                            std::ptr::null_mut(),
-                        )
+                        ReadFile_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle), (staging.ptr.cast::<c_void>()) as *mut u8, want, &mut read, std::ptr::null_mut()).0
                     };
                     if ok == 0 {
-                        let err = unsafe { GetLastError() };
-                        unsafe { CloseHandle(handle) };
+                        let err = unsafe { GetLastError_raw().0 };
+                        unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
                         return Err(format!("ReadFile failed: {}", err));
                     }
                     if read == 0 {
@@ -937,7 +889,7 @@ mod platform {
                         break;
                     }
                 }
-                unsafe { CloseHandle(handle) };
+                unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
                 Ok(copied)
             }));
         }
@@ -954,25 +906,27 @@ mod platform {
     pub fn win_mmap(path: &Path, bytes: u64) -> Result<u64, String> {
         let handle = open(path, FILE_FLAG_SEQUENTIAL_SCAN)?;
         let mapping = unsafe {
-            CreateFileMappingW(
-                handle,
+            CreateFileMappingW_raw(
+                makepad_windows_sys::Win32::Foundation::HANDLE(handle),
                 std::ptr::null_mut(),
-                PAGE_READONLY,
+                makepad_windows_sys::Win32::System::Memory::PAGE_PROTECTION_FLAGS(PAGE_READONLY),
                 0,
                 0,
-                std::ptr::null(),
+                makepad_windows_sys::core::PCWSTR(std::ptr::null()),
             )
+            .0
         };
         if mapping.is_null() {
-            let err = unsafe { GetLastError() };
-            unsafe { CloseHandle(handle) };
+            let err = unsafe { GetLastError_raw().0 };
+            unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
             return Err(format!("CreateFileMappingW failed: {}", err));
         }
-        let view = unsafe { MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0) };
+        let view =
+            unsafe { MapViewOfFile_raw(HANDLE(mapping), FILE_MAP(FILE_MAP_READ), 0, 0, 0).0 };
         if view.is_null() {
-            let err = unsafe { GetLastError() };
-            unsafe { CloseHandle(mapping) };
-            unsafe { CloseHandle(handle) };
+            let err = unsafe { GetLastError_raw().0 };
+            unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(mapping)).0 };
+            unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
             return Err(format!("MapViewOfFile failed: {}", err));
         }
         let mut sum = 0u64;
@@ -983,9 +937,9 @@ mod platform {
             offset += 4096;
         }
         std::hint::black_box(sum);
-        unsafe { UnmapViewOfFile(view) };
-        unsafe { CloseHandle(mapping) };
-        unsafe { CloseHandle(handle) };
+        unsafe { UnmapViewOfFile_raw(MEMORY_MAPPED_VIEW_ADDRESS(view as *mut c_void)).0 };
+        unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(mapping)).0 };
+        unsafe { CloseHandle_raw(makepad_windows_sys::Win32::Foundation::HANDLE(handle)).0 };
         Ok(bytes)
     }
 }

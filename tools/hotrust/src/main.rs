@@ -303,36 +303,46 @@ fn census_report(crates: &[crates::CrateUnit], per: &[census::Census], total: &c
 }
 
 /// Loads HotRust's core + std and a crate (root file), returns (program, crate index).
-pub fn load_with_std(root: &str, name: &str, test: bool) -> Result<(program::Program, u32, u32), Vec<String>> {
-    let exe = std::env::current_exe().unwrap_or_default();
-    // std sources: $HOTRUST_STD or <repo>/tools/hotrust/std
-    let std_dir = match std::env::var("HOTRUST_STD") {
+/// std sources: $HOTRUST_STD or <repo>/tools/hotrust/std
+pub fn std_dir() -> String {
+    match std::env::var("HOTRUST_STD") {
         Ok(d) => d,
         Err(_) => {
-            let mut d = exe.clone();
+            let mut d = std::env::current_exe().unwrap_or_default();
             for _ in 0..3 {
                 d.pop();
             }
             format!("{}/src/tools/hotrust/std", d.display())
         }
-    };
-    let mut prog = program::Program::new();
-    let core = match prog.load_crate("core", &format!("{}/core/lib.rs", std_dir), 2021, cfg::CfgSet::host(&[]), Vec::new()) {
-        Ok(c) => c,
-        Err(e) => return Err(vec![e]),
-    };
+    }
+}
+
+/// Loads core, alloc (when present) and std; returns core and the dependency list user crates
+/// get ([core, alloc, std]).
+pub fn load_std_crates(prog: &mut program::Program) -> Result<(u32, Vec<(program::Sym, u32)>), String> {
+    let dir = std_dir();
+    let core = prog.load_crate("core", &format!("{}/core/lib.rs", dir), 2021, cfg::CfgSet::host(&[]), Vec::new())?;
     let core_sym = prog.syms.intern("core");
-    let std = match prog.load_crate("std", &format!("{}/std/lib.rs", std_dir), 2021, cfg::CfgSet::host(&[]), vec![(core_sym, core)]) {
-        Ok(c) => c,
-        Err(e) => return Err(vec![e]),
-    };
-    let std_sym = prog.syms.intern("std");
+    let mut deps = vec![(core_sym, core)];
+    let alloc_root = format!("{}/alloc/lib.rs", dir);
+    if std::path::Path::new(&alloc_root).exists() {
+        let alloc = prog.load_crate("alloc", &alloc_root, 2021, cfg::CfgSet::host(&[]), deps.clone())?;
+        deps.push((prog.syms.intern("alloc"), alloc));
+    }
+    let std = prog.load_crate("std", &format!("{}/std/lib.rs", dir), 2021, cfg::CfgSet::host(&[]), deps.clone())?;
+    deps.push((prog.syms.intern("std"), std));
+    Ok((core, deps))
+}
+
+pub fn load_with_std(root: &str, name: &str, test: bool) -> Result<(program::Program, u32, u32), Vec<String>> {
+    let mut prog = program::Program::new();
+    let (core, deps) = load_std_crates(&mut prog).map_err(|e| vec![e])?;
     let mut cfgset = cfg::CfgSet::host(&[]);
     if test {
         cfgset.set.push("test".to_string());
     }
     cfgset.set.push("hotrust".to_string());
-    let krate = match prog.load_crate(name, root, 2021, cfgset, vec![(core_sym, core), (std_sym, std)]) {
+    let krate = match prog.load_crate(name, root, 2021, cfgset, deps) {
         Ok(c) => c,
         Err(e) => return Err(vec![e]),
     };
@@ -460,22 +470,12 @@ fn cmd_resolve(units_path: &str) {
         }
     };
     let t0 = Instant::now();
-    let exe = std::env::current_exe().unwrap_or_default();
-    let mut d = exe.clone();
-    for _ in 0..3 {
-        d.pop();
-    }
-    let std_dir = format!("{}/src/tools/hotrust/std", d.display());
     let mut prog = program::Program::new();
-    let core = prog.load_crate("core", &format!("{}/core/lib.rs", std_dir), 2021, cfg::CfgSet::host(&[]), Vec::new()).unwrap();
-    let core_sym = prog.syms.intern("core");
-    let std = prog.load_crate("std", &format!("{}/std/lib.rs", std_dir), 2021, cfg::CfgSet::host(&[]), vec![(core_sym, core)]).unwrap();
-    let std_sym = prog.syms.intern("std");
-    let alloc_sym = prog.syms.intern("alloc");
+    let (core, std_deps) = load_std_crates(&mut prog).unwrap();
     let base = prog.crates.len() as u32;
     let mut load_errors = 0;
     for c in &crates {
-        let mut deps = vec![(core_sym, core), (std_sym, std), (alloc_sym, std)];
+        let mut deps = std_deps.clone();
         for (i, n) in &c.deps {
             let s = prog.syms.intern(n);
             deps.push((s, base + *i as u32));

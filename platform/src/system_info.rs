@@ -142,7 +142,7 @@ fn os_version() -> Option<String> {
     }
     // RtlGetVersion reports the real version; GetVersionEx is capped at
     // what the executable's manifest declares.
-    windows_core::link!("ntdll.dll" "system" fn RtlGetVersion(info: *mut OsVersionInfoW) -> i32);
+    #[link(name = "ntdll", kind = "raw-dylib")] extern "system" { fn RtlGetVersion(info: *mut OsVersionInfoW) -> i32; }
     let mut info = OsVersionInfoW {
         dwOSVersionInfoSize: std::mem::size_of::<OsVersionInfoW>() as u32,
         dwMajorVersion: 0,
