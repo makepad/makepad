@@ -4,7 +4,7 @@
 #   real: rustc --test against real std
 #   shim: rustc --test with std::{sync,thread,time,io,fs,path,env,process,ffi,os,panic} and
 #         core::{time,sync::atomic,ffi} / alloc::ffi rewritten to the lane's modules
-#         (crate hotrust-std-os-check, built from std/check_os)
+#         (crate hotrust-std-os-check, built from std-next/check_os)
 #   hr:   `hotrust test` (only with --hotrust; HOTRUST_STD must point at a std tree that
 #         holds the lane's files)
 # and the "| " lines are diffed against the real run. Tests are named a01_.., a02_.. so
@@ -19,7 +19,7 @@ WT=$(cd "$ROOT/../.." && pwd)
 T=${OS_DIFF_TMP:-$WT/target-hotrust/os_diff}
 mkdir -p "$T"
 export CARGO_TARGET_DIR=$WT/target-hotrust CARGO_INCREMENTAL=0
-(cd "$ROOT/std/check_os" && nice -n 10 cargo build --release -j 4 -q) || exit 1
+(cd "$ROOT/std-next/check_os" && nice -n 10 cargo build --release -j 4 -q) || exit 1
 LIB=$WT/target-hotrust/release/libhotrust_std_os_check.rlib
 status=0
 for f in "$@"; do
@@ -36,7 +36,7 @@ for f in "$@"; do
   if diff "$T/$n.real.lines" "$T/$n.shim.lines" >"$T/$n.shim.diff"; then echo "$n: shim == real ($r lines)"; else echo "$n: shim DIFFERS"; head -20 "$T/$n.shim.diff"; status=1; fi
   grep -E "^test .*FAILED|panicked" "$T/$n.shim.out" | head -5
   if [ $HR = 1 ]; then
-    HOTRUST_STD=${HOTRUST_STD:-$ROOT/std} HOTRUST_WATCHDOG_MS=5000 nice -n 10 "$WT/target-hotrust/release/hotrust" test "$f" >"$T/$n.hr.out" 2>&1
+    HOTRUST_STD=${HOTRUST_STD:-$ROOT/std-next} HOTRUST_WATCHDOG_MS=5000 nice -n 10 "$WT/target-hotrust/release/hotrust" test "$f" >"$T/$n.hr.out" 2>&1
     grep -o '| .*' "$T/$n.hr.out" >"$T/$n.hr.lines"
     if diff "$T/$n.real.lines" "$T/$n.hr.lines" >"$T/$n.hr.diff"; then echo "$n: hotrust == real"; else echo "$n: hotrust DIFFERS"; head -10 "$T/$n.hr.diff"; grep -E "^error|FAILED|compile error" "$T/$n.hr.out" | head -5; status=1; fi
   fi

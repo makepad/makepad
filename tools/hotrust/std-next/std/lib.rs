@@ -87,4 +87,16 @@ pub mod num {
 
 // ---- std-os modules ----
 // (std-os lane: `pub mod <name>;` lines for std/std/<name>.rs or <name>/mod.rs go here)
+pub mod env;
+pub mod ffi;
+pub mod fs;
+pub mod io;
+pub mod os;
+pub mod panic;
+pub mod path;
+pub mod process;
+pub mod sync;
+pub(crate) mod sys;
+pub mod thread;
+pub mod time;
 // ---- end std-os modules ----

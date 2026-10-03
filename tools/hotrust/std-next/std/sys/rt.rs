@@ -1,6 +1,12 @@
 //! HotRust runtime hooks used by std (declared in core::intrinsics_rt). The rustc shim
-//! (check_os) mounts check_os/src/rt_shim.rs here instead, backed by real std.
+//! (check_os, built with --cfg hotrust_shim) uses check_os/src/rt_shim.rs instead.
 
+#[cfg(hotrust_shim)]
+#[path = "../../check_os/src/rt_shim.rs"]
+mod imp;
+
+#[cfg(not(hotrust_shim))]
+mod imp {
 use core::ffi::c_char;
 
 /// Runs `f(data)`; true if it panicked (live mode: the panic was reported and the stack
@@ -39,3 +45,6 @@ pub fn set_panic_trampoline(f: fn(&str, &core::panic::Location<'_>)) {
     }
     core::panicking::set_hook_fn(Some(core_hook));
 }
+}
+
+pub use self::imp::{args, catch_panic, panicking, set_panic_trampoline};

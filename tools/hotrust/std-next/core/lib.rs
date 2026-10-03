@@ -60,11 +60,14 @@ pub mod alloc {
 
 pub mod sync {
     // ---- std-os: `pub mod atomic;` (core/sync/atomic.rs) goes here
+    pub mod atomic;
     mod arc;
     pub use arc::{Arc, Weak};
 }
 
 // ---- std-os: `pub mod time;` (core/time.rs) and `pub mod ffi;` (core/ffi/mod.rs) go here
+pub mod time;
+pub mod ffi;
 
 pub mod f64 {
     pub mod consts {

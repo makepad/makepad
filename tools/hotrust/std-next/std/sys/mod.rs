@@ -14,7 +14,6 @@ pub mod os;
 #[path = "linux.rs"]
 pub mod os;
 
-#[cfg_attr(hotrust_shim, path = "../../check_os/src/rt_shim.rs")]
 pub mod rt;
 
 pub mod time;
