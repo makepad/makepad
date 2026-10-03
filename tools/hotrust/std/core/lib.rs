@@ -96,6 +96,36 @@ pub mod marker {
 }
 
 pub mod ops {
+    pub trait AddAssign<Rhs = Self> {
+        fn add_assign(&mut self, rhs: Rhs);
+    }
+    pub trait SubAssign<Rhs = Self> {
+        fn sub_assign(&mut self, rhs: Rhs);
+    }
+    pub trait MulAssign<Rhs = Self> {
+        fn mul_assign(&mut self, rhs: Rhs);
+    }
+    pub trait DivAssign<Rhs = Self> {
+        fn div_assign(&mut self, rhs: Rhs);
+    }
+    pub trait RemAssign<Rhs = Self> {
+        fn rem_assign(&mut self, rhs: Rhs);
+    }
+    pub trait BitAndAssign<Rhs = Self> {
+        fn bitand_assign(&mut self, rhs: Rhs);
+    }
+    pub trait BitOrAssign<Rhs = Self> {
+        fn bitor_assign(&mut self, rhs: Rhs);
+    }
+    pub trait BitXorAssign<Rhs = Self> {
+        fn bitxor_assign(&mut self, rhs: Rhs);
+    }
+    pub trait ShlAssign<Rhs = Self> {
+        fn shl_assign(&mut self, rhs: Rhs);
+    }
+    pub trait ShrAssign<Rhs = Self> {
+        fn shr_assign(&mut self, rhs: Rhs);
+    }
     pub trait FnOnce<Args> {
         type Output;
         fn call_once(self, args: Args) -> Self::Output;

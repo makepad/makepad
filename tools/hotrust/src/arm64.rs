@@ -18,6 +18,7 @@
 //! Encodings follow the hand-written encoders of platform/script/compute/src/arm64.rs,
 //! extended to 64-bit integer forms.
 
+use crate::cabi::{self, ArgPlan, PLoc, Plan, RetPlan};
 use crate::regalloc::{self, Alloc, Loc, MLoc, RegConfig};
 use crate::rir::*;
 
@@ -34,6 +35,8 @@ const IP0: u8 = 16; // call targets, immediates
 const IP1: u8 = 17; // address offsets
 const FS0: u8 = 30; // float scratch
 const FS1: u8 = 31;
+/// x8: indirect result register of the C ABI; otherwise a scratch for atomics loops
+const X8: u8 = 8;
 
 const INT_ARGS: usize = 8;
 const FLT_ARGS: usize = 8;
@@ -85,6 +88,10 @@ pub struct Env {
     pub thunk_size: u64,
     pub poll_flag: u64,
     pub rt_hang: u64,
+    /// pthread TSD slot holding this thread's thread-local block (0 = none yet)
+    pub tls_key: u64,
+    /// glue that allocates the calling thread's block: returns it in x16, preserves all else
+    pub tls_slow: u64,
 }
 
 // ------------------------------------------------------------ encoder
@@ -474,6 +481,12 @@ struct Gen<'a> {
     text_words: usize,
     pc_map: Vec<(u32, u64)>,
     cur_pos: u32,
+    /// C ABI body: its plan, per-argument buffer (sp offset, -1 = none), result buffer
+    cplan: Option<Plan>,
+    cbuf: Vec<i64>,
+    cret_buf: i64,
+    /// sp offset of the C call staging cells (8 bytes each)
+    stage: i64,
 }
 
 impl<'a> Gen<'a> {
@@ -602,27 +615,76 @@ impl<'a> Gen<'a> {
             self.poll_regs = seen;
         }
         let poll_fp = off;
-        // outgoing stack-argument area at the bottom of the frame ([sp, sp + out))
+        // C ABI body: buffers that rebuild aggregate params from their registers, and the
+        // buffer an aggregate result is written to before Ret loads it into registers
+        let mut cbuf_fp: Vec<i64> = Vec::new();
+        let mut cret_fp = 0i64;
+        if let Some(sig) = &self.f.cabi {
+            let plan = cabi::plan(sig, cabi::Target::Darwin64);
+            for (k, a) in plan.args.iter().enumerate() {
+                match (a, &sig.args[k]) {
+                    (ArgPlan::Parts(_), CArg::Agg(ag)) => {
+                        off += ((ag.size as i64 + 7) & !7) + 8;
+                        cbuf_fp.push(off);
+                    }
+                    _ => cbuf_fp.push(-1),
+                }
+            }
+            if let (RetPlan::Parts(_), Some(ag)) = (&plan.ret, &sig.ret) {
+                off += ((ag.size as i64 + 7) & !7) + 8;
+                cret_fp = off;
+            }
+            self.cplan = Some(plan);
+        }
+        // outgoing stack-argument area at the bottom of the frame ([sp, sp + out)) and
+        // staging cells for C calls (aggregate pieces, the result address)
         let mut out = 0i64;
+        let mut cells = 0i64;
         for b in &self.f.blocks {
             for i in &b.insts {
-                if let Inst::Call(_, a, _) = i {
-                    let (ni, nf) = count_classes(self.f, a);
-                    let over = ni.saturating_sub(INT_ARGS) + nf.saturating_sub(FLT_ARGS);
-                    out = out.max(8 * over as i64);
+                if let Inst::Call(c, a, _) = i {
+                    match c {
+                        Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig) => {
+                            let plan = cabi::plan(sig, cabi::Target::Darwin64);
+                            out = out.max(plan.stack_bytes as i64);
+                            let mut n = 0i64;
+                            for ap in &plan.args {
+                                if let ArgPlan::Parts(ps) = ap {
+                                    n += ps.len() as i64;
+                                }
+                            }
+                            if let RetPlan::Parts(ps) = &plan.ret {
+                                n = n.max(ps.len() as i64);
+                            }
+                            cells = cells.max(1 + n);
+                        }
+                        _ => {
+                            let (ni, nf) = count_classes(self.f, a);
+                            let over = ni.saturating_sub(INT_ARGS) + nf.saturating_sub(FLT_ARGS);
+                            out = out.max(8 * over as i64);
+                        }
+                    }
                 }
             }
         }
+        off += 8 * cells;
+        let stage_fp = off;
         let frame = (off + out + 15) / 16 * 16;
         self.frame = frame;
         for x in slot_fp {
             self.slot_off.push(frame - x);
         }
         self.poll_area = frame - poll_fp;
+        for x in cbuf_fp {
+            self.cbuf.push(if x < 0 { -1 } else { frame - x });
+        }
+        self.cret_buf = frame - cret_fp;
+        self.stage = frame - stage_fp;
 
         // prologue
         self.a.stp_pre(FP, LR, SP, -16);
         self.a.mov_sp(FP, SP);
+        self.stack_probe(frame);
         self.a.add_any(SP, SP, -frame);
         let mut k = 0i64;
         for r in self.al.used_callee_int.clone() {
@@ -633,45 +695,10 @@ impl<'a> Gen<'a> {
             k += 1;
             self.a.ldst(STRD, 8, x, FP, -8 * k);
         }
-        // params: incoming registers -> allocated locations
-        let mut mv = Vec::new();
-        let mut ni = 0usize;
-        let mut nf = 0usize;
-        let mut stack_params: Vec<(VReg, i64)> = Vec::new();
-        for p in &self.f.params {
-            let src = match self.cls(*p) {
-                Cls::I if ni < INT_ARGS => {
-                    ni += 1;
-                    MLoc::R(ni as u8 - 1)
-                }
-                Cls::F32 | Cls::F64 if nf < FLT_ARGS => {
-                    nf += 1;
-                    MLoc::F(nf as u8 - 1)
-                }
-                _ => {
-                    // overflow parameters: the caller's outgoing area, [fp + 16 + 8k]
-                    stack_params.push((*p, 16 + 8 * stack_params.len() as i64));
-                    continue;
-                }
-            };
-            if self.al.loc[p.0 as usize] != Loc::None {
-                mv.push((self.mloc(*p), src));
-            }
-        }
-        self.moves(&mv);
-        for (p, off) in stack_params {
-            let fl = self.cls(p) != Cls::I;
-            match self.al.loc[p.0 as usize] {
-                Loc::Reg(r) => self.a.ldst(LDRX, 8, r, FP, off),
-                Loc::Flt(x) => self.a.ldst(LDRD, 8, x, FP, off),
-                Loc::Stack(o) => {
-                    let so = self.spill_sp(o);
-                    self.a.ldst(LDRX, 8, S1, FP, off);
-                    self.a.ldst(STRX, 8, S1, SP, so);
-                }
-                Loc::None => {}
-            }
-            let _ = fl;
+        if self.cplan.is_some() {
+            self.c_prologue();
+        } else {
+            self.params_prologue();
         }
 
         let nb = self.f.blocks.len();
@@ -743,6 +770,513 @@ impl<'a> Gen<'a> {
                 self.a.patch(at, addr);
             }
         }
+    }
+
+    /// HotRust ABI params: incoming registers -> allocated locations; overflow params
+    /// from the caller's outgoing area, [fp + 16 + 8k].
+    fn params_prologue(&mut self) {
+        let mut mv = Vec::new();
+        let mut ni = 0usize;
+        let mut nf = 0usize;
+        let mut stack_params: Vec<(VReg, i64)> = Vec::new();
+        for p in &self.f.params {
+            let src = match self.cls(*p) {
+                Cls::I if ni < INT_ARGS => {
+                    ni += 1;
+                    MLoc::R(ni as u8 - 1)
+                }
+                Cls::F32 | Cls::F64 if nf < FLT_ARGS => {
+                    nf += 1;
+                    MLoc::F(nf as u8 - 1)
+                }
+                _ => {
+                    stack_params.push((*p, 16 + 8 * stack_params.len() as i64));
+                    continue;
+                }
+            };
+            if self.al.loc[p.0 as usize] != Loc::None {
+                mv.push((self.mloc(*p), src));
+            }
+        }
+        self.moves(&mv);
+        for (p, off) in stack_params {
+            let m = if self.cls(p) == Cls::I { Mem::Int(8, false) } else { Mem::F64 };
+            self.load_param(p, m, off);
+        }
+    }
+
+    /// Loads a stack-passed parameter ([fp + off], `m` sized) into its location.
+    fn load_param(&mut self, p: VReg, m: Mem, off: i64) {
+        let (op, size) = mem_op(m, true);
+        match self.al.loc[p.0 as usize] {
+            Loc::Reg(r) => self.a.ldst(op, size, r, FP, off),
+            Loc::Flt(x) => self.a.ldst(op, size, x, FP, off),
+            Loc::Stack(o) => {
+                let so = self.spill_sp(o);
+                if matches!(m, Mem::Int(..)) {
+                    self.a.ldst(op, size, S1, FP, off);
+                    self.a.ldst(STRX, 8, S1, SP, so);
+                } else {
+                    self.a.ldst(op, size, FS0, FP, off);
+                    self.a.ldst(STRD, 8, FS0, SP, so);
+                }
+            }
+            Loc::None => {}
+        }
+    }
+
+    /// Sets a parameter's location to `base + off` (an address).
+    fn def_addr_param(&mut self, p: VReg, base: u8, off: i64) {
+        if self.al.loc[p.0 as usize] == Loc::None {
+            return;
+        }
+        let rd = self.def_i(p, S0);
+        self.a.add_any(rd, base, off);
+        self.fin_i(p, rd);
+    }
+
+    /// Prologue of an `extern "C"` body: aggregate params are rebuilt in frame buffers
+    /// (their address is the param), the rest arrive like HotRust params but with C's
+    /// placement (Apple stack packing, x8 result address); narrow ints are re-extended.
+    fn c_prologue(&mut self) {
+        let plan = self.cplan.clone().unwrap();
+        let sig = self.f.cabi.clone().unwrap();
+        let params = self.f.params.clone();
+        let has_ret = sig.ret.is_some();
+        let pargs = if has_ret { &params[1..] } else { &params[..] };
+        // 1. aggregate pieces out of the argument registers (before any move clobbers them)
+        for (k, ap) in plan.args.iter().enumerate() {
+            if let ArgPlan::Parts(parts) = ap {
+                let buf = self.cbuf[k];
+                for pt in parts {
+                    let o = buf + pt.off as i64;
+                    match pt.loc {
+                        PLoc::Int(r) => {
+                            if pt.size == 4 {
+                                self.a.ldst(STRW, 4, r, SP, o);
+                            } else {
+                                self.a.ldst(STRX, 8, r, SP, o);
+                            }
+                        }
+                        PLoc::Flt(x) => {
+                            if pt.size == 4 {
+                                self.a.ldst(STRS, 4, x, SP, o);
+                            } else {
+                                self.a.ldst(STRD, 8, x, SP, o);
+                            }
+                        }
+                        PLoc::Stack(_) => {}
+                    }
+                }
+            }
+        }
+        // 2. register params (scalars, by-reference aggregates, the x8 result address)
+        let mut mv = Vec::new();
+        if let (RetPlan::Indirect, true) = (&plan.ret, has_ret) {
+            if self.al.loc[params[0].0 as usize] != Loc::None {
+                mv.push((self.mloc(params[0]), MLoc::R(X8)));
+            }
+        }
+        for (k, ap) in plan.args.iter().enumerate() {
+            let p = pargs[k];
+            if self.al.loc[p.0 as usize] == Loc::None {
+                continue;
+            }
+            match ap {
+                ArgPlan::Scalar(PLoc::Int(r), _) | ArgPlan::ByRef(PLoc::Int(r)) => mv.push((self.mloc(p), MLoc::R(*r))),
+                ArgPlan::Scalar(PLoc::Flt(x), _) => mv.push((self.mloc(p), MLoc::F(*x))),
+                _ => {}
+            }
+        }
+        self.moves(&mv);
+        // 3. stack params, aggregate addresses, re-extension of narrow C integers
+        for (k, ap) in plan.args.iter().enumerate() {
+            let p = pargs[k];
+            let m = match &sig.args[k] {
+                CArg::Scalar(m) => *m,
+                CArg::Agg(_) => Mem::Int(8, false),
+            };
+            match ap {
+                ArgPlan::Scalar(PLoc::Stack(o), _) => self.load_param(p, m, 16 + *o as i64),
+                ArgPlan::ByRef(PLoc::Stack(o)) => self.load_param(p, Mem::Int(8, false), 16 + *o as i64),
+                ArgPlan::Parts(_) => {
+                    let b = self.cbuf[k];
+                    self.def_addr_param(p, SP, b);
+                }
+                ArgPlan::Stack(o, _) => self.def_addr_param(p, FP, 16 + *o as i64),
+                ArgPlan::Scalar(PLoc::Int(_), _) => {
+                    if let Mem::Int(b, sg) = m {
+                        if b < 8 && self.al.loc[p.0 as usize] != Loc::None {
+                            let r = self.use_i(p, S0);
+                            self.a.extend(r, r, b * 8, sg);
+                            self.fin_i(p, r);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let (RetPlan::Parts(_), true) = (&plan.ret, has_ret) {
+            let b = self.cret_buf;
+            self.def_addr_param(params[0], SP, b);
+        }
+    }
+
+    /// Ret of an `extern "C"` body with an aggregate result held in registers.
+    fn c_ret_parts(&mut self) {
+        if let Some(RetPlan::Parts(parts)) = self.cplan.as_ref().map(|p| p.ret.clone()) {
+            let buf = self.cret_buf;
+            for pt in &parts {
+                let o = buf + pt.off as i64;
+                match pt.loc {
+                    PLoc::Int(r) => self.a.ldst(LDRX, 8, r, SP, o),
+                    PLoc::Flt(x) => {
+                        if pt.size == 4 {
+                            self.a.ldst(LDRS, 4, x, SP, o);
+                        } else {
+                            self.a.ldst(LDRD, 8, x, SP, o);
+                        }
+                    }
+                    PLoc::Stack(_) => {}
+                }
+            }
+        }
+    }
+
+    /// Touches every page of a big new frame from the top down, so a frame larger than
+    /// the guard page faults on the guard instead of skipping past it.
+    fn stack_probe(&mut self, frame: i64) {
+        const PAGE: i64 = 4096;
+        if frame <= PAGE {
+            return;
+        }
+        // x17 = sp; loop: x17 -= PAGE; str xzr, [x17]; until x17 <= sp - frame
+        self.a.mov_sp(IP1, SP);
+        let mut o = PAGE;
+        if frame <= 16 * PAGE {
+            while o < frame {
+                self.a.sub_imm_lsl12(IP1, IP1, (PAGE >> 12) as u32);
+                self.a.ldst(STRX, 8, ZR, IP1, 0);
+                o += PAGE;
+            }
+            return;
+        }
+        self.a.mov_imm(IP0, frame / PAGE);
+        let top = self.a.pos();
+        self.a.sub_imm_lsl12(IP1, IP1, (PAGE >> 12) as u32);
+        self.a.ldst(STRX, 8, ZR, IP1, 0);
+        self.a.sub_imm(IP0, IP0, 1);
+        let p = self.a.cbnz(IP0);
+        self.a.patch(p, top);
+    }
+
+    /// Copies `size` bytes [src + so] -> [dst + do_] through S1 (bases may be sp).
+    fn copy_bytes(&mut self, dst: u8, do_: i64, src: u8, so: i64, size: u32) {
+        let mut o = 0i64;
+        let size = size as i64;
+        while o < size {
+            let (lop, sop, n) = if size - o >= 8 {
+                (LDRX, STRX, 8)
+            } else if size - o >= 4 {
+                (LDRW, STRW, 4)
+            } else if size - o >= 2 {
+                (LDRH, STRH, 2)
+            } else {
+                (LDRB, STRB, 1)
+            };
+            self.a.ldst(lop, n as u32, S1, src, so + o);
+            self.a.ldst(sop, n as u32, S1, dst, do_ + o);
+            o += n;
+        }
+    }
+
+    /// A call under the C ABI (foreign function, `extern "C"` pointer or body).
+    fn c_call(&mut self, c: &Callee, sig: &CSig, args: &[VReg], rets: &[VReg]) {
+        let plan = cabi::plan(sig, cabi::Target::Darwin64);
+        let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
+        for (v, slot) in &saves {
+            let off = self.spill_sp(*slot);
+            match self.al.loc[v.0 as usize] {
+                Loc::Reg(r) => self.a.ldst(STRX, 8, r, SP, off),
+                Loc::Flt(x) => self.a.ldst(STRD, 8, x, SP, off),
+                _ => {}
+            }
+        }
+        let has_ret = sig.ret.is_some();
+        let cargs = if has_ret { &args[1..] } else { args };
+        let st = self.stage;
+        // the result address survives the call in staging cell 0
+        if has_ret {
+            let r = self.use_i(args[0], S0);
+            self.a.ldst(STRX, 8, r, SP, st);
+        }
+        if let Callee::CIndirect(v, _) = c {
+            let r = self.use_i(*v, IP0);
+            self.a.mov(IP0, r);
+        }
+        // stack arguments and aggregate pieces (staged in cells), then register moves
+        let mut mv = Vec::new();
+        let mut cell = 1i64;
+        for (k, ap) in plan.args.iter().enumerate() {
+            let v = cargs[k];
+            match ap {
+                ArgPlan::Scalar(PLoc::Int(r), _) | ArgPlan::ByRef(PLoc::Int(r)) => mv.push((MLoc::R(*r), self.mloc(v))),
+                ArgPlan::Scalar(PLoc::Flt(x), _) => mv.push((MLoc::F(*x), self.mloc(v))),
+                ArgPlan::Scalar(PLoc::Stack(o), size) => {
+                    let o = *o as i64;
+                    if self.cls(v) == Cls::I {
+                        let r = self.use_i(v, S0);
+                        let op = match size {
+                            1 => STRB,
+                            2 => STRH,
+                            4 => STRW,
+                            _ => STRX,
+                        };
+                        self.a.ldst(op, (*size).max(1), r, SP, o);
+                    } else {
+                        let x = self.use_f(v, FS0);
+                        if *size == 4 && self.cls(v) == Cls::F32 {
+                            self.a.ldst(STRS, 4, x, SP, o);
+                        } else if self.cls(v) == Cls::F32 {
+                            // variadic f32 would be promoted by C; store as f64
+                            self.a.e(0x1E22_C000 | (x as u32) << 5 | FS1 as u32);
+                            self.a.ldst(STRD, 8, FS1, SP, o);
+                        } else {
+                            self.a.ldst(STRD, 8, x, SP, o);
+                        }
+                    }
+                }
+                ArgPlan::ByRef(PLoc::Stack(o)) => {
+                    let r = self.use_i(v, S0);
+                    self.a.ldst(STRX, 8, r, SP, *o as i64);
+                }
+                ArgPlan::ByRef(PLoc::Flt(_)) => {}
+                ArgPlan::Parts(parts) => {
+                    let ra = self.use_i(v, S0);
+                    for pt in parts {
+                        let cell_off = st + 8 * cell;
+                        self.copy_bytes(SP, cell_off, ra, pt.off as i64, pt.size);
+                        match pt.loc {
+                            PLoc::Int(r) => mv.push((MLoc::R(r), MLoc::M(cell_off as i32))),
+                            PLoc::Flt(x) => mv.push((MLoc::F(x), MLoc::M(cell_off as i32))),
+                            PLoc::Stack(_) => {}
+                        }
+                        cell += 1;
+                    }
+                }
+                ArgPlan::Stack(o, size) => {
+                    let ra = self.use_i(v, S0);
+                    self.copy_bytes(SP, *o as i64, ra, 0, *size);
+                }
+            }
+        }
+        if let (RetPlan::Indirect, true) = (&plan.ret, has_ret) {
+            mv.push((MLoc::R(X8), MLoc::M(st as i32)));
+        }
+        self.moves(&mv);
+        match c {
+            Callee::CFn(id, _) => {
+                let slot = self.env.table_base + *id as u64 * 8;
+                self.a.mov_imm(IP0, slot as i64);
+                self.a.ldst(LDRX, 8, IP0, IP0, 0);
+                self.a.blr(IP0);
+            }
+            Callee::CHost(addr, _) => {
+                self.a.mov_imm(IP0, *addr as i64);
+                self.a.blr(IP0);
+            }
+            _ => self.a.blr(IP0),
+        }
+        // scalar results
+        let mut mv = Vec::new();
+        let mut ri = 0u8;
+        let mut rf = 0u8;
+        for r in rets {
+            if self.cls(*r) == Cls::I {
+                if self.al.loc[r.0 as usize] != Loc::None {
+                    mv.push((self.mloc(*r), MLoc::R(ri)));
+                }
+                ri += 1;
+            } else {
+                if self.al.loc[r.0 as usize] != Loc::None {
+                    mv.push((self.mloc(*r), MLoc::F(rf)));
+                }
+                rf += 1;
+            }
+        }
+        // aggregate result registers -> cells (x0/x1/v0-v3 are never allocated)
+        if let RetPlan::Parts(parts) = &plan.ret {
+            for (j, pt) in parts.iter().enumerate() {
+                let o = st + 8 * (1 + j as i64);
+                match pt.loc {
+                    PLoc::Int(r) => self.a.ldst(STRX, 8, r, SP, o),
+                    PLoc::Flt(x) => self.a.ldst(STRD, 8, x, SP, o),
+                    PLoc::Stack(_) => {}
+                }
+            }
+        }
+        self.moves(&mv);
+        for (v, slot) in &saves {
+            let off = self.spill_sp(*slot);
+            match self.al.loc[v.0 as usize] {
+                Loc::Reg(r) => self.a.ldst(LDRX, 8, r, SP, off),
+                Loc::Flt(x) => self.a.ldst(LDRD, 8, x, SP, off),
+                _ => {}
+            }
+        }
+        if let RetPlan::Parts(parts) = &plan.ret {
+            self.a.ldst(LDRX, 8, S0, SP, st);
+            for (j, pt) in parts.iter().enumerate() {
+                let o = st + 8 * (1 + j as i64);
+                self.copy_bytes(S0, pt.off as i64, SP, o, pt.size);
+            }
+        }
+    }
+
+    // ---- atomics (LSE: every Apple arm64 CPU has ARMv8.1 atomics)
+
+    fn atomic(&mut self, i: &Inst) {
+        fn size_bits(m: Mem) -> (u32, u8, bool) {
+            match m {
+                Mem::Int(1, s) => (0, 8, s),
+                Mem::Int(2, s) => (1, 16, s),
+                Mem::Int(4, s) => (2, 32, s),
+                Mem::Int(_, s) => (3, 64, s),
+                _ => (3, 64, false),
+            }
+        }
+        fn acq(o: AtomOrd) -> bool {
+            matches!(o, AtomOrd::Acquire | AtomOrd::AcqRel | AtomOrd::SeqCst)
+        }
+        fn rel(o: AtomOrd) -> bool {
+            matches!(o, AtomOrd::Release | AtomOrd::AcqRel | AtomOrd::SeqCst)
+        }
+        match i {
+            Inst::AtomicLoad(m, o, d, a) => {
+                let (sz, bits, sg) = size_bits(*m);
+                let ra = self.use_i(*a, S1);
+                let rd = self.def_i(*d, S0);
+                if acq(*o) {
+                    // ldar{b,h,w,x}
+                    self.a.e(0x08DF_FC00 | sz << 30 | (ra as u32) << 5 | rd as u32);
+                    if sg && bits < 64 {
+                        self.a.extend(rd, rd, bits, true);
+                    }
+                } else {
+                    let (op, size) = mem_op(*m, true);
+                    self.a.ldst(op, size, rd, ra, 0);
+                }
+                self.fin_i(*d, rd);
+            }
+            Inst::AtomicStore(m, o, a, v) => {
+                let (sz, _, _) = size_bits(*m);
+                let ra = self.use_i(*a, S1);
+                let rv = self.use_i(*v, S0);
+                if rel(*o) {
+                    // stlr{b,h,w,x}
+                    self.a.e(0x089F_FC00 | sz << 30 | (ra as u32) << 5 | rv as u32);
+                } else {
+                    let (op, size) = mem_op(*m, false);
+                    self.a.ldst(op, size, rv, ra, 0);
+                }
+            }
+            Inst::AtomicRmw(op, m, o, d, a, v) => {
+                let (sz, bits, sg) = size_bits(*m);
+                let ar = (acq(*o) as u32) << 23 | (rel(*o) as u32) << 22;
+                let ra = self.use_i(*a, IP0);
+                let rv = self.use_i(*v, S1);
+                let rd0 = self.def_i(*d, S0);
+                // the old value goes to a register no operand uses
+                let rd = if rd0 == ra || rd0 == rv { S0 } else { rd0 };
+                // LDADD family: size 111000 A R 1 Rs o3 opc 00 Rn Rt
+                let lse = |opc: u32, o3: u32, rs: u8| 0x3820_0000 | sz << 30 | ar | (rs as u32) << 16 | o3 << 15 | opc << 12 | (ra as u32) << 5;
+                match op {
+                    RmwOp::Xchg => self.a.e(lse(0, 1, rv) | rd as u32),
+                    RmwOp::Add => self.a.e(lse(0, 0, rv) | rd as u32),
+                    RmwOp::Sub => {
+                        self.a.rrr(0xCB00_0000, IP1, ZR, rv);
+                        self.a.e(lse(0, 0, IP1) | rd as u32);
+                    }
+                    RmwOp::And => {
+                        // ldclr with the complement
+                        self.a.rrr(0xAA20_0000, IP1, ZR, rv);
+                        self.a.e(lse(1, 0, IP1) | rd as u32);
+                    }
+                    RmwOp::Xor => self.a.e(lse(2, 0, rv) | rd as u32),
+                    RmwOp::Or => self.a.e(lse(3, 0, rv) | rd as u32),
+                    RmwOp::Max => self.a.e(lse(4, 0, rv) | rd as u32),
+                    RmwOp::Min => self.a.e(lse(5, 0, rv) | rd as u32),
+                    RmwOp::UMax => self.a.e(lse(6, 0, rv) | rd as u32),
+                    RmwOp::UMin => self.a.e(lse(7, 0, rv) | rd as u32),
+                    RmwOp::Nand => {
+                        // old = [a]; loop { new = !(old & v); cas(old -> new) }
+                        let (lop, lsz) = mem_op(Mem::Int(1 << sz, false), true);
+                        self.a.ldst(lop, lsz, X8, ra, 0);
+                        let top = self.a.pos();
+                        self.a.rrr(0x8A00_0000, IP1, X8, rv);
+                        self.a.rrr(0xAA20_0000, IP1, ZR, IP1);
+                        self.a.mov(rd, X8);
+                        // casal x8(expected -> observed), ip1(new), [ra]
+                        self.a.e(0x08A0_7C00 | sz << 30 | 1 << 22 | 1 << 15 | (X8 as u32) << 16 | (ra as u32) << 5 | IP1 as u32);
+                        self.a.cmp(X8, rd);
+                        let p = self.a.bcond(NE);
+                        self.a.patch(p, top);
+                    }
+                }
+                if sg && bits < 64 {
+                    self.a.extend(rd0, rd, bits, true);
+                } else {
+                    self.a.mov(rd0, rd);
+                }
+                self.fin_i(*d, rd0);
+            }
+            Inst::AtomicCas(m, ok, fail, d, a, e, n) => {
+                let (sz, bits, sg) = size_bits(*m);
+                let ra = self.use_i(*a, IP0);
+                let re = self.use_i(*e, S0);
+                let rn = self.use_i(*n, S1);
+                let a_bit = (acq(*ok) || acq(*fail)) as u32;
+                let r_bit = rel(*ok) as u32;
+                // cas: Rs = expected in, observed out
+                self.a.mov(IP1, re);
+                self.a.e(0x08A0_7C00 | sz << 30 | a_bit << 22 | r_bit << 15 | (IP1 as u32) << 16 | (ra as u32) << 5 | rn as u32);
+                let rd = self.def_i(*d, S0);
+                self.a.mov(rd, IP1);
+                if sg && bits < 64 {
+                    self.a.extend(rd, rd, bits, true);
+                }
+                self.fin_i(*d, rd);
+            }
+            Inst::Fence(o, single) => {
+                if !*single && *o != AtomOrd::Relaxed {
+                    if *o == AtomOrd::Acquire {
+                        self.a.e(0xD503_39BF); // dmb ishld
+                    } else {
+                        self.a.e(0xD503_3BBF); // dmb ish
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// d = this thread's thread-local block + off. Fast path: the block pointer sits in
+    /// the thread's pthread TSD slot (tpidrro_el0 base); a null slot calls `tls_slow`.
+    fn tls_addr(&mut self, d: VReg, off: u32) {
+        // mrs x16, tpidrro_el0; and x16, x16, #~7; ldr x16, [x16, #key*8]
+        self.a.e(0xD53B_D060 | IP0 as u32);
+        self.a.e(0x9243_F000 | (IP0 as u32) << 5 | IP0 as u32);
+        self.a.ldst(LDRX, 8, IP0, IP0, self.env.tls_key as i64 * 8);
+        let p = self.a.cbnz(IP0);
+        // slow path keeps every register but x16/x17 (glue), so no saves here; lr is
+        // preserved by the frame record
+        self.a.mov_imm(IP1, self.env.tls_slow as i64);
+        self.a.blr(IP1);
+        let skip = self.a.pos();
+        self.a.patch(p, skip);
+        let rd = self.def_i(d, S0);
+        self.a.add_any(rd, IP0, off as i64);
+        self.fin_i(d, rd);
     }
 
     /// Sets the flags for a fused compare and returns the condition for "true".
@@ -836,6 +1370,7 @@ impl<'a> Gen<'a> {
                 }
             }
             Term::Ret(vals) => {
+                self.c_ret_parts();
                 let mut mv = Vec::new();
                 let mut ni = 0u8;
                 let mut nf = 0u8;
@@ -1065,6 +1600,35 @@ impl<'a> Gen<'a> {
                 self.fin_i(*d, rd);
             }
             Inst::Call(c, args, rets) => self.call(c, args, rets),
+            Inst::Copy(dst, src, size) if *size > 256 => {
+                // x8 = dst, x17 = src, x16 = 16-byte chunks: ldp/stp post-index loop
+                let rd = self.use_i(*dst, S0);
+                self.a.mov(X8, rd);
+                let rs = self.use_i(*src, S1);
+                self.a.mov(IP1, rs);
+                let size = *size as i64;
+                self.a.mov_imm(IP0, size / 16);
+                let top = self.a.pos();
+                self.a.ldp_post(S0, S1, IP1, 16);
+                // stp x14, x15, [x8], #16
+                self.a.e(0xA880_0000 | (2u32 << 15) | (S1 as u32) << 10 | (X8 as u32) << 5 | S0 as u32);
+                // subs x16, x16, #1 ; b.ne top
+                self.a.e(0xF100_0400 | (IP0 as u32) << 5 | IP0 as u32);
+                let p = self.a.bcond(NE);
+                self.a.patch(p, top);
+                let mut o = 0i64;
+                let rest = size % 16;
+                while o + 8 <= rest {
+                    self.a.ldst(LDRX, 8, S0, IP1, o);
+                    self.a.ldst(STRX, 8, S0, X8, o);
+                    o += 8;
+                }
+                while o < rest {
+                    self.a.ldst(LDRB, 1, S0, IP1, o);
+                    self.a.ldst(STRB, 1, S0, X8, o);
+                    o += 1;
+                }
+            }
             Inst::Copy(dst, src, size) => {
                 let rd = self.use_i(*dst, S0);
                 let rs = self.use_i(*src, S1);
@@ -1087,6 +1651,8 @@ impl<'a> Gen<'a> {
                 }
             }
             Inst::Poll => self.poll(),
+            Inst::AtomicLoad(..) | Inst::AtomicStore(..) | Inst::AtomicRmw(..) | Inst::AtomicCas(..) | Inst::Fence(..) => self.atomic(i),
+            Inst::TlsAddr(d, off) => self.tls_addr(*d, *off),
         }
     }
 
@@ -1275,6 +1841,9 @@ impl<'a> Gen<'a> {
     }
 
     fn call(&mut self, c: &Callee, args: &[VReg], rets: &[VReg]) {
+        if let Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig) = c {
+            return self.c_call(c, sig, args, rets);
+        }
         // save caller-saved values that live across this call
         let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
         for (v, slot) in &saves {
@@ -1331,6 +1900,7 @@ impl<'a> Gen<'a> {
                 self.a.mov_imm(IP0, *addr as i64);
                 self.a.blr(IP0);
             }
+            Callee::CHost(..) | Callee::CIndirect(..) | Callee::CFn(..) => {}
         }
         let mut mv = Vec::new();
         let mut ri = 0u8;
@@ -1410,6 +1980,10 @@ pub fn compile(f: &Func, env: &Env) -> Result<Compiled, String> {
         text_words: 0,
         pc_map: Vec::new(),
         cur_pos: 0,
+        cplan: None,
+        cbuf: Vec::new(),
+        cret_buf: 0,
+        stage: 0,
     };
     g.gen();
     let frame = g.frame as u32;
@@ -1427,11 +2001,13 @@ pub fn lazy_entry(host_compile: u64) -> Vec<u8> {
     let mut a = Asm { w: Vec::new() };
     a.stp_pre(FP, LR, SP, -16);
     a.mov_sp(FP, SP);
-    a.sub_imm(SP, SP, 128);
+    a.sub_imm(SP, SP, 144);
     for k in 0..4u8 {
         a.stp(false, 2 * k, 2 * k + 1, SP, 16 * k as i32);
         a.stp(true, 2 * k, 2 * k + 1, SP, 64 + 16 * k as i32);
     }
+    // x8: the C ABI's indirect result address (extern "C" bodies reached through a stub)
+    a.ldst(STRX, 8, X8, SP, 128);
     a.mov(0, IP0);
     a.mov_imm64_fixed(IP1, host_compile);
     a.blr(IP1);
@@ -1440,6 +2016,7 @@ pub fn lazy_entry(host_compile: u64) -> Vec<u8> {
         a.ldp(false, 2 * k, 2 * k + 1, SP, 16 * k as i32);
         a.ldp(true, 2 * k, 2 * k + 1, SP, 64 + 16 * k as i32);
     }
+    a.ldst(LDRX, 8, X8, SP, 128);
     a.mov_sp(SP, FP);
     a.ldp_post(FP, LR, SP, 16);
     a.br(IP0);
@@ -1510,13 +2087,59 @@ pub fn enter_leave() -> (Vec<u8>, usize) {
     (words_to_bytes(&a.w), leave * 4)
 }
 
-/// JIT trampoline in front of a host panic function: records the caller's frame
-/// (fp, return address) at `frame`, then tail-jumps to `target`.
-pub fn panic_tramp(frame: u64, target: u64) -> Vec<u8> {
+/// JIT trampoline in front of a host panic function: passes the caller's frame
+/// (fp, return address) as arguments 4 and 5 (x4, x5), then tail-jumps to `target`.
+pub fn panic_tramp(target: u64) -> Vec<u8> {
     let mut a = Asm { w: Vec::new() };
-    a.mov_imm64_fixed(IP0, frame);
-    a.stp(false, FP, LR, IP0, 0);
+    a.mov(4, FP);
+    a.mov(5, LR);
     a.mov_imm64_fixed(IP0, target);
     a.br(IP0);
+    words_to_bytes(&a.w)
+}
+
+/// Slow path of `TlsAddr`: calls `host() -> block` and returns the block in x16,
+/// preserving every other register JIT code may hold (x0-x15, d0-d7, d16-d29).
+pub fn tls_slow(host: u64) -> Vec<u8> {
+    let mut a = Asm { w: Vec::new() };
+    a.stp_pre(FP, LR, SP, -16);
+    a.mov_sp(FP, SP);
+    a.sub_imm(SP, SP, 320);
+    for k in 0..8u8 {
+        a.stp(false, 2 * k, 2 * k + 1, SP, 16 * k as i32);
+    }
+    for k in 0..4u8 {
+        a.stp(true, 2 * k, 2 * k + 1, SP, 128 + 16 * k as i32);
+    }
+    for k in 0..7u8 {
+        a.stp(true, 16 + 2 * k, 17 + 2 * k, SP, 192 + 16 * k as i32);
+    }
+    a.mov_imm64_fixed(IP1, host);
+    a.blr(IP1);
+    a.mov(IP0, 0);
+    for k in 0..8u8 {
+        a.ldp(false, 2 * k, 2 * k + 1, SP, 16 * k as i32);
+    }
+    for k in 0..4u8 {
+        a.ldp(true, 2 * k, 2 * k + 1, SP, 128 + 16 * k as i32);
+    }
+    for k in 0..7u8 {
+        a.ldp(true, 16 + 2 * k, 17 + 2 * k, SP, 192 + 16 * k as i32);
+    }
+    a.mov_sp(SP, FP);
+    a.ldp_post(FP, LR, SP, 16);
+    a.ret();
+    words_to_bytes(&a.w)
+}
+
+/// `read_tsd(key) -> value`: this thread's TSD slot through tpidrro_el0, exactly the
+/// sequence `tls_addr` inlines (checked against pthread_getspecific at startup).
+pub fn tsd_reader() -> Vec<u8> {
+    let mut a = Asm { w: Vec::new() };
+    a.e(0xD53B_D060 | IP0 as u32);
+    a.e(0x9243_F000 | (IP0 as u32) << 5 | IP0 as u32);
+    // ldr x0, [x16, x0, lsl #3]
+    a.e(0xF860_7800 | (IP0 as u32) << 5);
+    a.ret();
     words_to_bytes(&a.w)
 }

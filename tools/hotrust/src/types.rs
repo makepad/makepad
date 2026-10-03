@@ -247,6 +247,19 @@ impl Types {
 }
 
 impl Types {
+    /// Does the type contain an unresolved (error) type?
+    pub fn has_error(&self, t: TyId) -> bool {
+        match self.kind(t) {
+            TyKind::Error => true,
+            TyKind::Tuple(v) | TyKind::Adt(_, v) | TyKind::FnDef(_, v) | TyKind::Assoc(_, v) => v.iter().any(|x| self.has_error(*x)),
+            TyKind::Array(e, _) | TyKind::Slice(e) | TyKind::Ref(_, e) | TyKind::Ptr(_, e) => self.has_error(*e),
+            TyKind::FnPtr(ps, r) => ps.iter().any(|x| self.has_error(*x)) || self.has_error(*r),
+            TyKind::Dyn(_, v, bs) => v.iter().any(|x| self.has_error(*x)) || bs.iter().any(|x| self.has_error(x.1)),
+            TyKind::Closure(_, _, s, u, _) => self.has_error(*s) || self.has_error(*u),
+            _ => false,
+        }
+    }
+
     /// Does the type contain generic params or inference variables?
     pub fn is_concrete(&self, t: TyId) -> bool {
         match self.kind(t) {

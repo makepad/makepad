@@ -21,6 +21,7 @@ pub mod tcx;
 pub mod typeck;
 pub mod x64;
 pub mod arm64;
+pub mod cabi;
 pub mod types;
 pub mod program;
 
