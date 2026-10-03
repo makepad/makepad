@@ -6,7 +6,7 @@ use crate::lower::{fn_name, Lcx};
 use crate::program::{DefId, DefKind, Program};
 use crate::tcx::Tcx;
 use crate::typeck::{Body, Res};
-use crate::types::TyId;
+use crate::types::{TyId, TyKind};
 // arch backend and OS runtime dispatch (arm64 lane): both backends expose the same API
 #[cfg(target_arch = "aarch64")]
 use crate::arm64 as x64;
@@ -25,7 +25,11 @@ pub enum FnKey {
     Inst(DefId, Vec<TyId>),
     /// (file, closure expr, parent fn slot)
     Closure(u32, u32, u32),
+    /// compiler-generated helper for a type: (kind, type); GLUE_DROP = drop in place
+    Glue(u8, TyId),
 }
+
+pub const GLUE_DROP: u8 = 0;
 
 pub struct FnEntry {
     pub key: FnKey,
@@ -56,6 +60,9 @@ pub struct Rt {
     pub fmod: u64,
     pub fmodf: u64,
     pub hang: u64,
+    pub memcpy: u64,
+    pub fmt_push: u64,
+    pub fmt_pop: u64,
 }
 
 pub struct Site {
@@ -85,6 +92,8 @@ pub struct Unit {
     pub sites: Vec<Site>,
     pub rt: Rt,
     pub bodies: HashMap<u32, Body>,
+    pub drop_cache: HashMap<TyId, bool>,
+    pub lang_cache: HashMap<String, Option<DefId>>,
     pub cur_fn: u32,
     pub errors: Vec<String>,
     pub core_crate: u32,
@@ -126,6 +135,7 @@ pub struct Stats {
 // ------------------------------------------------------------ OS memory
 
 extern "C" {
+    fn memcpy(d: *mut std::ffi::c_void, s: *const std::ffi::c_void, n: usize) -> *mut std::ffi::c_void;
     fn pthread_self() -> usize;
     fn pthread_kill(t: usize, sig: i32) -> i32;
 }
@@ -230,7 +240,10 @@ static IN_COMPILE: AtomicBool = AtomicBool::new(false);
 static RUN_GEN: AtomicU64 = AtomicU64::new(0);
 
 thread_local! {
-    static FMT: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// stack of format buffers: format!/write! to non-Formatter targets push one
+    static FMT: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(vec![String::new()]);
+    /// the last popped buffer (valid until the next pop)
+    static FMT_POPPED: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
     static PANIC: std::cell::RefCell<Option<PanicInfo>> = const { std::cell::RefCell::new(None) };
 }
 
@@ -282,7 +295,7 @@ extern "C" fn rt_fmt_str(p: *const u8, len: u64, spec: u64) {
     let ty = ((spec >> 40) & 0xff) as u8;
     let body = if ty == b'?' { format!("{:?}", s) } else { s };
     let out = if spec & 0xffff != 0 { spec_pad(body, spec, false) } else { body };
-    FMT.with(|f| f.borrow_mut().push_str(&out));
+    fmt_append(&out);
 }
 
 extern "C" fn rt_fmt_int(v: u64, kind: u64, spec: u64) {
@@ -324,7 +337,7 @@ extern "C" fn rt_fmt_int(v: u64, kind: u64, spec: u64) {
         },
     };
     let out = spec_pad(body, spec, k == 1 || k == 2);
-    FMT.with(|f| f.borrow_mut().push_str(&out));
+    fmt_append(&out);
 }
 
 extern "C" fn rt_fmt_float(v: f64, is64: u64, spec: u64) {
@@ -350,11 +363,59 @@ extern "C" fn rt_fmt_float(v: f64, is64: u64, spec: u64) {
     };
     let body = if plus && !body.starts_with('-') { format!("+{}", body) } else { body };
     let out = spec_pad(body, spec, true);
-    FMT.with(|f| f.borrow_mut().push_str(&out));
+    fmt_append(&out);
+}
+
+fn fmt_append(s: &str) {
+    FMT.with(|f| {
+        let mut v = f.borrow_mut();
+        if v.is_empty() {
+            v.push(String::new());
+        }
+        let n = v.len();
+        v[n - 1].push_str(s);
+    });
+}
+
+fn fmt_take_top() -> String {
+    FMT.with(|f| {
+        let mut v = f.borrow_mut();
+        if v.is_empty() {
+            v.push(String::new());
+        }
+        let n = v.len();
+        std::mem::take(&mut v[n - 1])
+    })
+}
+
+extern "C" fn rt_fmt_push() {
+    FMT.with(|f| f.borrow_mut().push(String::new()));
+}
+
+#[repr(C)]
+pub struct StrRet {
+    ptr: *const u8,
+    len: u64,
+}
+
+extern "C" fn rt_fmt_pop() -> StrRet {
+    let s = FMT.with(|f| {
+        let mut v = f.borrow_mut();
+        let s = v.pop().unwrap_or_default();
+        if v.is_empty() {
+            v.push(String::new());
+        }
+        s
+    });
+    FMT_POPPED.with(|p| {
+        *p.borrow_mut() = s;
+        let b = p.borrow();
+        StrRet { ptr: b.as_ptr(), len: b.len() as u64 }
+    })
 }
 
 extern "C" fn rt_fmt_print(stream: u64) {
-    let s = FMT.with(|f| std::mem::take(&mut *f.borrow_mut()));
+    let s = fmt_take_top();
     use std::io::Write;
     if stream == 2 {
         let _ = std::io::stderr().write_all(s.as_bytes());
@@ -400,7 +461,11 @@ fn collect_frames(rbp: u64, ret: u64) -> Vec<u64> {
 fn raise(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret: u64) -> ! {
     let frames = collect_frames(rbp, ret);
     PANIC.with(|p| *p.borrow_mut() = Some(PanicInfo { kind: kind.to_string(), message, site, frames, fault_addr: fault }));
-    FMT.with(|f| f.borrow_mut().clear());
+    FMT.with(|f| {
+        let mut v = f.borrow_mut();
+        v.clear();
+        v.push(String::new());
+    });
     unsafe {
         let leave: extern "C" fn(*mut u64, u64) -> ! = std::mem::transmute((&*UNIT).leave as usize);
         leave(std::ptr::addr_of_mut!(CTX) as *mut u64, 1)
@@ -408,7 +473,7 @@ fn raise(kind: &str, message: String, site: u64, fault: u64, rbp: u64, ret: u64)
 }
 
 extern "C" fn rt_panic_site(site: u64) {
-    let mut msg = FMT.with(|f| std::mem::take(&mut *f.borrow_mut()));
+    let mut msg = fmt_take_top();
     if msg.is_empty() {
         let u = unsafe { &*UNIT };
         if (site as usize) < u.sites.len() {
@@ -544,8 +609,10 @@ impl Unit {
             consts: HashMap::new(),
             statics: HashMap::new(),
             sites: Vec::new(),
-            rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, hang: 0 },
+            rt: Rt { fmt_str: 0, fmt_int: 0, fmt_float: 0, fmt_print: 0, panic_site: 0, panic_bounds: 0, str_eq: 0, fmod: 0, fmodf: 0, hang: 0, memcpy: 0, fmt_push: 0, fmt_pop: 0 },
             bodies: HashMap::new(),
+            drop_cache: HashMap::new(),
+            lang_cache: HashMap::new(),
             cur_fn: u32::MAX,
             errors: Vec::new(),
             core_crate,
@@ -588,6 +655,9 @@ impl Unit {
             fmod: rt_fmod as *const () as usize as u64,
             fmodf: rt_fmodf as *const () as usize as u64,
             hang: 0,
+            memcpy: memcpy as *const () as usize as u64,
+            fmt_push: rt_fmt_push as *const () as usize as u64,
+            fmt_pop: rt_fmt_pop as *const () as usize as u64,
         };
         u.rt.panic_site = u.emit_code(&ps);
         u.rt.panic_bounds = u.emit_code(&pb);
@@ -639,6 +709,77 @@ impl Unit {
         self.sites.len() as u64 - 1
     }
 
+    /// `core::<path>` item (traits like Drop, Deref, Index; cached).
+    pub fn lang(&mut self, path: &[&str]) -> Option<DefId> {
+        let key = path.join("::");
+        if let Some(x) = self.lang_cache.get(&key) {
+            return *x;
+        }
+        let prog = &self.prog;
+        let mut cur = Some(prog.mods[prog.crates[self.core_crate as usize].root_mod as usize].def);
+        for p in path {
+            cur = match (cur, prog.syms.get(p)) {
+                (Some(c), Some(s)) => match prog.lookup_in_container(c, s, true) {
+                    Some(d) => Some(d),
+                    None => prog.lookup_in_container(c, s, false),
+                },
+                _ => None,
+            };
+        }
+        self.lang_cache.insert(key, cur);
+        cur
+    }
+
+    /// Does dropping a value of type `t` run any code?
+    pub fn needs_drop(&mut self, t: TyId) -> bool {
+        if let Some(&b) = self.drop_cache.get(&t) {
+            return b;
+        }
+        // recursive types: assume no while computing (a cycle only goes through pointers)
+        self.drop_cache.insert(t, false);
+        let k = self.tcx.tys.kind(t).clone();
+        let r = match k {
+            TyKind::Adt(d, args) => {
+                let has_impl = match self.lang(&["ops", "Drop"]) {
+                    Some(td) => self.tcx.find_impl(td, t, &[]).is_some(),
+                    None => false,
+                };
+                if has_impl {
+                    true
+                } else {
+                    let adt = self.tcx.adts.get(&d).cloned();
+                    let mut any = false;
+                    if let Some(adt) = adt {
+                        if !adt.is_union {
+                            for v in &adt.variants {
+                                for f in &v.fields {
+                                    let ft = self.tcx.tys.subst(f.ty, &args);
+                                    if self.needs_drop(ft) {
+                                        any = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    any
+                }
+            }
+            TyKind::Tuple(v) => {
+                let mut any = false;
+                for x in v {
+                    if self.needs_drop(x) {
+                        any = true;
+                    }
+                }
+                any
+            }
+            TyKind::Array(e, n) => n > 0 && self.needs_drop(e),
+            _ => false,
+        };
+        self.drop_cache.insert(t, r);
+        r
+    }
+
     /// Slot of a function instance (created with a lazy stub on first use).
     pub fn fn_id(&mut self, key: FnKey) -> u32 {
         if let Some(&id) = self.fn_map.get(&key) {
@@ -652,6 +793,7 @@ impl Unit {
         let file = match &key {
             FnKey::Inst(d, _) => self.prog.def(*d).file,
             FnKey::Closure(f, _, _) => *f,
+            FnKey::Glue(..) => 0,
         };
         let stub_addr = self.stub_base + id as u64 * STUB_SIZE as u64;
         let stub = x64::stub(id, self.lazy_entry);
@@ -1015,7 +1157,7 @@ fn src_size(u: &Unit, id: u32) -> u32 {
             let it = u.prog.files[def.file as usize].ast.item(def.item);
             it.hi - it.lo
         }
-        FnKey::Closure(..) => u32::MAX,
+        FnKey::Closure(..) | FnKey::Glue(..) => u32::MAX,
     }
 }
 
@@ -1079,13 +1221,14 @@ pub unsafe fn build_rir(up: *mut Unit, id: u32) -> Result<(), String> {
             let builtin = match &u.fns[*c as usize].key {
                 FnKey::Inst(d, _) => u.prog.def(*d).krate == u.core_crate,
                 FnKey::Closure(..) => false,
+                FnKey::Glue(..) => true,
             };
             if !builtin && !cfg.inline_all {
                 continue;
             }
             let attr = match &u.fns[*c as usize].key {
                 FnKey::Inst(d, _) => inline_attrs(&u.prog, *d),
-                FnKey::Closure(..) => 0,
+                FnKey::Closure(..) | FnKey::Glue(..) => 0,
             };
             if u.fns[*c as usize].rir.is_none() && !u.fns[*c as usize].building && (src_size(u, *c) <= INLINE_SRC_BYTES || attr & crate::opt::ATTR_ALWAYS != 0) {
                 let saved = u.cur_fn;
@@ -1103,14 +1246,16 @@ pub unsafe fn build_rir(up: *mut Unit, id: u32) -> Result<(), String> {
         let get = |c: u32| -> Option<(*const crate::rir::Func, u8)> {
             let fns = &*fns_ptr;
             let prog = &*prog_ptr;
-            let d = match &fns[c as usize].key {
-                FnKey::Inst(d, _) => *d,
+            let attrs = match &fns[c as usize].key {
+                FnKey::Inst(d, _) => {
+                    if !inline_all && prog.def(*d).krate != core_crate {
+                        return None;
+                    }
+                    inline_attrs(prog, *d)
+                }
+                FnKey::Glue(..) => 0,
                 FnKey::Closure(..) => return None,
             };
-            if !inline_all && prog.def(d).krate != core_crate {
-                return None;
-            }
-            let attrs = inline_attrs(prog, d);
             match &fns[c as usize].rir {
                 Some(f) => Some((&**f as *const crate::rir::Func, attrs)),
                 None => None,
@@ -1157,6 +1302,13 @@ pub unsafe fn build_rir(up: *mut Unit, id: u32) -> Result<(), String> {
 
 unsafe fn build_rir_inner(up: *mut Unit, id: u32) -> Result<crate::rir::Func, String> {
     let key = (&*up).fns[id as usize].key.clone();
+    if let FnKey::Glue(kind, t) = key {
+        let u = &mut *up;
+        let t0 = cpu_ns();
+        let f = crate::lower::glue_func(u, kind, t);
+        u.stats.lower_ns += cpu_ns() - t0;
+        return Ok(f);
+    }
     let t0 = cpu_ns();
     let body = match &key {
         FnKey::Inst(d, args) => {
@@ -1170,6 +1322,7 @@ unsafe fn build_rir_inner(up: *mut Unit, id: u32) -> Result<crate::rir::Func, St
                 None => return Err("closure parent body missing".to_string()),
             }
         }
+        FnKey::Glue(..) => return Err("glue".to_string()),
     };
     if !body.errors.is_empty() {
         return Err(body.errors.join("\n"));
@@ -1224,7 +1377,9 @@ unsafe fn build_rir_inner(up: *mut Unit, id: u32) -> Result<crate::rir::Func, St
         match &key {
             FnKey::Inst(d, _) => lcx.lower_fn_body(*d),
             FnKey::Closure(_, ce, _) => lcx.lower_closure_body(*ce),
+            FnKey::Glue(..) => {}
         }
+        lcx.finish();
         let e = std::mem::take(&mut lcx.errors);
         let c = std::mem::take(&mut lcx.new_closures);
         (lcx.f, e, c)
@@ -1262,6 +1417,10 @@ fn clone_body(b: &Body) -> Body {
         binops: b.binops.clone(),
         coerce: b.coerce.clone(),
         field_idx: b.field_idx.clone(),
+        ov_derefs: b.ov_derefs.clone(),
+        ov_index: b.ov_index.clone(),
+        for_next: b.for_next.clone(),
+        for_into: b.for_into.clone(),
         index_derefs: b.index_derefs.clone(),
         locals: {
             let mut v = Vec::new();

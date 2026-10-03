@@ -66,6 +66,14 @@ pub struct Body {
     pub binops: HashMap<u32, MethodRes>,
     pub coerce: HashMap<u32, Coerce>,
     pub field_idx: HashMap<u32, (u8, u32)>,
+    /// overloaded deref steps: (expr, step index) -> `Deref::deref` with [Self]
+    pub ov_derefs: HashMap<(u32, u8), (DefId, Vec<TyId>)>,
+    /// overloaded indexing: expr -> `Index::index` with [Self, Idx]
+    pub ov_index: HashMap<u32, (DefId, Vec<TyId>)>,
+    /// `for` over an Iterator: iterator expr -> `Iterator::next` with [Iter]
+    pub for_next: HashMap<u32, (DefId, Vec<TyId>)>,
+    /// `for` over an IntoIterator: iterator expr -> (`into_iter`, [Self], iterator type)
+    pub for_into: HashMap<u32, (DefId, Vec<TyId>, TyId)>,
     pub index_derefs: HashMap<u32, u8>,
     pub locals: Vec<Local>,
     pub param_pats: Vec<PatId>,
@@ -164,6 +172,10 @@ pub fn check_fn(prog: &Program, tcx: &mut Tcx, def: DefId, args: &[TyId]) -> Bod
             binops: HashMap::new(),
             coerce: HashMap::new(),
             field_idx: HashMap::new(),
+            ov_derefs: HashMap::new(),
+            ov_index: HashMap::new(),
+            for_next: HashMap::new(),
+            for_into: HashMap::new(),
             index_derefs: HashMap::new(),
             locals: Vec::new(),
             param_pats: Vec::new(),
@@ -1100,6 +1112,37 @@ impl<'a> Fcx<'a> {
         args
     }
 
+    /// One autoderef step from `t`: built-in for references and raw pointers, through
+    /// `Deref` for other types. Records overloaded steps under (expr, step).
+    fn deref_step(&mut self, e: u32, step: u8, t: TyId) -> Option<TyId> {
+        let t = self.shallow(t);
+        match self.tcx.tys.kind(t).clone() {
+            TyKind::Ref(_, i) | TyKind::Ptr(_, i) => Some(self.shallow(i)),
+            TyKind::Adt(..) => {
+                let td = self.lang_item(&["ops", "Deref"])?;
+                let dt = self.deep(t);
+                self.tcx.find_impl(td, dt, &[])?;
+                let target = self.tcx.trait_assoc(self.prog, td, self.prog.syms.get("Target")?)?;
+                let proj = self.tcx.tys.intern(TyKind::Assoc(target, vec![dt]));
+                let r = self.tcx.normalize(self.prog, proj);
+                let m = self.trait_fn(td, "deref")?;
+                self.b.ov_derefs.insert((e, step), (m, vec![dt]));
+                Some(r)
+            }
+            _ => None,
+        }
+    }
+
+    fn trait_fn(&self, td: DefId, name: &str) -> Option<DefId> {
+        let s = self.prog.syms.get(name)?;
+        for &it in &self.prog.traits[self.prog.def(td).sub as usize] {
+            if self.prog.def(it).name == s {
+                return Some(it);
+            }
+        }
+        None
+    }
+
     /// Normalizes associated-type projections whose Self is known.
     fn norm(&mut self, t: TyId) -> TyId {
         let d = self.deep(t);
@@ -1377,11 +1420,10 @@ impl<'a> Fcx<'a> {
                 }
                 UnOp::Deref => {
                     let t = self.check_expr(*x, None);
-                    let st = self.shallow(t);
-                    match self.tcx.tys.kind(st).clone() {
-                        TyKind::Ref(_, i) | TyKind::Ptr(_, i) => i,
-                        _ => {
-                            let s = self.ty_str(st);
+                    match self.deref_step(e.0, 0, t) {
+                        Some(i) => i,
+                        None => {
+                            let s = self.ty_str(t);
                             self.err(lo, format!("cannot deref `{}`", s));
                             error
                         }
@@ -1683,11 +1725,13 @@ impl<'a> Fcx<'a> {
                             }
                             break;
                         }
-                        TyKind::Ref(_, i) => {
-                            cur = self.shallow(i);
-                            derefs += 1;
-                        }
-                        _ => break,
+                        _ => match self.deref_step(e.0, derefs, cur) {
+                            Some(i) => {
+                                cur = i;
+                                derefs += 1;
+                            }
+                            None => break,
+                        },
                     }
                 }
                 let s = self.ty_str(t);
@@ -1721,6 +1765,31 @@ impl<'a> Fcx<'a> {
                         TyKind::Ref(_, x) | TyKind::Ptr(_, x) => {
                             cur = self.shallow(x);
                             derefs += 1;
+                        }
+                        TyKind::Adt(..) => {
+                            // `Index<Idx>` impl on the type, else autoderef through Deref
+                            if let Some(td) = self.lang_item(&["ops", "Index"]) {
+                                let dc = self.deep(cur);
+                                let ti2 = self.deep(ti);
+                                if let Some((imp, iargs)) = self.tcx.find_impl(td, dc, &[ti2]) {
+                                    self.b.index_derefs.insert(e.0, derefs);
+                                    let m = self.trait_fn(td, "index").unwrap();
+                                    self.b.ov_index.insert(e.0, (m, vec![dc, ti2]));
+                                    let out = self.prog.syms.get("Output").unwrap_or(u32::MAX);
+                                    let r = match self.tcx.impl_assoc_ty(self.prog, imp, out) {
+                                        Some(at) => self.tcx.tys.subst(at, &iargs),
+                                        None => error,
+                                    };
+                                    return self.tcx.normalize(self.prog, r);
+                                }
+                            }
+                            match self.deref_step(e.0, derefs, cur) {
+                                Some(i) => {
+                                    cur = i;
+                                    derefs += 1;
+                                }
+                                None => break,
+                            }
                         }
                         _ => break,
                     }
@@ -2037,6 +2106,20 @@ impl<'a> Fcx<'a> {
         }
     }
 
+    /// `Iterator::Item` of `t` if it implements Iterator (records `next` for the loop).
+    fn iterator_item(&mut self, key: u32, t: TyId) -> Option<TyId> {
+        let td = self.lang_item(&["iter", "Iterator"])?;
+        let dt = self.deep(t);
+        let (imp, iargs) = self.tcx.find_impl(td, dt, &[])?;
+        let item = self.prog.syms.get("Item")?;
+        let at = self.tcx.impl_assoc_ty(self.prog, imp, item)?;
+        let r = self.tcx.tys.subst(at, &iargs);
+        let r = self.tcx.normalize(self.prog, r);
+        let next = self.trait_fn(td, "next")?;
+        self.b.for_next.insert(key, (next, vec![dt]));
+        Some(r)
+    }
+
     fn check_for_iter(&mut self, it: ExprId, lo: u32) -> TyId {
         let t = self.check_expr(it, None);
         let s = self.shallow(t);
@@ -2050,8 +2133,28 @@ impl<'a> Fcx<'a> {
                         return a;
                     }
                 }
+                if let Some(item) = self.iterator_item(it.0, s) {
+                    return item;
+                }
+                // IntoIterator (e.g. Vec by value)
+                if let Some(td) = self.lang_item(&["iter", "IntoIterator"]) {
+                    let dt = self.deep(s);
+                    if let Some((imp, iargs)) = self.tcx.find_impl(td, dt, &[]) {
+                        let isym = self.prog.syms.get("IntoIter").unwrap_or(u32::MAX);
+                        if let Some(at) = self.tcx.impl_assoc_ty(self.prog, imp, isym) {
+                            let iter_t = self.tcx.tys.subst(at, &iargs);
+                            let iter_t = self.tcx.normalize(self.prog, iter_t);
+                            if let Some(m) = self.trait_fn(td, "into_iter") {
+                                self.b.for_into.insert(it.0, (m, vec![dt], iter_t));
+                                if let Some(item) = self.iterator_item(it.0, iter_t) {
+                                    return item;
+                                }
+                            }
+                        }
+                    }
+                }
                 let ts = self.ty_str(s);
-                self.err(lo, format!("`for` over `{}` is not supported yet", ts));
+                self.err(lo, format!("`for` over `{}`: no Iterator / IntoIterator impl", ts));
                 error
             }
             TyKind::Array(el, _) => el,
@@ -2059,6 +2162,22 @@ impl<'a> Fcx<'a> {
                 let inner = self.shallow(inner);
                 match self.tcx.tys.kind(inner).clone() {
                     TyKind::Array(el, _) | TyKind::Slice(el) => self.tcx.tys.intern(TyKind::Ref(m, el)),
+                    TyKind::Adt(..) => {
+                        // `for x in &v` with v: Vec<T> (Deref<Target = [T]>)
+                        if let Some(target) = self.deref_step(it.0, 1, inner) {
+                            let tg = self.shallow(target);
+                            if let TyKind::Slice(el) = self.tcx.tys.kind(tg).clone() {
+                                return self.tcx.tys.intern(TyKind::Ref(m, el));
+                            }
+                        }
+                        // `for x in &mut iter`
+                        if let Some(item) = self.iterator_item(it.0, s) {
+                            return item;
+                        }
+                        let ts = self.ty_str(s);
+                        self.err(lo, format!("`for` over `{}` is not supported yet", ts));
+                        error
+                    }
                     _ => {
                         let ts = self.ty_str(s);
                         self.err(lo, format!("`for` over `{}` is not supported yet", ts));
@@ -2080,25 +2199,25 @@ impl<'a> Fcx<'a> {
         let mut cur = self.shallow(t);
         let mut derefs = 0u8;
         loop {
-            match self.tcx.tys.kind(cur).clone() {
-                TyKind::Adt(d, args) => {
-                    if let Some(adt) = self.tcx.adts.get(&d).cloned() {
-                        if !adt.is_enum {
-                            for (i, f) in adt.variants[0].fields.iter().enumerate() {
-                                if f.name == s {
-                                    self.b.field_idx.insert(e.0, (derefs, i as u32));
-                                    return self.tcx.tys.subst(f.ty, &args);
-                                }
+            if let TyKind::Adt(d, args) = self.tcx.tys.kind(cur).clone() {
+                if let Some(adt) = self.tcx.adts.get(&d).cloned() {
+                    if !adt.is_enum {
+                        for (i, f) in adt.variants[0].fields.iter().enumerate() {
+                            if f.name == s {
+                                self.b.field_idx.insert(e.0, (derefs, i as u32));
+                                return self.tcx.tys.subst(f.ty, &args);
                             }
                         }
                     }
-                    break;
                 }
-                TyKind::Ref(_, i) | TyKind::Ptr(_, i) => {
-                    cur = self.shallow(i);
+            }
+            // references, raw pointers, then Deref impls (Box<T>, wrappers)
+            match self.deref_step(e.0, derefs, cur) {
+                Some(i) => {
+                    cur = i;
                     derefs += 1;
                 }
-                _ => break,
+                None => break,
             }
         }
         let ts = self.ty_str(t);
@@ -2262,7 +2381,13 @@ impl<'a> Fcx<'a> {
                     // arrays get slice methods by unsizing
                     cur = self.tcx.tys.intern(TyKind::Slice(el));
                 }
-                _ => break,
+                _ => match self.deref_step(e.0, derefs, cur) {
+                    Some(i) => {
+                        cur = i;
+                        derefs += 1;
+                    }
+                    None => break,
+                },
             }
         }
         if let (None, Some((item, imp, self_ty))) = (found, trait_found) {

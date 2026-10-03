@@ -729,6 +729,7 @@ impl Tcx {
         out
     }
 
+    /// Associated type `name` of trait `td` or (transitively) its supertraits.
     pub fn trait_assoc(&self, prog: &Program, td: DefId, name: Sym) -> Option<DefId> {
         for &it in &prog.traits[prog.def(td).sub as usize] {
             let d = prog.def(it);
@@ -736,7 +737,33 @@ impl Tcx {
                 return Some(it);
             }
         }
+        for sup in self.trait_supers(prog, td) {
+            if sup != td {
+                if let Some(x) = self.trait_assoc(prog, sup, name) {
+                    return Some(x);
+                }
+            }
+        }
         None
+    }
+
+    /// Direct supertraits of a trait (resolved from its `: A + B` bounds).
+    pub fn trait_supers(&self, prog: &Program, td: DefId) -> Vec<DefId> {
+        let pd = prog.def(td);
+        let ast = &prog.files[pd.file as usize].ast;
+        let mut out = Vec::new();
+        if let ItemKind::Trait { supers, .. } = &ast.item(pd.item).kind {
+            for b in supers {
+                if let ast::Bound::Trait { path, .. } = b {
+                    if let Some(d) = self.resolve_type_path_def(prog, pd.file, pd.scope, path) {
+                        if prog.def(d).kind == DefKind::Trait {
+                            out.push(d);
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 
     /// An impl's `type Name = T;` lowered in the impl's environment.

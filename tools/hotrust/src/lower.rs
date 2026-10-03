@@ -31,11 +31,20 @@ enum LocalSt {
     Slot(VReg),
 }
 
+#[derive(Clone, Copy)]
+enum MatchRoot {
+    Local(u32),
+    /// an rvalue scrutinee: its drop flag
+    Temp(VReg),
+}
+
 struct LoopCx {
     label: Option<u32>,
     brk: u32,
     cont: u32,
     result: Option<(Place, TyId)>,
+    /// drop-scope depth when the loop was entered (break/continue drop deeper scopes)
+    scope_depth: usize,
 }
 
 pub struct Lcx<'a> {
@@ -54,12 +63,26 @@ pub struct Lcx<'a> {
     pub closure_of: Option<u32>,
     pub new_closures: Vec<(u32, u32)>, // (closure expr, fn id)
     pub errors: Vec<String>,
+    /// drop scopes: locals (index) that own a value needing drop, innermost last
+    scopes: Vec<Vec<u32>>,
+    /// per local: its drop flag (1 = holds a live value)
+    drop_flags: Vec<Option<VReg>>,
+    /// instructions run at function entry (drop flag initialisation)
+    entry_inits: Vec<Inst>,
+    /// rvalue temporaries to drop at the end of the current statement (with a drop flag
+    /// when parts may have been moved out)
+    stmt_temps: Vec<(VReg, TyId, Option<VReg>)>,
+    /// owner of the place a pattern currently matches (by-value bindings move out of it)
+    match_root: Option<MatchRoot>,
+    /// the place being lowered is written or mutably borrowed (DerefMut / IndexMut)
+    want_mut: bool,
 }
 
 pub fn fn_name(u: &Unit, key: &FnKey) -> String {
     match key {
         FnKey::Inst(d, _) => u.prog.def_path(*d),
         FnKey::Closure(_, e, p) => format!("{{closure#{}}}@{}", e, p),
+        FnKey::Glue(k, t) => format!("glue{}<{}>", k, crate::typeck::ty_to_string(&u.prog, &u.tcx, *t)),
     }
 }
 
@@ -83,6 +106,12 @@ impl<'a> Lcx<'a> {
             closure_of: None,
             new_closures: Vec::new(),
             errors: Vec::new(),
+            scopes: vec![Vec::new()],
+            drop_flags: vec![None; n],
+            entry_inits: Vec::new(),
+            stmt_temps: Vec::new(),
+            match_root: None,
+            want_mut: false,
         }
     }
 
@@ -402,6 +431,22 @@ impl<'a> Lcx<'a> {
     // ------------------------------------------------------------ function entry
 
     /// Lowers a fn item body. `params`: ABI parameter vregs are created here.
+    /// Puts the drop-flag initialisations at the start of the entry block.
+    pub fn finish(&mut self) {
+        let inits = std::mem::take(&mut self.entry_inits);
+        if inits.is_empty() {
+            return;
+        }
+        let b = &mut self.f.blocks[0];
+        let n = inits.len();
+        let mut insts = inits;
+        insts.extend(b.insts.drain(..));
+        b.insts = insts;
+        let mut pos = vec![0u64; n];
+        pos.extend(b.pos.drain(..));
+        b.pos = pos;
+    }
+
     pub fn lower_fn_body(&mut self, def: DefId) {
         self.scan_addr_taken();
         let ast = self.ast();
@@ -460,6 +505,7 @@ impl<'a> Lcx<'a> {
                 (Some(li), _) => {
                     let pl = self.local_place(li);
                     self.write_place(&pl, t, v);
+                    self.own_local(li);
                 }
                 (None, Some(p)) => self.bind_pat(p, v, t),
                 _ => {}
@@ -539,6 +585,17 @@ impl<'a> Lcx<'a> {
     }
 
     fn ret_val(&mut self, v: Val, t: TyId) {
+        // the return value is computed; every live local is dropped before returning
+        let v = match v {
+            Val::M(b, o) if self.scopes.iter().any(|s| !s.is_empty()) => {
+                // keep it out of reach of the drops (it may live in a local's memory)
+                let tmp = self.new_slot_for(t);
+                self.store_val(tmp, 0, t, Val::M(b, o));
+                Val::M(tmp, 0)
+            }
+            v => v,
+        };
+        self.drop_scopes_from(0);
         match self.sret {
             Some(p) => {
                 self.store_val(p, 0, t, v);
@@ -554,6 +611,13 @@ impl<'a> Lcx<'a> {
     // ------------------------------------------------------------ blocks / statements
 
     fn lower_block(&mut self, b: BlockId) -> Val {
+        self.push_scope();
+        let v = self.lower_block_stmts(b);
+        self.pop_scope();
+        v
+    }
+
+    fn lower_block_stmts(&mut self, b: BlockId) -> Val {
         let ast = self.ast();
         let blk = ast.block(b);
         let n = blk.stmts.len();
@@ -566,10 +630,14 @@ impl<'a> Lcx<'a> {
                     }
                     let t = self.b.pty(*pat);
                     match init {
+                        Some(e) if matches!(ast.pat(*pat), Pat::Wild) && else_.is_none() && self.is_place_expr(*e) => {
+                            // `let _ = place;` neither moves nor drops
+                        }
                         Some(e) => {
                             self.pos = ast.expr(*e).lo;
                             let v = self.lower_expr_coerced(*e, t);
                             match else_ {
+                                None if matches!(ast.pat(*pat), Pat::Wild) => self.drop_val(v, t),
                                 None => self.bind_pat(*pat, v, t),
                                 Some(eb) => {
                                     let fail = self.f.block();
@@ -600,9 +668,16 @@ impl<'a> Lcx<'a> {
                     let v = self.lower_expr(*e);
                     if i == n - 1 && !*semi {
                         result = v;
+                    } else {
+                        // a discarded rvalue that owns resources is dropped here
+                        let et = self.b.ty(*e);
+                        if !self.is_place_expr(*e) && self.needs_drop(et) {
+                            self.drop_val(v, et);
+                        }
                     }
                 }
             }
+            self.drop_stmt_temps();
         }
         result
     }
@@ -616,6 +691,306 @@ impl<'a> Lcx<'a> {
         crate::cfg::active(prog.src(self.b.file), attrs, &prog.crates[krate as usize].cfg)
     }
 
+    // ------------------------------------------------------------ autoderef
+
+    /// One deref step of the place `pl: pt` for expression `e`, step `k`: built-in for
+    /// references/pointers, a `Deref::deref` (or `deref_mut` in a mutable context) call
+    /// for overloaded steps.
+    fn deref_place(&mut self, e: u32, k: u8, pl: Place, pt: TyId) -> (Place, TyId) {
+        if let Some((m, args)) = self.b.ov_derefs.get(&(e, k)).cloned() {
+            return self.overloaded_deref(m, args, pl, pt);
+        }
+        let inner = match self.kind(pt) {
+            TyKind::Ref(_, i) | TyKind::Ptr(_, i) => i,
+            _ => pt,
+        };
+        let p = self.read_place(&pl, pt);
+        let p = self.to_leaves(p, pt);
+        if matches!(self.kind(inner), TyKind::Slice(_) | TyKind::Str) {
+            (Place::Regs(p), inner)
+        } else {
+            (Place::Mem(p[0], 0), inner)
+        }
+    }
+
+    fn overloaded_deref(&mut self, m: DefId, args: Vec<TyId>, pl: Place, pt: TyId) -> (Place, TyId) {
+        let mut def = m;
+        let mut mutbl = false;
+        if self.want_mut {
+            if let Some(td) = self.u.lang(&["ops", "DerefMut"]) {
+                if self.u.tcx.find_impl(td, pt, &[]).is_some() {
+                    for &it in &self.u.prog.traits[self.u.prog.def(td).sub as usize] {
+                        if self.u.prog.name(it) == "deref_mut" {
+                            def = it;
+                            mutbl = true;
+                        }
+                    }
+                }
+            }
+        }
+        let target = {
+            let u = &mut *self.u;
+            let td = u.prog.def(m).parent;
+            let tsym = u.prog.syms.get("Target").unwrap_or(u32::MAX);
+            match u.tcx.trait_assoc(&u.prog, td, tsym) {
+                Some(ad) => {
+                    let proj = u.tcx.tys.intern(TyKind::Assoc(ad, vec![pt]));
+                    u.tcx.normalize(&u.prog, proj)
+                }
+                None => u.tcx.tys.error,
+            }
+        };
+        let (d, a) = self.u.tcx.resolve_trait_method(&self.u.prog, def, &args);
+        let id = self.u.fn_id(FnKey::Inst(d, a));
+        let addr = self.place_addr(&pl, pt);
+        let self_t = self.u.tcx.tys.intern(TyKind::Ref(mutbl, pt));
+        let ret_t = self.u.tcx.tys.intern(TyKind::Ref(mutbl, target));
+        let r = self.emit_call(Callee::Fn(id), vec![(Val::L(vec![addr]), self_t)], ret_t);
+        let r = self.to_leaves(r, ret_t);
+        if matches!(self.kind(target), TyKind::Slice(_) | TyKind::Str) {
+            (Place::Regs(r), target)
+        } else {
+            (Place::Mem(r[0], 0), target)
+        }
+    }
+
+    /// `for p in it` over an Iterator: `loop { match it.next() { Some(p) => body, None => break } }`.
+    fn lower_for_iterator(&mut self, p: PatId, it: ExprId, b: BlockId, l: Option<u32>) {
+        let (next, nargs) = self.b.for_next.get(&it.0).cloned().unwrap();
+        let mut iter_v = self.lower_expr(it);
+        let mut iter_t = self.b.ty(it);
+        if let Some((into, iargs, ity)) = self.b.for_into.get(&it.0).cloned() {
+            let (d, a) = self.u.tcx.resolve_trait_method(&self.u.prog, into, &iargs);
+            let id = self.u.fn_id(FnKey::Inst(d, a));
+            iter_v = self.emit_call(Callee::Fn(id), vec![(iter_v, iter_t)], ity);
+            iter_t = ity;
+        }
+        // the iterator lives in memory for the loop (next takes &mut self)
+        let pl = self.val_to_place(iter_v);
+        let iter_addr = self.place_addr(&pl, iter_t);
+        let (d, a) = self.u.tcx.resolve_trait_method(&self.u.prog, next, &nargs);
+        let next_id = self.u.fn_id(FnKey::Inst(d, a));
+        let opt_t = {
+            let sig = self.u.tcx.sigs.get(&d).cloned();
+            match sig {
+                Some(sig) => {
+                    let args2 = self.u.tcx.resolve_trait_method(&self.u.prog, next, &nargs).1;
+                    let x = self.u.tcx.tys.subst(sig.ret, &args2);
+                    let u = &mut *self.u;
+                    u.tcx.normalize(&u.prog, x)
+                }
+                None => self.u.tcx.tys.error,
+            }
+        };
+        let some_vi = match self.kind(opt_t) {
+            TyKind::Adt(od, _) => {
+                let mut vi = 0;
+                if let Some(adt) = self.u.tcx.adts.get(&od) {
+                    for (k, v) in adt.variants.iter().enumerate() {
+                        if self.u.prog.syms.str(v.name) == "Some" {
+                            vi = k as u32;
+                        }
+                    }
+                }
+                vi
+            }
+            _ => 1,
+        };
+        let head = self.f.block();
+        let body = self.f.block();
+        let exit = self.f.block();
+        self.goto(head);
+        self.switch(head);
+        let self_t = self.u.tcx.tys.intern(TyKind::Ref(true, iter_t));
+        let r = self.emit_call(Callee::Fn(next_id), vec![(Val::L(vec![iter_addr]), self_t)], opt_t);
+        let rpl = self.val_to_place(r);
+        let ra = self.place_addr(&rpl, opt_t);
+        let opl = Place::Mem(ra, 0);
+        self.test_tag(&opl, opt_t, some_vi, exit);
+        self.goto(body);
+        self.switch(body);
+        self.push_scope();
+        let (fp, ft) = self.project(&opl, opt_t, some_vi, 0);
+        let v = self.read_place(&fp, ft);
+        self.bind_pat(p, v, ft);
+        self.loops.push(LoopCx { label: l, brk: exit, cont: head, result: None, scope_depth: self.scopes.len() - 1 });
+        self.lower_block(b);
+        self.loops.pop();
+        self.pop_scope();
+        self.goto(head);
+        self.switch(exit);
+        // the iterator itself is dropped after the loop
+        self.drop_at(iter_addr, iter_t);
+    }
+
+    /// `base[i]` through `Index::index` / `IndexMut::index_mut`.
+    fn overloaded_index(&mut self, m: DefId, args: Vec<TyId>, pl: Place, pt: TyId, i: ExprId, t: TyId) -> (Place, TyId) {
+        let mut def = m;
+        let mut mutbl = false;
+        if self.want_mut {
+            if let Some(td) = self.u.lang(&["ops", "IndexMut"]) {
+                if self.u.tcx.find_impl(td, pt, &args[1..]).is_some() {
+                    for &it in &self.u.prog.traits[self.u.prog.def(td).sub as usize] {
+                        if self.u.prog.name(it) == "index_mut" {
+                            def = it;
+                            mutbl = true;
+                        }
+                    }
+                }
+            }
+        }
+        let (d, a) = self.u.tcx.resolve_trait_method(&self.u.prog, def, &args);
+        let id = self.u.fn_id(FnKey::Inst(d, a));
+        let saved = self.want_mut;
+        self.want_mut = false;
+        let it = self.b.ty(i);
+        let iv = self.lower_expr(i);
+        self.want_mut = saved;
+        let addr = self.place_addr(&pl, pt);
+        let self_t = self.u.tcx.tys.intern(TyKind::Ref(mutbl, pt));
+        let ret_t = self.u.tcx.tys.intern(TyKind::Ref(mutbl, t));
+        let r = self.emit_call(Callee::Fn(id), vec![(Val::L(vec![addr]), self_t), (iv, it)], ret_t);
+        let r = self.to_leaves(r, ret_t);
+        if matches!(self.kind(t), TyKind::Slice(_) | TyKind::Str) {
+            (Place::Regs(r), t)
+        } else {
+            (Place::Mem(r[0], 0), t)
+        }
+    }
+
+    // ------------------------------------------------------------ drops
+
+    fn needs_drop(&mut self, t: TyId) -> bool {
+        self.u.needs_drop(t)
+    }
+
+    /// Drops the value of type `t` at `addr` (calls the type's drop glue).
+    fn drop_at(&mut self, addr: VReg, t: TyId) {
+        if self.needs_drop(t) {
+            let id = self.u.fn_id(FnKey::Glue(crate::jit::GLUE_DROP, t));
+            self.emit(Inst::Call(Callee::Fn(id), vec![addr], Vec::new()));
+        }
+    }
+
+    fn drop_val(&mut self, v: Val, t: TyId) {
+        if !self.needs_drop(t) {
+            return;
+        }
+        let pl = self.val_to_place(v);
+        let a = self.place_addr(&pl, t);
+        self.drop_at(a, t);
+    }
+
+    /// The drop flag of a local (created and registered in the current scope on first use).
+    fn flag_of(&mut self, li: u32) -> VReg {
+        if let Some(f) = self.drop_flags[li as usize] {
+            return f;
+        }
+        let f = self.f.vreg(Cls::I);
+        self.entry_inits.push(Inst::Iconst(f, 0));
+        self.drop_flags[li as usize] = Some(f);
+        let top = self.scopes.len() - 1;
+        self.scopes[top].push(li);
+        f
+    }
+
+    /// A local now owns a value: drop a previous one still owned (rebinding in loops),
+    /// then set its flag.
+    fn own_local(&mut self, li: u32) {
+        let lt = self.b.locals[li as usize].ty;
+        if !self.needs_drop(lt) {
+            return;
+        }
+        let f = self.flag_of(li);
+        self.emit(Inst::Iconst(f, 1));
+    }
+
+    /// Drop a previous value of a local about to be overwritten (before the write).
+    fn drop_local_before_rebind(&mut self, li: u32) {
+        let lt = self.b.locals[li as usize].ty;
+        if self.needs_drop(lt) && self.drop_flags[li as usize].is_some() {
+            self.drop_local_if_live(li);
+        }
+    }
+
+    fn moved_local(&mut self, li: u32) {
+        let lt = self.b.locals[li as usize].ty;
+        if self.needs_drop(lt) {
+            let f = self.flag_of(li);
+            self.emit(Inst::Iconst(f, 0));
+        }
+    }
+
+    fn drop_local_if_live(&mut self, li: u32) {
+        let f = match self.drop_flags[li as usize] {
+            Some(f) => f,
+            None => return,
+        };
+        let lt = self.b.locals[li as usize].ty;
+        let yes = self.f.block();
+        let join = self.f.block();
+        self.term(Term::Branch(f, yes, join));
+        self.switch(yes);
+        let pl = self.local_place(li);
+        let a = self.place_addr(&pl, lt);
+        self.drop_at(a, lt);
+        self.emit(Inst::Iconst(f, 0));
+        self.goto(join);
+        self.switch(join);
+    }
+
+    /// Emits drops for scopes `from..` (innermost first) without popping them.
+    fn drop_scopes_from(&mut self, from: usize) {
+        let mut i = self.scopes.len();
+        while i > from {
+            i -= 1;
+            let ls = self.scopes[i].clone();
+            for li in ls.iter().rev() {
+                self.drop_local_if_live(*li);
+            }
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(Vec::new());
+    }
+
+    fn pop_scope(&mut self) {
+        let n = self.scopes.len();
+        self.drop_scopes_from(n - 1);
+        self.scopes.pop();
+    }
+
+    fn drop_stmt_temps(&mut self) {
+        let ts = std::mem::take(&mut self.stmt_temps);
+        for (a, t, f) in ts.iter().rev() {
+            match f {
+                None => self.drop_at(*a, *t),
+                Some(f) => {
+                    let yes = self.f.block();
+                    let join = self.f.block();
+                    self.term(Term::Branch(*f, yes, join));
+                    self.switch(yes);
+                    self.drop_at(*a, *t);
+                    self.goto(join);
+                    self.switch(join);
+                }
+            }
+        }
+    }
+
+    /// Root local of a place expression (for partial moves).
+    fn place_root_local(&self, e: ExprId) -> Option<u32> {
+        match &self.ast().expr(e).kind {
+            ExprKind::Path(_) => match self.b.res.get(&e.0) {
+                Some(Res::Local(li)) => Some(*li),
+                _ => None,
+            },
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) | ExprKind::Paren(x) => self.place_root_local(*x),
+            _ => None,
+        }
+    }
+
     // ------------------------------------------------------------ patterns
 
     fn bind_pat(&mut self, p: PatId, v: Val, t: TyId) {
@@ -625,16 +1000,19 @@ impl<'a> Lcx<'a> {
                 if let Some(&li) = self.b.pat_local.get(&p.0) {
                     // an aggregate rvalue in memory is a fresh temporary (or a by-pointer
                     // parameter copy): the local takes it over instead of copying it
+                    self.drop_local_before_rebind(li);
                     if let (Val::M(base, off), None) = (&v, &self.locals[li as usize]) {
                         let l = self.layout(t);
                         if l.leaves.is_none() {
                             let a = self.addr_add(*base, *off);
                             self.locals[li as usize] = Some(LocalSt::Slot(a));
+                            self.own_local(li);
                             return;
                         }
                     }
                     let pl = self.local_place(li);
                     self.write_place(&pl, t, v);
+                    self.own_local(li);
                 }
             }
             _ => {
@@ -659,10 +1037,22 @@ impl<'a> Lcx<'a> {
                         let a = self.place_addr(place, t);
                         Val::L(vec![a])
                     } else {
+                        if self.needs_drop(t) {
+                            // moving out of the matched place: its owner no longer drops it
+                            match self.match_root {
+                                Some(MatchRoot::Local(r)) => self.moved_local(r),
+                                Some(MatchRoot::Temp(f)) => self.emit(Inst::Iconst(f, 0)),
+                                None => {}
+                            }
+                        }
                         self.read_place(place, t)
                     };
+                    self.drop_local_before_rebind(li);
                     let pl = self.local_place(li);
                     self.write_place(&pl, lt, v);
+                    if !*by_ref {
+                        self.own_local(li);
+                    }
                 }
                 if let Some(s) = sub {
                     self.bind_pat_place(*s, place, t);
@@ -1076,7 +1466,9 @@ impl<'a> Lcx<'a> {
                 Some(Res::Local(li)) => {
                     let pl = self.local_place(li);
                     let lt = self.b.locals[li as usize].ty;
-                    self.read_place(&pl, lt)
+                    let v = self.read_place(&pl, lt);
+                    self.moved_local(li);
+                    v
                 }
                 Some(Res::Def(d)) => self.lower_def_value(e, d, t),
                 _ => self.unit(),
@@ -1138,12 +1530,33 @@ impl<'a> Lcx<'a> {
             ExprKind::Assign(a, b) => {
                 let at = self.b.ty(*a);
                 let v = self.lower_expr_coerced(*b, at);
+                // a local: drop its old value if it holds one, then it owns the new one
+                if let ExprKind::Path(_) = &self.ast().expr(strip_paren(self.ast(), *a)).kind {
+                    if let Some(Res::Local(li)) = self.b.res.get(&strip_paren(self.ast(), *a).0).copied() {
+                        self.drop_local_before_rebind(li);
+                        let lt = self.b.locals[li as usize].ty;
+                        let pl = self.local_place(li);
+                        self.write_place(&pl, lt, v);
+                        self.own_local(li);
+                        return self.unit();
+                    }
+                }
+                self.want_mut = true;
                 let (pl, pt) = self.lower_place(*a);
+                self.want_mut = false;
+                if self.needs_drop(pt) {
+                    let addr = self.place_addr(&pl, pt);
+                    self.drop_at(addr, pt);
+                    self.store_val(addr, 0, pt, v);
+                    return self.unit();
+                }
                 self.write_place(&pl, pt, v);
                 self.unit()
             }
             ExprKind::AssignOp(op, a, b) => {
+                self.want_mut = true;
                 let (pl, pt) = self.lower_place(*a);
+                self.want_mut = false;
                 let cur = self.read_place(&pl, pt);
                 let cur = self.to_leaves(cur, pt);
                 let bt = self.b.ty(*b);
@@ -1163,7 +1576,7 @@ impl<'a> Lcx<'a> {
                     let brk = self.f.block();
                     let res = self.result_place(t);
                     let l = label.map(|x| self.lifetime_sym(x));
-                    self.loops.push(LoopCx { label: l, brk, cont: brk, result: Some((res.clone(), t)) });
+                    self.loops.push(LoopCx { label: l, brk, cont: brk, result: Some((res.clone(), t)), scope_depth: self.scopes.len() });
                     let v = self.lower_block(*b);
                     self.loops.pop();
                     if !self.is_never(t) {
@@ -1206,7 +1619,7 @@ impl<'a> Lcx<'a> {
                 self.lower_cond(*c, body, exit);
                 self.switch(body);
                 let l = label.map(|x| self.lifetime_sym(x));
-                self.loops.push(LoopCx { label: l, brk: exit, cont: head, result: None });
+                self.loops.push(LoopCx { label: l, brk: exit, cont: head, result: None, scope_depth: self.scopes.len() });
                 self.lower_block(*b);
                 self.loops.pop();
                 self.goto(head);
@@ -1221,7 +1634,7 @@ impl<'a> Lcx<'a> {
                 self.switch(head);
                 
                 let l = label.map(|x| self.lifetime_sym(x));
-                self.loops.push(LoopCx { label: l, brk: exit, cont: head, result: Some((res.clone(), t)) });
+                self.loops.push(LoopCx { label: l, brk: exit, cont: head, result: Some((res.clone(), t)), scope_depth: self.scopes.len() });
                 self.lower_block(*b);
                 self.loops.pop();
                 self.goto(head);
@@ -1247,6 +1660,8 @@ impl<'a> Lcx<'a> {
                             self.write_place(&pl, pt, val);
                         }
                     }
+                    let depth = self.loops[i].scope_depth;
+                    self.drop_scopes_from(depth);
                     let brk = self.loops[i].brk;
                     self.goto(brk);
                 }
@@ -1256,6 +1671,8 @@ impl<'a> Lcx<'a> {
             ExprKind::Continue(label) => {
                 let l = label.map(|y| self.lifetime_sym(y));
                 if let Some(i) = self.loop_index(l) {
+                    let depth = self.loops[i].scope_depth;
+                    self.drop_scopes_from(depth);
                     let c = self.loops[i].cont;
                     self.goto(c);
                 }
@@ -1347,9 +1764,12 @@ impl<'a> Lcx<'a> {
                 let (pl, pt) = self.lower_place(e);
                 self.read_place(&pl, pt)
             }
-            ExprKind::AddrOf(_, _, x) => {
+            ExprKind::AddrOf(_, m, x) => {
                 // `&[T; N]` from an array literal, `&local`, `&expr`
+                let saved = self.want_mut;
+                self.want_mut = *m;
                 let (pl, pt) = self.lower_place(*x);
+                self.want_mut = saved;
                 if matches!(self.kind(pt), TyKind::Str | TyKind::Slice(_)) {
                     // reborrow of an unsized place: the fat pointer itself
                     if let Place::Regs(r) = pl {
@@ -1696,6 +2116,10 @@ impl<'a> Lcx<'a> {
                     (self.val_to_place(v), t)
                 }
             },
+            ExprKind::Unary(UnOp::Deref, x) if self.b.ov_derefs.contains_key(&(e.0, 0)) => {
+                let (pl, pt) = self.lower_place(*x);
+                self.deref_place(e.0, 0, pl, pt)
+            }
             ExprKind::Unary(UnOp::Deref, x) => {
                 let xt = self.b.ty(*x);
                 let p = self.lower_expr(*x);
@@ -1711,34 +2135,23 @@ impl<'a> Lcx<'a> {
                     None => return (Place::Regs(Vec::new()), t),
                 };
                 let (mut pl, mut pt) = self.lower_place(*x);
-                for _ in 0..derefs {
-                    let inner = match self.kind(pt) {
-                        TyKind::Ref(_, i) | TyKind::Ptr(_, i) => i,
-                        _ => pt,
-                    };
-                    let p = self.read_place(&pl, pt);
-                    let p = self.to_leaves(p, pt);
-                    pl = Place::Mem(p[0], 0);
-                    pt = inner;
+                for k in 0..derefs {
+                    let (a, b2) = self.deref_place(e.0, k, pl, pt);
+                    pl = a;
+                    pt = b2;
                 }
                 self.project(&pl, pt, 0, fi)
             }
             ExprKind::Index(a, i) => {
                 let derefs = self.b.index_derefs.get(&e.0).copied().unwrap_or(0);
                 let (mut pl, mut pt) = self.lower_place(*a);
-                for _ in 0..derefs {
-                    let inner = match self.kind(pt) {
-                        TyKind::Ref(_, i) | TyKind::Ptr(_, i) => i,
-                        _ => pt,
-                    };
-                    let p = self.read_place(&pl, pt);
-                    let p = self.to_leaves(p, pt);
-                    if matches!(self.kind(inner), TyKind::Slice(_) | TyKind::Str) {
-                        pl = Place::Regs(p);
-                    } else {
-                        pl = Place::Mem(p[0], 0);
-                    }
-                    pt = inner;
+                for k in 0..derefs {
+                    let (a2, b2) = self.deref_place(e.0, k, pl, pt);
+                    pl = a2;
+                    pt = b2;
+                }
+                if let Some((m, args)) = self.b.ov_index.get(&e.0).cloned() {
+                    return self.overloaded_index(m, args, pl, pt, *i, t);
                 }
                 let it = self.b.ty(*i);
                 let iv = self.lower_expr(*i);
@@ -2109,16 +2522,22 @@ impl<'a> Lcx<'a> {
         let ast = self.ast();
         match &ast.expr(c).kind {
             ExprKind::Let(p, x) => {
-                let xt = self.b.ty(*x);
-                let (place, pt) = if self.is_place_expr(*x) {
-                    self.lower_place(*x)
-                } else {
-                    let v = self.lower_expr(*x);
-                    (self.val_to_place(v), xt)
-                };
-                self.test_pat(*p, &place, pt, f);
+                let (place, pt, root) = self.scrutinee(*x);
+                let fail = self.f.block();
+                self.test_pat(*p, &place, pt, fail);
+                let saved = self.match_root;
+                self.match_root = root;
                 self.bind_pat_place(*p, &place, pt);
+                self.match_root = saved;
+                // an rvalue scrutinee lives to the end of the statement (bindings may
+                // borrow it); parts moved out clear its flag
+                if let Some(MatchRoot::Temp(fl)) = root {
+                    let a = self.place_addr(&place, pt);
+                    self.stmt_temps.push((a, pt, Some(fl)));
+                }
                 self.goto(t);
+                self.switch(fail);
+                self.goto(f);
             }
             ExprKind::Binary(BinOp::And, a, b) => {
                 let mid = self.f.block();
@@ -2178,14 +2597,45 @@ impl<'a> Lcx<'a> {
         self.read_place(&res, t)
     }
 
-    fn lower_match(&mut self, x: ExprId, arms: &[Arm], t: TyId) -> Val {
+    /// The matched place and its owner for move tracking.
+    fn scrutinee(&mut self, x: ExprId) -> (Place, TyId, Option<MatchRoot>) {
         let xt = self.b.ty(x);
-        let (place, pt) = if self.is_place_expr(x) {
-            self.lower_place(x)
+        if self.is_place_expr(x) {
+            let (pl, pt) = self.lower_place(x);
+            let root = self.place_root_local(x).map(MatchRoot::Local);
+            (pl, pt, root)
         } else {
             let v = self.lower_expr(x);
-            (self.val_to_place(v), xt)
-        };
+            let mut place = self.val_to_place(v);
+            let mut root = None;
+            if self.needs_drop(xt) {
+                // keep the rvalue in memory with a flag; whatever is not moved out is
+                // dropped after the match
+                let a = self.place_addr(&place, xt);
+                place = Place::Mem(a, 0);
+                let f = self.f.vreg(Cls::I);
+                self.emit(Inst::Iconst(f, 1));
+                root = Some(MatchRoot::Temp(f));
+            }
+            (place, xt, root)
+        }
+    }
+
+    fn end_scrutinee(&mut self, place: &Place, t: TyId, root: Option<MatchRoot>) {
+        if let Some(MatchRoot::Temp(f)) = root {
+            let yes = self.f.block();
+            let join = self.f.block();
+            self.term(Term::Branch(f, yes, join));
+            self.switch(yes);
+            let a = self.place_addr(place, t);
+            self.drop_at(a, t);
+            self.goto(join);
+            self.switch(join);
+        }
+    }
+
+    fn lower_match(&mut self, x: ExprId, arms: &[Arm], t: TyId) -> Val {
+        let (place, pt, root) = self.scrutinee(x);
         let join = self.f.block();
         let res = self.result_place(t);
         for arm in arms {
@@ -2194,7 +2644,11 @@ impl<'a> Lcx<'a> {
             }
             let next = self.f.block();
             self.test_pat(arm.pat, &place, pt, next);
+            self.push_scope();
+            let saved = self.match_root;
+            self.match_root = root;
             self.bind_pat_place(arm.pat, &place, pt);
+            self.match_root = saved;
             if let Some(g) = arm.guard {
                 let body = self.f.block();
                 self.lower_cond(g, body, next);
@@ -2204,12 +2658,14 @@ impl<'a> Lcx<'a> {
             if !self.is_never(t) {
                 self.write_place(&res, t, v);
             }
+            self.pop_scope();
             self.goto(join);
             self.switch(next);
         }
         // no arm matched: unreachable for exhaustive matches
         self.term(Term::Unreachable);
         self.switch(join);
+        self.end_scrutinee(&place, pt, root);
         if self.is_never(t) {
             self.term(Term::Unreachable);
             self.dead();
@@ -2222,6 +2678,10 @@ impl<'a> Lcx<'a> {
         let itt = self.b.ty(it);
         let l = label.map(|x| self.lifetime_sym(x));
         let ast = self.ast();
+        if self.b.for_next.contains_key(&it.0) {
+            self.lower_for_iterator(p, it, b, l);
+            return;
+        }
         match self.kind(itt) {
             TyKind::Adt(d, args) => {
                 // integer ranges
@@ -2283,7 +2743,7 @@ impl<'a> Lcx<'a> {
                 let iv = self.f.vreg(Cls::I);
                 self.emit(Inst::Mov(iv, i));
                 self.bind_pat(p, Val::L(vec![iv]), et);
-                self.loops.push(LoopCx { label: l, brk: exit, cont: step, result: None });
+                self.loops.push(LoopCx { label: l, brk: exit, cont: step, result: None, scope_depth: self.scopes.len() });
                 self.lower_block(b);
                 self.loops.pop();
                 self.goto(step);
@@ -2311,11 +2771,25 @@ impl<'a> Lcx<'a> {
                     }
                     TyKind::Ref(_, inner) => {
                         let v = self.lower_expr(it);
-                        let r = self.to_leaves(v, itt);
-                        match self.kind(inner) {
-                            TyKind::Array(el, n) => (r[0], self.iconst(n as i64), el, true),
-                            TyKind::Slice(el) => (r[0], r[1], el, true),
-                            _ => return,
+                        if let TyKind::Adt(..) = self.kind(inner) {
+                            // &Vec<T>: Deref to the slice
+                            let r = self.to_leaves(v, itt);
+                            let (pl, pt) = self.deref_place(it.0, 1, Place::Mem(r[0], 0), inner);
+                            let s2 = match pl {
+                                Place::Regs(x) => x,
+                                _ => return,
+                            };
+                            match self.kind(pt) {
+                                TyKind::Slice(el) => (s2[0], s2[1], el, true),
+                                _ => return,
+                            }
+                        } else {
+                            let r = self.to_leaves(v, itt);
+                            match self.kind(inner) {
+                                TyKind::Array(el, n) => (r[0], self.iconst(n as i64), el, true),
+                                TyKind::Slice(el) => (r[0], r[1], el, true),
+                                _ => return,
+                            }
                         }
                     }
                     _ => return,
@@ -2347,7 +2821,7 @@ impl<'a> Lcx<'a> {
                     let v = self.read_place(&Place::Mem(addr, 0), elem);
                     self.bind_pat(p, v, elem);
                 }
-                self.loops.push(LoopCx { label: l, brk: exit, cont: step, result: None });
+                self.loops.push(LoopCx { label: l, brk: exit, cont: step, result: None, scope_depth: self.scopes.len() });
                 self.lower_block(b);
                 self.loops.pop();
                 self.goto(step);
@@ -2447,7 +2921,7 @@ impl<'a> Lcx<'a> {
                     let v = self.lower_expr_coerced(*a, pt);
                     vals.push((v, pt));
                 }
-                if let Some(v) = self.intrinsic(d, &vals, t) {
+                if let Some(v) = self.intrinsic(d, &gargs, &vals, t) {
                     return v;
                 }
                 let foreign = self.u.prog.def(d).kind == DefKind::ForeignFn;
@@ -2540,16 +3014,20 @@ impl<'a> Lcx<'a> {
         let rt = self.b.ty(recv);
         let recv_val = if m.autoref != 0 {
             let (mut pl, mut pt) = self.lower_place(recv);
-            for _ in 0..m.derefs {
-                let inner = match self.kind(pt) {
-                    TyKind::Ref(_, i) | TyKind::Ptr(_, i) => i,
-                    _ => pt,
-                };
-                let p = self.read_place(&pl, pt);
-                let p = self.to_leaves(p, pt);
-                pl = if matches!(self.kind(inner), TyKind::Slice(_) | TyKind::Str) { Place::Regs(p) } else { Place::Mem(p[0], 0) };
-                pt = inner;
+            if !self.is_place_expr(recv) && self.needs_drop(pt) {
+                // `make().method()`: the temporary lives to the end of the statement
+                let a = self.place_addr(&pl, pt);
+                pl = Place::Mem(a, 0);
+                self.stmt_temps.push((a, pt, None));
             }
+            let saved = self.want_mut;
+            self.want_mut = m.autoref == 2;
+            for k in 0..m.derefs {
+                let (a2, b2) = self.deref_place(e.0, k, pl, pt);
+                pl = a2;
+                pt = b2;
+            }
+            self.want_mut = saved;
             if matches!(self.kind(pt), TyKind::Slice(_) | TyKind::Str) {
                 match pl {
                     Place::Regs(r) => Val::L(r),
@@ -2570,22 +3048,19 @@ impl<'a> Lcx<'a> {
                 Val::L(vec![a])
             }
         } else {
-            let mut v = self.lower_expr(recv);
-            let mut cur = rt;
-            for _ in 0..m.derefs {
-                let inner = match self.kind(cur) {
-                    TyKind::Ref(_, i) | TyKind::Ptr(_, i) => i,
-                    _ => cur,
-                };
-                let p = self.to_leaves(v, cur);
-                v = if matches!(self.kind(inner), TyKind::Slice(_) | TyKind::Str) {
-                    Val::L(p)
-                } else {
-                    self.read_place(&Place::Mem(p[0], 0), inner)
-                };
-                cur = inner;
+            if m.derefs == 0 {
+                self.lower_expr(recv)
+            } else {
+                let v = self.lower_expr(recv);
+                let mut pl = self.val_to_place(v);
+                let mut cur = rt;
+                for k in 0..m.derefs {
+                    let (a2, b2) = self.deref_place(e.0, k, pl, cur);
+                    pl = a2;
+                    cur = b2;
+                }
+                self.read_place(&pl, cur)
             }
-            v
         };
         let mut vals = vec![(recv_val, self_pt)];
         for (i, a) in args.iter().enumerate() {
@@ -2596,7 +3071,7 @@ impl<'a> Lcx<'a> {
             };
             vals.push((self.lower_expr_coerced(*a, pt), pt));
         }
-        if let Some(v) = self.intrinsic(m.def, &vals, t) {
+        if let Some(v) = self.intrinsic(m.def, &m.args, &vals, t) {
             return v;
         }
         let id = self.u.fn_id(FnKey::Inst(m.def, m.args.clone()));
@@ -2604,11 +3079,107 @@ impl<'a> Lcx<'a> {
     }
 
     /// Calls to `extern "hotrust-intrinsic"` functions in HotRust's core become instructions.
-    fn intrinsic(&mut self, d: DefId, vals: &[(Val, TyId)], t: TyId) -> Option<Val> {
+    /// Memory intrinsics of core::mem::intrinsics_mem (generic over T = gargs[0]).
+    fn mem_intrinsic(&mut self, name: &str, gargs: &[TyId], vals: &[(Val, TyId)], t: TyId) -> Option<Val> {
+        let g0 = gargs.first().copied();
+        let elem = |s: &mut Self| -> (u32, u32) {
+            match g0 {
+                Some(g) => {
+                    let l = s.layout(g);
+                    (l.size, l.align)
+                }
+                None => (0, 1),
+            }
+        };
+        let leaf = |s: &mut Self, k: usize| -> Vec<VReg> {
+            let (v, ty) = vals[k].clone();
+            s.to_leaves(v, ty)
+        };
+        Some(match name {
+            "size_of" => {
+                let (sz, al) = elem(self);
+                Val::L(vec![self.iconst(crate::layout::round_up(sz, al) as i64)])
+            }
+            "align_of" => {
+                let (_, al) = elem(self);
+                Val::L(vec![self.iconst(al as i64)])
+            }
+            "needs_drop" => {
+                let nd = match g0 {
+                    Some(g) => self.u.needs_drop(g),
+                    None => false,
+                };
+                Val::L(vec![self.iconst(nd as i64)])
+            }
+            "drop_in_place" => {
+                let p = leaf(self, 0);
+                if let Some(g) = g0 {
+                    self.drop_at(p[0], g);
+                }
+                self.unit()
+            }
+            "ptr_read" => {
+                let p = leaf(self, 0);
+                let g = g0?;
+                self.read_place(&Place::Mem(p[0], 0), g)
+            }
+            "ptr_write" => {
+                let p = leaf(self, 0);
+                let g = g0?;
+                let v = vals[1].0.clone();
+                self.store_val(p[0], 0, g, v);
+                self.unit()
+            }
+            "ptr_add" | "ptr_add_mut" => {
+                let p = leaf(self, 0);
+                let n = leaf(self, 1);
+                let (sz, al) = elem(self);
+                let stride = crate::layout::round_up(sz, al) as i64;
+                let off = self.f.vreg(Cls::I);
+                self.emit(Inst::IBinI(IOp::Mul, U64, off, n[0], stride));
+                let d = self.f.vreg(Cls::I);
+                self.emit(Inst::IBin(IOp::Add, U64, d, p[0], off));
+                Val::L(vec![d])
+            }
+            "slice_from_raw" | "slice_from_raw_mut" | "str_from_raw" => {
+                let p = leaf(self, 0);
+                let n = leaf(self, 1);
+                Val::L(vec![p[0], n[0]])
+            }
+            "slice_ptr" => {
+                let s2 = leaf(self, 0);
+                Val::L(vec![s2[0]])
+            }
+            "null_mut" => Val::L(vec![self.iconst(0)]),
+            "forget" => self.unit(),
+            "copy_nonoverlapping" => {
+                // byte copy loop: n * size bytes
+                let src = leaf(self, 0);
+                let dst = leaf(self, 1);
+                let n = leaf(self, 2);
+                let (sz, al) = elem(self);
+                let stride = crate::layout::round_up(sz, al) as i64;
+                let bytes = self.f.vreg(Cls::I);
+                self.emit(Inst::IBinI(IOp::Mul, U64, bytes, n[0], stride));
+                let rt = self.u.rt.memcpy;
+                self.emit(Inst::Call(Callee::Host(rt), vec![dst[0], src[0], bytes], Vec::new()));
+                self.unit()
+            }
+            _ => {
+                let _ = t;
+                return None;
+            }
+        })
+    }
+
+    fn intrinsic(&mut self, d: DefId, gargs: &[TyId], vals: &[(Val, TyId)], t: TyId) -> Option<Val> {
         if self.u.prog.def(d).kind != DefKind::ForeignFn || !self.u.is_intrinsic(d) {
             return None;
         }
         let name = self.u.prog.name(d).to_string();
+        if let Some(v) = self.mem_intrinsic(&name, gargs, vals, t) {
+            return Some(v);
+        }
         let mut a = Vec::new();
         for (v, ty) in vals {
             let r = self.to_leaves(v.clone(), *ty);
@@ -3275,4 +3846,143 @@ fn parse_spec(s: &str) -> FmtSpec {
 
 pub fn closure_map(_b: &Body) -> HashMap<u32, u32> {
     HashMap::new()
+}
+
+// ---------------------------------------------------------------- glue
+
+/// Compiler-generated helper functions per type. GLUE_DROP: `fn(p: *mut T)` runs T's Drop
+/// impl (if any) and then drops every field that needs it, in declaration order.
+pub fn glue_func(u: &mut Unit, kind: u8, t: TyId) -> Func {
+    let name = fn_name(u, &FnKey::Glue(kind, t));
+    let mut f = Func::new(name, 0);
+    let entry = f.block();
+    let p = f.vreg(Cls::I);
+    f.params.push(p);
+    let mut cur = entry;
+    if kind == crate::jit::GLUE_DROP {
+        drop_glue_body(u, &mut f, &mut cur, p, t);
+    }
+    f.blocks[cur as usize].term = Term::Ret(Vec::new());
+    for b in f.blocks.iter_mut() {
+        while b.pos.len() < b.insts.len() {
+            b.pos.push(0);
+        }
+    }
+    f
+}
+
+fn push(f: &mut Func, b: u32, i: Inst) {
+    f.blocks[b as usize].insts.push(i);
+    f.blocks[b as usize].pos.push(0);
+}
+
+fn addr_off(f: &mut Func, b: u32, base: VReg, off: u32) -> VReg {
+    if off == 0 {
+        return base;
+    }
+    let d = f.vreg(Cls::I);
+    push(f, b, Inst::IBinI(IOp::Add, U64, d, base, off as i64));
+    d
+}
+
+fn call_drop(u: &mut Unit, f: &mut Func, b: u32, addr: VReg, t: TyId) {
+    if u.needs_drop(t) {
+        let id = u.fn_id(FnKey::Glue(crate::jit::GLUE_DROP, t));
+        push(f, b, Inst::Call(Callee::Fn(id), vec![addr], Vec::new()));
+    }
+}
+
+fn drop_glue_body(u: &mut Unit, f: &mut Func, cur: &mut u32, p: VReg, t: TyId) {
+    let k = u.tcx.tys.kind(t).clone();
+    match k {
+        TyKind::Adt(d, args) => {
+            // the type's own Drop::drop(&mut self) first
+            if let Some(td) = u.lang(&["ops", "Drop"]) {
+                if let Some((imp, iargs)) = u.tcx.find_impl(td, t, &[]) {
+                    let ii = u.prog.def(imp).sub as usize;
+                    let mut m = None;
+                    for &it in &u.prog.impls[ii].items {
+                        if u.prog.name(it) == "drop" {
+                            m = Some(it);
+                        }
+                    }
+                    if let Some(m) = m {
+                        let id = u.fn_id(FnKey::Inst(m, iargs));
+                        push(f, *cur, Inst::Call(Callee::Fn(id), vec![p], Vec::new()));
+                    }
+                }
+            }
+            let adt = match u.tcx.adts.get(&d) {
+                Some(a) => a.clone(),
+                None => return,
+            };
+            if adt.is_union {
+                return;
+            }
+            let l = u.lay.of(&mut u.tcx, t);
+            if !adt.is_enum {
+                for (fi, fd) in adt.variants[0].fields.iter().enumerate() {
+                    let ft = u.tcx.tys.subst(fd.ty, &args);
+                    if u.needs_drop(ft) {
+                        let a = addr_off(f, *cur, p, l.fields[fi]);
+                        call_drop(u, f, *cur, a, ft);
+                    }
+                }
+                return;
+            }
+            let (toff, tmem) = match l.tag {
+                Some(x) => x,
+                None => return,
+            };
+            let tag = f.vreg(Cls::I);
+            push(f, *cur, Inst::Load(tmem, tag, p, toff as i32));
+            let join = f.block();
+            for (vi, v) in adt.variants.iter().enumerate() {
+                let mut any = false;
+                for fd in &v.fields {
+                    let ft = u.tcx.tys.subst(fd.ty, &args);
+                    if u.needs_drop(ft) {
+                        any = true;
+                    }
+                }
+                if !any {
+                    continue;
+                }
+                let c = f.vreg(Cls::I);
+                push(f, *cur, Inst::ICmpI(Cond::Eq, true, c, tag, v.disc as i64));
+                let yes = f.block();
+                let no = f.block();
+                f.blocks[*cur as usize].term = Term::Branch(c, yes, no);
+                for (fi, fd) in v.fields.iter().enumerate() {
+                    let ft = u.tcx.tys.subst(fd.ty, &args);
+                    if u.needs_drop(ft) {
+                        let a = addr_off(f, yes, p, l.variant_fields[vi][fi]);
+                        call_drop(u, f, yes, a, ft);
+                    }
+                }
+                f.blocks[yes as usize].term = Term::Jump(join);
+                *cur = no;
+            }
+            f.blocks[*cur as usize].term = Term::Jump(join);
+            *cur = join;
+        }
+        TyKind::Tuple(v) => {
+            let l = u.lay.of(&mut u.tcx, t);
+            for (i, ft) in v.iter().enumerate() {
+                if u.needs_drop(*ft) {
+                    let a = addr_off(f, *cur, p, l.fields[i]);
+                    call_drop(u, f, *cur, a, *ft);
+                }
+            }
+        }
+        TyKind::Array(e, n) => {
+            let el = u.lay.of(&mut u.tcx, e);
+            let stride = crate::layout::round_up(el.size, el.align);
+            for i in 0..n as u32 {
+                let a = addr_off(f, *cur, p, i * stride);
+                call_drop(u, f, *cur, a, e);
+            }
+        }
+        _ => {}
+    }
 }
