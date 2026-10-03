@@ -17,7 +17,7 @@
 //! With `--scene=rect` or `--scene=ibl` the lab instead draws a `World`
 //! (`Renderer::draw_scene_full`) of generic items on resident geometry, in
 //! the dark (the world's Sun and Sky at zero):
-//! 0. a white cube under a rectangular area light (rect) or a smooth metal
+//! 0. a white cube lit by a rectangular area light before it (rect) or a smooth metal
 //!    cube lit by the `sunset` environment (ibl);
 //! 1. the same material with no light near it;
 //! 2. an Unlit cyan cube;
@@ -180,15 +180,19 @@ fn items_world(scene: Scene) -> World {
     }));
     w.set_material(MaterialFrame { id: MaterialId(4), kind: MaterialKind::Unlit(UnlitParams { color: vec4(1.0, 1.0, 1.0, 1.0), intensity: 1.0, map: None }), ..Default::default() });
     match scene {
+        // In front of the cube's camera-side face (z = 0.5; the camera
+        // looks down -z) and aimed back at it: the emitter is one-sided,
+        // so a light above the cube reached only its thin top face. Every
+        // point of that face is within 0.9 m; the next cube's nearest point
+        // is 1.006 m away, past the range, so it gets no light at all.
         Scene::Rect => w.lights.push(Light::Rect {
-            pos: vec3f(column_x(0), 1.3, 0.2),
-            normal: vec3f(0.0, -1.0, -0.3),
+            pos: vec3f(column_x(0), 0.6, 0.95),
+            normal: vec3f(0.0, -0.25, -1.0),
             tangent: vec3f(1.0, 0.0, 0.0),
             size: vec2f(0.8, 0.4),
             color: vec3f(1.0, 0.95, 0.85),
-            intensity: 60.0,
-            // Short of the next column (1.4 m away).
-            range: 1.25,
+            intensity: 6.0,
+            range: 0.95,
         }),
         Scene::Ibl => {
             w.environment.ibl = Some(makepad_scene::Ibl { source: makepad_scene::IblSource::Procedural(2), intensity: 1.0, rotation_deg: 0.0 });
