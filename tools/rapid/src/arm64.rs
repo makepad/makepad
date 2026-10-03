@@ -1056,6 +1056,10 @@ impl<'a> Gen<'a> {
             }
             _ => self.a.blr(IP0),
         }
+        // C leaves a narrow integer result's upper bits undefined
+        if let Some(it) = sig.ret_narrow {
+            self.a.extend(0, 0, it.bits, it.signed);
+        }
         // scalar results
         let mut mv = Vec::new();
         let mut ri = 0u8;

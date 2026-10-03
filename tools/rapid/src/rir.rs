@@ -133,6 +133,9 @@ pub struct CSig {
     pub ret: Option<CAgg>,
     /// variadic: the number of fixed arguments in `args`; u32::MAX when not variadic
     pub n_fixed: u32,
+    /// a narrow integer result (i8..i32, u8..u32, bool): C leaves the register's upper bits
+    /// undefined, so the backend re-extends it after the call
+    pub ret_narrow: Option<IntTy>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

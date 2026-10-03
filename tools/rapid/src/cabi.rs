@@ -411,10 +411,17 @@ pub fn c_sig(u: &mut crate::jit::Unit, params: &[TyId], ret: TyId, n_fixed: Opti
         args.push(c_arg(u, *p));
     }
     let rl = u.lay.of(&mut u.tcx, ret);
+    let mut ret_narrow = None;
     let ret = if rl.size == 0 {
         None
     } else {
         match c_arg(u, ret) {
+            CArg::Scalar(Mem::Int(n, signed)) => {
+                if n < 8 {
+                    ret_narrow = Some(crate::rir::IntTy { bits: n * 8, signed });
+                }
+                None
+            }
             CArg::Scalar(_) => None,
             CArg::Agg(a) => Some(a),
         }
@@ -422,7 +429,7 @@ pub fn c_sig(u: &mut crate::jit::Unit, params: &[TyId], ret: TyId, n_fixed: Opti
     CSig { args, ret, n_fixed: match n_fixed {
         Some(n) => n as u32,
         None => u32::MAX,
-    } }
+    }, ret_narrow }
 }
 
 #[cfg(test)]
@@ -440,7 +447,7 @@ mod tests {
         let rect = agg(32, 8, &[(0, Mem::F64), (8, Mem::F64), (16, Mem::F64), (24, Mem::F64)]);
         let pair = agg(8, 4, &[(0, I32), (4, I32)]);
         let big = agg(24, 8, &[(0, I64), (8, Mem::F64), (16, I64)]);
-        let sig = CSig { args: vec![CArg::Scalar(I64), rect, pair, big], ret: Some(CAgg { size: 16, align: 8, fields: vec![(0, Mem::F64), (8, Mem::F64)] }), n_fixed: u32::MAX };
+        let sig = CSig { args: vec![CArg::Scalar(I64), rect, pair, big], ret: Some(CAgg { size: 16, align: 8, fields: vec![(0, Mem::F64), (8, Mem::F64)] }), n_fixed: u32::MAX, ret_narrow: None };
         let p = plan(&sig, Target::Darwin64);
         assert_eq!(p.ret, RetPlan::Parts(vec![Part { off: 0, size: 8, loc: PLoc::Flt(0) }, Part { off: 8, size: 8, loc: PLoc::Flt(1) }]));
         assert_eq!(p.args[0], ArgPlan::Scalar(PLoc::Int(0), 8));
@@ -462,10 +469,10 @@ mod tests {
         }
         args.push(CArg::Scalar(Mem::Int(1, false)));
         args.push(CArg::Scalar(I32));
-        let p = plan(&CSig { args: args.clone(), ret: None, n_fixed: u32::MAX }, Target::Darwin64);
+        let p = plan(&CSig { args: args.clone(), ret: None, n_fixed: u32::MAX, ret_narrow: None }, Target::Darwin64);
         assert_eq!(p.args[8], ArgPlan::Scalar(PLoc::Stack(0), 1));
         assert_eq!(p.args[9], ArgPlan::Scalar(PLoc::Stack(4), 4));
-        let p = plan(&CSig { args: vec![CArg::Scalar(I64), CArg::Scalar(I32), CArg::Scalar(Mem::F64)], ret: None, n_fixed: 1 }, Target::Darwin64);
+        let p = plan(&CSig { args: vec![CArg::Scalar(I64), CArg::Scalar(I32), CArg::Scalar(Mem::F64)], ret: None, n_fixed: 1, ret_narrow: None }, Target::Darwin64);
         assert_eq!(p.args[1], ArgPlan::Scalar(PLoc::Stack(0), 8));
         assert_eq!(p.args[2], ArgPlan::Scalar(PLoc::Stack(8), 8));
     }

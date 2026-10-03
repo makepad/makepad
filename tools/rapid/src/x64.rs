@@ -1046,6 +1046,10 @@ impl<'a> Gen<'a> {
             self.a.modrm_rr(0, RSP);
             self.a.u32(stack_bytes);
         }
+        // C leaves a narrow integer result's upper bits undefined
+        if let Some(it) = sig.ret_narrow {
+            self.a.extend(RAX, it.bits, it.signed);
+        }
         if let RetPlan::Parts(parts) = &plan.ret {
             for (j, pt) in parts.iter().enumerate() {
                 let cd = st + 8 * (1 + j as i32);
