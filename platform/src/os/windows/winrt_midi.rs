@@ -1,415 +1,530 @@
-use {
-    crate::{
-        makepad_live_id::LiveId,
-        midi::*,
-        thread::SignalToUI,
-        windows::{
-            Devices::Enumeration::{DeviceInformation, DeviceInformationUpdate, DeviceWatcher},
-            Devices::Midi::{IMidiOutPort, MidiInPort, MidiMessageReceivedEventArgs, MidiOutPort},
-            Foundation::TypedEventHandler,
-            Storage::Streams::{DataReader, DataWriter},
-        },
+use crate::makepad_network::mpsc;
+use crate::windows::{
+    core::{HRESULT, HSTRING},
+    WinRT::*,
+};
+use crate::{makepad_live_id::LiveId, midi::*, thread::SignalToUI};
+use std::{
+    collections::VecDeque,
+    sync::{
+        mpsc::{sync_channel, SyncSender},
+        Arc, Mutex, Weak,
     },
-    makepad_futures_legacy::executor,
-    crate::makepad_network::mpsc,
-    std::sync::{Arc, Mutex},
 };
 
-type WindowsResult<T> = crate::windows::core::Result<T>;
-
+type InputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData)>>>>;
 pub struct OsMidiInput(mpsc::Receiver<(MidiPortId, MidiData)>);
-
 #[derive(Clone)]
 pub struct OsMidiOutput(pub(crate) Arc<Mutex<WinRTMidiAccess>>);
-
 impl OsMidiOutput {
-    pub fn send(&self, port_id: Option<MidiPortId>, d: MidiData) {
-        let _ = self
-            .0
-            .lock()
-            .unwrap()
-            .event_sender
-            .send(WinRTMidiEvent::SendMidi(port_id, d));
+    pub fn send(&self, port: Option<MidiPortId>, data: MidiData) {
+        self.0.lock().unwrap().events.post(Event::Send(port, data));
     }
 }
-
 impl OsMidiInput {
     pub fn receive(&mut self) -> Option<(MidiPortId, MidiData)> {
-        if let Ok((port_id, data)) = self.0.try_recv() {
-            return Some((port_id, data));
-        }
-        None
+        self.0.try_recv().ok()
     }
 }
 
-type InputSenders = Arc<Mutex<Vec<mpsc::Sender<(MidiPortId, MidiData)>>>>;
-
-#[derive(Clone)]
-pub struct WinRTMidiPort {
-    winrt_id: String,
+// Payloads stay queued until the worker takes them. A bounded, coalescing wake
+// channel never blocks the UI or a COM callback, and a full wake slot loses no work.
+struct Events {
+    pending: Mutex<VecDeque<Event>>,
+    wake: SyncSender<()>,
+}
+impl Events {
+    fn post(&self, event: Event) {
+        self.pending.lock().unwrap().push_back(event);
+        let _ = self.wake.try_send(());
+    }
+}
+enum Event {
+    Refresh,
+    Completed(u64),
+    Inputs(Vec<MidiPortId>),
+    Outputs(Vec<MidiPortId>),
+    Send(Option<MidiPortId>, MidiData),
+    Shutdown,
+}
+struct Port {
+    id: String,
     desc: MidiPortDesc,
 }
-
-#[derive(Clone)]
-pub struct WinRTMidiInput {
-    port_id: MidiPortId,
-    event_token: i64,
-    midi_input: MidiInPort,
+struct Input {
+    id: MidiPortId,
+    port: MidiInPort,
+    token: EventRegistrationToken,
 }
-
-#[derive(Clone)]
-pub struct WinRTMidiOutput {
-    port_id: MidiPortId,
-    midi_output: IMidiOutPort,
+impl Drop for Input {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = self.port.remove_MessageReceived(self.token);
+            if let Ok(c) = Closable::query(self.port.as_raw()) {
+                let _ = c.Close();
+            }
+        }
+    }
+}
+struct Output {
+    id: MidiPortId,
+    port: MidiOutPort,
+}
+impl Drop for Output {
+    fn drop(&mut self) {
+        unsafe {
+            if let Ok(c) = Closable::query(self.port.as_raw()) {
+                let _ = c.Close();
+            }
+        }
+    }
+}
+enum Pending {
+    List(u64, bool, ListDevicesOperation),
+    Input(u64, MidiPortId, OpenInputOperation),
+    Output(u64, MidiPortId, OpenOutputOperation),
+}
+impl Pending {
+    fn id(&self) -> u64 {
+        match self {
+            Self::List(id, _, _) | Self::Input(id, _, _) | Self::Output(id, _, _) => *id,
+        }
+    }
+}
+struct Completion {
+    events: Arc<Events>,
+    id: u64,
+}
+impl ListDevicesCompletedImpl for Completion {
+    fn Invoke(&self, _: Option<&ListDevicesOperation>, _: AsyncStatus) -> Result<(), HRESULT> {
+        self.events.post(Event::Completed(self.id));
+        Ok(())
+    }
+}
+impl OpenInputCompletedImpl for Completion {
+    fn Invoke(&self, _: Option<&OpenInputOperation>, _: AsyncStatus) -> Result<(), HRESULT> {
+        self.events.post(Event::Completed(self.id));
+        Ok(())
+    }
+}
+impl OpenOutputCompletedImpl for Completion {
+    fn Invoke(&self, _: Option<&OpenOutputOperation>, _: AsyncStatus) -> Result<(), HRESULT> {
+        self.events.post(Event::Completed(self.id));
+        Ok(())
+    }
+}
+struct Watch {
+    events: Arc<Events>,
+}
+impl DeviceAddedImpl for Watch {
+    fn Invoke(
+        &self,
+        _: Option<&DeviceWatcher>,
+        _: Option<&DeviceInformation>,
+    ) -> Result<(), HRESULT> {
+        self.events.post(Event::Refresh);
+        Ok(())
+    }
+}
+impl DeviceUpdatedImpl for Watch {
+    fn Invoke(
+        &self,
+        _: Option<&DeviceWatcher>,
+        _: Option<&DeviceInformationUpdate>,
+    ) -> Result<(), HRESULT> {
+        self.events.post(Event::Refresh);
+        Ok(())
+    }
+}
+impl DeviceEnumerationCompletedImpl for Watch {
+    fn Invoke(
+        &self,
+        _: Option<&DeviceWatcher>,
+        _: Option<&crate::windows::Win32::System::WinRT::IInspectable>,
+    ) -> Result<(), HRESULT> {
+        self.events.post(Event::Refresh);
+        Ok(())
+    }
+}
+// Activation factories are agile: the one looked up when the port opens
+// serves every message, on whichever thread WinRT delivers it.
+struct ReaderFactory(DataReaderStatics);
+unsafe impl Send for ReaderFactory {}
+unsafe impl Sync for ReaderFactory {}
+struct Receive {
+    senders: InputSenders,
+    id: MidiPortId,
+    readers: ReaderFactory,
+}
+impl MidiMessageReceivedImpl for Receive {
+    fn Invoke(
+        &self,
+        _: Option<&MidiInPort>,
+        args: Option<&MidiMessageReceivedEventArgs>,
+    ) -> Result<(), HRESULT> {
+        let Some(args) = args else { return Ok(()) };
+        unsafe {
+            let data = args.get_Message()?.get_RawData()?;
+            let reader = self.readers.0.FromBuffer(&data)?;
+            let mut bytes = [0u8; 3];
+            // MIDI channel messages can be shorter than three bytes.
+            let length = (reader.get_UnconsumedBufferLength()? as usize).min(bytes.len());
+            if length == 0 {
+                return Ok(());
+            }
+            reader.ReadBytes(&mut bytes[..length])?;
+            let mut senders = self.senders.lock().unwrap();
+            senders.retain(|s| s.send((self.id, MidiData { data: bytes })).is_ok());
+            if !senders.is_empty() {
+                SignalToUI::set_ui_signal();
+            }
+        }
+        Ok(())
+    }
 }
 
 pub struct WinRTMidiAccess {
     input_senders: InputSenders,
-    event_sender: mpsc::Sender<WinRTMidiEvent>,
+    events: Arc<Events>,
     descs: Vec<MidiPortDesc>,
 }
-
-#[derive(Clone)]
-enum WinRTMidiEvent {
-    UpdateDevices,
-    SendMidi(Option<MidiPortId>, MidiData),
-    UseMidiInputs(Vec<MidiPortId>),
-    UseMidiOutputs(Vec<MidiPortId>),
+impl Drop for WinRTMidiAccess {
+    fn drop(&mut self) {
+        self.events.post(Event::Shutdown);
+    }
 }
-
 impl WinRTMidiAccess {
-    async fn create_midi_in_port(winrt_id: &str) -> WindowsResult<MidiInPort> {
-        let port = MidiInPort::FromIdAsync(&winrt_id.into())?.await?;
-        Ok(port)
-    }
-
-    async fn create_midi_out_port(winrt_id: &str) -> WindowsResult<IMidiOutPort> {
-        let port = MidiOutPort::FromIdAsync(&winrt_id.into())?.await?;
-        Ok(port)
-    }
-
-    async fn get_ports_list() -> WindowsResult<Vec<WinRTMidiPort>> {
-        let input_query = MidiInPort::GetDeviceSelector().unwrap();
-        let mut ports = Vec::new();
-        let collection = DeviceInformation::FindAllAsyncAqsFilter(&input_query)?.await?;
-        for item in collection {
-            let winrt_id = item.Id().unwrap().to_string();
-            ports.push(WinRTMidiPort {
-                desc: MidiPortDesc {
-                    name: item.Name().unwrap().to_string(),
-                    port_id: LiveId::from_str(&winrt_id).into(),
-                    port_type: MidiPortType::Input,
-                },
-                winrt_id,
-            });
-        }
-        let output_query = MidiOutPort::GetDeviceSelector().unwrap();
-        let collection = DeviceInformation::FindAllAsyncAqsFilter(&output_query)?.await?;
-        for item in collection {
-            let winrt_id = item.Id().unwrap().to_string();
-            ports.push(WinRTMidiPort {
-                desc: MidiPortDesc {
-                    name: item.Name().unwrap().to_string(),
-                    port_id: LiveId::from_str(&winrt_id).into(),
-                    port_type: MidiPortType::Output,
-                },
-                winrt_id,
-            });
-        }
-        Ok(ports)
-    }
-
     pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self>> {
-        let (watch_sender, watch_receiver) = mpsc::channel();
+        let (wake, receiver) = sync_channel(1);
+        let events = Arc::new(Events {
+            pending: Mutex::new(VecDeque::new()),
+            wake,
+        });
         let input_senders = InputSenders::default();
-        let midi_access = Arc::new(Mutex::new(Self {
+        let access = Arc::new(Mutex::new(Self {
+            input_senders: input_senders.clone(),
+            events: events.clone(),
             descs: Vec::new(),
-            event_sender: watch_sender.clone(),
-            input_senders,
         }));
-        let midi_access_clone = midi_access.clone();
-        let change_signal_clone = change_signal.clone();
+        let owner = Arc::downgrade(&access);
         std::thread::spawn(move || {
-            let mut ports_list = Vec::new();
-
-            let mut midi_inputs: Vec<WinRTMidiInput> = Vec::new();
-            let mut midi_outputs: Vec<WinRTMidiOutput> = Vec::new();
-
-            // initiate device list update
-            watch_sender.send(WinRTMidiEvent::UpdateDevices).unwrap();
-            // now lets watch device changes
-            let query = MidiInPort::GetDeviceSelector().unwrap();
-            let input_watcher = DeviceInformation::CreateWatcherAqsFilter(&query).unwrap();
-            // The OUTPUT selector, which this asked for by name and then
-            // passed the input one to: both watchers watched inputs, so a
-            // device with no input end -- a synth, a lighting interface --
-            // arriving or leaving mid-session announced itself to nobody,
-            // and the enumeration below (which does list outputs) was never
-            // asked to run. A device with both ends masked it.
-            let query = MidiOutPort::GetDeviceSelector().unwrap();
-            let output_watcher = DeviceInformation::CreateWatcherAqsFilter(&query).unwrap();
-
-            fn bind_watcher(watch_sender: mpsc::Sender<WinRTMidiEvent>, watcher: &DeviceWatcher) {
-                let sender = watch_sender.clone();
-                watcher
-                    .Added(&TypedEventHandler::<DeviceWatcher, DeviceInformation>::new(
-                        move |_, _| {
-                            let _ = sender.send(WinRTMidiEvent::UpdateDevices);
-                            Ok(())
-                        },
-                    ))
-                    .unwrap();
-                let sender = watch_sender.clone();
-                watcher
-                    .Removed(
-                        &TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(
-                            move |_, _| {
-                                let _ = sender.send(WinRTMidiEvent::UpdateDevices);
-                                Ok(())
-                            },
-                        ),
-                    )
-                    .unwrap();
-                let sender = watch_sender.clone();
-                watcher
-                    .Updated(
-                        &TypedEventHandler::<DeviceWatcher, DeviceInformationUpdate>::new(
-                            move |_, _| {
-                                let _ = sender.send(WinRTMidiEvent::UpdateDevices);
-                                Ok(())
-                            },
-                        ),
-                    )
-                    .unwrap();
-                let sender = watch_sender.clone();
-                watcher
-                    .EnumerationCompleted(&TypedEventHandler::new(move |_, _| {
-                        let _ = sender.send(WinRTMidiEvent::UpdateDevices);
-                        Ok(())
-                    }))
-                    .unwrap();
+            use crate::windows::Win32::System::WinRT::{
+                RoInitialize, RoUninitialize, RO_INIT_TYPE,
+            };
+            if let Err(e) = unsafe { RoInitialize(RO_INIT_TYPE(1)) } {
+                crate::log!("midi: WinRT initialization failed: {e:?}");
+                return;
             }
-
-            bind_watcher(watch_sender.clone(), &input_watcher);
-            bind_watcher(watch_sender.clone(), &output_watcher);
-            input_watcher.Start().unwrap();
-            output_watcher.Start().unwrap();
-
-            while let Ok(msg) = watch_receiver.recv() {
-                match msg {
-                    WinRTMidiEvent::UpdateDevices => {
-                        // A device leaving mid-enumeration fails this. The
-                        // last list is better than no MIDI at all for the
-                        // rest of the session, which is what taking the
-                        // thread down means.
-                        let listed = executor::block_on(Self::get_ports_list());
-                        ports_list = match listed {
-                            Ok(list) => list,
-                            Err(error) => {
-                                crate::log!("midi: device list failed ({error:?}), keeping the last one");
-                                continue;
-                            }
+            {
+                let mut worker = Worker {
+                    events: events.clone(),
+                    owner,
+                    signal: change_signal,
+                    input_senders,
+                    ports: Vec::new(),
+                    inputs: Vec::new(),
+                    outputs: Vec::new(),
+                    wanted_inputs: Vec::new(),
+                    wanted_outputs: Vec::new(),
+                    pending: Vec::new(),
+                    serial: 0,
+                    refresh_again: false,
+                    listed: Vec::new(),
+                    watchers: Vec::new(),
+                };
+                if let Err(e) = unsafe { worker.watch() } {
+                    crate::log!("midi: device watcher failed: {e:?}");
+                }
+                events.post(Event::Refresh);
+                'worker: while receiver.recv().is_ok() {
+                    loop {
+                        let next = events.pending.lock().unwrap().pop_front();
+                        let Some(event) = next else {
+                            break;
                         };
-                        let mut descs = Vec::new();
-                        for port in &ports_list {
-                            descs.push(port.desc.clone());
+                        if let Event::Shutdown = event {
+                            break 'worker;
                         }
-                        midi_access_clone.lock().unwrap().descs = descs;
-                        change_signal_clone.set();
-                    }
-                    WinRTMidiEvent::UseMidiOutputs(ports) => {
-                        //let cself = midi_access_clone.lock().unwrap();
-                        // find all ports we want enabled
-                        for port_id in &ports {
-                            if let Some(port) = ports_list.iter_mut().find(|p| {
-                                p.desc.port_id == *port_id && p.desc.port_type.is_output()
-                            }) {
-                                if midi_outputs
-                                    .iter()
-                                    .find(|v| v.port_id == *port_id)
-                                    .is_some()
-                                {
-                                    continue;
-                                }
-                                // open this output
-                                if let Ok(midi_output) =
-                                    executor::block_on(Self::create_midi_out_port(&port.winrt_id))
-                                {
-                                    midi_outputs.push(WinRTMidiOutput {
-                                        port_id: *port_id,
-                                        midi_output,
-                                    });
-                                } else {
-                                    crate::log!(
-                                        "Midi output could not be created {}",
-                                        port.desc.name
-                                    );
-                                }
-                            }
-                        }
-                        let mut index = 0;
-                        while index < midi_outputs.len() {
-                            if ports
-                                .iter()
-                                .find(|p| **p == midi_outputs[index].port_id)
-                                .is_none()
-                            {
-                                // Closing a port whose device is already
-                                // gone fails, and the point of the call is
-                                // that we are done with it either way.
-                                let out = &midi_outputs[index];
-                                let _ = out.midi_output.Close();
-                                midi_outputs.remove(index);
-                            } else {
-                                index += 1;
-                            }
-                        }
-                    }
-                    WinRTMidiEvent::UseMidiInputs(ports) => {
-                        // find all ports we want enabled
-                        for port_id in &ports {
-                            // check if the port is an input
-                            if let Some(port) = ports_list
-                                .iter_mut()
-                                .find(|p| p.desc.port_id == *port_id && p.desc.port_type.is_input())
-                            {
-                                // check if we dont have it in our midi_inputs yet
-                                if midi_inputs.iter().find(|v| v.port_id == *port_id).is_some() {
-                                    continue;
-                                }
-                                // open this input
-                                if let Ok(midi_input) =
-                                    executor::block_on(Self::create_midi_in_port(&port.winrt_id))
-                                {
-                                    let input_senders =
-                                        midi_access_clone.lock().unwrap().input_senders.clone();
-                                    let port_id = *port_id;
-                                    let event_token = midi_input
-                                        .MessageReceived(&TypedEventHandler::<
-                                            MidiInPort,
-                                            MidiMessageReceivedEventArgs,
-                                        >::new(
-                                            move |_, msg| {
-                                                let msg = msg.as_ref().unwrap().Message().unwrap();
-                                                let raw_data = msg.RawData().unwrap();
-                                                let data_reader =
-                                                    DataReader::FromBuffer(&raw_data).unwrap();
-                                                let mut data = [0u8; 3];
-                                                if data_reader.ReadBytes(&mut data).is_ok() {
-                                                    let mut senders = input_senders.lock().unwrap();
-                                                    senders.retain(|s| {
-                                                        s.send((port_id, MidiData { data })).is_ok()
-                                                    });
-                                                    if senders.len() > 0 {
-                                                        // make sure our eventloop runs
-                                                        SignalToUI::set_ui_signal();
-                                                    }
-                                                }
-                                                Ok(())
-                                            },
-                                        ))
-                                        .unwrap();
-                                    midi_inputs.push(WinRTMidiInput {
-                                        event_token,
-                                        port_id,
-                                        midi_input,
-                                    });
-                                } else {
-                                    crate::log!(
-                                        "Midi input could not be created {}",
-                                        port.desc.name
-                                    );
-                                }
-                            }
-                        }
-                        let mut index = 0;
-                        while index < midi_inputs.len() {
-                            if ports
-                                .iter()
-                                .find(|p| **p == midi_inputs[index].port_id)
-                                .is_none()
-                            {
-                                let inp = &midi_inputs[index];
-                                let _ = inp.midi_input.RemoveMessageReceived(inp.event_token);
-                                let _ = inp.midi_input.Close();
-                                midi_inputs.remove(index);
-                            } else {
-                                index += 1;
-                            }
-                        }
-                    }
-                    WinRTMidiEvent::SendMidi(port_id, midi_data) => {
-                        // Nothing in here may panic. A surface unplugged
-                        // mid-set fails its next write, and the app writes
-                        // to it twenty times a second, so the window is
-                        // always open: this thread dying takes the app's
-                        // control calls with it, since those send down a
-                        // channel whose far end has just gone. The port is
-                        // dropped instead, and the removal that follows
-                        // tidies it up.
-                        let Ok(writer) = DataWriter::new() else { continue };
-                        if writer.WriteBytes(midi_data.wire()).is_err() {
-                            continue;
-                        }
-                        let Ok(buffer) = writer.DetachBuffer() else { continue };
-                        let mut lost = Vec::new();
-                        for output in &mut midi_outputs {
-                            if port_id.is_some() && Some(output.port_id) != port_id {
-                                continue;
-                            }
-                            if output.midi_output.SendBuffer(&buffer).is_err() {
-                                lost.push(output.port_id);
-                            }
-                        }
-                        if !lost.is_empty() {
-                            crate::log!("midi: {} port(s) stopped taking writes", lost.len());
-                            midi_outputs.retain(|out| !lost.contains(&out.port_id));
+                        if let Err(e) = unsafe { worker.handle(event) } {
+                            crate::log!("midi: Windows MIDI operation failed: {e:?}");
                         }
                     }
                 }
             }
-            let _ = input_watcher.Stop();
-            let _ = output_watcher.Stop();
+            unsafe {
+                RoUninitialize();
+            }
         });
-
-        //output_watcher.Start().unwrap();
-        // alrighty lets initialize midi.
-        change_signal.set();
-        midi_access
+        access
     }
-
     pub fn create_midi_input(&self) -> MidiInput {
-        let senders = self.input_senders.clone();
         let (send, recv) = mpsc::channel();
-        senders.lock().unwrap().push(send);
+        self.input_senders.lock().unwrap().push(send);
         MidiInput(Some(OsMidiInput(recv)))
     }
-
     pub fn midi_reset(&self) {
-        self.event_sender
-            .send(WinRTMidiEvent::UseMidiOutputs(vec![]))
-            .unwrap();
-        self.event_sender
-            .send(WinRTMidiEvent::UseMidiInputs(vec![]))
-            .unwrap();
-        self.event_sender
-            .send(WinRTMidiEvent::UpdateDevices)
-            .unwrap();
+        self.events.post(Event::Outputs(Vec::new()));
+        self.events.post(Event::Inputs(Vec::new()));
+        self.events.post(Event::Refresh);
     }
-
-    // These two run on the UI thread. If the MIDI thread is gone there is
-    // nobody to tell, and telling nobody is not a reason to take the app
-    // down in front of an audience -- which is exactly what it did, one
-    // port event after the surface was unplugged.
     pub fn use_midi_outputs(&mut self, ports: &[MidiPortId]) {
-        let _ = self.event_sender.send(WinRTMidiEvent::UseMidiOutputs(ports.to_vec()));
+        self.events.post(Event::Outputs(ports.to_vec()));
     }
-
     pub fn use_midi_inputs(&mut self, ports: &[MidiPortId]) {
-        let _ = self.event_sender.send(WinRTMidiEvent::UseMidiInputs(ports.to_vec()));
+        self.events.post(Event::Inputs(ports.to_vec()));
     }
-
     pub fn get_updated_descs(&self) -> Vec<MidiPortDesc> {
         self.descs.clone()
+    }
+}
+struct Worker {
+    events: Arc<Events>,
+    owner: Weak<Mutex<WinRTMidiAccess>>,
+    signal: SignalToUI,
+    input_senders: InputSenders,
+    ports: Vec<Port>,
+    inputs: Vec<Input>,
+    outputs: Vec<Output>,
+    wanted_inputs: Vec<MidiPortId>,
+    wanted_outputs: Vec<MidiPortId>,
+    pending: Vec<Pending>,
+    serial: u64,
+    refresh_again: bool,
+    listed: Vec<Port>,
+    watchers: Vec<DeviceWatcher>,
+}
+impl Drop for Worker {
+    fn drop(&mut self) {
+        unsafe {
+            for w in &self.watchers {
+                let _ = w.Stop();
+            }
+            for p in &self.pending {
+                let raw = match p {
+                    Pending::List(_, _, o) => o.as_raw(),
+                    Pending::Input(_, _, o) => o.as_raw(),
+                    Pending::Output(_, _, o) => o.as_raw(),
+                };
+                if let Ok(info) = AsyncInfo::query(raw) {
+                    let _ = info.Cancel();
+                }
+            }
+        }
+    }
+}
+impl Worker {
+    fn port_name(&self, id: MidiPortId) -> &str {
+        match self.ports.iter().find(|p| p.desc.port_id == id) {
+            Some(port) => &port.desc.name,
+            None => "(unlisted port)",
+        }
+    }
+    fn completion(&mut self) -> Completion {
+        self.serial += 1;
+        Completion {
+            events: self.events.clone(),
+            id: self.serial,
+        }
+    }
+    unsafe fn watch(&mut self) -> Result<(), HRESULT> {
+        let information =
+            DeviceInformationStatics::factory("Windows.Devices.Enumeration.DeviceInformation")?;
+        let input =
+            MidiInPortStatics::factory("Windows.Devices.Midi.MidiInPort")?.GetDeviceSelector()?;
+        let output =
+            MidiOutPortStatics::factory("Windows.Devices.Midi.MidiOutPort")?.GetDeviceSelector()?;
+        for query in [input, output] {
+            let w = information.CreateWatcherAqsFilter(&query)?;
+            w.add_Added(&DeviceAdded::implement(Box::new(Watch {
+                events: self.events.clone(),
+            })))?;
+            w.add_Removed(&DeviceUpdated::implement(Box::new(Watch {
+                events: self.events.clone(),
+            })))?;
+            w.add_Updated(&DeviceUpdated::implement(Box::new(Watch {
+                events: self.events.clone(),
+            })))?;
+            w.add_EnumerationCompleted(&DeviceEnumerationCompleted::implement(Box::new(Watch {
+                events: self.events.clone(),
+            })))?;
+            w.Start()?;
+            self.watchers.push(w);
+        }
+        Ok(())
+    }
+    unsafe fn list(&mut self, input: bool) -> Result<(), HRESULT> {
+        let query = if input {
+            MidiInPortStatics::factory("Windows.Devices.Midi.MidiInPort")?.GetDeviceSelector()?
+        } else {
+            MidiOutPortStatics::factory("Windows.Devices.Midi.MidiOutPort")?.GetDeviceSelector()?
+        };
+        let operation =
+            DeviceInformationStatics::factory("Windows.Devices.Enumeration.DeviceInformation")?
+                .FindAllAsyncAqsFilter(&query)?;
+        let callback = self.completion();
+        let id = callback.id;
+        operation.put_Completed(&ListDevicesCompleted::implement(Box::new(callback)))?;
+        self.pending.push(Pending::List(id, input, operation));
+        Ok(())
+    }
+    unsafe fn open_ports(&mut self) -> Result<(), HRESULT> {
+        self.inputs.retain(|p| self.wanted_inputs.contains(&p.id));
+        self.outputs.retain(|p| self.wanted_outputs.contains(&p.id));
+        for index in 0..self.ports.len() {
+            let port = &self.ports[index];
+            let id = port.desc.port_id;
+            let input = port.desc.port_type.is_input();
+            if input {
+                if !self.wanted_inputs.contains(&id)
+                    || self.inputs.iter().any(|p| p.id == id)
+                    || self
+                        .pending
+                        .iter()
+                        .any(|p| matches!(p,Pending::Input(_,pid,_) if *pid==id))
+                {
+                    continue;
+                }
+                let name = HSTRING::from_str(&port.id)?;
+                let operation = MidiInPortStatics::factory("Windows.Devices.Midi.MidiInPort")?
+                    .FromIdAsync(&name)?;
+                let callback = self.completion();
+                let serial = callback.id;
+                operation.put_Completed(&OpenInputCompleted::implement(Box::new(callback)))?;
+                self.pending.push(Pending::Input(serial, id, operation));
+            } else {
+                if !self.wanted_outputs.contains(&id)
+                    || self.outputs.iter().any(|p| p.id == id)
+                    || self
+                        .pending
+                        .iter()
+                        .any(|p| matches!(p,Pending::Output(_,pid,_) if *pid==id))
+                {
+                    continue;
+                }
+                let name = HSTRING::from_str(&port.id)?;
+                let operation = MidiOutPortStatics::factory("Windows.Devices.Midi.MidiOutPort")?
+                    .FromIdAsync(&name)?;
+                let callback = self.completion();
+                let serial = callback.id;
+                operation.put_Completed(&OpenOutputCompleted::implement(Box::new(callback)))?;
+                self.pending.push(Pending::Output(serial, id, operation));
+            }
+        }
+        Ok(())
+    }
+    unsafe fn handle(&mut self, event: Event) -> Result<(), HRESULT> {
+        match event {
+            Event::Refresh => {
+                if self.pending.iter().any(|p| matches!(p, Pending::List(..))) {
+                    self.refresh_again = true;
+                } else {
+                    self.listed.clear();
+                    self.list(true)?;
+                }
+            }
+            Event::Completed(id) => {
+                let Some(index) = self.pending.iter().position(|p| p.id() == id) else {
+                    return Ok(());
+                };
+                match self.pending.remove(index) {
+                    Pending::List(_, input, operation) => {
+                        // Preserve the published list if a device disappears during enumeration.
+                        let result = operation.GetResults();
+                        if let Ok(collection) = &result {
+                            for i in 0..collection.get_Size()? {
+                                let item = collection.GetAt(i)?;
+                                let id = item.get_Id()?.to_string();
+                                self.listed.push(Port {
+                                    desc: MidiPortDesc {
+                                        port_id: LiveId::from_str(&id).into(),
+                                        name: item.get_Name()?.to_string(),
+                                        port_type: if input {
+                                            MidiPortType::Input
+                                        } else {
+                                            MidiPortType::Output
+                                        },
+                                    },
+                                    id,
+                                });
+                            }
+                            if input {
+                                self.list(false)?;
+                                return Ok(());
+                            }
+                            self.ports = std::mem::take(&mut self.listed);
+                            let descs = self.ports.iter().map(|p| p.desc.clone()).collect();
+                            if let Some(owner) = self.owner.upgrade() {
+                                owner.lock().unwrap().descs = descs;
+                            }
+                            self.signal.set();
+                            self.open_ports()?;
+                        }
+                        if self.refresh_again {
+                            self.refresh_again = false;
+                            self.events.post(Event::Refresh);
+                        }
+                        result?;
+                    }
+                    Pending::Input(_, id, operation) => {
+                        // A device that cannot be opened completes with no port.
+                        let Ok(port) = operation.GetResults() else {
+                            crate::log!("Midi input could not be created {}", self.port_name(id));
+                            return Ok(());
+                        };
+                        if self.wanted_inputs.contains(&id) {
+                            let token = port.add_MessageReceived(
+                                &MidiMessageReceived::implement(Box::new(Receive {
+                                    senders: self.input_senders.clone(),
+                                    id,
+                                    readers: ReaderFactory(DataReaderStatics::factory(
+                                        "Windows.Storage.Streams.DataReader",
+                                    )?),
+                                })),
+                            )?;
+                            self.inputs.push(Input { id, port, token });
+                        } else if let Ok(c) = Closable::query(port.as_raw()) {
+                            let _ = c.Close();
+                        }
+                    }
+                    Pending::Output(_, id, operation) => {
+                        let Ok(port) = operation.GetResults() else {
+                            crate::log!("Midi output could not be created {}", self.port_name(id));
+                            return Ok(());
+                        };
+                        if self.wanted_outputs.contains(&id) {
+                            self.outputs.push(Output { id, port });
+                        } else if let Ok(c) = Closable::query(port.as_raw()) {
+                            let _ = c.Close();
+                        }
+                    }
+                }
+            }
+            Event::Inputs(ids) => {
+                self.wanted_inputs = ids;
+                self.open_ports()?;
+            }
+            Event::Outputs(ids) => {
+                self.wanted_outputs = ids;
+                self.open_ports()?;
+            }
+            Event::Send(id, data) => {
+                let writer = DataWriter::activate("Windows.Storage.Streams.DataWriter")?;
+                writer.WriteBytes(data.wire())?;
+                let buffer = writer.DetachBuffer()?;
+                self.outputs.retain(|p| {
+                    if id.is_some() && id != Some(p.id) {
+                        return true;
+                    }
+                    if let Err(e) = p.port.SendBuffer(&buffer) {
+                        crate::log!("midi: port stopped taking writes: {e:?}");
+                        false
+                    } else {
+                        true
+                    }
+                });
+            }
+            Event::Shutdown => {}
+        }
+        Ok(())
     }
 }

@@ -3,7 +3,7 @@ use {
         event::game_input::*,
         makepad_live_id::*,
         makepad_math::Vec2,
-        windows::core::{Interface, BOOL, GUID},
+        windows::core::{BOOL, GUID},
         windows::Win32::Devices::HumanInterfaceDevice::{
             DirectInput8Create, GUID_RxAxis, GUID_RyAxis, GUID_RzAxis, GUID_Slider, GUID_XAxis,
             GUID_YAxis, GUID_ZAxis, IDirectInput8W, IDirectInputDevice8W, IDirectInputEffect,
@@ -110,7 +110,7 @@ fn condition(k: i32) -> DiCondition {
 }
 
 /// Update only an effect's type-specific parameters (no restart).
-unsafe fn set_type_params(effect: &IDirectInputEffect, params: *mut std::ffi::c_void, size: usize) -> windows::core::Result<()> {
+unsafe fn set_type_params(effect: &IDirectInputEffect, params: *mut std::ffi::c_void, size: usize) -> Result<(),windows::core::HRESULT> {
     let mut eff = DIEFFECT {
         dwSize: size_of::<DIEFFECT>() as u32,
         dwFlags: 0,
@@ -268,7 +268,7 @@ unsafe fn create_direct_input() -> Option<IDirectInput8W> {
     let mut di_out: Option<IDirectInput8W> = None;
     // DIRECTINPUT_VERSION is 0x0800
     DirectInput8Create(
-        hinstance.into(),
+        windows::Win32::Foundation::HINSTANCE(hinstance.0),
         0x0800,
         &IDirectInput8W::IID,
         &mut di_out as *mut _ as *mut _,
@@ -313,13 +313,13 @@ struct XinputVibration {
 }
 
 unsafe fn xinput_set_state(slot: u32, vibration: &XinputVibration) -> u32 {
-    windows_core::link!("xinput1_4.dll" "system" fn XInputSetState(dwuserindex: u32, pvibration: *const XinputVibration) -> u32);
+    #[link(name = "xinput1_4", kind = "raw-dylib")] extern "system" { fn XInputSetState(dwuserindex: u32, pvibration: *const XinputVibration) -> u32; }
     unsafe { XInputSetState(slot, vibration) }
 }
 
 /// The foreground window when it belongs to this process, else null.
 fn own_foreground_window() -> windows::Win32::Foundation::HWND {
-    windows_core::link!("user32.dll" "system" fn GetWindowThreadProcessId(hwnd: windows::Win32::Foundation::HWND, process: *mut u32) -> u32);
+    #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn GetWindowThreadProcessId(hwnd: windows::Win32::Foundation::HWND, process: *mut u32) -> u32; }
     unsafe {
         let hwnd = windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow();
         let mut process = 0u32;

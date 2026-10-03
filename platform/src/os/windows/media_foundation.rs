@@ -7,7 +7,6 @@ use {
         video_encode::camera_video_encoder::VideoEncoder,
         windows::{
             core::{
-                AsImpl,
                 GUID,
                 HRESULT,
                 PCWSTR,
@@ -17,11 +16,11 @@ use {
             Win32::Foundation::PROPERTYKEY,
             Win32::Media::Audio::{
                 EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient,
-                IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE,
+                IMMNotificationClientImpl, MMDeviceEnumerator, DEVICE_STATE,
             },
             Win32::Media::MediaFoundation::{
                 IMFActivate, IMFMediaEvent, IMFMediaSource, IMFMediaType, IMFSample,
-                IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallback_Impl,
+                IMFSourceReader, IMFSourceReaderCallback, IMFSourceReaderCallbackImpl,
                 MFCreateAttributes, MFCreateSourceReaderFromMediaSource, MFEnumDeviceSources,
                 MFVideoFormat_MJPG, MFVideoFormat_NV12, MFVideoFormat_RGB24, MFVideoFormat_YUY2,
                 MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
@@ -145,7 +144,7 @@ struct MfInput {
     symlink: String,
     active_format: Option<VideoFormatId>,
     desc: VideoInputDesc,
-    reader_callback: IMFSourceReaderCallback,
+    reader_callback: Arc<SourceReaderCallback>,
     source_reader: IMFSourceReader,
     media_types: Vec<MfMediaType>,
 }
@@ -162,7 +161,7 @@ impl MfInput {
             panic!()
         };
         self.active_format = Some(video_format.format_id);
-        let cb = unsafe { self.reader_callback.as_impl() };
+        let cb = &self.reader_callback;
         *cb.config.lock().unwrap() = Some(SourceReaderConfig {
             video_format,
             callback,
@@ -220,12 +219,11 @@ impl MediaFoundationAccess {
     pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self>> {
         unsafe {
             //CoInitializeEx(None, COINIT_MULTITHREADED).unwrap();
-            let change_listener: IMMNotificationClient = MediaFoundationChangeListener {
+            let change_listener: IMMNotificationClient = IMMNotificationClient::implement(Box::new(MediaFoundationChangeListener {
                 change_signal: change_signal.clone(),
-            }
-            .into();
+            }));
             let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL, &IMMDeviceEnumerator::IID).and_then(|raw| IMMDeviceEnumerator::from_raw(raw)).unwrap();
             enumerator
                 .RegisterEndpointNotificationCallback(&change_listener)
                 .unwrap();
@@ -321,7 +319,7 @@ impl MediaFoundationAccess {
 
             let mut activate: *mut Option<IMFActivate> = 0 as *mut _;
             let mut count = 0;
-            MFEnumDeviceSources(&attributes, &mut activate, &mut count).unwrap();
+            MFEnumDeviceSources(&attributes, &mut activate as *mut _ as *mut _,  &mut count).unwrap();
             let devices = std::slice::from_raw_parts(activate, count as usize);
 
             for input in &mut self.inputs {
@@ -368,21 +366,21 @@ impl MediaFoundationAccess {
                         .SetUINT32(&MF_READWRITE_DISABLE_CONVERTERS, TRUE.0 as u32)
                         .unwrap();
 
-                    let reader_callback: IMFSourceReaderCallback = SourceReaderCallback {
+                    let reader_callback = Arc::new(SourceReaderCallback {
                         config: Mutex::new(None),
                         source_reader: Mutex::new(None),
-                    }
-                    .into();
+                    });
+                    let callback_interface = IMFSourceReaderCallback::implement(Box::new(SharedSourceReaderCallback(reader_callback.clone())));
 
                     attributes
-                        .SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, &reader_callback)
+                        .SetUnknown(&MF_SOURCE_READER_ASYNC_CALLBACK, callback_interface.as_IUnknown())
                         .unwrap();
 
                     let mut formats = Vec::new();
                     let mut media_types = Vec::new();
-                    let source: IMFMediaSource = device.ActivateObject().unwrap();
+                    let source: IMFMediaSource = device.ActivateObject(&IMFMediaSource::IID).and_then(|raw| IMFMediaSource::from_raw(raw)).unwrap();
                     let source_reader =
-                        MFCreateSourceReaderFromMediaSource(&source, &attributes).unwrap();
+                        MFCreateSourceReaderFromMediaSource(&source, Some(&attributes)).unwrap();
                     let mut index = 0;
 
                     while let Ok(media_type) = source_reader
@@ -398,11 +396,11 @@ impl MediaFoundationAccess {
 
                         #[allow(non_upper_case_globals)]
                         let pixel_format = match format_guid {
-                            MFVideoFormat_RGB24 => VideoPixelFormat::RGB24,
-                            MFVideoFormat_YUY2 => VideoPixelFormat::YUY2,
-                            MFVideoFormat_NV12 => VideoPixelFormat::NV12,
-                            MFVideoFormat_GRAY => VideoPixelFormat::GRAY,
-                            MFVideoFormat_MJPG => VideoPixelFormat::MJPEG,
+                            value if value == MFVideoFormat_RGB24 => VideoPixelFormat::RGB24,
+                            value if value == MFVideoFormat_YUY2 => VideoPixelFormat::YUY2,
+                            value if value == MFVideoFormat_NV12 => VideoPixelFormat::NV12,
+                            value if value == MFVideoFormat_GRAY => VideoPixelFormat::GRAY,
+                            value if value == MFVideoFormat_MJPG => VideoPixelFormat::MJPEG,
                             guid => VideoPixelFormat::Unsupported(guid.data1),
                         };
 
@@ -470,25 +468,20 @@ pub(crate) struct SourceReaderCallback {
     config: Mutex<Option<SourceReaderConfig>>,
     source_reader: Mutex<Option<IMFSourceReader>>,
 }
-crate::implement_com! {
-    for_struct: SourceReaderCallback,
-    identity: IMFSourceReaderCallback,
-    wrapper_struct: SourceReaderCallback_Impl,
-    interface_count: 1,
-    interfaces: {
-        0: IMFSourceReaderCallback
-    }
-}
 
-impl IMFSourceReaderCallback_Impl for SourceReaderCallback_Impl {
+
+struct SharedSourceReaderCallback(Arc<SourceReaderCallback>);
+impl std::ops::Deref for SharedSourceReaderCallback {type Target = SourceReaderCallback; fn deref(&self) -> &Self::Target {&self.0}}
+
+impl IMFSourceReaderCallbackImpl for SharedSourceReaderCallback {
     fn OnReadSample(
         &self,
         _hrstatus: HRESULT,
         _dwstreamindex: u32,
         _dwstreamflags: u32,
         _lltimestamp: i64,
-        psample: crate::windows::core::Ref<'_, IMFSample>,
-    ) -> crate::windows::core::Result<()> {
+        psample: Option<&IMFSample>,
+    ) -> Result<(),windows::core::HRESULT> {
         unsafe {
             if let Some(sample) = psample.as_ref() {
                 if let Ok(buffer) = sample.GetBufferByIndex(0) {
@@ -555,15 +548,15 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback_Impl {
         Ok(())
     }
 
-    fn OnFlush(&self, _dwstreamindex: u32) -> crate::windows::core::Result<()> {
+    fn OnFlush(&self, _dwstreamindex: u32) -> Result<(),windows::core::HRESULT> {
         Ok(())
     }
 
     fn OnEvent(
         &self,
         _dwstreamindex: u32,
-        _pevent: crate::windows::core::Ref<'_, IMFMediaEvent>,
-    ) -> crate::windows::core::Result<()> {
+        _pevent: Option<&IMFMediaEvent>,
+    ) -> Result<(),windows::core::HRESULT> {
         Ok(())
     }
 }
@@ -571,44 +564,36 @@ impl IMFSourceReaderCallback_Impl for SourceReaderCallback_Impl {
 pub(crate) struct MediaFoundationChangeListener {
     change_signal: SignalToUI,
 }
-crate::implement_com! {
-    for_struct: MediaFoundationChangeListener,
-    identity: IMMNotificationClient,
-    wrapper_struct: MediaFoundationChangeListener_Impl,
-    interface_count: 1,
-    interfaces: {
-        0: IMMNotificationClient
-    }
-}
 
-impl IMMNotificationClient_Impl for MediaFoundationChangeListener_Impl {
+
+impl IMMNotificationClientImpl for MediaFoundationChangeListener {
     fn OnDeviceStateChanged(
         &self,
-        _pwstrdeviceid: &PCWSTR,
+        _pwstrdeviceid: PCWSTR,
         _dwnewstate: DEVICE_STATE,
-    ) -> crate::windows::core::Result<()> {
+    ) -> Result<(),windows::core::HRESULT> {
         self.change_signal.set();
         Ok(())
     }
-    fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
+    fn OnDeviceAdded(&self, _pwstrdeviceid: PCWSTR) -> Result<(),windows::core::HRESULT> {
         Ok(())
     }
-    fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
+    fn OnDeviceRemoved(&self, _pwstrdeviceid: PCWSTR) -> Result<(),windows::core::HRESULT> {
         Ok(())
     }
     fn OnDefaultDeviceChanged(
         &self,
         _flow: EDataFlow,
         _role: ERole,
-        _pwstrdefaultdeviceid: &crate::windows::core::PCWSTR,
-    ) -> crate::windows::core::Result<()> {
+        _pwstrdefaultdeviceid: crate::windows::core::PCWSTR,
+    ) -> Result<(),windows::core::HRESULT> {
         Ok(())
     }
     fn OnPropertyValueChanged(
         &self,
-        _pwstrdeviceid: &PCWSTR,
-        _key: &PROPERTYKEY,
-    ) -> crate::windows::core::Result<()> {
+        _pwstrdeviceid: PCWSTR,
+        _key: PROPERTYKEY,
+    ) -> Result<(),windows::core::HRESULT> {
         Ok(())
     }
 }

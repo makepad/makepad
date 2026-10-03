@@ -618,9 +618,9 @@ pub(crate) fn windows_physical_memory_bytes() -> Option<u64> {
         ullAvailExtendedVirtual: u64,
     }
 
-    windows_core::link!("kernel32.dll" "system" fn GlobalMemoryStatusEx(
+    #[link(name = "kernel32", kind = "raw-dylib")] extern "system" { fn GlobalMemoryStatusEx(
         status: *mut MemoryStatusEx
-    ) -> windows_core::BOOL);
+    ) -> windows::core::BOOL; }
 
     let mut status = MemoryStatusEx {
         dwLength: std::mem::size_of::<MemoryStatusEx>() as u32,

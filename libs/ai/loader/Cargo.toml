@@ -15,3 +15,6 @@ path = "src/bin/storage_bench.rs"
 [[bin]]
 name = "mac-storage-bench"
 path = "src/bin/mac_storage_bench.rs"
+
+[target.'cfg(windows)'.dependencies]
+makepad-windows-sys = {path = "../../windows/sys", version = "0.1.0"}

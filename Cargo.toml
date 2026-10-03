@@ -321,19 +321,13 @@ workspace.exclude = [
     "libs/vulkan/zerocopy",
     "libs/rapier",
     # platform-specific libs
-    "libs/windows/windows-collections",
-    "libs/windows/windows-core",
-    "libs/windows/windows-future",
-    "libs/windows/windows-link",
-    "libs/windows/windows-result",
-    "libs/windows/windows-rs",
-    "libs/windows/windows-strings",
+    "libs/windows/sys",
+    "tools/winbind",
     "libs/linux/wayland-backend",
     "libs/linux/wayland-client",
     "libs/linux/wayland-egl",
     "libs/linux/wayland-protocols",
     "libs/linux/wayland-sys",
-    "tools/windows_strip",
     "tools/file_router",
     "tools/wasm_strip",
 ]
@@ -344,7 +338,6 @@ workspace.resolver = "2"
 [patch.crates-io]
 bitflags = { path = "libs/bitflags" }
 smallvec = { path = "libs/smallvec" }
-windows-link = { path = "libs/windows/windows-link" }
 
 # Build profiles, for every member, the private apps' crates included.
 #

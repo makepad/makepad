@@ -174,51 +174,21 @@ fn handle_stamp(_file: &std::fs::File, meta: &std::fs::Metadata) -> Stamp {
 }
 
 #[cfg(windows)]
-#[repr(C)]
-struct ByHandleFileInformation {
-    file_attributes: u32,
-    creation_time: [u32; 2],
-    last_access_time: [u32; 2],
-    last_write_time: [u32; 2],
-    volume_serial_number: u32,
-    file_size_high: u32,
-    file_size_low: u32,
-    number_of_links: u32,
-    file_index_high: u32,
-    file_index_low: u32,
-}
-
-#[cfg(windows)]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn GetFileInformationByHandle(
-        handle: *mut std::ffi::c_void,
-        info: *mut ByHandleFileInformation,
-    ) -> i32;
-}
-
-#[cfg(windows)]
 fn handle_stamp(file: &std::fs::File, meta: &std::fs::Metadata) -> Stamp {
-    use std::os::windows::io::AsRawHandle;
-    let mut info = ByHandleFileInformation {
-        file_attributes: 0,
-        creation_time: [0; 2],
-        last_access_time: [0; 2],
-        last_write_time: [0; 2],
-        volume_serial_number: 0,
-        file_size_high: 0,
-        file_size_low: 0,
-        number_of_links: 0,
-        file_index_high: 0,
-        file_index_low: 0,
+    use makepad_windows_sys::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION},
     };
-    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle() as *mut _, &mut info) };
-    let identity = (ok != 0).then(|| {
-        (
-            info.volume_serial_number as u64,
-            ((info.file_index_high as u64) << 32) | info.file_index_low as u64,
-        )
-    });
+    use std::os::windows::io::AsRawHandle;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let identity = unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }
+        .ok()
+        .map(|()| {
+            (
+                info.dwVolumeSerialNumber as u64,
+                ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64,
+            )
+        });
     Stamp {
         len: meta.len(),
         modified: meta.modified().ok(),

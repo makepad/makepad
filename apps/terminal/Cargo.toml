@@ -39,12 +39,6 @@ makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
 
 [target.'cfg(windows)'.dependencies.windows]
-path = "../../libs/windows/windows-rs"
-version = "0.62.2"
-features = [
-    "Win32_Foundation",
-    "Win32_Security",
-    "Win32_System_Console",
-    "Win32_System_Pipes",
-    "Win32_System_Threading",
-]
+package = "makepad-windows-sys"
+path = "../../libs/windows/sys"
+version = "0.1.0"

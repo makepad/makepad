@@ -5,7 +5,6 @@ use {
         makepad_live_id::*,
         thread::SignalToUI,
         windows::{
-            core::Interface,
             core::PCWSTR,
             Win32::Devices::FunctionDiscovery::PKEY_Device_FriendlyName,
             Win32::Foundation::PROPERTYKEY,
@@ -25,7 +24,7 @@ use {
                 IMMDevice,
                 IMMDeviceEnumerator,
                 IMMNotificationClient,
-                IMMNotificationClient_Impl,
+                IMMNotificationClientImpl,
                 MMDeviceEnumerator,
                 AUDCLNT_SHAREMODE_SHARED,
                 AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
@@ -144,7 +143,7 @@ fn elevate_audio_thread_priority() -> Option<HANDLE> {
             crate::warning!("audio: could not raise the audio thread's priority");
             None
         } else {
-            Some(handle.unwrap())
+            Some(HANDLE(handle.unwrap().0))
         }
     }
 }
@@ -165,16 +164,15 @@ impl WasapiAccess {
     pub fn new(change_signal: SignalToUI) -> Arc<Mutex<Self>> {
         unsafe {
             CoInitializeEx(None, COINIT_APARTMENTTHREADED).unwrap();
-            let change_listener: IMMNotificationClient = WasapiChangeListener {
+            let change_listener: IMMNotificationClient = IMMNotificationClient::implement(Box::new(WasapiChangeListener {
                 change_signal: change_signal.clone(),
-            }
-            .into();
+            }));
             let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL, &IMMDeviceEnumerator::IID).and_then(|raw| IMMDeviceEnumerator::from_raw(raw)).unwrap();
             enumerator
                 .RegisterEndpointNotificationCallback(&change_listener)
                 .unwrap();
-            //let change_listener:IMMNotificationClient = WasapiChangeListener{}.into();
+            //let change_listener:IMMNotificationClient = IMMNotificationClient::implement(Box::new(WasapiChangeListener {}));
             change_signal.set();
             Arc::new(Mutex::new(WasapiAccess {
                 change_signal,
@@ -193,7 +191,7 @@ impl WasapiAccess {
     pub fn get_updated_descs(&mut self) -> Vec<AudioDeviceDesc> {
         unsafe {
             let enumerator: IMMDeviceEnumerator =
-                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).unwrap();
+                CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL, &IMMDeviceEnumerator::IID).and_then(|raw| IMMDeviceEnumerator::from_raw(raw)).unwrap();
             let mut out = Vec::new();
             Self::enumerate_devices(AudioDeviceType::Input, &enumerator, &mut out);
             Self::enumerate_devices(AudioDeviceType::Output, &enumerator, &mut out);
@@ -505,7 +503,7 @@ impl WasapiAccess {
 
     /// Get the native channel count from the device's mix format
     unsafe fn get_device_channel_count(device: &IMMDevice) -> usize {
-        if let Ok(client) = device.Activate::<IAudioClient>(CLSCTX_ALL, None) {
+        if let Ok(client) = device.Activate(&IAudioClient::IID, CLSCTX_ALL, None).and_then(|raw| IAudioClient::from_raw(raw)) {
             if let Ok(mix_format) = client.GetMixFormat() {
                 let channel_count = (*mix_format).nChannels as usize;
                 // Free the format allocated by WASAPI
@@ -597,7 +595,7 @@ impl WasapiAccess {
 
     unsafe fn find_device_by_id(search_device_id: AudioDeviceId) -> Option<IMMDevice> {
         let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL, &IMMDeviceEnumerator::IID).and_then(|raw| IMMDeviceEnumerator::from_raw(raw)).ok()?;
         let col = enumerator.EnumAudioEndpoints(eAll, DEVICE_STATE_ACTIVE).ok()?;
         let count = col.GetCount().ok()?;
         for i in 0..count {
@@ -614,7 +612,7 @@ impl WasapiAccess {
     // Find the output device for a loopback device id (strips the "_loopback" suffix)
     unsafe fn find_loopback_device_by_id(search_device_id: AudioDeviceId) -> Option<IMMDevice> {
         let enumerator: IMMDeviceEnumerator =
-            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL, &IMMDeviceEnumerator::IID).and_then(|raw| IMMDeviceEnumerator::from_raw(raw)).ok()?;
         let col = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE).ok()?;
         let count = col.GetCount().ok()?;
         for i in 0..count {
@@ -748,7 +746,7 @@ impl WasapiBase {
             // Shared-mode streams must match (or autoconvert toward) the mix format.
             // Hardcoding 48000 fails on devices whose engine runs at 44100/96000/etc.
             let sample_rate = {
-                let probe: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|_| ())?;
+                let probe: IAudioClient = device.Activate(&IAudioClient::IID, CLSCTX_ALL, None).and_then(|raw| IAudioClient::from_raw(raw)).map_err(|_| ())?;
                 let mix = probe.GetMixFormat().map_err(|_| ())?;
                 let rate = (*mix).nSamplesPerSec as usize;
                 crate::windows::Win32::System::Com::CoTaskMemFree(Some(
@@ -766,7 +764,7 @@ impl WasapiBase {
                 as *const crate::windows::Win32::Media::Audio::WAVEFORMATEX;
 
             // Prefer IAudioClient3 low-latency shared stream when available.
-            if let Ok(client3) = device.Activate::<IAudioClient3>(CLSCTX_ALL, None) {
+            if let Ok(client3) = device.Activate(&IAudioClient3::IID, CLSCTX_ALL, None).and_then(|raw| IAudioClient3::from_raw(raw)) {
                 let mut default_period_frames = 0u32;
                 let mut fundamental_period_frames = 0u32;
                 let mut min_period_frames = 0u32;
@@ -792,7 +790,7 @@ impl WasapiBase {
                     let event = CreateEventA(None, false, false, None).map_err(|_| ())?;
                     client3.SetEventHandle(event).map_err(|_| ())?;
                     client3.Start().map_err(|_| ())?;
-                    let client: IAudioClient = client3.cast().map_err(|_| ())?;
+                    let client: IAudioClient = IAudioClient::query(client3.as_raw()).map_err(|_| ())?;
                     return Ok(Self {
                         device_id,
                         frames: default_period_frames.max(1),
@@ -807,7 +805,7 @@ impl WasapiBase {
             }
 
             // Fallback: classic shared-mode client with PCM autoconvert.
-            let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|_| ())?;
+            let client: IAudioClient = device.Activate(&IAudioClient::IID, CLSCTX_ALL, None).and_then(|raw| IAudioClient::from_raw(raw)).map_err(|_| ())?;
             let mut def_period = 0i64;
             let mut min_period = 0i64;
             client
@@ -852,7 +850,7 @@ impl WasapiBase {
             let channel_count = channel_count.min(2);
             // Find the output device that corresponds to this loopback device
             let device = WasapiAccess::find_loopback_device_by_id(device_id).ok_or(())?;
-            let client: IAudioClient = device.Activate(CLSCTX_ALL, None).map_err(|_| ())?;
+            let client: IAudioClient = device.Activate(&IAudioClient::IID, CLSCTX_ALL, None).and_then(|raw| IAudioClient::from_raw(raw)).map_err(|_| ())?;
 
             let mut def_period = 0i64;
             let mut min_period = 0i64;
@@ -937,7 +935,7 @@ pub struct WasapiAudioOutputBuffer {
 impl WasapiOutput {
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         let base = WasapiBase::new(device_id, channel_count)?;
-        let render_client = unsafe { base.client.GetService().map_err(|_| ())? };
+        let render_client = unsafe { base.client.GetService(&IAudioRenderClient::IID).and_then(|raw| IAudioRenderClient::from_raw(raw)).map_err(|_| ())? };
         Ok(Self {
             render_client,
             base,
@@ -1009,7 +1007,7 @@ pub struct WasapiAudioInputBuffer {
 impl WasapiInput {
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         let base = WasapiBase::new(device_id, channel_count)?;
-        let capture_client = unsafe { base.client.GetService().map_err(|_| ())? };
+        let capture_client = unsafe { base.client.GetService(&IAudioCaptureClient::IID).and_then(|raw| IAudioCaptureClient::from_raw(raw)).map_err(|_| ())? };
         Ok(Self {
             capture_client,
             base,
@@ -1072,7 +1070,7 @@ pub struct WasapiLoopback {
 impl WasapiLoopback {
     pub fn new(device_id: AudioDeviceId, channel_count: usize) -> Result<Self, ()> {
         let base = WasapiBase::new_loopback(device_id, channel_count)?;
-        let capture_client = unsafe { base.client.GetService().map_err(|_| ())? };
+        let capture_client = unsafe { base.client.GetService(&IAudioCaptureClient::IID).and_then(|raw| IAudioCaptureClient::from_raw(raw)).map_err(|_| ())? };
         Ok(Self {
             capture_client,
             base,
@@ -1134,30 +1132,22 @@ pub(crate) struct WasapiChangeListener {
     change_signal: SignalToUI,
 }
 
-crate::implement_com! {
-    for_struct: WasapiChangeListener,
-    identity: IMMNotificationClient,
-    wrapper_struct: WasapiChangeListener_Impl,
-    interface_count: 1,
-    interfaces: {
-        0: IMMNotificationClient
-    }
-}
 
-impl IMMNotificationClient_Impl for WasapiChangeListener_Impl {
+
+impl IMMNotificationClientImpl for WasapiChangeListener {
     fn OnDeviceStateChanged(
         &self,
-        _pwstrdeviceid: &PCWSTR,
+        _pwstrdeviceid: PCWSTR,
         _dwnewstate: DEVICE_STATE,
-    ) -> crate::windows::core::Result<()> {
+    ) -> Result<(),windows::core::HRESULT> {
         self.change_signal.set();
         Ok(())
     }
-    fn OnDeviceAdded(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
+    fn OnDeviceAdded(&self, _pwstrdeviceid: PCWSTR) -> Result<(),windows::core::HRESULT> {
         self.change_signal.set();
         Ok(())
     }
-    fn OnDeviceRemoved(&self, _pwstrdeviceid: &PCWSTR) -> crate::windows::core::Result<()> {
+    fn OnDeviceRemoved(&self, _pwstrdeviceid: PCWSTR) -> Result<(),windows::core::HRESULT> {
         self.change_signal.set();
         Ok(())
     }
@@ -1165,16 +1155,16 @@ impl IMMNotificationClient_Impl for WasapiChangeListener_Impl {
         &self,
         _flow: EDataFlow,
         _role: ERole,
-        _pwstrdefaultdeviceid: &crate::windows::core::PCWSTR,
-    ) -> crate::windows::core::Result<()> {
+        _pwstrdefaultdeviceid: crate::windows::core::PCWSTR,
+    ) -> Result<(),windows::core::HRESULT> {
         self.change_signal.set();
         Ok(())
     }
     fn OnPropertyValueChanged(
         &self,
-        _pwstrdeviceid: &PCWSTR,
-        _key: &PROPERTYKEY,
-    ) -> crate::windows::core::Result<()> {
+        _pwstrdeviceid: PCWSTR,
+        _key: PROPERTYKEY,
+    ) -> Result<(),windows::core::HRESULT> {
         Ok(())
     }
 }

@@ -2,83 +2,20 @@ use crate::{Emitter, FileSystemEventKind, RescanReason, WatchRoot};
 use std::ffi::{c_void, OsStr, OsString};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::PathBuf;
-use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-type Handle = *mut c_void;
-
-const INVALID_HANDLE_VALUE: Handle = (-1isize) as Handle;
-
-const FILE_LIST_DIRECTORY: u32 = 0x0001;
-const FILE_SHARE_READ: u32 = 0x0000_0001;
-const FILE_SHARE_WRITE: u32 = 0x0000_0002;
-const FILE_SHARE_DELETE: u32 = 0x0000_0004;
-const OPEN_EXISTING: u32 = 3;
-const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
-const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-
-const FILE_NOTIFY_CHANGE_FILE_NAME: u32 = 0x0000_0001;
-const FILE_NOTIFY_CHANGE_DIR_NAME: u32 = 0x0000_0002;
-const FILE_NOTIFY_CHANGE_ATTRIBUTES: u32 = 0x0000_0004;
-const FILE_NOTIFY_CHANGE_SIZE: u32 = 0x0000_0008;
-const FILE_NOTIFY_CHANGE_LAST_WRITE: u32 = 0x0000_0010;
-const FILE_NOTIFY_CHANGE_CREATION: u32 = 0x0000_0040;
-
-const FILE_ACTION_ADDED: u32 = 1;
-const FILE_ACTION_REMOVED: u32 = 2;
-const FILE_ACTION_MODIFIED: u32 = 3;
-const FILE_ACTION_RENAMED_OLD_NAME: u32 = 4;
-const FILE_ACTION_RENAMED_NEW_NAME: u32 = 5;
-
-/// `ReadDirectoryChangesW` reports this when its buffer overflowed and the
-/// caller must enumerate the directory again.
-const ERROR_NOTIFY_ENUM_DIR: u32 = 1022;
-
-#[repr(C)]
-struct ByHandleFileInformation {
-    file_attributes: u32,
-    creation_time: [u32; 2],
-    last_access_time: [u32; 2],
-    last_write_time: [u32; 2],
-    volume_serial_number: u32,
-    file_size_high: u32,
-    file_size_low: u32,
-    number_of_links: u32,
-    file_index_high: u32,
-    file_index_low: u32,
-}
-
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn CreateFileW(
-        lpFileName: *const u16,
-        dwDesiredAccess: u32,
-        dwShareMode: u32,
-        lpSecurityAttributes: *mut c_void,
-        dwCreationDisposition: u32,
-        dwFlagsAndAttributes: u32,
-        hTemplateFile: Handle,
-    ) -> Handle;
-
-    fn ReadDirectoryChangesW(
-        hDirectory: Handle,
-        lpBuffer: *mut c_void,
-        nBufferLength: u32,
-        bWatchSubtree: i32,
-        dwNotifyFilter: u32,
-        lpBytesReturned: *mut u32,
-        lpOverlapped: *mut c_void,
-        lpCompletionRoutine: *mut c_void,
-    ) -> i32;
-
-    fn GetFileInformationByHandle(hFile: Handle, info: *mut ByHandleFileInformation) -> i32;
-    fn CloseHandle(hObject: Handle) -> i32;
-    fn GetLastError() -> u32;
-}
+use makepad_windows_sys::{
+    core::PCWSTR,
+    Win32::{
+        Foundation::{
+            CloseHandle, GetLastError, ERROR_NOTIFY_ENUM_DIR, HANDLE, INVALID_HANDLE_VALUE,
+        },
+        Storage::FileSystem::*,
+    },
+};
 
 pub struct PlatformWatcher {
     stop: Arc<AtomicBool>,
@@ -143,8 +80,8 @@ impl PlatformWatcher {
         self.stop.store(true, Ordering::Relaxed);
         if let Ok(mut handles) = self.handles.lock() {
             for handle in handles.drain(..) {
-                let handle = handle as Handle;
-                if !handle.is_null() && handle != INVALID_HANDLE_VALUE {
+                let handle = HANDLE(handle as *mut c_void);
+                if !handle.0.is_null() && handle != INVALID_HANDLE_VALUE {
                     unsafe {
                         let _ = CloseHandle(handle);
                     }
@@ -209,12 +146,18 @@ fn classify(root: &std::path::Path, records: &[Record]) -> Vec<(PathBuf, FileSys
         let record = &records[i];
         let path = root.join(&record.relative);
         match record.action {
-            FILE_ACTION_ADDED => out.push((path, FileSystemEventKind::Created)),
-            FILE_ACTION_REMOVED => out.push((path, FileSystemEventKind::Removed)),
-            FILE_ACTION_MODIFIED => out.push((path, FileSystemEventKind::Changed)),
-            FILE_ACTION_RENAMED_OLD_NAME => {
+            action if action == FILE_ACTION_ADDED.0 => {
+                out.push((path, FileSystemEventKind::Created))
+            }
+            action if action == FILE_ACTION_REMOVED.0 => {
+                out.push((path, FileSystemEventKind::Removed))
+            }
+            action if action == FILE_ACTION_MODIFIED.0 => {
+                out.push((path, FileSystemEventKind::Changed))
+            }
+            action if action == FILE_ACTION_RENAMED_OLD_NAME.0 => {
                 if let Some(next) = records.get(i + 1) {
-                    if next.action == FILE_ACTION_RENAMED_NEW_NAME {
+                    if next.action == FILE_ACTION_RENAMED_NEW_NAME.0 {
                         out.push((
                             root.join(&next.relative),
                             FileSystemEventKind::Renamed { from: path },
@@ -225,7 +168,9 @@ fn classify(root: &std::path::Path, records: &[Record]) -> Vec<(PathBuf, FileSys
                 }
                 out.push((path, FileSystemEventKind::Removed));
             }
-            FILE_ACTION_RENAMED_NEW_NAME => out.push((path, FileSystemEventKind::Created)),
+            action if action == FILE_ACTION_RENAMED_NEW_NAME.0 => {
+                out.push((path, FileSystemEventKind::Created))
+            }
             _ => out.push((path, FileSystemEventKind::Changed)),
         }
         i += 1;
@@ -257,39 +202,31 @@ fn watch_root_loop(
     // Open the root itself, never what a reparse point behind it targets.
     let handle = unsafe {
         CreateFileW(
-            wide.as_ptr(),
-            FILE_LIST_DIRECTORY,
+            PCWSTR(wide.as_ptr()),
+            FILE_LIST_DIRECTORY.0,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            ptr::null_mut(),
+            None,
             OPEN_EXISTING,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            ptr::null_mut(),
+            None,
         )
     };
 
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        let _ = ready.send(Err(format!(
-            "cannot open watch root {}: error {}",
-            root.path.display(),
-            unsafe { GetLastError() }
-        )));
-        return;
-    }
-
-    let mut info = ByHandleFileInformation {
-        file_attributes: 0,
-        creation_time: [0; 2],
-        last_access_time: [0; 2],
-        last_write_time: [0; 2],
-        volume_serial_number: 0,
-        file_size_high: 0,
-        file_size_low: 0,
-        number_of_links: 0,
-        file_index_high: 0,
-        file_index_low: 0,
+    let handle = match handle {
+        Ok(handle) => handle,
+        Err(error) => {
+            let _ = ready.send(Err(format!(
+                "cannot open watch root {}: error {}",
+                root.path.display(),
+                error
+            )));
+            return;
+        }
     };
-    let known = unsafe { GetFileInformationByHandle(handle, &mut info) } != 0;
-    if known && info.file_attributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let known = unsafe { GetFileInformationByHandle(handle, &mut info) }.is_ok();
+    if known && info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
         unsafe {
             let _ = CloseHandle(handle);
         }
@@ -301,7 +238,7 @@ fn watch_root_loop(
     }
 
     if let Ok(mut list) = handles.lock() {
-        list.push(handle as usize);
+        list.push(handle.0 as usize);
     }
 
     let exclude = emitter.exclude();
@@ -319,20 +256,20 @@ fn watch_root_loop(
                 handle,
                 buffer.as_mut_ptr() as *mut c_void,
                 buffer.len() as u32,
-                1,
+                true,
                 FILE_NOTIFY_CHANGE_FILE_NAME
                     | FILE_NOTIFY_CHANGE_DIR_NAME
                     | FILE_NOTIFY_CHANGE_ATTRIBUTES
                     | FILE_NOTIFY_CHANGE_SIZE
                     | FILE_NOTIFY_CHANGE_LAST_WRITE
                     | FILE_NOTIFY_CHANGE_CREATION,
-                &mut bytes_returned,
-                ptr::null_mut(),
-                ptr::null_mut(),
+                Some(&mut bytes_returned),
+                None,
+                None,
             )
         };
 
-        if ok == 0 {
+        if ok.is_err() {
             if stop.load(Ordering::Relaxed) {
                 break;
             }
@@ -371,7 +308,7 @@ fn watch_root_loop(
     }
 
     if let Ok(mut list) = handles.lock() {
-        list.retain(|h| *h != handle as usize);
+        list.retain(|h| *h != handle.0 as usize);
     }
     unsafe {
         let _ = CloseHandle(handle);
@@ -386,11 +323,11 @@ fn wide_null(value: &OsStr) -> Vec<u16> {
 mod tests {
     use super::*;
 
-    fn record(next: u32, action: u32, name: &str) -> Vec<u8> {
+    fn record(next: u32, action: FILE_ACTION, name: &str) -> Vec<u8> {
         let wide: Vec<u16> = name.encode_utf16().collect();
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&next.to_le_bytes());
-        bytes.extend_from_slice(&action.to_le_bytes());
+        bytes.extend_from_slice(&action.0.to_le_bytes());
         bytes.extend_from_slice(&((wide.len() * 2) as u32).to_le_bytes());
         for unit in wide {
             bytes.extend_from_slice(&unit.to_le_bytes());

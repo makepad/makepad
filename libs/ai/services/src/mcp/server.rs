@@ -264,18 +264,12 @@ fn random_hex() -> Result<String, String> {
     }
     #[cfg(windows)]
     {
-        #[link(name = "bcrypt")]
-        unsafe extern "system" {
-            fn BCryptGenRandom(
-                algorithm: *mut std::ffi::c_void,
-                buffer: *mut u8,
-                count: u32,
-                flags: u32,
-            ) -> i32;
-        }
-        if unsafe { BCryptGenRandom(std::ptr::null_mut(), bytes.as_mut_ptr(), bytes.len() as u32, 2) }
-            != 0
-        {
+        use makepad_windows_sys::Win32::Security::Cryptography::{
+            BCryptGenRandom, BCRYPTGENRANDOM_FLAGS,
+        };
+        // 2 = BCRYPT_USE_SYSTEM_PREFERRED_RNG.
+        let flags = BCRYPTGENRANDOM_FLAGS(2);
+        if unsafe { BCryptGenRandom(None, bytes.as_mut_ptr(), bytes.len() as u32, flags) }.0 != 0 {
             return Err("OS randomness is unavailable for MCP tokens".into());
         }
     }

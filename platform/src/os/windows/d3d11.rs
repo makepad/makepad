@@ -24,12 +24,11 @@ use crate::{
     windows::{
         core::{
             //ComInterface,
-            Interface,
             PCSTR,
             PCWSTR,
         },
         Win32::{
-            Foundation::{CloseHandle, HANDLE, HMODULE, S_FALSE, WAIT_TIMEOUT},
+            Foundation::{CloseHandle, HANDLE, S_FALSE, WAIT_TIMEOUT},
             Graphics::{
                 Direct3D::{
                     Fxc::D3DCompile, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST,
@@ -122,9 +121,9 @@ impl Cx {
             let reported = unsafe {
                 d3d11_cx.factory.EnumAdapters(0).ok().map_or(0, |adapter| {
                     let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
-                    if adapter.cast::<IDXGIAdapter3>().is_ok_and(|adapter| {
+                    if IDXGIAdapter3::query(adapter.as_raw()).is_ok_and(|adapter| {
                         adapter
-                            .QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP(0), &mut info)
+                            .QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP(0)).map(|value| { info = value; })
                             .is_ok()
                     }) && info.Budget != 0
                     {
@@ -447,14 +446,14 @@ impl Cx {
                 geometry.dirty = geometry.dirty_vertices || geometry.dirty_indices;
 
                 unsafe {
-                    d3d11_cx.context.VSSetShader(&shp.vertex_shader, None);
-                    d3d11_cx.context.PSSetShader(&shp.pixel_shader, None);
+                    d3d11_cx.context.VSSetShader(Some(&shp.vertex_shader), None);
+                    d3d11_cx.context.PSSetShader(Some(&shp.pixel_shader), None);
                     d3d11_cx.context.PSSetSamplers(0, Some(&shp.samplers));
                     d3d11_cx.context.VSSetSamplers(0, Some(&shp.samplers));
                     d3d11_cx
                         .context
                         .IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-                    d3d11_cx.context.IASetInputLayout(&shp.input_layout);
+                    d3d11_cx.context.IASetInputLayout(Some(&shp.input_layout));
 
                     let depth_stencil_state = if draw_call.options.depth_write {
                         self.passes[pass_id].os.depth_stencil_state_write.as_ref()
@@ -467,7 +466,7 @@ impl Cx {
                     if let Some(depth_stencil_state) = depth_stencil_state {
                         d3d11_cx
                             .context
-                            .OMSetDepthStencilState(depth_stencil_state, 0);
+                            .OMSetDepthStencilState(Some(depth_stencil_state), 0);
                     }
                     let blend_max = sh.mapping.blend_op == crate::draw_shader::DrawShaderBlendOp::Max;
                     let blend_state = if draw_call.options.alpha_blend && blend_max {
@@ -480,7 +479,7 @@ impl Cx {
                     if let Some(blend_state) = blend_state {
                         let blend_factor = [0., 0., 0., 0.];
                         d3d11_cx.context.OMSetBlendState(
-                            blend_state,
+                            Some(blend_state),
                             Some(&blend_factor),
                             0xffffffff,
                         );
@@ -491,7 +490,7 @@ impl Cx {
                         self.passes[pass_id].os.raster_state_no_cull.as_ref()
                     };
                     if let Some(raster_state) = raster_state {
-                        d3d11_cx.context.RSSetState(raster_state);
+                        d3d11_cx.context.RSSetState(Some(raster_state));
                     }
 
                     // A geometry whose buffers could not be built — the device died between
@@ -511,7 +510,7 @@ impl Cx {
                     };
                     d3d11_cx
                         .context
-                        .IASetIndexBuffer(geom_ibuf, DXGI_FORMAT_R32_UINT, 0);
+                        .IASetIndexBuffer(Some(geom_ibuf), DXGI_FORMAT_R32_UINT, 0);
 
                     // Instances are read by the vertex shader from the
                     // instance buffer's word view (`instance_buffer_slot`).
@@ -642,8 +641,8 @@ impl Cx {
                         if let Some(km) = &cxtexture.os.keyed_mutex {
                             let km = km.clone();
                             unsafe {
-                                let _ = (Interface::vtable(&km).AcquireSync)(
-                                    Interface::as_raw(&km),
+                                let _ = (km.vtable().AcquireSync)(
+                                    km.as_raw(),
                                     0,
                                     2000,
                                 );
@@ -721,7 +720,7 @@ impl Cx {
                 // Release keyed mutexes acquired for shared textures in this draw call.
                 for km in &acquired_mutexes {
                     unsafe {
-                        let _ = (Interface::vtable(km).ReleaseSync)(Interface::as_raw(km), 0);
+                        let _ = (km.vtable().ReleaseSync)(km.as_raw(), 0);
                     }
                 }
             }
@@ -1194,7 +1193,7 @@ impl Cx {
             // IDXGIKeyedMutex, so call AcquireSync through the vtable like `is_gpu_done`
             // does for ID3D11DeviceContext::GetData.
             unsafe {
-                let _ = (Interface::vtable(km).AcquireSync)(Interface::as_raw(km), 0, 2000);
+                let _ = (km.vtable().AcquireSync)(km.as_raw(), 0, 2000);
             }
         }
     }
@@ -1203,7 +1202,7 @@ impl Cx {
     pub fn shared_texture_keyed_release(&self, texture: &Texture) {
         if let Some(km) = &self.textures[texture.texture_id()].os.keyed_mutex {
             unsafe {
-                let _ = (Interface::vtable(km).ReleaseSync)(Interface::as_raw(km), 0);
+                let _ = (km.vtable().ReleaseSync)(km.as_raw(), 0);
             }
         }
     }
@@ -1341,8 +1340,8 @@ impl Cx {
             device
                 .CreateTexture2D(&desc, None, Some(&mut staging))
                 .ok()?;
-            let staging_res: ID3D11Resource = staging?.cast().ok()?;
-            let src_res: ID3D11Resource = src_tex.cast().ok()?;
+            let staging_res: ID3D11Resource = ID3D11Resource::query(staging?.as_raw()).ok()?;
+            let src_res: ID3D11Resource = ID3D11Resource::query(src_tex.as_raw()).ok()?;
             context.CopySubresourceRegion(&staging_res, 0, 0, 0, 0, &src_res, 0, None);
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             context
@@ -1417,15 +1416,15 @@ impl Cx {
                 crate::log!("WINDBG[{}]: staging CreateTexture2D failed {:?}", tag, err);
                 return;
             }
-            let staging_res: ID3D11Resource = staging.unwrap().cast().unwrap();
-            let src_res: ID3D11Resource = src_tex.cast().unwrap();
+            let staging_res: ID3D11Resource = ID3D11Resource::query(staging.unwrap().as_raw()).unwrap();
+            let src_res: ID3D11Resource = ID3D11Resource::query(src_tex.as_raw()).unwrap();
             let mut acq_hr = 0i32;
             if let Some(km) = &keyed_mutex {
-                acq_hr = (Interface::vtable(km).AcquireSync)(Interface::as_raw(km), 0, 2000).0;
+                acq_hr = (km.vtable().AcquireSync)(km.as_raw(), 0, 2000).0;
             }
             context.CopySubresourceRegion(&staging_res, 0, 0, 0, 0, &src_res, 0, None);
             if let Some(km) = &keyed_mutex {
-                let _ = (Interface::vtable(km).ReleaseSync)(Interface::as_raw(km), 0);
+                let _ = (km.vtable().ReleaseSync)(km.as_raw(), 0);
             }
             let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
             // D3D11_MAP_READ = 1 (const stripped from bindings)
@@ -1602,7 +1601,7 @@ impl Cx {
                 desc.BindFlags = 0;
                 desc.CPUAccessFlags = 0x20000; // READ
                 desc.MiscFlags = 0;
-                let create = || -> windows::core::Result<(ID3D11Resource, ID3D11Query)> {
+                let create = || -> Result<(ID3D11Resource, ID3D11Query),windows::core::HRESULT> {
                     let mut staging = None;
                     let mut query = None;
                     device.CreateTexture2D(&desc, None, Some(&mut staging))?;
@@ -1613,9 +1612,7 @@ impl Cx {
                         },
                         Some(&mut query),
                     )?;
-                    let staging = staging
-                        .ok_or_else(windows::core::Error::empty)?
-                        .cast::<ID3D11Resource>()?;
+                    let staging = ID3D11Resource::query(staging.ok_or_else(windows::core::Error::empty)?.as_raw())?;
                     let query = query.ok_or_else(windows::core::Error::empty)?;
                     Ok((staging, query))
                 };
@@ -1623,8 +1620,8 @@ impl Cx {
                     work.completion.finish(Err(ReadbackError::DeviceLost));
                     continue;
                 };
-                context.CopySubresourceRegion(&staging, 0, 0, 0, 0, &source, 0, None);
-                context.End(&query);
+                context.CopySubresourceRegion(&staging, 0, 0, 0, 0, source.as_ID3D11Resource(), 0, None);
+                context.End(query.as_ID3D11Asynchronous());
                 if pass.is_none() {
                     self.textures.1.serials.submit();
                 }
@@ -1664,7 +1661,7 @@ impl Cx {
                 if !job.mapped {
                     let mut done = 0u32;
                     if context
-                        .GetData(&job.query, Some((&mut done as *mut u32).cast()), 4, 1)
+                        .GetData(job.query.as_ID3D11Asynchronous(), Some((&mut done as *mut u32).cast()), 4, 1)
                         .is_err()
                     {
                         result = Some(Err(ReadbackError::DeviceLost));
@@ -1806,8 +1803,8 @@ fn read_texture_rgba(src: &ID3D11Texture2D, d3d11_cx: &D3d11Cx) -> Option<(u32, 
             crate::error!("window capture: CreateTexture2D(staging) failed: {}", err);
             return None;
         }
-        let staging_res: ID3D11Resource = staging?.cast().ok()?;
-        let src_res: ID3D11Resource = src.cast().ok()?;
+        let staging_res: ID3D11Resource = ID3D11Resource::query(staging?.as_raw()).ok()?;
+        let src_res: ID3D11Resource = ID3D11Resource::query(src.as_raw()).ok()?;
         d3d11_cx
             .context
             .CopySubresourceRegion(&staging_res, 0, 0, 0, 0, &src_res, 0, None);
@@ -1847,10 +1844,10 @@ fn read_texture_rgba(src: &ID3D11Texture2D, d3d11_cx: &D3d11Cx) -> Option<(u32, 
 /// screen and DWM will stop retiring our presents. It is a SUCCESS hresult
 /// (0x087A0001), which is why `hr.is_err()` misses it. Not in the vendored
 /// bindings, so spelled out here (likewise the two device-lost codes).
-const DXGI_STATUS_OCCLUDED: windows_core::HRESULT = windows_core::HRESULT(0x087A0001u32 as i32);
-const DXGI_ERROR_DEVICE_REMOVED: windows_core::HRESULT =
-    windows_core::HRESULT(0x887A0005u32 as i32);
-const DXGI_ERROR_DEVICE_RESET: windows_core::HRESULT = windows_core::HRESULT(0x887A0007u32 as i32);
+const DXGI_STATUS_OCCLUDED: windows::core::HRESULT = windows::core::HRESULT(0x087A0001u32 as i32);
+const DXGI_ERROR_DEVICE_REMOVED: windows::core::HRESULT =
+    windows::core::HRESULT(0x887A0005u32 as i32);
+const DXGI_ERROR_DEVICE_RESET: windows::core::HRESULT = windows::core::HRESULT(0x887A0007u32 as i32);
 
 /// A frame-latency wait that timed out: skip presenting (the old
 /// code fired a `Present(1)` + DO_NOT_WAIT into a 33 ms churn instead), but
@@ -1867,10 +1864,10 @@ const DEFAULT_REFRESH_PERIOD: f64 = 1.0 / 60.0;
 unsafe fn get_frame_statistics(
     swap_chain: &IDXGISwapChain1,
     stats: &mut DXGI_FRAME_STATISTICS,
-) -> windows_core::HRESULT {
-    let base: &IDXGISwapChain = swap_chain;
+) -> windows::core::HRESULT {
+    let base: &IDXGISwapChain = swap_chain.as_IDXGISwapChain();
     unsafe {
-        (Interface::vtable(base).GetFrameStatistics)(Interface::as_raw(base), stats as *mut _)
+        (base.vtable().GetFrameStatistics)(base.as_raw(), stats as *mut _)
     }
 }
 
@@ -1880,8 +1877,8 @@ unsafe fn get_frame_statistics(
 /// It is the authoritative answer to "is this device still usable": it latches the real cause
 /// and keeps reporting it, and unlike a `Present` HRESULT it is available when the call that
 /// failed was a `CreateBuffer` on a window that never got as far as presenting.
-unsafe fn device_removed_reason(device: &ID3D11Device) -> windows_core::HRESULT {
-    unsafe { (Interface::vtable(device).GetDeviceRemovedReason)(Interface::as_raw(device)) }
+unsafe fn device_removed_reason(device: &ID3D11Device) -> windows::core::HRESULT {
+    unsafe { (device.vtable().GetDeviceRemovedReason)(device.as_raw()) }
 }
 
 /// Unbinds everything from the immediate context and flushes it.
@@ -1894,7 +1891,7 @@ unsafe fn device_removed_reason(device: &ID3D11Device) -> windows_core::HRESULT 
 /// the vendored bindings; `Flush` does.
 unsafe fn clear_and_flush(context: &ID3D11DeviceContext) {
     unsafe {
-        (Interface::vtable(context).ClearState)(Interface::as_raw(context));
+        (context.vtable().ClearState)(context.as_raw());
         context.Flush();
     }
 }
@@ -2107,7 +2104,7 @@ impl D3d11Window {
         let desc = self.swap_chain_desc();
         unsafe {
             let swap_chain = match d3d11_cx.factory.CreateSwapChainForHwnd(
-                &d3d11_cx.device,
+                d3d11_cx.device.as_IUnknown(),
                 self.win32_window.hwnd,
                 &desc,
                 None,
@@ -2119,7 +2116,7 @@ impl D3d11Window {
                     return false;
                 }
             };
-            let swap_texture: ID3D11Texture2D = match swap_chain.GetBuffer(0) {
+            let swap_texture: ID3D11Texture2D = match swap_chain.GetBuffer(0, &ID3D11Texture2D::IID).and_then(|raw| ID3D11Texture2D::from_raw(raw)) {
                 Ok(t) => t,
                 Err(e) => {
                     d3d11_cx.note_error("IDXGISwapChain::GetBuffer", &e);
@@ -2128,7 +2125,7 @@ impl D3d11Window {
             };
             let mut render_target_view = None;
             if let Err(e) = d3d11_cx.device.CreateRenderTargetView(
-                &swap_texture,
+                swap_texture.as_ID3D11Resource(),
                 None,
                 Some(&mut render_target_view),
             ) {
@@ -2147,7 +2144,7 @@ impl D3d11Window {
             // window, take its waitable object: the beat the event loop waits on, one credit
             // per retired present.
             if self.waitable_swap_chain {
-                let handle = match swap_chain.cast::<IDXGISwapChain2>() {
+                let handle = match IDXGISwapChain2::query(swap_chain.as_raw()) {
                     Ok(swap_chain2) => {
                         let _ = swap_chain2.SetMaximumFrameLatency(main_window_latency());
                         swap_chain2.GetFrameLatencyWaitableObject()
@@ -2159,7 +2156,7 @@ impl D3d11Window {
                     let window_id = self.window_id;
                     with_win32_app(|app| app.register_beat_handle(window_id, handle, false));
                 }
-            } else if let Ok(swap_chain2) = swap_chain.cast::<IDXGISwapChain2>() {
+            } else if let Ok(swap_chain2) = IDXGISwapChain2::query(swap_chain.as_raw()) {
                 // Popups keep the low one-frame latency without requesting the waitable flag.
                 let _ = swap_chain2.SetMaximumFrameLatency(1);
             }
@@ -2365,7 +2362,7 @@ impl D3d11Window {
                 // Fall through: re-acquire the old-size backbuffer so we keep presenting.
             }
 
-            let swap_texture: ID3D11Texture2D = match swap_chain.GetBuffer(0) {
+            let swap_texture: ID3D11Texture2D = match swap_chain.GetBuffer(0, &ID3D11Texture2D::IID).and_then(|raw| ID3D11Texture2D::from_raw(raw)) {
                 Ok(texture) => texture,
                 Err(e) => {
                     if !self.resize_error_logged {
@@ -2378,7 +2375,7 @@ impl D3d11Window {
             };
             let mut render_target_view = None;
             if let Err(e) = d3d11_cx.device.CreateRenderTargetView(
-                &swap_texture,
+                swap_texture.as_ID3D11Resource(),
                 None,
                 Some(&mut render_target_view),
             ) {
@@ -2625,17 +2622,17 @@ impl D3d11Cx {
     /// Fallible because recovery calls it while the display driver may still be restarting,
     /// when `EnumAdapters` and `D3D11CreateDevice` fail transiently for a few hundred
     /// milliseconds. Every argument is a literal, so nothing here depends on retained state.
-    fn create_device_tier() -> windows_core::Result<(
+    fn create_device_tier() -> Result<(
         IDXGIFactory2,
         ID3D11Device,
         ID3D11DeviceContext,
         ID3D11Query,
-    )> {
+    ),windows::core::HRESULT> {
         unsafe {
             // A DXGI factory snapshots its adapter enumeration when it is created, so one made
             // before a hybrid-GPU transition or a driver reinstall keeps handing back the
             // adapter that went away. Recovery always starts from a fresh factory.
-            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
+            let factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0), &IDXGIFactory2::IID).and_then(|raw| IDXGIFactory2::from_raw(raw))?;
             let adapter = factory.EnumAdapters(0)?;
             if let Ok(desc) = adapter.GetDesc() {
                 let len = desc.Description.iter().position(|c| *c == 0).unwrap_or(desc.Description.len());
@@ -2645,9 +2642,9 @@ impl D3d11Cx {
             let mut context: Option<ID3D11DeviceContext> = None;
             let mut query: Option<ID3D11Query> = None;
             D3D11CreateDevice(
-                &adapter,
+                Some(&adapter),
                 D3D_DRIVER_TYPE_UNKNOWN,
-                HMODULE(std::ptr::null_mut()),
+                None,
                 D3D11_CREATE_DEVICE_FLAG(0x800 | 0x20), // VIDEO_SUPPORT | BGRA_SUPPORT
                 Some(&[D3D_FEATURE_LEVEL_11_0]),
                 D3D11_SDK_VERSION,
@@ -2727,7 +2724,7 @@ impl D3d11Cx {
     /// The HRESULT a creation call returns is not always one of the two DXGI device-lost
     /// codes, so the device is asked directly instead of the error being pattern-matched.
     /// Nothing on the healthy path reaches this.
-    pub fn note_error(&self, what: &str, err: &windows_core::Error) {
+    pub fn note_error(&self, what: &str, err: &windows::core::Error) {
         if unsafe { device_removed_reason(&self.device) }.is_err() {
             if !self.device_lost.replace(true) {
                 crate::error!(
@@ -2743,14 +2740,14 @@ impl D3d11Cx {
 
     pub fn start_querying(&self) {
         // QUERY_EVENT signals when rendering is complete
-        unsafe { self.context.End(&self.query) };
+        unsafe { self.context.End(self.query.as_ID3D11Asynchronous()) };
     }
 
     pub fn is_gpu_done(&self) -> bool {
         let hresult = unsafe {
-            (Interface::vtable(&self.context).GetData)(
-                Interface::as_raw(&self.context),
-                Interface::as_raw(&self.query),
+            (self.context.vtable().GetData)(
+                self.context.as_raw(),
+                self.query.as_raw(),
                 std::ptr::null_mut(),
                 0,
                 0,
@@ -2762,7 +2759,7 @@ impl D3d11Cx {
             // the studio-hosted path has, since it renders to a texture and never presents.
             self.note_error(
                 "ID3D11DeviceContext::GetData",
-                &windows_core::Error::from(hresult),
+                &windows::core::Error::from(hresult),
             );
             return true;
         }
@@ -2874,12 +2871,12 @@ impl D3d11Buffer {
                             back: 1,
                         };
                         cx.context.CopySubresourceRegion(
-                            &destination,
+                            destination.as_ID3D11Resource(),
                             0,
                             (copy.destination * 4) as u32,
                             0,
                             0,
-                            previous,
+                            previous.as_ID3D11Resource(),
                             0,
                             Some(&source_box),
                         );
@@ -2903,7 +2900,7 @@ impl D3d11Buffer {
                     // DEFAULT resource updates are command ordered; the driver
                     // stages writes if prior draws still read this range.
                     cx.context.UpdateSubresource(
-                        &destination,
+                        destination.as_ID3D11Resource(),
                         0,
                         Some(&target_box),
                         data.as_ptr().cast(),
@@ -2968,14 +2965,14 @@ impl D3d11Buffer {
             if let Err(e) =
                 d3d11_cx
                     .context
-                    .Map(buffer, 0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped))
+                    .Map(buffer.as_ID3D11Resource(), 0, D3D11_MAP_WRITE_DISCARD, 0, Some(p_mapped))
             {
                 // Nothing was mapped, so there is no `Unmap` to pair on this path.
                 d3d11_cx.note_error("ID3D11DeviceContext::Map", &e);
                 return;
             }
             std::ptr::copy_nonoverlapping(data, mapped.pData, len_slots * 4);
-            d3d11_cx.context.Unmap(buffer, 0);
+            d3d11_cx.context.Unmap(buffer.as_ID3D11Resource(), 0);
         }
     }
 
@@ -3065,7 +3062,7 @@ impl D3d11Buffer {
         if let Err(e) = unsafe {
             d3d11_cx
                 .device
-                .CreateShaderResourceView(buffer, Some(&view_desc), Some(&mut view))
+                .CreateShaderResourceView(buffer.as_ID3D11Resource(), Some(&view_desc), Some(&mut view))
         } {
             d3d11_cx.note_error("CreateShaderResourceView(instances)", &e);
             self.word_view = None;
@@ -3219,7 +3216,7 @@ impl CxTexture {
                         .CreateTexture2D(&texture_desc, Some(sub_data.as_ptr()), Some(&mut texture))
                         .unwrap()
                 };
-                let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
+                let resource: ID3D11Resource = unsafe { ID3D11Resource::query(texture.as_ref().unwrap().as_raw()) }.unwrap();
                 let mut shader_resource_view = None;
                 unsafe {
                     d3d11_cx
@@ -3363,7 +3360,7 @@ impl CxTexture {
             // (a multi-second TDR). For it, only reuse pure appends (new rows never sampled yet);
             // rebuilds/resets recreate a fresh texture. Bitmap atlases (the color-glyph/emoji atlas,
             // images — sampled by normalized UV) are safe to update in place anywhere.
-            let is_sdf = matches!(dxgi_format, DXGI_FORMAT_R32G32B32A32_FLOAT);
+            let is_sdf = dxgi_format == DXGI_FORMAT_R32G32B32A32_FLOAT;
             let safe_to_reuse = matches!(updated, TextureUpdated::Partial(_))
                 && (!is_sdf || by + 1 >= self.os.vec_uploaded_height);
             let can_reuse = self.os.texture.is_some()
@@ -3388,7 +3385,7 @@ impl CxTexture {
                     let src =
                         unsafe { data_ptr.add((by * width + bx) * bpp) } as *const std::ffi::c_void;
                     let resource: ID3D11Resource =
-                        self.os.texture.as_ref().unwrap().cast().unwrap();
+                        unsafe { ID3D11Resource::query(self.os.texture.as_ref().unwrap().as_raw()) }.unwrap();
                     unsafe {
                         d3d11_cx.context.UpdateSubresource(
                             &resource,
@@ -3448,7 +3445,7 @@ impl CxTexture {
             }
             let Some(resource) = texture
                 .as_ref()
-                .and_then(|t: &ID3D11Texture2D| t.cast::<ID3D11Resource>().ok())
+                .and_then(|t: &ID3D11Texture2D| unsafe { ID3D11Resource::query(t.as_raw()) }.ok())
             else {
                 self.set_updated(TextureUpdated::Full);
                 return;
@@ -3539,7 +3536,7 @@ impl CxTexture {
             }
             let Some(resource) = texture
                 .as_ref()
-                .and_then(|t: &ID3D11Texture2D| t.cast::<ID3D11Resource>().ok())
+                .and_then(|t: &ID3D11Texture2D| unsafe { ID3D11Resource::query(t.as_raw()) }.ok())
             else {
                 self.alloc = None;
                 return;
@@ -3660,7 +3657,7 @@ impl CxTexture {
                     .CreateTexture2D(&texture_desc, None, Some(&mut texture))
                     .unwrap()
             };
-            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
+            let resource: ID3D11Resource = unsafe { ID3D11Resource::query(texture.as_ref().unwrap().as_raw()) }.unwrap();
             //let shader_resource_view = unsafe {d3d11_cx.device.CreateShaderResourceView(&texture, None).unwrap()};
 
             let dsv_desc = D3D11_DEPTH_STENCIL_VIEW_DESC {
@@ -3748,7 +3745,7 @@ impl CxTexture {
                 );
                 return;
             }
-            let resource: ID3D11Resource = texture.clone().unwrap().cast().unwrap();
+            let resource: ID3D11Resource = unsafe { ID3D11Resource::query(texture.as_ref().unwrap().as_raw()) }.unwrap();
             let mut shader_resource_view = None;
             unsafe {
                 d3d11_device
@@ -3768,11 +3765,11 @@ impl CxTexture {
             let mut name_wide: Vec<u16> = shared_texture_name(id_u64).encode_utf16().collect();
             name_wide.push(0);
             let mut handle = HANDLE(std::ptr::null_mut());
-            match resource.cast::<IDXGIResource1>() {
+            match unsafe { IDXGIResource1::query(resource.as_raw()) } {
                 Ok(dxgi_resource1) => {
                     let hr = unsafe {
-                        (Interface::vtable(&dxgi_resource1).CreateSharedHandle)(
-                            Interface::as_raw(&dxgi_resource1),
+                        (dxgi_resource1.vtable().CreateSharedHandle)(
+                            dxgi_resource1.as_raw(),
                             std::ptr::null(),
                             DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
                             PCWSTR(name_wide.as_ptr()),
@@ -3792,7 +3789,7 @@ impl CxTexture {
                     crate::error!("WINHOST: IDXGIResource1 cast failed: {:?}", err);
                 }
             }
-            let keyed_mutex: Option<IDXGIKeyedMutex> = resource.cast().ok();
+            let keyed_mutex: Option<IDXGIKeyedMutex> = unsafe { IDXGIKeyedMutex::query(resource.as_raw()) }.ok();
             crate::log!(
                 "WINHOST: update_shared_texture keyed_mutex={}",
                 keyed_mutex.is_some()
@@ -3818,7 +3815,7 @@ impl CxTexture {
             TextureFormat::SharedBGRAu8 { id, .. } => id.as_u64(),
             _ => 0,
         };
-        let device1: ID3D11Device1 = match d3d11_cx.device.cast() {
+        let device1: ID3D11Device1 = match unsafe { ID3D11Device1::query(d3d11_cx.device.as_raw()) } {
             Ok(d) => d,
             Err(err) => {
                 crate::error!("WINCHILD: ID3D11Device1 cast failed: {:?}", err);
@@ -3829,11 +3826,11 @@ impl CxTexture {
         name_wide.push(0);
         let mut resource_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
         let hr = unsafe {
-            (Interface::vtable(&device1).OpenSharedResourceByName)(
-                Interface::as_raw(&device1),
+            (device1.vtable().OpenSharedResourceByName)(
+                device1.as_raw(),
                 PCWSTR(name_wide.as_ptr()),
                 DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE,
-                &<ID3D11Texture2D as Interface>::IID,
+                &ID3D11Texture2D::IID,
                 &mut resource_ptr,
             )
         };
@@ -3845,8 +3842,8 @@ impl CxTexture {
             );
             return;
         }
-        let texture: ID3D11Texture2D = unsafe { ID3D11Texture2D::from_raw(resource_ptr) };
-        let resource: ID3D11Resource = texture.clone().cast().unwrap();
+        let texture: ID3D11Texture2D = unsafe { ID3D11Texture2D::from_raw(resource_ptr).expect("checked non-null resource") };
+        let resource: ID3D11Resource = unsafe { ID3D11Resource::query(texture.as_raw()) }.unwrap();
         let mut shader_resource_view = None;
         let srv = unsafe {
             d3d11_cx.device.CreateShaderResourceView(
@@ -3861,7 +3858,7 @@ impl CxTexture {
                 .device
                 .CreateRenderTargetView(&resource, None, Some(&mut render_target_view))
         };
-        let keyed_mutex: Option<IDXGIKeyedMutex> = resource.cast().ok();
+        let keyed_mutex: Option<IDXGIKeyedMutex> = unsafe { IDXGIKeyedMutex::query(resource.as_raw()) }.ok();
         crate::log!(
             "WINCHILD: OpenSharedResourceByName OK SRV={:?} RTV={:?} keyed_mutex={} id={:x}",
             srv,
@@ -4028,17 +4025,17 @@ impl CxOsPass {
         unsafe {
             d3d11_cx
                 .context
-                .RSSetState(self.raster_state_no_cull.as_ref().unwrap());
+                .RSSetState(self.raster_state_no_cull.as_ref());
             let blend_factor = [0., 0., 0., 0.];
             d3d11_cx.context.OMSetBlendState(
-                self.blend_state.as_ref().unwrap(),
+                self.blend_state.as_ref(),
                 Some(&blend_factor),
                 0xffffffff,
             );
             if let Some(depth_stencil_state) = self.depth_stencil_state_write.as_ref() {
                 d3d11_cx
                     .context
-                    .OMSetDepthStencilState(depth_stencil_state, 0);
+                    .OMSetDepthStencilState(Some(depth_stencil_state), 0);
             }
         }
     }
@@ -4084,11 +4081,11 @@ unsafe fn get_query_data<T>(
     context: &ID3D11DeviceContext,
     query: &ID3D11Query,
     out: &mut T,
-) -> windows_core::HRESULT {
+) -> windows::core::HRESULT {
     unsafe {
-        (Interface::vtable(context).GetData)(
-            Interface::as_raw(context),
-            Interface::as_raw(query),
+        (context.vtable().GetData)(
+            context.as_raw(),
+            query.as_raw(),
             (out as *mut T).cast(),
             std::mem::size_of::<T>() as u32,
             D3D11_ASYNC_GETDATA_DONOTFLUSH,
@@ -4105,7 +4102,7 @@ struct D3dGpuTimeSet {
 
 impl D3dGpuTimeSet {
     fn new(d3d11_cx: &D3d11Cx) -> Option<Self> {
-        let create = |kind| -> windows_core::Result<ID3D11Query> {
+        let create = |kind| -> Result<ID3D11Query,windows::core::HRESULT> {
             let mut query = None;
             unsafe {
                 d3d11_cx.device.CreateQuery(
@@ -4118,7 +4115,7 @@ impl D3dGpuTimeSet {
             }
             query.ok_or_else(windows::core::Error::empty)
         };
-        let set = || -> windows_core::Result<Self> {
+        let set = || -> Result<Self,windows::core::HRESULT> {
             Ok(Self {
                 disjoint: create(D3D11_QUERY_TIMESTAMP_DISJOINT)?,
                 start: create(D3D11_QUERY_TIMESTAMP)?,
@@ -4197,8 +4194,8 @@ impl D3dGpuTimer {
             return;
         };
         unsafe {
-            d3d11_cx.context.Begin(&set.disjoint);
-            d3d11_cx.context.End(&set.start);
+            d3d11_cx.context.Begin(set.disjoint.as_ID3D11Asynchronous());
+            d3d11_cx.context.End(set.start.as_ID3D11Asynchronous());
         }
         // The tag names what is encoded now; by completion the owner may have retagged.
         self.open = Some((set, recorder.current_tag()));
@@ -4207,8 +4204,8 @@ impl D3dGpuTimer {
     fn end(&mut self, d3d11_cx: &D3d11Cx) {
         if let Some((set, tag)) = self.open.take() {
             unsafe {
-                d3d11_cx.context.End(&set.end);
-                d3d11_cx.context.End(&set.disjoint);
+                d3d11_cx.context.End(set.end.as_ID3D11Asynchronous());
+                d3d11_cx.context.End(set.disjoint.as_ID3D11Asynchronous());
             }
             self.in_flight.push_back((set, tag));
         }
@@ -4504,10 +4501,10 @@ fn d3d_compile_hlsl(target: &str, entry: &str, shader: &str) -> Result<Vec<u8>, 
         if D3DCompile(
             shader_bytes.as_ptr() as *const _,
             shader_bytes.len(),
-            PCSTR("makepad_shader\0".as_ptr()),
+            Some(PCSTR("makepad_shader\0".as_ptr())),
             None,
             None,
-            PCSTR(entry.as_ptr()),
+            Some(PCSTR(entry.as_ptr())),
             PCSTR(target.as_ptr()),
             FLAGS,
             0,
@@ -5034,15 +5031,11 @@ impl CxOsTexture {
         const DXGI_FORMAT_R32_TYPELESS: DXGI_FORMAT = DXGI_FORMAT(39);
         const DXGI_FORMAT_R16G16B16A16_FLOAT: DXGI_FORMAT = DXGI_FORMAT(10);
         let bpp = match desc.Format {
-            DXGI_FORMAT_B8G8R8A8_UNORM
-            | DXGI_FORMAT_R8G8B8A8_UNORM
-            | DXGI_FORMAT_R32_FLOAT
-            | DXGI_FORMAT_D32_FLOAT
-            | DXGI_FORMAT_R32_TYPELESS => 4u64,
-            DXGI_FORMAT_R16G16B16A16_FLOAT => 8,
-            DXGI_FORMAT_R32G32B32A32_FLOAT => 16,
-            DXGI_FORMAT_R8_UNORM => 1,
-            DXGI_FORMAT_R8G8_UNORM | DXGI_FORMAT_R16_FLOAT => 2,
+            value if value == DXGI_FORMAT_B8G8R8A8_UNORM || value == DXGI_FORMAT_R8G8B8A8_UNORM || value == DXGI_FORMAT_R32_FLOAT || value == DXGI_FORMAT_D32_FLOAT || value == DXGI_FORMAT_R32_TYPELESS => 4u64,
+            value if value == DXGI_FORMAT_R16G16B16A16_FLOAT => 8,
+            value if value == DXGI_FORMAT_R32G32B32A32_FLOAT => 16,
+            value if value == DXGI_FORMAT_R8_UNORM => 1,
+            value if value == DXGI_FORMAT_R8G8_UNORM || value == DXGI_FORMAT_R16_FLOAT => 2,
             _ => return None,
         };
         let mut bytes = 0u64;
@@ -5095,7 +5088,7 @@ impl Cx {
                 // GetData's S_FALSE is also an HRESULT success: inspect the
                 // BOOL payload, not Result::is_ok alone.
                 if context
-                    .GetData(query, Some((&mut done as *mut u32).cast()), 4, 1)
+                    .GetData(query.as_ID3D11Asynchronous(), Some((&mut done as *mut u32).cast()), 4, 1)
                     .is_ok()
                     && done != 0
                 {
@@ -5124,7 +5117,7 @@ impl Cx {
                     .is_ok()
                 {
                     if let Some(query) = query {
-                        context.End(&query);
+                        context.End(query.as_ID3D11Asynchronous());
                         context.Flush();
                         state.d3d = Some((submitted, query));
                     }

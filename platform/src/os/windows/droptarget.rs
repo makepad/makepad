@@ -3,7 +3,6 @@
 #![allow(non_camel_case_types)]
 use {
     crate::{
-        //implement_com,
         event::DragItem,
         log,
         os::windows::dropfiles::*,
@@ -13,7 +12,7 @@ use {
                 Foundation::{HWND, LPARAM, POINTL, WPARAM},
                 System::{
                     Com::{IDataObject, DATADIR_GET, FORMATETC},
-                    Ole::{IDropTarget, IDropTarget_Impl, CF_HDROP, DROPEFFECT},
+                    Ole::{IDropTargetImpl, CF_HDROP, DROPEFFECT},
                     SystemServices::MODIFIERKEYS_FLAGS,
                 },
                 UI::WindowsAndMessaging::{SendMessageW, WM_USER},
@@ -44,15 +43,6 @@ pub(crate) struct DropTarget {
     // needs it for Over as well
     pub drag_items: RefCell<Option<Vec<DragItem>>>,
     pub hwnd: HWND, // which window to send the messages to
-}
-crate::implement_com! {
-    for_struct: DropTarget,
-    identity: IDropTarget,
-    wrapper_struct: DropTarget_Impl,
-    interface_count: 1,
-    interfaces: {
-        0: IDropTarget
-    }
 }
 
 fn create_dragitems_from_idataobject(data_object: &IDataObject) -> Option<Vec<DragItem>> {
@@ -95,14 +85,14 @@ fn create_dragitems_from_idataobject(data_object: &IDataObject) -> Option<Vec<Dr
 
 // IDropTarget implementation for DropTarget, which sends WM_DROPTARGET messages to the window as they appear
 
-impl IDropTarget_Impl for DropTarget_Impl {
+impl IDropTargetImpl for DropTarget {
     fn DragEnter(
         &self,
-        _p_data_obj: wcore::Ref<'_, IDataObject>,
+        _p_data_obj: Option<&IDataObject>,
         _grf_key_state: MODIFIERKEYS_FLAGS,
-        _pt: &POINTL,
+        _pt: POINTL,
         _pdweffect: *mut DROPEFFECT,
-    ) -> wcore::Result<()> {
+    ) -> Result<(),wcore::HRESULT> {
         // ignore null pointer
         let Some(p_data_obj) = _p_data_obj.as_ref() else {
             return Ok(());
@@ -123,7 +113,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         let effect = unsafe { *_pdweffect };
         let param = Box::new(DropTargetMessage::Enter(
             _grf_key_state,
-            *_pt,
+            _pt,
             effect,
             drag_items_opt.unwrap(),
         ));
@@ -141,7 +131,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         Ok(())
     }
 
-    fn DragLeave(&self) -> wcore::Result<()> {
+    fn DragLeave(&self) -> Result<(),wcore::HRESULT> {
         // read before we clear it below: Some means DragEnter's conversion
         // succeeded and the app was actually told about this drag, so
         // win32_window.rs knows whether a DragEnd is owed here.
@@ -169,9 +159,9 @@ impl IDropTarget_Impl for DropTarget_Impl {
     fn DragOver(
         &self,
         _grf_key_state: MODIFIERKEYS_FLAGS,
-        _pt: &POINTL,
+        _pt: POINTL,
         _pdweffect: *mut DROPEFFECT,
-    ) -> wcore::Result<()> {
+    ) -> Result<(),wcore::HRESULT> {
         // if for some reason there is no current drag item, exit
         if let None = *self.drag_items.borrow() {
             return Ok(());
@@ -181,7 +171,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         let effect = unsafe { *_pdweffect };
         let param = Box::new(DropTargetMessage::Over(
             _grf_key_state,
-            *_pt,
+            _pt,
             effect,
             self.drag_items.borrow().clone().unwrap(),
         ));
@@ -201,11 +191,11 @@ impl IDropTarget_Impl for DropTarget_Impl {
 
     fn Drop(
         &self,
-        _p_data_obj: wcore::Ref<'_, IDataObject>,
+        _p_data_obj: Option<&IDataObject>,
         _grf_key_state: MODIFIERKEYS_FLAGS,
-        _pt: &POINTL,
+        _pt: POINTL,
         _pdweffect: *mut DROPEFFECT,
-    ) -> wcore::Result<()> {
+    ) -> Result<(),wcore::HRESULT> {
         //log!("DropTarget::Drop");
 
         // ignore null pointer
@@ -228,7 +218,7 @@ impl IDropTarget_Impl for DropTarget_Impl {
         let effect = unsafe { *_pdweffect };
         let param = Box::new(DropTargetMessage::Drop(
             _grf_key_state,
-            *_pt,
+            _pt,
             effect,
             drag_items_opt.unwrap(),
         ));

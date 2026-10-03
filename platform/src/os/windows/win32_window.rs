@@ -138,8 +138,8 @@ struct WindowCompositionAttribData {
 unsafe fn SetWindowCompositionAttribute(
     hwnd: HWND,
     data: *mut WindowCompositionAttribData,
-) -> windows_core::BOOL {
-    windows_core::link!("user32.dll" "system" fn SetWindowCompositionAttribute(hwnd : HWND, data : *mut WindowCompositionAttribData) -> windows_core::BOOL);
+) -> windows::core::BOOL {
+    #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn SetWindowCompositionAttribute(hwnd : HWND, data : *mut WindowCompositionAttribData) -> windows::core::BOOL; }
     unsafe { SetWindowCompositionAttribute(hwnd, data) }
 }
 
@@ -159,31 +159,19 @@ struct CANDIDATEFORM {
 }
 
 #[inline]
-unsafe fn ImmSetCandidateWindow(himc: HIMC, lpcandidate: *const CANDIDATEFORM) -> windows_core::BOOL {
-    windows_core::link!("imm32.dll" "system" fn ImmSetCandidateWindow(himc : HIMC, lpcandidate : *const CANDIDATEFORM) -> windows_core::BOOL);
+unsafe fn ImmSetCandidateWindow(himc: HIMC, lpcandidate: *const CANDIDATEFORM) -> windows::core::BOOL {
+    #[link(name = "imm32", kind = "raw-dylib")] extern "system" { fn ImmSetCandidateWindow(himc : HIMC, lpcandidate : *const CANDIDATEFORM) -> windows::core::BOOL; }
     unsafe { ImmSetCandidateWindow(himc, lpcandidate) }
 }
 
 // `SetWindowTextW` is not present in the vendored (pruned) `windows` crate's
 // `WindowsAndMessaging` module; bind it the same way as the shims above.
 #[inline]
-unsafe fn SetWindowTextW(hwnd: HWND, lpstring: PCWSTR) -> windows_core::BOOL {
-    windows_core::link!("user32.dll" "system" fn SetWindowTextW(hwnd : HWND, lpstring : PCWSTR) -> windows_core::BOOL);
+unsafe fn SetWindowTextW(hwnd: HWND, lpstring: PCWSTR) -> windows::core::BOOL {
+    #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn SetWindowTextW(hwnd : HWND, lpstring : PCWSTR) -> windows::core::BOOL; }
     unsafe { SetWindowTextW(hwnd, lpstring) }
 }
 
-/*
-// Copied from Microsoft so it refers to the right IDropTarget
-#[allow(non_snake_case)]
-pub unsafe fn RegisterDragDrop<P0, P1>(hwnd: P0, pdroptarget: P1) -> coreResult<()>
-where
-    P0: IntoParam<HWND>,
-    P1: IntoParam<IDropTarget>,
-{
-    ::windows_link::link!("ole32.dll" "system" fn RegisterDragDrop(hwnd : HWND, pdroptarget : * mut::core::ffi::c_void) -> HRESULT);
-    RegisterDragDrop(hwnd.into_param().abi(), pdroptarget.into_param().abi()).ok()
-}
-*/
 //#[derive(Clone)]
 pub struct Win32Window {
     pub window_id: WindowId,
@@ -572,8 +560,8 @@ impl Win32Window {
         let hwnd = unsafe {
             CreateWindowExW(
                 style_ex,
-                PCWSTR(with_win32_app(|app| app.window_class_name.as_ptr())),
-                PCWSTR(title.as_ptr()),
+                Some(PCWSTR(with_win32_app(|app| app.window_class_name.as_ptr()))),
+                Some(PCWSTR(title.as_ptr())),
                 style,
                 x,
                 y,
@@ -581,22 +569,21 @@ impl Win32Window {
                 CW_USEDEFAULT,
                 None,
                 None,
-                Some(GetModuleHandleW(None).unwrap().into()),
+                Some(windows::Win32::Foundation::HINSTANCE(GetModuleHandleW(None).unwrap().0)),
                 None,
             )
-            .unwrap()
         };
+        assert!(!hwnd.is_invalid(), "CreateWindowExW failed: {:?}", unsafe { windows::Win32::Foundation::GetLastError() });
         // DWM chrome is applied in `init` after USERDATA is set (so NCCALCSIZE
         // can use our handler). Shape/NCRP here only covers the CreateWindow gap.
         Self::apply_win11_window_shape(hwnd, false);
         Self::set_nc_rendering_enabled(hwnd);
 
         // create DropTarget object that accesses the same data object, convert to COM and give to Microsoft
-        let drop_target: IDropTarget = DropTarget {
+        let drop_target: IDropTarget = IDropTarget::implement(Box::new(DropTarget {
             drag_items: RefCell::new(None),
             hwnd,
-        }
-        .into();
+        }));
         unsafe { RegisterDragDrop(hwnd, &drop_target).unwrap() };
 
         Win32Window {
@@ -647,8 +634,8 @@ impl Win32Window {
         let hwnd = unsafe {
             CreateWindowExW(
                 style_ex,
-                PCWSTR(with_win32_app(|app| app.window_class_name.as_ptr())),
-                PCWSTR(title.as_ptr()),
+                Some(PCWSTR(with_win32_app(|app| app.window_class_name.as_ptr()))),
+                Some(PCWSTR(title.as_ptr())),
                 style,
                 x,
                 y,
@@ -656,11 +643,11 @@ impl Win32Window {
                 h,
                 None,
                 None,
-                Some(GetModuleHandleW(None).unwrap().into()),
+                Some(windows::Win32::Foundation::HINSTANCE(GetModuleHandleW(None).unwrap().0)),
                 None,
             )
-            .unwrap()
         };
+        assert!(!hwnd.is_invalid(), "CreateWindowExW failed: {:?}", unsafe { windows::Win32::Foundation::GetLastError() });
         Self::apply_win11_window_shape(hwnd, true);
 
         Win32Window {
@@ -1440,7 +1427,7 @@ impl Win32Window {
     /// (a relaunch hands its own over with `AllowSetForegroundWindow`);
     /// otherwise the taskbar button flashes.
     pub fn bring_to_front(&self) {
-        windows_core::link!("user32.dll" "system" fn SetForegroundWindow(hwnd: HWND) -> crate::windows::core::BOOL);
+        #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn SetForegroundWindow(hwnd: HWND) -> crate::windows::core::BOOL; }
         if std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some() {
             return;
         }
@@ -1457,7 +1444,7 @@ impl Win32Window {
     /// signals; the paint loop skips it (keeping the pass dirty) and re-probes.
     /// `IsIconic` is not in the vendored bindings, so it is linked here.
     pub fn is_iconic(&self) -> bool {
-        windows_core::link!("user32.dll" "system" fn IsIconic(hwnd: HWND) -> crate::windows::core::BOOL);
+        #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn IsIconic(hwnd: HWND) -> crate::windows::core::BOOL; }
         unsafe { IsIconic(self.hwnd).as_bool() }
     }
 
@@ -2016,111 +2003,111 @@ impl Win32Window {
 
     pub fn virtual_key_to_key_code(wparam: WPARAM) -> KeyCode {
         match VIRTUAL_KEY(wparam.0 as u16) {
-            VK_ESCAPE => KeyCode::Escape,
-            VK_OEM_3 => KeyCode::Backtick,
-            VK_0 => KeyCode::Key0,
-            VK_1 => KeyCode::Key1,
-            VK_2 => KeyCode::Key2,
-            VK_3 => KeyCode::Key3,
-            VK_4 => KeyCode::Key4,
-            VK_5 => KeyCode::Key5,
-            VK_6 => KeyCode::Key6,
-            VK_7 => KeyCode::Key7,
-            VK_8 => KeyCode::Key8,
-            VK_9 => KeyCode::Key9,
-            VK_OEM_MINUS => KeyCode::Minus,
-            VK_OEM_PLUS => KeyCode::Equals,
-            VK_BACK => KeyCode::Backspace,
-            VK_TAB => KeyCode::Tab,
-            VK_Q => KeyCode::KeyQ,
-            VK_W => KeyCode::KeyW,
-            VK_E => KeyCode::KeyE,
-            VK_R => KeyCode::KeyR,
-            VK_T => KeyCode::KeyT,
-            VK_Y => KeyCode::KeyY,
-            VK_U => KeyCode::KeyU,
-            VK_I => KeyCode::KeyI,
-            VK_O => KeyCode::KeyO,
-            VK_P => KeyCode::KeyP,
-            VK_OEM_4 => KeyCode::LBracket,
-            VK_OEM_6 => KeyCode::RBracket,
-            VK_RETURN => KeyCode::ReturnKey,
-            VK_A => KeyCode::KeyA,
-            VK_S => KeyCode::KeyS,
-            VK_D => KeyCode::KeyD,
-            VK_F => KeyCode::KeyF,
-            VK_G => KeyCode::KeyG,
-            VK_H => KeyCode::KeyH,
-            VK_J => KeyCode::KeyJ,
-            VK_K => KeyCode::KeyK,
-            VK_L => KeyCode::KeyL,
-            VK_OEM_1 => KeyCode::Semicolon,
-            VK_OEM_7 => KeyCode::Quote,
-            VK_OEM_5 => KeyCode::Backslash,
-            VK_Z => KeyCode::KeyZ,
-            VK_X => KeyCode::KeyX,
-            VK_C => KeyCode::KeyC,
-            VK_V => KeyCode::KeyV,
-            VK_B => KeyCode::KeyB,
-            VK_N => KeyCode::KeyN,
-            VK_M => KeyCode::KeyM,
-            VK_OEM_COMMA => KeyCode::Comma,
-            VK_OEM_PERIOD => KeyCode::Period,
-            VK_OEM_2 => KeyCode::Slash,
-            VK_LCONTROL => KeyCode::Control,
-            VK_RCONTROL => KeyCode::Control,
-            VK_CONTROL => KeyCode::Control,
-            VK_LMENU => KeyCode::Alt,
-            VK_RMENU => KeyCode::Alt,
-            VK_MENU => KeyCode::Alt,
-            VK_LSHIFT => KeyCode::Shift,
-            VK_RSHIFT => KeyCode::Shift,
-            VK_SHIFT => KeyCode::Shift,
-            VK_LWIN => KeyCode::Logo,
-            VK_RWIN => KeyCode::Logo,
-            VK_SPACE => KeyCode::Space,
-            VK_CAPITAL => KeyCode::Capslock,
-            VK_F1 => KeyCode::F1,
-            VK_F2 => KeyCode::F2,
-            VK_F3 => KeyCode::F3,
-            VK_F4 => KeyCode::F4,
-            VK_F5 => KeyCode::F5,
-            VK_F6 => KeyCode::F6,
-            VK_F7 => KeyCode::F7,
-            VK_F8 => KeyCode::F8,
-            VK_F9 => KeyCode::F9,
-            VK_F10 => KeyCode::F10,
-            VK_F11 => KeyCode::F11,
-            VK_F12 => KeyCode::F12,
-            VK_SNAPSHOT => KeyCode::PrintScreen,
-            VK_SCROLL => KeyCode::ScrollLock,
-            VK_PAUSE => KeyCode::Pause,
-            VK_INSERT => KeyCode::Insert,
-            VK_DELETE => KeyCode::Delete,
-            VK_HOME => KeyCode::Home,
-            VK_END => KeyCode::End,
-            VK_PRIOR => KeyCode::PageUp,
-            VK_NEXT => KeyCode::PageDown,
-            VK_NUMPAD0 => KeyCode::Numpad0,
-            VK_NUMPAD1 => KeyCode::Numpad1,
-            VK_NUMPAD2 => KeyCode::Numpad2,
-            VK_NUMPAD3 => KeyCode::Numpad3,
-            VK_NUMPAD4 => KeyCode::Numpad4,
-            VK_NUMPAD5 => KeyCode::Numpad5,
-            VK_NUMPAD6 => KeyCode::Numpad6,
-            VK_NUMPAD7 => KeyCode::Numpad7,
-            VK_NUMPAD8 => KeyCode::Numpad8,
-            VK_NUMPAD9 => KeyCode::Numpad9,
-            VK_SUBTRACT => KeyCode::NumpadSubtract,
-            VK_ADD => KeyCode::NumpadAdd,
-            VK_DECIMAL => KeyCode::NumpadDecimal,
-            VK_MULTIPLY => KeyCode::NumpadMultiply,
-            VK_DIVIDE => KeyCode::NumpadDivide,
-            VK_NUMLOCK => KeyCode::Numlock,
-            VK_UP => KeyCode::ArrowUp,
-            VK_DOWN => KeyCode::ArrowDown,
-            VK_LEFT => KeyCode::ArrowLeft,
-            VK_RIGHT => KeyCode::ArrowRight,
+            value if value == VK_ESCAPE => KeyCode::Escape,
+            value if value == VK_OEM_3 => KeyCode::Backtick,
+            value if value == VK_0 => KeyCode::Key0,
+            value if value == VK_1 => KeyCode::Key1,
+            value if value == VK_2 => KeyCode::Key2,
+            value if value == VK_3 => KeyCode::Key3,
+            value if value == VK_4 => KeyCode::Key4,
+            value if value == VK_5 => KeyCode::Key5,
+            value if value == VK_6 => KeyCode::Key6,
+            value if value == VK_7 => KeyCode::Key7,
+            value if value == VK_8 => KeyCode::Key8,
+            value if value == VK_9 => KeyCode::Key9,
+            value if value == VK_OEM_MINUS => KeyCode::Minus,
+            value if value == VK_OEM_PLUS => KeyCode::Equals,
+            value if value == VK_BACK => KeyCode::Backspace,
+            value if value == VK_TAB => KeyCode::Tab,
+            value if value == VK_Q => KeyCode::KeyQ,
+            value if value == VK_W => KeyCode::KeyW,
+            value if value == VK_E => KeyCode::KeyE,
+            value if value == VK_R => KeyCode::KeyR,
+            value if value == VK_T => KeyCode::KeyT,
+            value if value == VK_Y => KeyCode::KeyY,
+            value if value == VK_U => KeyCode::KeyU,
+            value if value == VK_I => KeyCode::KeyI,
+            value if value == VK_O => KeyCode::KeyO,
+            value if value == VK_P => KeyCode::KeyP,
+            value if value == VK_OEM_4 => KeyCode::LBracket,
+            value if value == VK_OEM_6 => KeyCode::RBracket,
+            value if value == VK_RETURN => KeyCode::ReturnKey,
+            value if value == VK_A => KeyCode::KeyA,
+            value if value == VK_S => KeyCode::KeyS,
+            value if value == VK_D => KeyCode::KeyD,
+            value if value == VK_F => KeyCode::KeyF,
+            value if value == VK_G => KeyCode::KeyG,
+            value if value == VK_H => KeyCode::KeyH,
+            value if value == VK_J => KeyCode::KeyJ,
+            value if value == VK_K => KeyCode::KeyK,
+            value if value == VK_L => KeyCode::KeyL,
+            value if value == VK_OEM_1 => KeyCode::Semicolon,
+            value if value == VK_OEM_7 => KeyCode::Quote,
+            value if value == VK_OEM_5 => KeyCode::Backslash,
+            value if value == VK_Z => KeyCode::KeyZ,
+            value if value == VK_X => KeyCode::KeyX,
+            value if value == VK_C => KeyCode::KeyC,
+            value if value == VK_V => KeyCode::KeyV,
+            value if value == VK_B => KeyCode::KeyB,
+            value if value == VK_N => KeyCode::KeyN,
+            value if value == VK_M => KeyCode::KeyM,
+            value if value == VK_OEM_COMMA => KeyCode::Comma,
+            value if value == VK_OEM_PERIOD => KeyCode::Period,
+            value if value == VK_OEM_2 => KeyCode::Slash,
+            value if value == VK_LCONTROL => KeyCode::Control,
+            value if value == VK_RCONTROL => KeyCode::Control,
+            value if value == VK_CONTROL => KeyCode::Control,
+            value if value == VK_LMENU => KeyCode::Alt,
+            value if value == VK_RMENU => KeyCode::Alt,
+            value if value == VK_MENU => KeyCode::Alt,
+            value if value == VK_LSHIFT => KeyCode::Shift,
+            value if value == VK_RSHIFT => KeyCode::Shift,
+            value if value == VK_SHIFT => KeyCode::Shift,
+            value if value == VK_LWIN => KeyCode::Logo,
+            value if value == VK_RWIN => KeyCode::Logo,
+            value if value == VK_SPACE => KeyCode::Space,
+            value if value == VK_CAPITAL => KeyCode::Capslock,
+            value if value == VK_F1 => KeyCode::F1,
+            value if value == VK_F2 => KeyCode::F2,
+            value if value == VK_F3 => KeyCode::F3,
+            value if value == VK_F4 => KeyCode::F4,
+            value if value == VK_F5 => KeyCode::F5,
+            value if value == VK_F6 => KeyCode::F6,
+            value if value == VK_F7 => KeyCode::F7,
+            value if value == VK_F8 => KeyCode::F8,
+            value if value == VK_F9 => KeyCode::F9,
+            value if value == VK_F10 => KeyCode::F10,
+            value if value == VK_F11 => KeyCode::F11,
+            value if value == VK_F12 => KeyCode::F12,
+            value if value == VK_SNAPSHOT => KeyCode::PrintScreen,
+            value if value == VK_SCROLL => KeyCode::ScrollLock,
+            value if value == VK_PAUSE => KeyCode::Pause,
+            value if value == VK_INSERT => KeyCode::Insert,
+            value if value == VK_DELETE => KeyCode::Delete,
+            value if value == VK_HOME => KeyCode::Home,
+            value if value == VK_END => KeyCode::End,
+            value if value == VK_PRIOR => KeyCode::PageUp,
+            value if value == VK_NEXT => KeyCode::PageDown,
+            value if value == VK_NUMPAD0 => KeyCode::Numpad0,
+            value if value == VK_NUMPAD1 => KeyCode::Numpad1,
+            value if value == VK_NUMPAD2 => KeyCode::Numpad2,
+            value if value == VK_NUMPAD3 => KeyCode::Numpad3,
+            value if value == VK_NUMPAD4 => KeyCode::Numpad4,
+            value if value == VK_NUMPAD5 => KeyCode::Numpad5,
+            value if value == VK_NUMPAD6 => KeyCode::Numpad6,
+            value if value == VK_NUMPAD7 => KeyCode::Numpad7,
+            value if value == VK_NUMPAD8 => KeyCode::Numpad8,
+            value if value == VK_NUMPAD9 => KeyCode::Numpad9,
+            value if value == VK_SUBTRACT => KeyCode::NumpadSubtract,
+            value if value == VK_ADD => KeyCode::NumpadAdd,
+            value if value == VK_DECIMAL => KeyCode::NumpadDecimal,
+            value if value == VK_MULTIPLY => KeyCode::NumpadMultiply,
+            value if value == VK_DIVIDE => KeyCode::NumpadDivide,
+            value if value == VK_NUMLOCK => KeyCode::Numlock,
+            value if value == VK_UP => KeyCode::ArrowUp,
+            value if value == VK_DOWN => KeyCode::ArrowDown,
+            value if value == VK_LEFT => KeyCode::ArrowLeft,
+            value if value == VK_RIGHT => KeyCode::ArrowRight,
             _ => KeyCode::Unknown,
         }
     }

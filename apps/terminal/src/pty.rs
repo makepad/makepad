@@ -144,7 +144,7 @@ impl Pty {
         let pipe_security = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: std::ptr::null_mut(),
-            bInheritHandle: true.into(),
+            bInheritHandle: windows::core::BOOL(1),
         };
 
         let mut conpty_input_read = WinHandle::invalid();
@@ -219,14 +219,14 @@ impl Pty {
             .unwrap_or(PCWSTR::null());
         unsafe {
             CreateProcessW(
-                PCWSTR::null(),
+                None,
                 Some(PWSTR(command_line_wide.as_mut_ptr())),
                 None,
                 None,
                 false,
                 EXTENDED_STARTUPINFO_PRESENT,
                 None,
-                cwd_ptr,
+                Some(cwd_ptr),
                 &startup_info.StartupInfo,
                 &mut process_info,
             )
@@ -677,7 +677,7 @@ impl Drop for Pty {
 }
 
 #[cfg(windows)]
-fn windows_err(err: windows::core::Error) -> io::Error {
+fn windows_err(err: windows::core::HRESULT) -> io::Error {
     io::Error::other(err.to_string())
 }
 
@@ -797,7 +797,7 @@ impl ProcThreadAttributeList {
     fn new(attribute_count: u32) -> io::Result<Self> {
         let mut size = 0usize;
         unsafe {
-            let _ = InitializeProcThreadAttributeList(None, attribute_count, Some(0), &mut size);
+            let _ = InitializeProcThreadAttributeList(None, attribute_count, 0, &mut size);
         }
         if size == 0 {
             return Err(io::Error::other(
@@ -808,7 +808,7 @@ impl ProcThreadAttributeList {
         let mut storage = vec![0u8; size];
         let list = LPPROC_THREAD_ATTRIBUTE_LIST(storage.as_mut_ptr().cast());
         unsafe {
-            InitializeProcThreadAttributeList(Some(list), attribute_count, Some(0), &mut size)
+            InitializeProcThreadAttributeList(Some(list), attribute_count, 0, &mut size)
                 .map_err(windows_err)?;
         }
         Ok(Self {

@@ -112,29 +112,32 @@ struct MachineServiceLock {
 impl Drop for MachineServiceLock {
     fn drop(&mut self) {
         unsafe {
-            CloseHandle(self.handle as *mut std::ffi::c_void);
+            let _ = CloseHandle(HANDLE(self.handle as *mut std::ffi::c_void));
         }
     }
 }
 
 #[cfg(target_os = "windows")]
 fn acquire_machine_service_lock() -> Result<MachineServiceLock, AssetAiError> {
-    const ERROR_ALREADY_EXISTS: u32 = 183;
     let name: Vec<u16> = "Global\\MakepadAssetAiServiceSingleton"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
-    let handle = unsafe { CreateMutexW(std::ptr::null_mut(), 0, name.as_ptr()) };
-    if handle.is_null() {
-        return Err(AssetAiError::Io(format!(
-            "create machine-wide {} singleton: {}",
-            crate::SERVICE_NAME,
-            std::io::Error::last_os_error()
-        )));
-    }
+    let handle = unsafe { CreateMutexW(None, false, Some(PCWSTR(name.as_ptr()))) };
+    let handle = match handle {
+        Ok(handle) => handle,
+        Err(_) => {
+            return Err(AssetAiError::Io(format!(
+                "create machine-wide {} singleton: {}",
+                crate::SERVICE_NAME,
+                std::io::Error::last_os_error()
+            )))
+        }
+    };
+    // CreateMutexW succeeds on an existing mutex and says so in the last error.
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         unsafe {
-            CloseHandle(handle);
+            let _ = CloseHandle(handle);
         }
         return Err(AssetAiError::Io(format!(
             "another {} service is already running on this Windows machine — one service serves every GPU and cache directory",
@@ -142,21 +145,18 @@ fn acquire_machine_service_lock() -> Result<MachineServiceLock, AssetAiError> {
         )));
     }
     Ok(MachineServiceLock {
-        handle: handle as usize,
+        handle: handle.0 as usize,
     })
 }
 
 #[cfg(target_os = "windows")]
-#[link(name = "kernel32")]
-unsafe extern "system" {
-    fn CreateMutexW(
-        mutex_attributes: *mut std::ffi::c_void,
-        initial_owner: i32,
-        name: *const u16,
-    ) -> *mut std::ffi::c_void;
-    fn GetLastError() -> u32;
-    fn CloseHandle(object: *mut std::ffi::c_void) -> i32;
-}
+use makepad_windows_sys::{
+    core::PCWSTR,
+    Win32::{
+        Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, HANDLE},
+        System::Threading::CreateMutexW,
+    },
+};
 
 #[cfg(not(target_os = "windows"))]
 struct MachineServiceLock;

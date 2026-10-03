@@ -22,7 +22,7 @@ use {
         thread::SignalToUI,
         video_decode::yuv::YuvColorMatrix,
         windows::{
-            core::{Interface, GUID, PCWSTR},
+            core::{GUID, PCWSTR},
             Win32::{
                 Graphics::Direct3D11::{
                     ID3D11Device, ID3D11Multithread, ID3D11Texture2D, D3D11_BIND_DECODER,
@@ -114,7 +114,7 @@ fn create_source_reader_from_url(
         .encode_wide()
         .chain(std::iter::once(0))
         .collect();
-    unsafe { MFCreateSourceReaderFromURL(PCWSTR(wide.as_ptr()), attributes) }
+    unsafe { MFCreateSourceReaderFromURL(PCWSTR(wide.as_ptr()), Some(attributes)) }
         .map_err(|e| format!("MFCreateSourceReaderFromURL: {e:?}"))
 }
 
@@ -189,17 +189,16 @@ fn sample_to_dxgi_nv12(
 ) -> Result<(ID3D11Texture2D, u32, Arc<dyn std::any::Any + Send + Sync>), String> {
     let buffer = unsafe { sample.GetBufferByIndex(0) }
         .map_err(|e| format!("GetBufferByIndex: {e:?}"))?;
-    let dxgi: IMFDXGIBuffer = buffer.cast().map_err(|e| {
+    let dxgi: IMFDXGIBuffer = unsafe { IMFDXGIBuffer::query(buffer.as_raw()) }.map_err(|e| {
         format!("QI IMFDXGIBuffer failed ({e:?}) — decoder did not return a DXGI surface")
     })?;
 
-    let mut tex_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
-    unsafe { dxgi.GetResource(&ID3D11Texture2D::IID, &mut tex_ptr) }
+    let tex_ptr = unsafe { dxgi.GetResource(&ID3D11Texture2D::IID) }
         .map_err(|e| format!("IMFDXGIBuffer::GetResource: {e:?}"))?;
     if tex_ptr.is_null() {
         return Err("IMFDXGIBuffer::GetResource returned null".into());
     }
-    let texture: ID3D11Texture2D = unsafe { windows::core::Type::from_abi(tex_ptr) }
+    let texture: ID3D11Texture2D = unsafe { ID3D11Texture2D::from_raw(tex_ptr) }
         .map_err(|e| format!("ID3D11Texture2D abi: {e:?}"))?;
     let slice = unsafe { dxgi.GetSubresourceIndex() }.unwrap_or(0);
     let keep_alive: Arc<dyn std::any::Any + Send + Sync> = Arc::new(SendSample(sample));
@@ -207,17 +206,17 @@ fn sample_to_dxgi_nv12(
 }
 
 fn propvariant_i8(value: i64) -> PROPVARIANT {
-    // windows_strip drops the PROPVARIANT extension helpers; build VT_I8 by hand.
+    // Initialize the metadata-generated PROPVARIANT layout for VT_I8.
     const VT_I8: VARENUM = VARENUM(20);
     PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
-            Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+            Anonymous: PROPVARIANT_0_0 {
                 vt: VT_I8,
                 wReserved1: 0,
                 wReserved2: 0,
                 wReserved3: 0,
                 Anonymous: PROPVARIANT_0_0_0 { hVal: value },
-            }),
+            },
         },
     }
 }
@@ -225,7 +224,7 @@ fn propvariant_i8(value: i64) -> PROPVARIANT {
 fn propvariant_hns(var: &PROPVARIANT) -> i64 {
     // MF_PD_DURATION is VT_UI8 (100-ns units). Also accept VT_I8.
     unsafe {
-        let inner = &*var.Anonymous.Anonymous;
+        let inner = &var.Anonymous.Anonymous;
         match inner.vt.0 {
             20 => inner.Anonymous.hVal,          // VT_I8
             21 => inner.Anonymous.uhVal as i64,  // VT_UI8
@@ -337,11 +336,11 @@ unsafe impl Send for SrAudioOut {}
 impl SrAudioOut {
     fn open_default(channels: u32, sample_rate: u32) -> Result<Self, String> {
         let enumerator: IMMDeviceEnumerator =
-            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }
+            unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL, &IMMDeviceEnumerator::IID).and_then(|raw| IMMDeviceEnumerator::from_raw(raw)) }
                 .map_err(|e| format!("MMDeviceEnumerator: {e:?}"))?;
         let device = unsafe { enumerator.GetDefaultAudioEndpoint(eRender, eConsole) }
             .map_err(|e| format!("GetDefaultAudioEndpoint: {e:?}"))?;
-        let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
+        let client: IAudioClient = unsafe { device.Activate(&IAudioClient::IID, CLSCTX_ALL, None).and_then(|raw| IAudioClient::from_raw(raw)) }
             .map_err(|e| format!("Activate IAudioClient: {e:?}"))?;
 
         let channels = channels.clamp(1, 2) as usize;
@@ -376,7 +375,7 @@ impl SrAudioOut {
                 )
                 .map_err(|e| format!("IAudioClient::Initialize: {e:?}"))?;
         }
-        let render: IAudioRenderClient = unsafe { client.GetService() }
+        let render: IAudioRenderClient = unsafe { client.GetService(&IAudioRenderClient::IID).and_then(|raw| IAudioRenderClient::from_raw(raw)) }
             .map_err(|e| format!("GetService IAudioRenderClient: {e:?}"))?;
         Ok(Self {
             client,
@@ -670,7 +669,7 @@ fn post(cmd: SrCmd) {
 }
 
 fn enable_d3d11_multithread(device: &ID3D11Device) {
-    if let Ok(mt) = device.cast::<ID3D11Multithread>() {
+    if let Ok(mt) = unsafe { ID3D11Multithread::query(device.as_raw()) } {
         let _ = unsafe { mt.SetMultithreadProtected(true) };
     }
 }
@@ -929,11 +928,10 @@ fn create_session(
         unsafe { MFCreateDXGIDeviceManager(&mut reset_token, &mut dxgi_manager) }
             .map_err(|e| format!("MFCreateDXGIDeviceManager: {e:?}"))?;
         let dxgi_manager = dxgi_manager.ok_or_else(|| "null DXGI manager".to_string())?;
-        unsafe { dxgi_manager.ResetDevice(&device, reset_token) }
+        unsafe { dxgi_manager.ResetDevice(device.as_IUnknown(), reset_token) }
             .map_err(|e| format!("ResetDevice: {e:?}"))?;
 
-        let unk: windows::core::IUnknown = dxgi_manager
-            .cast()
+        let unk = unsafe { windows::core::IUnknown::query(dxgi_manager.as_raw()) }
             .map_err(|e| format!("DXGI manager cast: {e}"))?;
 
         // Prefer hardware MFTs (DXGI surfaces). If NV12 negotiation fails, retry
