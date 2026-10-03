@@ -169,7 +169,14 @@ impl Layouts {
                 }
                 Layout { size: round_up(size, align), align, fields: Vec::new(), tag: Some((0, tag_mem)), variant_fields: vfs, leaves: None }
             }
-            TyKind::Str | TyKind::Slice(_) => Layout { size: 0, align: 1, fields: Vec::new(), tag: None, variant_fields: Vec::new(), leaves: None },
+            TyKind::Str => Layout { size: 0, align: 1, fields: Vec::new(), tag: None, variant_fields: Vec::new(), leaves: None },
+            TyKind::Slice(e) => {
+                let el = self.of(tcx, e);
+                Layout { size: 0, align: el.align, fields: Vec::new(), tag: None, variant_fields: Vec::new(), leaves: None }
+            }
+            // a trait object's alignment is only known from its vtable; struct tails of dyn type
+            // are placed at an 8-aligned offset (the vtable's align beyond 8 is not supported)
+            TyKind::Dyn(..) => Layout { size: 0, align: 8, fields: Vec::new(), tag: None, variant_fields: Vec::new(), leaves: None },
             _ => Layout { size: 0, align: 1, fields: Vec::new(), tag: None, variant_fields: Vec::new(), leaves: Some(Vec::new()) },
         }
     }
@@ -202,8 +209,62 @@ impl Layouts {
         Layout { size: round_up(off, align), align, fields, tag: None, variant_fields: Vec::new(), leaves }
     }
 
-    pub fn is_unsized(&mut self, tcx: &Tcx, t: TyId) -> bool {
-        matches!(tcx.tys.kind(t), TyKind::Str | TyKind::Slice(_) | TyKind::Dyn(..))
+    /// Dynamically sized: str, slices, trait objects, and structs/tuples whose last field is.
+    pub fn is_unsized(&mut self, tcx: &mut Tcx, t: TyId) -> bool {
+        // by type structure only (no layouts: pointee layouts may be recursive)
+        match tcx.tys.kind(t).clone() {
+            TyKind::Str | TyKind::Slice(_) | TyKind::Dyn(..) => true,
+            TyKind::Tuple(v) => match v.last() {
+                Some(l) => self.is_unsized(tcx, *l),
+                None => false,
+            },
+            TyKind::Adt(d, args) => {
+                let adt = match tcx.adts.get(&d) {
+                    Some(a) => a.clone(),
+                    None => return false,
+                };
+                if adt.is_enum || adt.is_union {
+                    return false;
+                }
+                match adt.variants[0].fields.last() {
+                    Some(f) => {
+                        let ft = tcx.tys.subst(f.ty, &args);
+                        self.is_unsized(tcx, ft)
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// The innermost dynamically sized tail of `t` and its offset from the start of `t`
+    /// (`(0, t)` for str/slice/dyn themselves); None for sized types.
+    pub fn unsized_tail(&mut self, tcx: &mut Tcx, t: TyId) -> Option<(u32, TyId)> {
+        if !self.is_unsized(tcx, t) {
+            return None;
+        }
+        match tcx.tys.kind(t).clone() {
+            TyKind::Str | TyKind::Slice(_) | TyKind::Dyn(..) => Some((0, t)),
+            TyKind::Tuple(v) => {
+                let last = *v.last()?;
+                let (o, tail) = self.unsized_tail(tcx, last)?;
+                let l = self.of(tcx, t);
+                Some((l.fields[v.len() - 1] + o, tail))
+            }
+            TyKind::Adt(d, args) => {
+                let adt = tcx.adts.get(&d)?.clone();
+                if adt.is_enum || adt.is_union {
+                    return None;
+                }
+                let f = adt.variants[0].fields.last()?;
+                let ft = tcx.tys.subst(f.ty, &args);
+                let (o, tail) = self.unsized_tail(tcx, ft)?;
+                let l = self.of(tcx, t);
+                Some((l.fields[adt.variants[0].fields.len() - 1] + o, tail))
+            }
+            _ => None,
+        }
     }
 }
 

@@ -308,7 +308,23 @@ impl<'a> Fcx<'a> {
         self.tcx.tys.intern(TyKind::Infer(n))
     }
 
-    fn shallow(&self, mut t: TyId) -> TyId {
+    fn shallow(&mut self, t: TyId) -> TyId {
+        let t = self.shallow_vars(t);
+        // a projection whose Self became known normalizes to the impl's type
+        if let TyKind::Assoc(..) = self.tcx.tys.kind(t) {
+            let save = self.keep_literal_vars;
+            self.keep_literal_vars = true;
+            let d = self.deep(t);
+            self.keep_literal_vars = save;
+            let n = self.tcx.normalize(self.prog, d);
+            if !matches!(self.tcx.tys.kind(n), TyKind::Assoc(..)) {
+                return self.shallow_vars(n);
+            }
+        }
+        t
+    }
+
+    fn shallow_vars(&self, mut t: TyId) -> TyId {
         loop {
             match self.tcx.tys.kind(t) {
                 TyKind::Infer(v) => match self.vars[*v as usize] {
@@ -321,7 +337,7 @@ impl<'a> Fcx<'a> {
     }
 
     fn deep(&mut self, t: TyId) -> TyId {
-        let t = self.shallow(t);
+        let t = self.shallow_vars(t);
         let k = self.tcx.tys.kind(t).clone();
         match k {
             TyKind::Infer(v) => match self.vars[v as usize] {
@@ -533,7 +549,7 @@ impl<'a> Fcx<'a> {
         if depth > 64 {
             return true;
         }
-        let t = self.shallow(t);
+        let t = self.shallow_vars(t);
         match self.tcx.tys.kind(t).clone() {
             TyKind::Infer(w) => w == v,
             TyKind::Tuple(xs) | TyKind::Adt(_, xs) | TyKind::FnDef(_, xs) | TyKind::Assoc(_, xs) => xs.iter().any(|x| self.occurs(v, *x, depth + 1)),
@@ -542,6 +558,21 @@ impl<'a> Fcx<'a> {
             TyKind::Dyn(_, xs, bs) => xs.iter().any(|x| self.occurs(v, *x, depth + 1)) || bs.iter().any(|x| self.occurs(v, x.1, depth + 1)),
             TyKind::Closure(_, _, s, u, _) => self.occurs(v, s, depth + 1) || self.occurs(v, u, depth + 1),
             _ => false,
+        }
+    }
+
+    /// `&&u8` -> `u8` when the referent is a primitive number/bool/char; other types unchanged.
+    fn peel_prim_refs(&mut self, t: TyId) -> TyId {
+        let mut cur = self.shallow(t);
+        let mut n = 0;
+        while let TyKind::Ref(_, inner) = self.tcx.tys.kind(cur).clone() {
+            cur = self.shallow(inner);
+            n += 1;
+        }
+        if n > 0 && (self.is_numeric(cur) || matches!(self.tcx.tys.kind(cur), TyKind::Bool | TyKind::Char)) {
+            cur
+        } else {
+            t
         }
     }
 
@@ -714,6 +745,13 @@ impl<'a> Fcx<'a> {
                     return true;
                 }
             }
+            // `&mut T -> *mut T`, `&T -> *const T`, `&mut T -> *const T` (same bits)
+            (TyKind::Ref(m1, ia), TyKind::Ptr(m2, ix)) if *m1 || !*m2 => {
+                let (ia, ix) = (*ia, *ix);
+                if self.unify(ia, ix) {
+                    return true;
+                }
+            }
             (TyKind::Ptr(true, ia), TyKind::Ptr(false, ix)) => {
                 let (ia, ix) = (*ia, *ix);
                 if self.unify(ia, ix) {
@@ -737,9 +775,22 @@ impl<'a> Fcx<'a> {
     // ------------------------------------------------------------ writeback
 
     fn finish(&mut self) {
+        let mut err_at = None;
         for i in 0..self.b.expr_ty.len() {
             let t = self.b.expr_ty[i];
-            self.b.expr_ty[i] = self.norm(t);
+            let n = self.norm(t);
+            self.b.expr_ty[i] = n;
+            if err_at.is_none() && n != self.tcx.tys.error && self.tcx.tys.has_error(n) {
+                err_at = Some(i);
+            }
+        }
+        // an expression whose type contains an unresolved type (e.g. a field of an unresolved
+        // type) cannot be lowered: report it unless an error already explains the function
+        if let (Some(i), true) = (err_at, self.b.errors.is_empty()) {
+            let e = ExprId(self.b.expr_lo + i as u32);
+            let lo = self.ast().expr(e).lo;
+            let ts = self.ty_str(self.b.expr_ty[i]);
+            self.err(lo, format!("type `{}` contains an unresolved type -- fix that type's error first", ts));
         }
         for i in 0..self.b.pat_ty.len() {
             let t = self.b.pat_ty[i];
@@ -1342,6 +1393,10 @@ impl<'a> Fcx<'a> {
                 let cands = self.tcx.trait_methods_for(prog, self_ty, name);
                 if let Some(&(item, imp)) = cands.first() {
                     let la = last_args.unwrap_or_default();
+                    // several impls of the trait for this type (`Rc::from` from &str, String,
+                    // Box..): leave the trait args open; the impl is chosen once they are known
+                    let ambiguous = cands.iter().filter(|c| c.0 == item).count() > 1;
+                    let imp = if ambiguous { crate::program::NO_DEF } else { imp };
                     let args = self.trait_call_args(item, imp, self_ty, &la);
                     let t = self.value_def_ty(item, Some(args), key, 1);
                     return (Res::Def(item), t);
@@ -1764,6 +1819,7 @@ impl<'a> Fcx<'a> {
                 }
                 let is_shift = matches!(op, BinOp::Shl | BinOp::Shr);
                 let tb = self.check_expr(*b, if is_shift { None } else { Some(ta) });
+                let tb = self.peel_prim_refs(tb);
                 if !is_shift {
                     self.coerce_or_unify(tb, ta, Some(*b), lo);
                 }
@@ -1772,8 +1828,13 @@ impl<'a> Fcx<'a> {
             ExprKind::Cast(x, t) => {
                 let target = self.lower_ty(*t);
                 let st = self.shallow(target);
-                let _ = st;
-                self.check_expr(*x, None);
+                let xt = self.check_expr(*x, None);
+                // `b as Box<dyn Tr>` / `&x as &dyn Tr`: an unsizing coercion
+                let sx = self.shallow(xt);
+                let (kx, kt) = (self.tcx.tys.kind(sx).clone(), self.tcx.tys.kind(st).clone());
+                if let Some((src, dy)) = self.dyn_coercion(&kx, &kt) {
+                    self.b.coerce.insert(x.0, Coerce::ToDyn(src, dy));
+                }
                 target
             }
             ExprKind::Block(b, label) => {
@@ -2041,12 +2102,20 @@ impl<'a> Fcx<'a> {
                             if let Some(adt) = adt {
                                 if !adt.is_enum {
                                     if let Some(f) = adt.variants[0].fields.get(*idx as usize) {
-                                        self.b.field_idx.insert(e.0, (derefs, *idx));
-                                        return self.tcx.tys.subst(f.ty, &args);
+                                        if self.field_visible(d, f.is_pub) {
+                                            self.b.field_idx.insert(e.0, (derefs, *idx));
+                                            return self.tcx.tys.subst(f.ty, &args);
+                                        }
                                     }
                                 }
                             }
-                            break;
+                            match self.deref_step(e.0, derefs, cur) {
+                                Some(i) => {
+                                    cur = i;
+                                    derefs += 1;
+                                }
+                                None => break,
+                            }
                         }
                         _ => match self.deref_step(e.0, derefs, cur) {
                             Some(i) => {
@@ -2476,11 +2545,16 @@ impl<'a> Fcx<'a> {
                 };
                 let ta = self.check_expr(a, exp);
                 let sa0 = self.shallow(ta);
+                // `&x op y` on primitives: built in, through the references (core's
+                // forward-ref operator impls, without dispatch)
+                let ta = self.peel_prim_refs(sa0);
+                let sa0 = self.shallow(ta);
                 if matches!(self.tcx.tys.kind(sa0), TyKind::Adt(..) | TyKind::Ref(..) | TyKind::Tuple(..) | TyKind::Array(..)) {
                     self.cur_binop = e.0;
                     return self.check_op_trait(op, sa0, b, lo, false);
                 }
                 let tb = self.check_expr(b, Some(ta));
+                let tb = self.peel_prim_refs(tb);
                 let sa = self.shallow(ta);
                 let sb = self.shallow(tb);
                 // primitive arithmetic: both sides the same type
@@ -2590,7 +2664,9 @@ impl<'a> Fcx<'a> {
                 if let Some(adt) = self.tcx.adts.get(&d).cloned() {
                     if !adt.is_enum {
                         for (i, f) in adt.variants[0].fields.iter().enumerate() {
-                            if f.name == s {
+                            // a private field of a type from elsewhere is not visible: autoderef
+                            // continues (`rc.0` on Rc<Shared> is Shared's field)
+                            if f.name == s && self.field_visible(d, f.is_pub) {
                                 self.b.field_idx.insert(e.0, (derefs, i as u32));
                                 return self.tcx.tys.subst(f.ty, &args);
                             }
@@ -2610,6 +2686,28 @@ impl<'a> Fcx<'a> {
         let ts = self.ty_str(t);
         self.err(lo, format!("no field `{}` on `{}`", self.text(name), ts));
         self.tcx.tys.error
+    }
+
+    /// Is a field of ADT `d` visible here: `pub`, or we are inside the ADT's module (or below it).
+    fn field_visible(&self, d: DefId, is_pub: bool) -> bool {
+        if is_pub {
+            return true;
+        }
+        let target = self.prog.def(d).scope;
+        let mut m = Some(self.module);
+        let mut guard = 0;
+        while let Some(cur) = m {
+            if cur == target || self.prog.mods[cur as usize].normal == target {
+                return true;
+            }
+            let md = &self.prog.mods[cur as usize];
+            m = md.lexical_parent.or(md.parent_mod);
+            guard += 1;
+            if guard > 256 {
+                break;
+            }
+        }
+        false
     }
 
     fn check_call(&mut self, e: ExprId, f: ExprId, args: &[ExprId], expected: Option<TyId>, lo: u32) -> TyId {
@@ -2637,6 +2735,14 @@ impl<'a> Fcx<'a> {
         let mut bounded: Option<(DefId, Vec<TyId>, Vec<TyId>)> = None;
         let (params, ret) = match self.tcx.tys.kind(fs).clone() {
             TyKind::FnDef(d, gargs) => match self.tcx.sigs.get(&d).cloned() {
+                Some(sig) if sig.params.iter().any(|p| self.tcx.tys.has_error(*p)) || self.tcx.tys.has_error(sig.ret) => {
+                    let n = self.prog.def_path(d);
+                    self.err(lo, format!("`{}` has unresolved types in its signature -- fix its signature errors first", n));
+                    for a in args {
+                        self.check_expr(*a, None);
+                    }
+                    return error;
+                }
                 Some(sig) => {
                     let mut ps = Vec::new();
                     for p in &sig.params {
@@ -2805,6 +2911,8 @@ impl<'a> Fcx<'a> {
                     cur = self.shallow(i);
                     derefs += 1;
                 }
+                // method lookup never autoderefs raw pointers (`p.add(1)` is the pointer's)
+                TyKind::Ptr(..) => break,
                 TyKind::Array(el, _) => {
                     // arrays get slice methods by unsizing
                     cur = self.tcx.tys.intern(TyKind::Slice(el));

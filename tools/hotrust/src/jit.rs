@@ -33,6 +33,9 @@ pub const GLUE_DROP: u8 = 0;
 /// `dyn Fn` entry for a callable without state (fn item, fn pointer, capture-free closure):
 /// `fn(env, args..) -> R` forwarding to it
 pub const GLUE_CALL_SHIM: u8 = 1;
+/// a tuple-struct / tuple-variant constructor used as a fn value: GLUE_CTOR + variant index,
+/// for the constructor's fn pointer type `fn(fields..) -> Adt`
+pub const GLUE_CTOR: u8 = 16;
 
 pub struct FnEntry {
     pub key: FnKey,

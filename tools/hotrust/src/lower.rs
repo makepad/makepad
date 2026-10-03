@@ -204,8 +204,15 @@ impl<'a> Lcx<'a> {
         }
     }
     /// str, slices and trait objects: places of them are fat pointers (Place::Regs)
-    fn unsized_ty(&self, t: TyId) -> bool {
-        matches!(self.u.tcx.tys.kind(t), TyKind::Str | TyKind::Slice(_) | TyKind::Dyn(..))
+    fn unsized_ty(&mut self, t: TyId) -> bool {
+        match self.u.tcx.tys.kind(t) {
+            TyKind::Str | TyKind::Slice(_) | TyKind::Dyn(..) => true,
+            TyKind::Adt(..) | TyKind::Tuple(_) => {
+                let u = &mut *self.u;
+                u.lay.is_unsized(&mut u.tcx, t)
+            }
+            _ => false,
+        }
     }
     fn is_wide(&self, t: TyId) -> bool {
         matches!(self.u.tcx.tys.kind(t), TyKind::Int(Prim::I128) | TyKind::Int(Prim::U128))
@@ -420,6 +427,19 @@ impl<'a> Lcx<'a> {
                 return (Place::Regs(Vec::new()), self.u.tcx.tys.error);
             }
         };
+        // a place of a dynamically sized struct is its fat pointer: fields are at data + offset,
+        // the unsized tail keeps the pointer metadata
+        if let Place::Regs(r) = p {
+            if !r.is_empty() && self.unsized_ty(t) {
+                let a = self.addr_add(r[0], off as i32);
+                if self.unsized_ty(fty) {
+                    let mut v = vec![a];
+                    v.extend_from_slice(&r[1..]);
+                    return (Place::Regs(v), fty);
+                }
+                return (Place::Mem(a, 0), fty);
+            }
+        }
         match p {
             Place::Mem(b, o) => (Place::Mem(*b, *o + off as i32), fty),
             Place::Regs(r) => {
@@ -1909,13 +1929,16 @@ impl<'a> Lcx<'a> {
                 let cur = self.to_leaves(cur, pt);
                 let bt = self.b.ty(*b);
                 let rv = self.lower_expr(*b);
-                let rv = self.to_leaves(rv, bt);
+                let (rv, bt) = self.prim_leaves(rv, bt);
                 let r = self.arith(*op, pt, cur[0], rv[0], bt);
                 self.write_place(&pl, pt, Val::L(vec![r]));
                 self.unit()
             }
             ExprKind::Cast(x, _) => {
                 let xt = self.b.ty(*x);
+                if let Some(Coerce::ToDyn(..)) = self.b.coerce.get(&x.0) {
+                    return self.lower_expr_coerced(*x, t);
+                }
                 let v = self.lower_expr(*x);
                 self.cast(v, xt, t)
             }
@@ -2349,8 +2372,15 @@ impl<'a> Lcx<'a> {
                 }
             },
             DefKind::Variant | DefKind::Struct => {
-                // unit variant / unit struct value
                 let vi = if k == DefKind::Variant { self.u.prog.def(d).sub } else { 0 };
+                if let TyKind::FnPtr(..) = self.kind(t) {
+                    // a tuple constructor used as a fn value: its constructor function
+                    let id = self.u.fn_id(FnKey::Glue(crate::jit::GLUE_CTOR + vi as u8, t));
+                    let r = self.f.vreg(Cls::I);
+                    self.emit(Inst::FnAddr(r, id));
+                    return Val::L(vec![r]);
+                }
+                // unit variant / unit struct value
                 self.build_enum(t, vi, Vec::new())
             }
             // fn items are zero-sized values; calls resolve them directly
@@ -2731,6 +2761,20 @@ impl<'a> Lcx<'a> {
                 let at = self.b.ty(a);
                 let av = self.lower_expr(a);
                 let bv = self.lower_expr(b);
+                // `&a < &b` on primitives compares the values
+                let (av, bv, at) = match self.kind(at) {
+                    TyKind::Ref(_, inner) if matches!(self.kind(inner), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Ref(..)) => {
+                        let bt = self.b.ty(b);
+                        let (x, xt) = self.prim_leaves(av, at);
+                        let (y, _) = self.prim_leaves(bv, bt);
+                        if matches!(self.kind(xt), TyKind::Ref(..)) {
+                            (Val::L(x), Val::L(y), at)
+                        } else {
+                            (Val::L(x), Val::L(y), xt)
+                        }
+                    }
+                    _ => (av, bv, at),
+                };
                 let cond = match op {
                     BinOp::Eq => Cond::Eq,
                     BinOp::Ne => Cond::Ne,
@@ -2776,13 +2820,29 @@ impl<'a> Lcx<'a> {
                 let at = self.b.ty(a);
                 let bt = self.b.ty(b);
                 let av = self.lower_expr(a);
-                let av = self.to_leaves(av, at);
+                let (av, _) = self.prim_leaves(av, at);
                 let bv = self.lower_expr(b);
-                let bv = self.to_leaves(bv, bt);
+                let (bv, bt) = self.prim_leaves(bv, bt);
                 let r = self.arith(op, t, av[0], bv[0], bt);
                 Val::L(vec![r])
             }
         }
+    }
+
+    /// Leaves of a primitive operand, loading through references to primitives
+    /// (`&x + y`, `*a ^ &b`): returns the leaves and the primitive type.
+    fn prim_leaves(&mut self, v: Val, t: TyId) -> (Vec<VReg>, TyId) {
+        let mut r = self.to_leaves(v, t);
+        let mut t = t;
+        while let TyKind::Ref(_, inner) = self.kind(t) {
+            if !matches!(self.kind(inner), TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Ref(..)) {
+                break;
+            }
+            let v = self.load_val(r[0], 0, inner);
+            r = self.to_leaves(v, inner);
+            t = inner;
+        }
+        (r, t)
     }
 
     /// Arithmetic on primitive operands of type `t` (rhs type `bt` matters for shifts).
@@ -3400,8 +3460,8 @@ impl<'a> Lcx<'a> {
                         }
                         None => {
                             let n = self.u.prog.name(d).to_string();
-                            self.err(self.pos, format!("unknown foreign function `{}`", n));
-                            return self.unit();
+                            self.err(self.pos, format!("unknown foreign function `{}` -- link its library (#[link])", n));
+                            return self.dummy_val(t);
                         }
                     }
                 } else if sig.c_abi {
@@ -3757,6 +3817,26 @@ impl<'a> Lcx<'a> {
                     }
                 }
                 self.unit()
+            }
+            "transmute" => {
+                // reinterpret the bits: through memory, so any two same-size types work
+                let (v, st) = vals[0].clone();
+                let dt = match gargs.get(1) {
+                    Some(d) => *d,
+                    None => t,
+                };
+                let (ls, ld) = (self.layout(st), self.layout(dt));
+                if ls.size != ld.size {
+                    let (a, b) = (crate::typeck::ty_to_string(&self.u.prog, &self.u.tcx, st), crate::typeck::ty_to_string(&self.u.prog, &self.u.tcx, dt));
+                    self.err(self.pos, format!("transmute between types of different sizes (`{}` {} bytes, `{}` {} bytes)", a, ls.size, b, ld.size));
+                    return Some(self.dummy_val(dt));
+                }
+                let slot = {
+                    let big = if ls.align >= ld.align { st } else { dt };
+                    self.new_slot_for(big)
+                };
+                self.store_val(slot, 0, st, v);
+                self.load_val(slot, 0, dt)
             }
             "size_of_val" | "align_of_val" => {
                 // of the value behind a (possibly fat) pointer
@@ -4541,6 +4621,9 @@ pub fn glue_func(u: &mut Unit, kind: u8, t: TyId) -> Func {
     if kind == crate::jit::GLUE_CALL_SHIM {
         return call_shim(u, t);
     }
+    if kind >= crate::jit::GLUE_CTOR {
+        return ctor_fn(u, (kind - crate::jit::GLUE_CTOR) as u32, t);
+    }
     let name = fn_name(u, &FnKey::Glue(kind, t));
     let mut f = Func::new(name, 0);
     let entry = f.block();
@@ -4631,6 +4714,75 @@ fn call_shim(u: &mut Unit, t: TyId) -> Func {
         }
     };
     push(&mut f, b, Inst::Call(callee, fwd, rets.clone()));
+    f.blocks[b as usize].term = Term::Ret(rets);
+    f
+}
+
+/// `fn(fields..) -> Adt` building variant `vi` (tuple structs: 0) of the fn type's return ADT.
+fn ctor_fn(u: &mut Unit, vi: u32, t: TyId) -> Func {
+    let name = fn_name(u, &FnKey::Glue(crate::jit::GLUE_CTOR + vi as u8, t));
+    let mut f = Func::new(name, 0);
+    let b = f.block();
+    let (ps, ret) = match u.tcx.tys.kind(t).clone() {
+        TyKind::FnPtr(ps, r) => (ps, r),
+        _ => (Vec::new(), u.tcx.tys.unit),
+    };
+    let rl = u.lay.of(&mut u.tcx, ret);
+    let fits = matches!(&rl.leaves, Some(l) if ret_fits(l));
+    let sret = if fits {
+        None
+    } else {
+        let p = f.vreg(Cls::I);
+        f.params.push(p);
+        Some(p)
+    };
+    let slot = f.slot(rl.size, rl.align);
+    let base = f.vreg(Cls::I);
+    push(&mut f, b, Inst::SlotAddr(base, slot));
+    let offs: Vec<u32> = if rl.tag.is_some() { rl.variant_fields.get(vi as usize).cloned().unwrap_or_default() } else { rl.fields.clone() };
+    if let (Some((toff, tmem)), TyKind::Adt(d, _)) = (rl.tag, u.tcx.tys.kind(ret).clone()) {
+        let disc = u.tcx.adts.get(&d).map_or(0, |a| a.variants.get(vi as usize).map_or(0, |v| v.disc as i64));
+        let k = f.vreg(Cls::I);
+        push(&mut f, b, Inst::Iconst(k, disc));
+        push(&mut f, b, Inst::Store(tmem, base, toff as i32, k));
+    }
+    for (i, p) in ps.iter().enumerate() {
+        let pl = u.lay.of(&mut u.tcx, *p);
+        let off = offs.get(i).copied().unwrap_or(0) as i32;
+        match &pl.leaves {
+            Some(leaves) => {
+                for lf in leaves {
+                    let r = f.vreg(lf.cls);
+                    f.params.push(r);
+                    push(&mut f, b, Inst::Store(lf.mem, base, off + lf.off as i32, r));
+                }
+            }
+            None => {
+                let r = f.vreg(Cls::I);
+                f.params.push(r);
+                let dst = addr_off(&mut f, b, base, off as u32);
+                if pl.size > 0 {
+                    push(&mut f, b, Inst::Copy(dst, r, pl.size));
+                }
+            }
+        }
+    }
+    let mut rets = Vec::new();
+    match sret {
+        Some(p) => {
+            if rl.size > 0 {
+                push(&mut f, b, Inst::Copy(p, base, rl.size));
+            }
+        }
+        None => {
+            for lf in rl.leaves.clone().unwrap_or_default() {
+                f.rets.push(lf.cls);
+                let r = f.vreg(lf.cls);
+                push(&mut f, b, Inst::Load(lf.mem, r, base, lf.off as i32));
+                rets.push(r);
+            }
+        }
+    }
     f.blocks[b as usize].term = Term::Ret(rets);
     f
 }

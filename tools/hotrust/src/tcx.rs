@@ -95,6 +95,9 @@ pub struct Tcx {
     /// per fn: generic params bounded by Fn/FnMut/FnOnce, with the bound's signature as a
     /// FnPtr over the fn's generics (guides closure inference, checks callee signatures)
     pub fn_bounds: HashMap<DefId, Vec<(u32, TyId)>>,
+    /// per impl: trait bounds on its generic params (param index, trait), resolved in `collect`
+    impl_bound_cache: HashMap<DefId, Vec<(u32, DefId)>>,
+    bound_depth: u32,
     pub errors: Vec<String>,
 }
 
@@ -131,6 +134,8 @@ impl Tcx {
             impl_trait_args: HashMap::new(),
             alias_tys: HashMap::new(),
             fn_bounds: HashMap::new(),
+            impl_bound_cache: HashMap::new(),
+            bound_depth: 0,
             errors: Vec::new(),
         }
     }
@@ -173,6 +178,10 @@ impl Tcx {
                 }
             }
             self.impl_generics.insert(im.def, env);
+        }
+        for ii in 0..prog.impls.len() {
+            let d = prog.impls[ii].def;
+            self.resolve_impl_bounds(d, prog);
         }
         for di in 0..prog.defs.len() {
             let d = DefId(di as u32);
@@ -1074,6 +1083,11 @@ impl Tcx {
             if !ok {
                 continue;
             }
+            // the impl's own bounds must hold (`impl<I: Iterator> Iterator for &mut I` is not an
+            // Iterator impl for `&mut [u64]`)
+            if !self.impl_bounds_hold(imp, &binds) {
+                continue;
+            }
             let mut args = Vec::new();
             for b in binds {
                 args.push(b.unwrap_or(self.tys.error));
@@ -1081,6 +1095,51 @@ impl Tcx {
             return Some((imp, args));
         }
         None
+    }
+
+    /// Trait bounds of an impl's generic params: (param index, trait).
+    fn resolve_impl_bounds(&mut self, imp: DefId, prog: &Program) {
+        let mut out = Vec::new();
+        if let Some(env) = self.impl_generics.get(&imp).cloned() {
+            let module = self.item_module(prog, imp);
+            for (pi, file, path) in &env.bounds {
+                if let Some(td) = self.resolve_type_path_def(prog, *file, module, path) {
+                    if prog.def(td).kind != DefKind::Trait {
+                        continue;
+                    }
+                    // auto/marker traits and closures' traits are not impl-based here
+                    if matches!(prog.name(td), "Sized" | "Send" | "Sync" | "Unpin" | "Fn" | "FnMut" | "FnOnce" | "Copy" | "UnwindSafe" | "RefUnwindSafe") {
+                        continue;
+                    }
+                    out.push((*pi, td));
+                }
+            }
+        }
+        self.impl_bound_cache.insert(imp, out);
+    }
+
+    fn impl_bounds_hold(&mut self, imp: DefId, binds: &[Option<TyId>]) -> bool {
+        let bounds = self.impl_bound_cache.get(&imp).cloned().unwrap_or_default();
+        if bounds.is_empty() || self.bound_depth > 6 {
+            return true;
+        }
+        self.bound_depth += 1;
+        let mut ok = true;
+        for (pi, td) in bounds {
+            let t = match binds.get(pi as usize).copied().flatten() {
+                Some(t) => t,
+                None => continue,
+            };
+            if !self.tys.is_concrete(t) {
+                continue;
+            }
+            if self.find_impl(td, t, &[]).is_none() {
+                ok = false;
+                break;
+            }
+        }
+        self.bound_depth -= 1;
+        ok
     }
 
     /// Replaces resolvable associated type projections by the impl's types.
