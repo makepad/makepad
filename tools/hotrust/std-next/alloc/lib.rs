@@ -25,6 +25,11 @@ pub mod collections {
     pub use core::collections::VecDeque;
 }
 
+/// alloc::ffi (CString lives in core/ffi/c_string.rs; std-os lane)
+pub mod ffi {
+    pub use core::ffi::{CString, IntoStringError, NulError};
+}
+
 pub mod fmt {
     pub use core::fmt::format;
     pub use core::fmt::{
