@@ -132,6 +132,8 @@ pub struct Unit {
     pub patch_gen: u32,
     /// bytes of the per-thread block handed out by `tls_alloc`
     pub tls_next: u32,
+    /// panicking stand-ins for foreign fns this host lacks, by symbol
+    missing_stubs: HashMap<String, u64>,
 }
 
 #[derive(Default)]
@@ -928,6 +930,7 @@ impl Unit {
             patch_log: Vec::new(),
             patch_gen: 0,
             tls_next: 0,
+            missing_stubs: HashMap::new(),
         });
         let lazy = x64::lazy_entry(rt_compile as *const () as usize as u64);
         u.lazy_entry = u.emit_code(&lazy);
@@ -1377,11 +1380,32 @@ impl Unit {
                 }
             }
         }
-        if p.is_null() {
-            None
-        } else {
-            Some(p as u64)
+        if !p.is_null() {
+            return Some(p as u64);
         }
+        if self.prog.def(d).kind == DefKind::ForeignFn {
+            // a fn this host lacks (another platform's API behind a cfg the graph keeps):
+            // calls compile, and panic with a one-line report only when one runs
+            return Some(self.missing_foreign_stub(d));
+        }
+        None
+    }
+
+    /// Code that panics with "foreign function `x` is not available on this host" (one per
+    /// symbol): loads its site into the first argument and tail-jumps to the panic
+    /// trampoline, so the report names the JIT caller.
+    fn missing_foreign_stub(&mut self, d: DefId) -> u64 {
+        let name = self.link_name(d);
+        if let Some(&a) = self.missing_stubs.get(&name) {
+            return a;
+        }
+        let def = self.prog.def(d);
+        let (file, pos) = (def.file, self.prog.files[def.file as usize].ast.item(def.item).lo);
+        let site = self.site(file, pos, &format!("foreign function `{}` is not available on this host -- cfg the call out or link its library", name));
+        let code = x64::jump_with_arg0(site, self.rt.panic_site);
+        let a = self.emit_code(&code);
+        self.missing_stubs.insert(name, a);
+        a
     }
 
     /// Address of a constant's value (evaluated by running its initializer once).

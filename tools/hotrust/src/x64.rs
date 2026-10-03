@@ -339,6 +339,11 @@ impl Asm {
         self.byte(0xff);
         self.modrm_mem(4, base, disp);
     }
+    fn jmp_r(&mut self, r: u8) {
+        self.rex(false, 0, 0, r, false);
+        self.byte(0xff);
+        self.modrm_rr(4, r);
+    }
     fn ret(&mut self) {
         self.byte(0xc3);
     }
@@ -2142,6 +2147,15 @@ pub fn compile(f: &Func, env: &Env) -> Result<Compiled, String> {
     let frame = g.frame as u32;
     let text_len = g.text_len;
     Ok(Compiled { code: g.a.b, pc_map: g.pc_map, frame_size: frame, text_len })
+}
+
+/// `rdi = arg; jmp target` (tail jump: [rsp] stays the JIT caller's return address).
+pub fn jump_with_arg0(arg: u64, target: u64) -> Vec<u8> {
+    let mut a = Asm { b: Vec::new(), sib: None };
+    a.mov_ri(RDI, arg as i64);
+    a.mov_ri(R11, target as i64);
+    a.jmp_r(R11);
+    a.b
 }
 
 /// Slow path of `TlsAddr`: calls `host() -> block` and returns it in r11, preserving

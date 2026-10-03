@@ -2034,6 +2034,15 @@ pub fn panic_tramp(target: u64) -> Vec<u8> {
     words_to_bytes(&a.w)
 }
 
+/// `x0 = arg; br target` (tail jump keeping lr: the caller's frame stays the JIT one).
+pub fn jump_with_arg0(arg: u64, target: u64) -> Vec<u8> {
+    let mut a = Asm { w: Vec::new() };
+    a.mov_imm64_fixed(0, arg);
+    a.mov_imm64_fixed(IP0, target);
+    a.br(IP0);
+    words_to_bytes(&a.w)
+}
+
 /// Slow path of `TlsAddr`: calls `host() -> block` and returns the block in x16,
 /// preserving every other register JIT code may hold (x0-x15, d0-d7, d16-d29).
 pub fn tls_slow(host: u64) -> Vec<u8> {
