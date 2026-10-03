@@ -37,6 +37,11 @@ pub mod wifi_linux;
 pub mod system_linux;
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 mod system_slider;
+/// The saved display arrangement (order, main screen, modes, render-on
+/// GPU): pure parser/serializer/resolver model, no file I/O. Linux only,
+/// same gate as `system_linux` (it uses `LinuxDisplaySnapshot`).
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+pub mod display_layout;
 
 /// Register every shell widget. Called from `AppMain::script_mod` AFTER
 /// the theme has been evaluated (the DSL below reads `mod.wm_theme`).

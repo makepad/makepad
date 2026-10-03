@@ -780,7 +780,7 @@ impl WmDesk {
         }
         // Only windows in the layout join Recents: a tile client launched by
         // the home page stays out until the person opens it.
-        for c in state.layout.clients_on(state.layout.active) {
+        for c in state.layout().clients_on(state.layout().active) {
             if !state.phone.order.contains(&c) {state.phone.order.push(c);}
         }
         self.style=state.style.clone();

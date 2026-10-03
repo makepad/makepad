@@ -9,6 +9,11 @@
 //!
 //! Standalone (not hosted) the requests fall back: a preview/open spawns
 //! the associated app as its own window, title/cwd are no-ops.
+//! [`screens`]/[`set_fullscreen_span`] fall back too -- on Linux, not
+//! OHOS (direct or windowed; only the direct backend actually ever
+//! reports screens, so a span only ever resolves there) a span is
+//! resolved against [`screens`] and recorded in-process, no WM involved;
+//! see [`span_rect_for_window`] for the rect an app lays its content into.
 //!
 //! ```ignore
 //! // files, on Space:
@@ -19,6 +24,12 @@ use makepad_widgets_core::makepad_micro_serde::*;
 use makepad_widgets_core::makepad_platform::studio::AppToStudio;
 use makepad_widgets_core::*;
 use std::path::{Path, PathBuf};
+
+mod span;
+pub use span::{
+    primary_or_first_index, resolve_standalone_current_span, resolve_standalone_span,
+    screens_in_window, span_rect, ScreenSpan, SpanError, WmScreen,
+};
 
 /// What an app can ask the window manager.
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
@@ -44,6 +55,11 @@ pub enum WmRequest {
     /// Ask the WM to float / tile / fullscreen this window.
     SetFloating { floating: bool },
     SetFullscreen { fullscreen: bool },
+    /// Ask the WM to make this window fullscreen across `span`'s screens
+    /// (`None` = leave fullscreen). `SetFullscreen { fullscreen }` is the
+    /// same as `Current` / `None`. The WM answers with a fresh
+    /// [`WmEvent::Screens`] whose `span` says what it actually did.
+    SetFullscreenSpan { span: Option<ScreenSpan> },
 }
 
 /// What the window manager tells an app.
@@ -74,6 +90,20 @@ pub enum WmEvent {
     /// its Space/Esc close the panel (`PreviewClose`).
     PreviewShown { path: String },
     PreviewHidden,
+    /// The live screens, left to right, in THIS window's coordinates (a
+    /// screen's rect minus the window's own origin), and the names of the
+    /// screens this window currently spans fullscreen (`None` when it
+    /// spans none). The rects are desk-clipped, like the window's own
+    /// framebuffer (e.g. narrower while the AI pane reserves part of the
+    /// desk), not the physical screens. Sent when the window is first
+    /// shown or adopted, and again whenever the screens or the window's
+    /// position change, in no guaranteed order relative to a concurrent
+    /// `WindowGeomChange`/swapchain resize -- lay out from whichever
+    /// arrives last. Read it back with [`screens`].
+    Screens {
+        screens: Vec<WmScreen>,
+        span: Option<Vec<String>>,
+    },
 }
 
 // The wire envelope: `{"wm": ...}`. (The derives don't bound generics,
@@ -109,14 +139,179 @@ impl WmEvent {
         EventEnvelope { wm: self.clone() }.serialize_json()
     }
 
+    /// Parse a Custom message; `None` when it is not a WM event. A
+    /// [`WmEvent::Screens`] is also remembered for [`screens`], so an app
+    /// that parses its Custom messages (as every hosted app must to see
+    /// WM events at all) keeps that answer current without extra calls.
     pub fn parse(json: &str) -> Option<WmEvent> {
         if !json.contains("\"wm\"") {
             return None;
         }
-        EventEnvelope::deserialize_json(json)
-            .ok()
-            .map(|e| e.wm)
+        let ev = EventEnvelope::deserialize_json(json).ok().map(|e| e.wm)?;
+        if let WmEvent::Screens { screens, span } = &ev {
+            *LAST_SCREENS.lock().unwrap_or_else(|p| p.into_inner()) = Some(LastScreens {
+                screens: screens.clone(),
+                span: span.clone(),
+            });
+        }
+        Some(ev)
     }
+}
+
+/// The last [`WmEvent::Screens`] this process parsed (hosted only).
+#[derive(Clone, Debug, Default)]
+struct LastScreens {
+    screens: Vec<WmScreen>,
+    span: Option<Vec<String>>,
+}
+
+static LAST_SCREENS: std::sync::Mutex<Option<LastScreens>> = std::sync::Mutex::new(None);
+
+/// The live screens, left to right, in this window's coordinates.
+///
+/// Hosted: the last [`WmEvent::Screens`] the WM sent (empty until one
+/// arrives, and always empty under a host that never sends one, such as
+/// Studio's run view). Standalone: the platform's own screen list
+/// (`makepad_platform::screens()`), named by connector on Linux and
+/// `"screen0"`, `"screen1"`, ... elsewhere; on the Linux direct backend
+/// these are already in the (desktop-sized) window's coordinates.
+pub fn screens(cx: &Cx) -> Vec<WmScreen> {
+    if hosted(cx) {
+        return LAST_SCREENS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .map(|l| l.screens.clone())
+            .unwrap_or_default();
+    }
+    standalone_screens(
+        &makepad_widgets_core::makepad_platform::screens(),
+        &makepad_widgets_core::makepad_platform::linux_screen_names(),
+    )
+}
+
+/// The names of the screens this window currently spans fullscreen, left
+/// to right, or `None` when it spans none. Hosted: the last
+/// [`WmEvent::Screens`]'s `span`. Standalone: the span last recorded by
+/// [`set_fullscreen_span`] (Linux, not OHOS, only), re-resolved against
+/// the live screens (dropped, like the WM drops it, if a name no longer
+/// resolves -- e.g. after a hotplug); `None` on every other standalone
+/// backend, matching that function's fallback there.
+pub fn current_span(cx: &Cx) -> Option<Vec<String>> {
+    if hosted(cx) {
+        return LAST_SCREENS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .and_then(|l| l.span.clone());
+    }
+    standalone_current_span()
+}
+
+/// The union rect of the screens this window currently spans, in this
+/// window's coordinates (the same space [`screens`] reports) -- what the
+/// app should lay its content into. `None` when it spans no screens, or
+/// [`current_span`]'s names no longer resolve against [`screens`].
+pub fn span_rect_for_window(cx: &Cx) -> Option<(f64, f64, f64, f64)> {
+    let names = current_span(cx)?;
+    let screens = screens(cx);
+    span_rect(&screens, &ScreenSpan::Screens(names), None)
+        .ok()
+        .map(|(_, rect)| rect)
+}
+
+/// Platform screens as [`WmScreen`]s: `geoms[i]` named `names[i]`, or
+/// `"screen<i>"` where no connector name is known (non-Linux platforms
+/// have none).
+pub fn standalone_screens(
+    geoms: &[makepad_widgets_core::makepad_platform::ScreenGeom],
+    names: &[String],
+) -> Vec<WmScreen> {
+    geoms
+        .iter()
+        .enumerate()
+        .map(|(i, g)| WmScreen {
+            name: names
+                .get(i)
+                .filter(|n| !n.is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("screen{i}")),
+            x: g.bounds.pos.x,
+            y: g.bounds.pos.y,
+            w: g.bounds.size.x,
+            h: g.bounds.size.y,
+            primary: g.is_primary,
+        })
+        .collect()
+}
+
+/// Ask the WM to make this window fullscreen across `span` (`None` =
+/// leave fullscreen). Hosted, this is asynchronous: a `true` return means
+/// only that the request was sent, not that it was honoured -- the
+/// outcome arrives later as a [`WmEvent::Screens`] and is read back with
+/// [`current_span`]; under Studio's run view (hosted, but no WM to
+/// answer) it still returns `true` though no [`WmEvent::Screens`] ever
+/// follows.
+///
+/// Standalone on Linux, not OHOS (direct or windowed; there is no WM to
+/// answer, and on the direct backend its one window already covers the
+/// whole wide desktop): resolves `span` against the live screens and
+/// records it directly, same-process -- [`span_rect_for_window`] then
+/// gives the union rect to lay content into; no composition change.
+/// Returns false (and the recorded span is kept) when `span` does not
+/// resolve (unknown name, not adjacent, or -- `Current` with no
+/// primary/first screen -- no live screens; windowed Linux never has any,
+/// so it always lands here).
+///
+/// Standalone on every other backend (macOS, Windows, wasm,
+/// android/ohos): not yet implemented; returns false (nothing recorded,
+/// nothing asked) regardless of `span`.
+pub fn set_fullscreen_span(cx: &Cx, span: Option<ScreenSpan>) -> bool {
+    if hosted(cx) {
+        return send(cx, &WmRequest::SetFullscreenSpan { span });
+    }
+    standalone_set_fullscreen_span(span)
+}
+
+/// The span recorded by [`set_fullscreen_span`] for a standalone Linux
+/// direct app: there is no WM to hold it, so this process does.
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+static STANDALONE_SPAN: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn standalone_set_fullscreen_span(span: Option<ScreenSpan>) -> bool {
+    let screens = standalone_screens(
+        &makepad_widgets_core::makepad_platform::screens(),
+        &makepad_widgets_core::makepad_platform::linux_screen_names(),
+    );
+    let current = primary_or_first_index(&screens);
+    let mut slot = STANDALONE_SPAN.lock().unwrap_or_else(|p| p.into_inner());
+    let (recorded, ok) = resolve_standalone_span(&screens, current, &slot, span);
+    if !ok {
+        log!("wm_api: standalone span could not be honoured against the live screens; the current one is kept");
+    }
+    *slot = recorded;
+    ok
+}
+
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+fn standalone_current_span() -> Option<Vec<String>> {
+    let recorded = STANDALONE_SPAN.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let screens = standalone_screens(
+        &makepad_widgets_core::makepad_platform::screens(),
+        &makepad_widgets_core::makepad_platform::linux_screen_names(),
+    );
+    resolve_standalone_current_span(&screens, &recorded)
+}
+
+#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+fn standalone_set_fullscreen_span(_span: Option<ScreenSpan>) -> bool {
+    false
+}
+
+#[cfg(not(all(target_os = "linux", not(target_env = "ohos"))))]
+fn standalone_current_span() -> Option<Vec<String>> {
+    None
 }
 
 /// True when this process is hosted as an wm tile (or a Studio run view).
@@ -307,6 +502,62 @@ mod tests {
         };
         assert_eq!(WmEvent::parse(&ev.to_json()), Some(ev));
         assert_eq!(WmEvent::parse(&WmEvent::CloseRequested.to_json()), Some(WmEvent::CloseRequested));
+    }
+
+    fn screen(name: &str, x: f64, w: f64, primary: bool) -> WmScreen {
+        WmScreen { name: name.into(), x, y: 0.0, w, h: 1080.0, primary }
+    }
+
+    #[test]
+    fn span_request_round_trip() {
+        for span in [
+            None,
+            Some(ScreenSpan::Current),
+            Some(ScreenSpan::All),
+            Some(ScreenSpan::Screens(vec!["DP-1".into(), "HDMI-A-1".into()])),
+        ] {
+            let req = WmRequest::SetFullscreenSpan { span };
+            let json = req.to_json();
+            assert!(json.starts_with("{\"wm\":"), "{json}");
+            assert_eq!(WmRequest::parse(&json), Some(req));
+        }
+        let old = WmRequest::SetFullscreen { fullscreen: true };
+        assert_eq!(WmRequest::parse(&old.to_json()), Some(old));
+    }
+
+    #[test]
+    fn screens_event_round_trip() {
+        let ev = WmEvent::Screens {
+            screens: vec![screen("DP-1", -12.5, 1920.0, true), screen("HDMI-A-1", 1907.5, 2560.0, false)],
+            span: Some(vec!["DP-1".into()]),
+        };
+        assert_eq!(WmEvent::parse(&ev.to_json()), Some(ev));
+        let none = WmEvent::Screens { screens: Vec::new(), span: None };
+        assert_eq!(WmEvent::parse(&none.to_json()), Some(none));
+        // A Screens event is not a request, nor the raw tiled-fullscreen note.
+        assert_eq!(WmRequest::parse(&WmEvent::Screens { screens: Vec::new(), span: None }.to_json()), None);
+        assert!(WmEvent::parse(r#"{"wm_fullscreen":true}"#).is_none());
+    }
+
+    #[test]
+    fn standalone_screens_names_or_synthesizes() {
+        let geom = |x: f64, w: f64, primary: bool| ScreenGeom {
+            bounds: Rect { pos: dvec2(x, 0.0), size: dvec2(w, 1080.0) },
+            work_area: Rect { pos: dvec2(x, 0.0), size: dvec2(w, 1040.0) },
+            is_primary: primary,
+        };
+        let geoms = [geom(0.0, 1920.0, true), geom(1920.0, 2560.0, false)];
+        // Linux: connector names, index-aligned.
+        let named = standalone_screens(&geoms, &["DP-1".into(), "HDMI-A-1".into()]);
+        assert_eq!(named, vec![screen("DP-1", 0.0, 1920.0, true), screen("HDMI-A-1", 1920.0, 2560.0, false)]);
+        // Elsewhere: no names, so screen0.. by position in the list.
+        let synth = standalone_screens(&geoms, &[]);
+        assert_eq!(synth, vec![screen("screen0", 0.0, 1920.0, true), screen("screen1", 1920.0, 2560.0, false)]);
+        // A short or blank name list is filled in, never misaligned.
+        let partial = standalone_screens(&geoms, &["".into()]);
+        assert_eq!(partial[0].name, "screen0");
+        assert_eq!(partial[1].name, "screen1");
+        assert!(standalone_screens(&[], &["DP-1".into()]).is_empty());
     }
 
     #[test]

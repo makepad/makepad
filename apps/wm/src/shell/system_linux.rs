@@ -57,20 +57,31 @@
 //!   file renamed over the target. The scale itself is applied by the UI
 //!   through the platform's `dpi_override`; a failed save is reported as an
 //!   outcome and changes nothing on screen.
-//! * Display source ("Optimize for"): the connector name whose native
-//!   pixels define the shared framebuffer, in `display-source` next to
-//!   `display-scale`, same read/write rules ([`SystemCommand::SaveDisplaySource`],
-//!   `display_source`). The name is data for the renderer's own selection
-//!   API, never a command; it is validated as a bounded connector name.
-//! * GPU choice ("Compositor"): which GPU the compositor should start on
-//!   next time, in `display-gpu` beside the two above as the PCI identity
-//!   `<pci-address> <vendor>:<device>` (`cardN` numbering is not stable
-//!   across boots). This is the display GPU, not each application's.
-//!   Nothing changes at runtime: the session script resolves the identity
-//!   to that boot's card and sets `MAKEPAD_DRM_DEVICE` for the WM process
-//!   with `MAKEPAD_WM_GPU_FROM_SAVED=1`; an external `MAKEPAD_DRM_DEVICE`
-//!   (marker unset) is recorded as `gpu_env`. The panel shows the current
-//!   GPU and the next-start one. The worker also lists the GPUs from
+//! * Display layout: the screens' left-to-right order, the main screen,
+//!   per-screen modes and the render-on GPU, in `display-layout` next to
+//!   `display-scale` ([`super::display_layout`] has the format; screens
+//!   are keyed by card PCI address and connector, which survive card
+//!   renumbering). The worker reads it once at start-up into
+//!   `display_layout` and rewrites the whole file on
+//!   [`SystemCommand::SaveDisplayLayout`], same atomic write. When it is
+//!   missing, the older `display-source` (one card-prefixed connector
+//!   name) and `display-gpu` (`<pci-address> <vendor>:<device>`) are read
+//!   once and migrated in memory; the next save writes `display-layout`,
+//!   and the old files are never written again. The WM restores order,
+//!   modes and the main screen at runtime as a safety net; the session
+//!   script turns the file into `MAKEPAD_DISPLAY_ORDER`,
+//!   `MAKEPAD_DRM_MODES` and `MAKEPAD_VULKAN_COMPOSITOR_PCI` (with
+//!   `MAKEPAD_WM_GPU_FROM_SAVED=1`, and, per var,
+//!   `MAKEPAD_WM_ORDER_FROM_SAVED=1` / `MAKEPAD_WM_MODES_FROM_SAVED=1`) so
+//!   the first frame is already right, since the renderer reads those
+//!   before the WM starts. A `MAKEPAD_VULKAN_COMPOSITOR_PCI`/`_UUID` set
+//!   from outside (marker unset) is recorded as `gpu_env`; likewise an
+//!   externally pinned, non-empty `MAKEPAD_DISPLAY_ORDER` /
+//!   `MAKEPAD_DRM_MODES` (its own marker unset) is `order_env` /
+//!   `modes_env`, which the runtime restore (`linux_controls.rs`) must
+//!   not override, the same rule the session script itself applies: an
+//!   external env var wins over the file at both session start and
+//!   runtime, never only the first. The worker also lists the GPUs from
 //!   `/sys/class/drm` (PCI ids, driver, connected connectors) so the panel
 //!   can offer only usable ones.
 //! * Pointer speed: mouse and touchpad multipliers as integer hundredths
@@ -87,6 +98,7 @@
 #![cfg(all(target_os = "linux", not(target_env = "ohos")))]
 
 use {
+    super::display_layout::DisplayLayout,
     makepad_strict_json::{parse as parse_json, Value},
     makepad_widgets::{
         makepad_platform::{
@@ -182,6 +194,10 @@ const DISPLAY_SOURCE_FILE: &str = "display-source";
 /// `HDMI-A-1`, `eDP-1` are a few bytes; this is a sanity bound).
 pub const DISPLAY_SOURCE_MAX_LEN: usize = 128;
 const DISPLAY_GPU_FILE: &str = "display-gpu";
+/// The saved arrangement; supersedes `display-source` and `display-gpu`.
+const DISPLAY_LAYOUT_FILE: &str = "display-layout";
+/// Longest `display-layout` read: a few dozen short lines in practice.
+const DISPLAY_LAYOUT_MAX_LEN: u64 = 64 << 10;
 /// Longest persisted GPU identity line (`0000:01:00.0 10de:2b85`).
 pub const GPU_CHOICE_MAX_LEN: usize = 128;
 const MOUSE_SPEED_FILE: &str = "mouse-speed";
@@ -493,16 +509,11 @@ pub enum SystemCommand {
     /// slider is released. The scale is already applied on screen by then;
     /// this only decides what the next start uses.
     SaveDpiScale(u32),
-    /// Persist the "Optimize for" output: the connector name (as the
-    /// renderer lists it) whose native pixels define the shared
-    /// framebuffer. Only what the next start asks the renderer for.
-    SaveDisplaySource(String),
-    /// Persist which GPU the compositor should start on next time:
-    /// `Some(identity)` from [`GpuInfo::identity`], `None` for Auto (the
-    /// renderer's own preference, which removes the file). Nothing changes
-    /// until the WM restarts; the session script resolves the identity to
-    /// that boot's DRM card. This is the display GPU, not each app's.
-    SaveGpuChoice(Option<String>),
+    /// Persist the whole display layout (order, main screen, modes,
+    /// render-on GPU) to `display-layout`. What is on screen is already
+    /// applied by then; this decides what the next start (and the session
+    /// script) uses.
+    SaveDisplayLayout(DisplayLayout),
     /// Persist a pointer speed (integer hundredths, 25..=300). The speed is
     /// already applied in-process by then; this only decides the next start.
     SavePointerSpeed { touchpad: bool, value: u32 },
@@ -519,8 +530,7 @@ pub enum CommandKind {
     SelectInput,
     Refresh,
     DpiScale,
-    DisplaySource,
-    GpuChoice,
+    DisplayLayout,
     PointerSpeed,
 }
 
@@ -582,24 +592,42 @@ pub struct SystemSnapshot {
     /// start-up, then what the last successful save wrote. `None` when there
     /// is no valid saved value — the launch default stands then.
     pub dpi_scale: Option<u32>,
-    /// The persisted "Optimize for" connector name: what the file held at
-    /// start-up, then what the last successful save wrote. `None` when
-    /// there is no valid saved name — the renderer's own default stands.
-    pub display_source: Option<String>,
+    /// The persisted display layout: what `display-layout` held at
+    /// start-up (or what the legacy `display-source`/`display-gpu` files
+    /// migrate to when it is missing), then what the last successful save
+    /// wrote. Empty when nothing is saved — the renderer's defaults stand.
+    /// `render_on` is the next-start GPU (`None` is Auto).
+    pub display_layout: DisplayLayout,
     /// The start-up read of the display settings files has happened
     /// (whatever they held), so the UI may apply them once.
     pub display_settings_loaded: bool,
     /// The GPUs sysfs lists (`/sys/class/drm/cardN`) with their connected
     /// connectors; the renderer's outputs (`cardN-…`) map onto `card`.
     pub gpus: Vec<GpuInfo>,
-    /// The persisted next-start GPU: `Some(identity)`, or `None` for Auto.
-    pub gpu_choice: Option<String>,
-    /// External `MAKEPAD_DRM_DEVICE` this process was started with. Set
-    /// only when the wrapper did not apply a saved choice
+    /// External `MAKEPAD_VULKAN_COMPOSITOR_PCI` (or, without it,
+    /// `MAKEPAD_VULKAN_COMPOSITOR_UUID`) this process was started with.
+    /// Set only when the session script did not apply a saved choice
     /// (`MAKEPAD_WM_GPU_FROM_SAVED` is not `1`): a true override. `None`
-    /// for Auto, a wrapper-applied saved choice, or no device in the
+    /// for Auto, a script-applied saved choice, or no GPU in the
     /// environment.
     pub gpu_env: Option<String>,
+    /// External, non-empty `MAKEPAD_DISPLAY_ORDER` this process was
+    /// started with, unless the session script set it from the saved
+    /// layout (`MAKEPAD_WM_ORDER_FROM_SAVED` is not `1`). `None` for
+    /// unset/empty or a script-applied saved order. The runtime restore
+    /// (`display_layout::env_restore_plan`) must not reorder the desktop
+    /// while this is `Some`: the external value already won at session
+    /// start and keeps winning.
+    pub order_env: Option<String>,
+    /// External, non-empty `MAKEPAD_DRM_MODES` (the raw
+    /// `name=mode,name=mode` text) this process was started with, unless
+    /// the session script set it from the saved layout
+    /// (`MAKEPAD_WM_MODES_FROM_SAVED` is not `1`). `None` for unset/empty
+    /// or a script-applied saved value. The runtime restore must not set
+    /// a mode the restore would otherwise ask for on any screen this
+    /// names (same review note as `order_env`); a screen it does not
+    /// name is unaffected.
+    pub modes_env: Option<String>,
     /// Saved pointer speeds in hundredths: index 0 mouse, index 1 touchpad.
     /// `None` when that file was missing or out of range — the process
     /// default stands then.
@@ -616,11 +644,12 @@ impl Default for SystemSnapshot {
             applied_seq: 0,
             sampled_at: 0.0,
             dpi_scale: None,
-            display_source: None,
+            display_layout: DisplayLayout::default(),
             display_settings_loaded: false,
             gpus: Vec::new(),
-            gpu_choice: None,
             gpu_env: None,
+            order_env: None,
+            modes_env: None,
             pointer_speeds: [None, None],
             input_settings_loaded: false,
             audio: AudioState::unavailable("not sampled yet".into(), false),
@@ -1513,8 +1542,8 @@ fn read_display_scale() -> Option<u32> {
     parse_display_scale(&read_trim(&path)?)
 }
 
-/// The saved "Optimize for" connector name, or `None` for a missing,
-/// unreadable or invalid file.
+/// The legacy `display-source` connector name, or `None` for a missing,
+/// unreadable or invalid file. Read only to migrate to `display-layout`.
 fn read_display_source() -> Option<String> {
     let path = display_settings_path(DISPLAY_SOURCE_FILE).ok()?;
     let text = read_trim(&path)?;
@@ -1563,12 +1592,83 @@ pub fn validate_gpu_choice(line: &str) -> Result<&str, String> {
     }
 }
 
-/// The saved next-start GPU identity, or `None` (Auto) for a missing,
-/// unreadable or invalid file.
+/// The legacy `display-gpu` identity, or `None` (Auto) for a missing,
+/// unreadable or invalid file. Read only to migrate to `display-layout`.
 fn read_gpu_choice() -> Option<String> {
     let path = display_settings_path(DISPLAY_GPU_FILE).ok()?;
     let text = read_trim(&path)?;
     validate_gpu_choice(&text).ok().map(str::to_string)
+}
+
+/// The saved display layout. `display-layout` whenever it exists (a
+/// malformed line in it is skipped, never fatal; an unreadable one reads
+/// as empty, since the file's presence decides); otherwise the legacy
+/// `display-source` and `display-gpu` migrated in memory, with `gpus`
+/// (this boot's sysfs cards) mapping the source's `cardN` to its PCI
+/// address. Nothing is written here: the next save writes
+/// `display-layout`.
+fn read_display_layout(gpus: &[GpuInfo]) -> DisplayLayout {
+    let text = display_settings_path(DISPLAY_LAYOUT_FILE).ok().filter(|path| path.exists()).map(|path| {
+        let mut text = String::new();
+        let read = File::open(path).and_then(|file| file.take(DISPLAY_LAYOUT_MAX_LEN).read_to_string(&mut text));
+        if read.is_err() {
+            text.clear();
+        }
+        text
+    });
+    if let Some(text) = text {
+        return DisplayLayout::parse(&text);
+    }
+    let card_pci = |card: &str| {
+        gpus.iter().find(|gpu| gpu.card == card && !gpu.pci.is_empty()).map(|gpu| gpu.pci.clone())
+    };
+    DisplayLayout::migrate(read_display_source().as_deref(), read_gpu_choice().as_deref(), &card_pci)
+}
+
+/// The compositor GPU the process environment names from outside:
+/// `MAKEPAD_VULKAN_COMPOSITOR_PCI`, else `MAKEPAD_VULKAN_COMPOSITOR_UUID`
+/// (the variables the renderer reads), unless the session script set it
+/// from the saved choice (`MAKEPAD_WM_GPU_FROM_SAVED=1`).
+fn gpu_env() -> Option<String> {
+    if std::env::var("MAKEPAD_WM_GPU_FROM_SAVED").ok().as_deref() == Some("1") {
+        return None;
+    }
+    ["MAKEPAD_VULKAN_COMPOSITOR_PCI", "MAKEPAD_VULKAN_COMPOSITOR_UUID"]
+        .into_iter()
+        .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
+}
+
+/// Pure decision behind `order_env`/`modes_env`, and the shape `gpu_env`
+/// above already follows without naming it: `value` only pins this boot
+/// against the saved layout when it is non-empty and `from_saved` is
+/// `false` (the session script's own marker for *this* variable was not
+/// `1`). A marker per variable, not one shared marker, because
+/// `MAKEPAD_DISPLAY_ORDER` and `MAKEPAD_DRM_MODES` are independent
+/// session-script exports that can disagree about which one the helper
+/// derived from the file and which one it left as an outside pin (e.g.
+/// Arch USB's `wm.env` pinning the order but not the modes) — a single
+/// combined marker could not tell the two apart.
+fn env_pin(value: Option<String>, from_saved: bool) -> Option<String> {
+    if from_saved {
+        return None;
+    }
+    value.filter(|value| !value.is_empty())
+}
+
+/// External, non-empty `MAKEPAD_DISPLAY_ORDER` this process was started
+/// with, unless `tools/linux/display-layout-env.sh` set it from the saved
+/// layout (`MAKEPAD_WM_ORDER_FROM_SAVED=1`).
+fn order_env() -> Option<String> {
+    let from_saved = std::env::var("MAKEPAD_WM_ORDER_FROM_SAVED").ok().as_deref() == Some("1");
+    env_pin(std::env::var("MAKEPAD_DISPLAY_ORDER").ok(), from_saved)
+}
+
+/// External, non-empty `MAKEPAD_DRM_MODES` this process was started with,
+/// unless `tools/linux/display-layout-env.sh` set it from the saved
+/// layout (`MAKEPAD_WM_MODES_FROM_SAVED=1`).
+fn modes_env() -> Option<String> {
+    let from_saved = std::env::var("MAKEPAD_WM_MODES_FROM_SAVED").ok().as_deref() == Some("1");
+    env_pin(std::env::var("MAKEPAD_DRM_MODES").ok(), from_saved)
 }
 
 fn pointer_speed_file(touchpad: bool) -> &'static str {
@@ -1588,16 +1688,6 @@ fn parse_pointer_speed(text: &str) -> Option<u32> {
 fn read_pointer_speed(touchpad: bool) -> Option<u32> {
     let path = display_settings_path(pointer_speed_file(touchpad)).ok()?;
     parse_pointer_speed(&read_trim(&path)?)
-}
-
-/// Remove one settings file; one that is already gone is fine.
-fn remove_display_setting(file: &str) -> Result<(), String> {
-    let path = display_settings_path(file)?;
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("remove {}: {error}", path.display())),
-    }
 }
 
 /// Write one settings file atomically: a temporary file unique to this
@@ -1710,15 +1800,12 @@ impl Worker {
         // the sound server is asked anything: the desktop applies them as
         // soon as this first snapshot lands, not after `pactl` answers.
         self.snapshot.dpi_scale = read_display_scale();
-        self.snapshot.display_source = read_display_source();
-        self.snapshot.gpu_choice = read_gpu_choice();
-        // Wrapper-applied saved choice sets MAKEPAD_WM_GPU_FROM_SAVED=1 and
-        // is not an override; only a true external MAKEPAD_DRM_DEVICE is.
-        self.snapshot.gpu_env = if std::env::var("MAKEPAD_WM_GPU_FROM_SAVED").ok().as_deref() == Some("1") {
-            None
-        } else {
-            std::env::var("MAKEPAD_DRM_DEVICE").ok().filter(|v| !v.is_empty())
-        };
+        // The sysfs cards only to migrate a legacy `display-source`'s
+        // `cardN`; the regular sample lists them again below.
+        self.snapshot.display_layout = read_display_layout(&read_gpus());
+        self.snapshot.gpu_env = gpu_env();
+        self.snapshot.order_env = order_env();
+        self.snapshot.modes_env = modes_env();
         self.snapshot.pointer_speeds = [read_pointer_speed(false), read_pointer_speed(true)];
         self.snapshot.display_settings_loaded = true;
         self.snapshot.input_settings_loaded = true;
@@ -2026,42 +2113,12 @@ impl Worker {
                 (CommandKind::Refresh, CommandResult::Applied, false)
             }
             SystemCommand::SaveDpiScale(value) => (CommandKind::DpiScale, self.save_display_scale(value), false),
-            SystemCommand::SaveDisplaySource(name) => {
-                (CommandKind::DisplaySource, self.save_display_source(&name), false)
-            }
-            SystemCommand::SaveGpuChoice(choice) => {
-                (CommandKind::GpuChoice, self.save_gpu_choice(choice.as_deref()), false)
+            SystemCommand::SaveDisplayLayout(layout) => {
+                (CommandKind::DisplayLayout, self.save_display_layout(layout), false)
             }
             SystemCommand::SavePointerSpeed { touchpad, value } => {
                 (CommandKind::PointerSpeed, self.save_pointer_speed(touchpad, value), false)
             }
-        }
-    }
-
-    /// Persist the next-start GPU; `None` (Auto) removes the file. The
-    /// snapshot records the choice only once the file reflects it.
-    fn save_gpu_choice(&mut self, choice: Option<&str>) -> CommandResult {
-        match choice {
-            Some(identity) => {
-                let identity = match validate_gpu_choice(identity) {
-                    Ok(identity) => identity,
-                    Err(message) => return CommandResult::Failed(message),
-                };
-                match write_display_setting(DISPLAY_GPU_FILE, identity) {
-                    Ok(_) => {
-                        self.snapshot.gpu_choice = Some(identity.to_string());
-                        CommandResult::Applied
-                    }
-                    Err(message) => CommandResult::Failed(format!("GPU choice not saved: {message}")),
-                }
-            }
-            None => match remove_display_setting(DISPLAY_GPU_FILE) {
-                Ok(()) => {
-                    self.snapshot.gpu_choice = None;
-                    CommandResult::Applied
-                }
-                Err(message) => CommandResult::Failed(format!("GPU choice not cleared: {message}")),
-            },
         }
     }
 
@@ -2102,18 +2159,17 @@ impl Worker {
         }
     }
 
-    /// Persist the "Optimize for" connector name, same rules as the scale.
-    fn save_display_source(&mut self, name: &str) -> CommandResult {
-        let name = match validate_display_source(name) {
-            Ok(name) => name,
-            Err(message) => return CommandResult::Failed(message),
-        };
-        match write_display_setting(DISPLAY_SOURCE_FILE, name) {
+    /// Persist the whole display layout. The snapshot records it only
+    /// once it is on disk; a failed write reports why and leaves the
+    /// recorded layout alone.
+    fn save_display_layout(&mut self, layout: DisplayLayout) -> CommandResult {
+        let text = layout.serialize();
+        match write_display_setting(DISPLAY_LAYOUT_FILE, text.trim_end()) {
             Ok(_) => {
-                self.snapshot.display_source = Some(name.to_string());
+                self.snapshot.display_layout = layout;
                 CommandResult::Applied
             }
-            Err(message) => CommandResult::Failed(format!("display source not saved: {message}")),
+            Err(message) => CommandResult::Failed(format!("display layout not saved: {message}")),
         }
     }
 
@@ -2433,4 +2489,42 @@ fn is_device_event(line: &str) -> bool {
     };
     let facility = rest.trim_start().split([' ', '#']).next().unwrap_or("");
     matches!(facility, "sink" | "source" | "server" | "card")
+}
+
+#[cfg(test)]
+mod env_pin_tests {
+    use super::env_pin;
+
+    // `order_env`/`modes_env` only wrap `env_pin` around `std::env::var`,
+    // which is process-global state the test harness's parallel threads
+    // would race over; the pure decision is what is worth a unit test
+    // (mirrors `gpu_env`, never itself tested for the same reason).
+
+    #[test]
+    fn present_and_not_from_saved_pins() {
+        assert_eq!(env_pin(Some("x".to_string()), false), Some("x".to_string()));
+    }
+
+    #[test]
+    fn present_and_from_saved_does_not_pin() {
+        // The helper set it from the file: the value already equals the
+        // file, so the runtime restore is free to act (and would be a
+        // no-op by equality anyway).
+        assert_eq!(env_pin(Some("x".to_string()), true), None);
+    }
+
+    #[test]
+    fn absent_never_pins_regardless_of_the_marker() {
+        assert_eq!(env_pin(None, false), None);
+        assert_eq!(env_pin(None, true), None);
+    }
+
+    #[test]
+    fn empty_never_pins_regardless_of_the_marker() {
+        // `_mdl_set_env` never exports an empty value, but an external
+        // caller could still set `FOO=`; an empty var is not a pin either
+        // way, same as `gpu_env`'s own `filter(|value| !value.is_empty())`.
+        assert_eq!(env_pin(Some(String::new()), false), None);
+        assert_eq!(env_pin(Some(String::new()), true), None);
+    }
 }

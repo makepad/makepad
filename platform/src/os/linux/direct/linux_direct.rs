@@ -49,6 +49,11 @@ pub struct DirectApp {
     cursor: crate::cursor::MouseCursor,
     #[cfg(use_vulkan)]
     first_frame_submitted: bool,
+    /// The (layout generation, DPI factor bits) last published to
+    /// `screens()`; `direct_publish_screens` skips its work when neither
+    /// moved.
+    #[cfg(all(not(gpusim), use_vulkan, target_os = "linux", not(target_env = "ohos")))]
+    published_screens: Option<(u64, u64)>,
     // Dropped after the display/input resources on normal event-loop exit.
     _terminal: Option<DirectTerminal>,
 }
@@ -102,6 +107,8 @@ impl DirectApp {
             cursor: Default::default(),
             #[cfg(use_vulkan)]
             first_frame_submitted: false,
+            #[cfg(all(not(gpusim), use_vulkan, target_os = "linux", not(target_env = "ohos")))]
+            published_screens: None,
             width,
             height,
             #[cfg(not(use_vulkan))]
@@ -398,6 +405,8 @@ impl Cx {
         let reconciled = vulkan.direct_reconcile_outputs();
         let presented = vulkan.direct_present_retained();
         self.os.vulkan = Some(vulkan);
+        #[cfg(all(not(gpusim), use_vulkan, target_os = "linux", not(target_env = "ohos")))]
+        self.direct_publish_screens(direct_app);
         match reconciled {
             Ok(Some(extent)) => self.direct_apply_desktop_extent(direct_app, extent.width, extent.height),
             Ok(None) => {}
@@ -408,7 +417,77 @@ impl Cx {
         }
     }
 
-    /// The render source changed its native size: the logical desktop is that
+    /// Publish the wide desktop's screens for `screens()`, in the main
+    /// window's coordinates. Cheap: it reads the renderer's bookkeeping, and
+    /// skips rebuilding and republishing the list when neither the layout
+    /// generation nor the DPI factor moved since the last publish.
+    ///
+    /// Gated like `crate::screen::set_linux_screens` itself: Android and
+    /// OHOS builds that happen to set `linux_direct,vulkan` (`linux_direct`
+    /// and `use_vulkan` are plain `MAKEPAD=` config flags, not implied by the
+    /// target) have `Cx::linux_display_snapshot` but not that function.
+    #[cfg(all(not(gpusim), use_vulkan, target_os = "linux", not(target_env = "ohos")))]
+    fn direct_publish_screens(&self, direct_app: &mut DirectApp) {
+        let window_id = CxWindowPool::id_zero();
+        let dpi_factor = if self.windows.is_valid(window_id) && self.windows[window_id].is_created {
+            self.windows[window_id].effective_dpi_factor()
+        } else {
+            direct_app.dpi_factor
+        };
+        let generation = self
+            .os
+            .vulkan
+            .as_ref()
+            .map_or(0, |vulkan| vulkan.direct_layout_generation());
+        let key = (generation, dpi_factor.to_bits());
+        if direct_app.published_screens == Some(key) {
+            return;
+        }
+        let snapshot = self.linux_display_snapshot();
+        // Named alongside the geometry so the two end up in the same
+        // left-to-right order after the sort below: index i of one is
+        // index i of the other, for `screens()` and `linux_screen_names()`.
+        let mut named_screens: Vec<(String, crate::screen::ScreenGeom)> = snapshot
+            .outputs
+            .iter()
+            .filter_map(|output| {
+                let (x, y) = output.desktop_position?;
+                let bounds = Rect {
+                    pos: dvec2(x as f64 / dpi_factor, y as f64 / dpi_factor),
+                    size: dvec2(output.width as f64 / dpi_factor, output.height as f64 / dpi_factor),
+                };
+                Some((
+                    output.name.clone(),
+                    crate::screen::ScreenGeom { bounds, work_area: bounds, is_primary: output.primary },
+                ))
+            })
+            .collect();
+        // Desktop order: left to right by position.
+        named_screens.sort_by(|a, b| a.1.bounds.pos.x.partial_cmp(&b.1.bounds.pos.x).unwrap_or(std::cmp::Ordering::Equal));
+        let (names, screens): (Vec<String>, Vec<crate::screen::ScreenGeom>) = named_screens.into_iter().unzip();
+        // Raw input's pointer lives in its own space (native pixels over the base DPI
+        // factor), which is not necessarily `dpi_factor` above (the window's effective
+        // factor, with any DPI override) — so its rectangles are built separately, from
+        // the same snapshot outputs.
+        let screen_rects: Vec<[f64; 4]> = snapshot
+            .outputs
+            .iter()
+            .filter_map(|output| {
+                let (x, y) = output.desktop_position?;
+                Some([
+                    x as f64 / direct_app.dpi_factor,
+                    y as f64 / direct_app.dpi_factor,
+                    output.width as f64 / direct_app.dpi_factor,
+                    output.height as f64 / direct_app.dpi_factor,
+                ])
+            })
+            .collect();
+        direct_app.raw_input.set_screen_rects(screen_rects);
+        crate::screen::set_linux_screens(screens, names);
+        direct_app.published_screens = Some(key);
+    }
+
+    /// The wide desktop changed size: the logical desktop is that
     /// size divided by the effective DPI. The main window gets the ordinary
     /// geometry event (children relayout from it), raw input keeps its native
     /// base DPI so the existing override remap stays correct.
@@ -668,6 +747,15 @@ impl Cx {
                 CxOsOp::RepositionWindow(window_id, size) => {
                     let window = &mut self.windows[window_id];
                     window.window_geom.position = size;
+                }
+                CxOsOp::FullscreenWindow(_window_id) => {
+                    // The window already covers the whole wide desktop
+                    // (`CreateWindow` above); there is no further
+                    // composition change to make here. An app asking for a
+                    // screen span uses `makepad_wm_api::set_fullscreen_span`
+                    // instead, which records the span and hands back the
+                    // union rect to lay content into -- this op is a no-op
+                    // on direct, same as the other backends' stdin runtimes.
                 }
                 CxOsOp::CheckPermission {
                     permission,

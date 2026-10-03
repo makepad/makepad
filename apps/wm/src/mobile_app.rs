@@ -224,7 +224,7 @@ impl App {
         let area = self.desk_area(cx);
         let state = self.state_mut();
         let gap = state.gap;
-        state.layout.insert(client, area, gap);
+        state.layout_mut().insert(client, area, gap);
         log!("wm: home tile client {} opened as a window", client);
         self.update_bar(cx);
     }
@@ -413,8 +413,8 @@ impl App {
         let window=self.ui.window(cx,ids!(main_window));
         if style.mobile() && !previous.mobile() {
             let size=window.get_inner_size(cx);
-            let focused=self.state_mut().layout.focused_client();
-            let desktop_clients=self.state_mut().layout.all_clients();
+            let focused=self.state_mut().layout().focused_client();
+            let desktop_clients=self.state_mut().layout().all_clients();
             let phone=&mut self.state_mut().phone;
             phone.desktop_size=Some(size);phone.desktop_style=previous;
             phone.desktop_clients=desktop_clients;
@@ -430,9 +430,9 @@ impl App {
             // Give them normal desktop windows; retain pre-phone user geometry.
             let state=self.state_mut();
             let retained=std::mem::take(&mut state.phone.desktop_clients);
-            state.layout.desktop.windows.retain(|w|retained.contains(&w.client));
+            state.layout_mut().desktop.windows.retain(|w|retained.contains(&w.client));
             let area=LRect::new(0.0,36.0,size.x,(size.y-90.0).max(1.0));
-            for client in state.layout.all_clients() {state.layout.desktop.ensure(client,area);}
+            for client in state.layout().all_clients() {state.layout_mut().desktop.ensure(client,area);}
         }else if style.mobile() && previous!=style {
             let current=window.get_inner_size(cx);
             let size=phone_size(style);
@@ -447,6 +447,8 @@ impl App {
         self.ui.widget(cx,ids!(desktop_controls)).set_visible(cx,!style.mobile());
         self.ui.widget(cx,ids!(phone_controls)).set_visible(cx,strip);
         self.ui.widget(cx,ids!(bar)).set_visible(cx,!style.mobile() || strip);
+        // The strip's spacer follows the bar (see `sync_bar_placement`).
+        self.sync_bar_placement(cx);
         self.ui.widget(cx,ids!(shell_ai_pane)).set_visible(cx,!style.mobile());
         self.phone_time=0.0;
         if style.mobile() {self.ensure_home_order();}

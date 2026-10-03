@@ -65,6 +65,86 @@ pub struct WorkspaceCell {
     pub focused: bool,
 }
 
+/// One screen's share of the bar strip on a multi-screen desktop: the
+/// screen's x range (desk coordinates, which the strip shares), what it
+/// shows, and whether it is the active screen's (only that one wears the
+/// focused workspace at full strength).
+#[derive(Clone, Debug)]
+pub struct BarSegment {
+    pub x0: f64,
+    pub x1: f64,
+    pub data: BarData,
+    pub active: bool,
+    /// A span's window covers this screen: its segment is not drawn and
+    /// takes no input (the window's own top edge shows through).
+    pub hidden: bool,
+}
+
+/// Where the bar sits, from whether it is cut into per-screen segments,
+/// whether it is shown at all, and its height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BarPlacement {
+    /// The strip above the desk: a spacer of the bar's height pushes the
+    /// desk down (one screen, a mobile style, nested, the gallery).
+    /// `None`: the desk starts at the window's top edge.
+    pub strip: Option<f64>,
+    /// What every screen not covered by a span reserves at its top for
+    /// the bar floating over it (`ScreenSet::bar_top`).
+    pub reserved_top: f64,
+    /// The bar's own background, under its segments: only in the strip,
+    /// so a hidden segment shows the scene below it.
+    pub background: bool,
+}
+
+/// One segment (or none) keeps the bar a strip above the desk, as it
+/// always was; per-screen segments float it over the top of the scene,
+/// where each screen reserves its height and a span can cover it. A
+/// hidden bar takes nothing either way.
+pub fn bar_placement(segmented: bool, visible: bool, height: f64) -> BarPlacement {
+    match (visible, segmented) {
+        (false, _) => BarPlacement { strip: None, reserved_top: 0.0, background: !segmented },
+        (true, false) => BarPlacement { strip: Some(height), reserved_top: 0.0, background: true },
+        (true, true) => BarPlacement { strip: None, reserved_top: height, background: false },
+    }
+}
+
+/// The segments drawn across the strip `r`, as (segment index, rect):
+/// every one of `segment_rects`, minus the hidden ones. No segment, or
+/// one, is the whole strip and never hidden (one screen's fullscreen
+/// hides the whole bar instead).
+pub fn drawn_segments(r: Rect, segments: &[BarSegment]) -> Vec<(usize, Rect)> {
+    let spans: Vec<(f64, f64)> = segments.iter().map(|s| (s.x0, s.x1)).collect();
+    let rects = segment_rects(r, &spans);
+    let one = rects.len() <= 1;
+    rects
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| one || !segments[*i].hidden)
+        .collect()
+}
+
+/// One layout's workspace cluster: the active workspace (shown as a dot,
+/// even when empty) and every populated one, by number (workspace 10 reads
+/// "0"); empty ones are hidden. The second Vec is the workspace each cell
+/// stands for, what a click on it maps to.
+pub fn workspace_cells(layout: &crate::layout::WmLayout) -> (Vec<WorkspaceCell>, Vec<usize>) {
+    let mut cells = Vec::new();
+    let mut shown = Vec::new();
+    for i in 0..crate::layout::WORKSPACES {
+        let populated = !layout.clients_on(i).is_empty();
+        if i != layout.active && !populated {
+            continue;
+        }
+        shown.push(i);
+        cells.push(WorkspaceCell {
+            label: format!("{}", (i + 1) % 10),
+            occupied: populated,
+            focused: i == layout.active,
+        });
+    }
+    (cells, shown)
+}
+
 /// A bar indicator (`plugins/bar/indicators/`): one glyph with an active
 /// and an inactive reading. Inactive ones are hidden until the pointer is
 /// over the indicator block, then shown at α .45.
@@ -461,10 +541,65 @@ const TOOLTIP_DELAY: f64 = 0.4;
 const WINDOW_CONTROL_WIDTH: f64 = 36.0;
 const WINDOW_CONTROL_GAP: f64 = 6.0;
 
-/// The module whose recorded hit rect holds `p` — what the WM's drag query
-/// asks (`shell_bar_claims`): a claimed point is a button, not a drag.
-pub fn module_at_in(hits: &[(BarModule, Rect)], p: Vec2d) -> Option<BarModule> {
-    hits.iter().find(|(_, r)| contains(*r, p)).map(|(m, _)| *m)
+/// The segment and module whose recorded hit rect holds `p` — what the
+/// WM's drag query asks (`shell_bar_claims`): a claimed point is a button,
+/// not a drag.
+pub fn hit_at_in(hits: &[(usize, BarModule, Rect)], p: Vec2d) -> Option<(usize, BarModule)> {
+    hits.iter().find(|(_, _, r)| contains(*r, p)).map(|(s, m, _)| (*s, *m))
+}
+
+/// A bar module with a flyout was pressed in segment `seg` while
+/// `same_open` (its own flyout is already up) in segment `open_seg`: true
+/// when the press should move that flyout to `seg` rather than toggle it
+/// closed (the same module on another screen's segment).
+pub fn flyout_press_moves(same_open: bool, open_seg: usize, seg: usize) -> bool {
+    same_open && seg != open_seg
+}
+
+/// Each segment's rect across the strip `r`, from the screens' x ranges
+/// (`spans`, left to right): the first starts at the strip's left edge
+/// (the AI pane may clip the leftmost screen, never the bar), each ends
+/// where the next begins, and the last ends at the strip's right edge.
+/// No segment, or one, is the whole strip — today's bar.
+pub fn segment_rects(r: Rect, spans: &[(f64, f64)]) -> Vec<Rect> {
+    if spans.len() <= 1 {
+        return vec![r];
+    }
+    let left = r.pos.x;
+    let right = r.pos.x + r.size.x;
+    let mut starts: Vec<f64> = Vec::with_capacity(spans.len());
+    for (i, (x0, _)) in spans.iter().enumerate() {
+        let prev = starts.last().copied().unwrap_or(left);
+        starts.push(if i == 0 { left } else { x0.clamp(prev, right) });
+    }
+    (0..spans.len())
+        .map(|i| {
+            let x1 = starts.get(i + 1).copied().unwrap_or(right);
+            rect(starts[i], r.pos.y, x1 - starts[i], r.size.y)
+        })
+        .collect()
+}
+
+/// The left cluster of segment `seg` drawn into `r`: the menu button then
+/// one pill per workspace, as hit rects, and the x the style switch starts
+/// at. Pure, so the bar's layout is tested without a window.
+pub fn left_cluster(
+    seg: usize,
+    r: Rect,
+    pad_left: f64,
+    canvas: f64,
+    workspaces: usize,
+) -> (Vec<(usize, BarModule, Rect)>, f64) {
+    let mut hits = Vec::with_capacity(workspaces + 1);
+    let mut x = r.pos.x + pad_left.max(EDGE_MARGIN);
+    let menu_w = (canvas + MENU_MARGIN * 2.0).max(12.0);
+    hits.push((seg, BarModule::Menu, rect(x, r.pos.y, menu_w, r.size.y)));
+    x += menu_w;
+    for i in 0..workspaces {
+        hits.push((seg, BarModule::Workspace(i), rect(x, r.pos.y, WS_WIDTH, r.size.y)));
+        x += WS_WIDTH + WS_SPACING;
+    }
+    (hits, x + WS_TRAILING)
 }
 
 /// Whether this platform draws its window controls in the bar: every
@@ -499,17 +634,19 @@ script_mod! {
     }
 }
 
+/// The presses carry the segment they landed in (0 on a one-segment bar):
+/// on a multi-screen desktop segment `i` is live screen `i`'s.
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum ShellBarAction {
     /// A module was pressed (left button).
-    Press(BarModule),
+    Press(usize, BarModule),
     /// A module was right-pressed — the clock cycles its format, audio
     /// mutes, power toggles the percentage.
-    RightPress(BarModule),
+    RightPress(usize, BarModule),
     /// A module was middle-pressed (`ActiveWindow.qml`'s
     /// `Qt.MiddleButton` arm: only the active-window title answers to
     /// this, closing the focused client exactly like a right click does).
-    MiddlePress(BarModule),
+    MiddlePress(usize, BarModule),
     /// Wheel over a module: +1 / -1 notch.
     Wheel(BarModule, f64),
     #[default]
@@ -520,13 +657,13 @@ pub enum ShellBarAction {
 /// before secondary — a mouse reporting both bits on the same event (some
 /// drivers do, for a chorded click) still reads as the tertiary button,
 /// matching `ActiveWindow.qml`'s own `Qt.MiddleButton` branch order.
-fn press_action(module: BarModule, button: MouseButton) -> ShellBarAction {
+fn press_action(seg: usize, module: BarModule, button: MouseButton) -> ShellBarAction {
     if button.contains(MouseButton::MIDDLE) {
-        ShellBarAction::MiddlePress(module)
+        ShellBarAction::MiddlePress(seg, module)
     } else if button.contains(MouseButton::SECONDARY) {
-        ShellBarAction::RightPress(module)
+        ShellBarAction::RightPress(seg, module)
     } else {
-        ShellBarAction::Press(module)
+        ShellBarAction::Press(seg, module)
     }
 }
 
@@ -549,6 +686,10 @@ pub struct ShellBar {
     tokens: ShellTokens,
     #[rust]
     pub data: BarData,
+    /// One per live screen on a multi-screen desktop, left to right; empty
+    /// (or one) draws `data` across the whole strip, as always.
+    #[rust]
+    pub segments: Vec<BarSegment>,
     /// Content starts here, so the OS window buttons stay clear.
     #[rust]
     pub pad_left: f64,
@@ -558,19 +699,24 @@ pub struct ShellBar {
     /// surfaces directly, without a turtle of their own.
     #[rust]
     screen: Rect,
+    /// (segment, module, rect), recorded by the last draw.
     #[rust]
-    hits: Vec<(BarModule, Rect)>,
+    hits: Vec<(usize, BarModule, Rect)>,
+    /// The segment rects the last draw painted (hidden ones left out).
     #[rust]
-    hover: Option<BarModule>,
+    drawn: Vec<Rect>,
+    #[rust]
+    hover: Option<(usize, BarModule)>,
     #[rust]
     hover_time: f64,
     #[rust]
     next_frame: NextFrame,
     #[rust]
     last_time: f64,
-    /// The indicator block reveals its inactive glyphs while hovered.
+    /// The indicator block reveals its inactive glyphs while hovered (in
+    /// the hovered segment only).
     #[rust]
-    reveal_indicators: bool,
+    reveal_indicators: Option<usize>,
     #[rust]
     pub inert: bool,
     /// Draw the window's min/max/close at the far right
@@ -595,79 +741,126 @@ impl ShellBar {
 
     /// The status modules on the right, in `shell.json` order, with the
     /// icon each one shows right now.
-    fn right_modules(&self) -> Vec<(BarModule, Ico, bool)> {
+    fn right_modules(data: &BarData) -> Vec<(BarModule, Ico, bool)> {
         let mut v: Vec<(BarModule, Ico, bool)> = Vec::new();
-        for (i, ico) in self.data.tray.iter().enumerate() {
+        for (i, ico) in data.tray.iter().enumerate() {
             v.push((BarModule::Tray(i), *ico, true));
         }
         v.push((
             BarModule::Bluetooth,
-            match self.data.bluetooth {
+            match data.bluetooth {
                 Some(true) => Ico::Bluetooth,
                 _ => Ico::BluetoothOff,
             },
-            self.data.bluetooth.is_some(),
+            data.bluetooth.is_some(),
         ));
         v.push((
             BarModule::Network,
-            match self.data.network {
+            match data.network {
                 Some(true) => Ico::Wifi,
                 _ => Ico::WifiOff,
             },
-            self.data.network.is_some(),
+            data.network.is_some(),
         ));
         v.push((
             BarModule::Audio,
-            volume_icon(self.data.volume, self.data.muted),
-            self.data.volume.is_some(),
+            volume_icon(data.volume, data.muted),
+            data.volume.is_some(),
         ));
         v.push((
             BarModule::Monitor,
             Ico::Monitor,
-            self.data.brightness.is_some(),
+            data.brightness.is_some(),
         ));
         v.push((
             BarModule::Power,
-            if self.data.battery.is_some() {
+            if data.battery.is_some() {
                 Ico::Battery
             } else {
                 Ico::Power
             },
-            self.data.battery.is_some(),
+            data.battery.is_some(),
         ));
         v
     }
 
-    /// Draw the bar into `r`. Returns nothing; hit rects are recorded for
-    /// the next event pass.
+    /// Draw the bar into `r`: `data` across the whole strip, or with two
+    /// or more `segments` each screen's share of it. Hit rects are recorded
+    /// for the next event pass.
     pub fn draw_bar(&mut self, cx: &mut Cx2d, r: Rect) {
+        self.hits.clear();
+        self.screen = r;
+        let segments = std::mem::take(&mut self.segments);
+        let spans: Vec<(f64, f64)> = segments.iter().map(|s| (s.x0, s.x1)).collect();
+        let rects = segment_rects(r, &spans);
+        let drawn = drawn_segments(r, &segments);
+        let datas: Vec<BarData> = if segments.len() <= 1 {
+            vec![segments.first().map_or_else(|| self.data.clone(), |s| s.data.clone())]
+        } else {
+            segments.iter().map(|s| s.data.clone()).collect()
+        };
+        let last = rects.len() - 1;
+        for &(i, sr) in &drawn {
+            // One segment is the whole bar and always the active one.
+            let active = last == 0 || segments[i].active;
+            self.draw_segment(cx, i, &datas[i], sr, i == 0, i == last, active);
+        }
+        self.drawn = drawn.iter().map(|(_, r)| *r).collect();
+        // The hover tooltip, once the pointer has rested 400ms, over
+        // everything else.
+        if let Some((seg, module)) = self.hover {
+            if self.hover_time >= TOOLTIP_DELAY {
+                if let (Some(sr), Some(data)) = (rects.get(seg), datas.get(seg)) {
+                    if drawn.iter().any(|(i, _)| *i == seg) {
+                        self.draw_tooltip(cx, *sr, data, seg, module);
+                    }
+                }
+            }
+        }
+        self.segments = segments;
+    }
+
+    /// One segment: menu, workspaces, style switch and the window title on
+    /// the left, the clock centred on the segment, the status modules on
+    /// the right. The OS caption inset (`pad_left`) applies to the first
+    /// segment only and the window controls to the last; an inactive
+    /// segment dims its focused workspace.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_segment(
+        &mut self,
+        cx: &mut Cx2d,
+        seg: usize,
+        data: &BarData,
+        r: Rect,
+        first: bool,
+        last: bool,
+        active: bool,
+    ) {
         let tok = self.tokens;
         let fg = tok.bar.text;
         let accent = tok.bar.active;
         let slot = self.icon_slot();
         let canvas = tok.bar.icon_canvas;
-        self.hits.clear();
-        self.screen = r;
+        let hit_start = self.hits.len();
 
         // The strip itself: `Color.bar.background`, no border.
         self.draw_bg.color = alpha(tok.bar.background, tok.bar.background_alpha);
         self.draw_bg.draw_abs(cx, r);
 
         // ---- left: menu, workspaces
-        let mut x = r.pos.x + self.pad_left.max(EDGE_MARGIN);
-        let menu_w = (canvas + MENU_MARGIN * 2.0).max(12.0);
-        let menu_rect = rect(x, r.pos.y, menu_w, r.size.y);
+        let pad_left = if first { self.pad_left } else { 0.0 };
+        let (left, mut x) = left_cluster(seg, r, pad_left, canvas, data.workspaces.len());
+        let menu_rect = left[0].2;
         self.d
             .icon_centered(cx, Ico::Menu, menu_rect, canvas, fg);
-        self.hits.push((BarModule::Menu, menu_rect));
-        x += menu_w;
-
-        for (i, ws) in self.data.workspaces.clone().iter().enumerate() {
-            let cell = rect(x, r.pos.y, WS_WIDTH, r.size.y);
+        for (ws, (_, _, cell)) in data.workspaces.iter().zip(&left[1..]) {
+            let cell = *cell;
             let lit = ws.occupied || ws.focused;
             let color = fade(fg, if lit { 1.0 } else { 0.5 });
             if ws.focused {
-                // The focused workspace is a dot, not its number.
+                // The focused workspace is a dot, not its number; another
+                // screen's focused workspace is a dimmed one.
+                let color = if active { color } else { fade(fg, 0.45) };
                 self.d
                     .icon_centered(cx, Ico::Dot, cell, tok.bar.icon_font * 0.5, color);
             } else {
@@ -681,31 +874,29 @@ impl ShellBar {
                     &ws.label,
                 );
             }
-            self.hits.push((BarModule::Workspace(i), cell));
-            x += WS_WIDTH + WS_SPACING;
         }
-        x += WS_TRAILING;
-        let style_label = format!("{}  ▾", self.data.style.label());
+        self.hits.extend(left);
+        let style_label = format!("{}  ▾", data.style.label());
         let style_width = self.d.measure(cx, false, tok.font.body, &style_label) + 18.0;
         let style_rect = rect(x, r.pos.y, style_width, r.size.y);
         self.d.label(cx, style_rect, false, tok.font.body, fg, super::ui::HAlign::Center, &style_label);
-        self.hits.push((BarModule::Style, style_rect));
+        self.hits.push((seg, BarModule::Style, style_rect));
         x += style_width + 6.0;
 
-        if self.data.style.supports_dark() {
-            let label=if self.data.dark {"Dark"}else{"Light"};
+        if data.style.supports_dark() {
+            let label=if data.dark {"Dark"}else{"Light"};
             let width=self.d.measure(cx,false,tok.font.body,label)+18.0;
             let button=rect(x,r.pos.y,width,r.size.y);
             self.d.label(cx,button,false,tok.font.body,fg,super::ui::HAlign::Center,label);
-            self.hits.push((BarModule::Appearance,button));
+            self.hits.push((seg, BarModule::Appearance,button));
             x+=width+6.0;
         }
         // The active window's title: `min(280, implicitWidth) + controlPaddingX*2`,
         // `body` at α .85, elided right, with the full title in the tooltip.
-        if let Some(title) = self.data.active_window.clone() {
+        if let Some(title) = data.active_window.as_deref() {
             let text_w = self
                 .d
-                .measure(cx, false, tok.font.body, &title)
+                .measure(cx, false, tok.font.body, title)
                 .min(ACTIVE_WINDOW_MAX);
             let w = text_w + tok.spacing.control_padding_x * 2.0;
             let cell = rect(x, r.pos.y, w, r.size.y);
@@ -721,15 +912,15 @@ impl ShellBar {
                 tok.font.body,
                 fade(fg, 0.85),
                 super::ui::HAlign::Left,
-                &title,
+                title,
             );
-            self.hits.push((BarModule::ActiveWindow, cell));
+            self.hits.push((seg, BarModule::ActiveWindow, cell));
         }
 
         // ---- center: the clock is the anchor, centered on the bar itself
         let clock_w = self
             .d
-            .measure(cx, false, tok.font.body, &self.data.clock)
+            .measure(cx, false, tok.font.body, &data.clock)
             + CLOCK_MARGIN * 2.0;
         let clock_rect = rect(
             (r.pos.x + (r.size.x - clock_w) * 0.5).floor(),
@@ -744,16 +935,16 @@ impl ShellBar {
             tok.font.body,
             fg,
             super::ui::HAlign::Center,
-            &self.data.clock,
+            &data.clock,
         );
-        self.hits.push((BarModule::Clock, clock_rect));
+        self.hits.push((seg, BarModule::Clock, clock_rect));
 
         // Indicators sit flush against the anchor's left edge.
         let status = self.status_slot();
-        let indicators = self.data.indicators.clone();
+        let indicators = &data.indicators;
         let mut ix = clock_rect.pos.x;
         for (i, ind) in indicators.iter().enumerate().rev() {
-            let visible = ind.active || self.reveal_indicators;
+            let visible = ind.active || self.reveal_indicators == Some(seg);
             if !visible {
                 continue;
             }
@@ -767,13 +958,13 @@ impl ShellBar {
             let ico = if ind.active { ind.active_icon } else { ind.icon };
             self.d
                 .icon_centered(cx, ico, cell, tok.font.caption * 1.3, color);
-            self.hits.push((BarModule::Indicator(i), cell));
+            self.hits.push((seg, BarModule::Indicator(i), cell));
         }
 
         // Keyboard layout, weather and the update dot follow the anchor.
         let mut cx_right = clock_rect.pos.x + clock_rect.size.x;
-        if let Some(layout) = self.data.keyboard_layout.clone() {
-            let w = self.d.measure(cx, false, tok.font.caption, &layout) + 6.0 * 2.0;
+        if let Some(layout) = data.keyboard_layout.as_deref() {
+            let w = self.d.measure(cx, false, tok.font.caption, layout) + 6.0 * 2.0;
             let cell = rect(cx_right, r.pos.y, w, r.size.y);
             self.d.label(
                 cx,
@@ -782,13 +973,13 @@ impl ShellBar {
                 tok.font.caption,
                 fg,
                 super::ui::HAlign::Center,
-                &layout,
+                layout,
             );
-            self.hits.push((BarModule::KeyboardLayout, cell));
+            self.hits.push((seg, BarModule::KeyboardLayout, cell));
             cx_right += w;
         }
-        if let Some(weather) = self.data.weather.clone() {
-            let w = self.d.measure(cx, false, tok.font.caption, &weather) + 6.0 * 2.0;
+        if let Some(weather) = data.weather.as_deref() {
+            let w = self.d.measure(cx, false, tok.font.caption, weather) + 6.0 * 2.0;
             let cell = rect(cx_right, r.pos.y, w, r.size.y);
             self.d.label(
                 cx,
@@ -797,57 +988,57 @@ impl ShellBar {
                 tok.font.caption,
                 fg,
                 super::ui::HAlign::Center,
-                &weather,
+                weather,
             );
-            self.hits.push((BarModule::Weather, cell));
+            self.hits.push((seg, BarModule::Weather, cell));
             cx_right += w;
         }
-        if self.data.system_update {
+        if data.system_update {
             let cell = rect(cx_right, r.pos.y, status, r.size.y);
             self.d
                 .icon_centered(cx, Ico::Refresh, cell, tok.font.caption * 1.3, accent);
-            self.hits.push((BarModule::SystemUpdate, cell));
+            self.hits.push((seg, BarModule::SystemUpdate, cell));
         }
 
         // ---- right: the window controls at the very edge (where the
         // platform draws none), then tray and the status modules, laid out
         // right to left
         let (controls_left, modules_right) =
-            right_cluster_layout(r.pos.x + r.size.x, self.window_controls);
+            right_cluster_layout(r.pos.x + r.size.x, self.window_controls && last);
         if let Some(mut cx_ctrl) = controls_left {
             let controls = [
                 (BarModule::WindowMin, Ico::WindowMin),
                 (
                     BarModule::WindowMax,
-                    if self.data.maximized { Ico::WindowRestore } else { Ico::WindowMax },
+                    if data.maximized { Ico::WindowRestore } else { Ico::WindowMax },
                 ),
                 (BarModule::WindowClose, Ico::Close),
             ];
             for (module, ico) in controls {
                 let cell = rect(cx_ctrl, r.pos.y, WINDOW_CONTROL_WIDTH, r.size.y);
-                if self.hover == Some(module) {
+                if self.hover == Some((seg, module)) {
                     // The hovered control lights its slot, a close in the
                     // accent, like every desktop's caption buttons.
                     let wash = if module == BarModule::WindowClose { accent } else { fg };
                     self.d.solid(cx, cell, fade(wash, 0.18));
                 }
                 self.d.icon_centered(cx, ico, cell, canvas * 0.8, fg);
-                self.hits.push((module, cell));
+                self.hits.push((seg, module, cell));
                 cx_ctrl += WINDOW_CONTROL_WIDTH;
             }
         }
-        let modules = self.right_modules();
+        let modules = Self::right_modules(data);
         let mut rx = modules_right;
         for (module, ico, available) in modules.iter().rev() {
             #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
             if *module == BarModule::Power {
-                if let Some(battery) = self.data.battery {
+                if let Some(battery) = data.battery {
                     let label = format!("{}%{}", battery.percent, if battery.charging { " +" } else { "" });
                     let width = self.d.measure(cx, false, tok.font.caption, &label) + 8.0;
                     rx -= width;
                     let label_rect = rect(rx, r.pos.y, width, r.size.y);
                     self.d.label(cx, label_rect, false, tok.font.caption, fg, super::ui::HAlign::Center, &label);
-                    self.hits.push((*module, label_rect));
+                    self.hits.push((seg, *module, label_rect));
                 }
             }
             rx -= slot;
@@ -855,22 +1046,22 @@ impl ShellBar {
             let mut color = if *available { fg } else { fade(fg, 0.45) };
             // The battery goes urgent below 20% on battery power.
             if *module == BarModule::Power {
-                if let Some(b) = self.data.battery {
+                if let Some(b) = data.battery {
                     if !b.charging && b.percent <= 20 {
                         color = accent;
                     }
                 }
             }
-            if *module == BarModule::Audio && self.data.muted {
+            if *module == BarModule::Audio && data.muted {
                 color = fade(fg, 0.45);
             }
             self.d.icon_centered(cx, *ico, cell, canvas, color);
-            self.hits.push((*module, cell));
+            self.hits.push((seg, *module, cell));
         }
 
         // The open-panel pill, at the bar's inner (bottom) edge.
-        if let Some(open) = self.data.open_panel {
-            if let Some((_, cell)) = self.hits.iter().find(|(m, _)| *m == open) {
+        if let Some(open) = data.open_panel {
+            if let Some((_, _, cell)) = self.hits[hit_start..].iter().find(|(_, m, _)| *m == open) {
                 let extent = (slot * 0.55).round().max(10.0);
                 let pill = rect(
                     (cell.pos.x + (cell.size.x - extent) * 0.5).floor(),
@@ -881,25 +1072,16 @@ impl ShellBar {
                 self.d.solid(cx, pill, fade(accent, 0.9));
             }
         }
-
-        // The hover tooltip, once the pointer has rested 400ms.
-        if let Some(module) = self.hover {
-            if self.hover_time >= TOOLTIP_DELAY {
-                self.draw_tooltip(cx, r, module);
-            }
-        }
     }
 
     /// The tooltip a module shows after 400ms of hover.
-    fn tooltip_for(&self, module: BarModule) -> String {
+    fn tooltip_for(data: &BarData, module: BarModule) -> String {
         match module {
             BarModule::Style => "Choose operating system style".into(),
             BarModule::Appearance => "Toggle light / dark appearance".into(),
             BarModule::Menu => "Applications".into(),
             BarModule::Workspace(i) => format!("Workspace {}", i + 1),
-            BarModule::ActiveWindow => self
-                .data
-                .active_window
+            BarModule::ActiveWindow => data.active_window
                 .clone()
                 .unwrap_or_default(),
             BarModule::Clock => "Calendar".into(),
@@ -907,36 +1089,34 @@ impl ShellBar {
             BarModule::Weather => "Weather".into(),
             BarModule::SystemUpdate => "Pending updates".into(),
             BarModule::Tray(_) => "Tray".into(),
-            BarModule::Bluetooth => match self.data.bluetooth {
+            BarModule::Bluetooth => match data.bluetooth {
                 Some(true) => "Bluetooth on".into(),
                 Some(false) => "Bluetooth off".into(),
                 None => "Bluetooth unavailable".into(),
             },
-            BarModule::Network => match self.data.network {
+            BarModule::Network => match data.network {
                 Some(true) => "Connected".into(),
                 Some(false) => "Not connected".into(),
                 None => "Network unavailable".into(),
             },
-            BarModule::Audio => match (self.data.volume, self.data.muted) {
+            BarModule::Audio => match (data.volume, data.muted) {
                 (_, true) => "Muted".into(),
                 (Some(v), _) => format!("Volume {}%", v),
                 (None, _) => "Audio unavailable".into(),
             },
             BarModule::Monitor => "Display".into(),
-            BarModule::Power => match self.data.battery {
+            BarModule::Power => match data.battery {
                 Some(b) if b.charging => format!("Battery {}%, charging", b.percent),
                 Some(b) => format!("Battery {}%", b.percent),
                 None => "Power".into(),
             },
-            BarModule::Indicator(i) => self
-                .data
-                .indicators
+            BarModule::Indicator(i) => data.indicators
                 .get(i)
                 .map(|ind| ind.tooltip.to_string())
                 .unwrap_or_default(),
             BarModule::WindowMin => "Minimize".into(),
             BarModule::WindowMax => {
-                if self.data.maximized { "Restore".into() } else { "Maximize".into() }
+                if data.maximized { "Restore".into() } else { "Maximize".into() }
             }
             BarModule::WindowClose => "Close".into(),
         }
@@ -945,13 +1125,13 @@ impl ShellBar {
     /// `Ui/PanelToolTip.qml`: the tooltip card, `bodySmall` inside
     /// `controlPaddingX/Y`, on `[tooltip] background` behind its 1px
     /// border, 6px off the bar edge.
-    fn draw_tooltip(&mut self, cx: &mut Cx2d, r: Rect, module: BarModule) {
+    fn draw_tooltip(&mut self, cx: &mut Cx2d, r: Rect, data: &BarData, seg: usize, module: BarModule) {
         let tok = self.tokens;
-        let text = self.tooltip_for(module);
+        let text = Self::tooltip_for(data, module);
         if text.is_empty() {
             return;
         }
-        let Some((_, cell)) = self.hits.iter().find(|(m, _)| *m == module).copied() else {
+        let Some((_, _, cell)) = self.hits.iter().find(|(s, m, _)| *s == seg && *m == module).copied() else {
             return;
         };
         let px = tok.font.body_small;
@@ -976,16 +1156,31 @@ impl ShellBar {
         );
     }
 
-    pub fn module_at(&self, p: Vec2d) -> Option<BarModule> {
-        module_at_in(&self.hits, p)
+    /// `p` is on the bar as last drawn: inside a painted segment (the
+    /// whole strip on one screen), not where a hidden one lets a span's
+    /// window show through.
+    pub fn covers(&self, p: Vec2d) -> bool {
+        self.drawn.iter().any(|r| contains(*r, p))
     }
 
-    /// The rect a module occupies — the panels anchor to it.
-    pub fn module_rect(&self, module: BarModule) -> Option<Rect> {
+    pub fn module_at(&self, p: Vec2d) -> Option<BarModule> {
+        self.hit_at(p).map(|(_, m)| m)
+    }
+
+    /// The segment and module under `p`.
+    pub fn hit_at(&self, p: Vec2d) -> Option<(usize, BarModule)> {
+        hit_at_in(&self.hits, p)
+    }
+
+    /// The rect a module occupies in segment `seg` — the panels anchor to
+    /// it, so one opened from a segment opens on that screen. A segment
+    /// the bar no longer has falls back to the module's first rect.
+    pub fn module_rect(&self, seg: usize, module: BarModule) -> Option<Rect> {
         self.hits
             .iter()
-            .find(|(m, _)| *m == module)
-            .map(|(_, r)| *r)
+            .find(|(s, m, _)| *s == seg && *m == module)
+            .or_else(|| self.hits.iter().find(|(_, m, _)| *m == module))
+            .map(|(_, _, r)| *r)
     }
 }
 
@@ -1023,14 +1218,12 @@ impl Widget for ShellBar {
         }
         match event {
             Event::MouseMove(e) => {
-                let over = contains(bar_rect, e.abs);
-                let module = if over { self.module_at(e.abs) } else { None };
-                let reveal = matches!(module, Some(BarModule::Indicator(_)))
-                    || (over
-                        && self
-                            .hits
-                            .iter()
-                            .any(|(m, r)| matches!(m, BarModule::Indicator(_)) && contains(*r, e.abs)));
+                let over = contains(bar_rect, e.abs) && self.covers(e.abs);
+                let module = if over { self.hit_at(e.abs) } else { None };
+                let reveal = match module {
+                    Some((seg, BarModule::Indicator(_))) => Some(seg),
+                    _ => None,
+                };
                 if module != self.hover || reveal != self.reveal_indicators {
                     self.hover = module;
                     self.hover_time = 0.0;
@@ -1046,8 +1239,8 @@ impl Widget for ShellBar {
                 }
             }
             Event::MouseDown(e) => {
-                if let Some(module) = self.module_at(e.abs) {
-                    cx.widget_action(self.uid, press_action(module, e.button));
+                if let Some((seg, module)) = self.hit_at(e.abs) {
+                    cx.widget_action(self.uid, press_action(seg, module, e.button));
                 }
             }
             Event::Scroll(e) => {
@@ -1068,6 +1261,17 @@ impl Widget for ShellBar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_same_flyout_pressed_on_another_segment_moves() {
+        // Open on segment 0, pressed again on segment 1: it moves.
+        assert!(flyout_press_moves(true, 0, 1));
+        // Pressed again on its own segment: it toggles closed.
+        assert!(!flyout_press_moves(true, 1, 1));
+        // Another flyout (or none) up: the press opens this one.
+        assert!(!flyout_press_moves(false, 0, 1));
+        assert!(!flyout_press_moves(false, 0, 0));
+    }
 
     #[test]
     fn the_volume_ladder_matches_the_osd_thresholds() {
@@ -1103,19 +1307,93 @@ mod tests {
         let r = rect(0.0, 0.0, 1000.0, 26.0);
         let (controls_left, _) = right_cluster_layout(r.pos.x + r.size.x, true);
         let left = controls_left.unwrap();
-        let mut hits: Vec<(BarModule, Rect)> = Vec::new();
+        let mut hits: Vec<(usize, BarModule, Rect)> = Vec::new();
         let mut x = left;
         for module in [BarModule::WindowMin, BarModule::WindowMax, BarModule::WindowClose] {
-            hits.push((module, rect(x, r.pos.y, WINDOW_CONTROL_WIDTH, r.size.y)));
+            hits.push((0, module, rect(x, r.pos.y, WINDOW_CONTROL_WIDTH, r.size.y)));
             x += WINDOW_CONTROL_WIDTH;
         }
         // Inside each control: claimed, by that control. Just left of the
         // first one: nobody's — a drag.
         let mid = r.pos.y + 13.0;
-        assert_eq!(module_at_in(&hits, dvec2(left + 18.0, mid)), Some(BarModule::WindowMin));
-        assert_eq!(module_at_in(&hits, dvec2(left + 54.0, mid)), Some(BarModule::WindowMax));
-        assert_eq!(module_at_in(&hits, dvec2(left + 90.0, mid)), Some(BarModule::WindowClose));
-        assert_eq!(module_at_in(&hits, dvec2(left - 2.0, mid)), None);
+        assert_eq!(hit_at_in(&hits, dvec2(left + 18.0, mid)), Some((0, BarModule::WindowMin)));
+        assert_eq!(hit_at_in(&hits, dvec2(left + 54.0, mid)), Some((0, BarModule::WindowMax)));
+        assert_eq!(hit_at_in(&hits, dvec2(left + 90.0, mid)), Some((0, BarModule::WindowClose)));
+        assert_eq!(hit_at_in(&hits, dvec2(left - 2.0, mid)), None);
+    }
+
+    fn layout_fixture() -> crate::layout::WmLayout {
+        let mut l = crate::layout::WmLayout::new();
+        let area = crate::layout::LRect::new(0.0, 0.0, 1000.0, 800.0);
+        l.insert_on(0, 1, area, 4.0);
+        l.insert_on(3, 2, area, 4.0);
+        l.insert_on(9, 3, area, 4.0);
+        // The active workspace is the empty second one.
+        l.switch_workspace(1);
+        l
+    }
+
+    /// Omarchy's cluster: the active workspace (a dot, even when empty),
+    /// the populated ones by number (workspace 10 reads "0"), the empty
+    /// ones hidden; `shown` maps each cell back to its workspace.
+    #[test]
+    fn workspace_cells_show_the_active_and_the_populated_workspaces() {
+        let (cells, shown) = workspace_cells(&layout_fixture());
+        assert_eq!(shown, vec![0, 1, 3, 9]);
+        let labels: Vec<&str> = cells.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, vec!["1", "2", "4", "0"]);
+        let occupied: Vec<bool> = cells.iter().map(|c| c.occupied).collect();
+        assert_eq!(occupied, vec![true, false, true, true]);
+        let focused: Vec<bool> = cells.iter().map(|c| c.focused).collect();
+        assert_eq!(focused, vec![false, true, false, false]);
+    }
+
+    /// No segments, or one, is today's bar: the whole strip, whatever x
+    /// range the one screen has (the AI pane clips the desk, not the bar),
+    /// and the left cluster records the same hits it always did.
+    #[test]
+    fn one_segment_draws_the_same_hits_as_the_bare_bar() {
+        let r = rect(0.0, 0.0, 1920.0, 26.0);
+        assert_eq!(segment_rects(r, &[]), vec![r]);
+        assert_eq!(segment_rects(r, &[(400.0, 1520.0)]), vec![r]);
+        let data = BarData::fixture();
+        let canvas = 16.0;
+        let n = data.workspaces.len();
+        let (bare, bare_x) = left_cluster(0, r, 0.0, canvas, n);
+        let (one, one_x) = left_cluster(0, segment_rects(r, &[(400.0, 1520.0)])[0], 0.0, canvas, n);
+        assert_eq!(bare, one);
+        assert_eq!(bare_x, one_x);
+        // Today's arithmetic: the menu off the edge margin, then the pills.
+        let menu_w = (canvas + MENU_MARGIN * 2.0).max(12.0);
+        assert_eq!(bare[0], (0, BarModule::Menu, rect(EDGE_MARGIN, 0.0, menu_w, 26.0)));
+        for i in 0..n {
+            let x = EDGE_MARGIN + menu_w + i as f64 * (WS_WIDTH + WS_SPACING);
+            assert_eq!(bare[1 + i], (0, BarModule::Workspace(i), rect(x, 0.0, WS_WIDTH, 26.0)));
+        }
+        assert_eq!(bare_x, EDGE_MARGIN + menu_w + n as f64 * (WS_WIDTH + WS_SPACING) + WS_TRAILING);
+    }
+
+    /// Two screens share the strip: each segment spans its screen's x
+    /// range, the first stretched to the strip's left edge (the AI pane may
+    /// clip the desk) and the last to its right edge, and a click resolves
+    /// to the segment it lands in.
+    #[test]
+    fn a_click_in_segment_one_returns_segment_ones_module() {
+        let r = rect(0.0, 0.0, 3840.0, 26.0);
+        let segs = segment_rects(r, &[(400.0, 1920.0), (1920.0, 3800.0)]);
+        assert_eq!(segs, vec![rect(0.0, 0.0, 1920.0, 26.0), rect(1920.0, 0.0, 1920.0, 26.0)]);
+        let (mut hits, _) = left_cluster(0, segs[0], 0.0, 16.0, 3);
+        hits.extend(left_cluster(1, segs[1], 0.0, 16.0, 2).0);
+        let center = |seg: usize, m: BarModule| {
+            let r = hits.iter().find(|(s, mm, _)| *s == seg && *mm == m).unwrap().2;
+            dvec2(r.pos.x + r.size.x * 0.5, r.pos.y + r.size.y * 0.5)
+        };
+        // Segment 1's cluster starts off ITS left edge.
+        assert_eq!(hits.iter().find(|(s, m, _)| *s == 1 && *m == BarModule::Menu).unwrap().2.pos.x, 1920.0 + EDGE_MARGIN);
+        assert_eq!(hit_at_in(&hits, center(1, BarModule::Workspace(1))), Some((1, BarModule::Workspace(1))));
+        assert_eq!(hit_at_in(&hits, center(0, BarModule::Workspace(1))), Some((0, BarModule::Workspace(1))));
+        assert_eq!(hit_at_in(&hits, center(1, BarModule::Menu)), Some((1, BarModule::Menu)));
+        assert_eq!(hit_at_in(&hits, dvec2(1000.0, 13.0)), None);
     }
 
     #[test]
@@ -1134,18 +1412,74 @@ mod tests {
     #[test]
     fn middle_and_right_press_are_distinct_actions() {
         let m = BarModule::ActiveWindow;
-        assert_eq!(press_action(m, MouseButton::PRIMARY), ShellBarAction::Press(m));
+        assert_eq!(press_action(1, m, MouseButton::PRIMARY), ShellBarAction::Press(1, m));
         assert_eq!(
-            press_action(m, MouseButton::SECONDARY),
-            ShellBarAction::RightPress(m)
+            press_action(1, m, MouseButton::SECONDARY),
+            ShellBarAction::RightPress(1, m)
         );
         assert_eq!(
-            press_action(m, MouseButton::MIDDLE),
-            ShellBarAction::MiddlePress(m)
+            press_action(1, m, MouseButton::MIDDLE),
+            ShellBarAction::MiddlePress(1, m)
         );
         assert_ne!(
-            press_action(m, MouseButton::MIDDLE),
-            press_action(m, MouseButton::SECONDARY)
+            press_action(1, m, MouseButton::MIDDLE),
+            press_action(1, m, MouseButton::SECONDARY)
         );
+    }
+
+    fn seg(x0: f64, x1: f64, hidden: bool) -> BarSegment {
+        BarSegment { x0, x1, data: BarData::fixture(), active: false, hidden }
+    }
+
+    /// One screen keeps today's strip: the desk below a spacer of the
+    /// bar's height, nothing reserved inside it, the strip's background
+    /// painted. Hidden (ToggleBar, one screen's fullscreen), the desk
+    /// takes the whole window, as before.
+    #[test]
+    fn one_screen_keeps_the_strip_above_the_desk() {
+        assert_eq!(
+            bar_placement(false, true, 26.0),
+            BarPlacement { strip: Some(26.0), reserved_top: 0.0, background: true }
+        );
+        assert_eq!(
+            bar_placement(false, true, 38.0),
+            BarPlacement { strip: Some(38.0), reserved_top: 0.0, background: true }
+        );
+        assert_eq!(bar_placement(false, false, 26.0).strip, None);
+        assert_eq!(bar_placement(false, false, 26.0).reserved_top, 0.0);
+    }
+
+    /// Per-screen segments float over the scene: no strip, every screen
+    /// reserves the bar's height, no background under the segments (a
+    /// hidden one shows the span's window). ToggleBar reserves nothing.
+    #[test]
+    fn segments_float_over_the_scene() {
+        assert_eq!(
+            bar_placement(true, true, 26.0),
+            BarPlacement { strip: None, reserved_top: 26.0, background: false }
+        );
+        assert_eq!(
+            bar_placement(true, false, 26.0),
+            BarPlacement { strip: None, reserved_top: 0.0, background: false }
+        );
+    }
+
+    #[test]
+    fn drawn_segments_skip_the_spanned_screens() {
+        let r = rect(0.0, 0.0, 5760.0, 26.0);
+        let all = segment_rects(r, &[(0.0, 1920.0), (1920.0, 3840.0), (3840.0, 5760.0)]);
+        // Nothing spanned: every segment.
+        let none = [seg(0.0, 1920.0, false), seg(1920.0, 3840.0, false), seg(3840.0, 5760.0, false)];
+        assert_eq!(drawn_segments(r, &none), vec![(0, all[0]), (1, all[1]), (2, all[2])]);
+        // A span over the first two: only the third, at its own index (a
+        // click there still means screen 2).
+        let spanned = [seg(0.0, 1920.0, true), seg(1920.0, 3840.0, true), seg(3840.0, 5760.0, false)];
+        assert_eq!(drawn_segments(r, &spanned), vec![(2, all[2])]);
+        // A span over all of them: nothing.
+        let every = [seg(0.0, 1920.0, true), seg(1920.0, 3840.0, true), seg(3840.0, 5760.0, true)];
+        assert!(drawn_segments(r, &every).is_empty());
+        // No segment, or one, is the whole strip, never hidden.
+        assert_eq!(drawn_segments(r, &[]), vec![(0, r)]);
+        assert_eq!(drawn_segments(r, &[seg(0.0, 1920.0, true)]), vec![(0, r)]);
     }
 }
