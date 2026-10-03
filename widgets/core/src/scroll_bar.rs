@@ -328,6 +328,15 @@ pub struct ScrollBar {
     /// How long the bar stays shown after the last scroll, in seconds.
     #[live(1.5)]
     hide_delay: f64,
+    /// Content that gets shorter (a fold) does not pull the offset back: the
+    /// view keeps its place over empty space at the end, and what the reader
+    /// was looking at stays where it was. That empty space goes as the reader
+    /// scrolls back towards the content; it never grows.
+    #[live(false)]
+    keep_on_shrink: bool,
+    /// The offset kept past the content's end ([`Self::keep_on_shrink`]).
+    #[rust]
+    held_end: f64,
 
     #[apply_default]
     animator: Animator,
@@ -557,8 +566,15 @@ impl ScrollBar {
         return self.scroll_pos;
     }
 
+    /// How far the offset may go: the content's end, or (keeping on shrink)
+    /// the offset kept past it.
+    fn scroll_limit(&self) -> f64 {
+        let end = (self.view_total - self.view_visible).max(0.);
+        if self.keep_on_shrink { end.max(self.held_end) } else { end }
+    }
+
     pub fn set_scroll_pos_no_action(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
+        let scroll_pos = scroll_pos.min(self.scroll_limit()).max(0.);
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
             self.scroll_target = scroll_pos;
@@ -568,7 +584,7 @@ impl ScrollBar {
         return false;
     }
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
-        let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
+        let scroll_pos = scroll_pos.min(self.scroll_limit()).max(0.);
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
             self.scroll_target = scroll_pos;
@@ -609,9 +625,7 @@ impl ScrollBar {
     pub fn set_scroll_target(&mut self, cx: &mut Cx, scroll_pos_target: f64) -> bool {
         // clamp scroll_pos to
 
-        let new_target = scroll_pos_target
-            .min(self.view_total - self.view_visible)
-            .max(0.);
+        let new_target = scroll_pos_target.min(self.scroll_limit()).max(0.);
         if self.scroll_target != new_target {
             self.scroll_target = new_target;
             self.scroll_delta = new_target - self.scroll_pos;
@@ -1457,7 +1471,10 @@ impl ScrollBar {
             if cross_overflows { track_len - self.bar_size } else { track_len } - self.bar_side_margin * 2.;
         self.view_total = total;
         self.view_visible = viewport;
-        self.scroll_pos = self.scroll_pos.min(total - viewport).max(0.);
+        // Content that got shorter: the offset kept past its end, or pulled back.
+        let end = (total - viewport).max(0.);
+        self.held_end = if self.keep_on_shrink && self.scroll_pos > end { self.scroll_pos } else { 0. };
+        self.scroll_pos = self.scroll_pos.min(self.scroll_limit()).max(0.);
 
         if self.visible && self.show_handle {
             // Drop a stale hover, since we miss the hover-out if the pointer left while the bar wasn't drawn.
@@ -1497,10 +1514,7 @@ impl ScrollBar {
         }
 
         // see if we need to clamp
-        let clamped_pos = self
-            .scroll_pos
-            .min(self.view_total - self.view_visible)
-            .max(0.);
+        let clamped_pos = self.scroll_pos.min(self.scroll_limit()).max(0.);
         if clamped_pos != self.scroll_pos {
             self.scroll_pos = clamped_pos;
             self.scroll_target = clamped_pos;

@@ -1822,6 +1822,14 @@ impl View {
         }
     }
 
+    /// Scroll so `rect` (absolute, as drawn) is in view: smoothly when the
+    /// bars have `smoothing`, else at once.
+    pub fn scroll_into_view_abs(&mut self, cx: &mut Cx, rect: Rect) {
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj {
+            scroll_bars.scroll_into_view_abs(cx, rect);
+        }
+    }
+
     /// Where this view is scrolled to and how far it can go. `None` for a
     /// view without scroll bars: its `layout.scroll` is an offset someone
     /// set, not a position a reader can move, so there is no extent to report.
