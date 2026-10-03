@@ -9,9 +9,9 @@
 //! arrays, with the module scopes and preludes as walls (a name merely
 //! bound is not a use). A build tool blanks the unused ones in a web build.
 
-use crate::makepad_live_id::*;
-use crate::value::*;
-use crate::vm::*;
+use makepad_script::makepad_live_id::*;
+use makepad_script::value::*;
+use makepad_script::vm::*;
 use std::collections::HashSet;
 
 /// A top-level statement of a Splash block: its byte range (from the end
@@ -223,43 +223,43 @@ pub struct BlockUse {
 pub fn top_use(vm: &mut ScriptVm) -> Vec<BlockUse> {
     vm.gc();
     let heap = &vm.bx.heap;
-    let valid = |o: ScriptObject| heap.objects.is_valid(o) && heap.objects[o].tag.is_alloced();
+    let valid = |o: ScriptObject| heap.object_slots().is_valid(o) && heap.object_slots()[o].tag.is_alloced();
     // The module scopes and the preludes hold every name: walls.
     let mut walls: HashSet<ScriptObject> = HashSet::new();
     walls.insert(heap.modules);
-    for (key, m) in heap.objects[heap.modules].map.iter() {
+    for (key, m) in heap.object_slots()[heap.modules].map.iter() {
         let Some(module) = m.value.as_object() else { continue };
-        if heap.objects[module].proto != *key {
+        if heap.object_slots()[module].proto != *key {
             continue;
         }
         walls.insert(module);
         if key.as_id() == Some(id!(prelude)) {
-            walls.extend(heap.objects[module].map.iter().filter_map(|(_, v)| v.value.as_object()));
+            walls.extend(heap.object_slots()[module].map.iter().filter_map(|(_, v)| v.value.as_object()));
         }
     }
     // The definitions themselves (every value of a module scope): Rust
     // holds each type's proto from its registration on, which is not a use.
     let mut definitions: HashSet<ScriptObject> = HashSet::new();
     for wall in &walls {
-        definitions.extend(heap.objects[*wall].map.iter().filter_map(|(_, v)| v.value.as_object()));
+        definitions.extend(heap.object_slots()[*wall].map.iter().filter_map(|(_, v)| v.value.as_object()));
     }
     // A block's scope and `me`, and the child scopes made under them (a
     // function's captured scope among them), hold every name the block
     // bound (`use mod.widgets.*`): binding a name is not a use either.
     let is_block_scope = |o: ScriptObject| {
-        let mut proto = heap.objects[o].proto;
+        let mut proto = heap.object_slots()[o].proto;
         for _ in 0..64 {
             if proto == id!(scope).into() || proto == id!(root_me).into() {
                 return true;
             }
             match proto.as_object() {
-                Some(p) if valid(p) => proto = heap.objects[p].proto,
+                Some(p) if valid(p) => proto = heap.object_slots()[p].proto,
                 _ => return false,
             }
         }
         false
     };
-    let seeds: Vec<ScriptObject> = heap.root_objects.borrow().keys().copied().filter(|o| valid(*o) && !walls.contains(o) && !definitions.contains(o) && !is_block_scope(*o)).collect();
+    let seeds: Vec<ScriptObject> = heap.rooted_objects().into_iter().filter(|o| valid(*o) && !walls.contains(o) && !definitions.contains(o) && !is_block_scope(*o)).collect();
     let mut reached: HashSet<ScriptObject> = HashSet::new();
     let mut stack: Vec<ScriptObject> = Vec::new();
     for s in seeds {
@@ -270,7 +270,7 @@ pub fn top_use(vm: &mut ScriptVm) -> Vec<BlockUse> {
     let mut arrays: HashSet<ScriptArray> = HashSet::new();
     let mut values: Vec<ScriptValue> = Vec::new();
     while let Some(from) = stack.pop() {
-        let object = &heap.objects[from];
+        let object = &heap.object_slots()[from];
         values.clear();
         values.push(object.proto);
         values.extend(object.map.iter().map(|(_, e)| e.value));
@@ -284,7 +284,7 @@ pub fn top_use(vm: &mut ScriptVm) -> Vec<BlockUse> {
                     stack.push(to);
                 }
             } else if let Some(arr) = value.as_array() {
-                if heap.arrays.is_valid(arr) && arrays.insert(arr) {
+                if heap.array_slots().is_valid(arr) && arrays.insert(arr) {
                     for j in 0..heap.array_len(arr) {
                         values.push(heap.array_index_unchecked(arr, j));
                     }
@@ -296,7 +296,7 @@ pub fn top_use(vm: &mut ScriptVm) -> Vec<BlockUse> {
     // `let X` from the block's final scope.
     let lookup = |from: ScriptObject, name: &str| -> Option<ScriptValue> {
         let key: ScriptValue = LiveId::from_str(name).into();
-        heap.objects[from].map.iter().find(|(k, _)| **k == key).map(|(_, e)| e.value)
+        heap.object_slots()[from].map.iter().find(|(k, _)| **k == key).map(|(_, e)| e.value)
     };
     let mut out = Vec::new();
     for body in vm.bx.code.bodies.borrow().iter() {

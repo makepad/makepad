@@ -214,6 +214,7 @@ workspace.members = [
     "platform/script/test",
     "platform/script/audio_aot",
     "platform/script/compute",
+    "platform/script/census",
     "libs/tween/script",
     "platform/remote_core",
     # === makepad-widgets: the core and its family crates (widgets/ is the

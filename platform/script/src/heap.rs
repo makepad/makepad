@@ -141,8 +141,8 @@ pub struct ScriptHeap {
     /// instead of being refused. Off for Octoscript, which refuses them.
     pub(crate) charge_native_strings_after: bool,
     /// The module registrations, while a collect run records them
-    /// (`census`).
-    pub census: Option<Box<crate::census::Census>>,
+    /// (makepad-script-census; `census`).
+    pub census: Option<Box<dyn crate::census::ScriptCensus>>,
 }
 
 impl ScriptHeap {
@@ -783,6 +783,27 @@ impl ScriptHeap {
         if let (Some(census), Some(obj)) = (&self.census, obj) {
             census.default_used(obj);
         }
+    }
+
+    /// Every object slot, for heap walkers outside the VM (the module
+    /// census): `is_valid`, `get_at`, `generation`, indexing.
+    pub fn object_slots(&self) -> &GenVec<ScriptObjectData> {
+        &self.objects
+    }
+
+    /// Every array slot, for heap walkers outside the VM.
+    pub fn array_slots(&self) -> &GenVec<ScriptArrayData> {
+        &self.arrays
+    }
+
+    /// The objects Rust holds (rooted by a `ScriptObjectRef`).
+    pub fn rooted_objects(&self) -> Vec<ScriptObject> {
+        self.root_objects.borrow().keys().copied().collect()
+    }
+
+    /// The registered type defaults.
+    pub fn type_default_objects(&self) -> Vec<ScriptObject> {
+        self.type_defaults.values().copied().collect()
     }
 
     /// Look up a field's ScriptTypeId from the type-check structure of an object.

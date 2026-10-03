@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 
-pub use crate::makepad_script::top_use::{top_statements, TopStatement};
+pub use makepad_script_census::top_use::{top_statements, TopStatement};
 
 /// Per `script_mod!` block (by file, line and column, as `ScriptModKey`),
 /// its original text and its text with unused definitions blanked.
@@ -85,10 +85,10 @@ impl BlankList {
 
 /// The blank list of a finished run: in every `script_mod!` block, the
 /// top-level definitions whose objects the heap no longer reaches from
-/// what Rust holds ([`crate::makepad_script::top_use`]).
+/// what Rust holds ([`makepad_script_census::top_use`]).
 pub fn compute_blank_list(vm: &mut crate::makepad_script::vm::ScriptVm) -> BlankList {
     let mut list = BlankList::default();
-    for block in crate::makepad_script::top_use::top_use(vm) {
+    for block in makepad_script_census::top_use::top_use(vm) {
         let unused: Vec<&TopStatement> = block.statements.iter().filter(|(_, used)| *used == Some(false)).map(|(s, _)| s).collect();
         if unused.is_empty() {
             continue;

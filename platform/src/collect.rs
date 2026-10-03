@@ -350,15 +350,15 @@ impl Cx {
     /// script's `census`), from now on: before the first script module.
     /// A collect run does this itself; an app's own analysis calls it.
     pub fn record_module_census(&mut self) {
-        self.with_vm(|vm| vm.census_record());
+        self.with_vm(|vm| makepad_script_census::census_record(vm));
     }
 
     /// The script modules registered and used since
     /// [`Self::record_module_census`]; ends the recording. `app_crates`
     /// (crate names as in module paths) are the app's own: all their
     /// modules are used, and what they name.
-    pub fn module_census(&mut self, app_crates: &[&str]) -> Option<makepad_script::census::ModuleUse> {
-        self.with_vm(|vm| makepad_script::census::census_used_from(vm, app_crates))
+    pub fn module_census(&mut self, app_crates: &[&str]) -> Option<makepad_script_census::ModuleUse> {
+        self.with_vm(|vm| makepad_script_census::census_used_from(vm, app_crates))
     }
 
     /// Collect mode from the environment: called once as the Cx is made,

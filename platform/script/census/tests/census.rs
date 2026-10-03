@@ -29,7 +29,7 @@ fn register(vm: &mut ScriptVm, module_path: &'static str, code: &str) {
 fn a_spread_definition_is_used_by_the_module_that_spreads_it() {
     let vm = &mut test_vm();
     vm.new_module(id!(cz));
-    vm.census_record();
+    makepad_script_census::census_record(vm);
     // `vector` is only ever spread by `svg` (its fields are copied at
     // registration: no heap edge leads to it); `unused` nobody names.
     register(vm, "t::vector", "mod.cz.Vector = {fill: 1}");
@@ -40,7 +40,7 @@ fn a_spread_definition_is_used_by_the_module_that_spreads_it() {
     if let Some(obj) = app.as_object() {
         std::mem::forget(vm.bx.heap.new_object_ref(obj));
     }
-    let used = makepad_script::census::census_used(vm).expect("recording");
+    let used = makepad_script_census::census_used(vm).expect("recording");
     assert!(used.used.contains_key("t::svg"), "{used:?}");
     assert!(used.used.contains_key("t::vector"), "a spread definition must stay: {used:?}");
     assert!(!used.used.contains_key("t::unused"), "{used:?}");
@@ -50,7 +50,7 @@ fn a_spread_definition_is_used_by_the_module_that_spreads_it() {
 fn the_app_crate_is_a_root_with_everything_it_names() {
     let vm = &mut test_vm();
     vm.new_module(id!(cz));
-    vm.census_record();
+    makepad_script_census::census_record(vm);
     register(vm, "lib::window", "mod.cz.Window = {title: 1}");
     register(vm, "lib::unused", "mod.cz.Unused = {x: 3}");
     // The app registers its UI inside its own script_mod, and Rust holds it
@@ -61,7 +61,7 @@ fn the_app_crate_is_a_root_with_everything_it_names() {
         std::mem::forget(vm.bx.heap.new_object_ref(obj));
     }
     vm.census_end();
-    let used = makepad_script::census::census_used_from(vm, &["app"]).expect("recording");
+    let used = makepad_script_census::census_used_from(vm, &["app"]).expect("recording");
     assert!(used.used.contains_key("app"), "{used:?}");
     assert!(used.used.contains_key("lib::window"), "what the app names is used: {used:?}");
     assert!(!used.used.contains_key("lib::unused"), "{used:?}");
@@ -71,7 +71,7 @@ fn the_app_crate_is_a_root_with_everything_it_names() {
 fn a_registration_that_patches_a_used_definition_is_used() {
     let vm = &mut test_vm();
     vm.new_module(id!(cz));
-    vm.census_record();
+    makepad_script_census::census_record(vm);
     // `hardware` sets no name of its own: it replaces a field of `sampling`'s
     // definition (render's hardware shadow sampling), and `shader` spreads it.
     register(vm, "t::sampling", "mod.cz.Sampling = {map: {kind: 1}}");
@@ -82,7 +82,7 @@ fn a_registration_that_patches_a_used_definition_is_used() {
     if let Some(obj) = app.as_object() {
         std::mem::forget(vm.bx.heap.new_object_ref(obj));
     }
-    let used = makepad_script::census::census_used(vm).expect("recording");
+    let used = makepad_script_census::census_used(vm).expect("recording");
     assert!(used.used.contains_key("t::sampling"), "{used:?}");
     assert!(used.used.contains_key("t::hardware"), "a patch of a used definition must stay: {used:?}");
     assert!(!used.used.contains_key("t::unused"), "{used:?}");

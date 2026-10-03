@@ -1,0 +1,12 @@
+[package]
+name = "makepad-script-census"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "Which Splash modules and top-level definitions an app used, learned by running it: the input of the web build's module and definition stripping"
+license = "MIT OR Apache-2.0"
+homepage = "https://github.com/makepad/makepad/"
+repository = "https://github.com/makepad/makepad/"
+
+[dependencies]
+makepad-script = { path = "..", version = "1.0.0" }
