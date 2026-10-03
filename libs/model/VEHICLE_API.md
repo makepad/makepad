@@ -17,9 +17,14 @@ document. Ordinary assets with no wheel bindings compile normally; a vehicle
 with any bindings requires all four before compilation/publication.
 
 Author in metres with Y up, the nose towards **+Z**, and the driver's left
-towards **+X**. Front anchors must be ahead of their rear anchors in Z; left
-anchors must have larger X than right anchors. The vehicle runtime rotates
-this model by 180 degrees around Y into its driving direction, engine -Z.
+towards **+X** (facing +Z, +X is on your left). Export reads the frame from
+the wheels themselves: forward runs from the rear axle's middle to the front
+axle's, so a car laid out along another axis is turned to face +Z, and a
+left/right swap in the bindings is renamed by where each wheel stands. It
+refuses only a layout with no frame: a front wheel not ahead of both rear
+wheels, or an axle whose two wheels share a side. The vehicle runtime
+rotates the model by 180 degrees around Y into its driving direction,
+engine -Z.
 
 Each wheel's rotation axle is **object-local X**. The cylinder primitive's
 axle is Y, so rotate its geometry onto X using a mesh transform before binding.
@@ -30,6 +35,12 @@ Wheel node world transforms support translation and positive uniform scale;
 rotated or nonuniform node bases are refused. Use geometry transforms for the
 axle orientation. Wheel descendants may contain additional rigid rim geometry,
 but cannot contain another wheel binding.
+
+Build all four tires the same way: geometry centred on the hub with `pivot`
+`[0,0,0]` at the node origin, and the right side a translated copy of the
+left, never mirrored (negative scale or a mirror op) or turned 180 degrees.
+At runtime each tire rolls about the model's X axis through its hub, forward
+when the car moves forward, whatever its geometry's own orientation.
 
 `pivot` is the wheel centre in object-local coordinates. Export computes its
 model-space anchor through the object hierarchy. `radius` and `width` are

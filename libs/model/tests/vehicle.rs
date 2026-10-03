@@ -158,3 +158,33 @@ fn invalid_visual_wheel_limits_refuse_atomically(){
         assert_eq!(doc.to_bytes(None).unwrap(),source);
     }
 }
+
+#[test]
+fn a_vehicle_laid_out_along_another_axis_with_its_sides_swapped_exports_facing_plus_z(){
+    // The wheels say the car faces -X, and every left binding sits on the
+    // car's right: the export turns it to +Z and names each corner by place.
+    let mut doc=vehicle();
+    for i in 0..4{
+        let (front,bound_left)=(i<2,i%2==0);
+        let (x,z)=(if front{-1.3}else{1.3},if bound_left{-0.95}else{0.95});
+        apply(&mut doc,&format!("turn_{i}"),vec![Operation::Scene(SceneOperation::Node{object:format!("tire_{i}"),node:SceneNode{parent:Some("body".into()),transform:Transform{translation:[x,-0.35,z],..Default::default()},..Default::default()}})]);
+    }
+    let product=doc.compile(None).unwrap();
+    let model=StaticModel::parse_glb(&product.glb).unwrap();
+    for i in 0..4usize{
+        let (front,bound_left)=(i<2,i%2==0);
+        let (x,z)=(if front{-1.3f32}else{1.3},if bound_left{-0.95f32}else{0.95});
+        let expected=format!("wheel_{}_{}",if front{"front"}else{"rear"},if bound_left{"right"}else{"left"});
+        let wheel=model.driven_parts.iter().find(|p|p.connection==expected).unwrap_or_else(||panic!("{expected} missing"));
+        let anchor=[-2.+z,0.65,-(4.+x)];
+        assert!((wheel.anchor.x-anchor[0]).abs()<1e-4&&(wheel.anchor.y-anchor[1]).abs()<1e-4&&(wheel.anchor.z-anchor[2]).abs()<1e-4,"{expected}: {:?}",wheel.anchor);
+        let rest=wheel.rest_transform();
+        assert!((rest.v[12]-wheel.anchor.x).abs()<1e-4&&(rest.v[14]-wheel.anchor.z).abs()<1e-4,"the drawn wheel stands at its anchor");
+    }
+    let fronts:Vec<_>=model.driven_parts.iter().filter(|p|p.connection.contains("front")).map(|p|p.anchor.z).collect();
+    assert!(fronts.iter().all(|z|*z>-3.),"front axle ahead (+Z)");
+    // Axles on top of each other still have no frame.
+    let mut flat=vehicle();
+    for i in 0..4{apply(&mut flat,&format!("flat_{i}"),vec![Operation::Scene(SceneOperation::Node{object:format!("tire_{i}"),node:SceneNode{parent:Some("body".into()),transform:Transform{translation:[if i%2==0{0.95}else{-0.95},-0.35,0.],..Default::default()},..Default::default()}})]);}
+    assert!(flat.compile(None).is_err());
+}
