@@ -867,10 +867,18 @@ pub struct RawInput {
     height: f64,
     dpi_factor: f64,
     abs: Vec2d,
+    /// The wide desktop's screens, as `[x, y, width, height]` in raw input's own
+    /// coordinates: relative pointer motion stays on them, so screens of
+    /// different heights leave no reachable dead corners.
+    screen_rects: Vec<[f64; 4]>,
 }
 
 impl RawInput {
     pub fn new(width: f64, height: f64, dpi_factor: f64) -> Self {
+        // Guard like `set_bounds` does: a non-positive or non-finite factor
+        // carries no usable information (a zeroed or corrupt state value),
+        // and dividing by it later would poison every pointer coordinate.
+        let dpi_factor = if dpi_factor.is_finite() && dpi_factor > 0.0 { dpi_factor } else { 1.0 };
         let mut input = Self {
             devices: Vec::new(),
             next_device_id: 0,
@@ -881,13 +889,14 @@ impl RawInput {
             height,
             dpi_factor,
             abs: dvec2(0.0, 0.0),
+            screen_rects: Vec::new(),
             modifiers: Default::default(),
         };
         input.scan_devices();
         input
     }
 
-    /// The pointer's clamp rectangle follows the primary display. Called when a
+    /// The pointer's clamp rectangle follows the wide desktop. Called when a
     /// hotplug reconcile changes the desktop size; the current pointer position
     /// is kept and clamped so it stays on screen.
     pub fn set_bounds(&mut self, width: f64, height: f64, dpi_factor: f64) {
@@ -898,6 +907,22 @@ impl RawInput {
         }
         self.abs.x = self.abs.x.clamp(0.0, width.max(0.0));
         self.abs.y = self.abs.y.clamp(0.0, height.max(0.0));
+        self.clamp_to_screens();
+    }
+
+    /// The screens of the wide desktop, as `[x, y, width, height]` in the same
+    /// coordinates as the pointer; an empty list keeps the plain bounds clamp.
+    pub fn set_screen_rects(&mut self, rects: Vec<[f64; 4]>) {
+        self.screen_rects = rects;
+        self.clamp_to_screens();
+    }
+
+    fn clamp_to_screens(&mut self) {
+        if !self.screen_rects.is_empty() {
+            let (x, y) = crate::linux_wide_desktop::clamp_to_rects(&self.screen_rects, self.abs.x, self.abs.y);
+            self.abs.x = x;
+            self.abs.y = y;
+        }
     }
 
     fn scan_devices(&mut self) {
@@ -1062,6 +1087,7 @@ impl RawInput {
                     } else {
                         self.abs.x = (self.abs.x + delta.x).clamp(0.0, self.width.max(0.0));
                         self.abs.y = (self.abs.y + delta.y).clamp(0.0, self.height.max(0.0));
+                        self.clamp_to_screens();
                         dir_evts.push(DirectEvent::MouseMove(MouseMoveEvent {
                             lock_delta: Default::default(), abs: self.abs, window_id,
                             modifiers: self.modifiers, time, handled: Cell::new(Area::Empty),
@@ -1105,6 +1131,7 @@ impl RawInput {
                 if self.abs.x > self.width {
                     self.abs.x = self.width
                 }
+                self.clamp_to_screens();
             }
             EvRelCodes::REL_Y => {
                 self.abs.y += evt.value as f64 * crate::linux_input::pointer_speed(false) as f64 / 100.0 / self.dpi_factor;
@@ -1114,6 +1141,7 @@ impl RawInput {
                 if self.abs.y > self.height {
                     self.abs.y = self.height
                 }
+                self.clamp_to_screens();
             }
             EvRelCodes::REL_WHEEL | EvRelCodes::REL_HWHEEL => {
                 let delta = evt.value as f64 * 40.0;

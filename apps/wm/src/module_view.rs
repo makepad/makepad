@@ -136,6 +136,22 @@ impl MpModuleView {
         self.draw_bg.redraw(cx);
     }
 
+    /// The keyboard is (as far as can be told) on a widget of this tile's
+    /// root. A module's widgets claim the key focus themselves, so there is
+    /// no one area to compare as `MpRunView` does; they draw in the tile's
+    /// draw list inside its rect, so a focused area that does both counts
+    /// as ours. A field elsewhere (another tile, the bar, a flyout away
+    /// from this tile) keeps the keyboard.
+    fn holds_key_focus(&self, cx: &Cx) -> bool {
+        let key = cx.key_focus();
+        if key == Area::Empty || !key.is_valid(cx) || !self.area.is_valid(cx) {
+            return false;
+        }
+        key.draw_list_id().is_some()
+            && key.draw_list_id() == self.area.draw_list_id()
+            && self.area.rect(cx).contains(key.rect(cx).center())
+    }
+
     /// What the root's panic said, once it has.
     pub fn crashed(&self) -> Option<&str> {
         self.crashed.as_deref()
@@ -210,10 +226,15 @@ impl TileHost for MpModuleView {
     }
 
     fn release_keyboard(&mut self, cx: &mut Cx) {
+        let held = self.focused && self.holds_key_focus(cx);
         self.focused = false;
         // Whatever inside held the keyboard must let go too, or a field in
-        // a tile behind the pane would keep eating keys.
-        cx.set_key_focus(Area::Empty);
+        // a tile behind the pane would keep eating keys. Only when it is
+        // ours (as `MpRunView` checks `has_key_focus`): a field in a menu,
+        // flyout or another tile keeps it.
+        if held {
+            cx.set_key_focus(Area::Empty);
+        }
     }
 
     fn set_takes_key_focus(&mut self, on: bool) {

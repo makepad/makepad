@@ -11,7 +11,10 @@ pub const MIN_WINDOW_SIZE: Vec2d = Vec2d { x: 200.0, y: 120.0 };
 /// The rectangles are in the same coordinate space as the platform's window-position API,
 /// so a backend must build them from the same system calls it positions windows with:
 /// physical pixels with a top-left origin on Windows and X11, points with Cocoa's
-/// bottom-left origin on macOS.
+/// bottom-left origin on macOS. On Linux's direct backend the rectangles are window
+/// coordinates of the wide desktop — native pixels divided by the main window's effective
+/// DPI factor (which includes any DPI override) — with a top-left origin; other Linux
+/// backends return no screens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScreenGeom {
     /// The display's full extent.
@@ -37,13 +40,59 @@ pub fn screens() -> Vec<ScreenGeom> {
     crate::os::apple::macos::macos_window::macos_screens()
 }
 
+/// The screens the Linux direct backend arranged into its wide desktop, in
+/// window coordinates (native pixels divided by the window's DPI factor).
+/// Empty for other Linux backends.
+///
+/// `screens()` below is a free function without a `Cx`, so the direct
+/// backend publishes into this static; a future X11 implementation must
+/// publish here too or split the cfg. Connector names are kept alongside
+/// the geometry, under the same lock, so the two lists are always published
+/// together: index i of `screens()` and of `linux_screen_names()` is always
+/// the same screen.
+#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos")))]
+static LINUX_SCREENS: std::sync::Mutex<(Vec<ScreenGeom>, Vec<String>)> =
+    std::sync::Mutex::new((Vec::new(), Vec::new()));
+
+/// Every display attached right now, in the platform's window-position space:
+/// on Linux, the direct backend's wide desktop, ordered left to right by
+/// position (empty for other backends).
+#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos")))]
+pub fn screens() -> Vec<ScreenGeom> {
+    LINUX_SCREENS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).0.clone()
+}
+
+/// The connector name of each of `screens()`, in the same left-to-right
+/// order: index i of both lists is the same screen. Empty on other Linux
+/// backends, and (via the fallback below) on non-Linux platforms.
+#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos")))]
+#[allow(dead_code)] // not read inside the platform crate; a host process reads it
+pub fn linux_screen_names() -> Vec<String> {
+    LINUX_SCREENS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).1.clone()
+}
+
+/// Published by the direct backend whenever its desktop layout may change.
+#[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos"), linux_direct))]
+pub(crate) fn set_linux_screens(screens: Vec<ScreenGeom>, names: Vec<String>) {
+    *LINUX_SCREENS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = (screens, names);
+}
+
 /// A backend with no display list to offer answers with none; a caller
 /// then keeps its window where the system put it.
 #[cfg(not(any(
     all(not(gpusim), target_os = "windows"),
-    all(not(gpusim), target_os = "macos")
+    all(not(gpusim), target_os = "macos"),
+    all(not(gpusim), target_os = "linux", not(target_env = "ohos"))
 )))]
 pub fn screens() -> Vec<ScreenGeom> {
+    Vec::new()
+}
+
+/// Non-Linux platforms (and the gpusim/OHOS Linux fallback above) have no
+/// connector names to offer; `screens()` is empty there too.
+#[cfg(not(all(not(gpusim), target_os = "linux", not(target_env = "ohos"))))]
+#[allow(dead_code)] // not read inside the platform crate; a host process reads it
+pub fn linux_screen_names() -> Vec<String> {
     Vec::new()
 }
 

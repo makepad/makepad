@@ -133,6 +133,12 @@ impl CxVulkan {
         generation: u64,
         target: [u8; 16],
     ) -> Result<(), String> {
+        if !self.desktop.peers.is_empty() {
+            return Err(
+                "changing the rendering GPU is not supported while screens on other GPUs are part of the desktop"
+                    .into(),
+            );
+        }
         let state = &mut self.desktop.gpu;
         if state.pending.is_some() || state.retired.is_some() {
             return Err("the previous GPU transition has not retired".into());

@@ -74,6 +74,11 @@ pub mod linux_display;
 #[path = "os/linux/input.rs"]
 pub mod linux_input;
 
+// Wide-desktop geometry for the direct backend: pure, unit tested anywhere.
+#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[path = "os/linux/wide_desktop.rs"]
+pub mod linux_wide_desktop;
+
 #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
 #[path = "os/linux/gpu.rs"]
 pub mod linux_gpu;
@@ -334,7 +339,7 @@ pub use {
             unregister_media_playback_session, MediaPlaybackSessionId,
         },
         script::vm::*,
-        screen::{fit_window_rect_to_screens, screens, ScreenGeom, MIN_WINDOW_SIZE},
+        screen::{fit_window_rect_to_screens, linux_screen_names, screens, ScreenGeom, MIN_WINDOW_SIZE},
         shared_bytes::{MappedBytes, SharedBytes, SharedBytesStats},
         storage::{
             StorageError, StorageHandle, StorageList, StorageOp, StorageRequestId,

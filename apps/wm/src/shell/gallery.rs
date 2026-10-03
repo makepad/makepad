@@ -562,7 +562,7 @@ impl ShellGallery {
                 continue;
             };
             match wa.cast::<ShellBarAction>() {
-                ShellBarAction::Press(module) => {
+                ShellBarAction::Press(seg, module) => {
                     if matches!(module, BarModule::WindowMin | BarModule::WindowMax | BarModule::WindowClose) {
                         // A picture of the controls: the gallery window is
                         // not minimized, maximized or closed by them.
@@ -574,7 +574,7 @@ impl ShellGallery {
                         continue;
                     }
                     if let Some(kind) = PanelKind::for_module(module) {
-                        let anchor = self.bar.module_rect(module).unwrap_or_default();
+                        let anchor = self.bar.module_rect(seg, module).unwrap_or_default();
                         self.bar_panel.toggle(cx, kind, anchor);
                         self.bar.data.open_panel = self.bar_panel.open.map(|k| k.module());
                     }

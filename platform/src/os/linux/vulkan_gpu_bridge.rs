@@ -408,6 +408,11 @@ impl GpuBridge {
         Ok(owner_done && self.source.idle(source)?)
     }
 
+    /// The size of the rectangle each send carries.
+    pub fn extent(&self) -> vk::Extent2D {
+        self.extent
+    }
+
     pub fn pending(&self) -> bool {
         matches!(self.handoff, Handoff::Read(_))
     }
@@ -560,14 +565,27 @@ impl GpuBridge {
     /// Source image is local to `source` and ends in SHADER_READ_ONLY_OPTIMAL.
     /// Caller checked writable and submitted its composition before this call.
     pub unsafe fn send(&mut self, source: &CxVulkan, local_image: vk::Image) -> Result<(), String> {
+        unsafe { self.send_region(source, local_image, vk::Offset2D { x: 0, y: 0 }) }
+    }
+
+    /// Like `send`, but copies the bridge-sized rectangle of `local_image`
+    /// whose top-left corner is `offset`: one display GPU's slice of a larger
+    /// composition. The rectangle must lie inside `local_image`.
+    pub unsafe fn send_region(
+        &mut self,
+        source: &CxVulkan,
+        local_image: vk::Image,
+        offset: vk::Offset2D,
+    ) -> Result<(), String> {
         let Handoff::Write { sync, .. } = std::mem::replace(
             &mut self.handoff,
             Handoff::Failed("incomplete GPU handoff".into()),
         ) else {
             return Err("GPU bridge is not available for a new frame".into());
         };
+        let offset = vk::Offset3D { x: offset.x, y: offset.y, z: 0 };
         let result = self
-            .copy(source, &self.source, local_image, sync, true, true)
+            .copy(source, &self.source, local_image, offset, sync, true, true)
             .and_then(|()| self.source.submit(source, true));
         match result {
             Ok(sync) => {
@@ -605,6 +623,7 @@ impl GpuBridge {
                 destination,
                 &self.destination,
                 local_image,
+                vk::Offset3D::default(),
                 sync,
                 false,
                 local_valid,
@@ -627,11 +646,15 @@ impl GpuBridge {
         Err(error)
     }
 
+    /// `local_offset` is where the bridge-sized rectangle sits in
+    /// `local_image` (the copy's source when sending, destination when not).
+    #[allow(clippy::too_many_arguments)]
     fn copy(
         &self,
         gpu: &CxVulkan,
         endpoint: &Endpoint,
         local_image: vk::Image,
+        local_offset: vk::Offset3D,
         sync: dma_buf::SyncFile,
         write_bridge: bool,
         local_valid: bool,
@@ -698,9 +721,16 @@ impl GpuBridge {
             let layers = vk::ImageSubresourceLayers::default()
                 .aspect_mask(vk::ImageAspectFlags::COLOR)
                 .layer_count(1);
+            let (src_offset, dst_offset) = if write_bridge {
+                (local_offset, vk::Offset3D::default())
+            } else {
+                (vk::Offset3D::default(), local_offset)
+            };
             let region = vk::ImageCopy::default()
                 .src_subresource(layers)
                 .dst_subresource(layers)
+                .src_offset(src_offset)
+                .dst_offset(dst_offset)
                 .extent(vk::Extent3D {
                     width: self.extent.width,
                     height: self.extent.height,

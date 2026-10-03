@@ -2,7 +2,7 @@
 //! destroys groups, split ratios, workspace membership, or an app instance.
 use crate::layout::{ClientId, LRect};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct DesktopWindow {
     pub client: ClientId,
     pub rect: LRect,
