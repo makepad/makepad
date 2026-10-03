@@ -3204,9 +3204,12 @@ impl CxTexture {
             // excluding the atlas from partial updates entirely.
             const ATLAS_INPLACE_UPDATES: bool =
                 cfg!(not(any(target_env = "ohos", target_os = "android")));
-            let is_append_atlas = matches!(self.format, TextureFormat::VecRGBAf32 { .. });
+            let is_float_rgba = matches!(self.format, TextureFormat::VecRGBAf32 { .. });
             let allow_partial_texture_updates =
-                DO_PARTIAL_TEXTURE_UPDATES && (!is_append_atlas || ATLAS_INPLACE_UPDATES);
+                DO_PARTIAL_TEXTURE_UPDATES && (!is_float_rgba || ATLAS_INPLACE_UPDATES);
+            // Only an append-rows texture keeps headroom; every other one is
+            // allocated at exactly its size, so size() is what was uploaded.
+            let is_append_atlas = is_float_rgba && self.append_rows;
             let unpack_alignment = gl_unpack_alignment(bytes_per_pixel);
 
             match updated {

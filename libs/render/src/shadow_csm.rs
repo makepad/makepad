@@ -533,7 +533,9 @@ mod tests {
             1,
             "the one coverage test must reject uncovered z"
         );
-        assert!(src.contains("self.csm_inside(q, 0.99) < 0.5"), "selection walks the cascades by full XYZ coverage");
+        // The search keeps the first cascade whose full-XYZ test passes
+        // (a for loop since 08c2d52fc; the while form found none on Metal).
+        assert!(src.contains("self.csm_inside(qc, 0.99) > 0.5"), "selection walks the cascades by full XYZ coverage");
     }
 
     /// Every slice corner must land inside its cascade's ndc square and z

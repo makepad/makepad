@@ -51,9 +51,7 @@ script_mod! {
     // detail_map holds one meta row: texels 0..8 the SH9 irradiance
     // coefficients, texel 9 = (levels, level_height, intensity, rotation in
     // radians); then the prefiltered atlas: `levels` equirect levels of
-    // `level_height` rows (roughness k / (levels - 1)). Rows count from the
-    // top: size() is the allocation, which a backend may make taller than
-    // the rows it holds.
+    // `level_height` rows (roughness k / (levels - 1)).
     mod.draw.mat_ibl_meta = fn(i: float) -> vec4 {
         let size = self.detail_map.size()
         return self.detail_map.sample_nearest(vec2((i + 0.5) / size.x, 0.5 / size.y))

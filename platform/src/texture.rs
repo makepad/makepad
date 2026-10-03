@@ -124,7 +124,12 @@ impl std::error::Error for ReadbackError {}
 pub(crate) enum ReadbackChannelOrder { Bgra, Rgba }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ReadbackOrigin { TopLeft, BottomLeft }
+pub(crate) enum ReadbackOrigin {
+    /// Metal's raw window grab (`remote::deliver_grab_pixels`).
+    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
+    TopLeft,
+    BottomLeft,
+}
 
 /// The attachment's UNORM8 pixels as RGBA, rows top to bottom, packed
 /// (`width * 4` bytes a row) on every backend; the alpha convention is the
@@ -1613,6 +1618,12 @@ impl Texture {
         cx.textures[self.texture_id()].render_mips = mips;
     }
 
+    /// Mark an append-only data texture that grows by rows (see
+    /// `CxTexture::append_rows`). Off by default.
+    pub fn set_append_rows(&self, cx: &mut Cx, append_rows: bool) {
+        cx.textures[self.texture_id()].append_rows = append_rows;
+    }
+
     pub fn animation<'a>(&self, cx: &'a mut Cx) -> &'a Option<TextureAnimation> {
         &cx.textures[self.texture_id()].animation
     }
@@ -1753,6 +1764,12 @@ pub struct CxTexture {
     /// every pass that renders into it (for shaders that minify it with
     /// `sample_grad` / `sample_lod`). Metal; other backends keep level 0 only.
     pub(crate) render_mips: bool,
+    /// An append-only data texture that grows by rows (the SLUG glyph
+    /// atlas): a backend that updates rows in place may allocate spare rows
+    /// below the uploaded ones so growth reuses the allocation. Its shaders
+    /// address texels absolutely and never by `size()`. Every other texture
+    /// is allocated at exactly its size, so `size()` is the size uploaded.
+    pub(crate) append_rows: bool,
     pub os: CxOsTexture,
     pub previous_platform_resource: Option<CxOsTexture>,
 }

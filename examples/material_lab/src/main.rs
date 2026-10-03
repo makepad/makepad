@@ -17,16 +17,22 @@
 //! With `--scene=rect` or `--scene=ibl` the lab instead draws a `World`
 //! (`Renderer::draw_scene_full`) of generic items on resident geometry, in
 //! the dark (the world's Sun and Sky at zero):
-//! 0. a white cube under a rectangular area light (rect) or a smooth metal
+//! 0. a white cube lit by a rectangular area light before it (rect) or a smooth metal
 //!    cube lit by the `sunset` environment (ibl);
 //! 1. the same material with no light near it;
 //! 2. an Unlit cyan cube;
 //! 3. two small red cubes from one packed Instances item.
+//!
+//! Above every cube sits a sphere with the same material (and in the rect
+//! scene its own light): a sphere has every normal, so a light, the
+//! environment, a rim or a highlight always shows on it, where a cube can
+//! turn its faces away.
 use makepad_draw::*;
 use makepad_render::makepad_render_material::{Hook, HookMask, HookSet, MaterialDesc};
 use makepad_render::{
     preview_scene_state, set_pass_camera, CustomMaterialInstance, DrawSceneAlpha, DrawSceneCube, DrawSceneCustom,
     DrawSceneSkinned, DrawSceneSky, DrawSceneTerrain, ModelInstance, PreviewLook, PreviewStage, Renderer, SceneDraws,
+    TransformTint,
 };
 use makepad_render_graph::DrawSceneTexture;
 use makepad_widgets::*;
@@ -40,6 +46,9 @@ app_main!(App);
 
 pub const COLUMNS: usize = 7;
 pub const SPACING: f32 = 1.4;
+/// The sphere row's base height: spheres span y 1.35..2.35 above the cubes'
+/// 0..1, with a gap the tests find the rows by.
+pub const SPHERE_ROW: f32 = 1.35;
 /// The offscreen pass, in pixels (drawn stretched to the widget).
 pub const PASS_W: usize = 800;
 pub const PASS_H: usize = 300;
@@ -129,10 +138,78 @@ fn cube_geometry() -> GeometryData {
             ]);
             g.normals.push(n);
         }
-        // Winding outward (cross(b - a, c - a) along n).
-        g.indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        // Counter-clockwise seen from outside: cross(b - a, c - a) along n.
+        g.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
     g
+}
+
+/// A unit-diameter sphere on the cube's footprint (y 0..1): rings of shared
+/// vertices, so every normal is smooth (the direction from the centre).
+/// Quads come counter-clockwise seen from outside.
+fn sphere_mesh() -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[u32; 4]>) {
+    const RINGS: u32 = 24;
+    const SEGS: u32 = 48;
+    let mut positions = vec![[0.0, 1.0, 0.0]];
+    let mut normals = vec![[0.0, 1.0, 0.0]];
+    for r in 1..RINGS {
+        let theta = std::f32::consts::PI * r as f32 / RINGS as f32;
+        for s in 0..SEGS {
+            let phi = std::f32::consts::TAU * s as f32 / SEGS as f32;
+            let n = [theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin()];
+            positions.push([0.5 * n[0], 0.5 + 0.5 * n[1], 0.5 * n[2]]);
+            normals.push(n);
+        }
+    }
+    let bottom = positions.len() as u32;
+    positions.push([0.0, 0.0, 0.0]);
+    normals.push([0.0, -1.0, 0.0]);
+    // Ring r (1..RINGS-1), segment s; the poles are single vertices.
+    let at = |r: u32, s: u32| match r {
+        0 => 0,
+        r if r == RINGS => bottom,
+        r => 1 + (r - 1) * SEGS + s % SEGS,
+    };
+    let mut quads = Vec::new();
+    for r in 0..RINGS {
+        for s in 0..SEGS {
+            // Along the segment, then down the ring: counter-clockwise.
+            quads.push([at(r, s), at(r, s + 1), at(r + 1, s + 1), at(r + 1, s)]);
+        }
+    }
+    (positions, normals, quads)
+}
+
+/// The sphere as resident geometry, wound as `cube_geometry`.
+fn sphere_geometry() -> GeometryData {
+    let (positions, normals, quads) = sphere_mesh();
+    let mut g = GeometryData { positions, normals, ..Default::default() };
+    for [a, b, c, d] in quads {
+        // A pole quad has two corners on the pole: one triangle.
+        if a != b {
+            g.indices.extend_from_slice(&[a, b, c]);
+        }
+        if c != d {
+            g.indices.extend_from_slice(&[a, c, d]);
+        }
+    }
+    g
+}
+
+/// The sphere for the hook row's model lane, wound as `cube_glb`.
+fn sphere_glb() -> Vec<u8> {
+    let (positions, _, quads) = sphere_mesh();
+    let mut indices = Vec::new();
+    for [a, b, c, d] in quads {
+        if a != b {
+            indices.extend_from_slice(&[a, b, c]);
+        }
+        if c != d {
+            indices.extend_from_slice(&[a, c, d]);
+        }
+    }
+    let colors = vec![[1.0f32, 1.0, 1.0]; positions.len()];
+    makepad_gltf::write_glb_mesh_colored(&positions, &indices, Some(&colors))
 }
 
 fn column_x(c: usize) -> f32 {
@@ -143,9 +220,11 @@ fn column_x(c: usize) -> f32 {
 fn items_world(scene: Scene) -> World {
     let mut w = World::new();
     let cube = GeometryRef::Resident(GeometryId(1));
-    let at = |c: usize| {
+    let sphere = GeometryRef::Resident(GeometryId(2));
+    let at = |c: usize, y: f32| {
         let mut m = Mat4f::identity();
         m.v[12] = column_x(c);
+        m.v[13] = y;
         m
     };
     // No key, no fill: only the lights under test.
@@ -157,40 +236,51 @@ fn items_world(scene: Scene) -> World {
     };
     w.set_material(MaterialFrame { id: MaterialId(1), kind: lit, ..Default::default() });
     w.set_material(MaterialFrame { id: MaterialId(2), kind: MaterialKind::Unlit(UnlitParams { color: vec4(0.0, 1.0, 1.0, 1.0), intensity: 1.0, map: None }), ..Default::default() });
-    w.items.push(Item::new(ItemKind::Mesh { geometry: cube, material: MaterialId(1), transform: at(0) }));
-    w.items.push(Item::new(ItemKind::Mesh { geometry: cube, material: MaterialId(1), transform: at(1) }));
-    w.items.push(Item::new(ItemKind::Mesh { geometry: cube, material: MaterialId(2), transform: at(2) }));
-    // Two half-size cubes, one Instances item, tinted red through an
-    // Unlit material (so they show in the dark).
-    let mut data = Vec::new();
-    for dy in [0.0f32, 0.55] {
-        let mut m = Mat4f::identity();
-        m.v[0] = 0.45;
-        m.v[5] = 0.45;
-        m.v[10] = 0.45;
-        m.v[12] = column_x(3);
-        m.v[13] = dy;
-        data.extend_from_slice(&m.v);
-        data.extend_from_slice(&[1.0, 0.0, 0.0, 1.0]);
+    for (geometry, y) in [(cube, 0.0), (sphere, SPHERE_ROW)] {
+        w.items.push(Item::new(ItemKind::Mesh { geometry, material: MaterialId(1), transform: at(0, y) }));
+        w.items.push(Item::new(ItemKind::Mesh { geometry, material: MaterialId(1), transform: at(1, y) }));
+        w.items.push(Item::new(ItemKind::Mesh { geometry, material: MaterialId(2), transform: at(2, y) }));
+        // Two half-size copies, one Instances item, tinted red through an
+        // Unlit material (so they show in the dark).
+        let records = [0.0f32, 0.55].map(|dy| {
+            let mut m = Mat4f::identity();
+            m.v[0] = 0.45;
+            m.v[5] = 0.45;
+            m.v[10] = 0.45;
+            m.v[12] = column_x(3);
+            m.v[13] = y + dy;
+            TransformTint { transform: m, tint: vec4(1.0, 0.0, 0.0, 1.0), glow: 0.0 }
+        });
+        w.items.push(Item::new(ItemKind::Instances {
+            geometry,
+            material: MaterialId(4),
+            source: InstanceSource::Packed { data: TransformTint::floats(&records).into(), layout: makepad_render::LAYOUT_TRANSFORM_TINT },
+            count: 2,
+        }));
     }
-    w.items.push(Item::new(ItemKind::Instances {
-        geometry: cube,
-        material: MaterialId(4),
-        source: InstanceSource::Packed { data: data.into(), layout: makepad_render::LAYOUT_TRANSFORM_TINT },
-        count: 2,
-    }));
     w.set_material(MaterialFrame { id: MaterialId(4), kind: MaterialKind::Unlit(UnlitParams { color: vec4(1.0, 1.0, 1.0, 1.0), intensity: 1.0, map: None }), ..Default::default() });
     match scene {
-        Scene::Rect => w.lights.push(Light::Rect {
-            pos: vec3f(column_x(0), 1.3, 0.2),
-            normal: vec3f(0.0, -1.0, -0.3),
-            tangent: vec3f(1.0, 0.0, 0.0),
-            size: vec2f(0.8, 0.4),
-            color: vec3f(1.0, 0.95, 0.85),
-            intensity: 60.0,
-            // Short of the next column (1.4 m away).
-            range: 1.25,
-        }),
+        // In front of the cube's camera-side face (z = 0.5; the camera
+        // looks down -z) and aimed back at it: the emitter is one-sided,
+        // so a light above the cube reached only its thin top face. Every
+        // point of that face is within 0.9 m; the next cube's nearest point
+        // is 1.006 m away, past the range, so it gets no light at all. The
+        // sphere above has the same light at the same place; each light is
+        // out of the other row's reach (0.96 m to the cube, 1.07 m to the
+        // sphere).
+        Scene::Rect => {
+            for y in [0.6, SPHERE_ROW + 0.5] {
+                w.lights.push(Light::Rect {
+                    pos: vec3f(column_x(0), y, 0.95),
+                    normal: vec3f(0.0, -0.25, -1.0),
+                    tangent: vec3f(1.0, 0.0, 0.0),
+                    size: vec2f(0.8, 0.4),
+                    color: vec3f(1.0, 0.95, 0.85),
+                    intensity: 6.0,
+                    range: 0.95,
+                });
+            }
+        }
         Scene::Ibl => {
             w.environment.ibl = Some(makepad_scene::Ibl { source: makepad_scene::IblSource::Procedural(2), intensity: 1.0, rotation_deg: 0.0 });
         }
@@ -305,11 +395,13 @@ impl MaterialLab {
 
     fn instances() -> Vec<ModelInstance> {
         let names = [None, Some("finish"), Some("unlit"), Some("error"), Some("vertex"), Some("lighting"), Some("light")];
-        names.iter().enumerate().map(|(i, name)| {
+        let rows = [("lab/cube", 0.0), ("lab/sphere", SPHERE_ROW)];
+        rows.iter().flat_map(|&(model, y)| names.iter().enumerate().map(move |(i, name)| (model, y, i, name))).map(|(model, y, i, name)| {
             let mut transform = Mat4f::identity();
-            transform.v[12] = (i as f32 - (COLUMNS as f32 - 1.0) * 0.5) * SPACING;
+            transform.v[12] = column_x(i);
+            transform.v[13] = y;
             ModelInstance {
-                model: "lab/cube".into(),
+                model: model.into(),
                 custom_material: name.map(|n| CustomMaterialInstance { name: n.into(), params: Vec4f::default() }),
                 transform,
                 tint: vec4(0.8, 0.8, 0.8, 1.0),
@@ -339,9 +431,15 @@ impl Widget for MaterialLab {
             if let Err(e) = self.renderer.load_model(cx.cx, "lab/cube", &cube_glb(), None) {
                 log!("material lab: cube did not load: {e}");
             }
+            if let Err(e) = self.renderer.load_model(cx.cx, "lab/sphere", &sphere_glb(), None) {
+                log!("material lab: sphere did not load: {e}");
+            }
             self.install_materials(cx.cx);
             if let Err(e) = self.renderer.register_geometry(GeometryId(1), cube_geometry()) {
                 log!("material lab: cube geometry refused: {e}");
+            }
+            if let Err(e) = self.renderer.register_geometry(GeometryId(2), sphere_geometry()) {
+                log!("material lab: sphere geometry refused: {e}");
             }
         }
         let size = dvec2(PASS_W as f64, PASS_H as f64);
@@ -353,10 +451,17 @@ impl Widget for MaterialLab {
         // texel per point.
         self.pass.set_size(cx, size);
         self.pass.set_dpi_factor(cx, 1.0);
-        let look = PreviewLook { target: vec3f(0.0, 0.9, 0.0), distance: 9.0, fov: 30.0, yaw: 0.0, pitch: -0.12 };
+        // Framed on both rows (cubes y 0..1, spheres 1.35..2.35).
+        let look = PreviewLook { target: vec3f(0.0, 1.15, 0.0), distance: 9.0, fov: 30.0, yaw: 0.0, pitch: -0.12 };
         // The pass draws in its own coordinates: the scene's viewport starts at 0.
         let local = Rect { pos: dvec2(0.0, 0.0), size };
-        if let Some(scene_state) = preview_scene_state(look, local, cx.time()) {
+        if let Some(mut scene_state) = preview_scene_state(look, local, cx.time()) {
+            // The texture is drawn stretched over the widget: project at the
+            // widget's aspect, so a sphere stays round however the window
+            // (or a title bar inside it) shapes the widget.
+            if let Some(shown) = preview_scene_state(look, Rect { pos: dvec2(0.0, 0.0), size: rect.size }, cx.time()) {
+                scene_state.projection = shown.projection;
+            }
             set_pass_camera(cx.cx, &self.pass, &scene_state);
             let cx3d = &mut Cx3d::new(cx.cx);
             let scene = scene();
@@ -389,8 +494,10 @@ impl Widget for MaterialLab {
         cx.end_pass(&self.pass);
         self.draw_bg.draw_vars.set_texture(0, &self.color_texture);
         self.draw_bg.draw_abs(cx, rect);
+        // The pass keeps its own size: its texture is a fixed PASS_W x
+        // PASS_H, so the viewport must be too (an area-placed pass would
+        // follow the window and draw past the texture).
         self.area = self.draw_bg.area();
-        cx.set_pass_area(&self.pass, self.area);
         // Metal compiles pipelines asynchronously: keep drawing until every
         // material's pipeline is ready (the lanes fall back to stock until
         // then), and say so once for the test.
