@@ -193,6 +193,19 @@ pub(super) fn body(p: &Program, target: Target, fix: u32, calls: &[u32]) -> Opti
         }
     }
     w.stmt(sh.element);
+    // The run's counted work: the lanes' counts, summed, into its ctx word.
+    if let Some((var, word)) = sh.post {
+        w.sc.f.get(super::P_CTX);
+        let l = w.vv[var.0 as usize];
+        for lane in 0..4 {
+            w.get(l);
+            w.lane_op(op::I32X4_EXTRACT_LANE, lane);
+            if lane > 0 {
+                w.sc.f.b(op::I32_ADD);
+            }
+        }
+        w.sc.f.mem(op::I32_STORE, 4 * word);
+    }
     Some(finish(w, pre_at))
 }
 

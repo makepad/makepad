@@ -32,9 +32,6 @@ pub const K_HOST_WORK: u32 = 4;
 /// Host buffer 0: the control word (non-zero = stop at the next element),
 /// bound by the runtime to the call's cancel token.
 pub const CONTROL_BUFFER: &str = "#control";
-/// The last host buffer: each element's counted ops (see `crate::work`),
-/// at `element % CHUNK`; the runtime binds one per worker.
-pub const WORK_BUFFER: &str = "#work";
 /// Set to 1 when an emit found its element's slots full.
 pub const K_OVERFLOW: u32 = 5;
 /// A reduce kernel's running value (up to 16 lanes).
@@ -44,7 +41,10 @@ pub const K_HOST_ERR: u32 = 22;
 /// The op-equivalents one host call may cost for its actual input (0: no
 /// limit); set from admission.
 pub const K_HOST_LIMIT: u32 = 23;
-pub const K_PARAMS: u32 = 24;
+/// What a run's loops counted (see `crate::work`), stored after its
+/// element loop (four-wide code: its lanes summed).
+pub const K_WORK: u32 = 24;
+pub const K_PARAMS: u32 = 25;
 /// Most elements one call may run.
 pub const ELEMENT_CAP: u32 = 1 << 30;
 pub const MAX_BUFFERS: usize = 64;
@@ -130,9 +130,8 @@ impl KernelCtx {
         if self.buffers.is_empty() {
             self.buffers.push(BufferDecl { name: CONTROL_BUFFER.into(), access: Access::Read, stride: 1 });
         }
-        // The control word and the work counts take two of the slots.
-        if self.buffers.len() >= MAX_BUFFERS - 1 {
-            return err(span, format!("at most {} buffers", MAX_BUFFERS - 2));
+        if self.buffers.len() >= MAX_BUFFERS {
+            return err(span, format!("at most {} buffers", MAX_BUFFERS));
         }
         self.buffers.push(BufferDecl { name: name.to_string(), access, stride });
         Ok(self.buffers.len() as u8 - 1)
@@ -162,12 +161,17 @@ pub struct KernelLowered {
     /// The entry's name (vertex, instance, element, primitive, reduce_*).
     pub entry: String,
     pub program: Program,
+    /// `program` with its calls inlined (counting alike), optimized: what
+    /// native code and the interpreter run.
+    pub flat: Program,
     pub init: Option<Program>,
     pub params: Vec<ParamInfo>,
     pub buffers: Vec<BufferDecl>,
     pub shared_init: Vec<u32>,
     /// Worst-case AIR ops per element.
     pub cost: u64,
+    /// What each element counts by itself (its loops count at run time).
+    pub element_work: u64,
     /// Every write (and every read of a written buffer) touches only the
     /// element's own records: element ranges can run on different threads.
     pub parallel_safe: bool,
@@ -663,14 +667,24 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
     if program.air_cost() > MAX_COST_PER_ELEMENT {
         return Err(ShaderError::new(0, 1, format!("too much work per element (worst case {} ops); reduce loop sizes", cost)));
     }
-    // Every kernel counts the ops it runs (its budget is counted work).
-    if l.kernel.buffers.is_empty() {
-        l.kernel.buffers.push(BufferDecl { name: CONTROL_BUFFER.into(), access: Access::Read, stride: 1 });
-    }
-    l.kernel.buffers.push(BufferDecl { name: WORK_BUFFER.into(), access: Access::Write, stride: 1 });
-    if !crate::work::count(&mut program, l.kernel.buffers.len() as u8 - 1) {
+    // Every kernel counts the ops it runs (its budget is counted work): its
+    // program (wasm runs it, with functions) and its inlined form (native
+    // code and the interpreter), counted alike, then optimized.
+    let mut flat = (!program.funcs.is_empty()).then(|| crate::ir::inline_calls(&program));
+    let Some(element_work) = crate::work::count(&mut program) else {
         return Err(ShaderError::new(0, 1, "internal compiler error: the element loop was not found for work counting".into()));
-    }
+    };
+    let flat = match flat.as_mut() {
+        // Without functions the program is its own inlined form.
+        None => program.clone(),
+        Some(flat) => {
+            if crate::work::count(flat) != Some(element_work) {
+                return Err(ShaderError::new(0, 1, "internal compiler error: the inlined program counts differently".into()));
+            }
+            crate::opt::optimize(flat);
+            std::mem::take(flat)
+        }
+    };
     let parallel_safe = !l.kernel.nonlocal;
     let (live, folded) = match l.live.take() {
         Some(lift) => {
@@ -680,7 +694,7 @@ pub fn lower_kernel(items: &[Item], prelude_base: usize, layouts: &[Layout], liv
         }
         None => (Vec::new(), Vec::new()),
     };
-    Ok(KernelLowered { kind, math, entry: entry_name, program, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, parallel_safe, live, folded })
+    Ok(KernelLowered { kind, math, entry: entry_name, program, flat, init, params: l.params, buffers: l.kernel.buffers, shared_init: l.shared_init, cost, element_work, parallel_safe, live, folded })
 }
 
 /// Every f32 stored to a host buffer goes through `x != x ? NaN : x`, so

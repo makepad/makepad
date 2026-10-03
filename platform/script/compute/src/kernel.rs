@@ -28,11 +28,6 @@ use std::sync::Arc;
 /// Elements per chunk (the unit of scheduling and of reduce partials).
 pub const CHUNK: usize = 4096;
 
-/// The most ops (by the static worst case) a slice of elements runs
-/// between two looks at the counted work: how far past its limit a call
-/// can run before it stops.
-pub const SLICE_WORK: u64 = 1 << 22;
-
 /// The smallest range a map kernel's call is split into. A map kernel's
 /// result does not depend on how its elements are split (each element
 /// writes only its own records), so a call of a few thousand elements is
@@ -78,9 +73,7 @@ pub struct Kernel {
     /// The entry's name: vertex, instance, element, primitive, reduce_*.
     pub entry: String,
     params: Vec<ParamInfo>,
-    /// The kernel's buffers, then the hidden work buffer (index `work`).
     buffers: Vec<BufferDecl>,
-    work: usize,
     shared: Box<[u32]>,
     program: Program,
     /// `program` with its calls inlined and optimized again (the same
@@ -88,6 +81,9 @@ pub struct Kernel {
     flat: Program,
     /// Worst-case AIR ops per element.
     pub cost: u64,
+    /// What each element counts by itself; its loops count at run time
+    /// (ctx `K_WORK`).
+    element_work: u64,
     /// Element ranges may run on different threads.
     pub parallel_safe: bool,
     #[cfg(target_arch = "aarch64")]
@@ -98,6 +94,8 @@ pub struct Kernel {
     /// Admission's worst-case element estimate, computed on first admit
     /// (the job path stays allocation-free).
     pub(crate) admission: std::sync::OnceLock<crate::admission::ElementCost>,
+    /// One element's worst case in counted ops (slices are sized by it).
+    slice_ops: std::sync::OnceLock<u64>,
     /// Measured ns per element (f32 bits, a moving average; 0: none yet):
     /// how many threads a call is worth.
     speed: AtomicU32,
@@ -206,7 +204,7 @@ pub fn compile_live(src: &str, layouts: &[Layout], backend: Backend, modules: &[
         let mut io = ir::Io { ins: [&zeros, &zeros], outs: [&mut o0, &mut o1] };
         ir::run(init, &mut scratch, &mut mem, &mut io, 1);
     }
-    let flat = ir::flat(&lowered.program).into_owned();
+    let flat = lowered.flat;
     #[cfg(target_arch = "aarch64")]
     let native = if backend == Backend::Native {
         let writable = lowered.buffers.iter().enumerate().fold(0u64, |m, (k, b)| if b.access != Access::Read && k < 64 { m | 1 << k } else { m });
@@ -224,18 +222,19 @@ pub fn compile_live(src: &str, layouts: &[Layout], backend: Backend, modules: &[
         math: lowered.math,
         entry: lowered.entry,
         params: lowered.params,
-        work: lowered.buffers.len() - 1,
         buffers: lowered.buffers,
         shared: shared.into_boxed_slice(),
         program: lowered.program,
         flat,
         cost: lowered.cost,
+        element_work: lowered.element_work,
         parallel_safe: lowered.parallel_safe,
         #[cfg(target_arch = "aarch64")]
         native,
         #[cfg(target_arch = "aarch64")]
         neon,
         admission: std::sync::OnceLock::new(),
+        slice_ops: std::sync::OnceLock::new(),
         speed: AtomicU32::new(0),
         wasm_slots: [AtomicU32::new(0), AtomicU32::new(0)],
         live_values,
@@ -483,33 +482,31 @@ impl Kernel {
         self.params.iter().position(|p| p.name == name)
     }
 
-    /// The buffers a host binds (index 0, the control word, included; the
-    /// hidden work buffer after them is the runtime's).
     pub fn buffers(&self) -> &[BufferDecl] {
-        &self.buffers[..self.work]
+        &self.buffers
     }
 
     pub fn buffer_index(&self, name: &str) -> Option<usize> {
-        self.buffers().iter().position(|b| b.name == name)
+        self.buffers.iter().position(|b| b.name == name)
     }
 
-    /// Every buffer slot of a call's table, the work buffer last.
-    pub fn table_slots(&self) -> usize {
-        self.buffers.len()
+    /// Elements per slice when `remaining` ops of the call's limit are left
+    /// to `threads` workers: as many as can run (at their worst case)
+    /// within each worker's share, so the slices running at once cannot
+    /// pass the limit; at least four (four-wide code runs whole groups: a
+    /// call stops at most four elements a worker past its limit), at most
+    /// a chunk, and a slice's loop count fits the u32 ctx word. Far from
+    /// the limit, whole chunks run with no more looks at the count than
+    /// one a chunk.
+    pub(crate) fn slice(&self, remaining: u64, threads: usize) -> usize {
+        let fit = remaining / threads.max(1) as u64 / self.slice_ops();
+        let word = (u32::MAX as u64 / self.slice_ops()).max(4);
+        (fit.min(word).min(CHUNK as u64) as usize).max(4) & !3
     }
 
-    /// The hidden work buffer's slot (after [`Kernel::buffers`]): a host
-    /// that builds its own buffer table (a linked-wasm harness) binds
-    /// [`CHUNK`] writable words there, where each element's counted ops land
-    /// at `element % CHUNK`.
-    pub fn work_slot(&self) -> usize {
-        self.work
-    }
-
-    /// Elements per slice: about [`SLICE_WORK`] ops at the worst case, a
-    /// multiple of four (four-wide code runs whole groups), at most a chunk.
-    pub(crate) fn slice(&self) -> usize {
-        ((SLICE_WORK / self.cost.max(1)) as usize).clamp(4, CHUNK) & !3
+    /// One element's worst case in counted ops.
+    fn slice_ops(&self) -> u64 {
+        *self.slice_ops.get_or_init(|| crate::admission::element_ops(self).max(1))
     }
 
     pub fn backend(&self) -> Backend {
@@ -633,10 +630,10 @@ impl Kernel {
         let cancel = Arc::new(AtomicU32::new(0));
         let mut bufs = vec![None; self.buffers.len()];
         // Buffer 0 is the control word: the cancel token itself, which the
-        // kernel reads every element. The work buffer is each worker's own
-        // (`run_chunks` binds it).
-        bufs[0] = Some((cancel.as_ptr(), 1));
-        bufs[self.work] = Some((std::ptr::null_mut(), CHUNK));
+        // kernel reads every element.
+        if !bufs.is_empty() {
+            bufs[0] = Some((cancel.as_ptr(), 1));
+        }
         Call { kernel: self, ctx, bufs, cancel, work_limit: DEFAULT_WORK_LIMIT, simd: true, _borrow: std::marker::PhantomData }
     }
 
@@ -656,34 +653,37 @@ impl Kernel {
     }
 
     /// Runs elements [start, start + n) on this thread with `ctx` (the
-    /// caller's copy) and the buffer table, whose work slot is `work` (this
-    /// worker's [`CHUNK`] words), in slices of [`Kernel::slice`] elements.
+    /// caller's copy) and the buffer table, in slices of [`Kernel::slice`]
+    /// elements (`threads`: the workers sharing the call's limit).
     /// After each slice its counted ops join `count`; once those pass the
     /// limit the call stops (the other workers at their next element: the
     /// kernel polls the cancel token, the control buffer, every element).
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn run_range(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], start: usize, n: usize, mode: Mode, cancel: &AtomicU32, work: *const u32, count: &WorkCount) -> Result<(), KernelError> {
+    pub(crate) fn run_range(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], start: usize, n: usize, mode: Mode, cancel: &AtomicU32, count: &WorkCount, threads: usize) -> Result<(), KernelError> {
         // The IEEE environment is part of the result: round to nearest, no
         // flush-to-zero, no default-NaN, whatever the host thread had.
         let _fp = FpEnv::pin();
-        let step = self.slice();
         let mut at = 0;
         while at < n {
             if cancel.load(Ordering::Relaxed) != 0 {
                 return Err(KernelError::Cancelled);
             }
-            let k = (n - at).min(step);
+            // Its worst case is held while it runs (reserved against what
+            // is left of the limit in one step), so the slices running at
+            // once stay within it.
+            let (k, held) = count.reserve(|left| {
+                let k = (n - at).min(self.slice(left, threads));
+                (k, self.slice_ops().saturating_mul(k as u64))
+            });
             ctx[K_BASE as usize] = (start + at) as u32;
             ctx[kl::K_HOST_WORK as usize] = 0;
-            self.run_raw(ctx, table, lens, k, mode);
-            let mut ops = ctx[kl::K_HOST_WORK as usize] as u64;
-            for e in start + at..start + at + k {
-                // SAFETY: `work` holds CHUNK words this thread owns; the run
-                // above (on this thread) is done writing them.
-                ops += unsafe { work.add(e & (CHUNK - 1)).read() } as u64;
-            }
+            let ops = self.run_raw(ctx, table, lens, k, mode) + ctx[kl::K_HOST_WORK as usize] as u64;
+
             at += k;
-            if count.add(ops) {
+            let over = count.add(ops);
+            // The reservation becomes what it counted (never more).
+            count.committed.fetch_sub(held - ops.min(held), Ordering::AcqRel);
+            if over {
                 cancel.store(1, Ordering::Relaxed);
                 return Err(KernelError::Cancelled);
             }
@@ -759,18 +759,33 @@ impl Kernel {
             } else if scalar != 0 {
                 call(scalar, args(n, frame, ctx));
             } else {
+                // One element a call: each stores its own loops' count.
                 let base = ctx[K_BASE as usize];
+                let w = kl::K_WORK as usize;
+                let mut sum = 0u32;
                 for e in 0..n {
                     ctx[K_BASE as usize] = base.wrapping_add(e as u32);
+                    ctx[w] = 0;
                     call(simd, args(1, frame, ctx));
+                    sum = sum.wrapping_add(ctx[w]);
                 }
                 ctx[K_BASE as usize] = base;
+                ctx[w] = sum;
             }
         });
         true
     }
 
-    fn run_raw(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], n: usize, mode: Mode) {
+    /// Runs `n` elements and returns the ops they counted: each element's
+    /// own, and what their loops counted (ctx `K_WORK`).
+    fn run_raw(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], n: usize, mode: Mode) -> u64 {
+        ctx[kl::K_WORK as usize] = 0;
+        self.run_once(ctx, table, lens, n, mode);
+        self.element_work * n as u64 + ctx[kl::K_WORK as usize] as u64
+    }
+
+    /// One run of the generated code (or the interpreter).
+    fn run_once(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], n: usize, mode: Mode) {
         #[cfg(target_arch = "wasm32")]
         if mode != Mode::Interp && self.run_wasm(ctx, table, n, mode) {
             return;
@@ -784,10 +799,15 @@ impl Kernel {
                 // element-local and its written buffers hold every record.
                 unsafe { code.run_kernel(ctx.as_mut_ptr(), state.as_mut_ptr(), self.shared.as_ptr() as *mut u32, table.as_ptr(), n4 as u32) };
                 if n4 < n {
+                    // The tail on scalar code, its loops' count added.
+                    let w = kl::K_WORK as usize;
+                    let lanes = ctx[w];
                     let base = ctx[K_BASE as usize];
                     ctx[K_BASE as usize] = base.wrapping_add(n4 as u32);
-                    self.run_raw(ctx, table, lens, n - n4, Mode::Scalar);
+                    ctx[w] = 0;
+                    self.run_once(ctx, table, lens, n - n4, Mode::Scalar);
                     ctx[K_BASE as usize] = base;
+                    ctx[w] = ctx[w].wrapping_add(lanes);
                 }
                 return;
             }
@@ -936,13 +956,17 @@ pub(crate) fn check(kernel: &Kernel, lens: &[usize], count: usize, split: bool) 
 /// A call's counted work: the ops its slices reported, against its limit.
 pub(crate) struct WorkCount {
     used: AtomicU64,
+    /// What finished slices counted plus the worst case of those running
+    /// (reserved before each starts): one word, so a look at what is left
+    /// sees both at once.
+    committed: AtomicU64,
     limit: u64,
     over: AtomicBool,
 }
 
 impl WorkCount {
     pub(crate) fn new(limit: u64) -> WorkCount {
-        WorkCount { used: AtomicU64::new(0), limit, over: AtomicBool::new(false) }
+        WorkCount { used: AtomicU64::new(0), committed: AtomicU64::new(0), limit, over: AtomicBool::new(false) }
     }
 
     /// Adds a slice's ops; true when the call is now over its limit. Whether
@@ -959,6 +983,28 @@ impl WorkCount {
 
     pub(crate) fn used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
+    }
+
+    /// Reserves what `size(what is left)` says (a slice and its worst
+    /// case) against the limit, atomically. With nothing left while other
+    /// slices still run, it waits for them (they may end the call); with
+    /// nothing left and nothing running, the smallest slice goes past the
+    /// limit and stops the call.
+    fn reserve(&self, size: impl Fn(u64) -> (usize, u64)) -> (usize, u64) {
+        let mut seen = self.committed.load(Ordering::Acquire);
+        loop {
+            let left = self.limit.saturating_sub(seen);
+            if left == 0 && seen != self.used.load(Ordering::Acquire) && !self.over.load(Ordering::Acquire) {
+                std::thread::yield_now();
+                seen = self.committed.load(Ordering::Acquire);
+                continue;
+            }
+            let (k, held) = size(left);
+            match self.committed.compare_exchange_weak(seen, seen.saturating_add(held), Ordering::AcqRel, Ordering::Acquire) {
+                Ok(_) => return (k, held),
+                Err(now) => seen = now,
+            }
+        }
     }
 }
 
@@ -998,21 +1044,11 @@ pub(crate) fn run_chunks(
     let any_overflow = AtomicBool::new(false);
     let any_host_error = AtomicBool::new(false);
     let counted = WorkCount::new(limit);
+    let helpers = if kernel.parallel_safe { threads.max(1).min(chunks.max(1)) } else { 1 };
     let words = ctx.len().min(MAX_CTX);
-    let slots = kernel.table_slots().min(kl::MAX_BUFFERS);
-    let ws = kernel.work_slot();
     let work = |_worker: usize| {
         let mut buf = [0u32; MAX_CTX];
         let wctx = &mut buf[..words];
-        // This worker's work counts, bound in its own copy of the table.
-        let mut counts = [0u32; CHUNK];
-        let mut wtable = [0u64; 2 * kl::MAX_BUFFERS];
-        let tl = table.len().min(wtable.len());
-        wtable[..tl].copy_from_slice(&table[..tl]);
-        wtable[2 * ws] = counts.as_mut_ptr() as u64;
-        wtable[2 * ws + 1] = CHUNK as u64;
-        let wtable = &wtable[..tl.max(2 * slots)];
-        let counts = counts.as_ptr();
         loop {
             if failed.load(Ordering::Relaxed) {
                 return;
@@ -1029,7 +1065,7 @@ pub(crate) fn run_chunks(
             }
             let start = c * unit;
             let k = (count - start).min(unit);
-            if kernel.run_range(wctx, wtable, lens, start, k, mode, cancel, counts, &counted).is_err() {
+            if kernel.run_range(wctx, table, lens, start, k, mode, cancel, &counted, helpers).is_err() {
                 failed.store(true, Ordering::Relaxed);
                 return;
             }
@@ -1047,7 +1083,6 @@ pub(crate) fn run_chunks(
             }
         }
     };
-    let helpers = if kernel.parallel_safe { threads.max(1).min(chunks.max(1)) } else { 1 };
     if helpers <= 1 {
         work(0);
     } else {

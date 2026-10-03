@@ -1,15 +1,15 @@
 //! Admission and counted work for untrusted origins, in ops (the units a
 //! kernel counts while it runs): the worst case of a job is checked before
 //! it runs (the element bound, the untrusted ceiling, the device ledger),
-//! a running job stops once its counted ops pass its budget, whatever the
-//! machine, backend or thread count, and a job at the admitted per-element
-//! ceiling stops within 2 ms of a cancel natively (10 ms interpreted).
+//! a running job stops once its counted ops pass its budget (within one
+//! slice), whatever the machine, backend or thread count, and a cancel
+//! lands at the next element.
 
 use makepad_script_compute::admission::{element_ops, DeviceLimits, JobBudget, Ledger, Origin, Refused};
 use makepad_script_compute::kernel::{compile_with, Kernel, KernelError};
 use makepad_script_compute::Backend;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+
 
 fn kernel(body: &str, backend: Backend) -> Arc<Kernel> {
     let src = format!("let src = input(f32)\nlet o = output(f32)\nfn element(i) {{\n {}\n }}", body);
@@ -122,81 +122,71 @@ fn the_device_ledger_sums_every_live_job() {
     drop(small);
 }
 
-/// The largest `for` count whose element the ledger admits for untrusted
-/// code (the admitted ceiling), and that kernel.
-fn at_the_ceiling(template: &str, backend: Backend) -> (u32, Arc<Kernel>) {
-    let ledger = Ledger::new(DeviceLimits::default());
-    let (mut lo, mut hi) = (1u32, 2_000_000u32);
-    let admitted = |n: u32| {
-        let src = format!("let src = input(f32)\nlet o = output(f32)\nfn element(i) {{\n {}\n }}", template.replace("{N}", &n.to_string()));
-        compile_with(&src, &[], backend).ok().filter(|k| ledger.admit(k, 1, Origin::Ai, &budget(1000)).is_ok())
-    };
-    while lo + 1 < hi {
-        let mid = lo + (hi - lo) / 2;
-        if admitted(mid).is_some() {
-            lo = mid
-        } else {
-            hi = mid
+/// The element a test's cancel lands in, and the call to cancel.
+static CANCEL_AT: std::sync::Mutex<Option<(u32, makepad_script_compute::kernel::CancelToken)>> = std::sync::Mutex::new(None);
+
+/// `test.cancel_at(i)`: cancels the running call when its element `i` is
+/// the chosen one; returns `i + 1`.
+fn cancel_at(args: &[u32], _s: &[makepad_script_compute::host::HostSlice], rets: &mut [u32]) -> Result<(), makepad_script_compute::host::HostError> {
+    if let Some((at, token)) = CANCEL_AT.lock().unwrap().as_ref() {
+        if args[0] == *at {
+            token.cancel();
         }
     }
-    (lo, admitted(lo).unwrap())
+    rets[0] = args[0] + 1;
+    Ok(())
 }
 
-/// Runs `k` over many elements, cancels it after `after`, returns the time
-/// from the cancel to the call's return.
-fn cancel_latency(k: &Kernel, src: &[f32], n: usize, after: Duration) -> Duration {
-    let mut out = vec![0.0f32; n];
-    let mut c = k.call();
-    c.input("src", src).unwrap();
-    c.output("o", &mut out).unwrap();
-    let token = c.cancel_token();
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        std::thread::sleep(after);
-        let at = Instant::now();
-        token.cancel();
-        tx.send(at).unwrap();
-    });
-    let r = c.run(n);
-    let done = Instant::now();
-    assert!(matches!(r, Err(KernelError::Cancelled)), "the job finished before the cancel");
-    done.duration_since(rx.recv().unwrap())
-}
-
-pub const HOSTILE: &[(&str, &str)] = &[
-    ("dependent loads", "let s = i * 977\n for a in 0..{N} { s = int(src[s]) }\n o[i] = float(s)"),
-    ("fdiv chain", "let s = float(i) + 1.5\n for a in 0..{N} { s = 1.0 / (s + 1.5) }\n o[i] = s"),
-    ("sin chain", "let s = float(i)\n for a in 0..{N} { s = sin(s) + 0.5 }\n o[i] = s"),
-];
-
+/// A cancel lands at the next element: what runs after it is at most the
+/// element it came in, whose worst case admission bounds in ops (see
+/// `untrusted_elements_are_bounded_host_elements_are_not`). The same on
+/// every machine, at any load: the element that cancels is the last one
+/// written, native and interpreted, whatever the element's own work.
 #[test]
-fn cancel_stops_a_job_at_the_admitted_ceiling_within_2ms_natively() {
-    // A 64 MiB random cycle: every load of the chase misses.
-    let len = 1usize << 24;
-    let mut next = vec![0f32; len];
-    let mut x = 0x9E3779B97F4A7C15u64;
-    let mut perm: Vec<u32> = (0..len as u32).collect();
-    for k in (1..len).rev() {
-        x ^= x << 13;
-        x ^= x >> 7;
-        x ^= x << 17;
-        perm.swap(k, (x % k as u64) as usize);
-    }
-    for k in 0..len {
-        next[perm[k] as usize] = perm[(k + 1) % len] as f32;
-    }
-    drop(perm);
+fn a_cancel_stops_the_call_at_the_next_element() {
+    use makepad_script_compute::host::{self, HostFn, Tier};
+    use makepad_script_compute::ir::Ty;
+    let f = host::find("test.cancel_at").unwrap_or_else(|| {
+        host::register(HostFn { name: "test.cancel_at", params: &[Ty::I32], slices: &[], rets: &[Ty::I32], cost: |_| 1, misses: 0, tier: Tier::D, call: cancel_at, doc: "" }).unwrap()
+    });
+    let _ = f;
+    let src = "let o = output(i32)\nfn element(i) { let s = float(i)\n for a in 0..2000 { s = sin(s) + 0.5 }\n o[i] = test.cancel_at(i) + int(s) * 0 }";
     for backend in [Backend::Native, Backend::Interp] {
-        for (name, template) in HOSTILE {
-            let (n, k) = at_the_ceiling(template, backend);
-            // The best of three: the bound is about the kernel, not about
-            // a busy machine descheduling the test.
-            let worst = (0..3).map(|_| cancel_latency(&k, &next, 100_000, Duration::from_millis(30))).min().unwrap();
-            eprintln!("{:?} {:16} ceiling {:7} iterations: cancel -> return {:.3} ms", backend, name, n, worst.as_secs_f64() * 1e3);
-            // The element bound is ops, the same for every backend; the
-            // reference interpreter runs an op about ten times slower.
-            let bound = Duration::from_millis(if backend == Backend::Interp { 10 } else { 2 });
-            assert!(worst <= bound, "{:?} {}: {:?}", backend, name, worst);
+        let k = compile_with(src, &[], backend).unwrap_or_else(|e| panic!("{:?}", e));
+        for at in [0u32, 7, 4095, 4096, 9000] {
+            let n = 20_000;
+            let mut out = vec![0u32; n];
+            let mut c = k.call();
+            c.output_u32("o", &mut out).unwrap();
+            *CANCEL_AT.lock().unwrap() = Some((at, c.cancel_token()));
+            let r = if backend == Backend::Interp { c.run_interp(n) } else { c.run(n) };
+            *CANCEL_AT.lock().unwrap() = None;
+            drop(c);
+            assert!(matches!(r, Err(KernelError::Cancelled)), "{backend:?} at {at}: {r:?}");
+            let last = out.iter().rposition(|w| *w != 0).map(|k| k as u32);
+            assert_eq!(last, Some(at), "{backend:?}: the cancel came in element {at}");
+        }
+    }
+}
+
+/// A call stopped by its count stops close to its limit (in ops, the
+/// same on every machine): at most four elements a worker past it.
+#[test]
+fn a_count_stops_the_call_within_four_elements_a_worker_of_its_limit() {
+    let k = kernel("let s = float(i)\n for a in 0..2000 { s = sin(s) + 0.5 }\n o[i] = s", Backend::Native);
+    let per = element_ops(&k);
+    let ran = counted(&k, 1000, u64::MAX, 1, false, true).unwrap();
+    assert!(ran <= per * 1000, "an element counts {} of its worst case {per}", ran / 1000);
+    for threads in [1usize, 8] {
+        for limit in [per * 10, per * 5000 + 17, per * 40_000] {
+            match counted(&k, 100_000, limit, threads, false, true) {
+                Err(KernelError::OverBudget { work, limit: l }) => {
+                    assert_eq!(l, limit);
+                    let most = 4 * threads as u64;
+                    assert!(work > limit && work - limit <= most * per, "{threads} threads: {work} counted past {limit}");
+                }
+                other => panic!("{other:?}"),
+            }
         }
     }
 }

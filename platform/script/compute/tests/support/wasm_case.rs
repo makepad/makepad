@@ -173,7 +173,6 @@ pub fn source_case_spare(name: &str, src: &str, layouts: &[Layout], params: &[(&
             }
             (v, i > 0 && b.access != Access::Read)
         })
-        .chain(std::iter::once((vec![0u32; makepad_script_compute::kernel::CHUNK], true)))
         .collect();
     let name = if spare > 0 { format!("{} n={} spare {}", name, n, spare) } else { format!("{} n={}", name, n) };
     layout(name, k.program().clone(), k.parallel_safe, &ctx, k.shared_table(), &bufs, n)

@@ -420,7 +420,7 @@ impl Job {
         for (k, p) in kernel.params().iter().enumerate() {
             ctx[K_PARAMS as usize + k] = p.default.to_bits();
         }
-        let nb = kernel.table_slots();
+        let nb = kernel.buffers().len();
         let chunks = count.div_ceil(CHUNK);
         Job {
             ctx,
@@ -578,16 +578,13 @@ impl Job {
         &self.stats
     }
 
-    /// Fills the buffer table (buffer 0: this job's cancel word; the work
-    /// buffer is each worker's own, bound by `run_chunks`).
+    /// Fills the buffer table (buffer 0: this job's cancel word).
     fn table(&mut self) -> Result<(), KernelError> {
         self.table.clear();
         self.lens.clear();
-        let ws = self.kernel.work_slot();
         for (k, b) in self.bind.iter_mut().enumerate() {
             let (p, len) = match b {
                 _ if k == 0 => (self.slot.cancel.as_ptr(), 1),
-                _ if k == ws => (std::ptr::null_mut(), CHUNK),
                 Binding::None => return Err(KernelError::Unbound(self.kernel.buffers()[k].name.clone())),
                 Binding::InF32(a) => (a.as_ptr() as *mut u32, a.len()),
                 Binding::InU32(a) => (a.as_ptr() as *mut u32, a.len()),

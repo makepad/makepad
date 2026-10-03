@@ -195,10 +195,25 @@ pub(crate) struct Shape<'a> {
     pub(crate) element: &'a Stmt,
     /// The element counter.
     pub(crate) i: Var,
+    /// After the loop: a run's counted work (`crate::work`), the variable
+    /// each lane counted into and the ctx word their sum goes to.
+    pub(crate) post: Option<(Var, u32)>,
+}
+
+/// The counted-work postlude: `x = Get(var); ctx[word] = x`.
+fn postlude(b: &[Stmt]) -> Option<(Var, u32)> {
+    match b {
+        [Stmt::Def(x, Op::Get(var)), Stmt::Store { region: Region::Ctx, base, extent: 1, off: None, val }] if val == x => Some((*var, *base)),
+        _ => None,
+    }
 }
 
 pub(crate) fn shape(p: &Program) -> Option<Shape<'_>> {
-    let (last, prelude) = p.body.split_last()?;
+    let (body_end, post) = match p.body.len().checked_sub(2).and_then(|k| postlude(&p.body[k..]).map(|post| (k, post))) {
+        Some((k, post)) => (k, Some(post)),
+        None => (p.body.len(), None),
+    };
+    let (last, prelude) = p.body[..body_end].split_last()?;
     let Stmt::Loop { cap, body } = last else { return None };
     if *cap != ELEMENT_CAP || !prelude.iter().all(|s| matches!(s, Stmt::Def(..) | Stmt::Set(..))) {
         return None;
@@ -231,7 +246,7 @@ pub(crate) fn shape(p: &Program) -> Option<Shape<'_>> {
     if sets_var(body, *i) != 1 {
         return None;
     }
-    Some(Shape { prelude, element: last, i: *i })
+    Some(Shape { prelude, element: last, i: *i, post })
 }
 
 

@@ -325,13 +325,14 @@ pub unsafe extern "C" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut 
 /// grows as n²: budgets decide what an untrusted kernel may pass).
 pub const TRIANGULATE_MAX_POINTS: u32 = 1 << 16;
 
-/// Ear clipping's worst case for `words` words of points: n ears, each
-/// found by a scan of at most n vertices and re-tested at its two
-/// neighbours against at most n points (point tests of ~12 ops), plus the
-/// initial test of every vertex.
+/// Ear clipping's worst case for `words` words of points, in the ops
+/// [`triangulate_ops`] counts: the area pass, every vertex's first ear test
+/// (a scan of at most n points, 12 ops a point test), the two neighbours'
+/// re-tests at each of the n clips (the same scans), and the ear searches
+/// (at most n steps of 4 ops each).
 fn triangulate_cost(lens: &[u32]) -> u64 {
     let n = (lens.first().copied().unwrap_or(0) / 2) as u64;
-    16 * n * n + 64 * n + 256
+    12 * 3 * n * n + 4 * n * n + 64 * n + 256
 }
 
 static BUILTIN: &[HostFn] = &[HostFn {
@@ -353,19 +354,41 @@ static BUILTIN: &[HostFn] = &[HostFn {
 fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError> {
     let (pts, out) = (&s[0], &s[1]);
     let n = pts.len() / 2;
-    if n < 3 {
-        rets[0] = 0;
-        return Ok(());
-    }
     let p: Vec<(f64, f64)> = (0..n).map(|i| (pts.get_f32(2 * i) as f64, pts.get_f32(2 * i + 1) as f64)).collect();
+    let need = 3 * n.saturating_sub(2);
+    if n >= 3 && out.len() < need {
+        return Err(HostError(format!("the triangle buffer holds {} words; {} points need {}", out.len(), n, need)));
+    }
+    let (r, _) = ear_clip(&p, &mut |at, w| out.set(at, w));
+    rets[0] = r as u32;
+    Ok(())
+}
+
+/// The ops the triangulation runs on `pts` (vec2 points), counted as
+/// [`triangulate_cost`] declares them: what its declaration is held to.
+pub fn triangulate_ops(pts: &[f32]) -> u64 {
+    let p: Vec<(f64, f64)> = pts.chunks_exact(2).map(|c| (c[0] as f64, c[1] as f64)).collect();
+    ear_clip(&p, &mut |_, _| {}).1
+}
+
+/// Triangles of `p` into `out(word, value)`: the triangle count (-1: not
+/// simple), and the ops counted (12 a point test, 4 an ear-search step,
+/// 64 a vertex's setup).
+fn ear_clip(p: &[(f64, f64)], out: &mut dyn FnMut(usize, u32)) -> (i32, u64) {
+    let n = p.len();
+    if n < 3 {
+        return (0, 0);
+    }
+    let tests = std::cell::Cell::new(0u64);
+    let mut scans = 0u64;
+    let ops = |tests: u64, scans: u64| 12 * tests + 4 * scans + 64 * n as u64;
     let mut area = 0.0f64;
     for i in 0..n {
         let (a, b) = (p[i], p[(i + 1) % n]);
         area += a.0 * b.1 - b.0 * a.1;
     }
     if !(area.abs() > 0.0) {
-        rets[0] = (-1i32) as u32;
-        return Ok(());
+        return (-1, ops(0, 0));
     }
     let sign = if area > 0.0 { 1.0 } else { -1.0 };
     let cross = |a: (f64, f64), b: (f64, f64), c: (f64, f64)| ((b.0 - a.0) * (c.1 - a.1) - (b.1 - a.1) * (c.0 - a.0)) * sign;
@@ -374,6 +397,7 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
     let is_ear = |i: usize, next: &[usize], prev: &[usize]| {
         let (ia, ic) = (prev[i], next[i]);
         let (a, b, c) = (p[ia], p[i], p[ic]);
+        tests.set(tests.get() + 1);
         if cross(a, b, c) <= 0.0 {
             return false;
         }
@@ -381,6 +405,7 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         // equal to a corner are allowed: duplicated points).
         let mut j = next[ic];
         while j != ia {
+            tests.set(tests.get() + 1);
             let q = p[j];
             if q != a && q != b && q != c && cross(a, b, q) >= 0.0 && cross(b, c, q) >= 0.0 && cross(c, a, q) >= 0.0 {
                 return false;
@@ -390,10 +415,6 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         true
     };
     let mut ear: Vec<bool> = (0..n).map(|i| is_ear(i, &next, &prev)).collect();
-    let need = 3 * (n - 2);
-    if out.len() < need {
-        return Err(HostError(format!("the triangle buffer holds {} words; {} points need {}", out.len(), n, need)));
-    }
     let mut m = n;
     let mut at = 0usize;
     let mut cur = 0usize;
@@ -402,6 +423,7 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         let mut i = cur;
         let mut found = false;
         for _ in 0..m {
+            scans += 1;
             if ear[i] {
                 found = true;
                 break;
@@ -409,13 +431,12 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
             i = next[i];
         }
         if !found {
-            rets[0] = (-1i32) as u32;
-            return Ok(());
+            return (-1, ops(tests.get(), scans));
         }
         let (a, c) = (prev[i], next[i]);
-        out.set(at, a as u32);
-        out.set(at + 1, i as u32);
-        out.set(at + 2, c as u32);
+        out(at, a as u32);
+        out(at + 1, i as u32);
+        out(at + 2, c as u32);
         at += 3;
         written += 1;
         next[a] = c;
@@ -425,9 +446,9 @@ fn triangulate(_args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         ear[c] = is_ear(c, &next, &prev);
         cur = c;
     }
-    out.set(at, prev[cur] as u32);
-    out.set(at + 1, cur as u32);
-    out.set(at + 2, next[cur] as u32);
-    rets[0] = (written + 1) as u32;
-    Ok(())
+    out(at, prev[cur] as u32);
+    out(at + 1, cur as u32);
+    out(at + 2, next[cur] as u32);
+    ((written + 1) as i32, ops(tests.get(), scans))
 }
+

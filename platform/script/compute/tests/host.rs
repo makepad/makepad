@@ -217,14 +217,13 @@ fn triangulate_cost_is_honest_and_budgets_refuse_large_inputs() {
             ];
             let sl = [host::SliceRaw { buf: 0, off: 0, len: pts.len() as u32 }, host::SliceRaw { buf: 1, off: 0, len: tris.len() as u32 }];
             let mut rets = [0u32];
-            let t0 = std::time::Instant::now();
             assert!(host::invoke(f, &[], &sl, &mut rets, &bufs));
-            let took = t0.elapsed();
             assert_eq!(rets[0] as usize, n - 2, "{} points", n);
-            // Charged at the native rate (0.5 ns per op): the real time fits.
-            let declared_ns = h.cost_of(&[pts.len() as u32, tris.len() as u32]) / 2;
-            eprintln!("triangulate {} points: {:.3} ms, declared {:.3} ms", n, took.as_secs_f64() * 1e3, declared_ns as f64 / 1e6);
-            assert!((took.as_nanos() as u64) < declared_ns, "{} points took {:?}, declared {} ns", n, took, declared_ns);
+            // Honest: the ops it counts on this input stay within what it
+            // declares (the same on every machine).
+            let declared = h.cost_of(&[pts.len() as u32, tris.len() as u32]);
+            let ran = host::triangulate_ops(&pts);
+            assert!(ran <= declared, "{} points ran {} ops, declared {}", n, ran, declared);
             // A per-call limit below the input's cost refuses it before it runs.
             let limit = h.cost_of(&[pts.len() as u32, tris.len() as u32]) - 1;
             let mut rets = [7u32];
