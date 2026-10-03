@@ -220,8 +220,10 @@ script_mod! {
         gi_batch: texture_2d(float)
         gi_pass: uniform(vec4(1.0,1.0,32.0,0.0))
         batch_row: fn()->float {return min(floor(self.pos.y*self.gi_pass.x),self.gi_pass.x-1.0)}
-        batch_a: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.25,(row+0.5)/self.gi_pass.y))}
-        batch_b: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.75,(row+0.5)/self.gi_pass.y))}
+        // Rows over the allocation size() reports (a backend may make it
+        // taller than the rows uploaded).
+        batch_a: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.25,(row+0.5)/self.gi_batch.size().y))}
+        batch_b: fn(row:float)->vec4 {return self.gi_batch.sample_nearest(vec2(0.75,(row+0.5)/self.gi_batch.size().y))}
         // Spherical Fibonacci set under a random rotation per probe and
         // update: fixed directions printed probe-aligned stripes.
         gi_ray: fn(r:float,a:vec4)->vec3 {

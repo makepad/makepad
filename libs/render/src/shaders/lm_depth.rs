@@ -93,7 +93,10 @@ script_mod! {
             var k=0.0
             while k < 31.5 && self.morph_ctl.w > k + 0.5 {
                 let index=(k*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                // Rows count from the top of the allocation size() reports,
+                // which a backend may make taller than the rows uploaded.
+                let size=self.morph_map.size()
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/size.x,(floor(index/self.morph_ctl.x)+0.5)/size.y)
                 delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weight(k)
                 k=k+1.0
             }
@@ -243,7 +246,10 @@ script_mod! {
             var k=0.0
             while k < 31.5 && self.morph_ctl.w > k + 0.5 {
                 let index=(k*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                // Rows count from the top of the allocation size() reports,
+                // which a backend may make taller than the rows uploaded.
+                let size=self.morph_map.size()
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/size.x,(floor(index/self.morph_ctl.x)+0.5)/size.y)
                 delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weight(k)
                 k=k+1.0
             }
@@ -368,7 +374,10 @@ script_mod! {
             var k=0.0
             while k < 31.5 && self.morph_ctl.w > k + 0.5 {
                 let index=(k*self.morph_ctl.z+vertex)*2.0+lane
-                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/self.morph_ctl.x,(floor(index/self.morph_ctl.x)+0.5)/self.morph_ctl.y)
+                // Rows count from the top of the allocation size() reports,
+                // which a backend may make taller than the rows uploaded.
+                let size=self.morph_map.size()
+                let uv=vec2((modf(index,self.morph_ctl.x)+0.5)/size.x,(floor(index/self.morph_ctl.x)+0.5)/size.y)
                 delta=delta+self.morph_map.sample_nearest(uv, 0.0).xyz*self.morph_weight(k)
                 k=k+1.0
             }
