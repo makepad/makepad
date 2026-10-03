@@ -100,4 +100,6 @@ kart), shows under Vehicles and "car" in the Explorer, and drops into any
 game as a drivable car (E gets in and out). Name tyre objects by corner too
 (`front_left_tire`, `rear-right-tire`, `wheel_fl`): unbound but so named, they
 are bound at publish. Put "car", "truck", "van", "bus" or "kart" in the title.
-Optional: a `seat` socket at the driver's hips and a `steering_wheel` pivot.
+Optional: `seat_1` (or `seat`) socket at the driver's hips, `seat_2`,
+`seat_3`… at the passengers' (without them the seats are derived from the
+car's size), and a `steering_wheel` pivot.
