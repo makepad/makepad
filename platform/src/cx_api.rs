@@ -1340,6 +1340,14 @@ impl Cx {
     /// press point. Call `unpin_pointer_capture` only to cancel EARLY
     /// (Escape / right-click) while the button is still held.
     pub fn pin_pointer_capture(&mut self) {
+        // A drag injected through `--remote` (an automated, often hidden
+        // instance) never pins: the pin hides and detaches the machine's
+        // real cursor, which belongs to whoever sits at it. The injected
+        // moves carry their own positions and need no pin.
+        #[cfg(not(any(target_arch = "wasm32", target_os = "android", target_env = "ohos")))]
+        if self.remote_activity.remote_input.get() {
+            return;
+        }
         if self.fingers.pin_mouse_capture() {
             self.platform_ops.push_back(CxOsOp::PinMousePointer(true));
         }
