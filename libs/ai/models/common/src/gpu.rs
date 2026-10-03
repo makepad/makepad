@@ -3104,6 +3104,16 @@ mod imp {
         Err(GPU_UNAVAILABLE.to_string())
     }
 
+    /// Depthwise 1-D conv over time (Cantor's ConvNeXt blocks); the Metal
+    /// kernel is not written yet.
+    pub fn gpu_dwconv1d(
+        _x: &GpuTensor,
+        _weight: &GpuTensor,
+        _bias: Option<&GpuTensor>,
+    ) -> Result<GpuTensor, String> {
+        Err(GPU_UNAVAILABLE.to_string())
+    }
+
     pub fn gpu_alias_snake_updown2x(
         _x: &GpuTensor,
         _params: &GpuTensor,

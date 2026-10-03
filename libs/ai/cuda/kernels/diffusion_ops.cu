@@ -4512,6 +4512,56 @@ extern "C" cudaError_t makepad_cuda_wavenet_gate_f32(
     return cudaGetLastError();
 }
 
+// --- Cantor kernels ----------------------------------------------------------
+// Depthwise 1-D convolution over time on row-major (rows, ch) data, zero
+// padded by (k - 1) / 2 on both sides (ConvNeXt `dwconv`, kernel 7):
+// out[t, c] = bias[c] + sum_j w[c, j] * x[t + j - pad, c].
+static __global__ void makepad_cuda_dwconv1d_f32_kernel(
+        const float * __restrict__ input,
+        const float * __restrict__ weight,
+        const float * __restrict__ bias,
+        float * __restrict__ output,
+        uint32_t rows,
+        uint32_t ch,
+        uint32_t k) {
+    const uint32_t c = blockIdx.x * blockDim.x + threadIdx.x;
+    const uint32_t t = blockIdx.y;
+    if (c >= ch || t >= rows) {
+        return;
+    }
+    const int pad = static_cast<int>((k - 1u) / 2u);
+    float acc = bias != nullptr ? bias[c] : 0.0f;
+    for (uint32_t j = 0; j < k; ++j) {
+        const int src = static_cast<int>(t) + static_cast<int>(j) - pad;
+        if (src >= 0 && src < static_cast<int>(rows)) {
+            acc = fmaf(weight[static_cast<size_t>(c) * k + j], input[static_cast<size_t>(src) * ch + c], acc);
+        }
+    }
+    output[static_cast<size_t>(t) * ch + c] = acc;
+}
+
+extern "C" cudaError_t makepad_cuda_dwconv1d_f32(
+        const float * input,
+        const float * weight,
+        const float * bias,
+        float * output,
+        uint32_t rows,
+        uint32_t ch,
+        uint32_t k,
+        cudaStream_t stream) {
+    if (rows == 0 || ch == 0) {
+        return cudaSuccess;
+    }
+    if (k == 0 || (k & 1u) == 0 || rows > 65535u) {
+        return cudaErrorInvalidValue;
+    }
+    const dim3 block(256, 1, 1);
+    const dim3 grid((ch + block.x - 1) / block.x, rows, 1);
+    makepad_cuda_dwconv1d_f32_kernel<<<grid, block, 0, stream>>>(
+        input, weight, bias, output, rows, ch, k);
+    return cudaGetLastError();
+}
+
 // Fused anti-aliased SnakeBeta (BigVGAN Activation1d, ratio 2, 12-tap Kaiser
 // filters) on time-major (t, ch) rows, mirroring the CPU AliasFreeSnake
 // exactly: replicate-pad 5 -> depthwise transposed conv stride 2 (12 taps,

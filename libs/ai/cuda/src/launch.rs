@@ -1638,6 +1638,17 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_cuda_dwconv1d_f32(
+            input: *const f32,
+            weight: *const f32,
+            bias: *const f32,
+            output: *mut f32,
+            rows: u32,
+            ch: u32,
+            k: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_cuda_alias_snake_updown2x_f32(
             input: *const f32,
             params: *const f32,
@@ -9557,6 +9568,50 @@ mod imp {
                     out.device_ptr()?,
                     x.rows as u32,
                     n as u32,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
+            gpu_prof(backend.stream, crate::prof::CAT_ELEMENTWISE, prof_start, 0);
+            Ok(out)
+        })
+    }
+
+    /// Depthwise 1-D convolution over time on (rows, ch) f32 rows, zero
+    /// padded by (k - 1) / 2 each side: `out[t, c] = bias[c] + sum_j
+    /// weight[c, j] * x[t + j - pad, c]`. `weight` is a resident (ch, k) f32
+    /// tensor, `bias` a resident (1, ch) one; k odd, rows <= 65535.
+    pub fn gpu_dwconv1d(
+        x: &GpuTensor,
+        weight: &GpuTensor,
+        bias: Option<&GpuTensor>,
+    ) -> Result<GpuTensor, String> {
+        if x.half || weight.half || bias.map(|b| b.half).unwrap_or(false) {
+            return Err("gpu_dwconv1d expects f32 tensors".to_string());
+        }
+        if weight.rows != x.cols || bias.map(|b| b.rows * b.cols != x.cols).unwrap_or(false) {
+            return Err(format!(
+                "gpu_dwconv1d shape mismatch: x {}x{}, weight {}x{}",
+                x.rows, x.cols, weight.rows, weight.cols
+            ));
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(x.rows, x.cols)?;
+            let bias_ptr = match bias {
+                Some(b) => b.device_ptr()?.cast_const(),
+                None => std::ptr::null(),
+            };
+            let status = unsafe {
+                makepad_cuda_dwconv1d_f32(
+                    x.device_ptr()?,
+                    weight.device_ptr()?,
+                    bias_ptr,
+                    out.device_ptr()?,
+                    x.rows as u32,
+                    x.cols as u32,
+                    weight.cols as u32,
                     backend.stream,
                 )
             };

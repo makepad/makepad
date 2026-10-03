@@ -69,15 +69,21 @@ pub struct WeightFile {
 }
 
 pub fn write(path: &std::path::Path, config: &[(String, String)], params: &Params, dtype: Dtype) -> io::Result<()> {
+    write_with(path, config, params, |_, _| dtype)
+}
+
+/// [`write`] with each tensor's storage chosen by `dtype_of(name, tensor)`.
+pub fn write_with(path: &std::path::Path, config: &[(String, String)], params: &Params, dtype_of: impl Fn(&str, &Tensor) -> Dtype) -> io::Result<()> {
     let mut head = format!("{MAGIC}\n");
     for (k, v) in config {
         head.push_str(&format!("{k}={v}\n"));
     }
-    let ds = match dtype {
-        Dtype::F32 => "f32",
-        Dtype::F16 => "f16",
-    };
-    for (n, t) in params.names.iter().zip(&params.vals) {
+    let dtypes: Vec<Dtype> = params.names.iter().zip(&params.vals).map(|(n, t)| dtype_of(n, t)).collect();
+    for ((n, t), dt) in params.names.iter().zip(&params.vals).zip(&dtypes) {
+        let ds = match dt {
+            Dtype::F32 => "f32",
+            Dtype::F16 => "f16",
+        };
         head.push_str(&format!("tensor {n} {} {} {ds}\n", t.rows, t.cols));
     }
     head.push_str("---\n");
@@ -85,7 +91,7 @@ pub fn write(path: &std::path::Path, config: &[(String, String)], params: &Param
     {
         let mut f = io::BufWriter::new(std::fs::File::create(&tmp)?);
         f.write_all(head.as_bytes())?;
-        for t in &params.vals {
+        for (t, dtype) in params.vals.iter().zip(&dtypes) {
             match dtype {
                 Dtype::F32 => {
                     for v in &t.data {
