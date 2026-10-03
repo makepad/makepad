@@ -75,9 +75,9 @@ mod imp {
     use crate::cx::Cx;
     use crate::cx_api::CxOsApi;
     use crate::makepad_math::{dvec2, Vec2d};
-    use crate::texture::{
-        ReadbackChannelOrder, ReadbackOrigin, ReadbackRequest, ReadbackTicket, TextureReadback,
-    };
+    use crate::texture::{ReadbackRequest, ReadbackTicket, TextureReadback};
+    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
+    use crate::texture::{ReadbackChannelOrder, ReadbackOrigin};
     use crate::window::WindowId;
     use makepad_studio_protocol::{
         KeyEvent, RemoteMouseDown, RemoteMouseMove,
@@ -128,6 +128,8 @@ mod imp {
         })
     }
 
+    // For `deliver_grab_pixels`, the raw pixel path Metal takes.
+    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
     fn raw_grab_order(order: ReadbackChannelOrder) -> GrabOrder {
         match order {
             ReadbackChannelOrder::Rgba => GrabOrder::Rgba,
@@ -135,6 +137,7 @@ mod imp {
         }
     }
 
+    #[cfg(all(not(gpusim), any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
     fn raw_grab_origin(origin: ReadbackOrigin) -> GrabOrigin {
         match origin {
             ReadbackOrigin::TopLeft => GrabOrigin::TopLeft,
