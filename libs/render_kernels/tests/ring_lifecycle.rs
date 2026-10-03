@@ -92,7 +92,7 @@ fn slots_under_delayed_fences_and_a_hot_reload_under_load() {
                 let mut job = Job::new(if lease.layout() == layout { kernel.clone() } else { kernel_a.clone() }, count);
                 job.set_param("frame", frame as f32);
                 job.output_u32("out", data).unwrap();
-                let h = engine().scheduler().submit(job, Priority::Near, Origin::Host, JobBudget { wall: Duration::from_secs(10) }).unwrap_or_else(|(_, e)| panic!("{}", e));
+                let h = engine().scheduler().submit(job, Priority::Near, Origin::Host, JobBudget::UNLIMITED).unwrap_or_else(|(_, e)| panic!("{}", e));
                 running = Some((h, lease, count, layout));
             }
         }
@@ -168,7 +168,7 @@ fn an_emitted_index_buffer_is_validated_before_publish() {
         job.set_param("bad", bad);
         job.output_u32("v", vec![0; 15]).unwrap();
         job.output_u32("ix", vec![0; 15]).unwrap();
-        let mut job = engine().run(job, Priority::MustComplete, Duration::from_secs(5)).unwrap_or_else(|(_, e)| panic!("{}", e));
+        let mut job = engine().run(job, Priority::MustComplete).unwrap_or_else(|(_, e)| panic!("{}", e));
         lease.set_data(job.take_output_u32("v").unwrap());
         *lease.indices_mut() = job.take_output_u32("ix").unwrap();
         assert_eq!(ring.publish(lease, 5, &fences).is_ok(), ok);

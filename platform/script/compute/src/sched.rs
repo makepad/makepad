@@ -1,6 +1,6 @@
-//! Kernel jobs on a worker pool: priorities, cancellation, a watchdog, the
-//! async job API with "keep the last result" for realtime and a
-//! synchronous run for locked-time export.
+//! Kernel jobs on a worker pool: priorities, cancellation, the async job
+//! API with "keep the last result" for realtime and a synchronous run for
+//! locked-time export.
 //!
 //! The pool is the host's: Makepad's `TaskPool` (Heavy lane) through
 //! [`FnExecutor`], or [`ThreadExecutor`] headless. This crate stays std
@@ -30,16 +30,16 @@
 //!   word (polled every element) and re-queued, keeping its place.
 //! - **Admission** ([`crate::admission`]) happens before a job is queued;
 //!   its ticket (the ledger share, the work limit, the per-call host
-//!   component limit, the deadline) is held until the job ends.
-//! - **The watchdog** (one thread per scheduler, parked while nothing
-//!   runs) cancels a running job at its deadline; the job fails with
-//!   [`JobError::TimedOut`].
+//!   component limit) is held until the job ends.
+//! - **Counted work**: a job counts the ops it runs ([`crate::work`]) and
+//!   stops once they pass its ticket's work limit, with
+//!   [`KernelError::OverBudget`]; no clock decides whether work is done.
 //! - **Realtime** uses a [`Stream`]: two jobs in rotation; while one runs
 //!   the last completed one stays readable, and a request made while a
 //!   job is still running is a dropped geometry frame (counted).
 //! - **Locked time** uses [`Scheduler::run_sync`]: the job runs on the
 //!   calling thread with the workers' help, under the same admission and
-//!   watchdog, and returns only when it is done.
+//!   work limit, and returns only when it is done.
 //!
 //! Results never depend on the scheduling: chunks are fixed, chunk results
 //! combine in chunk order, and four-wide code is bit-identical to scalar.
@@ -49,11 +49,11 @@
 //! bindings.
 
 use crate::admission::{JobBudget, Ledger, Origin, Refused, Ticket};
-use crate::kernel::{check, run_chunks, Access, CancelToken, ChunkCell, Kernel, KernelError, Mode, RunStats, CHUNK, K_COUNT, K_PARAMS, K_SEED, K_TIME};
+use crate::kernel::{check, run_chunks, Access, ChunkCell, Kernel, KernelError, Mode, RunStats, CHUNK, K_COUNT, K_PARAMS, K_SEED, K_TIME};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
@@ -334,8 +334,6 @@ pub enum JobError {
     Kernel(KernelError),
     /// Cancelled by its owner.
     Cancelled,
-    /// The watchdog stopped it at its deadline.
-    TimedOut,
     /// The scheduler is gone or its pool refused the work.
     Closed,
 }
@@ -346,7 +344,6 @@ impl std::fmt::Display for JobError {
             JobError::Refused(r) => write!(f, "refused: {}", r),
             JobError::Kernel(e) => write!(f, "{}", e),
             JobError::Cancelled => write!(f, "cancelled"),
-            JobError::TimedOut => write!(f, "stopped by the watchdog at its deadline"),
             JobError::Closed => write!(f, "the scheduler is closed"),
         }
     }
@@ -371,7 +368,6 @@ const DONE: u8 = 3;
 const NO_REASON: u8 = 0;
 const USER: u8 = 1;
 const PREEMPT: u8 = 2;
-const TIMEOUT: u8 = 3;
 
 /// What the scheduler and the job's handle share.
 struct Slot {
@@ -381,8 +377,6 @@ struct Slot {
     reason: AtomicU8,
     state: AtomicU8,
     priority: AtomicU8,
-    /// Nanoseconds since the scheduler's epoch; u64::MAX: none.
-    deadline: AtomicU64,
     job: Mutex<Option<Job>>,
     result: Mutex<Option<Result<(), JobError>>>,
     done: Condvar,
@@ -396,7 +390,6 @@ impl Slot {
             reason: AtomicU8::new(NO_REASON),
             state: AtomicU8::new(IDLE),
             priority: AtomicU8::new(Priority::Near as u8),
-            deadline: AtomicU64::new(u64::MAX),
             job: Mutex::new(None),
             result: Mutex::new(None),
             done: Condvar::new(),
@@ -427,7 +420,7 @@ impl Job {
         for (k, p) in kernel.params().iter().enumerate() {
             ctx[K_PARAMS as usize + k] = p.default.to_bits();
         }
-        let nb = kernel.buffers().len();
+        let nb = kernel.table_slots();
         let chunks = count.div_ceil(CHUNK);
         Job {
             ctx,
@@ -585,13 +578,16 @@ impl Job {
         &self.stats
     }
 
-    /// Fills the buffer table (buffer 0: this job's cancel word).
+    /// Fills the buffer table (buffer 0: this job's cancel word; the work
+    /// buffer is each worker's own, bound by `run_chunks`).
     fn table(&mut self) -> Result<(), KernelError> {
         self.table.clear();
         self.lens.clear();
+        let ws = self.kernel.work_slot();
         for (k, b) in self.bind.iter_mut().enumerate() {
             let (p, len) = match b {
                 _ if k == 0 => (self.slot.cancel.as_ptr(), 1),
+                _ if k == ws => (std::ptr::null_mut(), CHUNK),
                 Binding::None => return Err(KernelError::Unbound(self.kernel.buffers()[k].name.clone())),
                 Binding::InF32(a) => (a.as_ptr() as *mut u32, a.len()),
                 Binding::InU32(a) => (a.as_ptr() as *mut u32, a.len()),
@@ -623,8 +619,8 @@ impl Job {
         self.table()?;
         let count = self.count;
         let split = crate::kernel::splits(&self.kernel, threads, count);
-        let wide_ok = check(&self.kernel, &self.lens, count, true, self.work_limit).is_ok();
-        check(&self.kernel, &self.lens, count, split, self.work_limit)?;
+        let wide_ok = check(&self.kernel, &self.lens, count, true).is_ok();
+        check(&self.kernel, &self.lens, count, split)?;
         let mode = if self.simd && self.kernel.simd() && self.kernel.parallel_safe && wide_ok { Mode::Vector } else { Mode::Scalar };
         let chunks = count.div_ceil(CHUNK);
         if self.cells.len() < chunks {
@@ -633,12 +629,13 @@ impl Job {
         self.ctx[K_COUNT as usize] = count as u32;
         let t = crate::kernel::split_threads(&self.kernel, threads, count, mode);
         let t1 = Instant::now();
-        let (overflowed, host_error, reduced) = run_chunks(&self.kernel, &self.ctx, &self.table, &self.lens, count, mode, &self.slot.cancel, &self.cells, exec, t)?;
+        let (overflowed, host_error, reduced, work) = run_chunks(&self.kernel, &self.ctx, &self.table, &self.lens, count, mode, &self.slot.cancel, &self.cells, exec, t, self.work_limit)?;
         self.kernel.observe(count, t, t1.elapsed().as_nanos() as u64, mode);
         let lanes = self.kernel.reduce_parts().1;
         self.stats.elements = count;
         self.stats.overflowed = overflowed;
         self.stats.host_error = host_error;
+        self.stats.work = work;
         self.stats.reduced.clear();
         self.stats.reduced.extend_from_slice(&reduced[..lanes]);
         self.stats.nanos = t0.elapsed().as_nanos() as u64;
@@ -719,7 +716,8 @@ pub struct SchedStats {
     pub completed: u64,
     pub failed: u64,
     pub cancelled: u64,
-    pub timed_out: u64,
+    /// Stopped by their work limit.
+    pub over_budget: u64,
     pub preempted: u64,
     pub refused: u64,
     /// Wall time of the last finished job and the 95th percentile of the
@@ -742,25 +740,12 @@ struct SInner {
     exec: Arc<dyn Executor>,
     config: SchedulerConfig,
     state: Mutex<SState>,
-    epoch: Instant,
     driver: OnceLock<Arc<dyn Fn() + Send + Sync>>,
-    watchdog: Mutex<Option<std::thread::Thread>>,
-    watchdog_alive: AtomicBool,
 }
 
 impl SInner {
-    fn now_ns(&self) -> u64 {
-        self.epoch.elapsed().as_nanos() as u64
-    }
-
     fn ledger(&self) -> &Ledger {
         self.config.ledger.as_ref().unwrap_or_else(|| Ledger::device())
-    }
-
-    fn wake_watchdog(&self) {
-        if let Some(t) = lock(&self.watchdog).as_ref() {
-            t.unpark();
-        }
     }
 }
 
@@ -784,21 +769,10 @@ impl Scheduler {
                 times_at: 0,
             }),
             config,
-            epoch: Instant::now(),
             driver: OnceLock::new(),
-            watchdog: Mutex::new(None),
-            watchdog_alive: AtomicBool::new(false),
         });
         let weak = Arc::downgrade(&inner);
         let _ = inner.driver.set(Arc::new(move || drive(&weak)));
-        // One watchdog thread for the scheduler's lifetime (parked while
-        // nothing runs). Without threads, deadlines are checked when a job
-        // starts and cancel only through its owner.
-        let weak = Arc::downgrade(&inner);
-        if let Ok(h) = std::thread::Builder::new().name("kernel-watchdog".into()).spawn(move || watchdog(weak)) {
-            *lock(&inner.watchdog) = Some(h.thread().clone());
-            inner.watchdog_alive.store(true, Ordering::Release);
-        }
         Scheduler { inner }
     }
 
@@ -815,8 +789,7 @@ impl Scheduler {
     /// Admits and queues a job. On refusal the job comes back.
     pub fn submit(&self, mut job: Job, priority: Priority, origin: Origin, budget: JobBudget) -> Result<JobHandle, (Job, JobError)> {
         let inner = &self.inner;
-        let threads = inner.config.threads.min(inner.exec.workers() + 1).max(1);
-        let ticket = match inner.ledger().admit(&job.kernel, job.count, threads, origin, &budget) {
+        let ticket = match inner.ledger().admit(&job.kernel, job.count, origin, &budget) {
             Ok(t) => t,
             Err(r) => {
                 lock(&inner.state).stats.refused += 1;
@@ -833,8 +806,6 @@ impl Scheduler {
         slot.cancel.store(0, Ordering::Release);
         slot.reason.store(NO_REASON, Ordering::Release);
         slot.priority.store(priority as u8, Ordering::Release);
-        let deadline = ticket.deadline().saturating_duration_since(inner.epoch).as_nanos() as u64;
-        slot.deadline.store(deadline, Ordering::Release);
         *lock(&slot.ticket) = Some(ticket);
         *lock(&slot.result) = None;
         *lock(&slot.job) = Some(job);
@@ -872,22 +843,14 @@ impl Scheduler {
         Ok(JobHandle { slot })
     }
 
-    /// Moves a job's deadline earlier (a frame deadline, a host timeout):
-    /// the watchdog stops it at `now + within` if it is still running.
-    pub fn tighten(&self, h: &JobHandle, within: Duration) {
-        let d = self.inner.now_ns().saturating_add(within.as_nanos() as u64);
-        h.slot.deadline.fetch_min(d, Ordering::AcqRel);
-        self.inner.wake_watchdog();
-    }
-
     /// Runs a job to completion on the calling thread (with the workers'
-    /// help): admission, the watchdog and the result are the same as for a
+    /// help): admission, the work limit and the result are the same as for a
     /// submitted job, and it is never queued behind others. For locked-time
     /// export; never on the UI thread.
     pub fn run_sync(&self, job: &mut Job, origin: Origin, budget: JobBudget) -> Result<(), JobError> {
         let inner = &self.inner;
         let threads = inner.config.threads.min(inner.exec.workers() + 1).max(1);
-        let ticket = inner.ledger().admit(&job.kernel, job.count, threads, origin, &budget).map_err(|r| {
+        let ticket = inner.ledger().admit(&job.kernel, job.count, origin, &budget).map_err(|r| {
             lock(&inner.state).stats.refused += 1;
             JobError::Refused(r)
         })?;
@@ -897,13 +860,11 @@ impl Scheduler {
         slot.cancel.store(0, Ordering::Release);
         slot.reason.store(NO_REASON, Ordering::Release);
         slot.priority.store(Priority::MustComplete as u8, Ordering::Release);
-        slot.deadline.store(ticket.deadline().saturating_duration_since(inner.epoch).as_nanos() as u64, Ordering::Release);
         lock(&inner.state).running.push(slot.clone());
-        inner.wake_watchdog();
         let r = job.run(&*inner.exec, threads).map(|_| ());
         let mut st = lock(&inner.state);
         st.running.retain(|s| !Arc::ptr_eq(s, &slot));
-        let r = finish(&mut st, &slot, r, job.stats.nanos);
+        let r = finish(&mut st, r, job.stats.nanos);
         drop(st);
         drop(ticket);
         r
@@ -926,28 +887,24 @@ impl Drop for Scheduler {
             let _ = slot.reason.compare_exchange(NO_REASON, USER, Ordering::AcqRel, Ordering::Relaxed);
             slot.cancel.store(1, Ordering::Release);
         }
-        drop(st);
-        self.inner.wake_watchdog();
     }
 }
 
 /// Maps a run's outcome to the job's result and counts it.
-fn finish(st: &mut SState, slot: &Slot, r: Result<(), KernelError>, nanos: u64) -> Result<(), JobError> {
+fn finish(st: &mut SState, r: Result<(), KernelError>, nanos: u64) -> Result<(), JobError> {
     let r = match r {
         Ok(()) => {
             st.stats.completed += 1;
             Ok(())
         }
-        Err(KernelError::Cancelled) => match slot.reason.load(Ordering::Acquire) {
-            TIMEOUT => {
-                st.stats.timed_out += 1;
-                Err(JobError::TimedOut)
-            }
-            _ => {
-                st.stats.cancelled += 1;
-                Err(JobError::Cancelled)
-            }
-        },
+        Err(KernelError::Cancelled) => {
+            st.stats.cancelled += 1;
+            Err(JobError::Cancelled)
+        }
+        Err(e @ KernelError::OverBudget { .. }) => {
+            st.stats.over_budget += 1;
+            Err(JobError::Kernel(e))
+        }
         Err(e) => {
             st.stats.failed += 1;
             Err(JobError::Kernel(e))
@@ -985,13 +942,8 @@ fn drive(weak: &Weak<SInner>) {
             }
         };
         slot.state.store(RUNNING, Ordering::Release);
-        inner.wake_watchdog();
         let Some(mut job) = lock(&slot.job).take() else { continue };
-        // A job whose deadline passed while queued does not start.
-        let r = if inner.now_ns() >= slot.deadline.load(Ordering::Acquire) {
-            let _ = slot.reason.compare_exchange(NO_REASON, TIMEOUT, Ordering::AcqRel, Ordering::Relaxed);
-            Err(KernelError::Cancelled)
-        } else if slot.cancel.load(Ordering::Acquire) != 0 {
+        let r = if slot.cancel.load(Ordering::Acquire) != 0 {
             Err(KernelError::Cancelled)
         } else {
             job.run(&*inner.exec, threads).map(|_| ())
@@ -1009,7 +961,7 @@ fn drive(weak: &Weak<SInner>) {
             st.queues[p.min(3)].push_front(slot);
             continue;
         }
-        let r = finish(&mut st, &slot, r, job.stats.nanos);
+        let r = finish(&mut st, r, job.stats.nanos);
         drop(st);
         *lock(&slot.ticket) = None;
         *lock(&slot.result) = Some(r);
@@ -1018,94 +970,6 @@ fn drive(weak: &Weak<SInner>) {
         slot.state.store(DONE, Ordering::Release);
         drop(g);
         slot.done.notify_all();
-    }
-}
-
-/// Cancels running jobs at their deadlines. Parked while nothing runs.
-fn watchdog(weak: Weak<SInner>) {
-    loop {
-        let wait = {
-            let Some(inner) = weak.upgrade() else { return };
-            let st = lock(&inner.state);
-            if st.closed && st.running.is_empty() {
-                return;
-            }
-            let now = inner.now_ns();
-            let mut next = u64::MAX;
-            for s in &st.running {
-                let d = s.deadline.load(Ordering::Acquire);
-                if d <= now {
-                    if s.reason.compare_exchange(NO_REASON, TIMEOUT, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
-                        s.cancel.store(1, Ordering::Release);
-                    }
-                } else {
-                    next = next.min(d);
-                }
-            }
-            (next != u64::MAX).then(|| Duration::from_nanos(next - now))
-        };
-        match wait {
-            Some(d) => std::thread::park_timeout(d),
-            None => std::thread::park(),
-        }
-    }
-}
-
-// =========================================================================
-// Deadlines for a single call
-// =========================================================================
-
-/// The deadlines of calls run outside a [`Scheduler`] job (a host that runs
-/// a kernel `Call` itself under an admission ticket): one parked thread for
-/// the process cancels each armed call at its deadline.
-struct Deadlines {
-    armed: Mutex<Vec<(u64, Instant, CancelToken)>>,
-    wake: Condvar,
-    next: AtomicU64,
-}
-
-fn deadlines() -> &'static Deadlines {
-    static D: OnceLock<&'static Deadlines> = OnceLock::new();
-    D.get_or_init(|| {
-        let d: &'static Deadlines = Box::leak(Box::new(Deadlines { armed: Mutex::new(Vec::new()), wake: Condvar::new(), next: AtomicU64::new(0) }));
-        let _ = std::thread::Builder::new().name("kernel-deadlines".into()).spawn(move || {
-            let mut armed = lock(&d.armed);
-            loop {
-                let now = Instant::now();
-                armed.retain(|(_, at, token)| {
-                    if *at <= now {
-                        token.cancel();
-                        false
-                    } else {
-                        true
-                    }
-                });
-                armed = match armed.iter().map(|a| a.1).min() {
-                    Some(at) => d.wake.wait_timeout(armed, at - now).unwrap_or_else(|e| e.into_inner()).0,
-                    None => d.wake.wait(armed).unwrap_or_else(|e| e.into_inner()),
-                };
-            }
-        });
-        d
-    })
-}
-
-/// A deadline armed by [`arm_deadline`]; disarmed on drop (the call
-/// finished first).
-pub struct Armed(u64);
-
-/// Cancel `token`'s call at `at`, unless the returned guard is dropped first.
-pub fn arm_deadline(at: Instant, token: CancelToken) -> Armed {
-    let d = deadlines();
-    let id = d.next.fetch_add(1, Ordering::Relaxed);
-    lock(&d.armed).push((id, at, token));
-    d.wake.notify_one();
-    Armed(id)
-}
-
-impl Drop for Armed {
-    fn drop(&mut self) {
-        lock(&deadlines().armed).retain(|a| a.0 != self.0);
     }
 }
 

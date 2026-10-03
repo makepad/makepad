@@ -226,15 +226,22 @@ pub fn invoke(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32], bufs:
 /// [`invoke`] under a per-call budget (op-equivalents; 0: none): a call
 /// whose actual input costs more is refused before it runs.
 pub fn invoke_limited(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32], bufs: &[RawBuf], limit: u64) -> bool {
+    invoke_counted(f, args, slices, rets, bufs, limit).0
+}
+
+/// [`invoke_limited`], and the op-equivalents the call counts: its declared
+/// cost at the input it was actually given (0 when it did not run). A
+/// kernel adds them to its counted work (`K_HOST_WORK`).
+pub fn invoke_counted(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32], bufs: &[RawBuf], limit: u64) -> (bool, u64) {
     rets.fill(0);
-    let Some(h) = get(f) else { return false };
+    let Some(h) = get(f) else { return (false, 0) };
     if args.len() != h.params.len() || slices.len() != h.slices.len() || rets.len() != h.rets.len() {
-        return false;
+        return (false, 0);
     }
     let mut ok = true;
     let mut views = [HostSlice::EMPTY; 8];
     for (k, (s, sig)) in slices.iter().zip(h.slices).enumerate() {
-        let Some(b) = bufs.get(s.buf as usize) else { return false };
+        let Some(b) = bufs.get(s.buf as usize) else { return (false, 0) };
         let start = (s.off as usize).min(b.len);
         let mut len = (s.len as usize).min(b.len - start);
         if len > sig.max_words as usize {
@@ -249,21 +256,20 @@ pub fn invoke_limited(f: u16, args: &[u32], slices: &[SliceRaw], rets: &mut [u32
         views[k] = HostSlice { buf, start, len };
     }
     let views = &views[..slices.len()];
-    if limit != 0 {
-        let mut lens = [0u32; 8];
-        for (k, v) in views.iter().enumerate() {
-            lens[k] = v.len as u32;
-        }
-        if (h.cost)(&lens[..views.len()]) > limit {
-            return false;
-        }
+    let mut lens = [0u32; 8];
+    for (k, v) in views.iter().enumerate() {
+        lens[k] = v.len as u32;
+    }
+    let cost = (h.cost)(&lens[..views.len()]);
+    if limit != 0 && cost > limit {
+        return (false, 0);
     }
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (h.call)(args, views, rets)));
     match r {
-        Ok(Ok(())) => ok,
+        Ok(Ok(())) => (ok, cost),
         _ => {
             rets.fill(0);
-            false
+            (false, cost)
         }
     }
 }
@@ -301,7 +307,10 @@ pub unsafe extern "C" fn trampoline(rec: *mut u32, table: *const u64, ctx: *mut 
             *b = RawBuf { ptr: *table.add(2 * k) as *mut u32, len: *table.add(2 * k + 1) as usize, writable: writable >> k & 1 != 0 };
         }
         let limit = *ctx.add(crate::lower::kernel::K_HOST_LIMIT as usize) as u64;
-        invoke_limited(f as u16, args, &slices[..ns], rets, &bufs[..nb.min(64)], limit)
+        let (ok, cost) = invoke_counted(f as u16, args, &slices[..ns], rets, &bufs[..nb.min(64)], limit);
+        let counted = ctx.add(crate::lower::kernel::K_HOST_WORK as usize);
+        *counted = (*counted as u64).saturating_add(cost).min(u32::MAX as u64) as u32;
+        ok
     }));
     if !matches!(r, Ok(true)) {
         *ctx.add(crate::lower::kernel::K_HOST_ERR as usize) = 1;

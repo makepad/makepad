@@ -9,7 +9,7 @@
 use makepad_platform::Cx;
 use makepad_render_kernels::compute::sched::{Job, Priority};
 use makepad_render_kernels::{engine, install};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 const CHEAP: &str = "let x = input(f32)\nlet y = output(f32)\nlet a = param(2.0)\nfn element(i) { y[i] = x[i] * a + 1.0 }";
 const NOISE: &str = "let W = 1024\nlet base = input(f32)\nlet pos = output(vec3)\nlet hgt = output(f32)\nlet amp = param(6.0)\nfn vertex(i) { let x = float(i % W)\n let z = float(i / W)\n let h = base[i] + fbm2(vec2(x, z) * 0.01, 4, 2.0, 0.5) * amp\n pos[i] = vec3(x, h, z)\n hgt[i] = h }";
@@ -38,7 +38,7 @@ fn main() {
                 let mut times = Vec::new();
                 for r in 0..60 {
                     let t = Instant::now();
-                    let j = e.run(slot.take().unwrap(), Priority::MustComplete, Duration::from_secs(10)).unwrap_or_else(|(_, err)| panic!("{}", err));
+                    let j = e.run(slot.take().unwrap(), Priority::MustComplete).unwrap_or_else(|(_, err)| panic!("{}", err));
                     slot = Some(j);
                     if r >= 10 {
                         times.push(t.elapsed().as_secs_f64() * 1e6);

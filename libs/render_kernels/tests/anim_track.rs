@@ -6,7 +6,7 @@ use makepad_csg_math::portable as pm;
 use makepad_render_kernels::anim::{ease_id, pack_track, TrackEase, CURVES};
 use makepad_render_kernels::compute::sched::{InlineExecutor, Job, Priority};
 use makepad_render_kernels::engine;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 fn ease_in(c: usize, u: f64) -> f64 {
     let pi = std::f64::consts::PI;
@@ -136,7 +136,7 @@ fn a_motion_track_evaluates_to_its_bits_per_element() {
         for (p, v) in [("n", packed.keys as f32), ("width", 2.0), ("comp", comp as f32), ("t0", t0), ("dt", dt)] {
             job.set_param(p, v);
         }
-        let mut job = engine().run(job, Priority::Near, Duration::from_secs(10)).unwrap_or_else(|(_, e)| panic!("{}", e));
+        let mut job = engine().run(job, Priority::Near).unwrap_or_else(|(_, e)| panic!("{}", e));
         let out = job.take_output_u32("out").unwrap();
         for i in 0..count {
             let got = f64::from_bits(out[2 * i] as u64 | (out[2 * i + 1] as u64) << 32);
@@ -163,7 +163,7 @@ fn a_hundred_thousand_track_evaluations() {
         job.input_vec_u32("values", times.clone()).unwrap();
         job.output_u32("out", vec![0; n]).unwrap();
         let t = Instant::now();
-        let _ = engine().run(job, Priority::MustComplete, Duration::from_secs(10)).unwrap_or_else(|(_, e)| panic!("{}", e));
+        let _ = engine().run(job, Priority::MustComplete).unwrap_or_else(|(_, e)| panic!("{}", e));
         best = best.min(t.elapsed().as_secs_f64() * 1e3);
     }
     let kd = makepad_render_kernels::compile(SRC, &[], &[]).unwrap();
@@ -180,7 +180,7 @@ fn a_hundred_thousand_track_evaluations() {
         job.set_param("n", 3.0);
         job.set_param("dt", 2.0 / n as f32);
         let t = Instant::now();
-        let _ = engine().run(job, Priority::MustComplete, Duration::from_secs(10)).unwrap_or_else(|(_, e)| panic!("{}", e));
+        let _ = engine().run(job, Priority::MustComplete).unwrap_or_else(|(_, e)| panic!("{}", e));
         best_d = best_d.min(t.elapsed().as_secs_f64() * 1e3);
     }
     println!("100k evaluations: f32 keys {best:.3} ms, f64 Motion track {best_d:.3} ms on {} threads", engine().threads());

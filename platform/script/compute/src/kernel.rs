@@ -22,11 +22,16 @@ pub use crate::lower::kernel::{
 };
 pub use crate::lower::ParamInfo;
 use crate::{Backend, ShaderError};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 
 /// Elements per chunk (the unit of scheduling and of reduce partials).
 pub const CHUNK: usize = 4096;
+
+/// The most ops (by the static worst case) a slice of elements runs
+/// between two looks at the counted work: how far past its limit a call
+/// can run before it stops.
+pub const SLICE_WORK: u64 = 1 << 22;
 
 /// The smallest range a map kernel's call is split into. A map kernel's
 /// result does not depend on how its elements are split (each element
@@ -73,7 +78,9 @@ pub struct Kernel {
     /// The entry's name: vertex, instance, element, primitive, reduce_*.
     pub entry: String,
     params: Vec<ParamInfo>,
+    /// The kernel's buffers, then the hidden work buffer (index `work`).
     buffers: Vec<BufferDecl>,
+    work: usize,
     shared: Box<[u32]>,
     program: Program,
     /// `program` with its calls inlined and optimized again (the same
@@ -217,6 +224,7 @@ pub fn compile_live(src: &str, layouts: &[Layout], backend: Backend, modules: &[
         math: lowered.math,
         entry: lowered.entry,
         params: lowered.params,
+        work: lowered.buffers.len() - 1,
         buffers: lowered.buffers,
         shared: shared.into_boxed_slice(),
         program: lowered.program,
@@ -424,13 +432,13 @@ pub enum KernelError {
     NoSuchBuffer(String),
     /// Bound read-only but the kernel writes it.
     ReadOnly(String),
-    /// Cancelled (by the watchdog or the owner) before it finished.
+    /// Cancelled by its owner (or pre-empted) before it finished.
     Cancelled,
     /// An output buffer is smaller than the call needs (words).
     TooSmall { name: String, need: u64, have: usize },
     /// More elements than one call may run.
     TooMany(usize),
-    /// Worst-case work (ops per element x elements) exceeds the call's limit.
+    /// Stopped: the ops it counted passed the call's limit.
     OverBudget { work: u64, limit: u64 },
 }
 
@@ -445,7 +453,7 @@ impl std::fmt::Display for KernelError {
             KernelError::Cancelled => write!(f, "cancelled"),
             KernelError::TooSmall { name, need, have } => write!(f, "buffer `{}` has {} words; this call needs {}", name, have, need),
             KernelError::TooMany(n) => write!(f, "{} elements is more than one call may run", n),
-            KernelError::OverBudget { work, limit } => write!(f, "worst-case work {} ops exceeds the limit of {}", work, limit),
+            KernelError::OverBudget { work, limit } => write!(f, "stopped after {} ops: its limit is {} ops", work, limit),
         }
     }
 }
@@ -461,6 +469,8 @@ pub struct RunStats {
     pub host_error: bool,
     /// A reduce kernel's result (its lanes).
     pub reduced: Vec<f32>,
+    /// The ops it counted (see [`crate::work`]): the same on every machine.
+    pub work: u64,
     pub nanos: u64,
 }
 
@@ -473,12 +483,33 @@ impl Kernel {
         self.params.iter().position(|p| p.name == name)
     }
 
+    /// The buffers a host binds (index 0, the control word, included; the
+    /// hidden work buffer after them is the runtime's).
     pub fn buffers(&self) -> &[BufferDecl] {
-        &self.buffers
+        &self.buffers[..self.work]
     }
 
     pub fn buffer_index(&self, name: &str) -> Option<usize> {
-        self.buffers.iter().position(|b| b.name == name)
+        self.buffers().iter().position(|b| b.name == name)
+    }
+
+    /// Every buffer slot of a call's table, the work buffer last.
+    pub fn table_slots(&self) -> usize {
+        self.buffers.len()
+    }
+
+    /// The hidden work buffer's slot (after [`Kernel::buffers`]): a host
+    /// that builds its own buffer table (a linked-wasm harness) binds
+    /// [`CHUNK`] writable words there, where each element's counted ops land
+    /// at `element % CHUNK`.
+    pub fn work_slot(&self) -> usize {
+        self.work
+    }
+
+    /// Elements per slice: about [`SLICE_WORK`] ops at the worst case, a
+    /// multiple of four (four-wide code runs whole groups), at most a chunk.
+    pub(crate) fn slice(&self) -> usize {
+        ((SLICE_WORK / self.cost.max(1)) as usize).clamp(4, CHUNK) & !3
     }
 
     pub fn backend(&self) -> Backend {
@@ -556,7 +587,7 @@ impl Kernel {
         &self.shared
     }
 
-    /// Ctx words: base, count, time, seed, cancel, overflow, reduce lanes,
+    /// Ctx words: base, count, time, seed, host work, overflow, reduce lanes,
     /// then the params.
     pub fn ctx_words(&self) -> usize {
         K_PARAMS as usize + self.params.len()
@@ -602,10 +633,10 @@ impl Kernel {
         let cancel = Arc::new(AtomicU32::new(0));
         let mut bufs = vec![None; self.buffers.len()];
         // Buffer 0 is the control word: the cancel token itself, which the
-        // kernel reads every element.
-        if !bufs.is_empty() {
-            bufs[0] = Some((cancel.as_ptr(), 1));
-        }
+        // kernel reads every element. The work buffer is each worker's own
+        // (`run_chunks` binds it).
+        bufs[0] = Some((cancel.as_ptr(), 1));
+        bufs[self.work] = Some((std::ptr::null_mut(), CHUNK));
         Call { kernel: self, ctx, bufs, cancel, work_limit: DEFAULT_WORK_LIMIT, simd: true, _borrow: std::marker::PhantomData }
     }
 
@@ -625,14 +656,17 @@ impl Kernel {
     }
 
     /// Runs elements [start, start + n) on this thread with `ctx` (the
-    /// caller's copy) and the buffer table. The kernel itself polls the
-    /// cancel token (the control buffer) every element.
-    pub(crate) fn run_range(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], start: usize, n: usize, mode: Mode, cancel: &AtomicU32) -> Result<(), KernelError> {
+    /// caller's copy) and the buffer table, whose work slot is `work` (this
+    /// worker's [`CHUNK`] words), in slices of [`Kernel::slice`] elements.
+    /// After each slice its counted ops join `count`; once those pass the
+    /// limit the call stops (the other workers at their next element: the
+    /// kernel polls the cancel token, the control buffer, every element).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn run_range(&self, ctx: &mut [u32], table: &[u64], lens: &[usize], start: usize, n: usize, mode: Mode, cancel: &AtomicU32, work: *const u32, count: &WorkCount) -> Result<(), KernelError> {
         // The IEEE environment is part of the result: round to nearest, no
         // flush-to-zero, no default-NaN, whatever the host thread had.
         let _fp = FpEnv::pin();
-        let interp = mode == Mode::Interp;
-        let step = if interp { 256 } else { CHUNK };
+        let step = self.slice();
         let mut at = 0;
         while at < n {
             if cancel.load(Ordering::Relaxed) != 0 {
@@ -640,8 +674,19 @@ impl Kernel {
             }
             let k = (n - at).min(step);
             ctx[K_BASE as usize] = (start + at) as u32;
+            ctx[kl::K_HOST_WORK as usize] = 0;
             self.run_raw(ctx, table, lens, k, mode);
+            let mut ops = ctx[kl::K_HOST_WORK as usize] as u64;
+            for e in start + at..start + at + k {
+                // SAFETY: `work` holds CHUNK words this thread owns; the run
+                // above (on this thread) is done writing them.
+                ops += unsafe { work.add(e & (CHUNK - 1)).read() } as u64;
+            }
             at += k;
+            if count.add(ops) {
+                cancel.store(1, Ordering::Relaxed);
+                return Err(KernelError::Cancelled);
+            }
         }
         if cancel.load(Ordering::Relaxed) != 0 {
             return Err(KernelError::Cancelled);
@@ -861,20 +906,16 @@ pub(crate) struct ChunkCell {
 /// The ctx words a worker copies per chunk (params included).
 const MAX_CTX: usize = K_PARAMS as usize + 256;
 
-/// Checks a call before it runs: the element count, the worst-case work
-/// against `work_limit`, and that every buffer written per element holds
-/// `count` records (always for emit buffers; for plain outputs when the
-/// run is split across threads or four elements run at once, so no two
-/// of them ever share a word). `lens[k]` is buffer k's bound length.
-pub(crate) fn check(kernel: &Kernel, lens: &[usize], count: usize, split: bool, work_limit: u64) -> Result<(), KernelError> {
+/// Checks a call before it runs: the element count, and that every buffer
+/// written per element holds `count` records (always for emit buffers; for
+/// plain outputs when the run is split across threads or four elements run
+/// at once, so no two of them ever share a word). `lens[k]` is buffer k's
+/// bound length. (Work is counted while it runs, not estimated here.)
+pub(crate) fn check(kernel: &Kernel, lens: &[usize], count: usize, split: bool) -> Result<(), KernelError> {
     if count > kl::ELEMENT_CAP as usize {
         return Err(KernelError::TooMany(count));
     }
-    let work = kernel.cost.saturating_mul(count as u64);
-    if work > work_limit {
-        return Err(KernelError::OverBudget { work, limit: work_limit });
-    }
-    for (k, b) in kernel.buffers.iter().enumerate().skip(1) {
+    for (k, b) in kernel.buffers().iter().enumerate().skip(1) {
         let per = match b.access {
             Access::Read => continue,
             Access::Write if !split => continue,
@@ -892,12 +933,46 @@ pub(crate) fn check(kernel: &Kernel, lens: &[usize], count: usize, split: bool, 
     Ok(())
 }
 
+/// A call's counted work: the ops its slices reported, against its limit.
+pub(crate) struct WorkCount {
+    used: AtomicU64,
+    limit: u64,
+    over: AtomicBool,
+}
+
+impl WorkCount {
+    pub(crate) fn new(limit: u64) -> WorkCount {
+        WorkCount { used: AtomicU64::new(0), limit, over: AtomicBool::new(false) }
+    }
+
+    /// Adds a slice's ops; true when the call is now over its limit. Whether
+    /// a call ends over its limit depends only on its total, not on how its
+    /// slices ran.
+    fn add(&self, ops: u64) -> bool {
+        let used = self.used.fetch_add(ops, Ordering::Relaxed).saturating_add(ops);
+        if used > self.limit {
+            self.over.store(true, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn used(&self) -> u64 {
+        self.used.load(Ordering::Relaxed)
+    }
+}
+
+/// What a finished [`run_chunks`] reports: overflowed, host error, the
+/// reduce lanes, the counted ops.
+pub(crate) type ChunksDone = (bool, bool, [f32; 16], u64);
+
 /// Runs `count` elements in fixed chunks of [`CHUNK`]: element-local
 /// kernels on up to `threads` workers of `exec` (the caller included),
 /// others in order on the caller. `ctx` is the call's ctx (count, time,
 /// seed, params); every chunk starts from a copy of it, and the chunk
 /// results are combined in chunk order, so the outcome is the same for any
-/// thread count. `cells` holds at least one cell per chunk. Allocates
+/// thread count. `cells` holds at least one cell per chunk. The ops counted
+/// past `limit` stop the call ([`KernelError::OverBudget`]). Allocates
 /// nothing.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_chunks(
@@ -911,20 +986,33 @@ pub(crate) fn run_chunks(
     cells: &[ChunkCell],
     exec: &dyn crate::sched::Executor,
     threads: usize,
-) -> Result<(bool, bool, [f32; 16]), KernelError> {
+    limit: u64,
+) -> Result<ChunksDone, KernelError> {
     let (op, lanes, init) = kernel.reduce_init();
     // Map kernels split into equal ranges, several per thread (any split
     // gives the same bits); reduce kernels into the fixed chunks.
     let unit = if lanes == 0 && threads > 1 { count.div_ceil(threads * 4).next_multiple_of(4).clamp(MIN_SPLIT, CHUNK) } else { CHUNK };
     let chunks = count.div_ceil(unit);
     let next = std::sync::atomic::AtomicUsize::new(0);
-    let failed = std::sync::atomic::AtomicBool::new(false);
-    let any_overflow = std::sync::atomic::AtomicBool::new(false);
-    let any_host_error = std::sync::atomic::AtomicBool::new(false);
+    let failed = AtomicBool::new(false);
+    let any_overflow = AtomicBool::new(false);
+    let any_host_error = AtomicBool::new(false);
+    let counted = WorkCount::new(limit);
     let words = ctx.len().min(MAX_CTX);
+    let slots = kernel.table_slots().min(kl::MAX_BUFFERS);
+    let ws = kernel.work_slot();
     let work = |_worker: usize| {
         let mut buf = [0u32; MAX_CTX];
         let wctx = &mut buf[..words];
+        // This worker's work counts, bound in its own copy of the table.
+        let mut counts = [0u32; CHUNK];
+        let mut wtable = [0u64; 2 * kl::MAX_BUFFERS];
+        let tl = table.len().min(wtable.len());
+        wtable[..tl].copy_from_slice(&table[..tl]);
+        wtable[2 * ws] = counts.as_mut_ptr() as u64;
+        wtable[2 * ws + 1] = CHUNK as u64;
+        let wtable = &wtable[..tl.max(2 * slots)];
+        let counts = counts.as_ptr();
         loop {
             if failed.load(Ordering::Relaxed) {
                 return;
@@ -941,7 +1029,7 @@ pub(crate) fn run_chunks(
             }
             let start = c * unit;
             let k = (count - start).min(unit);
-            if kernel.run_range(wctx, table, lens, start, k, mode, cancel).is_err() {
+            if kernel.run_range(wctx, wtable, lens, start, k, mode, cancel, counts, &counted).is_err() {
                 failed.store(true, Ordering::Relaxed);
                 return;
             }
@@ -965,6 +1053,11 @@ pub(crate) fn run_chunks(
     } else {
         exec.fan_out(helpers, &work);
     }
+    if counted.over.load(Ordering::Relaxed) {
+        // The stop was the count's, not the owner's: the token is free again.
+        cancel.store(0, Ordering::Relaxed);
+        return Err(KernelError::OverBudget { work: counted.used(), limit });
+    }
     if failed.load(Ordering::Relaxed) || cancel.load(Ordering::Relaxed) != 0 {
         return Err(KernelError::Cancelled);
     }
@@ -979,8 +1072,7 @@ pub(crate) fn run_chunks(
             }
         }
     }
-    let _ = op;
-    Ok((overflowed, host_error, reduced))
+    Ok((overflowed, host_error, reduced, counted.used()))
 }
 
 /// How a range of elements runs.
@@ -1005,14 +1097,15 @@ pub struct Call<'a> {
     _borrow: std::marker::PhantomData<&'a mut [u32]>,
 }
 
-/// Default admission limit: worst-case ops per element x elements.
+/// A call's work limit unless its owner sets one: the counted ops it may
+/// run before it is stopped.
 pub const DEFAULT_WORK_LIMIT: u64 = 1 << 40;
 
 // SAFETY: the raw pointers are borrows held for 'a; a call is moved, not
 // shared, and parallel runs only split element-local work.
 unsafe impl Send for Call<'_> {}
 
-/// Cancels a running call from another thread (the watchdog).
+/// Cancels a running call from another thread (its owner).
 #[derive(Clone)]
 pub struct CancelToken(Arc<AtomicU32>);
 
@@ -1043,8 +1136,9 @@ impl<'a> Call<'a> {
         self.ctx[K_SEED as usize] = seed;
     }
 
-    /// Admission: refuse calls whose worst-case work (ops per element x
-    /// elements) exceeds `ops` (untrusted kernels get a host-chosen limit).
+    /// The counted ops this call may run (see [`crate::work`]): past them
+    /// it stops with [`KernelError::OverBudget`] (untrusted kernels get the
+    /// limit their admission ticket gives).
     pub fn set_work_limit(&mut self, ops: u64) {
         self.work_limit = ops;
     }
@@ -1143,9 +1237,9 @@ impl<'a> Call<'a> {
         self.bufs.iter().map(|b| b.map_or(0, |(_, len)| len)).collect()
     }
 
-    /// Admission and capacity (see [`check`]).
+    /// Capacity (see [`check`]).
     fn admit(&self, count: usize, split: bool) -> Result<(), KernelError> {
-        check(self.kernel, &self.lens(), count, split, self.work_limit)
+        check(self.kernel, &self.lens(), count, split)
     }
 
     fn run_with(&mut self, count: usize, interp: bool) -> Result<RunStats, KernelError> {
@@ -1162,10 +1256,10 @@ impl<'a> Call<'a> {
         let cells: Vec<ChunkCell> = (0..count.div_ceil(CHUNK)).map(|_| ChunkCell::default()).collect();
         let t = split_threads(self.kernel, threads, count, mode);
         let t1 = Clock::now();
-        let (overflowed, host_error, reduced) = run_chunks(self.kernel, &self.ctx, &table, &lens, count, mode, &self.cancel, &cells, exec, t)?;
+        let (overflowed, host_error, reduced, work) = run_chunks(self.kernel, &self.ctx, &table, &lens, count, mode, &self.cancel, &cells, exec, t, self.work_limit)?;
         self.kernel.observe(count, t, t1.nanos(), mode);
         let lanes = self.kernel.reduce_init().1;
-        Ok(RunStats { elements: count, overflowed, host_error, reduced: reduced[..lanes].to_vec(), nanos: t0.nanos() })
+        Ok(RunStats { elements: count, overflowed, host_error, reduced: reduced[..lanes].to_vec(), work, nanos: t0.nanos() })
     }
 
     /// Runs `count` elements split across up to `threads` workers of the

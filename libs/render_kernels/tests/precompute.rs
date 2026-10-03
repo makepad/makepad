@@ -3,7 +3,7 @@
 use makepad_render_kernels::compute::sched::{InlineExecutor, Job, Priority};
 use makepad_render_kernels::precompute::precompute;
 use makepad_render_kernels::{compile, engine};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // `math: portable`: the kernels promise the host loop's f32 bits (a fast
 // kernel fuses multiply-adds).
@@ -40,7 +40,7 @@ fn a_one_kilohertz_spring_over_ten_seconds() {
     job.input_vec_u32("table", h.table.clone()).unwrap();
     job.output_u32("out", vec![0; n]).unwrap();
     job.set_param("steps", steps as f32);
-    let mut job = engine().run(job, Priority::Near, Duration::from_secs(5)).unwrap_or_else(|(_, e)| panic!("{}", e));
+    let mut job = engine().run(job, Priority::Near).unwrap_or_else(|(_, e)| panic!("{}", e));
     let out = job.take_output_u32("out").unwrap();
     for i in 0..n {
         assert_eq!(out[i], h.at(0, 0, i as f32 * 0.0137 - 0.5).to_bits(), "sample {i}");

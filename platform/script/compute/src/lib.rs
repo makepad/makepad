@@ -38,6 +38,7 @@ pub mod parse;
 pub mod pipeline;
 pub mod rand;
 pub mod sched;
+pub mod work;
 mod spmd;
 #[cfg(feature = "vm")]
 pub mod vm_kernel;

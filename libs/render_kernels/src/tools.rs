@@ -6,21 +6,23 @@
 //! `kernel_check` compiles the source (with the layouts and modules the
 //! call names), reports every problem with its line, column and the line's
 //! text, describes what compiled (entry, buffers, params, math, worst-case
-//! cost, parallel and four-wide, the time for a million elements, whether
-//! untrusted work of that kernel would be admitted) and dry-runs it on a
-//! few synthetic elements as untrusted work (admission, watchdog), reporting
+//! cost in ops, parallel and four-wide, whether untrusted work of that
+//! kernel would be admitted) and dry-runs it on a few synthetic elements as
+//! untrusted work (admission, a counted work limit), reporting
 //! non-finite outputs, emit or loop overflow and host-component errors.
 
 use crate::engine::engine;
-use makepad_script_compute::admission::{self, JobBudget, Origin};
+use makepad_script_compute::admission::{self, DeviceLimits, JobBudget, Origin};
 use makepad_script_compute::kernel::{Access, FieldTy, Kernel, KernelKind, Layout, LayoutField, MathMode};
 use makepad_script_compute::module::{Module, STD};
 use makepad_script_compute::sched::Job;
 use makepad_script_compute::{Backend, ShaderError};
 use makepad_strict_json::{self as json, Value};
-use std::time::Duration;
 
 pub use makepad_kernel_tools::{find, KernelToolDef, CHECK, GUIDE, TOOLS};
+
+/// The counted ops a dry run may take.
+const DRY_RUN_WORK: u64 = 1 << 30;
 
 const GUIDE_TEXT: &str = include_str!("guide.md");
 
@@ -157,8 +159,8 @@ fn describe(k: &Kernel) -> Value {
             .collect(),
     );
     let params = Value::Arr(k.params().iter().map(|p| json::obj(vec![("name", json::s(p.name.clone())), ("default", Value::F64(p.default as f64)), ("min", Value::F64(p.min as f64)), ("max", Value::F64(p.max as f64))])).collect());
-    let est = admission::estimate(k, 1_000_000, 8);
-    let element_us = admission::element_ps(k, k.backend()) as f64 / 1e6;
+    let element_ops = admission::element_ops(k);
+    let element_bound = DeviceLimits::default().element_work;
     json::obj(vec![
         ("entry", json::s(k.entry.clone())),
         ("kind", json::s(kind)),
@@ -168,9 +170,8 @@ fn describe(k: &Kernel) -> Value {
         ("worst_ops_per_element", Value::Int(k.cost.min(i64::MAX as u64) as i64)),
         ("parallel", Value::Bool(k.parallel_safe)),
         ("four_wide", Value::Bool(k.simd())),
-        ("worst_ms_per_million_on_8_threads", Value::F64((est.wall_ns as f64 / 1e6 * 100.0).round() / 100.0)),
-        ("worst_us_per_element", Value::F64((element_us * 1000.0).round() / 1000.0)),
-        ("untrusted_admissible", Value::Bool(element_us <= 1000.0)),
+        ("worst_counted_ops_per_element", Value::Int(element_ops.min(i64::MAX as u64) as i64)),
+        ("untrusted_admissible", Value::Bool(element_ops <= element_bound)),
     ])
 }
 
@@ -239,9 +240,9 @@ fn dry_run(k: &std::sync::Arc<Kernel>, args: &Value) -> (Vec<Value>, Value) {
             problems.push(problem(0, 0, format!("dry run: {e}"), ""));
         }
     }
-    // As untrusted work: admission and the watchdog bound what an AI's
-    // kernel may cost.
-    let budget = JobBudget { wall: Duration::from_millis(500) };
+    // As untrusted work: admission and a counted work limit bound what an
+    // AI's kernel may run.
+    let budget = JobBudget { work: DRY_RUN_WORK };
     let r = engine().scheduler().run_sync(&mut job, Origin::Ai, budget);
     let mut run = vec![("elements", Value::Int(n as i64))];
     match r {

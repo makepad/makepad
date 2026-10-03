@@ -17,7 +17,7 @@
 //!   `(ctx, state, shared, table, n, frame) -> ()`, all i32, all but `n`
 //!   byte addresses in that memory:
 //!   - `ctx`: the kernel's ctx words (element base, count, time, seed,
-//!     cancel, overflow, ..., params; [`crate::kernel::Kernel::ctx_words`]).
+//!     host work, overflow, ..., params; [`crate::kernel::Kernel::ctx_words`]).
 //!   - `state`: one word (kernels have no state); an audio program's
 //!     voice or effect state (below).
 //!   - `shared`: the shared tables ([`crate::kernel::Kernel::shared_table`]).

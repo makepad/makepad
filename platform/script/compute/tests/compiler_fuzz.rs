@@ -7,7 +7,6 @@
 use makepad_script_compute::admission::{DeviceLimits, JobBudget, Ledger, Origin};
 use makepad_script_compute::kernel::{compile_with, Access, FieldTy, Kernel, Layout, LayoutField};
 use makepad_script_compute::Backend;
-use std::time::Duration;
 
 const CORPUS: &[&str] = &[
     "let W = 64\nlet pos = output(vec3)\nlet amp = param(8.0)\nfn vertex(i) { let x = float(i % W)\n let z = float(i / W)\n pos[i] = vec3(x, fbm2(vec2(x, z) * 0.02, 3, 2.0, 0.5) * amp, z) }",
@@ -147,8 +146,10 @@ fn hostile_source_never_panics_and_what_compiles_runs_bit_equal() {
     for (n, src) in CORPUS.iter().enumerate() {
         compile_with(src, &layouts, Backend::Native).unwrap_or_else(|e| panic!("corpus {} does not compile: {:?}", n, e));
     }
-    let ledger = Ledger::new(DeviceLimits::default());
-    let budget = JobBudget { wall: Duration::from_millis(100) };
+    // Untrusted jobs whose worst case passes 2e8 ops are refused: the fuzz
+    // runs only what finishes quickly.
+    let ledger = Ledger::new(DeviceLimits { untrusted_worst_case: 200_000_000, ..DeviceLimits::default() });
+    let budget = JobBudget { work: 200_000_000 };
     // FUZZ_SEED / FUZZ_ROUNDS explore further than the default run.
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
     let mut r = Rng(env("FUZZ_SEED", 0x243F_6A88_85A3_08D3) | 1);
@@ -165,7 +166,7 @@ fn hostile_source_never_panics_and_what_compiles_runs_bit_equal() {
         };
         compiled += 1;
         // Untrusted admission first: a job it refuses never runs.
-        if ledger.admit(&k, ELEMENTS, 1, Origin::Ai, &budget).is_err() {
+        if ledger.admit(&k, ELEMENTS, Origin::Ai, &budget).is_err() {
             refused += 1;
             continue;
         }

@@ -130,9 +130,9 @@ impl Pipeline {
     }
 
     /// Runs every pass through `engine` at `priority` (the scheduler's
-    /// admission, watchdog and priority classes apply to each pass).
-    pub fn run_on(&mut self, engine: &crate::KernelEngine, priority: makepad_script_compute::sched::Priority, budget: std::time::Duration) -> Result<(), PipelineError> {
-        self.run_with(engine.executor(), engine.threads(), &mut |job: Job| engine.run(job, priority, budget))
+    /// admission and priority classes apply to each pass).
+    pub fn run_on(&mut self, engine: &crate::KernelEngine, priority: makepad_script_compute::sched::Priority) -> Result<(), PipelineError> {
+        self.run_with(engine.executor(), engine.threads(), &mut |job: Job| engine.run(job, priority))
     }
 
     fn run_with(&mut self, exec: &dyn Executor, threads: usize, run: &mut dyn FnMut(Job) -> Result<Job, (Job, JobError)>) -> Result<(), PipelineError> {

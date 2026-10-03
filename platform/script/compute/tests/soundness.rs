@@ -138,15 +138,19 @@ fn init_is_budgeted_and_cannot_see_host_buffers() {
 }
 
 #[test]
-fn work_admission_refuses_oversized_jobs() {
+fn a_call_stops_past_its_counted_work() {
     let k = compile("let o = output(f32)\nfn element(i) { let s = 0.0\n for a in 0..1000 { s = s + sin(float(a)) }\n o[i] = s }").unwrap();
     let mut out = vec![0.0f32; 1000];
     let mut c = k.call();
     c.output("o", &mut out).unwrap();
-    c.set_work_limit(k.cost * 10);
+    // The worst case bounds what a call counts.
+    let worst = makepad_script_compute::admission::element_ops(&k) * 1000;
+    let used = c.run(1000).unwrap().work;
+    assert!(used > 0 && used <= worst, "{used} of {worst}");
+    c.set_work_limit(used / 100);
     assert!(matches!(c.run(1000), Err(KernelError::OverBudget { .. })));
-    c.set_work_limit(k.cost * 1000);
-    assert!(c.run(1000).is_ok());
+    c.set_work_limit(used);
+    assert_eq!(c.run(1000).unwrap().work, used);
 }
 
 // -- 4. the validator never panics and rejects malformed IR -----------------------

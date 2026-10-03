@@ -1,8 +1,8 @@
-//! Admission bench: the worst ns per AIR op over hostile op mixes, and
-//! the cost of a dependent load that misses every cache (the rates
-//! `admission::rates` converts worst-case work into time with). The
-//! cancellation latency at the admitted ceiling is measured by
-//! `tests/admission.rs` (`--nocapture` prints it).
+//! Op-time bench: the worst ns per AIR op over hostile op mixes, and the
+//! cost of a dependent load that misses every cache (the yardstick
+//! `tests/host_hostile.rs` holds host components' declared costs to;
+//! budgets themselves count ops). The cancellation latency at the admitted
+//! ceiling is measured by `tests/admission.rs` (`--nocapture` prints it).
 //!
 //! cargo run --release -p makepad-script-compute --example bench_admission
 

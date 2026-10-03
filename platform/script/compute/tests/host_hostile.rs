@@ -132,15 +132,21 @@ fn adversarial(kind: u32) -> Vec<f32> {
     pts
 }
 
+/// What a declared op and a declared miss may take at most (an Apple
+/// M-series core measured 0.32 ns per op and 114 ns per dependent load,
+/// with margin): the yardstick a component's declared cost is held to.
+/// Only this check of the declarations uses time; budgets count ops.
+const OP_PS: u64 = 500;
+const MISS_PS: u64 = 250_000;
+
 #[test]
 fn built_in_costs_bound_their_adversarial_time() {
-    let ledger_rates = makepad_script_compute::admission::rates(Backend::Native);
     for name in ["poly.triangulate"] {
         let f = host::find(name).unwrap();
         let h = host::get(f).unwrap();
         let words = [2 * N as u32, 3 * (N as u32 - 2)];
         // The declared cost at these input sizes (what a call is charged).
-        let declared_ps = (h.cost_of(&words) + 8) * ledger_rates.op_ps + h.misses as u64 * ledger_rates.miss_ps;
+        let declared_ps = (h.cost_of(&words) + 8) * OP_PS + h.misses as u64 * MISS_PS;
         let mut worst = Duration::ZERO;
         for kind in 0..3 {
             let mut pts = adversarial(kind);
@@ -177,13 +183,13 @@ fn a_slow_component_is_admitted_by_its_cost_and_stopped_by_cancel() {
     let ledger = Ledger::new(DeviceLimits::default());
     let src = "let o = output(f32)\nfn element(i) { o[i] = hostile.slow(i) }";
     let twice = "let o = output(f32)\nfn element(i) { o[i] = hostile.slow(i) + hostile.slow(i + 1) }";
-    let budget = JobBudget { wall: Duration::from_secs(1) };
+    let budget = JobBudget { work: 1 << 30 };
     for backend in [Backend::Native, Backend::Interp] {
         let k = compile_with(src, &[], backend).unwrap_or_else(|e| panic!("{:?}", e));
-        assert!(ledger.admit(&k, 1, 1, Origin::Ai, &budget).is_ok(), "one call fits the element bound");
+        assert!(ledger.admit(&k, 1, Origin::Ai, &budget).is_ok(), "one call fits the element bound");
         // Two calls per element: refused (here already by the compiler's
         // per-element cap, else by admission).
-        let refused = compile_with(twice, &[], backend).map_or(true, |k2| ledger.admit(&k2, 1, 1, Origin::Ai, &budget).is_err());
+        let refused = compile_with(twice, &[], backend).map_or(true, |k2| ledger.admit(&k2, 1, Origin::Ai, &budget).is_err());
         assert!(refused, "two calls per element do not fit");
         let n = 50_000;
         let mut out = vec![0.0f32; n];
@@ -212,17 +218,13 @@ fn an_untrusted_call_on_a_run_time_size_gets_a_per_call_limit() {
     let src = "let pts = input(f32)\nlet tris = output(i32, 1, 0, tris)\nlet o = output(i32)\nfn element(i) { o[i] = poly.triangulate(pts, 0, int(pts[0]), tris, 0, 3000) }";
     let k = compile_with(src, &[], Backend::Native).unwrap_or_else(|e| panic!("{:?}", e));
     let ledger = Ledger::new(DeviceLimits::default());
-    let budget = JobBudget { wall: Duration::from_secs(1) };
-    let t = ledger.admit(&k, 1, 1, Origin::Ai, &budget).unwrap();
+    let budget = JobBudget { work: 1 << 30 };
+    let t = ledger.admit(&k, 1, Origin::Ai, &budget).unwrap();
     let limit = t.host_call_limit();
     assert!(limit > 0, "untrusted open calls are limited");
-    assert!(t.estimate().element_ps <= 1_000_000_000, "the element bound holds with the limit");
-    // Trusted code: no per-call limit, charged at the largest input (a
-    // 65536-point polygon: tens of seconds, so it needs a budget for it).
-    assert!(ledger.admit(&k, 1, 1, Origin::Host, &budget).is_err());
-    let long = JobBudget { wall: Duration::from_secs(600) };
-    let offline = Ledger::new(DeviceLimits { max_in_flight: Duration::from_secs(3600), ..DeviceLimits::default() });
-    assert_eq!(offline.admit(&k, 1, 1, Origin::Host, &long).unwrap().host_call_limit(), 0, "trusted: no limit");
+    assert!(t.estimate().element_ops <= DeviceLimits::default().element_work, "the element bound holds with the limit");
+    // Trusted code: no per-call limit (its budget bounds what it runs).
+    assert_eq!(ledger.admit(&k, 1, Origin::Host, &budget).unwrap().host_call_limit(), 0, "trusted: no limit");
     let f = host::find("poly.triangulate").unwrap();
     let h = host::get(f).unwrap();
     // A small polygon fits the limit; a large one is refused before it runs.

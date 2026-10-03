@@ -4,7 +4,7 @@
 //! An app installs the platform's `TaskPool` at start-up ([`install`]):
 //! kernel jobs then run on its Heavy lane (the lane long work shares, so a
 //! burst of kernels never queues in front of the light jobs), with no thread
-//! of their own beyond the scheduler's watchdog. Before that, or headless
+//! of their own. Before that, or headless
 //! (tests, tools, a level built without a window), the engine runs on the
 //! compute crate's own pool. Results never depend on which: chunks are
 //! fixed and combine in order.
@@ -18,7 +18,6 @@ use makepad_script_compute::sched::{Executor, FnExecutor, Job, JobError, Priorit
 use makepad_script_compute::{Backend, ShaderError};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Duration;
 
 pub struct KernelEngine {
     exec: Arc<dyn Executor>,
@@ -47,14 +46,15 @@ pub fn task_pool_executor(pool: TaskPool, ui: std::thread::ThreadId) -> Arc<dyn 
     ))
 }
 
-/// Summed worst-case worker time of the admitted jobs the device may hold
-/// (the admission ledger's `max_in_flight`), for the engine's trusted work.
-/// Admission charges every load of a kernel as a cache and TLB miss, so a
-/// trusted pass that runs in milliseconds (a terrain tile's topology pass:
-/// ~130 loads per element) is estimated at a minute; the default 30 s would
-/// refuse a world's build. Untrusted work keeps its own, smaller share
-/// (`max_untrusted_in_flight`), which this does not change.
-pub const TRUSTED_IN_FLIGHT: Duration = Duration::from_secs(3600);
+/// The ops the admitted jobs the device may hold can run, summed (the
+/// admission ledger's `max_in_flight`), for the engine's trusted work: not
+/// held back. Admission charges a job the least of its static worst case
+/// and its budget, and a trusted pass's worst case (every loop at its cap,
+/// every buffer access weighed as a miss) is far above what it runs, so a
+/// world's build would otherwise wait on its own estimates. Untrusted work
+/// keeps its own, smaller share (`max_untrusted_in_flight`), which this
+/// does not change.
+pub const TRUSTED_IN_FLIGHT: u64 = u64::MAX;
 
 impl KernelEngine {
     fn new(exec: Arc<dyn Executor>, task_pool: bool) -> Self {
@@ -88,9 +88,10 @@ impl KernelEngine {
     /// Runs one trusted job to completion at `priority` and gives it back:
     /// on the calling thread with the workers' help for MustComplete (load
     /// gating: nothing queues in front of it), otherwise queued in its
-    /// class and waited for. Never call this on the UI thread.
-    pub fn run(&self, mut job: Job, priority: Priority, budget: Duration) -> Result<Job, (Job, JobError)> {
-        let budget = JobBudget { wall: budget };
+    /// class and waited for. Trusted work runs to its end (its counted ops
+    /// are not limited). Never call this on the UI thread.
+    pub fn run(&self, mut job: Job, priority: Priority) -> Result<Job, (Job, JobError)> {
+        let budget = JobBudget::UNLIMITED;
         if priority == Priority::MustComplete {
             return match self.sched.run_sync(&mut job, Origin::Host, budget) {
                 Ok(()) => Ok(job),

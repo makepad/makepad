@@ -955,7 +955,10 @@ impl<'a, 'm, 'i> Interp<'a, 'm, 'i> {
                     let mut out = [0u32; 1];
                     let nr = rets.len().min(1);
                     let limit = self.mem.ctx.get(crate::lower::kernel::K_HOST_LIMIT as usize).copied().unwrap_or(0) as u64;
-                    let ok = crate::host::invoke_limited(*f, &a[..args.len().min(16)], &sl[..slices.len().min(8)], &mut out[..nr], self.mem.bufs, limit);
+                    let (ok, cost) = crate::host::invoke_counted(*f, &a[..args.len().min(16)], &sl[..slices.len().min(8)], &mut out[..nr], self.mem.bufs, limit);
+                    if let Some(w) = self.mem.ctx.get_mut(crate::lower::kernel::K_HOST_WORK as usize) {
+                        *w = (*w as u64).saturating_add(cost).min(u32::MAX as u64) as u32;
+                    }
                     if !ok {
                         if let Some(w) = self.mem.ctx.get_mut(crate::lower::kernel::K_HOST_ERR as usize) {
                             *w = 1;

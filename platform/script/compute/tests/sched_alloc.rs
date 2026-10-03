@@ -7,7 +7,6 @@ use makepad_script_compute::sched::{Executor, Job, Priority, Scheduler, Schedule
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 struct Counting;
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
@@ -42,7 +41,7 @@ fn steady_state_jobs_allocate_nothing() {
         j
     };
     let mut stream = Stream::new(mk(), mk());
-    let budget = JobBudget { wall: Duration::from_secs(1) };
+    let budget = JobBudget::UNLIMITED;
     let frame = |stream: &mut Stream, f: u32| {
         stream.request(&s, Priority::Near, Origin::Host, budget, |j| j.set_time(f as f32)).unwrap();
         while stream.busy() {
