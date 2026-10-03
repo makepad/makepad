@@ -34,8 +34,8 @@ use makepad_widgets::makepad_platform::linux_input::{
 };
 use makepad_widgets::makepad_platform::linux_display::LinuxDisplaySnapshot;
 use shell::display_layout::{
-    fill_slots, is_joining, restore_plan, restore_waiting, screen_key, screen_rows, screens_span_gpus,
-    DisplayLayout, RestoreOp, ScreenEntry, ScreenKey,
+    env_restore_plan, fill_slots, is_joining, restore_plan, restore_waiting, screen_key, screen_rows,
+    screens_span_gpus, DisplayLayout, RestoreOp, ScreenEntry, ScreenKey,
 };
 use shell::panels::{PanelKind, ShellPanel};
 use shell::system_linux::{
@@ -269,6 +269,18 @@ impl LinuxControls {
     /// screen out of the desktop cannot end it before the order is checked
     /// again. Otherwise it gives up `SOURCE_RESTORE_TIMEOUT` after the
     /// first inventory or the last request, whichever is later.
+    ///
+    /// `order_env`/`modes_env` are the externally pinned (non-empty,
+    /// not-from-saved) `MAKEPAD_DISPLAY_ORDER`/`MAKEPAD_DRM_MODES` this
+    /// process started with (`SystemSnapshot::order_env`/`modes_env`),
+    /// if any: the plan is filtered through `env_restore_plan` first, so
+    /// an `Order`/`Mode` the file wants but the env already pins at this
+    /// boot is neither sent nor counted as outstanding — the restore can
+    /// still end on the env's arrangement, matching the global
+    /// constraint "an externally set non-empty env var always wins over
+    /// the file" — previously this only held at session start (the
+    /// session helper's own `MAKEPAD_WM_*_FROM_SAVED` deferral); this
+    /// extends it to the WM's own runtime restore.
     fn order_restore_step(
         &mut self,
         layout: &DisplayLayout,
@@ -276,12 +288,14 @@ impl LinuxControls {
         generation: u64,
         now: f64,
         since: f64,
+        order_env: Option<&str>,
+        modes_env: Option<&str>,
     ) -> Vec<RestoreOp> {
         let mut send = Vec::new();
         if self.layout_restore_done {
             return send;
         }
-        let plan = restore_plan(layout, displays);
+        let plan = env_restore_plan(restore_plan(layout, displays), order_env, modes_env);
         let waiting = restore_waiting(layout, displays);
         let laid_out = displays.outputs.iter().any(|o| o.desktop_position.is_some());
         if self.layout_restore_generation != Some(generation) && laid_out {
@@ -881,7 +895,9 @@ impl App {
             .then(|| cx.linux_display_snapshot());
         let gpus = monitor_open.then(|| cx.linux_gpu_snapshot());
         if let (true, Some(displays)) = (restore_pending, displays.as_ref()) {
-            changed |= self.restore_display_layout(cx, displays, adjusting);
+            let order_env = snapshot.as_ref().and_then(|s| s.order_env.as_deref());
+            let modes_env = snapshot.as_ref().and_then(|s| s.modes_env.as_deref());
+            changed |= self.restore_display_layout(cx, displays, adjusting, order_env, modes_env);
         }
         let actual_dpi = self.main_window_dpi(cx);
         let state = &mut self.linux_controls;
@@ -1052,7 +1068,17 @@ impl App {
     /// once it is active, or at once while it is joining (another GPU's
     /// screen, which the renderer accepts early); otherwise it gets the
     /// same bounded wait.
-    fn restore_display_layout(&mut self, cx: &mut Cx, displays: &LinuxDisplaySnapshot, adjusting: bool) -> bool {
+    ///
+    /// `order_env`/`modes_env`: see `order_restore_step`, which this
+    /// passes them to unchanged.
+    fn restore_display_layout(
+        &mut self,
+        cx: &mut Cx,
+        displays: &LinuxDisplaySnapshot,
+        adjusting: bool,
+        order_env: Option<&str>,
+        modes_env: Option<&str>,
+    ) -> bool {
         if !displays.direct {
             // The desktop owns the outputs: nothing to arrange.
             log!("wm: saved display layout not applied: the desktop owns the outputs");
@@ -1073,7 +1099,9 @@ impl App {
         let timed_out = now - since > SOURCE_RESTORE_TIMEOUT;
         let mut asked = false;
         let generation = cx.linux_display_generation();
-        for op in self.linux_controls.order_restore_step(&layout, displays, generation, now, since) {
+        for op in self.linux_controls.order_restore_step(
+            &layout, displays, generation, now, since, order_env, modes_env,
+        ) {
             match &op {
                 RestoreOp::Order(order) => {
                     log!("wm: applying saved display order {}", order.join(","));
@@ -1286,13 +1314,13 @@ mod tests {
         }
     }
 
-    /// nebmind: the AMD card (0c:00.0) is a peer, the NVIDIA card renders.
-    const NEBMIND_LAYOUT: &str =
+    /// Two-card layout: the AMD card (0c:00.0) is a peer, the NVIDIA card renders (main).
+    const TWO_GPU_LAYOUT: &str =
         "screen 0000:0c:00.0 HDMI-A-2 mode=3840x2160@30\nscreen 0000:01:00.0 HDMI-A-1 main\n";
 
-    /// One poll of the order/mode restore against `snap`.
+    /// One poll of the order/mode restore against `snap`, no env pin.
     fn step(c: &mut LinuxControls, layout: &DisplayLayout, snap: &LinuxDisplaySnapshot, generation: u64, now: f64) -> Vec<RestoreOp> {
-        c.order_restore_step(layout, snap, generation, now, 0.0)
+        c.order_restore_step(layout, snap, generation, now, 0.0, None, None)
     }
 
     fn sent_order(ops: &[RestoreOp]) -> bool {
@@ -1301,7 +1329,7 @@ mod tests {
 
     #[test]
     fn order_restore_outlives_a_mode_reacquire_of_a_peer() {
-        let layout = layout(NEBMIND_LAYOUT);
+        let layout = layout(TWO_GPU_LAYOUT);
         let mut c = LinuxControls::default();
         let own = screen("card1-HDMI-A-1", "0000:01:00.0", Some((0, 0)), true);
         // Generation 1: the peer cannot show its fastest mode yet (failed,
@@ -1342,7 +1370,7 @@ mod tests {
         // Peer placed (at 4K60, still at (0, 0) before its slice) -> mode
         // sent -> unplaced while reacquiring -> placed again on the right:
         // the order is still sent and the restore ends only once it holds.
-        let layout = layout(NEBMIND_LAYOUT);
+        let layout = layout(TWO_GPU_LAYOUT);
         let mut c = LinuxControls::default();
         let own = screen("card1-HDMI-A-1", "0000:01:00.0", Some((0, 0)), true);
         let mut peer = screen("card0-HDMI-A-2", "0000:0c:00.0", Some((0, 0)), false);
@@ -1365,6 +1393,56 @@ mod tests {
         assert!(sent_order(&sent), "the order was never sent: {sent:?}");
         // Still on the wrong side 10 s after the last request: give up.
         step(&mut c, &layout, &snap, 3, 14.0);
+        assert!(c.layout_restore_done);
+    }
+
+    // The runtime half of the same rule: an externally pinned
+    // MAKEPAD_DISPLAY_ORDER / MAKEPAD_DRM_MODES must not be overridden by
+    // the file, the same way the session helper already defers to it at
+    // session start.
+
+    #[test]
+    fn order_restore_step_skips_order_pinned_by_an_external_env() {
+        // Two plain screens, reversed from their saved order: without a
+        // pin this sends Order; with one, it must not, and the restore
+        // still ends because nothing else is outstanding.
+        let layout = layout("screen 0000:00:02.0 DP-1 main\nscreen 0000:01:00.0 DP-2\n");
+        // 3840 apart (each screen's own width, from the `screen` helper)
+        // so the two rects do not overlap and "still settling" never
+        // masks the order mismatch this test wants to see.
+        let dp1 = screen("card0-DP-1", "0000:00:02.0", Some((3840, 0)), true);
+        let dp2 = screen("card1-DP-2", "0000:01:00.0", Some((0, 0)), false);
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![dp2, dp1] };
+        // Sanity: unpinned, the file and the running order disagree.
+        let mut unpinned = LinuxControls::default();
+        let ops = unpinned.order_restore_step(&layout, &snap, 1, 1.0, 0.0, None, None);
+        assert!(sent_order(&ops), "sanity: the running order should need fixing: {ops:?}");
+        // Pinned: Order is withheld and the restore ends on what is
+        // already laid out, not on the file.
+        let mut c = LinuxControls::default();
+        let ops = c.order_restore_step(&layout, &snap, 1, 1.0, 0.0, Some("card1-DP-2,card0-DP-1"), None);
+        assert!(ops.is_empty(), "order must not be sent while the env pins it: {ops:?}");
+        assert!(c.layout_restore_done, "nothing else was outstanding, so the restore can still end");
+    }
+
+    #[test]
+    fn order_restore_step_skips_a_mode_pinned_by_an_external_env_for_its_screen_only() {
+        let layout = layout(TWO_GPU_LAYOUT);
+        let own = screen("card1-HDMI-A-1", "0000:01:00.0", Some((0, 0)), true);
+        let mut peer = screen("card0-HDMI-A-2", "0000:0c:00.0", None, false);
+        peer.status = "failed: no free display plane can present the selected mode".to_string();
+        let snap = LinuxDisplaySnapshot { direct: true, outputs: vec![peer.clone(), own.clone()] };
+        // A pin naming a different screen leaves this one's Mode alone.
+        let mut other_pinned = LinuxControls::default();
+        let ops =
+            other_pinned.order_restore_step(&layout, &snap, 1, 1.0, 0.0, None, Some("card9-DP-9=1920x1080"));
+        assert_eq!(ops, vec![RestoreOp::Mode("card0-HDMI-A-2".to_string(), Some("3840x2160@30".to_string()))]);
+        assert!(!other_pinned.layout_restore_done);
+        // Pinned for this screen: no Mode op, and the restore ends (the
+        // peer's failed status is not "joining", so nothing else waits).
+        let mut c = LinuxControls::default();
+        let ops = c.order_restore_step(&layout, &snap, 1, 1.0, 0.0, None, Some("card0-HDMI-A-2=1920x1080"));
+        assert!(ops.is_empty(), "mode must not be sent for the env-pinned screen: {ops:?}");
         assert!(c.layout_restore_done);
     }
 }

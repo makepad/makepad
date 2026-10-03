@@ -748,6 +748,15 @@ impl Cx {
                     let window = &mut self.windows[window_id];
                     window.window_geom.position = size;
                 }
+                CxOsOp::FullscreenWindow(_window_id) => {
+                    // The window already covers the whole wide desktop
+                    // (`CreateWindow` above); there is no further
+                    // composition change to make here. An app asking for a
+                    // screen span uses `makepad_wm_api::set_fullscreen_span`
+                    // instead, which records the span and hands back the
+                    // union rect to lay content into -- this op is a no-op
+                    // on direct, same as the other backends' stdin runtimes.
+                }
                 CxOsOp::CheckPermission {
                     permission,
                     request_id,

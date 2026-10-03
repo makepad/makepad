@@ -82,6 +82,20 @@ mod tests {
             assert_eq!(*weight, expected, "style weight at index {index}");
         }
     }
+    /// Every desktop style's shelf (the macOS dock, the Windows taskbars)
+    /// stands aside while the main screen shows a fullscreen window and
+    /// returns when it ends; the mobile styles have none either way.
+    #[test]
+    fn the_dock_hides_under_a_fullscreen_main_screen() {
+        for style in [DesktopStyle::Macos, DesktopStyle::Windows, DesktopStyle::Windows2000, DesktopStyle::NextStep] {
+            assert!(dock_visible(style, false), "{style:?}");
+            assert!(!dock_visible(style, true), "{style:?}");
+        }
+        for style in [DesktopStyle::Ios, DesktopStyle::Android] {
+            assert!(!dock_visible(style, false), "{style:?}");
+            assert!(!dock_visible(style, true), "{style:?}");
+        }
+    }
 }
 
 use crate::desk::WmState;
@@ -544,6 +558,19 @@ fn dock_screen(state: &WmState, full: Rect) -> Rect {
         _ => full,
     }
 }
+/// Whether the shelf (the macOS dock, the Windows and Windows 2000
+/// taskbars, the NeXT dock: one widget for every desktop style) is drawn,
+/// takes hits and is sampled by the compositor: a desktop (not mobile)
+/// style, unless the main screen, where it sits, shows a fullscreen
+/// window, whose own bottom edge it would otherwise cover. It comes back
+/// when the fullscreen ends; a maximized window keeps it.
+pub fn dock_visible(style: DesktopStyle, main_fullscreen: bool) -> bool {
+    !style.mobile() && !main_fullscreen
+}
+/// `dock_visible` for the WM's current style and screens.
+pub fn dock_shown(state: &WmState) -> bool {
+    dock_visible(state.style.target, state.screens.main_fullscreen())
+}
 pub fn dock_bounds(state: &WmState, size: Vec2d) -> Rect {
     shelf_layout(dock_screen(state, rect(0.0,0.0,size.x,size.y)), &state.style, dock_app_ids(state).len()).bar
 }
@@ -583,7 +610,7 @@ impl Widget for DesktopShelf {
                 script_apply_eval!(cx,self.glass,{draw_bg +: {tint_color: #(tint) tint_alpha: #(tint_alpha)}});
             }
             let opacity = (1.0 - t.weights[0]) as f32;
-            if opacity > 0.001 && !style.mobile() {
+            if opacity > 0.001 && dock_shown(state) {
                 let mut apps: Vec<_> = crate::shell::launcher::apps(&state.launchable)
                     .into_iter()
                     .filter(|a| !a.disabled)

@@ -461,6 +461,8 @@ impl App {
                 let (on_desktop, over_window) = self.desk(cx).borrow::<WmDesk>()
                     .map(|d| (d.desk_rect.contains(p), d.window_at(p).is_some()))
                     .unwrap_or((false, false));
+                // The bar floating over the desk's top is not the desktop.
+                let on_desktop = on_desktop && !self.bar_floats_over(cx, p);
                 if e.button.contains(MouseButton::SECONDARY)
                     && on_desktop
                     && (chrome_hit.is_some() || !over_window)

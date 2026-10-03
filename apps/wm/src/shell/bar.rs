@@ -75,6 +75,52 @@ pub struct BarSegment {
     pub x1: f64,
     pub data: BarData,
     pub active: bool,
+    /// A span's window covers this screen: its segment is not drawn and
+    /// takes no input (the window's own top edge shows through).
+    pub hidden: bool,
+}
+
+/// Where the bar sits, from whether it is cut into per-screen segments,
+/// whether it is shown at all, and its height.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BarPlacement {
+    /// The strip above the desk: a spacer of the bar's height pushes the
+    /// desk down (one screen, a mobile style, nested, the gallery).
+    /// `None`: the desk starts at the window's top edge.
+    pub strip: Option<f64>,
+    /// What every screen not covered by a span reserves at its top for
+    /// the bar floating over it (`ScreenSet::bar_top`).
+    pub reserved_top: f64,
+    /// The bar's own background, under its segments: only in the strip,
+    /// so a hidden segment shows the scene below it.
+    pub background: bool,
+}
+
+/// One segment (or none) keeps the bar a strip above the desk, as it
+/// always was; per-screen segments float it over the top of the scene,
+/// where each screen reserves its height and a span can cover it. A
+/// hidden bar takes nothing either way.
+pub fn bar_placement(segmented: bool, visible: bool, height: f64) -> BarPlacement {
+    match (visible, segmented) {
+        (false, _) => BarPlacement { strip: None, reserved_top: 0.0, background: !segmented },
+        (true, false) => BarPlacement { strip: Some(height), reserved_top: 0.0, background: true },
+        (true, true) => BarPlacement { strip: None, reserved_top: height, background: false },
+    }
+}
+
+/// The segments drawn across the strip `r`, as (segment index, rect):
+/// every one of `segment_rects`, minus the hidden ones. No segment, or
+/// one, is the whole strip and never hidden (one screen's fullscreen
+/// hides the whole bar instead).
+pub fn drawn_segments(r: Rect, segments: &[BarSegment]) -> Vec<(usize, Rect)> {
+    let spans: Vec<(f64, f64)> = segments.iter().map(|s| (s.x0, s.x1)).collect();
+    let rects = segment_rects(r, &spans);
+    let one = rects.len() <= 1;
+    rects
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| one || !segments[*i].hidden)
+        .collect()
 }
 
 /// One layout's workspace cluster: the active workspace (shown as a dot,
@@ -656,6 +702,9 @@ pub struct ShellBar {
     /// (segment, module, rect), recorded by the last draw.
     #[rust]
     hits: Vec<(usize, BarModule, Rect)>,
+    /// The segment rects the last draw painted (hidden ones left out).
+    #[rust]
+    drawn: Vec<Rect>,
     #[rust]
     hover: Option<(usize, BarModule)>,
     #[rust]
@@ -744,23 +793,27 @@ impl ShellBar {
         let segments = std::mem::take(&mut self.segments);
         let spans: Vec<(f64, f64)> = segments.iter().map(|s| (s.x0, s.x1)).collect();
         let rects = segment_rects(r, &spans);
+        let drawn = drawn_segments(r, &segments);
         let datas: Vec<BarData> = if segments.len() <= 1 {
             vec![segments.first().map_or_else(|| self.data.clone(), |s| s.data.clone())]
         } else {
             segments.iter().map(|s| s.data.clone()).collect()
         };
         let last = rects.len() - 1;
-        for (i, (sr, data)) in rects.iter().zip(&datas).enumerate() {
+        for &(i, sr) in &drawn {
             // One segment is the whole bar and always the active one.
             let active = last == 0 || segments[i].active;
-            self.draw_segment(cx, i, data, *sr, i == 0, i == last, active);
+            self.draw_segment(cx, i, &datas[i], sr, i == 0, i == last, active);
         }
+        self.drawn = drawn.iter().map(|(_, r)| *r).collect();
         // The hover tooltip, once the pointer has rested 400ms, over
         // everything else.
         if let Some((seg, module)) = self.hover {
             if self.hover_time >= TOOLTIP_DELAY {
                 if let (Some(sr), Some(data)) = (rects.get(seg), datas.get(seg)) {
-                    self.draw_tooltip(cx, *sr, data, seg, module);
+                    if drawn.iter().any(|(i, _)| *i == seg) {
+                        self.draw_tooltip(cx, *sr, data, seg, module);
+                    }
                 }
             }
         }
@@ -1103,6 +1156,13 @@ impl ShellBar {
         );
     }
 
+    /// `p` is on the bar as last drawn: inside a painted segment (the
+    /// whole strip on one screen), not where a hidden one lets a span's
+    /// window show through.
+    pub fn covers(&self, p: Vec2d) -> bool {
+        self.drawn.iter().any(|r| contains(*r, p))
+    }
+
     pub fn module_at(&self, p: Vec2d) -> Option<BarModule> {
         self.hit_at(p).map(|(_, m)| m)
     }
@@ -1158,7 +1218,7 @@ impl Widget for ShellBar {
         }
         match event {
             Event::MouseMove(e) => {
-                let over = contains(bar_rect, e.abs);
+                let over = contains(bar_rect, e.abs) && self.covers(e.abs);
                 let module = if over { self.hit_at(e.abs) } else { None };
                 let reveal = match module {
                     Some((seg, BarModule::Indicator(_))) => Some(seg),
@@ -1365,5 +1425,61 @@ mod tests {
             press_action(1, m, MouseButton::MIDDLE),
             press_action(1, m, MouseButton::SECONDARY)
         );
+    }
+
+    fn seg(x0: f64, x1: f64, hidden: bool) -> BarSegment {
+        BarSegment { x0, x1, data: BarData::fixture(), active: false, hidden }
+    }
+
+    /// One screen keeps today's strip: the desk below a spacer of the
+    /// bar's height, nothing reserved inside it, the strip's background
+    /// painted. Hidden (ToggleBar, one screen's fullscreen), the desk
+    /// takes the whole window, as before.
+    #[test]
+    fn one_screen_keeps_the_strip_above_the_desk() {
+        assert_eq!(
+            bar_placement(false, true, 26.0),
+            BarPlacement { strip: Some(26.0), reserved_top: 0.0, background: true }
+        );
+        assert_eq!(
+            bar_placement(false, true, 38.0),
+            BarPlacement { strip: Some(38.0), reserved_top: 0.0, background: true }
+        );
+        assert_eq!(bar_placement(false, false, 26.0).strip, None);
+        assert_eq!(bar_placement(false, false, 26.0).reserved_top, 0.0);
+    }
+
+    /// Per-screen segments float over the scene: no strip, every screen
+    /// reserves the bar's height, no background under the segments (a
+    /// hidden one shows the span's window). ToggleBar reserves nothing.
+    #[test]
+    fn segments_float_over_the_scene() {
+        assert_eq!(
+            bar_placement(true, true, 26.0),
+            BarPlacement { strip: None, reserved_top: 26.0, background: false }
+        );
+        assert_eq!(
+            bar_placement(true, false, 26.0),
+            BarPlacement { strip: None, reserved_top: 0.0, background: false }
+        );
+    }
+
+    #[test]
+    fn drawn_segments_skip_the_spanned_screens() {
+        let r = rect(0.0, 0.0, 5760.0, 26.0);
+        let all = segment_rects(r, &[(0.0, 1920.0), (1920.0, 3840.0), (3840.0, 5760.0)]);
+        // Nothing spanned: every segment.
+        let none = [seg(0.0, 1920.0, false), seg(1920.0, 3840.0, false), seg(3840.0, 5760.0, false)];
+        assert_eq!(drawn_segments(r, &none), vec![(0, all[0]), (1, all[1]), (2, all[2])]);
+        // A span over the first two: only the third, at its own index (a
+        // click there still means screen 2).
+        let spanned = [seg(0.0, 1920.0, true), seg(1920.0, 3840.0, true), seg(3840.0, 5760.0, false)];
+        assert_eq!(drawn_segments(r, &spanned), vec![(2, all[2])]);
+        // A span over all of them: nothing.
+        let every = [seg(0.0, 1920.0, true), seg(1920.0, 3840.0, true), seg(3840.0, 5760.0, true)];
+        assert!(drawn_segments(r, &every).is_empty());
+        // No segment, or one, is the whole strip, never hidden.
+        assert_eq!(drawn_segments(r, &[]), vec![(0, r)]);
+        assert_eq!(drawn_segments(r, &[seg(0.0, 1920.0, true)]), vec![(0, r)]);
     }
 }

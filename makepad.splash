@@ -81,5 +81,6 @@ hub.set_run_items([
     RunStudioRelease{name: "makepad-example-xr"}
     RunStudioRelease{name: "makepad-example-cad"}
     RunStudioRelease{name: "makepad-app-fab"}
+    RunStudioRelease{name: "makepad-example-screen-span"}
     RunQuest{name: "makepad-example-xr-quest", run:"makepad-example-xr"}
 ])

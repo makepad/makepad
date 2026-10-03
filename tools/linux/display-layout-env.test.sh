@@ -10,11 +10,16 @@
 # cardN than a hypothetical earlier boot); a screen whose card is missing
 # this boot; a malformed file (bad render-on, a too-short screen line, an
 # unknown keyword, a duplicate screen key, an invalid mode=); a pre-set
-# env var winning over the file for each of the three variables; the
-# legacy display-gpu fallback, both when it should apply (no display-
-# layout file at all) and when it must not (display-layout exists, even
-# without a render-on line); and an unreadable-but-present display-layout
-# read as empty rather than falling back.
+# env var winning over the file for each of the three variables, and the
+# per-variable MAKEPAD_WM_ORDER_FROM_SAVED/MAKEPAD_WM_MODES_FROM_SAVED
+# markers that go with MAKEPAD_DISPLAY_ORDER/MAKEPAD_DRM_MODES (set only
+# when *this* var was set from the file, cleared when it was left alone,
+# and never left stale from a previous process even when the caller's
+# environment already carried one); the legacy display-gpu fallback,
+# both when it should apply (no display-layout file at all) and when it
+# must not (display-layout exists, even without a render-on line); and
+# an unreadable-but-present display-layout read as empty rather than
+# falling back.
 
 set -u
 
@@ -78,11 +83,13 @@ write_gpu() {
 # run_case SCRATCH [EXTRA_ENV_ASSIGNMENT ...]
 # Sources the helper in a brand-new, otherwise-empty bash process (so no
 # variable from this test script, or from a previous case, can leak in)
-# and prints the four variables the production code cares about, one per
-# line, each `<unset>` when the helper left it alone. Stderr (the
-# `display-layout:` log lines) is captured to $run_stderr for the few
-# cases that check it, and the subshell's own exit status is captured to
-# $run_status (expected 0 always: the helper must never fail the caller).
+# and prints the production code's variables, one per line, each
+# `<unset>` when the helper left it alone: the three the platform reads,
+# and the three from-saved markers (one for the GPU, one each for order
+# and modes). Stderr (the `display-layout:` log lines) is captured to
+# $run_stderr for the few cases that check it, and the subshell's own
+# exit status is captured to $run_status (expected 0 always: the helper
+# must never fail the caller).
 run_stdout=""
 run_stderr=""
 run_status=0
@@ -105,11 +112,14 @@ run_case() {
             printf "%s\n" "${MAKEPAD_DRM_MODES:-<unset>}"
             printf "%s\n" "${MAKEPAD_VULKAN_COMPOSITOR_PCI:-<unset>}"
             printf "%s\n" "${MAKEPAD_WM_GPU_FROM_SAVED:-<unset>}"
+            printf "%s\n" "${MAKEPAD_WM_ORDER_FROM_SAVED:-<unset>}"
+            printf "%s\n" "${MAKEPAD_WM_MODES_FROM_SAVED:-<unset>}"
         ' 2>"$stderr_file")
     run_status=$?
     run_stderr=$(cat "$stderr_file")
     rm -f "$stderr_file"
-    IFS=$'\n' read -r -d '' field_order field_modes field_pci field_fromsaved <<<"$run_stdout"
+    IFS=$'\n' read -r -d '' field_order field_modes field_pci field_fromsaved \
+        field_order_fromsaved field_modes_fromsaved <<<"$run_stdout"
 }
 
 # ---------------------------------------------------------------------
@@ -129,6 +139,8 @@ assert_eq "happy-path" "order" "card0-HDMI-A-2,card1-HDMI-A-1" "$field_order"
 assert_eq "happy-path" "modes" "card0-HDMI-A-2=3840x2160@30" "$field_modes"
 assert_eq "happy-path" "pci" "0000:01:00.0" "$field_pci"
 assert_eq "happy-path" "from_saved" "1" "$field_fromsaved"
+assert_eq "happy-path" "order_from_saved" "1" "$field_order_fromsaved"
+assert_eq "happy-path" "modes_from_saved" "1" "$field_modes_fromsaved"
 rm -rf "$s"
 
 # ---------------------------------------------------------------------
@@ -213,12 +225,25 @@ screen 0000:01:00.0 HDMI-A-1 main
 '
 run_case "$s" MAKEPAD_DISPLAY_ORDER=keep-me
 assert_eq "preset-order" "order" "keep-me" "$field_order"
+assert_eq "preset-order" "order_from_saved stays unset (not our export)" "<unset>" "$field_order_fromsaved"
 assert_eq "preset-order" "modes still applied" "card0-HDMI-A-2=3840x2160@30" "$field_modes"
+assert_eq "preset-order" "modes_from_saved still set (independent of the order pin)" "1" "$field_modes_fromsaved"
 assert_eq "preset-order" "pci still applied" "0000:01:00.0" "$field_pci"
 
 run_case "$s" MAKEPAD_DRM_MODES=keep-me
 assert_eq "preset-modes" "modes" "keep-me" "$field_modes"
+assert_eq "preset-modes" "modes_from_saved stays unset (not our export)" "<unset>" "$field_modes_fromsaved"
 assert_eq "preset-modes" "order still applied" "card0-HDMI-A-2,card1-HDMI-A-1" "$field_order"
+assert_eq "preset-modes" "order_from_saved still set (independent of the modes pin)" "1" "$field_order_fromsaved"
+
+# A caller whose environment already carries a stale from-saved marker
+# (e.g. inherited from an earlier, unrelated process) must not have it
+# survive once the var itself is externally pinned: both markers are
+# unset first, before either var is even looked at.
+run_case "$s" MAKEPAD_DISPLAY_ORDER=keep-me MAKEPAD_WM_ORDER_FROM_SAVED=1
+assert_eq "preset-order-stale-marker" "order_from_saved is cleared, not left stale" "<unset>" "$field_order_fromsaved"
+run_case "$s" MAKEPAD_DRM_MODES=keep-me MAKEPAD_WM_MODES_FROM_SAVED=1
+assert_eq "preset-modes-stale-marker" "modes_from_saved is cleared, not left stale" "<unset>" "$field_modes_fromsaved"
 
 run_case "$s" MAKEPAD_VULKAN_COMPOSITOR_PCI=keep-me
 assert_eq "preset-pci" "pci" "keep-me" "$field_pci"

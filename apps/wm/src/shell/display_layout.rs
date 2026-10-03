@@ -33,12 +33,45 @@
 //! `display-gpu` files; [`DisplayLayout::migrate`] reads them once to
 //! build the first saved layout.
 //!
+//! # Applying the saved layout before start-up
+//!
+//! The renderer reads its environment before `Event::Startup`
+//! (`platform/src/os/linux/vulkan_linux.rs::new_direct`), so the WM
+//! cannot apply this file to its own process in time by calling into
+//! itself. A session script run before the WM binary is exec'd
+//! (`tools/linux/display-layout-env.sh`) turns the file into
+//! `MAKEPAD_DISPLAY_ORDER`, `MAKEPAD_DRM_MODES` and
+//! `MAKEPAD_VULKAN_COMPOSITOR_PCI`/`_UUID`, each exported only when not
+//! already set from outside, with a matching `MAKEPAD_WM_ORDER_FROM_SAVED`
+//! / `MAKEPAD_WM_MODES_FROM_SAVED` / `MAKEPAD_WM_GPU_FROM_SAVED` marker so
+//! the running WM can tell "the script applied the saved value" from "this
+//! was pinned from outside" (`SystemSnapshot::order_env`/`modes_env`/
+//! `gpu_env`, `system_linux.rs`). An externally pinned, non-empty value
+//! always wins over the file, both at session start (the script's own
+//! check) and at runtime (`env_restore_plan`, above) — the WM's own
+//! restore is a safety net for drift the script's one-shot export cannot
+//! catch (e.g. the DRM/KMS state settling after the script ran).
+//!
+//! # Restart contract
+//!
+//! Saving a layout that moves the render-on GPU needs the renderer
+//! restarted on the new choice, which the process cannot do to itself:
+//! `restart_gate` (`linux_controls.rs`) asks the UI to confirm, and
+//! `Event::Shutdown` then exits with code 75 (`EX_TEMPFAIL`) instead of
+//! 0. A session manager
+//! that runs the WM as a service treats that code as a request to relaunch
+//! it, not a crash (`systemd`'s `RestartForceExitStatus=75`/
+//! `SuccessExitStatus=75`, `tools/arch_usb/makepad-wm.service`); the next
+//! launch re-reads `display-layout` through the same session script, so
+//! the new GPU choice is already in the environment on the way up.
+//!
 //! Compiled for Linux only (the inner `cfg` below makes the module empty
 //! elsewhere), so no other platform's behaviour changes.
 
 #![cfg(all(target_os = "linux", not(target_env = "ohos")))]
 
 use makepad_widgets::makepad_platform::linux_display::{LinuxDisplayOutput, LinuxDisplaySnapshot};
+use makepad_widgets::makepad_platform::linux_wide_desktop::parse_mode_overrides;
 
 use super::system_linux::validate_gpu_choice;
 
@@ -530,6 +563,39 @@ pub fn restore_plan(layout: &DisplayLayout, snap: &LinuxDisplaySnapshot) -> Vec<
     ops
 }
 
+/// `plan` with every `Order`/`Mode` op removed that an external,
+/// non-saved env var already pins for this boot: all of `Order` while
+/// `order_env` is `Some` (any non-empty, externally pinned
+/// `MAKEPAD_DISPLAY_ORDER` — the whole order is one call, so there is no
+/// partial order to keep), and a `Mode(name, _)` for any screen `name`
+/// appears in `modes_env`'s own `name=mode,name=mode` text (reparsed with
+/// the platform's own [`parse_mode_overrides`], never a second copy of
+/// that grammar). `Main` is never filtered: the main screen has no env
+/// var of its own, and `restart_gate`/the panel's own live edits are
+/// unaffected (a person's `DisplayOrder`/`DisplayMode` action calls
+/// `Cx::linux_set_display_*` directly, never through this plan).
+///
+/// This is the runtime half of the constraint "an externally set
+/// non-empty env var always wins over the file": the session helper
+/// already defers to a pinned var at session start, and without this the
+/// WM's own restore did not, so a pinned env and a disagreeing file
+/// produced two layouts per boot (the env's for the first frame, then the
+/// file's once the restore ran).
+pub fn env_restore_plan(plan: Vec<RestoreOp>, order_env: Option<&str>, modes_env: Option<&str>) -> Vec<RestoreOp> {
+    let order_pinned = order_env.is_some_and(|value| !value.is_empty());
+    let mode_pinned: Vec<String> = modes_env
+        .filter(|value| !value.is_empty())
+        .map(|text| parse_mode_overrides(text).into_iter().map(|(name, _)| name).collect())
+        .unwrap_or_default();
+    plan.into_iter()
+        .filter(|op| match op {
+            RestoreOp::Order(_) => !order_pinned,
+            RestoreOp::Mode(name, _) => !mode_pinned.contains(name),
+            RestoreOp::Main(_) => true,
+        })
+        .collect()
+}
+
 /// A connected screen on another GPU whose peer has not been created yet:
 /// the renderer already accepts it as the main screen.
 pub fn is_peer_pending(output: &LinuxDisplayOutput) -> bool {
@@ -987,6 +1053,66 @@ mod tests {
         assert!(!restore_waiting(&layout, &failed));
         assert!(!is_joining(&failed.outputs[1]));
         assert_eq!(restore_plan(&layout, &failed), vec![RestoreOp::Main("card0-HDMI-A-1".to_string())]);
+    }
+
+    // env_restore_plan: env present/absent/empty crossed with the plan
+    // having something to filter, per var.
+
+    fn full_plan() -> Vec<RestoreOp> {
+        vec![
+            RestoreOp::Order(vec!["card0-HDMI-A-2".to_string(), "card1-HDMI-A-1".to_string()]),
+            RestoreOp::Mode("card0-HDMI-A-2".to_string(), Some("3840x2160@30".to_string())),
+            RestoreOp::Main("card1-HDMI-A-1".to_string()),
+        ]
+    }
+
+    #[test]
+    fn env_restore_plan_absent_changes_nothing() {
+        assert_eq!(env_restore_plan(full_plan(), None, None), full_plan());
+    }
+
+    #[test]
+    fn env_restore_plan_order_pin_drops_only_order() {
+        let plan = env_restore_plan(full_plan(), Some("whatever,non-empty"), None);
+        assert_eq!(
+            plan,
+            vec![
+                RestoreOp::Mode("card0-HDMI-A-2".to_string(), Some("3840x2160@30".to_string())),
+                RestoreOp::Main("card1-HDMI-A-1".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn env_restore_plan_modes_pin_drops_only_the_named_screens_mode() {
+        let plan = env_restore_plan(full_plan(), None, Some("card0-HDMI-A-2=1920x1080"));
+        assert_eq!(
+            plan,
+            vec![
+                RestoreOp::Order(vec!["card0-HDMI-A-2".to_string(), "card1-HDMI-A-1".to_string()]),
+                RestoreOp::Main("card1-HDMI-A-1".to_string()),
+            ]
+        );
+        // A pinned var that does not name this screen leaves its Mode op
+        // alone: the pin is per screen, not per variable.
+        let plan = env_restore_plan(full_plan(), None, Some("card9-DP-9=1920x1080"));
+        assert!(plan.iter().any(|op| matches!(op, RestoreOp::Mode(name, _) if name == "card0-HDMI-A-2")));
+    }
+
+    #[test]
+    fn env_restore_plan_both_pinned_drops_order_and_mode_keeps_main() {
+        assert_eq!(
+            env_restore_plan(full_plan(), Some("x"), Some("card0-HDMI-A-2=1920x1080")),
+            vec![RestoreOp::Main("card1-HDMI-A-1".to_string())]
+        );
+    }
+
+    #[test]
+    fn env_restore_plan_empty_string_does_not_pin() {
+        // `order_env`/`modes_env` never hand this fn an empty string (the
+        // `Option` is already `None` then, same as `gpu_env`), but the
+        // pure fn is still defined for it: empty means nothing to pin.
+        assert_eq!(env_restore_plan(full_plan(), Some(""), Some("")), full_plan());
     }
 
     #[test]

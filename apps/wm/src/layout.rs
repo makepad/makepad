@@ -3194,7 +3194,7 @@ mod tests {
         assert_eq!(rect_of(&l, 1), AREA);
     }
 
-    // Fix round 1 (task-2 review I1, I2, I3, client_fullscreen, M7).
+    // Transfer between layouts: scratchpad, focus and fullscreen edge cases.
 
     #[test]
     fn a_transfer_closes_the_targets_open_scratchpad_so_focus_goes_with_it() {

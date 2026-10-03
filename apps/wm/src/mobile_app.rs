@@ -447,6 +447,8 @@ impl App {
         self.ui.widget(cx,ids!(desktop_controls)).set_visible(cx,!style.mobile());
         self.ui.widget(cx,ids!(phone_controls)).set_visible(cx,strip);
         self.ui.widget(cx,ids!(bar)).set_visible(cx,!style.mobile() || strip);
+        // The strip's spacer follows the bar (see `sync_bar_placement`).
+        self.sync_bar_placement(cx);
         self.ui.widget(cx,ids!(shell_ai_pane)).set_visible(cx,!style.mobile());
         self.phone_time=0.0;
         if style.mobile() {self.ensure_home_order();}

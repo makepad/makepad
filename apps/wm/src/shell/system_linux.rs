@@ -71,10 +71,17 @@
 //!   modes and the main screen at runtime as a safety net; the session
 //!   script turns the file into `MAKEPAD_DISPLAY_ORDER`,
 //!   `MAKEPAD_DRM_MODES` and `MAKEPAD_VULKAN_COMPOSITOR_PCI` (with
-//!   `MAKEPAD_WM_GPU_FROM_SAVED=1`) so the first frame is already right,
-//!   since the renderer reads those before the WM starts. A
-//!   `MAKEPAD_VULKAN_COMPOSITOR_PCI`/`_UUID` set from outside (marker
-//!   unset) is recorded as `gpu_env`. The worker also lists the GPUs from
+//!   `MAKEPAD_WM_GPU_FROM_SAVED=1`, and, per var,
+//!   `MAKEPAD_WM_ORDER_FROM_SAVED=1` / `MAKEPAD_WM_MODES_FROM_SAVED=1`) so
+//!   the first frame is already right, since the renderer reads those
+//!   before the WM starts. A `MAKEPAD_VULKAN_COMPOSITOR_PCI`/`_UUID` set
+//!   from outside (marker unset) is recorded as `gpu_env`; likewise an
+//!   externally pinned, non-empty `MAKEPAD_DISPLAY_ORDER` /
+//!   `MAKEPAD_DRM_MODES` (its own marker unset) is `order_env` /
+//!   `modes_env`, which the runtime restore (`linux_controls.rs`) must
+//!   not override, the same rule the session script itself applies: an
+//!   external env var wins over the file at both session start and
+//!   runtime, never only the first. The worker also lists the GPUs from
 //!   `/sys/class/drm` (PCI ids, driver, connected connectors) so the panel
 //!   can offer only usable ones.
 //! * Pointer speed: mouse and touchpad multipliers as integer hundredths
@@ -604,6 +611,23 @@ pub struct SystemSnapshot {
     /// for Auto, a script-applied saved choice, or no GPU in the
     /// environment.
     pub gpu_env: Option<String>,
+    /// External, non-empty `MAKEPAD_DISPLAY_ORDER` this process was
+    /// started with, unless the session script set it from the saved
+    /// layout (`MAKEPAD_WM_ORDER_FROM_SAVED` is not `1`). `None` for
+    /// unset/empty or a script-applied saved order. The runtime restore
+    /// (`display_layout::env_restore_plan`) must not reorder the desktop
+    /// while this is `Some`: the external value already won at session
+    /// start and keeps winning.
+    pub order_env: Option<String>,
+    /// External, non-empty `MAKEPAD_DRM_MODES` (the raw
+    /// `name=mode,name=mode` text) this process was started with, unless
+    /// the session script set it from the saved layout
+    /// (`MAKEPAD_WM_MODES_FROM_SAVED` is not `1`). `None` for unset/empty
+    /// or a script-applied saved value. The runtime restore must not set
+    /// a mode the restore would otherwise ask for on any screen this
+    /// names (same review note as `order_env`); a screen it does not
+    /// name is unaffected.
+    pub modes_env: Option<String>,
     /// Saved pointer speeds in hundredths: index 0 mouse, index 1 touchpad.
     /// `None` when that file was missing or out of range — the process
     /// default stands then.
@@ -624,6 +648,8 @@ impl Default for SystemSnapshot {
             display_settings_loaded: false,
             gpus: Vec::new(),
             gpu_env: None,
+            order_env: None,
+            modes_env: None,
             pointer_speeds: [None, None],
             input_settings_loaded: false,
             audio: AudioState::unavailable("not sampled yet".into(), false),
@@ -1612,6 +1638,39 @@ fn gpu_env() -> Option<String> {
         .find_map(|key| std::env::var(key).ok().filter(|value| !value.is_empty()))
 }
 
+/// Pure decision behind `order_env`/`modes_env`, and the shape `gpu_env`
+/// above already follows without naming it: `value` only pins this boot
+/// against the saved layout when it is non-empty and `from_saved` is
+/// `false` (the session script's own marker for *this* variable was not
+/// `1`). A marker per variable, not one shared marker, because
+/// `MAKEPAD_DISPLAY_ORDER` and `MAKEPAD_DRM_MODES` are independent
+/// session-script exports that can disagree about which one the helper
+/// derived from the file and which one it left as an outside pin (e.g.
+/// Arch USB's `wm.env` pinning the order but not the modes) — a single
+/// combined marker could not tell the two apart.
+fn env_pin(value: Option<String>, from_saved: bool) -> Option<String> {
+    if from_saved {
+        return None;
+    }
+    value.filter(|value| !value.is_empty())
+}
+
+/// External, non-empty `MAKEPAD_DISPLAY_ORDER` this process was started
+/// with, unless `tools/linux/display-layout-env.sh` set it from the saved
+/// layout (`MAKEPAD_WM_ORDER_FROM_SAVED=1`).
+fn order_env() -> Option<String> {
+    let from_saved = std::env::var("MAKEPAD_WM_ORDER_FROM_SAVED").ok().as_deref() == Some("1");
+    env_pin(std::env::var("MAKEPAD_DISPLAY_ORDER").ok(), from_saved)
+}
+
+/// External, non-empty `MAKEPAD_DRM_MODES` this process was started with,
+/// unless `tools/linux/display-layout-env.sh` set it from the saved
+/// layout (`MAKEPAD_WM_MODES_FROM_SAVED=1`).
+fn modes_env() -> Option<String> {
+    let from_saved = std::env::var("MAKEPAD_WM_MODES_FROM_SAVED").ok().as_deref() == Some("1");
+    env_pin(std::env::var("MAKEPAD_DRM_MODES").ok(), from_saved)
+}
+
 fn pointer_speed_file(touchpad: bool) -> &'static str {
     if touchpad { TOUCHPAD_SPEED_FILE } else { MOUSE_SPEED_FILE }
 }
@@ -1745,6 +1804,8 @@ impl Worker {
         // `cardN`; the regular sample lists them again below.
         self.snapshot.display_layout = read_display_layout(&read_gpus());
         self.snapshot.gpu_env = gpu_env();
+        self.snapshot.order_env = order_env();
+        self.snapshot.modes_env = modes_env();
         self.snapshot.pointer_speeds = [read_pointer_speed(false), read_pointer_speed(true)];
         self.snapshot.display_settings_loaded = true;
         self.snapshot.input_settings_loaded = true;
@@ -2428,4 +2489,42 @@ fn is_device_event(line: &str) -> bool {
     };
     let facility = rest.trim_start().split([' ', '#']).next().unwrap_or("");
     matches!(facility, "sink" | "source" | "server" | "card")
+}
+
+#[cfg(test)]
+mod env_pin_tests {
+    use super::env_pin;
+
+    // `order_env`/`modes_env` only wrap `env_pin` around `std::env::var`,
+    // which is process-global state the test harness's parallel threads
+    // would race over; the pure decision is what is worth a unit test
+    // (mirrors `gpu_env`, never itself tested for the same reason).
+
+    #[test]
+    fn present_and_not_from_saved_pins() {
+        assert_eq!(env_pin(Some("x".to_string()), false), Some("x".to_string()));
+    }
+
+    #[test]
+    fn present_and_from_saved_does_not_pin() {
+        // The helper set it from the file: the value already equals the
+        // file, so the runtime restore is free to act (and would be a
+        // no-op by equality anyway).
+        assert_eq!(env_pin(Some("x".to_string()), true), None);
+    }
+
+    #[test]
+    fn absent_never_pins_regardless_of_the_marker() {
+        assert_eq!(env_pin(None, false), None);
+        assert_eq!(env_pin(None, true), None);
+    }
+
+    #[test]
+    fn empty_never_pins_regardless_of_the_marker() {
+        // `_mdl_set_env` never exports an empty value, but an external
+        // caller could still set `FOO=`; an empty var is not a pin either
+        // way, same as `gpu_env`'s own `filter(|value| !value.is_empty())`.
+        assert_eq!(env_pin(Some(String::new()), false), None);
+        assert_eq!(env_pin(Some(String::new()), true), None);
+    }
 }

@@ -2615,7 +2615,8 @@ impl CxVulkan {
 
     pub fn new_direct(mode: Option<&str>, spawner: &ThreadSpawner) -> Result<Self, String> {
         let mut renderer = Self::new_direct_presenter(mode, spawner, DrmFilter::from_env(), true)?;
-        // A saved left-to-right order until the window manager stores one.
+        // A saved left-to-right order, read once at start-up and kept
+        // until a `direct_request_display_order` call replaces it.
         if let Ok(text) = std::env::var("MAKEPAD_DISPLAY_ORDER") {
             if let Some(direct) = renderer.desktop.direct.as_mut() {
                 direct.preferred_order = crate::linux_wide_desktop::parse_display_order(&text);
@@ -6475,8 +6476,8 @@ fn set_connector_mode_override(name: &str, mode: Option<&str>) {
 }
 
 /// The GPU chosen to render on (`MAKEPAD_VULKAN_COMPOSITOR_UUID` or
-/// `MAKEPAD_VULKAN_COMPOSITOR_PCI`, as the window manager's saved GPU choice
-/// sets it), for preferring its own screens.
+/// `MAKEPAD_VULKAN_COMPOSITOR_PCI`, as a saved choice applied before
+/// start-up sets it), for preferring its own screens.
 #[cfg(linux_direct)]
 enum RenderOn {
     Uuid([u8; 16]),
@@ -6497,9 +6498,9 @@ impl RenderOn {
 /// `canonicalize(/sys/class/drm/<card>/device)`, the DRM sysfs symlink that
 /// resolves to the PCI device directory (e.g. `0000:01:00.0`). `None` when
 /// the link cannot be resolved (card gone, or not a PCI device). Shared by
-/// `RenderOn::Pci::matches` and the display snapshot's `pci` field, so the
-/// window manager's GPU list and the render-on preference agree on one
-/// card's address.
+/// `RenderOn::Pci::matches` and the display snapshot's `pci` field, so a
+/// host's own GPU list and the render-on preference agree on one card's
+/// address.
 #[cfg(linux_direct)]
 fn card_pci_address(card: &Path) -> Option<String> {
     let link = PathBuf::from("/sys/class/drm").join(connector_card_name(card)).join("device");
@@ -6508,6 +6509,13 @@ fn card_pci_address(card: &Path) -> Option<String> {
         .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
 }
 
+/// `MAKEPAD_VULKAN_COMPOSITOR_UUID` (32 hex digits, checked first) or
+/// `MAKEPAD_VULKAN_COMPOSITOR_PCI` (a PCI address such as `0000:01:00.0`):
+/// which GPU this process renders the desktop on. This only picks the
+/// render-on card; it does not exclude any other card from the wide
+/// desktop — every other GPU with a connected screen still joins as a
+/// peer through the GPU bridge, each showing its own slice. `None` (unset
+/// or empty) leaves the choice to `new_direct_presenter`'s own ranking.
 #[cfg(linux_direct)]
 fn render_on_preference() -> Option<RenderOn> {
     if let Ok(pin) = std::env::var("MAKEPAD_VULKAN_COMPOSITOR_UUID") {

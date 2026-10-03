@@ -66,7 +66,7 @@ pub fn screens() -> Vec<ScreenGeom> {
 /// order: index i of both lists is the same screen. Empty on other Linux
 /// backends, and (via the fallback below) on non-Linux platforms.
 #[cfg(all(not(gpusim), target_os = "linux", not(target_env = "ohos")))]
-#[allow(dead_code)] // not read inside the platform crate; the window manager calls it
+#[allow(dead_code)] // not read inside the platform crate; a host process reads it
 pub fn linux_screen_names() -> Vec<String> {
     LINUX_SCREENS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).1.clone()
 }
@@ -91,7 +91,7 @@ pub fn screens() -> Vec<ScreenGeom> {
 /// Non-Linux platforms (and the gpusim/OHOS Linux fallback above) have no
 /// connector names to offer; `screens()` is empty there too.
 #[cfg(not(all(not(gpusim), target_os = "linux", not(target_env = "ohos"))))]
-#[allow(dead_code)] // not read inside the platform crate; the window manager calls it
+#[allow(dead_code)] // not read inside the platform crate; a host process reads it
 pub fn linux_screen_names() -> Vec<String> {
     Vec::new()
 }

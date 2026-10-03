@@ -83,7 +83,7 @@ use makepad_widgets::makepad_platform::shared_framebuf::shared_swapchain_from_ho
 use hub::{send_to_app, ClientId, HubEvent, WmHub};
 use layout::{Axis, Dir, DividerHit, FullscreenMode, LRect};
 use makepad_studio_protocol::{AppToStudio, StudioToApp};
-use makepad_wm_api::{WmEvent, WmRequest};
+use makepad_wm_api::{ScreenSpan, WmEvent, WmRequest};
 use preview::PreviewCache;
 use run_view::MpRunView;
 use makepad_widgets::makepad_micro_serde::*;
@@ -130,22 +130,18 @@ script_mod! {
                 // its buttons) so the window still drags.
                 show_caption_bar: false
                 body +: {
+                    // The bar is drawn over the column, after the scene:
+                    // a strip above the desk (`bar_space` holds its place)
+                    // on one screen, floating over the top of every screen
+                    // on a multi-screen desktop (`shell::bar::bar_placement`).
+                    flow: Overlay
+                    body_column := View{
+                    width: Fill
+                    height: Fill
                     flow: Down
+                    bar_space := View{width: Fill height: 26}
                     // The wallpaper layer: the theme's image (crop-to-fill)
                     // over the theme's deep background.
-                        bar := SolidView{
-                            width: Fill
-                            height: 26
-                            flow: Overlay
-                            draw_bg +: {
-                                color: mod.wm_theme.background
-                            }
-                            desktop_controls := View{
-                                width: Fill height: Fill
-                                shell_bar := ShellBar{width: Fill height: Fill}
-                            }
-                            phone_controls := PhoneSurface{visible: false}
-                        }
                     scene := WmScene{
                     wallpaper := CachedView{width: Fill height: Fill flow: Overlay
                     bg_fill := RectView{
@@ -203,6 +199,20 @@ script_mod! {
                         height: Fill
                         visible: false
                         shell_gallery_host := ShellGalleryHost{}
+                    }
+                    }
+                    bar := SolidView{
+                        width: Fill
+                        height: 26
+                        flow: Overlay
+                        draw_bg +: {
+                            color: mod.wm_theme.background
+                        }
+                        desktop_controls := View{
+                            width: Fill height: Fill
+                            shell_bar := ShellBar{width: Fill height: Fill}
+                        }
+                        phone_controls := PhoneSurface{visible: false}
                     }
                 }
             }
@@ -604,6 +614,10 @@ pub struct App {
     /// SUPER+SHIFT+SPACE — so it comes back on its own.
     #[rust]
     bar_hidden_by_fullscreen: bool,
+    /// Where the bar was last placed (`sync_bar_placement`): a strip above
+    /// the desk, or floating over the scene.
+    #[rust]
+    bar_placed: Option<shell::bar::BarPlacement>,
     /// Output lines from every child, for the tile's status line.
     #[rust]
     client_lines: Option<ClientLines>,
@@ -1094,6 +1108,8 @@ impl App {
         // Wake it: samplers, refresh timers, everything a dormant instance
         // was told to hold back (`makepad_wm_api::warm_start`).
         self.send_wm_event(client, WmEvent::Adopted);
+        // …and where the screens are, once its tile is laid out.
+        self.resend_screens_event(client);
         // The tile owns the framebuffer now; the warm one is held briefly
         // in case a frame is still in flight against it.
         if let Some(frame) = self.warm_frames.get_mut(&client) {
@@ -1462,13 +1478,108 @@ impl App {
                     self.redraw_all(cx);
                 }
             }
+            // `SetFullscreen` is the `Current` span (or leaving it).
             WmRequest::SetFullscreen { fullscreen } => {
-                self.focus_client(cx, client);
-                let on = self.state_mut().layout().fullscreen_mode() != FullscreenMode::None;
-                if on != *fullscreen {
-                    self.do_action(cx, WmAction::Fullscreen(FullscreenMode::Fullscreen));
+                let span = fullscreen.then_some(ScreenSpan::Current);
+                self.set_client_span(cx, client, span);
+            }
+            WmRequest::SetFullscreenSpan { span } => self.set_client_span(cx, client, span.clone()),
+        }
+    }
+
+    /// `client` asked to be drawn fullscreen across `span` (`None`: leave
+    /// it). With several screens this is `ScreenSet::set_span` /
+    /// `clear_span`; on one screen it is today's single-desk fullscreen
+    /// (any span that resolves there covers that one screen). A span that
+    /// cannot be honoured (an unknown or non-adjacent screen, a client
+    /// that is not on a live screen) is logged and changes nothing: the
+    /// client keeps the span or fullscreen it had (or stays a normal
+    /// window), and is sent its `WmEvent::Screens` again, whose `span`
+    /// (`fullscreen_span_of`) says what it still covers.
+    fn set_client_span(&mut self, cx: &mut Cx, client: ClientId, span: Option<ScreenSpan>) {
+        let state = self.state_mut();
+        let several = state.screens.live_count() >= 2;
+        let result = match (&span, several) {
+            (None, true) => {
+                state.screens.clear_span(client);
+                Ok(())
+            }
+            (Some(span), true) => {
+                let (gap, reserved, gaps_out) = (state.gap, state.style.reserved_height(), state.gaps_out);
+                state.screens.set_span(client, span, gap, reserved, gaps_out)
+            }
+            (Some(span), false) => {
+                let live = state.screens.live_wm_screens();
+                let current = state.screens.screen_of(client);
+                makepad_wm_api::span_rect(&live, span, current).map(|_| ())
+            }
+            (None, false) => Ok(()),
+        };
+        match result {
+            Err(err) => {
+                log!("wm: client {} cannot span {:?}: {:?}; it keeps its current state", client, span, err);
+                self.resend_screens_event(client);
+            }
+            Ok(()) if several => {
+                if span.is_some() {
+                    self.focus_client(cx, client);
                 }
             }
+            Ok(()) => {
+                // One screen: SUPER+F's own path (the bar hides with it).
+                self.focus_client(cx, client);
+                let on = self.state_mut().layout().fullscreen_mode() != FullscreenMode::None;
+                if on != span.is_some() {
+                    self.do_action(cx, WmAction::Fullscreen(FullscreenMode::Fullscreen));
+                }
+                return;
+            }
+        }
+        self.sync_bar_for_fullscreen(cx);
+        self.update_bar(cx);
+        self.redraw_all(cx);
+    }
+
+    /// Bring every tiled client's `WmEvent::Screens` up to date after a
+    /// desk draw: the live screens in that client's window coordinates and
+    /// what it spans, sent only to clients whose event changed.
+    fn sync_screens_events(&mut self) {
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        if !state.screens_dirty {
+            return;
+        }
+        state.screens_dirty = false;
+        let clients = &state.clients;
+        state.tile_origins.retain(|c, _| clients.contains_key(c));
+        state.screens_sent.retain(|c, _| clients.contains_key(c));
+        let live = state.screens.live_wm_screens();
+        let mut out = Vec::new();
+        for (client, tile) in &state.tile_origins {
+            let Some(slot) = state.clients.get(client) else { continue };
+            if slot.warm || slot.sender.is_none() {
+                continue;
+            }
+            let span = state.screens.fullscreen_span_of(*client);
+            let ev = crate::screens::screens_event_for(*tile, &live, span);
+            if state.screens_sent.get(client) != Some(&ev) {
+                out.push((*client, ev));
+            }
+        }
+        for (client, ev) in out {
+            if self.send_wm_event(client, ev.clone()) {
+                self.state_mut().screens_sent.insert(client, ev);
+            }
+        }
+    }
+
+    /// Forget what `client` was last sent and send its `WmEvent::Screens`
+    /// again on the next event (a reply, or a fresh socket after connect).
+    fn resend_screens_event(&mut self, client: ClientId) {
+        if let Some(state) = self.state.as_mut() {
+            state.screens_sent.remove(&client);
+            state.screens_dirty = true;
         }
     }
 
@@ -1859,6 +1970,8 @@ impl App {
         if let Some(app) = self.state_mut().phone.tiles.forget_client(client) {
             log!("wm: home tile {} lost client {}", app, client);
         }
+        // A closing spanned window frees its screens.
+        self.state_mut().screens.clear_span(client);
         self.state_mut().layout_of_mut(client).remove(client);
         self.state_mut().clients.remove(&client);
         // A dying warm viewer (or its requester) clears the cache's
@@ -2149,6 +2262,14 @@ impl App {
                 pos: dvec2(0.0, BAR_HEIGHT_FALLBACK),
                 size: dvec2(1400.0, 860.0),
             }
+        };
+        // The pane sits under the leftmost bar segment, which reaches the
+        // window's left edge: floating over the scene, the pane starts
+        // below it (unless a span hides that segment).
+        let top = self.state.as_ref().map_or(0.0, |s| s.screens.reserved_top_for(0));
+        let rect = Rect {
+            pos: dvec2(rect.pos.x, rect.pos.y + top),
+            size: dvec2(rect.size.x, (rect.size.y - top).max(0.0)),
         };
         let gap = self.state_mut().gaps_out;
         let sliding = self
@@ -2872,6 +2993,8 @@ impl App {
                     if let Some(path) = self.preview_cache.take_pending(client) {
                         self.send_wm_event(client, WmEvent::PreviewFile { path });
                     }
+                    // Its screens, once its tile is laid out.
+                    self.resend_screens_event(client);
                 }
                 HubEvent::Disconnected { socket } => {
                     let client = self
@@ -3405,6 +3528,28 @@ impl App {
             .unwrap_or(false)
     }
 
+    /// The bar is under `p`: anywhere on the strip, or, floating over the
+    /// scene, on a segment it painted (not where a span's window shows
+    /// through a hidden one).
+    fn bar_covers(&self, cx: &mut Cx, p: Vec2d) -> bool {
+        if self.bar_placed.is_none_or(|placed| placed.strip.is_some()) {
+            return true;
+        }
+        // Hidden (ToggleBar): its last segments are stale.
+        if self.bar_placed.is_some_and(|placed| placed.reserved_top <= 0.0) {
+            return false;
+        }
+        let bar = self.ui.widget(cx, ids!(shell_bar));
+        let borrowed = bar.borrow::<shell::bar::ShellBar>();
+        borrowed.as_ref().is_some_and(|b| b.covers(p))
+    }
+
+    /// The bar floats over the scene (per-screen segments) and painted
+    /// `p`: the desk below does not own that point.
+    fn bar_floats_over(&self, cx: &mut Cx, p: Vec2d) -> bool {
+        self.bar_placed.is_some_and(|placed| placed.strip.is_none()) && self.bar_covers(cx, p)
+    }
+
     /// Toggle a bar module's flyout, anchored to the module itself.
     /// `seg` is the bar segment it was pressed in, so the flyout opens on
     /// that screen; pressed on another segment while its flyout is up, it
@@ -3516,6 +3661,7 @@ impl App {
     /// (`shell/bar.rs` does the sampling — cheap things every second, the
     /// expensive ones every fifth).
     fn update_bar(&mut self, cx: &mut Cx) {
+        self.sync_bar_placement(cx);
         if let Some(clock)=self.bar_sample.clock.split_whitespace().find(|s|s.contains(':')).map(str::to_string) {
             self.state_mut().phone.clock=clock;
         }
@@ -3528,7 +3674,7 @@ impl App {
             (screens.active, list)
         };
         let mut shown: Vec<Vec<usize>> = Vec::with_capacity(screens.len());
-        let mut parts: Vec<(Vec<shell::bar::WorkspaceCell>, Option<String>, LRect, bool)> = Vec::new();
+        let mut parts: Vec<(Vec<shell::bar::WorkspaceCell>, Option<String>, LRect, bool, bool)> = Vec::new();
         {
             let state = self.state_mut();
             for &i in &screens {
@@ -3540,7 +3686,9 @@ impl App {
                     .map(|s| s.display_title().to_string())
                     .filter(|t| !t.is_empty());
                 shown.push(cell_ws);
-                parts.push((cells, title, state.screens.screens[i].rect, i == active));
+                // A span's window covers this screen's bar segment.
+                let hidden = segmented && state.screens.spanned(i).is_some();
+                parts.push((cells, title, state.screens.screens[i].rect, i == active, hidden));
             }
         }
         self.bar_workspaces = shown;
@@ -3551,7 +3699,7 @@ impl App {
         base.maximized = self.ui.window(cx, ids!(main_window)).is_fullscreen(cx);
         let mut segments: Vec<shell::bar::BarSegment> = Vec::new();
         let mut data = base.clone();
-        for (seg, (cells, title, rect, is_active)) in parts.into_iter().enumerate() {
+        for (seg, (cells, title, rect, is_active, hidden)) in parts.into_iter().enumerate() {
             let mut d = base.clone();
             d.workspaces = cells;
             d.active_window = title;
@@ -3560,7 +3708,7 @@ impl App {
                 data = d.clone();
             }
             if segmented {
-                segments.push(shell::bar::BarSegment { x0: rect.x, x1: rect.x + rect.w, data: d, active: is_active });
+                segments.push(shell::bar::BarSegment { x0: rect.x, x1: rect.x + rect.w, data: d, active: is_active, hidden });
             }
         }
         let window_controls = shell::bar::window_controls_default()
@@ -3579,6 +3727,42 @@ impl App {
                 // The direct-display session has no outer window to control.
                 b.window_controls = window_controls;
             }
+        }
+        self.redraw_all(cx);
+    }
+
+    /// Put the bar where `shell::bar::bar_placement` says: on one screen
+    /// (and nested, in a mobile style, in the gallery) the strip above the
+    /// desk, exactly as before; with per-screen segments it floats over
+    /// the top of the scene, the desk starts at the window's top edge and
+    /// every screen a span does not cover reserves the bar's height
+    /// (`ScreenSet::bar_top`). The bar is drawn outside the texture-cached
+    /// scene, so its redraws never invalidate it. Cheap when nothing moved.
+    fn sync_bar_placement(&mut self, cx: &mut Cx) {
+        if self.state.is_none() {
+            return;
+        }
+        let height = self.bar_metrics.map_or(BAR_HEIGHT_FALLBACK, |(h, _)| h);
+        let visible = self.ui.widget(cx, ids!(bar)).visible();
+        let placed = shell::bar::bar_placement(self.bar_segmented(), visible, height);
+        self.state_mut().screens.bar_top = placed.reserved_top;
+        if self.bar_placed == Some(placed) {
+            return;
+        }
+        self.bar_placed = Some(placed);
+        let space = self.ui.widget(cx, ids!(bar_space));
+        space.set_visible(cx, placed.strip.is_some());
+        if let Some(h) = placed.strip {
+            let mut space = space;
+            script_apply_eval!(cx, space, {
+                height: #(h)
+            });
+        }
+        let mut bar = self.ui.widget(cx, ids!(bar));
+        if placed.background {
+            script_apply_eval!(cx, bar, { show_bg: true });
+        } else {
+            script_apply_eval!(cx, bar, { show_bg: false });
         }
         self.redraw_all(cx);
     }
@@ -3676,7 +3860,8 @@ impl App {
     /// The focused window of bar segment `seg`'s screen (its title).
     fn bar_focused_client(&mut self, seg: usize) -> Option<ClientId> {
         let screen = self.bar_screen(seg);
-        self.state_mut().layout_at(screen).focused_client()
+        let spanned = self.state_mut().screens.spanned(screen);
+        spanned.or_else(|| self.state_mut().layout_at(screen).focused_client())
     }
 
     /// A click on workspace cell `i` of bar segment `seg`: that segment's
@@ -3690,6 +3875,12 @@ impl App {
             return;
         };
         let screen = self.bar_screen(seg);
+        // A screen a span covers from another screen shows that span, not
+        // its own workspaces: its cells do nothing (the home screen's
+        // cells switch the span's workspace).
+        if self.state_mut().screens.span_home(screen).is_some_and(|home| home != screen) {
+            return;
+        }
         let old = self.state_mut().screens.active;
         self.state_mut().screens.active = screen;
         self.do_action(cx, WmAction::Workspace(ws));
@@ -3756,6 +3947,8 @@ impl App {
         script_apply_eval!(cx, bar, {
             height: #(height)
         });
+        // The strip's spacer (or each screen's reservation) follows.
+        self.sync_bar_placement(cx);
         // The bar's content starts after the OS window buttons.
         let shell_bar = self.ui.widget(cx, ids!(shell_bar));
         {
@@ -3978,7 +4171,9 @@ impl App {
             return;
         };
         if !self.ai_pane_is_open(cx) {
-            if let Some(c) = self.screen_keyboard_client(i) {
+            // Over a span: its window (on its home screen `i`).
+            let spanned = self.state_mut().screens.spanned(i);
+            if let Some(c) = spanned.or_else(|| self.screen_keyboard_client(i)) {
                 self.focus_client(cx, c);
             } else {
                 // An empty screen, or one whose focused window is a
@@ -3994,15 +4189,7 @@ impl App {
     /// SUPER+F hides the bar with the window; anything that leaves
     /// fullscreen puts it back, unless SUPER+SHIFT+SPACE hid it.
     fn sync_bar_for_fullscreen(&mut self, cx: &mut Cx) {
-        let fullscreen = {
-            let state = self.state_mut();
-            let several = state.screens.live_count() >= 2;
-            let layout = state.layout();
-            let ws = layout.focus_ws();
-            layout.workspaces[ws].fullscreen.is_some()
-                && layout.workspaces[ws].fullscreen_mode == FullscreenMode::Fullscreen
-                && !several
-        };
+        let fullscreen = self.state_mut().screens.one_screen_fullscreen();
         let bar = self.ui.widget(cx, ids!(bar));
         if fullscreen && bar.visible() {
             bar.set_visible(cx, false);
@@ -4011,6 +4198,7 @@ impl App {
             bar.set_visible(cx, true);
             self.bar_hidden_by_fullscreen = false;
         }
+        self.sync_bar_placement(cx);
     }
 
     /// The layout picked a new focus on its own (a window closed, a client
@@ -4062,16 +4250,24 @@ impl App {
                 }
             }
             WmAction::Fullscreen(mode) => {
-                // Several screens share one bar strip, which cannot hide
-                // over one screen only: fullscreen maximizes within its
-                // screen and the bar stays (true per-screen fullscreen is
-                // a follow-up).
-                let mode = if mode == FullscreenMode::Fullscreen && self.state_mut().screens.live_count() >= 2 {
-                    FullscreenMode::Maximized
+                let state = self.state_mut();
+                if mode == FullscreenMode::Fullscreen && state.screens.live_count() >= 2 {
+                    // Several screens: SUPER+F toggles a span of the
+                    // focused window's own screen (true fullscreen there,
+                    // the other screens keep their windows).
+                    if let Some(focus) = focus {
+                        if state.screens.span_of(focus).is_some() {
+                            state.screens.clear_span(focus);
+                        } else {
+                            let (reserved, gaps_out) = (state.style.reserved_height(), state.gaps_out);
+                            if let Err(err) = state.screens.set_span(focus, &ScreenSpan::Current, gap, reserved, gaps_out) {
+                                log!("wm: fullscreen of client {}: {:?}", focus, err);
+                            }
+                        }
+                    }
                 } else {
-                    mode
-                };
-                self.state_mut().layout_mut().toggle_fullscreen_mode(mode);
+                    state.layout_mut().toggle_fullscreen_mode(mode);
+                }
             }
             WmAction::TiledFullscreen => {
                 if let Some(focus) = focus {
@@ -4239,6 +4435,11 @@ impl App {
 
     fn begin_drag(&mut self, cx: &mut Cx, abs: Vec2d, resize: bool) -> bool {
         self.sync_geometry(cx);
+        // A span's window is fullscreen: nothing to move or resize, and
+        // the screens it covers have no other window to grab.
+        if self.state_mut().span_at(abs.x, abs.y).is_some() {
+            return false;
+        }
         // The window under the pointer is on the screen under the pointer.
         let screen = self.state_mut().screen_under(abs.x, abs.y);
         let area = self.screen_area(cx, screen);
@@ -4517,6 +4718,11 @@ impl App {
     /// window behaves exactly as it always did.
     fn begin_divider_drag(&mut self, cx: &mut Cx, abs: Vec2d) -> bool {
         self.sync_geometry(cx);
+        // Over a span the press is its window's: the covered screens'
+        // hidden tiling has no dividers to grab.
+        if self.state_mut().span_at(abs.x, abs.y).is_some() {
+            return false;
+        }
         let screen = self.state_mut().screen_under(abs.x, abs.y);
         let area = self.screen_area(cx, screen);
         let gap = self.state_mut().gap;
@@ -4595,11 +4801,12 @@ impl App {
         let screen = self.state_mut().screen_under(abs.x, abs.y);
         let area = self.screen_area(cx, screen);
         let gap = self.state_mut().gap;
-        let on_client = self
-            .state_mut()
-            .layout_at(screen)
-            .client_at(abs.x, abs.y, area, gap)
-            .is_some();
+        let on_client = self.state_mut().span_at(abs.x, abs.y).is_some()
+            || self
+                .state_mut()
+                .layout_at(screen)
+                .client_at(abs.x, abs.y, area, gap)
+                .is_some();
         let axis = if on_client {
             None
         } else {
@@ -4663,7 +4870,12 @@ impl App {
     /// screen under the pointer.
     fn scroll_workspace(&mut self, cx: &mut Cx, down: bool, abs: Vec2d) {
         let state = self.state_mut();
-        state.screens.active = state.screen_under(abs.x, abs.y);
+        // Over a span: its home screen, whose workspace holds the span
+        // (switching it away hides the span, like a fullscreen).
+        state.screens.active = match state.span_at(abs.x, abs.y) {
+            Some((_, home)) => home,
+            None => state.screen_under(abs.x, abs.y),
+        };
         let layout = self.state_mut().layout();
         let n = layout.cycle_occupied(layout.active, down);
         self.state_mut().layout_mut().switch_workspace(n);
@@ -5013,6 +5225,9 @@ impl MatchEvent for App {
             screen_key: Default::default(),
             screen_phys: Default::default(),
             screens_changed: false,
+            tile_origins: Default::default(),
+            screens_sent: Default::default(),
+            screens_dirty: false,
             dock_backdrop: None,
             clients: std::collections::HashMap::new(),
             hub_port,
@@ -5453,6 +5668,7 @@ impl AppMain for App {
         // A reconcile in the last desk draw: the bar follows it now.
         if self.state.is_some() && !matches!(event, Event::Draw(_)) {
             self.drain_screens_changed(cx);
+            self.sync_screens_events();
         }
         self.phone_animation_event(cx,event);
         if let Event::Storage(responses) = event {
@@ -5504,7 +5720,8 @@ impl AppMain for App {
             }
         }
         if let Event::WindowDragQuery(dq) = event {
-            // Caption-less window: the bar strip is the drag handle; the
+            // Caption-less window: the bar is the drag handle (on the
+            // floating multi-screen bar, only its painted segments); the
             // desk below answers Client so tile clicks never move the
             // window. macOS treats unanswered strip points as native drag.
             // The shell bar's own modules are BUTTONS, not a drag handle:
@@ -5512,7 +5729,7 @@ impl AppMain for App {
             let bar = self.ui.view(cx, ids!(bar)).area();
             if self.phone_toolbar_hit(cx,dq.abs).is_some() || self.shell_bar_claims(cx, dq.abs) {
                 dq.response.set(WindowDragQueryResponse::Client);
-            } else if bar.is_valid(cx) && bar.rect(cx).contains(dq.abs) {
+            } else if bar.is_valid(cx) && bar.rect(cx).contains(dq.abs) && self.bar_covers(cx, dq.abs) {
                 dq.response.set(WindowDragQueryResponse::Caption);
             } else {
                 dq.response.set(WindowDragQueryResponse::Client);

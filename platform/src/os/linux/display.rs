@@ -22,9 +22,10 @@ pub struct LinuxDisplayOutput {
     pub height: u32,
     /// Selected mode refresh in Hz (0.0 when no mode was selected).
     pub refresh_hz: f64,
-    /// The main screen: the dock goes here. It may be on any GPU. Under the
-    /// window manager, new windows and menus go to the active screen
-    /// instead (the one the pointer or the focused window is on).
+    /// The main screen: the dock goes here. It may be on any GPU. A host
+    /// with its own per-screen placement may still send new windows and
+    /// menus to whichever screen is active (the one the pointer or the
+    /// focused window is on) instead.
     pub primary: bool,
     /// The DRM card driving this connector, e.g. `card1`.
     pub card: String,
@@ -45,8 +46,9 @@ pub struct LinuxDisplayOutput {
     /// of whether the connector has started yet.
     pub mode_override: Option<String>,
     /// The basename of `canonicalize(/sys/class/drm/<card>/device)`: the
-    /// card's PCI address, for joining this screen to the window manager's
-    /// GPU list. `None` when the sysfs link cannot be resolved.
+    /// card's PCI address, for joining this screen to a host's own GPU
+    /// list by a key that survives card renumbering. `None` when the
+    /// sysfs link cannot be resolved.
     pub pci: Option<String>,
 }
 

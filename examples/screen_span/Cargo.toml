@@ -1,0 +1,19 @@
+[package]
+name = "makepad-example-screen-span"
+version = "1.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0", optional = true }
+makepad-wm-api = { path = "../../libs/wm_api", version = "0.1.0" }
+
+[dev-dependencies]
+makepad-test = { path = "../../libs/makepad_test", version = "0.1.0" }

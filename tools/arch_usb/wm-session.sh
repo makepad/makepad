@@ -19,10 +19,10 @@ fi
 # ${XDG_CONFIG_HOME:-$HOME/.config}/makepad/wm/display-layout, migrated
 # from the legacy display-gpu file for one release when display-layout
 # does not exist yet. See tools/linux/display-layout-env.sh (and
-# apps/wm/src/shell/display_layout.rs, docs/research/2026-10-02-wm-
-# display-panel-map.md §3.1/§3.3) for the file format and the exact
-# resolution rule. Never fatal: a missing or malformed file falls back to
-# the renderer's automatic choices, logged to stderr.
+# apps/wm/src/shell/display_layout.rs, the pure model) for the file
+# format and the exact resolution rule. Never fatal: a missing or
+# malformed file falls back to the renderer's automatic choices, logged
+# to stderr.
 if test -r "$MAKEPAD_WM_ROOT/tools/linux/display-layout-env.sh"; then
     . "$MAKEPAD_WM_ROOT/tools/linux/display-layout-env.sh"
 fi
