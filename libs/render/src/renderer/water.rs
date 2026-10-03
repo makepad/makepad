@@ -239,7 +239,10 @@ pub(super) fn water_column(water: Option<&WaterView>, eye: Vec3f, t: f32, sun: &
     if eye_under_water(water, eye, t).is_some() {
         return [[0.0; 4]; 3];
     }
-    let drawn = || water.volumes.iter().filter(|v| v.draw_sheet);
+    // Mesh-drawn waters (a level's pools, a river's ribbon) are not a level
+    // the whole scene below sits under: their own surface hides what is
+    // beneath it instead.
+    let drawn = || water.volumes.iter().filter(|v| v.draw_sheet && v.mesh.is_none());
     let dist = |v: &WaterSurface| {
         if v.unbounded { return 0.0 }
         let dx = (v.min.x - eye.x).max(eye.x - v.max.x).max(0.0);

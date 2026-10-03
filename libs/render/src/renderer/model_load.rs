@@ -157,13 +157,13 @@ impl Renderer {
         UploadedStaticPreview{lods,morph,ao,sdf,bake_geometry,lm_source:prepared.lm_source,emitters:prepared.emitters,geometry,texture,detail,detail_scale,material,wants_pbr,
             prelit:prepared.prelit,triangles:prepared.mesh_indices.len()/3,min:prepared.min,max:prepared.max,
             authored_collisions:prepared.authored_collisions,collider_parts:prepared.collider_parts,occluder_parts:prepared.occluder_parts,positions:prepared.positions,indices:prepared.mesh_indices,
-            extra_draws,anim_parts,driven_parts,sky}
+            extra_draws,anim_parts,driven_parts,sky,liquids:prepared.liquids}
     }
     pub(super) fn uploaded_static_model(uploaded:UploadedStaticPreview)->LoadedModel {
         LoadedModel{lods:uploaded.lods.into_iter().map(|(distance,model)|(distance,Self::uploaded_static_model(model))).collect(),morph:uploaded.morph,prepared_sdf:Some(uploaded.sdf),emitters:uploaded.emitters,geometry:uploaded.geometry,texture:uploaded.texture,detail:uploaded.detail,detail_scale:uploaded.detail_scale,
             extra_draws:uploaded.extra_draws,material:uploaded.material,wants_pbr:uploaded.wants_pbr,prelit:uploaded.prelit,triangles:uploaded.triangles,
             min:uploaded.min,max:uploaded.max,authored_collisions:uploaded.authored_collisions,collider_parts:uploaded.collider_parts,occluder_parts:uploaded.occluder_parts,
-            anim_parts:uploaded.anim_parts,driven_parts:uploaded.driven_parts,sky:uploaded.sky,liquids:Default::default(),mesh_positions:uploaded.positions,mesh_indices:uploaded.indices,
+            anim_parts:uploaded.anim_parts,driven_parts:uploaded.driven_parts,sky:uploaded.sky,liquids:uploaded.liquids,mesh_positions:uploaded.positions,mesh_indices:uploaded.indices,
             lm_source:uploaded.lm_source,bake_geometry:uploaded.bake_geometry}
     }
 

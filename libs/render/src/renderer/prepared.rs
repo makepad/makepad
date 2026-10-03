@@ -124,6 +124,7 @@ pub struct PreparedStaticPreview {
     pub(super) anim_parts: Vec<PreparedAnimPreview>,
     pub(super) driven_parts: Vec<PreparedDrivenPreview>,
     pub(super) sky: Option<PreparedSky>,
+    pub(super) liquids: std::sync::Arc<Vec<crate::model::LiquidSurface>>,
     pub(super) min: Vec3f, pub(super) max: Vec3f, pub(super) prelit: bool,
 }
 
@@ -263,7 +264,7 @@ impl PreparedStaticPreview {
         let positions=std::sync::Arc::new(positions);let occluder_parts=std::sync::Arc::new(occluder_parts);
         let collider_parts=Colliders::from_mesh(positions.clone(),mesh_indices.clone(),model.min,model.max,occluder_parts.clone());
         Ok(Self{lods:Vec::new(),morph:None,ao,lm_source,bake_stream,sdf,emitters:Default::default(),main,extra,positions,mesh_indices,
-            authored_collisions:Default::default(),collider_parts,occluder_parts,anim_parts,driven_parts,sky,
+            authored_collisions:Default::default(),collider_parts,occluder_parts,anim_parts,driven_parts,sky,liquids:std::sync::Arc::new(std::mem::take(&mut model.liquids)),
             min:model.min,max:model.max,prelit:model.prelit})
     }
     /// The GPU textures this asset uploads, as (content hash, bytes), each
@@ -322,6 +323,7 @@ pub struct UploadedStaticPreview {
     pub(super) ao:Option<Texture>,pub(super) lm_source:Option<std::sync::Arc<crate::lightmap::LmMeshSource>>,pub(super) bake_geometry:Option<std::rc::Rc<Geometry>>,pub(super) sdf:Option<(Texture,SdfMeta)>,
     pub(super) emitters: std::sync::Arc<Vec<crate::asset_lights::AssetLightEmitter>>,
     pub(super) extra_draws: Vec<(std::rc::Rc<Geometry>, Texture, Texture, [f32; 2], LayerMaterial)>,
+    pub(super) liquids: std::sync::Arc<Vec<crate::model::LiquidSurface>>,
     pub(super) geometry: std::rc::Rc<Geometry>,
     pub(super) texture: Texture,
     pub(super) detail: Texture,

@@ -123,33 +123,6 @@ script_mod! {
             return acc
         }
 
-        // PIXEL-stage twin of the slope half of wave_term (a helper is
-        // emitted for ONE stage on Metal): the swell's slope per pixel, each
-        // wave faded by the pixel's footprint, so far water keeps the long
-        // waves its sparse rings cannot displace, and never stripes.
-        px_slope: fn(p: vec2, wa: vec4, wb: vec4, t: float, f: float) -> vec2 {
-            let phase = wa.z * (wa.x * p.x + wa.y * p.y) - wa.w * t + wb.y
-            var env = 1.0
-            if wb.z > 0.0 {
-                let e = 0.5 + 0.5 * cos(phase / wb.z)
-                env = e * e
-            }
-            let slope = wb.x * env * cos(phase) * wa.z * clamp(2.0 - wa.z * f / 0.7853982, 0.0, 1.0)
-            return vec2(slope * wa.x, slope * wa.y)
-        }
-
-        swell_slope: fn(p: vec2, t: float, f: float) -> vec2 {
-            var s = self.px_slope(p, self.wave_a0, self.wave_b0, t, f)
-            s = s + self.px_slope(p, self.wave_a1, self.wave_b1, t, f)
-            s = s + self.px_slope(p, self.wave_a2, self.wave_b2, t, f)
-            s = s + self.px_slope(p, self.wave_a3, self.wave_b3, t, f)
-            s = s + self.px_slope(p, self.wave_a4, self.wave_b4, t, f)
-            s = s + self.px_slope(p, self.wave_a5, self.wave_b5, t, f)
-            s = s + self.px_slope(p, self.wave_a6, self.wave_b6, t, f)
-            s = s + self.px_slope(p, self.wave_a7, self.wave_b7, t, f)
-            return s
-        }
-
         vertex: fn() {
             let t = self.water_params.y
             let c = self.water_center
@@ -209,7 +182,10 @@ script_mod! {
             let s2 = self.detail_tex.sample_repeat(q / (tile * 0.37) - vec2(drift.y, drift.x) / (tile * 0.3)).xy - vec2(0.5, 0.5)
             let near = clamp(1.5 - foot / (tile * 0.04), 0.0, 1.0)
             let rip = (s0 * clamp(1.5 - foot / (tile * 0.15), 0.0, 1.0) * 0.8 + (s1 * 0.6 + s2 * 0.35) * near) * self.sea_foam.z * 0.3
-            let sw = self.swell_slope(p.xz, t, foot)
+            // The swell's slope comes from the vertices (dense near the eye,
+            // each wave faded where the rings stop resolving it): the pixel
+            // stage evaluates no wave at all.
+            let sw = self.v_swell.xy
             let n = normalize(vec3(0.0 - sw.x - rip.x, 1.0, 0.0 - sw.y - rip.y))
             let eye = self.water_eye.xyz
             let v = normalize(eye - p)

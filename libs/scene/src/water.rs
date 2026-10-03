@@ -329,6 +329,28 @@ pub struct WaterMesh {
     pub spacing: f32,
 }
 
+impl WaterMesh {
+    /// Does the mesh cover (x, z) seen from above?
+    pub fn covers_xz(&self, x: f32, z: f32) -> bool {
+        self.indices.chunks_exact(3).any(|t| {
+            let (Some(a), Some(b), Some(c)) = (
+                self.positions.get(t[0] as usize),
+                self.positions.get(t[1] as usize),
+                self.positions.get(t[2] as usize),
+            ) else {
+                return false;
+            };
+            let d = (b[2] - c[2]) * (a[0] - c[0]) + (c[0] - b[0]) * (a[2] - c[2]);
+            if d.abs() < 1.0e-9 {
+                return false;
+            }
+            let u = ((b[2] - c[2]) * (x - c[0]) + (c[0] - b[0]) * (z - c[2])) / d;
+            let v = ((c[2] - a[2]) * (x - c[0]) + (a[0] - c[0]) * (z - c[2])) / d;
+            u >= 0.0 && v >= 0.0 && u + v <= 1.0
+        })
+    }
+}
+
 /// A visible water region, with its still surface at `max.y`.
 #[derive(Clone, Debug)]
 pub struct WaterSurface {
@@ -366,9 +388,12 @@ impl WaterSurface {
         }
         h
     }
-    /// Does the surface cover (x, z)?
+    /// Does the surface cover (x, z)? A mesh-drawn one only where its
+    /// mesh is (a level's pool, not the box around all of its pools).
     pub fn covers_xz(&self, x: f32, z: f32) -> bool {
-        self.unbounded || (x >= self.min.x && x <= self.max.x && z >= self.min.z && z <= self.max.z)
+        self.unbounded
+            || (x >= self.min.x && x <= self.max.x && z >= self.min.z && z <= self.max.z
+                && self.mesh.as_ref().is_none_or(|m| m.covers_xz(x, z)))
     }
 }
 #[derive(Clone, Default)]
