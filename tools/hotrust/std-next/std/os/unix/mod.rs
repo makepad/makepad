@@ -2,6 +2,7 @@
 
 pub mod ffi;
 pub mod fs;
+pub mod net;
 pub mod io {
     pub use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 }

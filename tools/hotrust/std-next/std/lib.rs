@@ -91,6 +91,7 @@ pub mod env;
 pub mod ffi;
 pub mod fs;
 pub mod io;
+pub mod net;
 pub mod os;
 pub mod panic;
 pub mod path;

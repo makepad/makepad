@@ -2,7 +2,7 @@
 # Differential runner for the std-os lane's tests (tools/hotrust/tests/std/os_*.rs).
 # Every test prints its observations as lines starting with "| ". The same file runs
 #   real: rustc --test against real std
-#   shim: rustc --test with std::{sync,thread,time,io,fs,path,env,process,ffi,os,panic} and
+#   shim: rustc --test with std::{sync,thread,time,io,fs,path,env,process,ffi,os,panic,net} and
 #         core::{time,sync::atomic,ffi} / alloc::ffi rewritten to the lane's modules
 #         (crate hotrust-std-os-check, built from std-next/check_os)
 #   hr:   `hotrust test` (only with --hotrust; HOTRUST_STD must point at a std tree that
@@ -28,7 +28,7 @@ for f in "$@"; do
   "$T/$n.real" --test-threads=1 --nocapture >"$T/$n.real.out" 2>&1
   grep -o '| .*' "$T/$n.real.out" >"$T/$n.real.lines"
   { echo 'extern crate hotrust_std_os_check as hrs;'
-    sed -E 's/(^|[^a-z_:])std::(sync|thread|time|io|fs|path|env|process|ffi|os|panic)([^a-z_])/\1hrs::\2\3/g; s/(^|[^a-z_:])core::time::/\1hrs::core_time::/g; s/(^|[^a-z_:])core::sync::atomic/\1hrs::core_atomic/g; s/(^|[^a-z_:])core::ffi::/\1hrs::core_ffi::/g; s/(^|[^a-z_:])alloc::ffi::/\1hrs::core_ffi::/g' "$f"; } >"$T/${n}_shim.rs"
+    sed -E 's/(^|[^a-z_:])std::(sync|thread|time|io|fs|path|env|process|ffi|os|panic|net)([^a-z_])/\1hrs::\2\3/g; s/(^|[^a-z_:])core::time::/\1hrs::core_time::/g; s/(^|[^a-z_:])core::sync::atomic/\1hrs::core_atomic/g; s/(^|[^a-z_:])core::ffi::/\1hrs::core_ffi::/g; s/(^|[^a-z_:])alloc::ffi::/\1hrs::core_ffi::/g' "$f"; } >"$T/${n}_shim.rs"
   rustc --edition 2021 -O --test "$T/${n}_shim.rs" --crate-name "${n}_shim" -o "$T/$n.shim" -L "$WT/target-hotrust/release/deps" --extern hotrust_std_os_check="$LIB" 2>"$T/$n.shim.err" || { echo "$n: rustc (shim) failed"; grep -E "^error" -A5 "$T/$n.shim.err" | head -40; status=1; continue; }
   "$T/$n.shim" --test-threads=1 --nocapture >"$T/$n.shim.out" 2>&1
   grep -o '| .*' "$T/$n.shim.out" >"$T/$n.shim.lines"

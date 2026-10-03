@@ -16,6 +16,7 @@ pub mod os;
 
 pub mod rt;
 
+pub mod net;
 pub mod time;
 
 pub type ssize_t = isize;

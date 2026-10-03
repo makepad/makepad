@@ -194,6 +194,8 @@ pub mod ffi;
 pub mod fs;
 #[path = "../../std/io/mod.rs"]
 pub mod io;
+#[path = "../../std/net/mod.rs"]
+pub mod net;
 #[path = "../../std/os/mod.rs"]
 pub mod os;
 #[path = "../../std/panic.rs"]
