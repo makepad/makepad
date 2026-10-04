@@ -1825,7 +1825,8 @@ impl Ease {
                     return t;
                 }
 
-                let epsilon = 1.0 / 200.0 * t;
+                // Tight enough that steep curves stay smooth instead of jittering back and forth.
+                const EPSILON: f64 = 1e-7;
                 let cx = 3.0 * cp0;
                 let bx = 3.0 * (cp2 - cp0) - cx;
                 let ax = 1.0 - cx - bx;
@@ -1834,9 +1835,9 @@ impl Ease {
                 let ay = 1.0 - cy - by;
                 let mut u = t;
 
-                for _i in 0..6 {
+                for _i in 0..8 {
                     let x = ((ax * u + bx) * u + cx) * u - t;
-                    if x.abs() < epsilon {
+                    if x.abs() < EPSILON {
                         return ((ay * u + by) * u + cy) * u;
                     }
                     let d = (3.0 * ax * u + 2.0 * bx) * u + cx;
@@ -1856,9 +1857,9 @@ impl Ease {
                 let mut w = 0.0;
                 let mut v = 1.0;
                 u = t;
-                for _i in 0..8 {
+                for _i in 0..30 {
                     let x = ((ax * u + bx) * u + cx) * u;
-                    if (x - t).abs() < epsilon {
+                    if (x - t).abs() < EPSILON {
                         return ((ay * u + by) * u + cy) * u;
                     }
 
