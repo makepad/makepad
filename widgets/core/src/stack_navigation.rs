@@ -87,15 +87,15 @@ script_mod! {
                 default: @hide
                 hide: AnimatorState{
                     redraw: true
-                    ease: Ease.ExpDecay{d1: 0.80 d2: 0.97}
-                    from: {all: Play.Forward{duration: 0.35}}
+                    ease: Ease.Emphasized
+                    from: {all: Play.Forward{duration: 0.45}}
                     apply: {slide: 1.0}
                 }
 
                 show: AnimatorState{
                     redraw: true
-                    ease: Ease.ExpDecay{d1: 0.80 d2: 0.97}
-                    from: {all: Play.Forward{duration: 0.35}}
+                    ease: Ease.Emphasized
+                    from: {all: Play.Forward{duration: 0.45}}
                     apply: {slide: 0.0}
                 }
             }
