@@ -1549,6 +1549,10 @@ pub enum Ease {
         cp2: f64,
         cp3: f64,
     },
+    /// Material's emphasized easing, i.e., Android's `fast_out_extra_slow_in`,
+    /// which Android uses for its activity transitions.
+    #[live]
+    Emphasized,
 }
 
 impl Ease {
@@ -1873,6 +1877,46 @@ impl Ease {
 
                 return ((ay * u + by) * u + cy) * u;
             }
+            Self::Emphasized => {
+                // Android's path is the emphasized-accelerate curve up to 40% at a sixth of
+                // the time, then the emphasized-decelerate curve for the rest.
+                const SPLIT_TIME: f64 = 1.0 / 6.0;
+                const SPLIT_PROGRESS: f64 = 0.4;
+                if t <= 0. {
+                    return 0.;
+                }
+                if t >= 1. {
+                    return 1.;
+                }
+                if t < SPLIT_TIME {
+                    let accelerate = Self::Bezier { cp0: 0.3, cp1: 0.0, cp2: 0.8, cp3: 0.15 };
+                    return SPLIT_PROGRESS * accelerate.map(t / SPLIT_TIME);
+                }
+                let decelerate = Self::Bezier { cp0: 0.05, cp1: 0.7, cp2: 0.1, cp3: 1.0 };
+                let t = (t - SPLIT_TIME) / (1. - SPLIT_TIME);
+                return SPLIT_PROGRESS + (1. - SPLIT_PROGRESS) * decelerate.map(t);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod ease_tests {
+    use super::*;
+
+    #[test]
+    fn emphasized_matches_androids_fast_out_extra_slow_in() {
+        // Sampled from the path data of Android's `fast_out_extra_slow_in` interpolator.
+        let samples = [(0.1, 0.0935), (1.0 / 6.0, 0.4), (0.25, 0.7728), (0.5, 0.9506), (0.75, 0.9914)];
+        for (t, expected) in samples {
+            assert!((Ease::Emphasized.map(t) - expected).abs() < 1e-4, "t = {t}");
+        }
+        let mut prev = 0.0;
+        for i in 0..=1000 {
+            let t = i as f64 / 1000.0;
+            let mix = Ease::Emphasized.map(t);
+            assert!(mix >= prev, "steps backwards at t = {t}");
+            prev = mix;
         }
     }
 }
