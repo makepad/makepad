@@ -61,8 +61,33 @@ pub fn define_web_socket_delegate() -> *const Class {
     decl.register()
 }
 
+/// An owned reference to an `NSURLSessionWebSocketTask`.
+/// `webSocketTaskWithRequest:` hands back an autoreleased task that only
+/// the session keeps alive while it runs: once the connection fails or
+/// closes, the session lets go and the next drain of the autorelease pool
+/// frees it. The socket and its receive handler each hold one of these
+/// (through the `Arc`), so the task outlives every message sent to it;
+/// a send to a finished task just fails through its completion handler.
+struct RetainedTask(ObjcId);
+
+impl RetainedTask {
+    /// Takes a reference of our own to `task`.
+    unsafe fn retain(task: ObjcId) -> Self {
+        let _: ObjcId = msg_send![task, retain];
+        Self(task)
+    }
+}
+
+impl Drop for RetainedTask {
+    fn drop(&mut self) {
+        unsafe {
+            let () = msg_send![self.0, release];
+        }
+    }
+}
+
 pub struct AppleWebSocket {
-    data_task: Arc<ObjcId>,
+    data_task: Arc<RetainedTask>,
     rx_sender: Sender<WebSocketMessage>,
 }
 
@@ -96,20 +121,20 @@ impl AppleWebSocket {
                     message
                 }
                 WebSocketMessage::Closed => {
-                    let () = msg_send![*Arc::as_ptr(&self.data_task), cancel];
+                    let () = msg_send![self.data_task.0, cancel];
                     return Ok(());
                 }
                 WebSocketMessage::Opened | WebSocketMessage::Error(_) => return Ok(()),
             };
 
-            let () = msg_send![*Arc::as_ptr(&self.data_task), sendMessage: msg completionHandler: &handler];
+            let () = msg_send![self.data_task.0, sendMessage: msg completionHandler: &handler];
             Ok(())
         }
     }
 
     pub fn close(&self) {
         unsafe {
-            let () = msg_send![*self.data_task, cancel];
+            let () = msg_send![self.data_task.0, cancel];
         }
     }
 
@@ -138,7 +163,7 @@ impl AppleWebSocket {
             let () = msg_send![data_task, setMaximumMessageSize:5*1024*1024];
 
             fn set_message_receive_handler(
-                data_task_ref: Arc<ObjcId>,
+                data_task_ref: Arc<RetainedTask>,
                 rx_sender: Sender<WebSocketMessage>,
             ) {
                 let data_task = data_task_ref.clone();
@@ -174,14 +199,14 @@ impl AppleWebSocket {
                 });
 
                 unsafe {
-                    let () = msg_send![*Arc::as_ptr(&data_task_ref), receiveMessageWithCompletionHandler: &handler];
+                    let () = msg_send![data_task_ref.0, receiveMessageWithCompletionHandler: &handler];
                 }
             }
 
             let () = msg_send![data_task, setDelegate: web_socket_delegate_instance];
-            let data_task = Arc::new(data_task);
+            let data_task = Arc::new(RetainedTask::retain(data_task));
             set_message_receive_handler(data_task.clone(), rx_sender.clone());
-            let () = msg_send![*Arc::as_ptr(&data_task), resume];
+            let () = msg_send![data_task.0, resume];
 
             AppleWebSocket {
                 rx_sender,
