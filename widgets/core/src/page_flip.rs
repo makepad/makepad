@@ -202,6 +202,8 @@ impl PageFlip {
         if self.active_page != page_id {
             self.active_page = page_id;
             self.redraw(cx);
+            // The page's retained draw lists missed any redraws while it was hidden.
+            page_widget.redraw(cx);
         }
         Some(page_widget)
     }
