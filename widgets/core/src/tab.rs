@@ -350,6 +350,17 @@ impl Tab {
         self.animator_toggle(cx, is_active, animate, ids!(active.on), ids!(active.off));
     }
 
+    /// Returns the cursor for a pointer that is over (or off) this tab.
+    ///
+    /// The tab sets this itself, since `animator_play` sets a state's cursor only
+    /// when the state changes, and a held button leaves the hover state stale.
+    fn hover_cursor(&self, is_over: bool) -> MouseCursor {
+        is_over
+            .then(|| self.animator.state_cursor(ids!(hover.on)))
+            .flatten()
+            .unwrap_or(MouseCursor::Default)
+    }
+
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
         self.draw_bg.begin(cx, self.walk, self.layout);
         if self.closeable {
@@ -394,6 +405,7 @@ impl Tab {
         match event.hits(cx, self.draw_bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
+                cx.set_cursor(self.hover_cursor(true));
             }
             Hit::FingerHoverOut(_) => {
                 if !block_hover_out {
@@ -420,8 +432,12 @@ impl Tab {
                         );
                     }
                 } else {
-                    // Mouse: drag the tab after exceeding the minimum drag distance.
-                    if !self.is_dragging && (e.abs - e.abs_start).length() > self.min_drag_dist {
+                    // Mouse: drag the tab after exceeding the minimum drag distance. Only
+                    // the primary button drags, since only a primary release ends a drag.
+                    if !self.is_dragging
+                        && e.device.is_primary_hit()
+                        && (e.abs - e.abs_start).length() > self.min_drag_dist
+                    {
                         self.is_dragging = true;
                         dispatch_action(cx, TabAction::ShouldTabStartDrag);
                     }
@@ -431,6 +447,21 @@ impl Tab {
                 if self.is_dragging {
                     dispatch_action(cx, TabAction::ShouldTabStopDrag);
                     self.is_dragging = false;
+                }
+                // A held button suppresses hover events, so the hover state and cursor
+                // catch up with where the button was released.
+                if fue.device.has_hovers() {
+                    self.close_button.animator_play(cx, ids!(hover.off));
+                    if fue.is_over {
+                        self.animator_play(cx, ids!(hover.on));
+                    } else {
+                        self.animator_play(cx, ids!(hover.off));
+                    }
+                    // A cancelled press was taken away rather than released, so the cursor
+                    // stays with whatever took it.
+                    if !fue.cancelled {
+                        cx.set_cursor(self.hover_cursor(fue.is_over));
+                    }
                 }
                 if fue.device.is_touch() && fue.cancelled {
                     dispatch_action(cx, TabAction::TouchCancel);
