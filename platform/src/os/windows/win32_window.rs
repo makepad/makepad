@@ -152,6 +152,13 @@ const CFS_EXCLUDE: u32 = 0x0080;
 // The vendored `windows` bindings lack this constant too.
 const WM_SETCURSOR: u32 = 0x0020;
 
+// Nor do they have `GetCapture`; bind it the same way as the shims above.
+#[inline]
+unsafe fn GetCapture() -> HWND {
+    windows_core::link!("user32.dll" "system" fn GetCapture() -> HWND);
+    unsafe { GetCapture() }
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct CANDIDATEFORM {
@@ -1895,6 +1902,11 @@ impl Win32Window {
     }
 
     pub fn send_mouse_down(&mut self, button: MouseButton, modifiers: KeyModifiers) {
+        // Losing the capture also loses the button-ups that would balance the count,
+        // as when an OLE drag takes the capture and consumes the release.
+        if unsafe { GetCapture() } != self.hwnd {
+            self.mouse_buttons_down = 0;
+        }
         if self.mouse_buttons_down == 0 {
             unsafe {
                 SetCapture(self.hwnd);
