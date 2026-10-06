@@ -20,8 +20,8 @@ use {
         os::{
             apple::apple_sys::*,
             apple_util::{
-                get_event_key_modifier, get_event_keycode, keycode_to_menu_key, nsstring_to_string,
-                str_to_nsstring,
+                get_event_key_modifier, get_event_keycode, keycode_to_menu_key, load_mouse_cursor,
+                nsstring_to_string, str_to_nsstring,
             },
             cx_native::EventFlow,
             macos::{macos_delegates::*, macos_event::*, macos_ime::MacosImeKeyboard, macos_window::MacosWindow},
@@ -314,6 +314,9 @@ pub struct MacosApp {
 
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
+    /// Whether the shown cursor was set directly, bypassing cursor rects, because
+    /// a mouse button was held.
+    cursor_set_directly: bool,
     /// Pointer lock (FPS mouse capture): while true the hardware cursor is
     /// frozen+hidden and MouseMove positions are synthesized from NSEvent
     /// deltas into `virtual_mouse` — downstream consumers never know.
@@ -385,6 +388,7 @@ impl MacosApp {
                 event_callback: Some(event_callback),
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
+                cursor_set_directly: false,
                 mouse_pointer_lock: false,
                 virtual_mouse: None,
                 pointer_lock_applied: false,
@@ -1393,8 +1397,29 @@ impl MacosApp {
                         invalidateCursorRectsForView: *view
                     ];
                 }
+                // Cursor rects don't apply while a mouse button is held, so a visible cursor
+                // requested then, and the first one requested after the release, is set directly.
+                let buttons: u64 = msg_send![class!(NSEvent), pressedMouseButtons];
+                if buttons != 0 || self.cursor_set_directly {
+                    let native_cursor = self.native_cursor(cursor);
+                    if cursor != MouseCursor::Hidden && !native_cursor.is_null() {
+                        let () = msg_send![native_cursor, set];
+                        self.cursor_set_directly = buttons != 0;
+                    }
+                }
             }
         }
+    }
+
+    /// Returns the NSCursor for `cursor`, loading and retaining it on first use.
+    pub fn native_cursor(&mut self, cursor: MouseCursor) -> ObjcId {
+        *self.cursors.entry(cursor).or_insert_with(|| {
+            let id = load_mouse_cursor(cursor);
+            if !id.is_null() {
+                let _: ObjcId = unsafe { msg_send![id, retain] };
+            }
+            id
+        })
     }
 
     /// Arm (or resume) display-link pacing: one CADisplayLink per window via

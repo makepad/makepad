@@ -348,16 +348,21 @@ impl Cx {
                 self.drag_drop.cycle_drag();
             }
             Win32Event::DragEnd => {
-                // send MouseUp
-                self.call_event_handler(&Event::MouseUp(MouseUpEvent {
-                    abs: dvec2(-100000.0, -100000.0),
-                    button: MouseButton::PRIMARY,
-                    window_id: CxWindowPool::id_zero(),
-                    modifiers: Default::default(),
-                    time: 0.0,
-                }));
-                self.fingers.mouse_up(MouseButton::PRIMARY);
-                self.fingers.cycle_hover_area(live_id!(mouse).into());
+                self.release_mouse_after_drag();
+                // A drag this app started ends with `InternalDragEnd` once OLE is done with it.
+                if !with_win32_app(|app| app.is_dragging_internal.get()) {
+                    self.call_event_handler(&Event::DragEnd);
+                    self.drag_drop.cycle_drag();
+                }
+            }
+            Win32Event::InternalDragEnd { ran } => {
+                // Only a drop or exit over one of our windows releases the button that OLE
+                // consumed, so a drag that never reached one still holds it.
+                if ran && self.fingers.first_mouse_button.is_some() {
+                    self.release_mouse_after_drag();
+                }
+                self.call_event_handler(&Event::DragEnd);
+                self.drag_drop.cycle_drag();
             }
             Win32Event::KeyDown(e) => {
                 self.keyboard.process_key_down(e.clone());
@@ -474,6 +479,23 @@ impl Cx {
         } else {
             EventFlow::Wait
         }
+    }
+
+    /// Ends the press and hover state left over from a drag over our windows: OLE
+    /// consumes the button release and every mouse move made while it runs.
+    fn release_mouse_after_drag(&mut self) {
+        // A cursor requested before the drag ended is stale; the next hover under
+        // the pointer requests its own.
+        with_win32_app(|app| app.request_cursor(crate::cursor::MouseCursor::Default));
+        self.call_event_handler(&Event::MouseUp(MouseUpEvent {
+            abs: dvec2(-100000.0, -100000.0),
+            button: MouseButton::PRIMARY,
+            window_id: CxWindowPool::id_zero(),
+            modifiers: Default::default(),
+            time: 0.0,
+        }));
+        self.fingers.mouse_up(MouseButton::PRIMARY);
+        self.fingers.cycle_hover_area(live_id!(mouse).into());
     }
 
     /// One paint tick: advance the frame, redraw what is dirty, and present.

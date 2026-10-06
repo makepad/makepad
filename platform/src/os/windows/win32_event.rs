@@ -41,6 +41,9 @@ pub enum Win32Event {
     Drag(WindowId, DragEvent),
     Drop(WindowId, DropEvent),
     DragEnd,
+    /// A drag this app started has finished: dropped anywhere, cancelled, or never begun.
+    /// `ran` says whether OLE ran the drag, which consumes the button release that ends it.
+    InternalDragEnd { ran: bool },
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextCopy(TextClipboardEvent),

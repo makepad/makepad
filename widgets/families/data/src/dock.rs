@@ -2379,6 +2379,21 @@ impl Dock {
             self.area.redraw(cx);
         }
 
+        // A window drag query can reset the cursor on any move, so an in-app tab drag
+        // re-sets it on every drag move; drags from outside the app have no internal id.
+        if let Event::Drag(e) = event {
+            let in_app = e.items.iter().any(|item| {
+                matches!(
+                    item,
+                    DragItem::FilePath { internal_id: Some(_), .. }
+                        | DragItem::String { internal_id: Some(_), .. }
+                )
+            });
+            if in_app && self.dragging_tab.is_some() {
+                cx.set_cursor(MouseCursor::Grabbing);
+            }
+        }
+
         match event.drag_hits(cx, self.area) {
             DragHit::Drag(f) => {
                 self.drop_state = None;
@@ -2829,8 +2844,12 @@ impl DockRef {
         }
     }
 
+    /// Starts dragging a tab, showing the grabbing cursor until the drag ends.
+    ///
+    /// On Windows the OLE drag session shows its own drag cursors instead.
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
+        cx.set_cursor(MouseCursor::Grabbing);
     }
 }
 

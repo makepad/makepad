@@ -1473,7 +1473,10 @@ impl XlibApp {
             MouseCursor::ColResize => self.load_first_cursor(&[b"split_h\0", b"h_double_arrow\0"]),
             MouseCursor::RowResize => self.load_first_cursor(&[b"split_v\0", b"v_double_arrow\0"]),
             MouseCursor::Grab => self.load_first_cursor(&[b"grab\0"]),
-            MouseCursor::Grabbing => self.load_first_cursor(&[b"grabbing\0"]),
+            // `closedhand` is the Qt/KDE name; `fleur` is a core X cursor, so it always loads.
+            MouseCursor::Grabbing => {
+                self.load_first_cursor(&[b"grabbing\0", b"closedhand\0", b"fleur\0"])
+            }
         };
         if let Some(x11_cursor) = x11_cursor {
             unsafe {
