@@ -930,6 +930,7 @@ impl Win32App {
             if items.len() > 1 {
                 error!("multi-item drag/drop operation not supported");
             }
+            let mut ran = false;
             match &items[0] {
                 DragItem::FilePath { path, internal_id } => {
                     //log!("win32: about to drag path \"{}\" with internal ID {:?}", path, internal_id);
@@ -956,8 +957,7 @@ impl Win32App {
                                 &mut effect,
                             )
                         } {
-                            DRAGDROP_S_DROP => { /*log!("DoDragDrop: succesful")*/ }
-                            DRAGDROP_S_CANCEL => { /*log!("DoDragDrop: canceled")*/ }
+                            DRAGDROP_S_DROP | DRAGDROP_S_CANCEL => ran = true,
                             _ => {
                                 log!("DoDragDrop: failed for some reason")
                             }
@@ -982,7 +982,10 @@ impl Win32App {
                         }
                     }
                 }
-            })
+            });
+            // Only a drag that ends over a makepad window reaches our drop target, so the
+            // end of every drag, including one dropped elsewhere or cancelled, is reported here.
+            Win32App::do_callback(Win32Event::InternalDragEnd { ran });
         }
     }
 
