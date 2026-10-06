@@ -4,7 +4,7 @@
 use crate::{
     windows::core::{self as wcore, BOOL},
     windows::Win32::{
-        Foundation::{DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK},
+        Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK},
         System::{
             Ole::{IDropSource, IDropSource_Impl, DROPEFFECT},
             SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
@@ -26,9 +26,11 @@ crate::implement_com! {
 // IDropSource implementation for DropSource, which validates a drop on left mouse button up
 
 impl IDropSource_Impl for DropSource_Impl {
-    fn QueryContinueDrag(&self, _: BOOL, grfkeystate: MODIFIERKEYS_FLAGS) -> wcore::HRESULT {
-        // if the left mousebutton is not pressed anymore, drop that item
-        if (grfkeystate & MK_LBUTTON) == MODIFIERKEYS_FLAGS(0) {
+    fn QueryContinueDrag(&self, fescapepressed: BOOL, grfkeystate: MODIFIERKEYS_FLAGS) -> wcore::HRESULT {
+        // Escape cancels the drag, and releasing the left mouse button drops the item.
+        if fescapepressed.as_bool() {
+            DRAGDROP_S_CANCEL
+        } else if (grfkeystate & MK_LBUTTON) == MODIFIERKEYS_FLAGS(0) {
             DRAGDROP_S_DROP
         } else {
             S_OK
