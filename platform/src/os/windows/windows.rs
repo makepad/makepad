@@ -348,6 +348,9 @@ impl Cx {
                 self.drag_drop.cycle_drag();
             }
             Win32Event::DragEnd => {
+                // A cursor requested before the drag ended is stale; the next hover under
+                // the pointer requests its own.
+                with_win32_app(|app| app.request_cursor(crate::cursor::MouseCursor::Default));
                 // send MouseUp
                 self.call_event_handler(&Event::MouseUp(MouseUpEvent {
                     abs: dvec2(-100000.0, -100000.0),
