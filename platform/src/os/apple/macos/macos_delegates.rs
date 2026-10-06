@@ -11,8 +11,7 @@ use {
             apple::apple_sys::*,
             apple_classes::get_apple_class_global,
             apple_util::{
-                get_event_key_modifier, get_event_mouse_button, load_mouse_cursor,
-                nsstring_to_string, superclass,
+                get_event_key_modifier, get_event_mouse_button, nsstring_to_string, superclass,
             },
             cx_native::EventFlow,
             macos::{
@@ -714,15 +713,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         // object we do not own — the cache holds retained ids for that reason.
         let call = std::panic::AssertUnwindSafe(|| unsafe {
             let Some(current_cursor) = try_with_macos_app(|app| app.current_cursor.clone()) else { return };
-            let Some(cursor_id) = try_with_macos_app(|app| {
-                *app.cursors.entry(current_cursor.clone()).or_insert_with(|| {
-                    let id = load_mouse_cursor(current_cursor.clone());
-                    if !id.is_null() {
-                        let _: ObjcId = msg_send![id, retain];
-                    }
-                    id
-                })
-            }) else { return };
+            let Some(cursor_id) = try_with_macos_app(|app| app.native_cursor(current_cursor.clone())) else { return };
             if cursor_id.is_null() {
                 return;
             }

@@ -46,8 +46,8 @@ use {
                     WindowsAndMessaging::{
                         DispatchMessageW, GetMessageW, GetSystemMetrics, IsGUIThread,
                         IsProcessDPIAware, KillTimer, LoadCursorW, LoadIconW, LoadImageW,
-                        PeekMessageW, RegisterClassExW, SetCursor, SetTimer, ShowCursor,
-                        TranslateMessage, CS_OWNDC, HICON, IDC_ARROW, IDC_CROSS, IDC_HAND,
+                        PeekMessageW, RegisterClassExW, SetCursor, SetTimer, TranslateMessage,
+                        CS_OWNDC, HCURSOR, HICON, IDC_ARROW, IDC_CROSS, IDC_HAND,
                         IDC_HELP, IDC_IBEAM, IDC_NO, IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENS,
                         IDC_SIZENWSE, IDC_SIZEWE, IDI_WINLOGO, IMAGE_ICON, LR_DEFAULTCOLOR, MSG,
                         PM_NOREMOVE, PM_REMOVE, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON,
@@ -291,6 +291,12 @@ pub struct Win32App {
     pub event_flow: EventFlow,
     pub dpi_functions: DpiFunctions,
     pub current_cursor: Option<MouseCursor>,
+    /// The cursor WM_SETCURSOR re-applies over the client area.
+    pub requested_cursor: MouseCursor,
+    /// The system cursor for `requested_cursor`, or `None` while it is hidden.
+    requested_hcursor: Option<HCURSOR>,
+    /// The window whose client area last received WM_SETCURSOR.
+    pub cursor_hwnd: Option<HWND>,
     pub currently_clicked_window_id: Option<WindowId>,
     pub start_dragging_items: Option<Vec<DragItem>>,
     pub is_dragging_internal: Cell<bool>,
@@ -439,6 +445,9 @@ impl Win32App {
             timers: Vec::new(),
             dpi_functions: DpiFunctions::new(),
             current_cursor: None,
+            requested_cursor: MouseCursor::Default,
+            requested_hcursor: Self::load_cursor(MouseCursor::Default),
+            cursor_hwnd: None,
             currently_clicked_window_id: None,
             is_dragging_internal: Cell::new(false),
             beat_handles: Vec::new(),
@@ -921,6 +930,7 @@ impl Win32App {
             if items.len() > 1 {
                 error!("multi-item drag/drop operation not supported");
             }
+            let mut ran = false;
             match &items[0] {
                 DragItem::FilePath { path, internal_id } => {
                     //log!("win32: about to drag path \"{}\" with internal ID {:?}", path, internal_id);
@@ -947,13 +957,16 @@ impl Win32App {
                                 &mut effect,
                             )
                         } {
-                            DRAGDROP_S_DROP => { /*log!("DoDragDrop: succesful")*/ }
-                            DRAGDROP_S_CANCEL => { /*log!("DoDragDrop: canceled")*/ }
+                            DRAGDROP_S_DROP | DRAGDROP_S_CANCEL => ran = true,
                             _ => {
                                 log!("DoDragDrop: failed for some reason")
                             }
                         }
-                        with_win32_app(|app| app.is_dragging_internal.replace(false));
+                        with_win32_app(|app| {
+                            app.is_dragging_internal.replace(false);
+                            // OLE's last drag cursor is still showing, not `current_cursor`.
+                            app.current_cursor = None;
+                        });
                     }
                 }
                 _ => {
@@ -969,7 +982,10 @@ impl Win32App {
                         }
                     }
                 }
-            })
+            });
+            // Only a drag that ends over a makepad window reaches our drop target, so the
+            // end of every drag, including one dropped elsewhere or cancelled, is reported here.
+            Win32App::do_callback(Win32Event::InternalDragEnd { ran });
         }
     }
 
@@ -998,49 +1014,63 @@ impl Win32App {
         self.time.time_now()
     }
 
+    /// Loads the system cursor shown for `cursor`, or returns `None` for a hidden cursor.
+    fn load_cursor(cursor: MouseCursor) -> Option<HCURSOR> {
+        let id = match cursor {
+            MouseCursor::Hidden => return None,
+            MouseCursor::Default => IDC_ARROW,
+            MouseCursor::Crosshair => IDC_CROSS,
+            MouseCursor::Hand => IDC_HAND,
+            // Default to Hand for non-supported cursors, until we include our own custom cursor files.
+            MouseCursor::Grab | MouseCursor::Grabbing => IDC_HAND,
+            MouseCursor::Arrow => IDC_ARROW,
+            MouseCursor::Move => IDC_SIZEALL,
+            MouseCursor::Text => IDC_IBEAM,
+            MouseCursor::Wait => IDC_ARROW,
+            MouseCursor::Help => IDC_HELP,
+            MouseCursor::NotAllowed => IDC_NO,
+
+            MouseCursor::EResize => IDC_SIZEWE,
+            MouseCursor::NResize => IDC_SIZENS,
+            MouseCursor::NeResize => IDC_SIZENESW,
+            MouseCursor::NwResize => IDC_SIZENWSE,
+            MouseCursor::SResize => IDC_SIZENS,
+            MouseCursor::SeResize => IDC_SIZENWSE,
+            MouseCursor::SwResize => IDC_SIZENESW,
+            MouseCursor::WResize => IDC_SIZEWE,
+
+            MouseCursor::NsResize => IDC_SIZENS,
+            MouseCursor::NeswResize => IDC_SIZENESW,
+            MouseCursor::EwResize => IDC_SIZEWE,
+            MouseCursor::NwseResize => IDC_SIZENWSE,
+
+            MouseCursor::ColResize => IDC_SIZEWE,
+            MouseCursor::RowResize => IDC_SIZENS,
+        };
+        unsafe { LoadCursorW(None, id).or_else(|_| LoadCursorW(None, IDC_ARROW)).ok() }
+    }
+
+    /// Records `cursor` as the one WM_SETCURSOR shows, without showing it yet.
+    pub fn request_cursor(&mut self, cursor: MouseCursor) {
+        if self.requested_cursor != cursor {
+            self.requested_cursor = cursor;
+            self.requested_hcursor = Self::load_cursor(cursor);
+        }
+    }
+
     pub fn set_mouse_cursor(&mut self, cursor: MouseCursor) {
-        if self.current_cursor.is_none() || self.current_cursor.unwrap() != cursor {
-            let win32_cursor = match cursor {
-                MouseCursor::Hidden => PCWSTR::null(),
-                MouseCursor::Default => IDC_ARROW,
-                MouseCursor::Crosshair => IDC_CROSS,
-                MouseCursor::Hand => IDC_HAND,
-                // Default to Hand for non-supported cursors, until we include our own custom cursor files.
-                MouseCursor::Grab | MouseCursor::Grabbing => IDC_HAND,
-                MouseCursor::Arrow => IDC_ARROW,
-                MouseCursor::Move => IDC_SIZEALL,
-                MouseCursor::Text => IDC_IBEAM,
-                MouseCursor::Wait => IDC_ARROW,
-                MouseCursor::Help => IDC_HELP,
-                MouseCursor::NotAllowed => IDC_NO,
+        self.request_cursor(cursor);
+        // OLE draws its own drag cursors while DoDragDrop runs.
+        if self.current_cursor != Some(cursor) && !self.is_dragging_internal.get() {
+            self.apply_requested_cursor();
+        }
+    }
 
-                MouseCursor::EResize => IDC_SIZEWE,
-                MouseCursor::NResize => IDC_SIZENS,
-                MouseCursor::NeResize => IDC_SIZENESW,
-                MouseCursor::NwResize => IDC_SIZENWSE,
-                MouseCursor::SResize => IDC_SIZENS,
-                MouseCursor::SeResize => IDC_SIZENWSE,
-                MouseCursor::SwResize => IDC_SIZENESW,
-                MouseCursor::WResize => IDC_SIZEWE,
-
-                MouseCursor::NsResize => IDC_SIZENS,
-                MouseCursor::NeswResize => IDC_SIZENESW,
-                MouseCursor::EwResize => IDC_SIZEWE,
-                MouseCursor::NwseResize => IDC_SIZENWSE,
-
-                MouseCursor::ColResize => IDC_SIZEWE,
-                MouseCursor::RowResize => IDC_SIZENS,
-            };
-            self.current_cursor = Some(cursor);
-            unsafe {
-                if win32_cursor == PCWSTR::null() {
-                    ShowCursor(false);
-                } else {
-                    SetCursor(Some(LoadCursorW(None, win32_cursor).unwrap()));
-                    ShowCursor(true);
-                }
-            }
-            //TODO
+    /// Shows the requested cursor; WM_SETCURSOR calls this on uncaptured client-area moves.
+    pub fn apply_requested_cursor(&mut self) {
+        self.current_cursor = Some(self.requested_cursor);
+        unsafe {
+            SetCursor(self.requested_hcursor);
         }
     }
 }

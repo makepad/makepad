@@ -865,6 +865,11 @@ impl Animator {
         self.current_state_matches(state)
     }
 
+    /// Returns the cursor that `state` sets when it is played, if any.
+    pub fn state_cursor(&self, state: &[LiveId; 2]) -> Option<MouseCursor> {
+        self.groups.get(&state[0])?.states.get(&state[1])?.cursor
+    }
+
     /// Inspect the requested state without a draw context. Cancel visibility must
     /// follow a pending open/close even before its animation has drawn a frame.
     pub(crate) fn in_state_id(&self, state: &[LiveId; 2]) -> bool {
