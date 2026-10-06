@@ -65,8 +65,10 @@ pub(crate) fn parse_dropfiles(bytes: &[u8]) -> Option<Vec<DragItem>> {
     // (the second NUL of the terminating pair). Decoding a whole name at a
     // time rather than a code unit at a time is what keeps an emoji or any
     // other non-BMP character in a filename intact.
-    for name in units.split(|unit| *unit == 0) {
-        if name.is_empty() {
+    for (index, name) in units.split(|unit| *unit == 0).enumerate() {
+        // A drag identified by its internal ID alone has an empty path,
+        // which still counts as its one name.
+        if name.is_empty() && !(index == 0 && internal_id.is_some()) {
             break;
         }
         items.push(DragItem::FilePath {
@@ -202,6 +204,19 @@ mod tests {
                 internal_id: Some(LiveId(0x1234_5678_9abc_def0))
             }])
         );
+    }
+
+    #[test]
+    fn an_internal_drag_with_an_empty_path_keeps_its_live_id() {
+        let bytes = dropfiles(28, 1, 0x1234_5678_9abc_def0, &[""]);
+        assert_eq!(
+            parse_dropfiles(&bytes),
+            Some(vec![DragItem::FilePath {
+                path: String::new(),
+                internal_id: Some(LiveId(0x1234_5678_9abc_def0))
+            }])
+        );
+        assert_eq!(parse_dropfiles(&dropfiles(28, 1, 0, &[""])), None);
     }
 
     #[test]
