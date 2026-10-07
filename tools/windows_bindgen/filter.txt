@@ -2158,7 +2158,7 @@ Windows.Win32.UI.WindowsAndMessaging.ShowCursor
 Windows.Win32.UI.WindowsAndMessaging.ShowWindow
 Windows.Win32.UI.WindowsAndMessaging.TIMERPROC
 Windows.Win32.UI.WindowsAndMessaging.TranslateMessage
-Windows.Win32.UI.WindowsAndMessaging.WA_ACTIVE
+Windows.Win32.UI.WindowsAndMessaging.WA_INACTIVE
 Windows.Win32.UI.WindowsAndMessaging.WINDOWPLACEMENT
 Windows.Win32.UI.WindowsAndMessaging.WINDOWPLACEMENT_FLAGS
 Windows.Win32.UI.WindowsAndMessaging.WINDOWPOS
