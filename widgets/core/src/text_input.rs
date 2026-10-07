@@ -895,6 +895,10 @@ pub struct TextInput {
     /// `Returned` on Enter).
     #[live(false)]
     submit_on_enter: bool,
+    /// Keeps key focus and the IME up after submitting (emitting `Returned`),
+    /// e.g., so a chat input can take the next message right away.
+    #[live(false)]
+    keep_focus_on_submit: bool,
     #[live]
     scroll_bar: ScrollBar,
     /// Space between the vertical scroll bar and the input's top, right and bottom edges,
@@ -1033,6 +1037,14 @@ impl TextInput {
                 );
             });
         }
+    }
+
+    fn submit(&mut self, cx: &mut Cx, uid: WidgetUid, mods: KeyModifiers) {
+        if !self.keep_focus_on_submit {
+            cx.hide_text_ime();
+            cx.set_key_focus(Area::Empty);
+        }
+        self.emit_return(cx, uid, mods);
     }
 
     pub fn is_multiline(&self) -> bool {
@@ -3231,9 +3243,7 @@ impl Widget for TextInput {
                     || mods.is_primary()
                     || (has_physical_keyboard && self.submit_on_enter && !mods.any());
                 if should_submit {
-                    cx.hide_text_ime();
-                    cx.set_key_focus(Area::Empty);
-                    self.emit_return(cx, uid, mods);
+                    self.submit(cx, uid, mods);
                 } else if !self.is_read_only {
                     self.reset_blink_timer(cx);
                     self.create_or_extend_edit_group(EditKind::Other);
@@ -3272,9 +3282,7 @@ impl Widget for TextInput {
                 if !self.is_multiline {
                     // Single-line fields submit on Enter regardless of Shift; never embed
                     // a raw newline.
-                    cx.hide_text_ime();
-                    cx.set_key_focus(Area::Empty);
-                    self.emit_return(cx, uid, mods);
+                    self.submit(cx, uid, mods);
                 } else {
                     self.reset_blink_timer(cx);
                     self.create_or_extend_edit_group(EditKind::Other);
@@ -3708,9 +3716,7 @@ impl Widget for TextInput {
                 let mods = KeyModifiers::default();
                 match event.action {
                     ImeAction::Done | ImeAction::Go | ImeAction::Search | ImeAction::Send => {
-                        cx.hide_text_ime();
-                        cx.set_key_focus(Area::Empty);
-                        self.emit_return(cx, uid, mods);
+                        self.submit(cx, uid, mods);
                     }
                     ImeAction::Next | ImeAction::Previous => {
                         self.emit_return(cx, uid, mods);
