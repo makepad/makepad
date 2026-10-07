@@ -85,7 +85,7 @@ use {
                         HTSYSMENU, HTTOP, HTTOPLEFT, HTTOPRIGHT, HWND_NOTOPMOST, HWND_TOPMOST,
                         LWA_ALPHA, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
                         SWP_NOSIZE, SWP_NOZORDER, SW_MAXIMIZE, SW_MINIMIZE, SW_RESTORE, SW_SHOW,
-                        WA_ACTIVE, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+                        WA_INACTIVE, WM_ACTIVATE, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
                         WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE, WM_IME_COMPOSITION,
                         WM_IME_ENDCOMPOSITION, WM_IME_STARTCOMPOSITION, WM_KEYDOWN, WM_KEYUP,
                         WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEMOVE,
@@ -800,7 +800,8 @@ impl Win32Window {
         let window = &mut (*(user_data as *mut Win32Window));
         match msg {
             WM_ACTIVATE => {
-                if wparam.0 & 0xffff == WA_ACTIVE as usize {
+                // Both WA_ACTIVE and WA_CLICKACTIVE mean the window was activated.
+                if wparam.0 & 0xffff != WA_INACTIVE as usize {
                     window.do_callback(Win32Event::WindowGotFocus(window.window_id));
                 } else {
                     if window.is_popup {

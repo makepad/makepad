@@ -140149,7 +140149,7 @@ pub const SW_SHOW: SHOW_WINDOW_CMD = SHOW_WINDOW_CMD(5i32);
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct SYSTEM_METRICS_INDEX(pub i32);
 pub type TIMERPROC = Option<unsafe extern "system" fn(param0: super::super::Foundation::HWND, param1: u32, param2: usize, param3: u32)>;
-pub const WA_ACTIVE: u32 = 1u32;
+pub const WA_INACTIVE: u32 = 0u32;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WINDOWPLACEMENT {
