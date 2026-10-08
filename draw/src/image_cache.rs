@@ -5,7 +5,7 @@ use makepad_zune_bmp::BmpDecoder;
 use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 use makepad_zune_png::makepad_zune_core::options::DecoderOptions;
-use makepad_zune_png::{post_process_image, PngDecoder};
+use makepad_zune_png::{BlendOp, DisposeOp, PngDecoder};
 use makepad_zune_qoi::QoiDecoder;
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -188,7 +188,10 @@ fn animation_atlas_layout_with_limit(
     if frame_count == 0 || frame_count > MAX_IMAGE_FRAMES {
         return Err(ImageError::DimensionsTooLarge { width, height });
     }
-    let fits_horizontal = (Cx::max_texture_width() / width).max(1);
+    // Use as few rows as the frames fit in, then as few columns as fill those rows,
+    // so the atlas (which gets uploaded all at once) is barely bigger than its frames.
+    let max_columns = (Cx::max_texture_width() / width).max(1);
+    let fits_horizontal = frame_count.div_ceil(frame_count.div_ceil(max_columns));
     let total_width = fits_horizontal * width;
     let rows = frame_count
         .checked_add(fits_horizontal - 1)
@@ -382,6 +385,8 @@ impl ImageBuffer {
         Ok(orient(buffer, decoder.info().and_then(|i| i.exif.as_deref())))
     }
 
+    /// Decodes an animated PNG by drawing each frame onto a canvas the way browsers do
+    /// (blending it, then disposing of it), and packs those into an atlas like GIF/WebP.
     fn decode_animated_png<T: makepad_zune_png::makepad_zune_core::bytestream::ZByteReaderTrait>(
         decoder: &mut PngDecoder<T>,
     ) -> Result<ImageBuffer, ImageError> {
@@ -397,100 +402,82 @@ impl ImageBuffer {
                 .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
                     "Failed to get animated PNG image dimensions",
                 )))?;
-        let actl_info =
-            decoder
-                .actl_info()
-                .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
-                    "Failed to get animated PNG actl info",
-                )))?;
-
         let num_components = colorspace.num_components();
         let frame_pixels = checked_pixel_count(width, height)?;
-        let output_len = frame_pixels
-            .checked_mul(num_components)
-            .filter(|&len| len <= MAX_IMAGE_DECODED_BYTES)
-            .ok_or(ImageError::DimensionsTooLarge { width, height })?;
-        let mut output = vec![0; output_len];
-        // The atlas is sized from the declared `num_frames`; the decode loop below
-        // is driven by the actual fcTL chunks in the stream, which a malicious PNG
-        // can make exceed the declaration. Cap the loop to the allocated count so a
-        // frame can never be written past the atlas bounds.
-        let num_frames = actl_info.num_frames as usize;
-        let (total_width, total_height) = animation_atlas_layout(num_frames, width, height)?;
-        let mut final_buffer = ImageBuffer::default();
-        final_buffer.data.resize(total_width * total_height, 0);
-        final_buffer.width = total_width;
-        final_buffer.height = total_height;
-        let mut cx = 0;
-        let mut cy = 0;
-        final_buffer.animation = Some(TextureAnimation {
-            width,
-            height,
-            num_frames,
-            frame_delays: Vec::new(),
-        });
-        let mut previous_frame = None;
-        let mut frame_index = 0;
+        let max_frames = (MAX_IMAGE_PIXELS / frame_pixels).max(1).min(MAX_IMAGE_FRAMES);
+        let mut canvas = vec![0u8; frame_pixels * IMAGE_RGBA_BYTES_PER_PIXEL];
+        let mut frames = Vec::new();
+        let mut frame_delays = Vec::new();
+
         while decoder.more_frames() {
-            if frame_index >= num_frames {
-                break;
-            }
-            frame_index += 1;
             decoder.decode_headers()?;
-            let frame = decoder.frame_info().expect("to have already been decoded");
-            let pix = decoder.decode_raw()?;
-            let info =
-                decoder
-                    .info()
-                    .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
-                        "Failed to get animated PNG image info",
-                    )))?;
-            post_process_image(
-                info,
-                colorspace,
-                &frame,
-                &pix,
-                previous_frame.as_deref(),
-                &mut output,
-                None,
-            )?;
-            previous_frame = Some(pix);
-            match num_components {
-                4 => {
-                    for y in 0..height {
-                        for x in 0..width {
-                            let r = output[y * width * 4 + x * 4];
-                            let g = output[y * width * 4 + x * 4 + 1];
-                            let b = output[y * width * 4 + x * 4 + 2];
-                            let a = output[y * width * 4 + x * 4 + 3];
-                            final_buffer.data[(y + cy) * total_width + (x + cx)] = ((a as u32)
-                                << 24)
-                                | ((r as u32) << 16)
-                                | ((g as u32) << 8)
-                                | (b as u32);
-                        }
-                    }
-                }
-                3 => {
-                    for y in 0..height {
-                        for x in 0..width {
-                            let r = output[y * width * 3 + x * 3];
-                            let g = output[y * width * 3 + x * 3 + 1];
-                            let b = output[y * width * 3 + x * 3 + 2];
-                            final_buffer.data[(y + cy) * total_width + (x + cx)] =
-                                0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-                        }
-                    }
-                }
-                _ => return Err(ImageError::InvalidPixelAlignment(num_components)),
+            let frame = decoder.frame_info().ok_or(ImageError::PngDecode(
+                PngDecodeErrors::GenericStatic("Failed to get animated PNG frame info"),
+            ))?;
+            let pixels = decoder.decode_raw()?;
+            // A default image that isn't part of the animation is only there for viewers without APNG support.
+            if !frame.is_part_of_seq {
+                continue;
             }
-            cx += width;
-            if cx >= total_width {
-                cy += height;
-                cx = 0;
+            if frames.len() >= max_frames {
+                return Err(ImageError::DimensionsTooLarge { width, height });
+            }
+            if frame.width == 0
+                || frame.height == 0
+                || frame.x_offset + frame.width > width
+                || frame.y_offset + frame.height > height
+                || pixels.len() < frame.width * frame.height * num_components
+            {
+                return Err(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                    "Animated PNG frame doesn't fit within the image",
+                )));
+            }
+            let frame_rgba = match num_components {
+                4 => pixels,
+                3 => rgb_to_rgba(&pixels),
+                2 => pixels.chunks_exact(2).flat_map(|la| [la[0], la[0], la[0], la[1]]).collect(),
+                1 => pixels.iter().flat_map(|&l| [l, l, l, 0xFF]).collect(),
+                unsupported => return Err(ImageError::InvalidPixelAlignment(unsupported)),
+            };
+            // A first frame that asks to be disposed to the "previous" frame is disposed to the background instead.
+            let previous_canvas = (frame.dispose_op == DisposeOp::Previous && !frames.is_empty())
+                .then(|| canvas.clone());
+            for (y, src_row) in frame_rgba.chunks_exact(frame.width * 4).take(frame.height).enumerate() {
+                let dst_start = ((frame.y_offset + y) * width + frame.x_offset) * 4;
+                let dst_row = &mut canvas[dst_start..dst_start + frame.width * 4];
+                match frame.blend_op {
+                    BlendOp::Source => dst_row.copy_from_slice(src_row),
+                    BlendOp::Over => {
+                        for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
+                            blend_rgba_over(dst, src);
+                        }
+                    }
+                }
+            }
+            frames.push(canvas.clone());
+            // A delay denominator of 0 means hundredths of a second.
+            let delay_denom = if frame.delay_denom == 0 { 100 } else { frame.delay_denom };
+            frame_delays.push(f64::from(frame.delay_num) / f64::from(delay_denom));
+
+            match (frame.dispose_op, previous_canvas) {
+                (DisposeOp::None, _) => {}
+                (DisposeOp::Previous, Some(previous_canvas)) => canvas = previous_canvas,
+                (DisposeOp::Background | DisposeOp::Previous, _) => {
+                    for y in frame.y_offset..frame.y_offset + frame.height {
+                        let row_start = (y * width + frame.x_offset) * 4;
+                        canvas[row_start..row_start + frame.width * 4].fill(0);
+                    }
+                }
             }
         }
-        Ok(final_buffer)
+
+        match frames.len() {
+            0 => Err(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                "Animated PNG had no frames",
+            ))),
+            1 => Self::new(&frames[0], width, height),
+            _ => Self::pack_animation_atlas(frames, frame_delays, width, height),
+        }
     }
 
     pub fn from_webp(data: &[u8]) -> Result<Self, ImageError> {
@@ -523,6 +510,11 @@ impl ImageBuffer {
         if num_frames > max_frames {
             return Err(ImageError::DimensionsTooLarge { width, height });
         }
+        // Browsers ignore the file's background color and clear disposed frames to transparent.
+        // Without a background color, the decoder never clears them at all.
+        decoder
+            .set_background_color([0, 0, 0, 0])
+            .map_err(ImageError::WebpDecode)?;
         decoder.reset_animation();
         let mut frames: Vec<Vec<u8>> = Vec::new();
         let mut frame_delays: Vec<f64> = Vec::new();
@@ -1076,6 +1068,84 @@ fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Draws the RGBA pixel `src` over the RGBA pixel `dst`, neither of them premultiplied.
+fn blend_rgba_over(dst: &mut [u8], src: &[u8]) {
+    let src_alpha = u32::from(src[3]);
+    if src_alpha == 0xFF {
+        dst.copy_from_slice(src);
+        return;
+    }
+    if src_alpha == 0 {
+        return;
+    }
+    let dst_alpha = u32::from(dst[3]) * (0xFF - src_alpha) / 0xFF;
+    let out_alpha = src_alpha + dst_alpha;
+    for (dst_channel, &src_channel) in dst.iter_mut().zip(src).take(3) {
+        let blended = u32::from(src_channel) * src_alpha + u32::from(*dst_channel) * dst_alpha;
+        *dst_channel = ((blended + out_alpha / 2) / out_alpha) as u8;
+    }
+    dst[3] = out_alpha as u8;
+}
+
+/// Returns true if `data` is an animated GIF, WebP or PNG, by looking at its headers only.
+pub fn is_animated_image(data: &[u8]) -> bool {
+    match detect_image_format(data) {
+        Some("gif") => gif_has_multiple_frames(data).unwrap_or(false),
+        // An animated WebP starts with a VP8X chunk whose flags have the animation bit set.
+        Some("webp") => data.get(12..16) == Some(&b"VP8X"[..]) && data.get(20).is_some_and(|flags| flags & 0x02 != 0),
+        Some("png") => png_has_multiple_frames(data).unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Returns whether a GIF has at least two frames, skipping over all the blocks before its second one.
+fn gif_has_multiple_frames(data: &[u8]) -> Option<bool> {
+    let color_table_len = |flags: u8| if flags & 0x80 != 0 { 3 << ((flags & 0x07) + 1) } else { 0 };
+    let skip_sub_blocks = |mut pos: usize| -> Option<usize> {
+        loop {
+            let len = *data.get(pos)? as usize;
+            pos += 1 + len;
+            if len == 0 {
+                return Some(pos);
+            }
+        }
+    };
+    // The header and logical screen descriptor are 13 bytes, followed by an optional global color table.
+    let mut pos = 13 + color_table_len(*data.get(10)?);
+    let mut num_frames = 0;
+    loop {
+        match *data.get(pos)? {
+            // An extension: its introducer, its label, then its data sub-blocks.
+            0x21 => pos = skip_sub_blocks(pos + 2)?,
+            // An image descriptor, an optional local color table, the LZW code size, then sub-blocks.
+            0x2C => {
+                num_frames += 1;
+                if num_frames > 1 {
+                    return Some(true);
+                }
+                pos = skip_sub_blocks(pos + 10 + color_table_len(*data.get(pos + 9)?) + 1)?;
+            }
+            _ => return Some(false),
+        }
+    }
+}
+
+/// Returns whether a PNG has an `acTL` chunk for more than one frame before its image data.
+fn png_has_multiple_frames(data: &[u8]) -> Option<bool> {
+    let mut pos = 8;
+    loop {
+        let len = u32::from_be_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        match data.get(pos + 4..pos + 8)? {
+            b"acTL" => {
+                let num_frames = u32::from_be_bytes(data.get(pos + 8..pos + 12)?.try_into().ok()?);
+                return Some(num_frames > 1);
+            }
+            b"IDAT" | b"IEND" => return Some(false),
+            _ => pos = pos.checked_add(12)?.checked_add(len)?,
+        }
+    }
+}
+
 fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, ImageError> {
     if data.len() > MAX_IMAGE_DECODED_BYTES {
         return Err(ImageError::DataTooLarge {
@@ -1567,8 +1637,8 @@ mod tests {
             .frame_delays
             .iter()
             .all(|delay| (*delay - 0.05).abs() < f64::EPSILON));
-        assert!(image.width >= 2 * 4);
-        assert!(image.height >= 2);
+        // Four frames fit in one row, so the atlas is no wider than that.
+        assert_eq!((image.width, image.height), (2 * 4, 2));
     }
 
     #[test]
@@ -1585,10 +1655,29 @@ mod tests {
     }
 
     #[test]
-    fn test_from_png_animated_does_not_populate_frame_delays() {
+    fn test_from_png_animated_reads_frame_delays() {
         let image = ImageBuffer::from_png(&animated_png()).unwrap();
         let animation = image.animation.as_ref().unwrap();
-        assert!(animation.frame_delays.is_empty());
+        assert_eq!(animation.num_frames, 4);
+        assert_eq!(animation.frame_delays, vec![0.05; 4]);
+    }
+
+    #[test]
+    fn test_animation_atlas_layout_splits_frames_evenly_across_rows() {
+        let max_columns = Cx::max_texture_width() / 10;
+        let layout = animation_atlas_layout(max_columns + 2, 10, 10).unwrap();
+        assert_eq!(layout, ((max_columns + 2).div_ceil(2) * 10, 2 * 10));
+    }
+
+    #[test]
+    fn test_is_animated_image() {
+        assert!(is_animated_image(&animated_gif()));
+        assert!(!is_animated_image(&single_frame_gif()));
+        assert!(is_animated_image(&animated_png()));
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0".to_vec();
+        assert!(!is_animated_image(&webp));
+        webp[20] = 0x02;
+        assert!(is_animated_image(&webp));
     }
 
     #[test]
