@@ -5,10 +5,10 @@ use makepad_zune_bmp::BmpDecoder;
 use makepad_zune_jpeg::JpegDecoder;
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;
 use makepad_zune_png::makepad_zune_core::options::DecoderOptions;
-use makepad_zune_png::{post_process_image, PngDecoder};
+use makepad_zune_png::{BlendOp, DisposeOp, PngDecoder};
 use makepad_zune_qoi::QoiDecoder;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::io::Read;
@@ -33,6 +33,8 @@ pub struct ImageBuffer {
     /// highest level `n`) instead of level 0 only. Set by
     /// [`ImageBuffer::build_cpu_mip_chain_if_uploaded`].
     max_level: Option<usize>,
+    /// The size of the image (or of each animation frame) before it was shrunk, if it was.
+    natural_size: Option<(usize, usize)>,
 }
 
 /// Alpha-weighted average of up to four `0xAARRGGBB` texels (premultiplying RGB by alpha so
@@ -104,6 +106,90 @@ fn mip_chain_max_level(width: usize, height: usize) -> usize {
 /// CPU time and memory.
 fn backend_uploads_cpu_mip_chain() -> bool {
     cfg!(any(target_os = "macos", target_os = "ios", target_os = "tvos"))
+}
+
+/// Halves an image's size in both directions, rounding up.
+fn halve_size((width, height): (usize, usize)) -> (usize, usize) {
+    (width.div_ceil(2), height.div_ceil(2))
+}
+
+/// Returns how many times an image that's `natural_size` pixels big can be halved
+/// and still have enough pixels to be drawn `drawn_size` pixels big.
+fn count_halvings(natural_size: (usize, usize), drawn_size: (usize, usize)) -> usize {
+    let mut size = natural_size;
+    let mut halvings = 0;
+    while size != (1, 1) && halve_size(size).0 >= drawn_size.0 && halve_size(size).1 >= drawn_size.1 {
+        size = halve_size(size);
+        halvings += 1;
+    }
+    halvings
+}
+
+/// Returns how many pixels an image that's `natural_size` pixels big gets decoded into
+/// to be drawn `drawn_size` pixels big: halved as often as it can be, like a mip level.
+fn get_decoded_size(natural_size: (usize, usize), drawn_size: (usize, usize)) -> (usize, usize) {
+    (0..count_halvings(natural_size, drawn_size)).fold(natural_size, |size, _| halve_size(size))
+}
+
+/// Halves the `width` x `height` texels at the start of `src` (whose rows are `stride` texels
+/// apart) into a new buffer, averaging each 2x2 block the same way the mip chain does.
+fn halve_texels(src: &[u32], stride: usize, (width, height): (usize, usize)) -> Vec<u32> {
+    let (half_width, half_height) = halve_size((width, height));
+    let mut half = Vec::with_capacity(half_width * half_height);
+    for y in 0..half_height {
+        let row0 = y * 2 * stride;
+        let row1 = (y * 2 + 1).min(height - 1) * stride;
+        for x in 0..half_width {
+            let (x0, x1) = (x * 2, (x * 2 + 1).min(width - 1));
+            half.push(box_average_bgra(&[
+                src[row0 + x0],
+                src[row0 + x1],
+                src[row1 + x0],
+                src[row1 + x1],
+            ]));
+        }
+    }
+    half
+}
+
+/// Returns whether `texture` has enough pixels to be drawn `drawn_size` pixels big,
+/// or to be drawn with all of the image's pixels if that's `None`.
+pub fn has_enough_pixels(cx: &mut Cx, texture: &Texture, drawn_size: Option<(usize, usize)>) -> bool {
+    let Some(natural_size) = texture.natural_size(cx) else {
+        return true;
+    };
+    let Some(drawn_size) = drawn_size else {
+        return false;
+    };
+    let decoded_size = match texture.animation(cx) {
+        Some(animation) => (animation.width, animation.height),
+        None => texture.get_format(cx).vec_width_height().unwrap_or_default(),
+    };
+    let needed_size = get_decoded_size(natural_size, drawn_size);
+    decoded_size.0 >= needed_size.0 && decoded_size.1 >= needed_size.1
+}
+
+/// A decode that's on its way, with enough pixels for an image that's `natural_size` pixels big
+/// to be drawn at `drawn_size`, or with all of its pixels if that's `None`.
+#[derive(Clone, Copy)]
+struct PendingDecode {
+    natural_size: (usize, usize),
+    drawn_size: Option<(usize, usize)>,
+}
+
+impl PendingDecode {
+    /// Returns whether this decode will have enough pixels for the image to be drawn at `drawn_size` too.
+    fn is_big_enough_for(&self, drawn_size: Option<(usize, usize)>) -> bool {
+        match (self.drawn_size, drawn_size) {
+            (None, _) => true,
+            (Some(_), None) => false,
+            (Some(own_drawn_size), Some(drawn_size)) => {
+                let own_decoded_size = get_decoded_size(self.natural_size, own_drawn_size);
+                let decoded_size = get_decoded_size(self.natural_size, drawn_size);
+                own_decoded_size.0 >= decoded_size.0 && own_decoded_size.1 >= decoded_size.1
+            }
+        }
+    }
 }
 
 /// Hard upper bound on a decoded image's width or height (per side). Matches
@@ -188,7 +274,10 @@ fn animation_atlas_layout_with_limit(
     if frame_count == 0 || frame_count > MAX_IMAGE_FRAMES {
         return Err(ImageError::DimensionsTooLarge { width, height });
     }
-    let fits_horizontal = (Cx::max_texture_width() / width).max(1);
+    // Use as few rows as the frames fit in, then as few columns as fill those rows,
+    // so the atlas (which gets uploaded all at once) is barely bigger than its frames.
+    let max_columns = (Cx::max_texture_width() / width).max(1);
+    let fits_horizontal = frame_count.div_ceil(frame_count.div_ceil(max_columns));
     let total_width = fits_horizontal * width;
     let rows = frame_count
         .checked_add(fits_horizontal - 1)
@@ -265,6 +354,7 @@ impl ImageBuffer {
             data: out,
             animation: None,
             max_level: None,
+            natural_size: None,
         })
     }
 
@@ -311,6 +401,7 @@ impl ImageBuffer {
         };
         let texture = Texture::new_with_format(cx, format);
         texture.set_animation(cx, self.animation);
+        texture.set_natural_size(cx, self.natural_size);
         texture
     }
 
@@ -382,6 +473,8 @@ impl ImageBuffer {
         Ok(orient(buffer, decoder.info().and_then(|i| i.exif.as_deref())))
     }
 
+    /// Decodes an animated PNG by drawing each frame onto a canvas the way browsers do
+    /// (blending it, then disposing of it), and packs those into an atlas like GIF/WebP.
     fn decode_animated_png<T: makepad_zune_png::makepad_zune_core::bytestream::ZByteReaderTrait>(
         decoder: &mut PngDecoder<T>,
     ) -> Result<ImageBuffer, ImageError> {
@@ -397,100 +490,82 @@ impl ImageBuffer {
                 .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
                     "Failed to get animated PNG image dimensions",
                 )))?;
-        let actl_info =
-            decoder
-                .actl_info()
-                .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
-                    "Failed to get animated PNG actl info",
-                )))?;
-
         let num_components = colorspace.num_components();
         let frame_pixels = checked_pixel_count(width, height)?;
-        let output_len = frame_pixels
-            .checked_mul(num_components)
-            .filter(|&len| len <= MAX_IMAGE_DECODED_BYTES)
-            .ok_or(ImageError::DimensionsTooLarge { width, height })?;
-        let mut output = vec![0; output_len];
-        // The atlas is sized from the declared `num_frames`; the decode loop below
-        // is driven by the actual fcTL chunks in the stream, which a malicious PNG
-        // can make exceed the declaration. Cap the loop to the allocated count so a
-        // frame can never be written past the atlas bounds.
-        let num_frames = actl_info.num_frames as usize;
-        let (total_width, total_height) = animation_atlas_layout(num_frames, width, height)?;
-        let mut final_buffer = ImageBuffer::default();
-        final_buffer.data.resize(total_width * total_height, 0);
-        final_buffer.width = total_width;
-        final_buffer.height = total_height;
-        let mut cx = 0;
-        let mut cy = 0;
-        final_buffer.animation = Some(TextureAnimation {
-            width,
-            height,
-            num_frames,
-            frame_delays: Vec::new(),
-        });
-        let mut previous_frame = None;
-        let mut frame_index = 0;
+        let max_frames = (MAX_IMAGE_PIXELS / frame_pixels).max(1).min(MAX_IMAGE_FRAMES);
+        let mut canvas = vec![0u8; frame_pixels * IMAGE_RGBA_BYTES_PER_PIXEL];
+        let mut frames = Vec::new();
+        let mut frame_delays = Vec::new();
+
         while decoder.more_frames() {
-            if frame_index >= num_frames {
-                break;
-            }
-            frame_index += 1;
             decoder.decode_headers()?;
-            let frame = decoder.frame_info().expect("to have already been decoded");
-            let pix = decoder.decode_raw()?;
-            let info =
-                decoder
-                    .info()
-                    .ok_or(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
-                        "Failed to get animated PNG image info",
-                    )))?;
-            post_process_image(
-                info,
-                colorspace,
-                &frame,
-                &pix,
-                previous_frame.as_deref(),
-                &mut output,
-                None,
-            )?;
-            previous_frame = Some(pix);
-            match num_components {
-                4 => {
-                    for y in 0..height {
-                        for x in 0..width {
-                            let r = output[y * width * 4 + x * 4];
-                            let g = output[y * width * 4 + x * 4 + 1];
-                            let b = output[y * width * 4 + x * 4 + 2];
-                            let a = output[y * width * 4 + x * 4 + 3];
-                            final_buffer.data[(y + cy) * total_width + (x + cx)] = ((a as u32)
-                                << 24)
-                                | ((r as u32) << 16)
-                                | ((g as u32) << 8)
-                                | (b as u32);
-                        }
-                    }
-                }
-                3 => {
-                    for y in 0..height {
-                        for x in 0..width {
-                            let r = output[y * width * 3 + x * 3];
-                            let g = output[y * width * 3 + x * 3 + 1];
-                            let b = output[y * width * 3 + x * 3 + 2];
-                            final_buffer.data[(y + cy) * total_width + (x + cx)] =
-                                0xff000000 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32);
-                        }
-                    }
-                }
-                _ => return Err(ImageError::InvalidPixelAlignment(num_components)),
+            let frame = decoder.frame_info().ok_or(ImageError::PngDecode(
+                PngDecodeErrors::GenericStatic("Failed to get animated PNG frame info"),
+            ))?;
+            let pixels = decoder.decode_raw()?;
+            // A default image that isn't part of the animation is only there for viewers without APNG support.
+            if !frame.is_part_of_seq {
+                continue;
             }
-            cx += width;
-            if cx >= total_width {
-                cy += height;
-                cx = 0;
+            if frames.len() >= max_frames {
+                return Err(ImageError::DimensionsTooLarge { width, height });
+            }
+            if frame.width == 0
+                || frame.height == 0
+                || frame.x_offset + frame.width > width
+                || frame.y_offset + frame.height > height
+                || pixels.len() < frame.width * frame.height * num_components
+            {
+                return Err(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                    "Animated PNG frame doesn't fit within the image",
+                )));
+            }
+            let frame_rgba = match num_components {
+                4 => pixels,
+                3 => rgb_to_rgba(&pixels),
+                2 => pixels.chunks_exact(2).flat_map(|la| [la[0], la[0], la[0], la[1]]).collect(),
+                1 => pixels.iter().flat_map(|&l| [l, l, l, 0xFF]).collect(),
+                unsupported => return Err(ImageError::InvalidPixelAlignment(unsupported)),
+            };
+            // A first frame that asks to be disposed to the "previous" frame is disposed to the background instead.
+            let previous_canvas = (frame.dispose_op == DisposeOp::Previous && !frames.is_empty())
+                .then(|| canvas.clone());
+            for (y, src_row) in frame_rgba.chunks_exact(frame.width * 4).take(frame.height).enumerate() {
+                let dst_start = ((frame.y_offset + y) * width + frame.x_offset) * 4;
+                let dst_row = &mut canvas[dst_start..dst_start + frame.width * 4];
+                match frame.blend_op {
+                    BlendOp::Source => dst_row.copy_from_slice(src_row),
+                    BlendOp::Over => {
+                        for (dst, src) in dst_row.chunks_exact_mut(4).zip(src_row.chunks_exact(4)) {
+                            blend_rgba_over(dst, src);
+                        }
+                    }
+                }
+            }
+            frames.push(canvas.clone());
+            // A delay denominator of 0 means hundredths of a second.
+            let delay_denom = if frame.delay_denom == 0 { 100 } else { frame.delay_denom };
+            frame_delays.push(f64::from(frame.delay_num) / f64::from(delay_denom));
+
+            match (frame.dispose_op, previous_canvas) {
+                (DisposeOp::None, _) => {}
+                (DisposeOp::Previous, Some(previous_canvas)) => canvas = previous_canvas,
+                (DisposeOp::Background | DisposeOp::Previous, _) => {
+                    for y in frame.y_offset..frame.y_offset + frame.height {
+                        let row_start = (y * width + frame.x_offset) * 4;
+                        canvas[row_start..row_start + frame.width * 4].fill(0);
+                    }
+                }
             }
         }
-        Ok(final_buffer)
+
+        match frames.len() {
+            0 => Err(ImageError::PngDecode(PngDecodeErrors::GenericStatic(
+                "Animated PNG had no frames",
+            ))),
+            1 => Self::new(&frames[0], width, height),
+            _ => Self::pack_animation_atlas(frames, frame_delays, width, height),
+        }
     }
 
     pub fn from_webp(data: &[u8]) -> Result<Self, ImageError> {
@@ -523,6 +598,11 @@ impl ImageBuffer {
         if num_frames > max_frames {
             return Err(ImageError::DimensionsTooLarge { width, height });
         }
+        // Browsers ignore the file's background color and clear disposed frames to transparent.
+        // Without a background color, the decoder never clears them at all.
+        decoder
+            .set_background_color([0, 0, 0, 0])
+            .map_err(ImageError::WebpDecode)?;
         decoder.reset_animation();
         let mut frames: Vec<Vec<u8>> = Vec::new();
         let mut frame_delays: Vec<f64> = Vec::new();
@@ -677,6 +757,65 @@ impl ImageBuffer {
         Ok(final_buffer)
     }
 
+    /// Shrinks this image (or each frame of this animation) to as few pixels as it
+    /// needs to be drawn `drawn_size` pixels big, by halving it like a mip level.
+    fn shrink_to_drawn_size(self, drawn_size: (usize, usize)) -> Result<ImageBuffer, ImageError> {
+        let frame_size = self.animation.as_ref()
+            .map_or((self.width, self.height), |animation| (animation.width, animation.height));
+        let halvings = count_halvings(frame_size, drawn_size);
+        if halvings == 0 {
+            return Ok(self);
+        }
+        let shrunk_size = get_decoded_size(frame_size, drawn_size);
+        let shrink_frame = |first_texel: usize| {
+            let mut texels = halve_texels(&self.data[first_texel..], self.width, frame_size);
+            let mut size = halve_size(frame_size);
+            for _ in 1..halvings {
+                texels = halve_texels(&texels, size.0, size);
+                size = halve_size(size);
+            }
+            texels
+        };
+        let Some(animation) = &self.animation else {
+            return Ok(ImageBuffer {
+                width: shrunk_size.0,
+                height: shrunk_size.1,
+                data: shrink_frame(0),
+                animation: None,
+                max_level: None,
+                natural_size: Some(frame_size),
+            });
+        };
+
+        // Pack the shrunk frames into a smaller atlas, in the same order.
+        let (atlas_width, atlas_height) =
+            animation_atlas_layout(animation.num_frames, shrunk_size.0, shrunk_size.1)?;
+        let columns = self.width / frame_size.0;
+        let shrunk_columns = atlas_width / shrunk_size.0;
+        let mut data = vec![0; atlas_width * atlas_height];
+        for frame in 0..animation.num_frames {
+            let first_texel = (frame / columns) * frame_size.1 * self.width + (frame % columns) * frame_size.0;
+            let shrunk_first_texel = (frame / shrunk_columns) * shrunk_size.1 * atlas_width
+                + (frame % shrunk_columns) * shrunk_size.0;
+            for (y, row) in shrink_frame(first_texel).chunks_exact(shrunk_size.0).enumerate() {
+                let start = shrunk_first_texel + y * atlas_width;
+                data[start..start + shrunk_size.0].copy_from_slice(row);
+            }
+        }
+        Ok(ImageBuffer {
+            width: atlas_width,
+            height: atlas_height,
+            data,
+            animation: Some(TextureAnimation {
+                width: shrunk_size.0,
+                height: shrunk_size.1,
+                ..animation.clone()
+            }),
+            max_level: None,
+            natural_size: Some(frame_size),
+        })
+    }
+
     pub fn from_jpg(data: &[u8]) -> Result<Self, ImageError> {
         let cursor = ZCursor::new(data);
         let mut decoder = JpegDecoder::new_with_options(cursor, decoder_options());
@@ -749,6 +888,12 @@ pub struct ImageCache {
     /// lane; a re-request of the same path replaces the staged decode.
     pub decode_queue: TaskQueue<PathBuf>,
     pub pending_http_requests: HashMap<LiveId, PathBuf>,
+    /// The decode that's on its way for each image being decoded,
+    /// so a request it has enough pixels for just waits for it.
+    pending_decodes: HashMap<PathBuf, PendingDecode>,
+    /// Images evicted while a decode of them was on its way. That decode still gets cached when
+    /// it lands (for anything waiting on it), and then evicted when the next decode lands.
+    evicted_while_decoding: HashSet<PathBuf>,
 }
 
 impl Default for ImageCache {
@@ -767,6 +912,8 @@ impl ImageCache {
             map: HashMap::new(),
             decode_queue: TaskQueue::new(Lane::Light, MAX_POOL_WORKERS, 1024),
             pending_http_requests: HashMap::new(),
+            pending_decodes: HashMap::new(),
+            evicted_while_decoding: HashSet::new(),
         }
     }
 
@@ -785,6 +932,9 @@ impl ImageCache {
     /// cap that may never be reached. Prefer [`evict_image_from_cache`],
     /// which also releases the pixels behind the entry.
     pub fn evict(&mut self, image_path: &Path) -> Option<ImageCacheEntry> {
+        if self.pending_decodes.contains_key(image_path) {
+            self.evicted_while_decoding.insert(image_path.into());
+        }
         self.map.remove(image_path)
     }
 
@@ -1046,7 +1196,7 @@ fn detect_image_format_from_path_and_data(image_path: &Path, data: &[u8]) -> Opt
 /// Decodes an image of any format makepad supports into an [`ImageBuffer`],
 /// auto-detecting the format from the encoded `data`'s magic bytes.
 pub fn decode_image_from_data(data: &[u8]) -> Result<ImageBuffer, ImageError> {
-    decode_image_buffer(Path::new(""), data)
+    decode_image_buffer(Path::new(""), data, None)
 }
 
 /// Returns true if `data` looks like an SVG document (vs. a raster image).
@@ -1076,7 +1226,91 @@ fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
     out
 }
 
-fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, ImageError> {
+/// Draws the RGBA pixel `src` over the RGBA pixel `dst`, neither of them premultiplied.
+fn blend_rgba_over(dst: &mut [u8], src: &[u8]) {
+    let src_alpha = u32::from(src[3]);
+    if src_alpha == 0xFF {
+        dst.copy_from_slice(src);
+        return;
+    }
+    if src_alpha == 0 {
+        return;
+    }
+    let dst_alpha = u32::from(dst[3]) * (0xFF - src_alpha) / 0xFF;
+    let out_alpha = src_alpha + dst_alpha;
+    for (dst_channel, &src_channel) in dst.iter_mut().zip(src).take(3) {
+        let blended = u32::from(src_channel) * src_alpha + u32::from(*dst_channel) * dst_alpha;
+        *dst_channel = ((blended + out_alpha / 2) / out_alpha) as u8;
+    }
+    dst[3] = out_alpha as u8;
+}
+
+/// Returns true if `data` is an animated GIF, WebP or PNG, by looking at its headers only.
+pub fn is_animated_image(data: &[u8]) -> bool {
+    match detect_image_format(data) {
+        Some("gif") => gif_has_multiple_frames(data).unwrap_or(false),
+        // An animated WebP starts with a VP8X chunk whose flags have the animation bit set.
+        Some("webp") => data.get(12..16) == Some(&b"VP8X"[..]) && data.get(20).is_some_and(|flags| flags & 0x02 != 0),
+        Some("png") => png_has_multiple_frames(data).unwrap_or(false),
+        _ => false,
+    }
+}
+
+/// Returns whether a GIF has at least two frames, skipping over all the blocks before its second one.
+fn gif_has_multiple_frames(data: &[u8]) -> Option<bool> {
+    let color_table_len = |flags: u8| if flags & 0x80 != 0 { 3 << ((flags & 0x07) + 1) } else { 0 };
+    let skip_sub_blocks = |mut pos: usize| -> Option<usize> {
+        loop {
+            let len = *data.get(pos)? as usize;
+            pos += 1 + len;
+            if len == 0 {
+                return Some(pos);
+            }
+        }
+    };
+    // The header and logical screen descriptor are 13 bytes, followed by an optional global color table.
+    let mut pos = 13 + color_table_len(*data.get(10)?);
+    let mut num_frames = 0;
+    loop {
+        match *data.get(pos)? {
+            // An extension: its introducer, its label, then its data sub-blocks.
+            0x21 => pos = skip_sub_blocks(pos + 2)?,
+            // An image descriptor, an optional local color table, the LZW code size, then sub-blocks.
+            0x2C => {
+                num_frames += 1;
+                if num_frames > 1 {
+                    return Some(true);
+                }
+                pos = skip_sub_blocks(pos + 10 + color_table_len(*data.get(pos + 9)?) + 1)?;
+            }
+            _ => return Some(false),
+        }
+    }
+}
+
+/// Returns whether a PNG has an `acTL` chunk for more than one frame before its image data.
+fn png_has_multiple_frames(data: &[u8]) -> Option<bool> {
+    let mut pos = 8;
+    loop {
+        let len = u32::from_be_bytes(data.get(pos..pos + 4)?.try_into().ok()?) as usize;
+        match data.get(pos + 4..pos + 8)? {
+            b"acTL" => {
+                let num_frames = u32::from_be_bytes(data.get(pos + 8..pos + 12)?.try_into().ok()?);
+                return Some(num_frames > 1);
+            }
+            b"IDAT" | b"IEND" => return Some(false),
+            _ => pos = pos.checked_add(12)?.checked_add(len)?,
+        }
+    }
+}
+
+/// Decodes `data` with just enough pixels to be drawn `drawn_size` pixels big,
+/// or with all of them if that's `None`.
+fn decode_image_buffer(
+    image_path: &Path,
+    data: &[u8],
+    drawn_size: Option<(usize, usize)>,
+) -> Result<ImageBuffer, ImageError> {
     if data.len() > MAX_IMAGE_DECODED_BYTES {
         return Err(ImageError::DataTooLarge {
             bytes: data.len(),
@@ -1085,7 +1319,7 @@ fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, Im
     }
     let format = detect_image_format_from_path_and_data(image_path, data)
         .ok_or(ImageError::UnsupportedFormat)?;
-    match format {
+    let buffer = match format {
         "jpg" => ImageBuffer::from_jpg(data),
         "png" => ImageBuffer::from_png(data),
         "webp" => ImageBuffer::from_webp(data),
@@ -1094,6 +1328,10 @@ fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, Im
         "qoi" => ImageBuffer::from_qoi(data),
         "ico" => ImageBuffer::from_ico(data),
         _ => Err(ImageError::UnsupportedFormat),
+    }?;
+    match drawn_size {
+        Some(drawn_size) => buffer.shrink_to_drawn_size(drawn_size),
+        None => Ok(buffer),
     }
 }
 
@@ -1102,6 +1340,14 @@ fn decode_image_buffer(image_path: &Path, data: &[u8]) -> Result<ImageBuffer, Im
 /// upright. Returns the buffer unchanged when there's no usable orientation tag.
 fn orient(buffer: ImageBuffer, exif: Option<&[u8]>) -> ImageBuffer {
     apply_exif_orientation(buffer, exif.and_then(tiff_orientation).unwrap_or(1))
+}
+
+/// Returns the size of an image that's `width` x `height` once its EXIF orientation is applied.
+fn get_oriented_size((width, height): (usize, usize), exif: Option<&[u8]>) -> (usize, usize) {
+    match exif.and_then(tiff_orientation) {
+        Some(5..=8) => (height, width),
+        _ => (width, height),
+    }
 }
 
 /// Reads the Orientation tag (0x0112) from a TIFF/EXIF block that begins at the
@@ -1180,11 +1426,11 @@ fn apply_exif_orientation(buf: ImageBuffer, orientation: u16) -> ImageBuffer {
             dst[dy * dw + dx] = buf.data[y * w + x];
         }
     }
-    ImageBuffer { width: dw, height: dh, data: dst, animation: buf.animation, max_level: None }
+    ImageBuffer { width: dw, height: dh, data: dst, animation: buf.animation, max_level: None, natural_size: None }
 }
 
-/// Returns the `(width, height)` in pixels of an encoded image, auto-detecting
-/// the format from the data's magic bytes (falling back to the path's extension).
+/// Returns the `(width, height)` in pixels of an encoded image as it's shown (after its EXIF orientation),
+/// auto-detecting the format from the data's magic bytes (falling back to the path's extension).
 /// Reads only headers for most formats; does not fully decode.
 pub fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usize), ImageError> {
     let format = detect_image_format_from_path_and_data(image_path, data)
@@ -1200,7 +1446,7 @@ pub fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usiz
                 ))
             })?;
             checked_pixel_count(width, height)?;
-            Ok((width, height))
+            Ok(get_oriented_size((width, height), decoder.exif().map(Vec::as_slice)))
         }
         "png" => {
             let cursor = ZCursor::new(data);
@@ -1210,16 +1456,19 @@ pub fn image_size_by_data(data: &[u8], image_path: &Path) -> Result<(usize, usiz
                 PngDecodeErrors::GenericStatic("Failed to get PNG image dimensions"),
             ))?;
             checked_pixel_count(width, height)?;
-            Ok((width, height))
+            // Animations are never rotated, see `apply_exif_orientation`.
+            let exif = if decoder.is_animated() { None } else { decoder.info().and_then(|i| i.exif.as_deref()) };
+            Ok(get_oriented_size((width, height), exif))
         }
         "webp" => {
             let cursor = std::io::Cursor::new(data);
-            let decoder = WebPDecoder::new(std::io::BufReader::new(cursor))
+            let mut decoder = WebPDecoder::new(std::io::BufReader::new(cursor))
                 .map_err(ImageError::WebpDecode)?;
             let (width, height) = decoder.dimensions();
             let (width, height) = (width as usize, height as usize);
             checked_pixel_count(width, height)?;
-            Ok((width, height))
+            let exif = if decoder.is_animated() { None } else { decoder.exif_metadata().ok().flatten() };
+            Ok(get_oriented_size((width, height), exif.as_deref()))
         }
         "gif" => {
             let decoder = DecodeOptions::new()
@@ -1567,8 +1816,8 @@ mod tests {
             .frame_delays
             .iter()
             .all(|delay| (*delay - 0.05).abs() < f64::EPSILON));
-        assert!(image.width >= 2 * 4);
-        assert!(image.height >= 2);
+        // Four frames fit in one row, so the atlas is no wider than that.
+        assert_eq!((image.width, image.height), (2 * 4, 2));
     }
 
     #[test]
@@ -1585,10 +1834,29 @@ mod tests {
     }
 
     #[test]
-    fn test_from_png_animated_does_not_populate_frame_delays() {
+    fn test_from_png_animated_reads_frame_delays() {
         let image = ImageBuffer::from_png(&animated_png()).unwrap();
         let animation = image.animation.as_ref().unwrap();
-        assert!(animation.frame_delays.is_empty());
+        assert_eq!(animation.num_frames, 4);
+        assert_eq!(animation.frame_delays, vec![0.05; 4]);
+    }
+
+    #[test]
+    fn test_animation_atlas_layout_splits_frames_evenly_across_rows() {
+        let max_columns = Cx::max_texture_width() / 10;
+        let layout = animation_atlas_layout(max_columns + 2, 10, 10).unwrap();
+        assert_eq!(layout, ((max_columns + 2).div_ceil(2) * 10, 2 * 10));
+    }
+
+    #[test]
+    fn test_is_animated_image() {
+        assert!(is_animated_image(&animated_gif()));
+        assert!(!is_animated_image(&single_frame_gif()));
+        assert!(is_animated_image(&animated_png()));
+        let mut webp = b"RIFF\0\0\0\0WEBPVP8X\x0a\0\0\0\0\0\0\0".to_vec();
+        assert!(!is_animated_image(&webp));
+        webp[20] = 0x02;
+        assert!(is_animated_image(&webp));
     }
 
     #[test]
@@ -1602,7 +1870,7 @@ mod tests {
     #[test]
     fn test_decode_image_buffer_rejects_random_bytes_as_unsupported() {
         assert!(matches!(
-            decode_image_buffer(Path::new("sticker"), &[0; 16]),
+            decode_image_buffer(Path::new("sticker"), &[0; 16], None),
             Err(ImageError::UnsupportedFormat)
         ));
     }
@@ -1752,7 +2020,7 @@ mod tests {
             qoi_solid_2x2(10, 20, 30),
             ico_wrap(&ico_dib_2x2_32bit(10, 20, 30), 2, 2, 32),
         ] {
-            let image = decode_image_buffer(Path::new("img"), &data).unwrap();
+            let image = decode_image_buffer(Path::new("img"), &data, None).unwrap();
             assert_eq!((image.width, image.height), (2, 2));
         }
     }
@@ -1772,9 +2040,166 @@ mod tests {
             Err(ImageError::UnsupportedFormat)
         ));
     }
+
+    #[test]
+    fn decoded_size_halves_while_it_still_has_enough_pixels() {
+        assert_eq!(get_decoded_size((4032, 3024), (800, 600)), (1008, 756));
+        assert_eq!(get_decoded_size((4032, 3024), (1009, 600)), (2016, 1512));
+        assert_eq!(get_decoded_size((400, 300), (800, 600)), (400, 300));
+        // Odd sizes round up, so no pixel row or column gets dropped.
+        assert_eq!(get_decoded_size((5, 3), (1, 1)), (1, 1));
+        assert_eq!(get_decoded_size((5, 3), (2, 2)), (3, 2));
+        assert_eq!(get_decoded_size((1, 1), (1, 1)), (1, 1));
+    }
+
+    #[test]
+    fn shrinking_averages_by_alpha_and_keeps_the_natural_size() {
+        let red = [255, 0, 0, 255];
+        let blue = [0, 0, 255, 255];
+        let clear = [0, 0, 0, 0];
+        let rows = [[red, red, blue, blue], [red, red, blue, blue], [clear, red, clear, clear]];
+        let data: Vec<u8> = rows.iter().flatten().flatten().copied().collect();
+        let image = ImageBuffer::new(&data, 4, 3).unwrap().shrink_to_drawn_size((2, 2)).unwrap();
+        assert_eq!((image.width, image.height, image.natural_size), (2, 2, Some((4, 3))));
+        // A transparent pixel lowers the alpha but doesn't darken the color.
+        assert_eq!(image.data, vec![0xffff0000, 0xff0000ff, 0x7fff0000, 0x00000000]);
+
+        let image = ImageBuffer::new(&data, 4, 3).unwrap().shrink_to_drawn_size((3, 3)).unwrap();
+        assert_eq!((image.width, image.height, image.natural_size), (4, 3, None));
+    }
+
+    #[test]
+    fn shrinking_an_animation_shrinks_each_frame() {
+        let image = decode_image_buffer(Path::new("a.gif"), &animated_gif(), Some((1, 1))).unwrap();
+        let animation = image.animation.as_ref().unwrap();
+        assert_eq!((animation.width, animation.height, animation.num_frames), (1, 1, 4));
+        assert_eq!(animation.frame_delays, vec![0.05; 4]);
+        assert_eq!(image.natural_size, Some((2, 2)));
+        assert_eq!((image.width, image.height), (4, 1));
+        // Each frame's one pixel averages two pixels of one color and two of the next one.
+        assert_eq!(image.data, vec![0xff7f0000, 0xff7f7f00, 0xff007f7f, 0xff00007f]);
+    }
+
+    #[test]
+    fn a_pending_decode_covers_requests_that_decode_to_the_same_size() {
+        let pending_decode = PendingDecode { natural_size: (4032, 3024), drawn_size: Some((1000, 700)) };
+        assert!(pending_decode.is_big_enough_for(Some((1005, 755))));
+        assert!(!pending_decode.is_big_enough_for(Some((1009, 757))));
+        assert!(!pending_decode.is_big_enough_for(None));
+        let pending_decode = PendingDecode { natural_size: (4032, 3024), drawn_size: None };
+        assert!(pending_decode.is_big_enough_for(Some((4000, 3000))));
+        assert!(pending_decode.is_big_enough_for(None));
+    }
+
+    #[test]
+    fn oriented_size_swaps_for_turning_exif_orientations() {
+        let exif = |orientation: u8| {
+            let mut tiff = b"II\x2a\0\x08\0\0\0\x01\0".to_vec();
+            tiff.extend_from_slice(&[0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, orientation, 0, 0, 0]);
+            tiff
+        };
+        assert_eq!(get_oriented_size((4, 3), Some(&exif(6))), (3, 4));
+        assert_eq!(get_oriented_size((4, 3), Some(&exif(8))), (3, 4));
+        assert_eq!(get_oriented_size((4, 3), Some(&exif(3))), (4, 3));
+        assert_eq!(get_oriented_size((4, 3), None), (4, 3));
+    }
+
+    #[test]
+    fn only_a_decode_with_enough_pixels_counts_as_cached() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        ensure_image_cache(&mut cx);
+        let is_loaded = |result: Option<AsyncLoadResult>| matches!(result, Some(AsyncLoadResult::Loaded));
+        let loading_size = |result: Option<AsyncLoadResult>| match result {
+            Some(AsyncLoadResult::Loading(w, h)) => Some((w, h)),
+            _ => None,
+        };
+
+        // An image that's still being fetched gets all of its pixels.
+        let fetched = Path::new("https://example.com/photo.png");
+        cx.get_global::<ImageCache>().map.insert(fetched.into(), ImageCacheEntry::Loading(1, 1));
+        assert_eq!(loading_size(get_cached_load_result(&mut cx, fetched, None)), Some((1, 1)));
+
+        let path = Path::new("photo.png");
+        let mut shrunk = ImageBuffer::new(&[0; 2 * 2 * 4], 2, 2).unwrap();
+        shrunk.natural_size = Some((8, 8));
+        let texture = shrunk.into_new_texture(&mut cx);
+        cx.get_global::<ImageCache>().insert_loaded(path.into(), texture);
+        assert!(is_loaded(get_cached_load_result(&mut cx, path, Some((2, 2)))));
+        assert!(get_cached_load_result(&mut cx, path, Some((3, 3))).is_none());
+        assert!(get_cached_load_result(&mut cx, path, None).is_none());
+
+        // A request that a decode on its way covers waits for it.
+        cx.get_global::<ImageCache>()
+            .pending_decodes
+            .insert(path.into(), PendingDecode { natural_size: (8, 8), drawn_size: Some((4, 4)) });
+        assert_eq!(loading_size(get_cached_load_result(&mut cx, path, Some((3, 3)))), Some((8, 8)));
+        assert!(get_cached_load_result(&mut cx, path, Some((5, 5))).is_none());
+    }
+
+    #[test]
+    fn an_image_evicted_while_decoding_goes_once_its_decode_lands() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        ensure_image_cache(&mut cx);
+        let (path, other_path) = (Path::new("photo.png"), Path::new("other.png"));
+        let decoded = || ImageBuffer::new(&[0; 2 * 2 * 4], 2, 2).unwrap();
+        for path in [path, other_path] {
+            let cache = cx.get_global::<ImageCache>();
+            cache.map.insert(path.into(), ImageCacheEntry::Loading(2, 2));
+            cache.pending_decodes.insert(path.into(), PendingDecode { natural_size: (2, 2), drawn_size: None });
+        }
+        assert!(evict_image_from_cache(&mut cx, path));
+        // Its decode still lands in the cache, for anything that's waiting on it.
+        process_async_image_load(&mut cx, path, Ok(decoded()));
+        assert!(load_image_from_cache(&mut cx, path).is_some());
+        process_async_image_load(&mut cx, other_path, Ok(decoded()));
+        assert!(load_image_from_cache(&mut cx, path).is_none());
+        assert!(load_image_from_cache(&mut cx, other_path).is_some());
+    }
+
+    #[test]
+    fn a_cached_image_with_more_pixels_is_kept() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        ensure_image_cache(&mut cx);
+        let path = Path::new("photo.png");
+        let shrunk = |pixels: usize| {
+            let mut image = ImageBuffer::new(&vec![0; pixels * pixels * 4], pixels, pixels).unwrap();
+            image.natural_size = Some((8, 8));
+            image
+        };
+        let cached_size = |cx: &mut Cx| {
+            load_image_from_cache(cx, path).and_then(|texture| texture.get_format(cx).vec_width_height())
+        };
+        cx.get_global::<ImageCache>()
+            .pending_decodes
+            .insert(path.into(), PendingDecode { natural_size: (8, 8), drawn_size: Some((4, 4)) });
+        process_async_image_load(&mut cx, path, Ok(shrunk(2)));
+        assert_eq!(cached_size(&mut cx), Some((2, 2)));
+        // A bigger decode is still on its way.
+        assert!(is_decoding_image(&mut cx, path, Some((4, 4))));
+
+        process_async_image_load(&mut cx, path, Ok(shrunk(4)));
+        assert_eq!(cached_size(&mut cx), Some((4, 4)));
+        assert!(!is_decoding_image(&mut cx, path, Some((4, 4))));
+        let texture = load_image_from_cache(&mut cx, path).unwrap();
+        assert!(has_enough_pixels(&mut cx, &texture, Some((4, 4))));
+        assert!(!has_enough_pixels(&mut cx, &texture, Some((5, 5))));
+        assert!(!has_enough_pixels(&mut cx, &texture, None));
+
+        // One with fewer pixels that lands later doesn't replace it.
+        process_async_image_load(&mut cx, path, Ok(shrunk(2)));
+        assert_eq!(cached_size(&mut cx), Some((4, 4)));
+        // A failed decode doesn't throw the cached one out either.
+        process_async_image_load(&mut cx, path, Err(ImageError::EmptyData));
+        assert_eq!(cached_size(&mut cx), Some((4, 4)));
+    }
 }
 
-fn spawn_decode_job<D>(cx: &mut Cx, image_path: PathBuf, data: Arc<D>)
+fn spawn_decode_job<D>(
+    cx: &mut Cx,
+    image_path: PathBuf,
+    data: Arc<D>,
+    drawn_size: Option<(usize, usize)>,
+)
 where
     D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
 {
@@ -1790,7 +2215,7 @@ where
                     image_size_bytes
                 );
             }
-            let result = decode_image_buffer(&image_path, (*data).as_ref()).map(|mut buffer| {
+            let result = decode_image_buffer(&image_path, (*data).as_ref(), drawn_size).map(|mut buffer| {
                 // Mip-chain generation belongs with the decode: doing it here keeps the
                 // box-filter cost off the UI thread when the texture is committed.
                 buffer.build_cpu_mip_chain_if_uploaded();
@@ -1851,31 +2276,55 @@ pub fn process_async_image_load(
     // A finished decode frees a slot: hand the next staged one over.
     let pool = cx.task_pool();
     cx.get_global::<ImageCache>().decode_queue.pump(&pool);
+    // Images that were evicted while they were decoding go now if their decode has landed.
+    let cache = cx.get_global::<ImageCache>();
+    let landed_paths: Vec<PathBuf> = cache.evicted_while_decoding.iter()
+        .filter(|path| !cache.pending_decodes.contains_key(path.as_path()))
+        .cloned()
+        .collect();
+    for path in landed_paths {
+        cx.get_global::<ImageCache>().evicted_while_decoding.remove(&path);
+        evict_image_from_cache(cx, &path);
+    }
     if let Ok(data) = result {
         let width = data.width;
         let height = data.height;
-        let upload_start = decode_timing_start();
-        let texture = data.into_new_texture(cx);
-        if image_decode_debug_enabled() {
-            if let Some(upload_start) = upload_start {
-                log!(
-                    "ImageCache: gpu_commit key={} elapsed_ms={:.1} size={}x{}",
-                    image_path.display(),
-                    (Cx::monotonic_now() - upload_start) * 1000.0,
-                    width,
-                    height
-                );
-            } else {
-                log!(
-                    "ImageCache: gpu_commit key={} size={}x{}",
-                    image_path.display(),
-                    width,
-                    height
-                );
+        let cached_texture = load_image_from_cache(cx, image_path);
+        // A smaller decode that lands after a bigger one doesn't replace it.
+        let cached_size = cached_texture.as_ref().and_then(|texture| texture.get_format(cx).vec_width_height());
+        let texture = match cached_texture {
+            Some(cached_texture) if cached_size.is_some_and(|(w, h)| w * h >= width * height) => cached_texture,
+            _ => {
+                let upload_start = decode_timing_start();
+                let texture = data.into_new_texture(cx);
+                if image_decode_debug_enabled() {
+                    if let Some(upload_start) = upload_start {
+                        log!(
+                            "ImageCache: gpu_commit key={} elapsed_ms={:.1} size={}x{}",
+                            image_path.display(),
+                            (Cx::monotonic_now() - upload_start) * 1000.0,
+                            width,
+                            height
+                        );
+                    } else {
+                        log!(
+                            "ImageCache: gpu_commit key={} size={}x{}",
+                            image_path.display(),
+                            width,
+                            height
+                        );
+                    }
+                }
+                cx.get_global::<ImageCache>()
+                    .insert_loaded(image_path.into(), texture.clone());
+                texture
             }
+        };
+        // It's done decoding, unless a decode with more pixels is still on its way.
+        let pending_decode = cx.get_global::<ImageCache>().pending_decodes.get(image_path).copied();
+        if pending_decode.is_some_and(|pending_decode| has_enough_pixels(cx, &texture, pending_decode.drawn_size)) {
+            cx.get_global::<ImageCache>().pending_decodes.remove(image_path);
         }
-        cx.get_global::<ImageCache>()
-            .insert_loaded(image_path.into(), texture);
     } else {
         if image_decode_debug_enabled() {
             log!(
@@ -1883,7 +2332,12 @@ pub fn process_async_image_load(
                 image_path.display()
             );
         }
-        cx.get_global::<ImageCache>().map.remove(image_path);
+        let cache = cx.get_global::<ImageCache>();
+        cache.pending_decodes.remove(image_path);
+        // An image that's already decoded (with fewer pixels) stays cached.
+        if matches!(cache.map.get(image_path), Some(ImageCacheEntry::Loading(..))) {
+            cache.map.remove(image_path);
+        }
     }
 }
 
@@ -1909,6 +2363,8 @@ pub fn process_async_image_load(
 /// is what the process is still *holding*: the next decode reuses those
 /// pages instead of asking for more, so a viewer dialing through a folder
 /// stops climbing.
+///
+/// Its GPU copy is released too, unless something else still has a handle to it.
 pub fn evict_image_from_cache(cx: &mut Cx, image_path: &Path) -> bool {
     if !cx.has_global::<ImageCache>() {
         return false;
@@ -1917,13 +2373,20 @@ pub fn evict_image_from_cache(cx: &mut Cx, image_path: &Path) -> bool {
         return false;
     };
     if let ImageCacheEntry::Loaded(texture) = entry {
+        let is_last_handle = texture.readers() == 1;
         // The decoded pixels; the slot itself goes when `texture` drops.
         match texture.get_format(cx) {
-            TextureFormat::VecBGRAu8_32 { data, .. }
-            | TextureFormat::VecMipBGRAu8_32 { data, .. } => {
+            // Pixels that something showing them still has to upload are kept.
+            TextureFormat::VecBGRAu8_32 { data, updated, .. }
+            | TextureFormat::VecMipBGRAu8_32 { data, updated, .. }
+                if is_last_handle || updated.is_empty() =>
+            {
                 *data = None;
             }
             _ => {}
+        }
+        if is_last_handle {
+            texture.release(cx);
         }
     }
     true
@@ -1969,13 +2432,39 @@ pub fn load_image_from_data_async<D>(
 where
     D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
 {
+    load_image_from_data_async_at_size(cx, image_path, data, None)
+}
+
+/// Like [`load_image_from_data_async`], but decodes the image with just enough pixels to be drawn
+/// `drawn_size` pixels big (or all of them if `None`), unless it's cached or decoding with that many.
+pub fn load_image_from_data_async_at_size<D>(
+    cx: &mut Cx,
+    image_path: &Path,
+    data: Arc<D>,
+    drawn_size: Option<(usize, usize)>,
+) -> Result<AsyncLoadResult, ImageError>
+where
+    D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
+{
     ensure_image_cache_inner(cx);
-    match cx.get_global::<ImageCache>().map.get(image_path) {
-        Some(ImageCacheEntry::Loaded(_)) => return Ok(AsyncLoadResult::Loaded),
-        Some(ImageCacheEntry::Loading(w, h)) => return Ok(AsyncLoadResult::Loading(*w, *h)),
-        None => {}
+    // It's wanted again, so it stays cached once its decode lands.
+    cx.get_global::<ImageCache>().evicted_while_decoding.remove(image_path);
+    if let Some(result) = get_cached_load_result(cx, image_path, drawn_size) {
+        return Ok(result);
     }
     let bytes: &[u8] = (*data).as_ref();
+    // Decode it once with enough pixels for both this and the decode that's on its way.
+    let pending_drawn_size = cx.get_global::<ImageCache>()
+        .pending_decodes
+        .get(image_path)
+        .and_then(|pending_decode| pending_decode.drawn_size);
+    let drawn_size = match (pending_drawn_size, drawn_size) {
+        (Some(pending_drawn_size), Some(drawn_size)) => Some((
+            pending_drawn_size.0.max(drawn_size.0),
+            pending_drawn_size.1.max(drawn_size.1),
+        )),
+        _ => drawn_size,
+    };
     if bytes.len() > MAX_IMAGE_DECODED_BYTES {
         return Err(ImageError::DataTooLarge {
             bytes: bytes.len(),
@@ -1992,7 +2481,7 @@ where
     let force_sync = gpusim_mode_enabled();
 
     if force_sync {
-        let image = decode_image_buffer(image_path, bytes)?;
+        let image = decode_image_buffer(image_path, bytes, drawn_size)?;
         let texture = image.into_new_texture(cx);
         cx.get_global::<ImageCache>()
             .insert_loaded(image_path.into(), texture);
@@ -2009,11 +2498,43 @@ where
             h
         );
     }
-    cx.get_global::<ImageCache>()
-        .map
-        .insert(image_path.into(), ImageCacheEntry::Loading(w, h));
-    spawn_decode_job(cx, image_path.to_path_buf(), data);
+    let cache = cx.get_global::<ImageCache>();
+    cache.pending_decodes.insert(image_path.into(), PendingDecode { natural_size: (w, h), drawn_size });
+    // An image that's cached with fewer pixels stays cached until this decode lands.
+    cache.map.entry(image_path.into()).or_insert(ImageCacheEntry::Loading(w, h));
+    spawn_decode_job(cx, image_path.to_path_buf(), data, drawn_size);
     Ok(AsyncLoadResult::Loading(w, h))
+}
+
+/// Returns how loading the image at `image_path` with enough pixels to be drawn at `drawn_size`
+/// (or with all of them if `None`) goes if the cache already has it or is getting it.
+fn get_cached_load_result(cx: &mut Cx, image_path: &Path, drawn_size: Option<(usize, usize)>) -> Option<AsyncLoadResult> {
+    let cache = cx.get_global::<ImageCache>();
+    let pending_decode = cache.pending_decodes.get(image_path).copied();
+    let cached_texture = match cache.map.get(image_path) {
+        Some(ImageCacheEntry::Loaded(texture)) => Some(texture.clone()),
+        // It's still being fetched, so it'll be decoded with all of its pixels.
+        Some(ImageCacheEntry::Loading(w, h)) if pending_decode.is_none() => {
+            return Some(AsyncLoadResult::Loading(*w, *h));
+        }
+        _ => None,
+    };
+    if cached_texture.is_some_and(|texture| has_enough_pixels(cx, &texture, drawn_size)) {
+        return Some(AsyncLoadResult::Loaded);
+    }
+    // A decode with enough pixels that's on its way just needs waiting for.
+    let (w, h) = pending_decode
+        .filter(|pending_decode| pending_decode.is_big_enough_for(drawn_size))?
+        .natural_size;
+    Some(AsyncLoadResult::Loading(w, h))
+}
+
+/// Returns whether the image at `image_path` is being decoded with enough pixels
+/// to be drawn `drawn_size` pixels big, or with all of them if that's `None`.
+pub fn is_decoding_image(cx: &mut Cx, image_path: &Path, drawn_size: Option<(usize, usize)>) -> bool {
+    cx.has_global::<ImageCache>()
+        && cx.get_global::<ImageCache>().pending_decodes.get(image_path)
+            .is_some_and(|pending_decode| pending_decode.is_big_enough_for(drawn_size))
 }
 
 pub fn load_image_file_by_path_async(
@@ -2021,23 +2542,22 @@ pub fn load_image_file_by_path_async(
     image_path: &Path,
 ) -> Result<AsyncLoadResult, ImageError> {
     ensure_image_cache_inner(cx);
-    match cx.get_global::<ImageCache>().map.get(image_path) {
-        Some(ImageCacheEntry::Loaded(_)) => Ok(AsyncLoadResult::Loaded),
-        Some(ImageCacheEntry::Loading(w, h)) => Ok(AsyncLoadResult::Loading(*w, *h)),
-        None => match read_image_file_limited(image_path) {
-            Ok(data) => load_image_from_data_async(cx, image_path, Arc::new(data)),
-            Err(err) => Err(err),
-        },
+    // It's wanted again, so it stays cached once its decode lands.
+    cx.get_global::<ImageCache>().evicted_while_decoding.remove(image_path);
+    if let Some(result) = get_cached_load_result(cx, image_path, None) {
+        return Ok(result);
     }
+    let data = read_image_file_limited(image_path)?;
+    load_image_from_data_async(cx, image_path, Arc::new(data))
 }
 
 pub fn load_image_http_by_url_async(cx: &mut Cx, url: &str) -> Result<AsyncLoadResult, ImageError> {
     ensure_image_cache_inner(cx);
     let image_path = PathBuf::from(url);
-    match cx.get_global::<ImageCache>().map.get(&image_path) {
-        Some(ImageCacheEntry::Loaded(_)) => return Ok(AsyncLoadResult::Loaded),
-        Some(ImageCacheEntry::Loading(w, h)) => return Ok(AsyncLoadResult::Loading(*w, *h)),
-        None => {}
+    // It's wanted again, so it stays cached once its decode lands.
+    cx.get_global::<ImageCache>().evicted_while_decoding.remove(&image_path);
+    if let Some(result) = get_cached_load_result(cx, &image_path, None) {
+        return Ok(result);
     }
 
     let request_id = LiveId::unique();
@@ -2288,7 +2808,7 @@ pub trait ImageCacheImpl {
         id: usize,
         image_path: &Path,
     ) -> Result<(), ImageError> {
-        let image = decode_image_buffer(image_path, data)?;
+        let image = decode_image_buffer(image_path, data, None)?;
         let texture = image.into_new_texture(cx);
         ensure_image_cache(cx);
         cx.get_global::<ImageCache>()
@@ -2303,7 +2823,7 @@ pub trait ImageCacheImpl {
         image_path: &Path,
         id: usize,
     ) -> Result<(), ImageError> {
-        if let Some(texture) = load_image_from_cache(cx, image_path) {
+        if let Some(texture) = load_image_from_cache(cx, image_path).filter(|texture| has_enough_pixels(cx, texture, None)) {
             self.set_texture(Some(texture), id);
             return Ok(());
         }
@@ -2318,7 +2838,7 @@ pub trait ImageCacheImpl {
         id: usize,
     ) -> Result<(), ImageError> {
         let p_image_path = Path::new(image_path);
-        if let Some(texture) = load_image_from_cache(cx, p_image_path) {
+        if let Some(texture) = load_image_from_cache(cx, p_image_path).filter(|texture| has_enough_pixels(cx, texture, None)) {
             self.set_texture(Some(texture), id);
             return Ok(());
         }

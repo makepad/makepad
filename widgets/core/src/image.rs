@@ -83,7 +83,8 @@ script_mod! {
                 let cr = vec2(c.x * cos_a - c.y * sin_a, c.x * sin_a + c.y * cos_a)
                 let iuv = cr / vec2(self.image_dim_w, self.image_dim_h) + vec2(0.5, 0.5)
                 let uv = iuv * scale + pan
-                if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                // Also check iuv, since an animated texture's other frames sit right next to this one.
+                if iuv.x < 0.0 || iuv.x > 1.0 || iuv.y < 0.0 || iuv.y > 1.0 || uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
                     return self.letterbox_color
                 }
                 return self.sample_at(uv, scale)
@@ -343,6 +344,9 @@ pub enum ImageAnimation {
     LoopFps(f64),
     #[live(60.0)]
     BounceFps(f64),
+    /// Shows each frame for as long as the image says to, looping forever,
+    /// the way browsers play GIFs. It only ticks while the image is on screen.
+    Natural,
 }
 
 #[derive(Script, ScriptHook, Widget, Animator)]
@@ -364,12 +368,18 @@ pub struct Image {
     placeholder_height: u64,
     #[live(1.0)]
     width_scale: f64,
-    #[live(ImageAnimation::BounceFps(25.0))]
+    #[live(ImageAnimation::Natural)]
     animation: ImageAnimation,
     #[rust]
     last_time: Option<f64>,
     #[rust]
     animation_frame: f64,
+    /// When a `Natural` animation shows its next frame, on the `AnimationClock`'s timeline.
+    /// `None` while it's stopped, e.g., because it went off screen.
+    #[rust]
+    next_frame_time: Option<f64>,
+    #[rust]
+    shown_animation: Option<ShownAnimation>,
     #[visible]
     #[live(true)]
     visible: bool,
@@ -402,6 +412,11 @@ pub struct Image {
     /// Whether `slice_scale` counts layout points or device pixels.
     #[live]
     pub slice_units: ImageSliceUnits,
+    /// Decodes images loaded from data with just enough pixels for the size they're drawn at,
+    /// once they're drawn, and again if they're later drawn bigger. So an image that isn't drawn
+    /// until it has loaded (e.g., `Media`'s picture) never loads with this on.
+    #[live]
+    downscale_to_drawn_size: bool,
     /// HTTP/file resource handle for loading image data (set via `http_resource()` or `crate_resource()`)
     #[live]
     src: Option<ScriptHandleRef>,
@@ -411,6 +426,9 @@ pub struct Image {
     async_image_path: Option<PathBuf>,
     #[rust]
     async_image_size: Option<(usize, usize)>,
+    /// The image being loaded or shown, if `downscale_to_drawn_size` might need to decode it again.
+    #[rust]
+    encoded_image: Option<EncodedImage>,
     #[rust]
     texture: Option<Texture>,
     /// The async-load key that produced `texture`, when it came from a completed
@@ -434,6 +452,42 @@ pub struct Image {
     /// Animation clock (seconds) for animated SVGs, advanced via `next_frame`.
     #[rust]
     svg_time: f64,
+}
+
+/// The animated texture an `Image` is drawing, plus the `image_scale` and `image_pan`
+/// it had before we pointed them at one frame of it, so a static texture gets them back.
+struct ShownAnimation {
+    texture_id: TextureId,
+    orig_image_scale: Vec2f,
+    orig_image_pan: Vec2f,
+}
+
+/// An image that's decoded with just enough pixels for the size it's drawn at.
+struct EncodedImage {
+    image_path: PathBuf,
+    /// Loads it with enough pixels to be drawn at the given size.
+    load_at_size: Box<dyn Fn(&mut Cx, (usize, usize)) -> Result<AsyncLoadResult, ImageError>>,
+    /// The biggest size we've loaded it to be drawn at.
+    drawn_size: Option<(usize, usize)>,
+}
+
+/// Browsers show a frame that asks for 10ms or less for this long instead,
+/// and GIFs made for the web are made with that in mind.
+const DEFAULT_FRAME_DELAY_SECS: f64 = 0.1;
+
+/// Frames due within this long after a clock tick change on that tick, since the screen
+/// only updates once per display frame anyway. This lets more of them share a repaint.
+const ANIMATION_TICK_SLACK_SECS: f64 = 0.008;
+
+/// One clock that steps every `Natural` animation, so all the frames that are due
+/// at about the same time change together, in one timer event and one repaint.
+#[derive(Default)]
+struct AnimationClock {
+    /// The timer for the next tick, and when it'll fire.
+    next_tick: Timer,
+    next_tick_time: f64,
+    /// The tick that's being handled right now.
+    current_tick: Timer,
 }
 
 impl ImageCacheImpl for Image {
@@ -646,6 +700,15 @@ impl Widget for Image {
                     if self.async_image_size.is_some()
                         && self.async_image_path.as_deref() == Some(image_path.as_path())
                     {
+                        let loading_size = self.async_image_size;
+                        // A sliced picture is cut in its texture's own pixels, so it waits for all of them.
+                        let is_slice_waiting_for_all_pixels = matches!(self.fit, ImageFit::Slice)
+                            && is_decoding_image(cx, image_path, loading_size)
+                            && load_image_from_cache(cx, image_path)
+                                .is_some_and(|texture| !has_enough_pixels(cx, &texture, None));
+                        if is_slice_waiting_for_all_pixels {
+                            continue;
+                        }
                         // see if we can load from cache
                         self.load_image_from_cache(cx, image_path, 0);
                         self.async_image_size = None;
@@ -653,7 +716,27 @@ impl Widget for Image {
                         // Record which async load produced the texture, so a later
                         // load for a different key knows it is stale.
                         self.texture_async_source = Some(image_path.to_path_buf());
-                        self.animator_play(cx, ids!(async_load.off));
+                        // A decode with fewer pixels (for another image showing this one) can land
+                        // before ours does, so we show that one while we keep waiting for ours.
+                        let drawn_size = self.encoded_image.as_ref()
+                            .filter(|encoded_image| encoded_image.image_path == *image_path)
+                            .map(|encoded_image| encoded_image.drawn_size);
+                        let is_waiting_for_more_pixels = match drawn_size {
+                            // It hasn't been drawn yet, so any decode of it will do for now.
+                            Some(None) => false,
+                            // Without `downscale_to_drawn_size`, it wants all of its pixels.
+                            drawn_size => {
+                                let drawn_size = drawn_size.flatten();
+                                is_decoding_image(cx, image_path, drawn_size)
+                                    && !self.texture.as_ref().is_some_and(|texture| has_enough_pixels(cx, texture, drawn_size))
+                            }
+                        };
+                        if is_waiting_for_more_pixels {
+                            self.async_image_size = loading_size;
+                            self.async_image_path = Some(image_path.to_path_buf());
+                        } else {
+                            self.animator_play(cx, ids!(async_load.off));
+                        }
                         self.redraw(cx);
                     }
                 }
@@ -730,6 +813,8 @@ impl Widget for Image {
                             }
                             self.next_frame = cx.new_next_frame();
                         }
+                        // Natural animations step on the `AnimationClock` instead.
+                        ImageAnimation::Natural => {}
                     }
                     // alright now lets turn animation_frame into the right image_pan
                     let last_pan = self.draw_bg.image_pan;
@@ -740,16 +825,24 @@ impl Widget for Image {
                         self.animation_frame
                     } as usize;
 
-                    let horizontal_frames = texture_width / animation.width;
-                    let xpos = ((frame % horizontal_frames) * animation.width) as f32
-                        / texture_width as f32;
-                    let ypos = ((frame / horizontal_frames) * animation.height) as f32
-                        / texture_height as f32;
-                    self.draw_bg.image_pan = vec2(xpos, ypos);
+                    self.draw_bg.image_pan = get_frame_pan(
+                        frame,
+                        (animation.width, animation.height),
+                        (texture_width, texture_height),
+                    );
                     if self.draw_bg.image_pan != last_pan {
                         // patch it into the area
                         self.draw_bg.update_instance_area_value(cx, ids!(image_pan))
                     }
+                }
+            }
+        }
+        if let Some(next_frame_time) = self.next_frame_time {
+            if is_animation_tick(cx, event) {
+                if next_frame_time <= Cx::monotonic_now() + ANIMATION_TICK_SLACK_SECS {
+                    self.show_next_animation_frame(cx, next_frame_time);
+                } else {
+                    request_animation_tick(cx, next_frame_time);
                 }
             }
         }
@@ -826,9 +919,47 @@ impl Image {
                 .svg_size()
                 .map(|sz| (sz.x as usize, sz.y as usize));
         }
-        self.texture
-            .as_ref()
-            .and_then(|t| t.get_format(cx).vec_width_height())
+        let texture = self.texture.as_ref()?;
+        if let Some(natural_size) = texture.natural_size(cx) {
+            return Some(natural_size);
+        }
+        // An animated texture holds all of its frames, so its own size isn't the image's size.
+        if let Some(animation) = texture.animation(cx) {
+            return Some((animation.width, animation.height));
+        }
+        texture.get_format(cx).vec_width_height()
+    }
+
+    /// Shows the next frame of a `Natural` animation, which was due at `frame_time`,
+    /// then waits as long as that frame asks.
+    ///
+    /// This stops once the image is no longer on screen, and drawing it again restarts it.
+    fn show_next_animation_frame(&mut self, cx: &mut Cx, frame_time: f64) {
+        self.next_frame_time = None;
+        let Some(texture) = self.texture.clone() else { return };
+        let Some(texture_size) = texture.get_format(cx).vec_width_height() else { return };
+        let Some((frame_width, frame_height, num_frames)) = texture.animation(cx).as_ref()
+            .map(|animation| (animation.width, animation.height, animation.num_frames))
+        else {
+            return;
+        };
+        if num_frames < 2 || !is_area_on_screen(cx, self.draw_bg.area()) {
+            return;
+        }
+        let frame = (self.animation_frame as usize + 1) % num_frames;
+        self.animation_frame = frame as f64;
+        self.draw_bg.image_pan = get_frame_pan(frame, (frame_width, frame_height), texture_size);
+        self.draw_bg.update_instance_area_value(cx, ids!(image_pan));
+        let frame_delay = texture.animation(cx).as_ref()
+            .map_or(DEFAULT_FRAME_DELAY_SECS, |animation| get_frame_delay(animation, frame));
+        // If we fell behind (e.g., the app was busy), get back on the clock's timeline
+        // instead of rushing through frames to catch up.
+        let now = Cx::monotonic_now();
+        let next_frame_time = Some(frame_time + frame_delay)
+            .filter(|&time| time >= now)
+            .unwrap_or_else(|| get_aligned_frame_time(now, frame_delay));
+        self.next_frame_time = Some(next_frame_time);
+        request_animation_tick(cx, next_frame_time);
     }
 
     /// True if a texture has been set on this `Image`.
@@ -938,7 +1069,26 @@ impl Image {
         // decode's, not the texture it keeps showing meanwhile.
         let mut texture_texels: Option<Vec2d> = None;
 
-        let (width, height) = if let Some((w, h)) = &self.async_image_size {
+        // A decode that landed while this wasn't getting events (e.g., in a closed modal) is picked up now.
+        let missed_decode = self.async_image_path.as_deref().and_then(|image_path| {
+            let drawn_size = self.encoded_image.as_ref()
+                .filter(|encoded_image| encoded_image.image_path == image_path)
+                .and_then(|encoded_image| encoded_image.drawn_size);
+            if is_decoding_image(cx, image_path, drawn_size) {
+                return None;
+            }
+            load_image_from_cache(cx, image_path).map(|texture| (image_path.to_path_buf(), texture))
+        });
+        if let Some((image_path, texture)) = missed_decode {
+            self.set_texture(Some(texture), 0);
+            self.finish_async_load(cx, &image_path);
+        }
+        // A decode of the image that's loading (just with fewer pixels) is drawn like any other,
+        // so an animation keeps playing while it waits for a bigger decode.
+        let is_showing_loading_image = self.async_image_path.is_some()
+            && self.texture.is_some()
+            && self.texture_async_source == self.async_image_path;
+        let (width, height) = if let Some((w, h)) = self.async_image_size.filter(|_| !is_showing_loading_image) {
             // Still loading. Any texture present here is legitimate current content
             // (the occupant's own placeholder, or a previous load of this same
             // source; begin_async_load already cleared stale ones), so keep showing
@@ -950,7 +1100,7 @@ impl Image {
             } else {
                 self.draw_bg.draw_vars.empty_texture(0);
             }
-            (*w as f64, *h as f64)
+            (w as f64, h as f64)
         } else if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
             texture_texels = texels_of(image_texture, cx);
@@ -962,14 +1112,56 @@ impl Image {
                 // min_* (usually zero) and the picture silently vanished.
                 .or_else(|| image_texture.get_format(cx).render_fixed_width_height())
                 .unwrap_or((self.placeholder_width as usize, self.placeholder_height as usize));
-            if let Some(animation) = image_texture.animation(cx) {
-                let (w, h) = (animation.width as f64, animation.height as f64);
-                self.next_frame = cx.new_next_frame();
+            let texture_id = image_texture.texture_id();
+            // A texture with fewer pixels than its image is still laid out at the image's size.
+            let natural_size = image_texture.natural_size(cx);
+            let frame_info = image_texture.animation(cx).as_ref()
+                .map(|animation| (animation.width, animation.height, animation.num_frames));
+            if frame_info.is_none() {
+                if let Some(shown) = self.shown_animation.take() {
+                    self.draw_bg.image_scale = shown.orig_image_scale;
+                    self.draw_bg.image_pan = shown.orig_image_pan;
+                    self.next_frame_time = None;
+                }
+            }
+            if let Some((frame_width, frame_height, num_frames)) = frame_info {
+                if self.shown_animation.as_ref().is_none_or(|shown| shown.texture_id != texture_id) {
+                    // A newly shown animation starts over from its first frame.
+                    let (orig_image_scale, orig_image_pan) = match self.shown_animation.take() {
+                        Some(shown) => (shown.orig_image_scale, shown.orig_image_pan),
+                        None => (self.draw_bg.image_scale, self.draw_bg.image_pan),
+                    };
+                    self.shown_animation = Some(ShownAnimation { texture_id, orig_image_scale, orig_image_pan });
+                    self.animation_frame = 0.0;
+                    self.last_time = None;
+                    self.draw_bg.image_pan = vec2(0.0, 0.0);
+                    self.next_frame_time = None;
+                }
+                if !matches!(self.animation, ImageAnimation::Natural) {
+                    self.next_frame = cx.new_next_frame();
+                } else if num_frames > 1 {
+                    // Drawing a natural animation (re)starts it, e.g., after it was off screen,
+                    // or after something it's in kept the clock's tick from reaching it.
+                    let now = Cx::monotonic_now();
+                    let next_frame_time = match self.next_frame_time {
+                        Some(time) if time + ANIMATION_TICK_SLACK_SECS >= now => time,
+                        _ => {
+                            let frame_delay = image_texture.animation(cx).as_ref().map_or(
+                                DEFAULT_FRAME_DELAY_SECS,
+                                |animation| get_frame_delay(animation, self.animation_frame as usize),
+                            );
+                            get_aligned_frame_time(now, frame_delay)
+                        }
+                    };
+                    self.next_frame_time = Some(next_frame_time);
+                    request_animation_tick(cx, next_frame_time);
+                }
                 // we have an animation. lets compute the scale and zoom for a certain frame
-                let scale_x = w as f32 / width as f32;
-                let scale_y = h as f32 / height as f32;
+                let scale_x = frame_width as f32 / width as f32;
+                let scale_y = frame_height as f32 / height as f32;
                 self.draw_bg.image_scale = vec2(scale_x, scale_y);
-                (w, h)
+                let (frame_width, frame_height) = natural_size.unwrap_or((frame_width, frame_height));
+                (frame_width as f64, frame_height as f64)
             } else if image_texture.get_format(cx).is_render() {
                 // Render targets are stored top-left on EVERY backend now
                 // (GL renders offscreen through a Y-inverted projection),
@@ -977,6 +1169,7 @@ impl Image {
                 // unconditional flip here showed them upside down.
                 (width as f64 * self.width_scale, height as f64)
             } else {
+                let (width, height) = natural_size.unwrap_or((width, height));
                 (width as f64 * self.width_scale, height as f64)
             }
         } else {
@@ -1076,7 +1269,81 @@ impl Image {
 
         self.draw_bg.draw_walk(cx, walk);
 
+        // Load the image this is loading or showing again if it's now drawn bigger
+        // than it was ever loaded for, unless it already has (or is getting) enough pixels.
+        if !self.downscale_to_drawn_size {
+            return DrawStep::done();
+        }
+        let is_current = self.encoded_image.as_ref()
+            .is_some_and(|encoded_image| self.is_loading_or_showing(&encoded_image.image_path));
+        if !is_current {
+            // It now shows something else, e.g., a texture that was set directly.
+            self.encoded_image = None;
+            return DrawStep::done();
+        }
+        let (drawn_width, drawn_height) = if matches!(self.fit, ImageFit::Slice) {
+            // A sliced picture is cut in its texture's own pixels, so it needs all of them.
+            let natural_size = self.texture.as_ref()
+                .and_then(|texture| texture.natural_size(cx))
+                .or(self.async_image_size);
+            let Some((width, height)) = natural_size else {
+                return DrawStep::done();
+            };
+            (width as f64, height as f64)
+        } else {
+            // When it's cropped to fill its rect, the whole image is drawn bigger than that rect.
+            let rect = self.draw_bg.area().rect(cx);
+            (
+                (rect.size.x * dpi / self.draw_bg.fit_scale.x as f64).ceil(),
+                (rect.size.y * dpi / self.draw_bg.fit_scale.y as f64).ceil(),
+            )
+        };
+        if !(drawn_width >= 1.0 && drawn_height >= 1.0) {
+            return DrawStep::done();
+        }
+        let (drawn_width, drawn_height) = (drawn_width as usize, drawn_height as usize);
+        let Some(encoded_image) = self.encoded_image.as_mut() else { return DrawStep::done() };
+        let drawn_size = match encoded_image.drawn_size {
+            Some((width, height)) if width >= drawn_width && height >= drawn_height => return DrawStep::done(),
+            Some((width, height)) => (width.max(drawn_width), height.max(drawn_height)),
+            None => (drawn_width, drawn_height),
+        };
+        encoded_image.drawn_size = Some(drawn_size);
+        if self.async_image_path.is_none()
+            && self.texture.as_ref().is_some_and(|texture| has_enough_pixels(cx, texture, Some(drawn_size)))
+        {
+            return DrawStep::done();
+        }
+        let image_path = encoded_image.image_path.clone();
+        match (encoded_image.load_at_size)(cx, drawn_size) {
+            Ok(AsyncLoadResult::Loaded) => {
+                // The cache had enough pixels already, e.g., from another image showing this one.
+                if self.load_image_from_cache(cx, &image_path, 0) {
+                    self.finish_async_load(cx, &image_path);
+                    cx.redraw_area_in_draw(self.draw_bg.area());
+                }
+            }
+            Ok(AsyncLoadResult::Loading(width, height)) => {
+                if self.async_image_path.is_none() {
+                    // Keep showing the one with fewer pixels, at the same size, until this one lands.
+                    let natural_size = self.texture.as_ref().and_then(|texture| texture.natural_size(cx));
+                    self.begin_async_load(cx, &image_path, natural_size.unwrap_or((width, height)));
+                }
+            }
+            Err(_) => self.cancel_async_load(cx),
+        }
         DrawStep::done()
+    }
+
+    /// Returns whether this image is already loading or showing the image at `image_path`.
+    ///
+    /// Loading it again then changes nothing, which matters for widgets that re-issue
+    /// their loads on every draw (e.g., list items), since a redraw would just loop.
+    fn is_loading_or_showing(&self, image_path: &Path) -> bool {
+        match self.async_image_path.as_deref() {
+            Some(loading_path) => loading_path == image_path,
+            None => self.texture.is_some() && self.texture_async_source.as_deref() == Some(image_path),
+        }
     }
 
     /// Loads the image at the given `image_path` on disk into this `ImageRef`.
@@ -1085,6 +1352,9 @@ impl Image {
         cx: &mut Cx,
         image_path: &Path,
     ) -> Result<(), ImageError> {
+        if self.is_loading_or_showing(image_path) {
+            return Ok(());
+        }
         self.lazy_create_image_cache(cx);
         match self.load_image_file_by_path_async_impl(cx, image_path, 0) {
             Ok(AsyncLoadResult::Loading(w, h)) => {
@@ -1109,7 +1379,35 @@ impl Image {
     where
         D: AsRef<[u8]> + Send + Sync + ?Sized + 'static,
     {
+        if self.is_loading_or_showing(image_path) {
+            return Ok(());
+        }
         self.lazy_create_image_cache(cx);
+        // A sliced picture is cut in its texture's own pixels, so it keeps all of them.
+        if self.downscale_to_drawn_size && !matches!(self.fit, ImageFit::Slice) {
+            // Show any cached decode of it right away, since drawing it
+            // then decodes it again if it needs more pixels.
+            if self.load_image_from_cache(cx, image_path, 0) {
+                self.finish_async_load(cx, image_path);
+            } else {
+                match image_size_by_data((*data).as_ref(), image_path) {
+                    Ok(size) => self.begin_async_load(cx, image_path, size),
+                    Err(_) => {
+                        self.cancel_async_load(cx);
+                        return Ok(());
+                    }
+                }
+            }
+            let path = image_path.to_path_buf();
+            self.encoded_image = Some(EncodedImage {
+                image_path: image_path.to_path_buf(),
+                load_at_size: Box::new(move |cx, drawn_size| {
+                    load_image_from_data_async_at_size(cx, &path, data.clone(), Some(drawn_size))
+                }),
+                drawn_size: None,
+            });
+            return Ok(());
+        }
         match self.load_image_from_data_async_impl(cx, image_path, data, 0) {
             Ok(AsyncLoadResult::Loading(w, h)) => {
                 self.begin_async_load(cx, image_path, (w, h));
@@ -1129,6 +1427,9 @@ impl Image {
         cx: &mut Cx,
         url: &str,
     ) -> Result<(), ImageError> {
+        if self.is_loading_or_showing(Path::new(url)) {
+            return Ok(());
+        }
         self.lazy_create_image_cache(cx);
         match self.load_image_http_by_url_async_impl(cx, url, 0) {
             Ok(AsyncLoadResult::Loading(w, h)) => {
@@ -1173,15 +1474,6 @@ impl Image {
     /// The requested image was already cached and its texture has been set: clear
     /// the pending-load state so the draw path binds the texture directly.
     fn finish_async_load(&mut self, cx: &mut Cx, image_path: &Path) {
-        // Re-loading the image that is already bound changes nothing; skip the
-        // animator and redraw so widgets that re-issue loads on every draw
-        // (e.g. list items repopulated per frame) don't dirty themselves into
-        // an endless redraw loop.
-        if self.async_image_path.is_none()
-            && self.texture_async_source.as_deref() == Some(image_path)
-        {
-            return;
-        }
         self.async_image_size = None;
         self.async_image_path = None;
         // Record which load produced the texture, just like the decode-completion
@@ -1219,6 +1511,72 @@ fn texels_of(texture: &Texture, cx: &mut Cx) -> Option<Vec2d> {
         .vec_width_height()
         .or_else(|| format.render_fixed_width_height())
         .map(|(w, h)| dvec2(w as f64, h as f64))
+}
+
+/// Returns the `image_pan` that shows the given frame of an animated texture,
+/// which holds its frames left to right in rows.
+fn get_frame_pan(frame: usize, frame_size: (usize, usize), texture_size: (usize, usize)) -> Vec2f {
+    let columns = (texture_size.0 / frame_size.0.max(1)).max(1);
+    vec2(
+        ((frame % columns) * frame_size.0) as f32 / texture_size.0 as f32,
+        ((frame / columns) * frame_size.1) as f32 / texture_size.1 as f32,
+    )
+}
+
+/// Returns when a frame shown from `now` should change: the first multiple of its delay
+/// that's at least a delay away, so animations with the same frame delay change together.
+fn get_aligned_frame_time(now: f64, frame_delay: f64) -> f64 {
+    ((now + frame_delay) / frame_delay).ceil() * frame_delay
+}
+
+/// Asks the shared `AnimationClock` to tick at the given time, unless it'll already tick by then.
+fn request_animation_tick(cx: &mut Cx, time: f64) {
+    if !cx.has_global::<AnimationClock>() {
+        cx.set_global(AnimationClock::default());
+    }
+    let now = Cx::monotonic_now();
+    let clock = cx.get_global::<AnimationClock>();
+    // A tick that's past due is never trusted, since its event may have gone unhandled.
+    if !clock.next_tick.is_empty() && clock.next_tick_time <= time && clock.next_tick_time >= now {
+        return;
+    }
+    let later_tick = std::mem::replace(&mut clock.next_tick, Timer::empty());
+    cx.stop_timer(later_tick);
+    let next_tick = cx.start_timeout((time - now).max(0.0));
+    let clock = cx.get_global::<AnimationClock>();
+    clock.next_tick = next_tick;
+    clock.next_tick_time = time;
+}
+
+/// Returns whether the given event is a tick of the shared `AnimationClock`.
+fn is_animation_tick(cx: &mut Cx, event: &Event) -> bool {
+    let Event::Timer(timer_event) = event else { return false };
+    if !cx.has_global::<AnimationClock>() {
+        return false;
+    }
+    let clock = cx.get_global::<AnimationClock>();
+    // The first image to see a tick frees the clock up to be scheduled again.
+    if !clock.next_tick.is_empty() && timer_event.timer_id == clock.next_tick.0 {
+        clock.current_tick = std::mem::replace(&mut clock.next_tick, Timer::empty());
+    }
+    !clock.current_tick.is_empty() && timer_event.timer_id == clock.current_tick.0
+}
+
+/// Returns how long the given frame of an animation should be shown, in seconds.
+fn get_frame_delay(animation: &TextureAnimation, frame: usize) -> f64 {
+    animation.frame_delays.get(frame)
+        .copied()
+        .filter(|&delay| delay > 0.0101)
+        .unwrap_or(DEFAULT_FRAME_DELAY_SECS)
+}
+
+/// Returns whether the given area is on screen right now, unlike one in a hidden
+/// dock tab or one whose draw list has since been redrawn without it.
+fn is_area_on_screen(cx: &Cx, area: Area) -> bool {
+    area.is_valid(cx) && area.draw_list_id()
+        .and_then(|draw_list_id| cx.draw_lists[draw_list_id].draw_pass_id)
+        .is_some_and(|pass_id| !cx.pass_attachment_is_stale(pass_id)
+            && area.is_attached(cx, &cx.attached_draw_lists(pass_id)))
 }
 
 pub enum AsyncLoad {
