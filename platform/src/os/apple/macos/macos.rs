@@ -909,11 +909,6 @@ impl Cx {
                             }
                         }
                         metal_window.gate_closed_since = None;
-                        // PerfMonitor: a presented window frame starts here;
-                        // nextDrawable is where vsync/pool pressure blocks
-                        // the main thread, so it gets its own channel.
-                        self.perf_monitor
-                            .frame_boundary(with_macos_app(|app| app.time_now()));
                         let drawable = acquired.as_ref().map_or(nil, RcObjcId::as_id);
                         if drawable == nil {
                             if let Some(trace) = &metal_cx.present_trace { trace.cause(PresentCause::NoDrawable); }
@@ -972,6 +967,20 @@ impl Cx {
                         };
                         if remote_present {
                             self.os.remote_presented = Some(presented);
+                        }
+                        if presented {
+                            self.perf_monitor
+                                .frame_boundary(with_macos_app(|app| app.time_now()));
+                            // A normal paint can satisfy an input frame that
+                            // initially had to wait for a drawable. Its old
+                            // acquisition deadline must not poison a later input.
+                            if self
+                                .os
+                                .remote_present_waiting
+                                .is_some_and(|(id, _)| id == window_id)
+                            {
+                                self.os.remote_present_waiting = None;
+                            }
                         }
                         // The pass bailed before presenting, so its handler never
                         // fires. Give the count back or the gate closes for good.
