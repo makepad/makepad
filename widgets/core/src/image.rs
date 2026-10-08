@@ -412,6 +412,11 @@ pub struct Image {
     /// Whether `slice_scale` counts layout points or device pixels.
     #[live]
     pub slice_units: ImageSliceUnits,
+    /// Decodes images loaded from data with just enough pixels for the size they're drawn at,
+    /// once they're drawn, and again if they're later drawn bigger. So an image that isn't drawn
+    /// until it has loaded (e.g., `Media`'s picture) never loads with this on.
+    #[live]
+    downscale_to_drawn_size: bool,
     /// HTTP/file resource handle for loading image data (set via `http_resource()` or `crate_resource()`)
     #[live]
     src: Option<ScriptHandleRef>,
@@ -421,6 +426,9 @@ pub struct Image {
     async_image_path: Option<PathBuf>,
     #[rust]
     async_image_size: Option<(usize, usize)>,
+    /// The image being loaded or shown, if `downscale_to_drawn_size` might need to decode it again.
+    #[rust]
+    encoded_image: Option<EncodedImage>,
     #[rust]
     texture: Option<Texture>,
     /// The async-load key that produced `texture`, when it came from a completed
@@ -452,6 +460,15 @@ struct ShownAnimation {
     texture_id: TextureId,
     orig_image_scale: Vec2f,
     orig_image_pan: Vec2f,
+}
+
+/// An image that's decoded with just enough pixels for the size it's drawn at.
+struct EncodedImage {
+    image_path: PathBuf,
+    /// Loads it with enough pixels to be drawn at the given size.
+    load_at_size: Box<dyn Fn(&mut Cx, (usize, usize)) -> Result<AsyncLoadResult, ImageError>>,
+    /// The biggest size we've loaded it to be drawn at.
+    drawn_size: Option<(usize, usize)>,
 }
 
 /// Browsers show a frame that asks for 10ms or less for this long instead,
@@ -683,6 +700,15 @@ impl Widget for Image {
                     if self.async_image_size.is_some()
                         && self.async_image_path.as_deref() == Some(image_path.as_path())
                     {
+                        let loading_size = self.async_image_size;
+                        // A sliced picture is cut in its texture's own pixels, so it waits for all of them.
+                        let is_slice_waiting_for_all_pixels = matches!(self.fit, ImageFit::Slice)
+                            && is_decoding_image(cx, image_path, loading_size)
+                            && load_image_from_cache(cx, image_path)
+                                .is_some_and(|texture| !has_enough_pixels(cx, &texture, None));
+                        if is_slice_waiting_for_all_pixels {
+                            continue;
+                        }
                         // see if we can load from cache
                         self.load_image_from_cache(cx, image_path, 0);
                         self.async_image_size = None;
@@ -690,7 +716,27 @@ impl Widget for Image {
                         // Record which async load produced the texture, so a later
                         // load for a different key knows it is stale.
                         self.texture_async_source = Some(image_path.to_path_buf());
-                        self.animator_play(cx, ids!(async_load.off));
+                        // A decode with fewer pixels (for another image showing this one) can land
+                        // before ours does, so we show that one while we keep waiting for ours.
+                        let drawn_size = self.encoded_image.as_ref()
+                            .filter(|encoded_image| encoded_image.image_path == *image_path)
+                            .map(|encoded_image| encoded_image.drawn_size);
+                        let is_waiting_for_more_pixels = match drawn_size {
+                            // It hasn't been drawn yet, so any decode of it will do for now.
+                            Some(None) => false,
+                            // Without `downscale_to_drawn_size`, it wants all of its pixels.
+                            drawn_size => {
+                                let drawn_size = drawn_size.flatten();
+                                is_decoding_image(cx, image_path, drawn_size)
+                                    && !self.texture.as_ref().is_some_and(|texture| has_enough_pixels(cx, texture, drawn_size))
+                            }
+                        };
+                        if is_waiting_for_more_pixels {
+                            self.async_image_size = loading_size;
+                            self.async_image_path = Some(image_path.to_path_buf());
+                        } else {
+                            self.animator_play(cx, ids!(async_load.off));
+                        }
                         self.redraw(cx);
                     }
                 }
@@ -874,6 +920,9 @@ impl Image {
                 .map(|sz| (sz.x as usize, sz.y as usize));
         }
         let texture = self.texture.as_ref()?;
+        if let Some(natural_size) = texture.natural_size(cx) {
+            return Some(natural_size);
+        }
         // An animated texture holds all of its frames, so its own size isn't the image's size.
         if let Some(animation) = texture.animation(cx) {
             return Some((animation.width, animation.height));
@@ -1022,13 +1071,24 @@ impl Image {
 
         // A decode that landed while this wasn't getting events (e.g., in a closed modal) is picked up now.
         let missed_decode = self.async_image_path.as_deref().and_then(|image_path| {
+            let drawn_size = self.encoded_image.as_ref()
+                .filter(|encoded_image| encoded_image.image_path == image_path)
+                .and_then(|encoded_image| encoded_image.drawn_size);
+            if is_decoding_image(cx, image_path, drawn_size) {
+                return None;
+            }
             load_image_from_cache(cx, image_path).map(|texture| (image_path.to_path_buf(), texture))
         });
         if let Some((image_path, texture)) = missed_decode {
             self.set_texture(Some(texture), 0);
             self.finish_async_load(cx, &image_path);
         }
-        let (width, height) = if let Some((w, h)) = &self.async_image_size {
+        // A decode of the image that's loading (just with fewer pixels) is drawn like any other,
+        // so an animation keeps playing while it waits for a bigger decode.
+        let is_showing_loading_image = self.async_image_path.is_some()
+            && self.texture.is_some()
+            && self.texture_async_source == self.async_image_path;
+        let (width, height) = if let Some((w, h)) = self.async_image_size.filter(|_| !is_showing_loading_image) {
             // Still loading. Any texture present here is legitimate current content
             // (the occupant's own placeholder, or a previous load of this same
             // source; begin_async_load already cleared stale ones), so keep showing
@@ -1040,7 +1100,7 @@ impl Image {
             } else {
                 self.draw_bg.draw_vars.empty_texture(0);
             }
-            (*w as f64, *h as f64)
+            (w as f64, h as f64)
         } else if let Some(image_texture) = &self.texture {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
             texture_texels = texels_of(image_texture, cx);
@@ -1053,6 +1113,8 @@ impl Image {
                 .or_else(|| image_texture.get_format(cx).render_fixed_width_height())
                 .unwrap_or((self.placeholder_width as usize, self.placeholder_height as usize));
             let texture_id = image_texture.texture_id();
+            // A texture with fewer pixels than its image is still laid out at the image's size.
+            let natural_size = image_texture.natural_size(cx);
             let frame_info = image_texture.animation(cx).as_ref()
                 .map(|animation| (animation.width, animation.height, animation.num_frames));
             if frame_info.is_none() {
@@ -1098,6 +1160,7 @@ impl Image {
                 let scale_x = frame_width as f32 / width as f32;
                 let scale_y = frame_height as f32 / height as f32;
                 self.draw_bg.image_scale = vec2(scale_x, scale_y);
+                let (frame_width, frame_height) = natural_size.unwrap_or((frame_width, frame_height));
                 (frame_width as f64, frame_height as f64)
             } else if image_texture.get_format(cx).is_render() {
                 // Render targets are stored top-left on EVERY backend now
@@ -1106,6 +1169,7 @@ impl Image {
                 // unconditional flip here showed them upside down.
                 (width as f64 * self.width_scale, height as f64)
             } else {
+                let (width, height) = natural_size.unwrap_or((width, height));
                 (width as f64 * self.width_scale, height as f64)
             }
         } else {
@@ -1205,6 +1269,69 @@ impl Image {
 
         self.draw_bg.draw_walk(cx, walk);
 
+        // Load the image this is loading or showing again if it's now drawn bigger
+        // than it was ever loaded for, unless it already has (or is getting) enough pixels.
+        if !self.downscale_to_drawn_size {
+            return DrawStep::done();
+        }
+        let is_current = self.encoded_image.as_ref()
+            .is_some_and(|encoded_image| self.is_loading_or_showing(&encoded_image.image_path));
+        if !is_current {
+            // It now shows something else, e.g., a texture that was set directly.
+            self.encoded_image = None;
+            return DrawStep::done();
+        }
+        let (drawn_width, drawn_height) = if matches!(self.fit, ImageFit::Slice) {
+            // A sliced picture is cut in its texture's own pixels, so it needs all of them.
+            let natural_size = self.texture.as_ref()
+                .and_then(|texture| texture.natural_size(cx))
+                .or(self.async_image_size);
+            let Some((width, height)) = natural_size else {
+                return DrawStep::done();
+            };
+            (width as f64, height as f64)
+        } else {
+            // When it's cropped to fill its rect, the whole image is drawn bigger than that rect.
+            let rect = self.draw_bg.area().rect(cx);
+            (
+                (rect.size.x * dpi / self.draw_bg.fit_scale.x as f64).ceil(),
+                (rect.size.y * dpi / self.draw_bg.fit_scale.y as f64).ceil(),
+            )
+        };
+        if !(drawn_width >= 1.0 && drawn_height >= 1.0) {
+            return DrawStep::done();
+        }
+        let (drawn_width, drawn_height) = (drawn_width as usize, drawn_height as usize);
+        let Some(encoded_image) = self.encoded_image.as_mut() else { return DrawStep::done() };
+        let drawn_size = match encoded_image.drawn_size {
+            Some((width, height)) if width >= drawn_width && height >= drawn_height => return DrawStep::done(),
+            Some((width, height)) => (width.max(drawn_width), height.max(drawn_height)),
+            None => (drawn_width, drawn_height),
+        };
+        encoded_image.drawn_size = Some(drawn_size);
+        if self.async_image_path.is_none()
+            && self.texture.as_ref().is_some_and(|texture| has_enough_pixels(cx, texture, Some(drawn_size)))
+        {
+            return DrawStep::done();
+        }
+        let image_path = encoded_image.image_path.clone();
+        match (encoded_image.load_at_size)(cx, drawn_size) {
+            Ok(AsyncLoadResult::Loaded) => {
+                // The cache had enough pixels already, e.g., from another image showing this one.
+                if self.load_image_from_cache(cx, &image_path, 0) {
+                    self.finish_async_load(cx, &image_path);
+                    cx.redraw_area_in_draw(self.draw_bg.area());
+                }
+            }
+            Ok(AsyncLoadResult::Loading(width, height)) => {
+                if self.async_image_path.is_none() {
+                    // Keep showing the one with fewer pixels, at the same size, until this one lands.
+                    let natural_size = self.texture.as_ref().and_then(|texture| texture.natural_size(cx));
+                    self.begin_async_load(cx, &image_path, natural_size.unwrap_or((width, height)));
+                }
+            }
+            Err(_) => self.cancel_async_load(cx),
+        }
         DrawStep::done()
     }
 
@@ -1256,6 +1383,31 @@ impl Image {
             return Ok(());
         }
         self.lazy_create_image_cache(cx);
+        // A sliced picture is cut in its texture's own pixels, so it keeps all of them.
+        if self.downscale_to_drawn_size && !matches!(self.fit, ImageFit::Slice) {
+            // Show any cached decode of it right away, since drawing it
+            // then decodes it again if it needs more pixels.
+            if self.load_image_from_cache(cx, image_path, 0) {
+                self.finish_async_load(cx, image_path);
+            } else {
+                match image_size_by_data((*data).as_ref(), image_path) {
+                    Ok(size) => self.begin_async_load(cx, image_path, size),
+                    Err(_) => {
+                        self.cancel_async_load(cx);
+                        return Ok(());
+                    }
+                }
+            }
+            let path = image_path.to_path_buf();
+            self.encoded_image = Some(EncodedImage {
+                image_path: image_path.to_path_buf(),
+                load_at_size: Box::new(move |cx, drawn_size| {
+                    load_image_from_data_async_at_size(cx, &path, data.clone(), Some(drawn_size))
+                }),
+                drawn_size: None,
+            });
+            return Ok(());
+        }
         match self.load_image_from_data_async_impl(cx, image_path, data, 0) {
             Ok(AsyncLoadResult::Loading(w, h)) => {
                 self.begin_async_load(cx, image_path, (w, h));

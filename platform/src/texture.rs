@@ -1460,6 +1460,17 @@ impl Texture {
         cx.textures[self.texture_id()].animation = animation;
     }
 
+    /// Records that this texture holds a shrunk copy of an image (or of each frame of an
+    /// animation) that's `natural_size` pixels big, so it can still be laid out at that size.
+    pub fn set_natural_size(&self, cx: &mut Cx, natural_size: Option<(usize, usize)>) {
+        cx.textures[self.texture_id()].natural_size = natural_size;
+    }
+
+    /// The size of the image this texture holds a shrunk copy of, if it was shrunk.
+    pub fn natural_size(&self, cx: &Cx) -> Option<(usize, usize)> {
+        cx.textures[self.texture_id()].natural_size
+    }
+
     /// Mark a render target as an application-held cache (see
     /// `CxTexture::retained_render_target`).
     pub fn set_retained_render_target(&self, cx: &mut Cx, retained: bool) {
@@ -1598,6 +1609,7 @@ pub struct CxTexture {
     pub(crate) allocation_generation: u64,
     pub(crate) producer_serial: u64,
     pub(crate) animation: Option<TextureAnimation>,
+    pub(crate) natural_size: Option<(usize, usize)>,
     /// A render target the application keeps as a cache: a software backend
     /// never releases its framebuffer for idleness or budget while the
     /// handle lives (GPU backends keep every target anyway).
