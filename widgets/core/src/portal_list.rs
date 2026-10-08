@@ -18,7 +18,10 @@ use {
         widget_async::CxSplashVmExt,
         widget_tree::CxWidgetExt,
     },
-    std::{collections::HashMap, ops::Range},
+    std::{
+        collections::{HashMap, VecDeque},
+        ops::Range,
+    },
 };
 
 script_mod! {
@@ -910,6 +913,14 @@ pub struct PortalList {
     pub capture_overload: bool,
     #[live(false)]
     keep_invisible: bool,
+    /// Retain this many recently requested entry identities in addition to
+    /// visible/selected items. Unlike `reuse_items`, retained widgets keep their
+    /// entry and state and are never reset or rebound to a different entry.
+    /// Zero preserves the default visible-only policy. Ignored by reuse_items.
+    #[live(0)]
+    cache_items: usize,
+    #[rust]
+    cached_item_order: VecDeque<usize>,
     #[live(true)]
     skip_widget_tree_search: bool,
 
@@ -1495,6 +1506,7 @@ impl PortalList {
         // so their selection state persists when scrolled back into view.
         if !self.keep_invisible && !self.is_selecting {
             let selection_range = self.get_selection_range();
+            self.cached_item_order.truncate(self.cache_items);
             // A pressed row leaving view is recycled (or dropped) only after
             // its press is taken away: its captures are cancelled (the list
             // keeps its own) and a FingerCancel follows right after this
@@ -1516,9 +1528,14 @@ impl PortalList {
                 self.items.retain_visible_with(|v: WidgetItem| {
                     reusable_items.entry(v.template).or_default().push(v);
                 });
-            } else if let Some((start, end)) = selection_range {
-                self.items
-                    .retain_visible_and(|item_id, _| *item_id >= start.0 && *item_id <= end.0);
+            } else if self.cache_items > 0 || selection_range.is_some() {
+                let cached = &self.cached_item_order;
+                self.items.retain_visible_and(|item_id, _| {
+                    cached.contains(item_id)
+                        || selection_range.is_some_and(|(start, end)| {
+                            *item_id >= start.0 && *item_id <= end.0
+                        })
+                });
             } else {
                 self.items.retain_visible();
             }
@@ -1947,6 +1964,11 @@ impl PortalList {
         use std::collections::hash_map::Entry;
 
         if let Some(template_ref) = self.templates.get(&template) {
+            if self.cache_items > 0 && !self.reuse_items {
+                self.cached_item_order.retain(|id| *id != entry_id);
+                self.cached_item_order.push_front(entry_id);
+                self.cached_item_order.truncate(self.cache_items);
+            }
             let template_value: ScriptValue = template_ref.as_object().into();
             // Instantiate items in the VM whose heap actually minted the template.
             // Using `cx.with_vm` (the main VM) here would dereference an isolate-heap
