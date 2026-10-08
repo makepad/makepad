@@ -567,7 +567,7 @@ impl CalendarView {
             stack
                 .view_by_id(cx, id)
                 .as_stack_navigation_view()
-                .show(cx, 0.0);
+                .show(cx);
         }
         self.pages.push(id);
         self.view.redraw(cx);
@@ -602,8 +602,6 @@ impl CalendarView {
         self.view.redraw(cx);
     }
     fn configure_stack_motion(&self, cx: &mut Cx) {
-        // Stock StackNavigationView closes after offset > width. The epsilon is subpixel.
-        let width = self.dimensions.x.max(1.0) + 0.01;
         let push = if self.reduced_motion { 0.0 } else { 0.24 };
         let pop = if self.reduced_motion { 0.0 } else { 0.20 };
         for id in [
@@ -614,7 +612,7 @@ impl CalendarView {
             live_id!(search_page),
         ] {
             let mut page = self.stack(cx).view_by_id(cx, id);
-            script_apply_eval!(cx,page,{animator +: {slide +: {hide +: {from:{all:mod.prelude.widgets_internal.Play.Forward{duration:#(pop)}} apply:{offset:#(width)}} show +: {from:{all:mod.prelude.widgets_internal.Play.Forward{duration:#(push)}}}}}});
+            script_apply_eval!(cx,page,{animator +: {slide +: {hide +: {from:{all:mod.prelude.widgets_internal.Play.Forward{duration:#(pop)}}} show +: {from:{all:mod.prelude.widgets_internal.Play.Forward{duration:#(push)}}}}}});
         }
     }
     fn remember_scroll(&mut self, cx: &mut Cx) {

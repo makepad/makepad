@@ -426,6 +426,15 @@ impl Cx {
                         // but immediately torn down again (rotation race).
                         self.os.needs_first_draw = true;
                     }
+                    // A hide still pending after this draw really hides the keyboard,
+                    // unless the draw queued a `ShowTextIME` for an input that took focus.
+                    if self.os.pending_ime_hide
+                        && !self.platform_ops.iter().any(|op| matches!(op, CxOsOp::ShowTextIME(..)))
+                    {
+                        self.os.pending_ime_hide = false;
+                        unsafe { android_jni::to_java_show_keyboard(false); }
+                        self.os.last_ime_config = None;
+                    }
                 }
                 Ok(message) => {
                     self.handle_message(message);
@@ -2606,6 +2615,9 @@ impl Cx {
                     self.os.timers.timers.remove(&timer_id);
                 }
                 CxOsOp::ShowTextIME(_area, _pos, config) => unsafe {
+                    // An input asking for the keyboard right after a hide (e.g., it just took
+                    // focus from another input) keeps the keyboard up.
+                    self.os.pending_ime_hide = false;
                     // A focused `TextInput` re-issues `ShowTextIME` on every
                     // draw. Calling into Java each time thrashes the IME:
                     // `configure_keyboard` can restart the input connection,
@@ -2615,19 +2627,19 @@ impl Cx {
                     // — a loop that flickers the soft keyboard open then shut.
                     // Only touch Java when the requested config actually
                     // changes; `last_ime_config` is cleared whenever the
-                    // keyboard goes down (here or via `ResizeTextIME`).
+                    // keyboard goes down (once a pending hide goes through,
+                    // or via `ResizeTextIME`).
                     if self.os.last_ime_config != Some(config) {
                         android_jni::to_java_configure_keyboard(&config);
                         android_jni::to_java_show_keyboard(true);
                         self.os.last_ime_config = Some(config);
                     }
                 },
-                CxOsOp::HideTextIME => unsafe {
+                CxOsOp::HideTextIME => {
                     // Unconditional on purpose: unlike `ShowTextIME` this is not
                     // issued per-frame, so there is no thrash to dedup — and a
                     // skipped hide would leave the soft keyboard stuck open.
-                    android_jni::to_java_show_keyboard(false);
-                    self.os.last_ime_config = None;
+                    self.os.pending_ime_hide = true;
                 },
                 CxOsOp::SyncImeState {
                     text,
@@ -3496,6 +3508,7 @@ impl Default for CxOs {
             last_ime_height: 0.0,
             last_ime_visible: false,
             last_ime_config: None,
+            pending_ime_hide: false,
             media: CxAndroidMedia::default(),
             display: None,
             surface_alive: false,
@@ -3638,9 +3651,12 @@ pub struct CxOs {
     /// or `None` while the keyboard is requested-hidden. A focused `TextInput`
     /// re-issues `ShowTextIME` every draw; this dedups those so the JNI IME
     /// calls (and the inset-driven redraw loop they trigger) fire only on a
-    /// real change. Reset to `None` on `HideTextIME` and when Java reports the
-    /// keyboard closed.
+    /// real change. Reset to `None` once a `HideTextIME` goes through and when
+    /// Java reports the keyboard closed.
     pub last_ime_config: Option<TextInputConfig>,
+    /// Set by `HideTextIME`, which waits until after the next draw, so that moving focus
+    /// from one text input to another keeps the keyboard up instead of hiding it.
+    pub pending_ime_hide: bool,
     pub frame_time: i64,
     pub quit: bool,
     pub fullscreen: bool,
