@@ -6,7 +6,7 @@ use crate::makepad_draw::text::{
 use crate::text_input::{mark_band_rect, DrawTextMark, TextMark, TextMarkKind, TextMarkSet};
 use crate::{
     animator::*, makepad_derive_widget::*, makepad_draw::shader::draw_text::TextOverflow,
-    makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
+    makepad_draw::turtle::RowAlign, makepad_draw::*, widget::*, widget_tree::CxWidgetExt,
 };
 use std::rc::Rc;
 use unicode_segmentation::UnicodeSegmentation;
@@ -851,6 +851,16 @@ pub struct TextFlow {
     pub heading_margin: Inset,
     #[live(Inset{top:0.5,bottom:0.5,left:0.0,right:0.0})]
     pub paragraph_margin: Inset,
+    /// Collapses block margins like CSS does: neighboring ones share the larger one, and none
+    /// are added at the start or end of the flow, a list item, a quote, a code block or a table cell.
+    #[live(false)]
+    pub collapse_block_margins: bool,
+    /// The collapsed block margin that's applied right before the next content is drawn.
+    #[rust]
+    pending_block_margin: f64,
+    /// Whether no content has been drawn yet in the current flow, list item (past its marker), quote, code block or table cell.
+    #[rust]
+    is_at_block_start: bool,
 
     #[rust]
     area: Area,
@@ -969,7 +979,14 @@ impl TextFlow {
     /// Returns `None` (and does nothing) while the line budget still has room.
     /// Pair every call with [`Self::end_inline_content`].
     pub fn begin_inline_content(&mut self, cx: &mut Cx2d) -> Option<InlineContentHold> {
-        if self.max_lines == 0 || self.lines_drawn < self.max_lines {
+        let is_budget_spent = self.max_lines > 0 && self.lines_drawn >= self.max_lines;
+        // A new line past the budget can't hold anything, e.g., right after a list or quote ends.
+        if is_budget_spent && self.collapse_block_margins && Self::is_at_row_start(cx) {
+            self.content_truncated = true;
+            return None;
+        }
+        self.flush_block_margin(cx);
+        if !is_budget_spent {
             return None;
         }
         let restore_wrap = matches!(cx.turtle().layout().flow, Flow::Right { wrap: true, .. });
@@ -987,6 +1004,29 @@ impl TextFlow {
             clip_index,
             start_x: cx.turtle().pos().x,
         })
+    }
+
+    /// Whether the turtle is at the left edge of its row, so the next thing drawn opens a new visual line.
+    fn is_at_row_start(cx: &Cx2d) -> bool {
+        cx.turtle().pos().x - cx.turtle().inner_rect().pos.x <= 0.5
+    }
+
+    /// The block-start state that `end_inline_widget` puts back if a widget draws nothing.
+    pub(crate) fn block_start_state(&self) -> (bool, f64) {
+        (self.is_at_block_start, self.pending_block_margin)
+    }
+
+    /// Counts a drawn inline widget as content on its line. If it drew nothing, the block
+    /// start (and pending margin) that `begin_inline_content` used up are put back.
+    pub(crate) fn end_inline_widget(&mut self, drew_something: bool, block_start_state: (bool, f64)) {
+        if !self.collapse_block_margins {
+            return;
+        }
+        if drew_something {
+            self.first_thing_on_a_line = false;
+        } else if block_start_state.0 {
+            (self.is_at_block_start, self.pending_block_margin) = block_start_state;
+        }
     }
 
     /// Completes an inline-content draw begun with
@@ -1472,6 +1512,8 @@ impl TextFlow {
         self.table_row_is_header = false;
         self.table_is_first_row = false;
         self.cell_text_align_x = 0.0;
+        self.pending_block_margin = 0.0;
+        self.is_at_block_start = true;
     }
 
     pub fn push_size_rel_scale(&mut self, scale: f64) {
@@ -1812,9 +1854,11 @@ impl TextFlow {
 
     pub fn begin_code(&mut self, cx: &mut Cx2d) {
         self.draw_block.block_type = FlowBlockType::Code;
-        self.draw_block.begin(cx, self.code_walk, self.code_layout);
+        let walk = self.begin_block_box(cx, self.code_walk);
+        self.draw_block.begin(cx, walk, self.code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
         self.first_thing_on_a_line = true;
+        self.is_at_block_start = true;
     }
 
     pub fn end_code(&mut self, cx: &mut Cx2d) {
@@ -1826,25 +1870,90 @@ impl TextFlow {
         };
         self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
+        self.end_block_box(cx, self.code_walk);
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
+    }
+
+    /// Applies the pending block margin right before content is drawn,
+    /// or drops it if nothing's been drawn yet in the current container.
+    pub fn flush_block_margin(&mut self, cx: &mut Cx2d) {
+        if !self.collapse_block_margins {
+            return;
+        }
+        let margin = std::mem::take(&mut self.pending_block_margin);
+        if self.is_at_block_start {
+            self.is_at_block_start = false;
+        } else if margin > 0.0 {
+            cx.turtle_new_line_with_spacing(margin);
+        }
+    }
+
+    /// Collapses a block's top margin into the pending one, then applies or drops it.
+    fn begin_block_margin(&mut self, cx: &mut Cx2d, top: f64) {
+        self.pending_block_margin = self.pending_block_margin.max(top);
+        self.flush_block_margin(cx);
+    }
+
+    /// Ends a block: whatever comes next starts below it, after its bottom margin.
+    fn end_block_margin(&mut self, cx: &mut Cx2d, bottom: f64) {
+        cx.turtle_new_line();
+        self.first_thing_on_a_line = true;
+        self.is_at_block_start = false;
+        self.pending_block_margin = self.pending_block_margin.max(bottom);
+    }
+
+    /// Returns the walk to begin a block box with. When collapsing,
+    /// its vertical margins are handled as block margins instead.
+    fn begin_block_box(&mut self, cx: &mut Cx2d, walk: Walk) -> Walk {
+        if !self.collapse_block_margins {
+            return walk;
+        }
+        // A box only lines up with a list item's marker on a baseline-aligned row,
+        // so otherwise it starts on the row below the marker.
+        let is_after_marker = self.is_at_block_start && !self.first_thing_on_a_line;
+        if is_after_marker && !matches!(cx.turtle().flow(), Flow::Right { row_align: RowAlign::Baseline, .. }) {
+            cx.turtle_new_line();
+            self.first_thing_on_a_line = true;
+            if self.tracks_text() {
+                self.selection_tracker.push_newline();
+            }
+        }
+        self.begin_block_margin(cx, walk.margin.top);
+        Walk {
+            margin: Inset { top: 0.0, bottom: 0.0, ..walk.margin },
+            ..walk
+        }
+    }
+
+    /// Ends a block box begun with `begin_block_box`, dropping any trailing margin inside it.
+    fn end_block_box(&mut self, cx: &mut Cx2d, walk: Walk) {
+        if !self.collapse_block_margins {
+            return;
+        }
+        self.pending_block_margin = 0.0;
+        self.end_block_margin(cx, walk.margin.bottom);
     }
 
     pub fn begin_list_item(&mut self, cx: &mut Cx2d, dot: &str, pad: f64) {
         let fs = *self.font_sizes.last().unwrap_or(&self.font_size);
         let font_based_padding = fs as f64 * pad;
 
-        cx.begin_turtle(
-            self.list_item_walk,
-            Layout {
-                padding: Inset {
-                    left: self.list_item_layout.padding.left + font_based_padding,
-                    ..self.list_item_layout.padding
-                },
-                ..self.list_item_layout
-            },
-        );
+        let mut walk = self.list_item_walk;
+        let mut padding = Inset {
+            left: self.list_item_layout.padding.left + font_based_padding,
+            ..self.list_item_layout.padding
+        };
+        if self.collapse_block_margins {
+            // A list item doesn't draw a box, so its vertical padding acts as margin too.
+            self.begin_block_margin(cx, walk.margin.top + padding.top);
+            walk.margin.top = 0.0;
+            walk.margin.bottom = 0.0;
+            padding.top = 0.0;
+            padding.bottom = 0.0;
+        }
+        cx.begin_turtle(walk, Layout { padding, ..self.list_item_layout });
 
         cx.turtle_mut()
             .move_right_down(dvec2(-font_based_padding, 0.0));
@@ -1871,17 +1980,27 @@ impl TextFlow {
         // Note: deliberately NOT pushed onto `area_stack` — `end_list_item` never pops,
         // so a push here would leak an entry per list item and let a stray close tag
         // (unbalanced HTML) pop the wrong block's area in `end_code`/`end_quote`.
+        self.is_at_block_start = true;
     }
 
     pub fn end_list_item(&mut self, cx: &mut Cx2d) {
         cx.end_turtle();
         self.first_thing_on_a_line = true;
+        if self.collapse_block_margins {
+            // No box here either, so the last child's bottom margin collapses with the item's own.
+            self.end_block_margin(cx, self.list_item_walk.margin.bottom + self.list_item_layout.padding.bottom);
+        }
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
     }
 
     pub fn new_line_collapsed(&mut self, cx: &mut Cx2d) {
+        // Nothing's been drawn in this container yet, so there's no line to end.
+        // Right after a list item's marker, that keeps the block on the marker's row.
+        if self.collapse_block_margins && self.is_at_block_start {
+            return;
+        }
         cx.turtle_new_line();
         self.first_thing_on_a_line = true;
         if self.tracks_text() {
@@ -1893,6 +2012,7 @@ impl TextFlow {
     /// gap matches the line spacing of the most recently drawn text.
     /// This is intended for `<br>` tags in HTML rendering.
     pub fn new_line_with_wrap_spacing(&mut self, cx: &mut Cx2d) {
+        self.flush_block_margin(cx);
         let spacing = cx.turtle().wrap_spacing();
         cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
@@ -1902,6 +2022,11 @@ impl TextFlow {
     }
 
     pub fn new_line_collapsed_with_spacing(&mut self, cx: &mut Cx2d, spacing: f64) {
+        if self.collapse_block_margins {
+            self.new_line_collapsed(cx);
+            self.pending_block_margin = self.pending_block_margin.max(spacing);
+            return;
+        }
         cx.turtle_new_line_with_spacing(spacing);
         self.first_thing_on_a_line = true;
         if self.tracks_text() {
@@ -1911,14 +2036,19 @@ impl TextFlow {
 
     pub fn sep(&mut self, cx: &mut Cx2d) {
         self.draw_block.block_type = FlowBlockType::Sep;
-        self.draw_block.draw_walk(cx, self.sep_walk);
+        let walk = self.begin_block_box(cx, self.sep_walk);
+        self.draw_block.draw_walk(cx, walk);
+        self.end_block_box(cx, self.sep_walk);
     }
 
     pub fn begin_quote(&mut self, cx: &mut Cx2d) {
         self.draw_block.block_type = FlowBlockType::Quote;
+        let walk = self.begin_block_box(cx, self.quote_walk);
         self.draw_block
-            .begin(cx, self.quote_walk, self.quote_layout);
+            .begin(cx, walk, self.quote_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
+        self.first_thing_on_a_line = true;
+        self.is_at_block_start = true;
     }
 
     pub fn end_quote(&mut self, cx: &mut Cx2d) {
@@ -1928,6 +2058,7 @@ impl TextFlow {
         };
         self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
+        self.end_block_box(cx, self.quote_walk);
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
@@ -1936,13 +2067,15 @@ impl TextFlow {
     pub fn begin_table(&mut self, cx: &mut Cx2d, num_columns: usize) {
         self.table_num_columns = num_columns;
         self.table_is_first_row = true;
-        cx.begin_turtle(self.table_walk, self.table_layout);
+        let walk = self.begin_block_box(cx, self.table_walk);
+        cx.begin_turtle(walk, self.table_layout);
     }
 
     pub fn end_table(&mut self, cx: &mut Cx2d) {
         cx.end_turtle();
         self.table_num_columns = 0;
         self.in_table_header = false;
+        self.end_block_box(cx, self.table_walk);
         if self.tracks_text() {
             self.selection_tracker.push_newline();
         }
@@ -2062,12 +2195,16 @@ impl TextFlow {
         cx.begin_turtle(walk, layout);
         self.first_thing_on_a_line = true;
         self.cell_text_align_x = align_x;
+        self.is_at_block_start = true;
     }
 
     pub fn end_table_cell(&mut self, cx: &mut Cx2d) {
         let cell_rect = cx.end_turtle();
         self.table_row_cell_rects.push(cell_rect);
         self.cell_text_align_x = 0.0;
+        // Drop any trailing block margin inside the cell; the cell itself counts as content.
+        self.pending_block_margin = 0.0;
+        self.is_at_block_start = false;
     }
 
     pub fn draw_item_counted(&mut self, cx: &mut Cx2d, template: LiveId) -> LiveId {
@@ -2276,11 +2413,25 @@ impl TextFlow {
             if (text == " " || text == "") && self.first_thing_on_a_line {
                 return;
             }
-            let text = if self.first_thing_on_a_line {
-                text.trim_start().trim_end_matches("\n")
-            } else {
+            let is_at_line_start = self.first_thing_on_a_line || (self.collapse_block_margins && self.is_at_block_start);
+            let text = if !is_at_line_start {
                 text.trim_end_matches("\n")
+            } else if self.collapse_block_margins {
+                // Only html whitespace collapses, so `&nbsp;` and full-width spaces stay as content.
+                text.trim_start_matches(crate::makepad_html::is_html_whitespace).trim_end_matches("\n")
+            } else {
+                text.trim_start().trim_end_matches("\n")
             };
+            // Whitespace that starts a line or follows a list item's marker isn't content.
+            if self.collapse_block_margins && is_at_line_start && text.is_empty() {
+                return;
+            }
+            // A run that would start a new line past the budget is dropped before its margin applies.
+            if self.collapse_block_margins && self.max_lines > 0 && self.lines_drawn >= self.max_lines && Self::is_at_row_start(cx) {
+                self.content_truncated = true;
+                return;
+            }
+            self.flush_block_margin(cx);
 
             // Select the appropriate text style based on bold/italic/fixed state
             let (text_style, style_slot) = if self.fixed.value() > 0 {
@@ -2344,13 +2495,7 @@ impl TextFlow {
             // Widget-level max_lines: compute how many layouter rows this run
             // is allowed. A "continuation" run starts mid-line (turtle x > left
             // edge), so its first row shares the current visual line.
-            let mut is_continuation = if self.max_lines > 0 {
-                let turtle_pos = cx.turtle().pos();
-                let turtle_rect = cx.turtle().inner_rect();
-                (turtle_pos.x - turtle_rect.pos.x) > 0.5
-            } else {
-                false
-            };
+            let mut is_continuation = self.max_lines > 0 && !Self::is_at_row_start(cx);
 
             // A continuation run joins a visual line that something else
             // already opened. When the opener was not a text run — an inline

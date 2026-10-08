@@ -376,7 +376,7 @@ impl HtmlDoc {
 /// `char::is_whitespace` follows Unicode, which also covers U+00A0 and
 /// U+3000. Using it here collapsed `&nbsp;` away and ate the full-width
 /// spaces in CJK text, neither of which HTML permits.
-fn is_html_whitespace(c: char) -> bool {
+pub fn is_html_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{c}')
 }
 
