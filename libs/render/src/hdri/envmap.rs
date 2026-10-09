@@ -65,12 +65,62 @@ pub struct GeneratedEnvMap {
 /// hands the renderer for a generated map
 /// (`Renderer::register_generated_environment`; a procedural preset the
 /// renderer bakes itself goes the same way). `run` spreads the rows of the
-/// bake and then of the key's reach, so it is called twice.
+/// bake and then of the key's reach, so it is called twice. No pictures: an
+/// image light draws plain. See [`bake_generated_env_map_with`].
 pub fn bake_generated_env_map(params: &HdriParams, width: usize, run: impl Fn(usize, &(dyn Fn(usize) + Sync))) -> GeneratedEnvMap {
-    let env = Env::new(params);
+    bake_generated_env_map_with(params, &ImageSet::default(), width, run)
+}
+
+/// [`bake_generated_env_map`] with the pictures the params name by key taken
+/// from `images` (1b: image lights). A key the set lacks draws as it does in
+/// the app: the plain light. [`ImageStore`] fills such a set from files.
+pub fn bake_generated_env_map_with(params: &HdriParams, images: &ImageSet, width: usize, run: impl Fn(usize, &(dyn Fn(usize) + Sync))) -> GeneratedEnvMap {
+    let env = Env::new_with(params, images);
     let map = env.bake_par(width, &run);
     let keyless = env.bake_keyless_par(&map, &run);
     GeneratedEnvMap { map, keyless, sun: env.sun(), daylight: env.sun_dir() }
+}
+
+/// A host's loaded pictures: the set [`Env::new_with`] reads, and the keys
+/// whose file could not be read. Those are not tried again, so a map that
+/// is re-baked often (the sandbox's day cycle) does not go to the disk for
+/// a missing file on every bake. `Env` itself still opens no file, and
+/// neither does the store: the host reads (`load_missing`'s `read`) and
+/// hands `set` to the bake.
+#[derive(Clone, Debug, Default)]
+pub struct ImageStore {
+    pub set: ImageSet,
+    failed: std::collections::HashSet<String>,
+}
+
+impl ImageStore {
+    /// Reads every picture `params` names that is neither loaded nor failed.
+    /// `read` gives a key's bytes: the host resolves the key (the app's keys
+    /// are full paths; the sandbox reads a relative key inside the game's
+    /// folder) and bounds the read; an `Err` (a missing file, a key the host
+    /// refuses) is a failed file. A light's picture is decoded as the app
+    /// decodes it (`image::decode_image`: the file's orientation, its alpha),
+    /// shrunk to `MAX_LIGHT_IMAGE_SIDE`. Returns one line per file that
+    /// failed in this call.
+    pub fn load_missing(&mut self, params: &HdriParams, read: &dyn Fn(&str) -> Result<Vec<u8>, String>) -> Vec<String> {
+        let mut problems = Vec::new();
+        for key in super::image_light::referenced_keys(params) {
+            if self.set.contains(&key) || self.failed.contains(&key) {
+                continue;
+            }
+            match read(&key).and_then(|bytes| super::image::decode_image(&bytes)) {
+                Ok(map) => {
+                    let map = super::image_light::shrink_to(map, super::image_light::MAX_LIGHT_IMAGE_SIDE);
+                    self.set.insert(key, map);
+                }
+                Err(error) => {
+                    problems.push(format!("picture {key}: {error}"));
+                    self.failed.insert(key);
+                }
+            }
+        }
+        problems
+    }
 }
 
 /// Loads an equirect as an engine environment map (EXR, Radiance .hdr, or
@@ -685,5 +735,60 @@ mod tests {
         let mut copy = short.clone();
         remove_sun(&mut copy, &EnvSun { dir: vec3f(0.0, 1.0, 0.0), radiance: vec3f(1.0, 1.0, 1.0), cos_radius: 0.9, facing: 1.0, cos_cover: 0.9 });
         assert_eq!(copy, short);
+    }
+
+    /// A studio map with one large image light whose picture is `key`.
+    fn picture_light(key: &str) -> HdriParams {
+        let mut p = HdriParams::default();
+        p.mode = "studio".to_string();
+        p.lights.push(LightParams {
+            width_deg: 60.0,
+            height_deg: 60.0,
+            image: Some(LightImageParams { key: key.to_string(), ..LightImageParams::default() }),
+            ..LightParams::default()
+        });
+        p
+    }
+
+    #[test]
+    fn a_host_bakes_with_the_pictures_its_params_name() {
+        let dir = std::env::temp_dir().join(format!("makepad_hdri_envmap_images_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A picture that is black on its left half and white on its right.
+        let png = Cx::encode_rgba_as_png(2, 1, &[0, 0, 0, 255, 255, 255, 255, 255]).unwrap();
+        std::fs::write(dir.join("half.png"), png).unwrap();
+        let params = picture_light("half.png");
+        // The host reads a key's bytes (here: from the test's folder; the
+        // sandbox reads inside the game's folder, bounded); the store decodes.
+        let read = |key: &str| std::fs::read(dir.join(key)).map_err(|e| e.to_string());
+        let mut store = ImageStore::default();
+        // The first call reads the file: the picture is in the set under its key.
+        assert!(store.load_missing(&params, &read).is_empty());
+        assert!(store.set.contains("half.png"));
+        // With the pictures the light shows its picture; without them it is plain.
+        let with = bake_generated_env_map_with(&params, &store.set, 64, serial);
+        let plain = bake_generated_env_map(&params, 64, serial);
+        assert!(with.map != plain.map, "the picture shows in the bake");
+        assert!(plain == bake_generated_env_map_with(&params, &ImageSet::default(), 64, serial), "bake_generated_env_map is the empty set");
+        // A loaded picture is not read again: the file may go.
+        std::fs::remove_file(dir.join("half.png")).unwrap();
+        assert!(store.load_missing(&params, &read).is_empty());
+        assert!(store.set.contains("half.png"));
+        // A file that cannot be read is reported once, and its light stays plain.
+        let missing = picture_light("gone.png");
+        let problems = store.load_missing(&missing, &read);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("gone.png"), "{problems:?}");
+        assert!(store.load_missing(&missing, &read).is_empty(), "a failed file is not tried again");
+        assert!(bake_generated_env_map_with(&missing, &store.set, 64, serial) == bake_generated_env_map(&missing, 64, serial));
+        // A key the host refuses to read (the sandbox refuses one outside the
+        // game's folder) fails like a missing file: reported, its light plain.
+        let outside = picture_light("../outside.png");
+        let refuse = |key: &str| -> Result<Vec<u8>, String> { Err(format!("`{key}` must be a relative path inside the game's folder")) };
+        let problems = store.load_missing(&outside, &refuse);
+        assert!(problems.len() == 1 && problems[0].contains("inside the game's folder"), "{problems:?}");
+        assert!(!store.set.contains("../outside.png"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

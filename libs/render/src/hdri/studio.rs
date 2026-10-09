@@ -24,6 +24,7 @@ use crate::sky::luminance;
 use super::shaped::ShapedLight;
 use super::gels::{gel_stack, shifted_kelvin};
 use super::spectrum::light_source_rgb;
+use super::image_light::{ImageSet, LightImage};
 
 /// Strength of a full ±1 tint: at +1 green is cut to about a third of red and blue.
 const TINT_STRENGTH: f32 = 0.4;
@@ -215,10 +216,17 @@ impl Studio {
     /// A stroke (1b) is placed by its points, not by its azimuth and elevation, so its
     /// cone, its radiance (the same meaning), its facing share and its covering cone
     /// come from the shape core instead.
+    /// No pictures: an image light is drawn plain (see `new_with`).
     pub fn new(studio: &StudioParams, lights: &[LightParams]) -> Studio {
+        Studio::new_with(studio, lights, &ImageSet::default())
+    }
+
+    /// `new` with the pictures image lights show (`Env::new_with` passes
+    /// them through). A light whose key is not in `images` is drawn plain.
+    pub(super) fn new_with(studio: &StudioParams, lights: &[LightParams], images: &ImageSet) -> Studio {
         let rgb = |c: [f32; 3]| vec3f(c[0].max(0.0), c[1].max(0.0), c[2].max(0.0));
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
-        let prepared: Vec<PreparedLight> = enabled.iter().map(|l| PreparedLight::new(l)).collect();
+        let prepared: Vec<PreparedLight> = enabled.iter().map(|l| PreparedLight::new(l, images)).collect();
         let key_index = enabled.iter().position(|l| l.key && l.blend() == Blend::Add);
         let key = key_index.map(|i| {
             let l = enabled[i];
@@ -274,6 +282,8 @@ impl Studio {
     ///   not at all outside. That is how a black flag cuts a softbox or the sky.
     /// - Polygons, strokes and scrims follow the same rules through the shape core,
     ///   except that an Add scrim is cloth: it hides what is behind it, then glows.
+    /// - An image light's colour is its picture at that point of its box, times
+    ///   the light's colour; the picture's alpha, when it masks, fades the light in.
     pub fn apply_lights(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
         self.apply_lights_skipping(dir, base, None)
     }
@@ -289,26 +299,28 @@ impl Studio {
     fn apply_lights_skipping(&self, dir: Vec3f, base: Vec3f, skip: Option<usize>) -> Vec3f {
         let mut c = base;
         for (i, light) in self.lights.iter().enumerate() {
-            if let Some(shaped) = &light.shaped {
-                // The key left out (`skip`, N3) loses its own light, while
-                // whatever it hides stays hidden (B5's scrim is cloth in front
-                // of what is behind it): `ShapedLight::hide`. For a light that
-                // hides nothing that is the same as skipping it.
-                c = if skip == Some(i) { shaped.hide(dir, c) } else { shaped.compose(dir, c, light.color) };
+            // The key left out (`skip`, N3) loses its own light, while whatever
+            // it hides stays hidden (B5's scrim): `PreparedLight::hide`. For a
+            // light that hides nothing (an A3 light, a polygon, a stroke, a
+            // picture) that is the same as skipping it.
+            let left_out = skip == Some(i);
+            let Some(image) = &light.image else {
+                c = if left_out { light.hide(dir, c) } else { light.over(dir, c, light.color) };
                 continue;
-            }
-            if skip == Some(i) {
-                continue;
-            }
+            };
+            // The picture is only looked up where the light can reach.
             let Some(p) = project(&light.frame, dir) else { continue };
-            let m = light.mask(p);
-            if !(m > 0.0) {
+            if !light.reaches(dir, p) {
                 continue;
             }
-            match light.blend {
-                Blend::Add => c += light.color * m,
-                Blend::Multiply => c *= Vec3f::all(1.0) + (light.color - Vec3f::all(1.0)) * m,
+            let (texel, alpha) = image.shade(p, light.half);
+            if !(alpha > 0.0) {
+                continue;
             }
+            let lit = if left_out { light.hide(dir, c) } else { light.over(dir, c, light.color * texel) };
+            // Alpha fades the whole light in. For Add and Multiply alike that
+            // is a mix toward what the light makes of the pixel.
+            c = if alpha >= 1.0 { lit } else { c + (lit - c) * alpha };
         }
         c
     }
@@ -453,10 +465,12 @@ struct PreparedLight {
     color: Vec3f,
     /// Polygons, strokes and scrims (1b): the shape core draws the light.
     shaped: Option<ShapedLight>,
+    /// A picture as the light's content (1b); None draws the plain colour.
+    image: Option<LightImage>,
 }
 
 impl PreparedLight {
-    fn new(l: &LightParams) -> PreparedLight {
+    fn new(l: &LightParams, images: &ImageSet) -> PreparedLight {
         let width = sane(l.width_deg, 0.1, 170.0);
         let height = sane(l.height_deg, 0.1, 170.0);
         let half = vec2f((0.5 * width).to_radians().tan(), (0.5 * height).to_radians().tan());
@@ -488,6 +502,43 @@ impl PreparedLight {
             hotspot: HOTSPOT_FALLOFF * sane(l.hotspot, 0.0, 1.0),
             color: light_color(l),
             shaped: ShapedLight::new(l),
+            image: l.image.as_ref().and_then(|image| LightImage::new(image, images)),
+        }
+    }
+
+    /// This light drawn over `acc` in the colour `color`.
+    fn over(&self, dir: Vec3f, acc: Vec3f, color: Vec3f) -> Vec3f {
+        if let Some(shaped) = &self.shaped {
+            return shaped.compose(dir, acc, color);
+        }
+        let Some(p) = project(&self.frame, dir) else { return acc };
+        let m = self.mask(p);
+        if !(m > 0.0) {
+            return acc;
+        }
+        match self.blend {
+            Blend::Add => acc + color * m,
+            Blend::Multiply => acc * (Vec3f::all(1.0) + (color - Vec3f::all(1.0)) * m),
+        }
+    }
+
+    /// This light over `acc` with its own light left out: what the key leaves
+    /// of the map in the engine's keyless lighting copy (plan 2's N3). What it
+    /// hides stays hidden (a scrim's cloth, through the shape core); an A3
+    /// light adds only, so it leaves `acc`.
+    fn hide(&self, dir: Vec3f, acc: Vec3f) -> Vec3f {
+        match &self.shaped {
+            Some(shaped) => shaped.hide(dir, acc),
+            None => acc,
+        }
+    }
+
+    /// A cheap test that the light can touch `dir`, whose tangent-plane point
+    /// is `p`: the cull cone of a shaped light, the reach box of the others.
+    fn reaches(&self, dir: Vec3f, p: Vec2f) -> bool {
+        match &self.shaped {
+            Some(shaped) => shaped.cull().contains(dir),
+            None => p.x.abs() <= self.reach.x && p.y.abs() <= self.reach.y,
         }
     }
 

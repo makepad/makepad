@@ -52,8 +52,10 @@ pub mod prepare;
 pub mod gels;
 pub mod spectrum;
 pub mod cri;
+pub mod image_light;
 
 pub use params::*;
+pub use image_light::ImageSet;
 // hdri::bake_env_map, load_env_map, detect_sun, remove_sun, as the spec names them.
 pub use envmap::*;
 
@@ -107,12 +109,19 @@ pub struct Env {
 }
 
 impl Env {
-    /// Clamps a copy of `params` and builds every layer once.
+    /// An environment that uses no pictures: `new_with` over an empty set.
     pub fn new(params: &HdriParams) -> Env {
+        Env::new_with(params, &ImageSet::default())
+    }
+
+    /// Clamps a copy of `params` and builds every layer once. `images` holds
+    /// the pictures the params name by key (image lights); a key that is not
+    /// in it draws the plain light. Still pure: no file is opened here.
+    pub fn new_with(params: &HdriParams, images: &ImageSet) -> Env {
         let mut params = params.clone();
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
-        let studio = studio::Studio::new(&params.studio, &params.lights);
+        let studio = studio::Studio::new_with(&params.studio, &params.lights, images);
         let (atmo, clouds, night, cloud_sun, cloud_ambient) = match params.mode() {
             Mode::Sky => {
                 let sky = &params.sky;

@@ -34,6 +34,11 @@ pub const LIGHT_SHAPE_NAMES: &[&str] = &["rect", "disc", "ring", "polygon", "str
 /// Accepted values of `LightParams::blend`; the first is the fallback.
 pub const BLEND_NAMES: &[&str] = &["add", "multiply"];
 
+/// Accepted values of `LightImageParams::fit`; the first is the fallback.
+pub const IMAGE_FIT_NAMES: &[&str] = &["stretch", "fit", "fill"];
+/// Longest image key kept, in characters: a path, with room to spare.
+const IMAGE_KEY_LIMIT: usize = 1024;
+
 /// Longest light name kept, in characters; a list row has no room for more.
 const LIGHT_NAME_LIMIT: usize = 64;
 
@@ -220,6 +225,68 @@ pub struct LightParams {
     /// about 53), 0.5 about 80, 1 a full-spectrum one (about 95). Only the
     /// source `led` reads it. None = `spectrum::LED_QUALITY_DEFAULT`.
     pub source_quality: Option<f32>,
+    /// A picture as the light's content (1b): see `LightImageParams`.
+    pub image: Option<LightImageParams>,
+}
+
+/// A picture shown by a light: it fills the light's box, is cut by the
+/// light's shape, and is scaled to mean luminance 1 so the light's colour
+/// and `intensity_ev` keep their meaning.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct LightImageParams {
+    /// The picture's key in the `ImageSet` given to `Env::new_with` (the app
+    /// uses the file's path), at most 1024 characters. "" or a key that is
+    /// not loaded draws the plain light.
+    pub key: String,
+    /// "stretch" (fill the box, ignoring the picture's aspect) | "fit" (the
+    /// whole picture inside the box) | "fill" (cover the box, cropping).
+    pub fit: String,
+    /// The picture's alpha cuts the light out; false ignores alpha.
+    pub alpha_as_mask: bool,
+}
+
+impl Default for LightImageParams {
+    fn default() -> Self {
+        LightImageParams { key: String::new(), fit: "stretch".to_string(), alpha_as_mask: false }
+    }
+}
+
+/// Typed view of `LightImageParams::fit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageFit {
+    Stretch,
+    Fit,
+    Fill,
+}
+
+impl ImageFit {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImageFit::Stretch => "stretch",
+            ImageFit::Fit => "fit",
+            ImageFit::Fill => "fill",
+        }
+    }
+}
+
+impl LightImageParams {
+    pub fn fit(&self) -> ImageFit {
+        if is_choice(&self.fit, "fit") {
+            ImageFit::Fit
+        } else if is_choice(&self.fit, "fill") {
+            ImageFit::Fill
+        } else {
+            ImageFit::Stretch
+        }
+    }
+
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        if self.key.chars().count() > IMAGE_KEY_LIMIT {
+            self.key = self.key.chars().take(IMAGE_KEY_LIMIT).collect();
+            f.push(prefix, "key");
+        }
+        f.choice(prefix, "fit", &mut self.fit, IMAGE_FIT_NAMES);
+    }
 }
 
 /// Widest a polygon or a scrim may be, each way, in degrees. clamp() holds
@@ -655,6 +722,7 @@ impl Default for LightParams {
             gels: None,
             source: None,
             source_quality: None,
+            image: None,
         }
     }
 }
@@ -944,6 +1012,9 @@ impl LightParams {
         if let Some(quality) = self.source_quality.as_mut() {
             f.range(prefix, "source_quality", quality, 0.0, 1.0, super::spectrum::LED_QUALITY_DEFAULT);
         }
+        if let Some(image) = self.image.as_mut() {
+            image.clamp_fields(&join_path(prefix, "image"), f);
+        }
     }
 }
 
@@ -1082,6 +1153,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "lights[].polygon" => json_tree(&PolygonParams::default()).ok(),
         "lights[].stroke" => json_tree(&StrokeParams::default()).ok(),
         "lights[].scrim" => json_tree(&ScrimParams::default()).ok(),
+        "lights[].image" => json_tree(&LightImageParams::default()).ok(),
         _ => None,
     }
 }
@@ -1901,5 +1973,40 @@ mod source_param_tests {
             .unwrap();
         assert!(report.is_empty(), "{report:?}");
         assert_eq!((knob.lights[0].source.as_deref(), knob.lights[0].source_quality), (Some("led"), Some(0.9)));
+    }
+
+    #[test]
+    fn image_blocks_clamp_and_round_trip() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams {
+            image: Some(LightImageParams { key: "C:\\pics\\window.png".to_string(), fit: " FILL".to_string(), alpha_as_mask: true }),
+            ..LightParams::default()
+        });
+        assert_eq!(p.lights[0].image.as_ref().unwrap().fit(), ImageFit::Fill, "the accessor reads a loose spelling");
+        assert_eq!(p.clamp(), ["lights[0].image.fit"]);
+        let image = p.lights[0].image.clone().unwrap();
+        assert_eq!((image.key.as_str(), image.fit.as_str(), image.alpha_as_mask), ("C:\\pics\\window.png", "fill", true));
+        // A key is a path: backslashes and spaces survive the file format.
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
+        p.lights[0].image.as_mut().unwrap().fit = "tile".to_string();
+        p.lights[0].image.as_mut().unwrap().key = "k".repeat(2000);
+        assert_eq!(p.clamp(), ["lights[0].image.key", "lights[0].image.fit"]);
+        assert_eq!(p.lights[0].image.as_ref().unwrap().fit, "stretch");
+        assert_eq!(p.lights[0].image.as_ref().unwrap().key.len(), 1024);
+        assert_eq!(ImageFit::Fit.as_str(), IMAGE_FIT_NAMES[1]);
+        let plain = HdriParams { lights: vec![LightParams::default()], ..HdriParams::default() };
+        assert!(!plain.to_json().contains("image"));
+    }
+
+    #[test]
+    fn a_partial_image_patch_is_completed_from_the_defaults() {
+        let (merged, report) = HdriParams::default()
+            .merge_json(r#"{"lights": [{"image": {"key": "a.png"}}]}"#)
+            .unwrap();
+        assert_eq!(merged.lights[0].image, Some(LightImageParams { key: "a.png".to_string(), ..LightImageParams::default() }));
+        assert!(report.is_empty(), "{report:?}");
+        let (merged, report) = merged.merge_json(r#"{"lights": [{"image": {"key": "a.png", "fit": "fit", "zoom": 2}}]}"#).unwrap();
+        assert_eq!(merged.lights[0].image.as_ref().unwrap().fit(), ImageFit::Fit);
+        assert_eq!(report, ["ignored: lights[0].image.zoom"]);
     }
 }

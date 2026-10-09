@@ -3,9 +3,10 @@
 //! formats the image cache decodes, and Radiance `.hdr` (through `ibl::load_hdr`). Writers live
 //! in `export.rs`.
 //!
-//! Everything here is linear Rec.709 radiance in an `EnvMap` (alpha 1). sRGB appears only where
-//! 8-bit files come in. Nothing here samples, resizes or decodes RGBE itself: `EnvMap` and `ibl`
-//! already do that.
+//! Everything here is linear Rec.709 radiance in an `EnvMap`. Alpha is 1 but for the pictures of
+//! image lights (1b): an 8-bit file's alpha and an EXR's A channel are kept, straight, and
+//! `load_equirect` makes an environment opaque again. sRGB appears only where 8-bit files come in.
+//! Nothing here samples, resizes or decodes RGBE itself: `EnvMap` and `ibl` already do that.
 //!
 //! Two conventions meet here. The engine (`ibl::dir_to_equirect_uv`) puts −Z at the image centre
 //! and +X at u = 0.75; files (Blender, Unity, three.js, DrawPbr) put +X at the centre. They differ
@@ -122,9 +123,10 @@ fn checked_texels(width: usize, height: usize) -> Result<usize, String> {
 }
 
 /// Reads an OpenEXR through makepad-openexr. It takes the first part with R, G and B channels or,
-/// failing that, a luminance-only Y part read as grey; samples may be half, float or uint. The
-/// image is the part's data window, whatever its origin; the display window is ignored. The
-/// columns are returned as the file holds them (the file convention, +X at the centre).
+/// failing that, a luminance-only Y part read as grey; samples may be half, float or uint. An "A"
+/// channel in that part is read as straight alpha (1b). The image is the part's data window,
+/// whatever its origin; the display window is ignored. The columns are returned as the file
+/// holds them (the file convention, +X at the centre).
 /// The reader handles scanline files with no, ZIP, ZIPS or PXR24 compression. PIZ, DWA and tiled
 /// files fail with a message that points at `.hdr`, which always imports.
 pub fn read_exr(bytes: &[u8]) -> Result<EnvMap, String> {
@@ -158,13 +160,22 @@ pub fn read_exr(bytes: &[u8]) -> Result<EnvMap, String> {
     if planes.iter().any(|plane| plane.len() != count) {
         return Err(format!("EXR: channel sizes do not match the {width}x{height} data window"));
     }
+    // Alpha (1b, B14): an "A" channel in the same part, for the pictures of
+    // image lights. OpenEXR stores colour premultiplied by it; the pictures
+    // want it straight, as the 8-bit decodes give it, so the colour is divided
+    // back out where a texel is partly covered. `load_equirect` multiplies it
+    // in again. A file without A (or with an A of another size) is opaque.
+    let alpha = take_channel(&mut part, "A");
+    let alpha = if alpha.len() == count { alpha } else { Vec::new() };
     let data = (0..count)
         .map(|i| {
+            let a = alpha.get(i).map_or(1.0, |&a| if a.is_finite() { a.clamp(0.0, 1.0) } else { 1.0 });
+            let straight = |c: f32| if a > 0.0 && a < 1.0 { (c / a).min(65504.0) } else { c };
             [
-                sanitize_radiance(planes[0][i]),
-                sanitize_radiance(planes[1][i]),
-                sanitize_radiance(planes[2][i]),
-                1.0,
+                straight(sanitize_radiance(planes[0][i])),
+                straight(sanitize_radiance(planes[1][i])),
+                straight(sanitize_radiance(planes[2][i])),
+                a,
             ]
         })
         .collect();
@@ -193,8 +204,9 @@ fn take_channel(part: &mut ExrPart, name: &str) -> Vec<f32> {
 /// - Radiance (`#?`) through `ibl::load_hdr`, with a fresh 1 GiB `DecodeBudget` (the app has no
 ///   document budget to charge; `load_hdr`'s own size caps still apply);
 /// - anything else `decode_image_from_data` knows (PNG, JPEG, WebP, GIF, BMP, QOI, ICO). Its
-///   8-bit sRGB values are linearised with the exact sRGB curve, and alpha is dropped. Animated
-///   files are refused, and so is anything over the 64 Mpx cap (as for EXR).
+///   8-bit sRGB values are linearised with the exact sRGB curve, and alpha is kept in the fourth
+///   channel (opaque files read 1.0). Animated files are refused, and so is anything over the
+///   64 Mpx cap (as for EXR).
 pub fn decode_image(bytes: &[u8]) -> Result<EnvMap, String> {
     if bytes.starts_with(&EXR_MAGIC) {
         return read_exr(bytes);
@@ -222,7 +234,9 @@ pub fn decode_image(bytes: &[u8]) -> Result<EnvMap, String> {
                 linear[((packed >> 16) & 0xff) as usize],
                 linear[((packed >> 8) & 0xff) as usize],
                 linear[(packed & 0xff) as usize],
-                1.0,
+                // Straight (not premultiplied) alpha, as the decoder packs it:
+                // an image light may use it to cut the light out (B14).
+                (packed >> 24) as f32 / 255.0,
             ]
         })
         .collect();
@@ -248,7 +262,25 @@ pub fn load_equirect(path: &Path) -> Result<EnvMap, String> {
             file.height
         ));
     }
-    Ok(roll_quarter(&file, false))
+    let mut map = roll_quarter(&file, false);
+    make_opaque(&mut map);
+    Ok(map)
+}
+
+/// Makes a loaded environment opaque: a partly covered texel shows its colour over black, as a
+/// premultiplied EXR stores it. Alpha only means something for the pictures of image lights (1b),
+/// which come through `load_image`. `load_equirect` ends with this, and so must a host that
+/// decodes an equirect itself (the sandbox's bounded read: `decode_image`, `roll_quarter`, this).
+pub fn make_opaque(map: &mut EnvMap) {
+    for texel in &mut map.data {
+        let a = texel[3];
+        if a < 1.0 {
+            texel[0] *= a;
+            texel[1] *= a;
+            texel[2] *= a;
+        }
+        texel[3] = 1.0;
+    }
 }
 
 #[cfg(test)]
@@ -582,6 +614,54 @@ mod tests {
         let path = dir.join("pano.jpg");
         std::fs::write(&path, TWO_BLOCK_JPG).unwrap();
         assert_eq!(load_equirect(&path).unwrap(), roll_quarter(&env, false));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn eight_bit_files_keep_their_alpha_and_equirects_are_opaque() {
+        // A half-transparent white texel and a fully transparent one.
+        let png = Cx::encode_rgba_as_png(2, 1, &[255, 255, 255, 128, 0, 0, 0, 0]).unwrap();
+        let picture = decode_image(&png).unwrap();
+        let white = texel(&picture, 0, 0);
+        assert!(white[..3].iter().all(|c| (c - 1.0).abs() < 1.0e-6), "straight alpha: the colour is not darkened by it: {white:?}");
+        assert!((white[3] - 128.0 / 255.0).abs() < 1.0e-6);
+        assert_eq!(texel(&picture, 1, 0)[3], 0.0);
+        // The same file through load_image keeps it; as an environment (2:1) it is opaque.
+        let dir = scratch_dir("alpha");
+        let path = dir.join("cutout.png");
+        std::fs::write(&path, &png).unwrap();
+        assert_eq!(load_image(&path).unwrap(), picture);
+        let environment = load_equirect(&path).unwrap();
+        assert!(environment.data.iter().all(|t| t[3] == 1.0), "{:?}", environment.data);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn exr_alpha_is_read_straight_and_equirects_stay_premultiplied() {
+        // OpenEXR stores colour premultiplied by A: a half-covered texel of
+        // straight colour 2.0 is stored as 1.0 with A 0.5. Four wide, so the
+        // equirect roll below is an exact column copy.
+        let colour = vec![1.0f32, 0.0, 3.0, 3.0, 1.0, 0.0, 3.0, 3.0];
+        let part = ExrPart::new(None, 4, 2, Compression::None, vec![
+            ExrChannel::float("A", vec![0.5, 0.0, 1.0, 1.0, 0.5, 0.0, 1.0, 1.0]),
+            ExrChannel::float("B", colour.clone()),
+            ExrChannel::float("G", colour.clone()),
+            ExrChannel::float("R", colour),
+        ]);
+        let bytes = write_to_vec(&ExrImage::single(part)).unwrap();
+        let picture = read_exr(&bytes).unwrap();
+        assert_eq!(texel(&picture, 0, 0), [2.0, 2.0, 2.0, 0.5], "straight, as the 8-bit decodes give it");
+        assert_eq!(texel(&picture, 1, 0), [0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(texel(&picture, 2, 0), [3.0, 3.0, 3.0, 1.0]);
+        // As an environment it is opaque and premultiplied again: what it showed before alpha was read.
+        let dir = scratch_dir("exr_alpha");
+        let path = dir.join("cutout.exr");
+        std::fs::write(&path, &bytes).unwrap();
+        let environment = load_equirect(&path).unwrap();
+        assert!(environment.data.iter().all(|t| t[3] == 1.0), "{:?}", environment.data);
+        let mut row: Vec<f32> = (0..4).map(|x| texel(&environment, x, 0)[0]).collect();
+        row.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(row, [0.0, 1.0, 3.0, 3.0]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
