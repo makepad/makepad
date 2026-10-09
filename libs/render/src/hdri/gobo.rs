@@ -14,8 +14,11 @@
 //! its light at any `distance`. A window's pattern is separable (glass is
 //! "inside a pane across" and "inside a pane down"), and so is a box filter,
 //! so the blurred window is exactly the product of two one-axis filters.
+//! Leaves and fern (`foliage.rs`) soften each blade's and stem's edge
+//! instead, so a canopy passes somewhat less of its light as it moves away.
 
 use super::*;
+use super::foliage::Foliage;
 
 /// Half-width, in s-units, of the penumbra of a gobo hanging `distance` 0..=1
 /// in front of its light. Against the light (0) its edges are sharp; far off
@@ -80,25 +83,34 @@ pub struct Gobo {
     tilt_sin: f32,
     tilt_cos: f32,
     vertical: bool,
+    /// Leaves or fern fronds, scattered once from the seed (B7).
+    foliage: Option<Foliage>,
 }
 
 impl Gobo {
     /// The gobo of `p` over a light with tangent half extents `half`. None
-    /// when the kind draws nothing: leaves and fern arrive with B7, image
-    /// masks (which `images` resolves) with B8.
+    /// when the kind draws nothing: image masks (which `images` resolves)
+    /// arrive with B8.
     pub fn new(p: &GoboParams, half: Vec2f, _images: &ImageSet) -> Option<Gobo> {
         let kind = p.kind();
-        if !matches!(kind, GoboKind::Window | GoboKind::Grid | GoboKind::Blinds) {
+        if kind == GoboKind::Image {
             return None;
         }
         let half = vec2f(half.x.max(1.0e-4), half.y.max(1.0e-4));
         let s = half.x.min(half.y);
+        let rect = vec2f(half.x / s, half.y / s);
+        let soft = penumbra(p.distance);
+        let foliage = match kind {
+            GoboKind::Leaves => Some(Foliage::leaves(rect, p.density, p.scale, p.seed, soft)),
+            GoboKind::Fern => Some(Foliage::fern(rect, p.density, p.scale, p.seed, soft)),
+            _ => None,
+        };
         let (tilt_sin, tilt_cos) = p.tilt_deg.max(0.0).min(90.0).to_radians().sin_cos();
         Some(Gobo {
             kind,
             s,
-            rect: vec2f(half.x / s, half.y / s),
-            soft: penumbra(p.distance),
+            rect,
+            soft,
             panes: [p.panes_x.clamp(1, 16), p.panes_y.clamp(1, 16)],
             bar: p.bar.max(0.0).min(0.5),
             frame: p.frame.max(0.0).min(0.5),
@@ -108,6 +120,7 @@ impl Gobo {
             tilt_sin,
             tilt_cos,
             vertical: p.vertical,
+            foliage,
         })
     }
 
@@ -122,7 +135,8 @@ impl Gobo {
             GoboKind::Window => self.window(p, true),
             GoboKind::Grid => self.window(p, false),
             GoboKind::Blinds => self.blinds(p, q),
-            GoboKind::Leaves | GoboKind::Fern | GoboKind::Image => 1.0,
+            GoboKind::Leaves | GoboKind::Fern => self.foliage.as_ref().map_or(1.0, |f| f.transmission(p)),
+            GoboKind::Image => 1.0,
         };
         if t.is_finite() {
             t.max(0.0).min(1.0)
@@ -295,7 +309,7 @@ mod tests {
 
     #[test]
     fn a_gobo_only_ever_passes_part_of_the_light() {
-        for kind in ["window", "blinds", "grid"] {
+        for kind in ["window", "blinds", "grid", "leaves", "fern"] {
             for distance in [0.0f32, 0.5, 1.0] {
                 let g = gobo(GoboParams { kind: kind.to_string(), distance, ..GoboParams::default() }, vec2f(0.5, 0.2));
                 for j in 0..41 {
@@ -328,10 +342,26 @@ mod tests {
 
     #[test]
     fn the_kinds_not_drawn_yet_are_no_gobo() {
-        // Leaves and fern arrive with B7, image masks with B8.
-        for kind in ["leaves", "fern", "image"] {
-            let p = GoboParams { kind: kind.to_string(), ..GoboParams::default() };
-            assert!(Gobo::new(&p, vec2f(0.3, 0.2), &ImageSet::default()).is_none(), "{kind}");
+        // Image masks arrive with B8.
+        let p = GoboParams { kind: "image".to_string(), ..GoboParams::default() };
+        assert!(Gobo::new(&p, vec2f(0.3, 0.2), &ImageSet::default()).is_none());
+    }
+
+    #[test]
+    fn leaf_and_fern_gobos_are_part_dark_part_open() {
+        for kind in ["leaves", "fern"] {
+            let g = gobo(GoboParams { kind: kind.to_string(), density: 0.6, ..GoboParams::default() }, vec2f(0.4, 0.3));
+            let (mut dark, mut open) = (false, false);
+            for j in 0..30 {
+                for i in 0..40 {
+                    let q = vec2f(-0.4 + 0.8 * (i as f32 + 0.5) / 40.0, -0.3 + 0.6 * (j as f32 + 0.5) / 30.0);
+                    let t = g.transmission(q);
+                    assert!((0.0..=1.0).contains(&t));
+                    dark |= t < 0.05;
+                    open |= t > 0.95;
+                }
+            }
+            assert!(dark && open, "{kind}: dark {dark}, open {open}");
         }
     }
 }
