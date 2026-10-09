@@ -46,6 +46,7 @@ pub mod night;
 pub mod image;
 pub mod export;
 pub mod shape;
+pub mod shaped;
 pub mod envmap;
 pub mod prepare;
 

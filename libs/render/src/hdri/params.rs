@@ -171,7 +171,7 @@ pub struct LightParams {
     pub name: String,
     /// "rect" | "disc" | "ring" (phase 1b adds more). A strip is a thin rect.
     pub shape: String,
-    /// 0..=1 (rect only).
+    /// 0..=1: rounds a rect's or a polygon's corners.
     pub corner: f32,
     /// 0..=0.95 (ring only).
     pub inner: f32,
@@ -201,6 +201,98 @@ pub struct LightParams {
     pub key: bool,
     /// Explicit linear colour, 0..=1 per channel; overrides kelvin and tint when Some.
     pub rgb: Option<[f32; 3]>,
+    /// Shape "polygon" (1b): the outline. None draws the default hexagon.
+    pub polygon: Option<PolygonParams>,
+}
+
+/// Widest a polygon or a scrim may be, each way, in degrees. clamp() holds
+/// them there and reports the change; the panel resyncs its Width and Height
+/// sliders to it (A11 resyncs whenever clamp() changed something).
+pub const SHAPED_SPAN_MAX_DEG: f32 = 120.0;
+
+/// A polygon light's outline, in the light's unit box: x and y from -1 to 1,
+/// y up and x toward increasing azimuth (the viewer's right on the panorama),
+/// stretched to the light's width and height.
+#[derive(Clone, Debug, PartialEq, DeJson)]
+pub struct PolygonParams {
+    /// 3..=64 corners of the regular polygon or star; its first corner points straight up.
+    pub sides: u32,
+    /// 0..=0.95. 0 is a regular polygon. Above 0 it becomes a star whose inner
+    /// corners sit at (1 - star) of the polygon's own inner radius.
+    pub star: f32,
+    /// Up to 64 corners in the box, in order. Three or more replace the regular
+    /// polygon; clamp() drops a list of fewer than three.
+    pub points: Vec<[f32; 2]>,
+}
+
+impl Default for PolygonParams {
+    fn default() -> Self {
+        PolygonParams { sides: 6, star: 0.0, points: Vec::new() }
+    }
+}
+
+/// Written by hand, as the derive would write it: micro-serde has SerJson for
+/// slices (`impl<T> SerJson for [T]`) but not for fixed-size arrays, so a
+/// derived `Vec<[f32; 2]>` field does not compile; DeJson for `[T; N]` exists.
+impl SerJson for PolygonParams {
+    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
+        s.st_pre();
+        s.field(d + 1, "sides");
+        self.sides.ser_json(d + 1, s);
+        s.conl();
+        s.field(d + 1, "star");
+        self.star.ser_json(d + 1, s);
+        s.conl();
+        s.field(d + 1, "points");
+        ser_points(&self.points, d + 1, s);
+        s.st_post(d);
+    }
+}
+
+/// A list of 2D points as a JSON array of [x, y] arrays, laid out like a Vec.
+fn ser_points(points: &[[f32; 2]], d: usize, s: &mut SerJsonState) {
+    s.out.push('[');
+    if !points.is_empty() {
+        let last = points.len() - 1;
+        for (i, p) in points.iter().enumerate() {
+            s.indent(d + 1);
+            p[..].ser_json(d + 1, s);
+            if i != last {
+                s.out.push(',');
+            }
+        }
+        s.indent(d);
+    }
+    s.out.push(']');
+}
+
+impl PolygonParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = PolygonParams::default();
+        f.int(prefix, "sides", &mut self.sides, 3, 64);
+        f.range(prefix, "star", &mut self.star, 0.0, 0.95, d.star);
+        let points = unit_box_points(&self.points);
+        if points != self.points {
+            self.points = points;
+            f.push(prefix, "points");
+        }
+    }
+}
+
+/// Finite points only, the first 64, each held inside the unit box. Fewer
+/// than three make no outline, so then none are kept.
+fn unit_box_points(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
+    let kept: Vec<[f32; 2]> = points
+        .iter()
+        .filter(|p| p[0].is_finite() && p[1].is_finite())
+        .take(64)
+        .map(|p| [p[0].clamp(-1.0, 1.0), p[1].clamp(-1.0, 1.0)])
+        .collect();
+    if kept.len() < 3 {
+        Vec::new()
+    } else {
+        kept
+    }
 }
 
 /// Typed view of `HdriParams::mode`.
@@ -372,6 +464,7 @@ impl Default for LightParams {
             blend: "add".to_string(),
             key: false,
             rgb: None,
+            polygon: None,
         }
     }
 }
@@ -625,6 +718,17 @@ impl LightParams {
         if let Some(rgb) = self.rgb.as_mut() {
             f.color(prefix, "rgb", rgb, 1.0, [1.0; 3]);
         }
+        if let Some(polygon) = self.polygon.as_mut() {
+            polygon.clamp_fields(&join_path(prefix, "polygon"), f);
+        }
+        // A polygon or a scrim is drawn in the light's gnomonic box, which
+        // stretches toward its edges: past about 120 degrees across a shape
+        // distorts (the spec's limit for one shaped light). A stroke may be
+        // longer, and rect, disc and ring keep A1's 170 above.
+        if matches!(self.shape(), LightShape::Polygon | LightShape::Scrim) {
+            f.range(prefix, "width_deg", &mut self.width_deg, 0.1, SHAPED_SPAN_MAX_DEG, d.width_deg);
+            f.range(prefix, "height_deg", &mut self.height_deg, 0.1, SHAPED_SPAN_MAX_DEG, d.height_deg);
+        }
     }
 }
 
@@ -755,21 +859,22 @@ fn json_tree<T: SerJson>(value: &T) -> Result<JsonValue, String> {
 
 /// The complete object a patch starts from when it creates something that is
 /// not there yet. Every light in a patched "lights" list starts from the
-/// default light, so a patch names only the fields it changes. Phase 1b adds
-/// its optional sub-objects here (e.g. "lights[].polygon").
+/// default light, so a patch names only the fields it changes; so does a
+/// light's optional shape block.
 fn template_for(schema: &str) -> Option<JsonValue> {
     match schema {
         "lights[]" => json_tree(&LightParams::default()).ok(),
+        "lights[].polygon" => json_tree(&PolygonParams::default()).ok(),
         _ => None,
     }
 }
 
 /// Integer fields, with the range their Rust type holds. micro-serde refuses
 /// `3.6` or `-1` for a `u32`, so numbers aimed at these are rounded into range
-/// before the typed parse. Phase 1b adds its integer fields here.
+/// before the typed parse.
 fn integer_range(schema: &str) -> Option<(f64, f64)> {
     match schema {
-        "version" | "seed" | "sky.sun.month" | "sky.sun.day" => Some((0.0, u32::MAX as f64)),
+        "version" | "seed" | "sky.sun.month" | "sky.sun.day" | "lights[].polygon.sides" => Some((0.0, u32::MAX as f64)),
         "sky.sun.year" => Some((i32::MIN as f64, i32::MAX as f64)),
         _ => None,
     }
@@ -1374,5 +1479,57 @@ mod shape_param_tests {
             assert_eq!(changed, ["lights[0].shape"], "only the spelling was fixed");
             assert_eq!(shape.as_str(), name);
         }
+    }
+
+    #[test]
+    fn polygon_params_clamp_and_round_trip() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams {
+            shape: "polygon".to_string(),
+            polygon: Some(PolygonParams { sides: 1, star: 2.0, points: vec![[f32::NAN, 0.0], [5.0, 0.0], [0.0, 1.0], [-1.0, -1.0]] }),
+            ..LightParams::default()
+        });
+        let changed = p.clamp();
+        let poly = p.lights[0].polygon.clone().unwrap();
+        assert_eq!(poly.sides, 3);
+        assert_eq!(poly.star, 0.95);
+        assert_eq!(poly.points, vec![[1.0, 0.0], [0.0, 1.0], [-1.0, -1.0]], "NaN dropped, the rest held in the box");
+        assert_eq!(changed, ["lights[0].polygon.sides", "lights[0].polygon.star", "lights[0].polygon.points"]);
+        // Fewer than three points make no outline: they go, and the regular polygon shows.
+        p.lights[0].polygon = Some(PolygonParams { sides: 5, star: 0.0, points: vec![[0.0, 0.0], [1.0, 1.0]] });
+        assert_eq!(p.clamp(), ["lights[0].polygon.points"]);
+        assert!(p.lights[0].polygon.as_ref().unwrap().points.is_empty());
+        // JSON: pretty and compact both load back, and a missing polygon stays None.
+        p.lights[0].polygon = Some(poly.clone());
+        assert_eq!(HdriParams::from_json(&p.to_json()).unwrap(), p);
+        assert_eq!(PolygonParams::deserialize_json(&poly.serialize_json()).unwrap(), poly);
+        let plain = HdriParams { lights: vec![LightParams::default()], ..HdriParams::default() };
+        assert!(!plain.to_json().contains("polygon"), "an absent polygon is not written");
+        assert_eq!(HdriParams::from_json(&plain.to_json()).unwrap().lights[0].polygon, None);
+    }
+
+    #[test]
+    fn a_partial_polygon_patch_is_completed_from_the_defaults() {
+        let (merged, report) = HdriParams::default()
+            .merge_json(r#"{"lights": [{"shape": "polygon", "polygon": {"sides": 5.4, "star": 0.5}}]}"#)
+            .unwrap();
+        assert_eq!(merged.lights[0].polygon, Some(PolygonParams { sides: 5, star: 0.5, points: Vec::new() }));
+        assert_eq!(report, ["lights[0].polygon.sides"], "5.4 was rounded to a whole number of sides");
+    }
+
+    #[test]
+    fn polygons_and_scrims_stay_under_120_degrees_but_strokes_do_not() {
+        let mut p = HdriParams::default();
+        for shape in ["polygon", "scrim", "stroke", "rect"] {
+            p.lights.push(LightParams { shape: shape.to_string(), width_deg: 150.0, height_deg: 130.0, ..LightParams::default() });
+        }
+        let changed = p.clamp();
+        let span = |i: usize| (p.lights[i].width_deg, p.lights[i].height_deg);
+        assert_eq!(span(0), (SHAPED_SPAN_MAX_DEG, SHAPED_SPAN_MAX_DEG), "a polygon lives in its gnomonic box");
+        assert_eq!(span(1), (SHAPED_SPAN_MAX_DEG, SHAPED_SPAN_MAX_DEG), "so does a scrim");
+        // A stroke may be longer (its points place it), and A3's rect keeps A1's 170.
+        assert_eq!(span(2), (150.0, 130.0));
+        assert_eq!(span(3), (150.0, 130.0));
+        assert_eq!(changed, ["lights[0].width_deg", "lights[0].height_deg", "lights[1].width_deg", "lights[1].height_deg"]);
     }
 }

@@ -21,6 +21,7 @@
 use makepad_draw::*;
 use super::{dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams};
 use crate::sky::luminance;
+use super::shaped::ShapedLight;
 
 /// Strength of a full ±1 tint: at +1 green is cut to about a third of red and blue.
 const TINT_STRENGTH: f32 = 0.4;
@@ -235,6 +236,7 @@ impl Studio {
     /// - **Add** accumulates the light's colour.
     /// - **Multiply** scales everything drawn so far by its colour: fully at the core,
     ///   not at all outside. That is how a black flag cuts a softbox or the sky.
+    /// - Polygons, strokes and scrims follow the same rules through the shape core.
     pub fn apply_lights(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
         self.apply_lights_skipping(dir, base, None)
     }
@@ -250,6 +252,14 @@ impl Studio {
     fn apply_lights_skipping(&self, dir: Vec3f, base: Vec3f, skip: Option<usize>) -> Vec3f {
         let mut c = base;
         for (i, light) in self.lights.iter().enumerate() {
+            if let Some(shaped) = &light.shaped {
+                // The key left out (`skip`, N3) loses its own light, while
+                // whatever it hides stays hidden (B5's scrim is cloth in front
+                // of what is behind it): `ShapedLight::hide`. For a light that
+                // hides nothing that is the same as skipping it.
+                c = if skip == Some(i) { shaped.hide(dir, c) } else { shaped.compose(dir, c, light.color) };
+                continue;
+            }
             if skip == Some(i) {
                 continue;
             }
@@ -294,6 +304,10 @@ struct KeyIntegral {
 /// its cosine-weighted share and the cone that covers its reach.
 /// - `lights[0]` is the key: its shape, corner, ring, soft edge, hotspot and roll all
 ///   come in through its own `mask`.
+/// - A light the shape core draws (1b: a polygon, B5's scrim) gives its `emit` instead
+///   of A3's mask, and a shaped flag dims the key through `ShapedLight::compose`, as
+///   `apply_lights` draws both. Its outline lies inside its box, so the grid holds it
+///   and the box's corner cone (`cos_cover`) covers it.
 /// - Every Multiply light after it scales it as it does in the map. An Add light after
 ///   it is a light of its own, and a light before it touches only what came before.
 ///
@@ -324,15 +338,26 @@ fn key_emission(lights: &[PreparedLight], n: usize) -> KeyIntegral {
             if !(r2 <= 400.0) {
                 continue;
             }
-            let m = key.mask(vec2f(x, y));
+            let dir = || (key.frame.center + key.frame.right * x + key.frame.up * y).normalize();
+            // The weight `apply_lights` gives the key's colour here: A3's mask, or the
+            // shape core's emission for a light it draws (1b: a polygon, B5's scrim).
+            let m = match &key.shaped {
+                Some(shaped) => shaped.sample(dir()).emit,
+                None => key.mask(vec2f(x, y)),
+            };
             if !(m > 0.0) {
                 continue;
             }
             let cos = 1.0 / r2.sqrt();
             let mut w = Vec3f::all(m * cos / r2);
             if !flags.is_empty() {
-                let dir = (key.frame.center + key.frame.right * x + key.frame.up * y).normalize();
+                let dir = dir();
                 for flag in &flags {
+                    // As `apply_lights` draws the flag: a shaped one through the shape core.
+                    if let Some(shaped) = &flag.shaped {
+                        w = shaped.compose(dir, w, flag.color);
+                        continue;
+                    }
                     let Some(q) = project(&flag.frame, dir) else { continue };
                     let f = flag.mask(q);
                     if f > 0.0 {
@@ -381,6 +406,8 @@ struct PreparedLight {
     /// Exponent scale of the Gaussian centre falloff (HOTSPOT_FALLOFF x hotspot).
     hotspot: f32,
     color: Vec3f,
+    /// Polygons, strokes and scrims (1b): the shape core draws the light.
+    shaped: Option<ShapedLight>,
 }
 
 impl PreparedLight {
@@ -415,6 +442,7 @@ impl PreparedLight {
             reach: vec2f(half.x + band, half.y + band),
             hotspot: HOTSPOT_FALLOFF * sane(l.hotspot, 0.0, 1.0),
             color: light_color(l),
+            shaped: ShapedLight::new(l),
         }
     }
 
@@ -956,12 +984,42 @@ mod tests {
         };
         // An Add light over the strip, after it: it is not the key's light.
         let over = LightParams { azimuth_deg: 250.0, elevation_deg: 10.0, ..Default::default() };
+        // 1b (B2): a rolled, rounded hexagon key with a soft edge and a hotspot, the
+        // shape core's emission, under a star-shaped blue gel, a shaped flag.
+        let hexagon = LightParams {
+            key: true,
+            shape: "polygon".to_string(),
+            azimuth_deg: 150.0,
+            elevation_deg: 25.0,
+            width_deg: 40.0,
+            height_deg: 28.0,
+            roll_deg: 20.0,
+            corner: 0.3,
+            softness: 0.2,
+            hotspot: 0.5,
+            polygon: Some(crate::hdri::PolygonParams::default()),
+            ..Default::default()
+        };
+        let star_gel = LightParams {
+            name: "Star gel".to_string(),
+            shape: "polygon".to_string(),
+            azimuth_deg: 152.0,
+            elevation_deg: 27.0,
+            width_deg: 18.0,
+            height_deg: 18.0,
+            softness: 0.3,
+            blend: "multiply".to_string(),
+            rgb: Some([0.25, 0.5, 1.0]),
+            polygon: Some(crate::hdri::PolygonParams { sides: 5, star: 0.5, points: Vec::new() }),
+            ..Default::default()
+        };
         vec![
             ("a hard elliptical ring, rolled", vec![ring]),
             (
                 "a rolled strip under a flag and a gel, with a flag before it and a light over it",
                 vec![flag_at(250.0, 10.0, 30.0), strip, flag_at(250.0, 10.0, 8.0), gel, over],
             ),
+            ("a rolled hexagon key under a star-shaped gel", vec![hexagon, star_gel]),
         ]
     }
 
@@ -1158,6 +1216,25 @@ mod tests {
                     assert_eq!(env.radiance(d), Vec3f::default(), "{name}: lit {scale} x the cone's edge away, at ring angle {i}");
                 }
             }
+        }
+    }
+
+    /// N3: the engine lights a generated map from its keyless copy
+    /// (`Env::bake_keyless_par`, through `envmap::bake_generated_env_map`), which
+    /// must be the map with exactly the key light switched off: the flags after
+    /// it, the light over it and the shape core's lights kept. Texel for texel:
+    /// the copy re-evaluates the key's covering cone through the lookup without
+    /// it, and outside the cone the key draws nothing.
+    #[test]
+    fn a_keys_lighting_copy_is_the_map_with_the_key_switched_off() {
+        for (name, lights) in awkward_keys() {
+            let p = studio_params(lights);
+            let baked = crate::hdri::envmap::bake_generated_env_map(&p, 64, on_all_cores);
+            let mut off = p.clone();
+            let key = off.lights.iter().position(|l| l.enabled && l.key && l.blend() == Blend::Add).expect("a key light");
+            off.lights[key].enabled = false;
+            assert!(baked.keyless.as_ref() == Some(&Env::new(&off).bake(64)), "{name}: the keyless copy is not the map without its key");
+            assert!(baked.keyless.as_ref() != Some(&baked.map), "{name}: the key drew nothing");
         }
     }
 
