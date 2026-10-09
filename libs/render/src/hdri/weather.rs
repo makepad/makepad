@@ -302,6 +302,9 @@ pub struct Weather {
     ground_color: [f32; 3],
     /// The rain slab reaches up to the cloud base, metres.
     rain_height: f32,
+    /// The cloud cover the map is drawn with (the kind's floor or the sky's
+    /// own, whichever is more): it greys the fog's light as it greys the deck's.
+    coverage: f32,
     sun_dir: Vec3f,
     seed: u32,
     bolt: Option<Bolt>,
@@ -329,6 +332,7 @@ impl Weather {
             ground_light: kind.ground_light,
             ground_color: if drawn.snow { SNOW_ALBEDO } else { sky.atmosphere.ground_color },
             rain_height: if base.is_finite() { base.clamp(200.0, 12_000.0) } else { 2000.0 },
+            coverage: unit(sky.clouds.coverage).max(kind.coverage_min),
             sun_dir: sun,
             seed: params.seed,
             bolt: if drawn.lightning { Some(build_bolt(params.seed)) } else { None },
@@ -434,10 +438,10 @@ impl Weather {
         vec3f(BOLT_COLOR[0], BOLT_COLOR[1], BOLT_COLOR[2]) * (light * self.transmittance_toward(d).sqrt())
     }
 
-    /// The veil between the eye and what is drawn along `d`: virga and rain
-    /// haze, then fog. `sun_irradiance` is the sun's light under the clouds
-    /// (already through the cover along the sun), `ambient` the sky's mean
-    /// radiance.
+    /// The veil between the eye and what is drawn along `d`: rain haze and its
+    /// virga shafts, then fog. `sun_irradiance` is the sun's light under the
+    /// clouds (already through the cover along the sun), `ambient` the sky's
+    /// mean radiance.
     pub fn veil(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f) -> Vec3f {
         let mut c = c;
         // The air under a rain or storm deck is lit by what that deck passes,
@@ -445,18 +449,20 @@ impl Weather {
         let ambient = ambient * self.cloud_gain;
         let grey = luminance(ambient);
         if self.effects.rain > 0.0 {
-            // Shafts of rain under the deck darken what is behind them.
-            c = c * (1.0 - self.virga(d));
             let through = (-self.rain_depth(d)).exp();
             let haze = grey * if self.effects.snow { SNOWFALL_ALBEDO } else { RAIN_ALBEDO };
             c = c * through + vec3f(haze, haze, haze) * (1.0 - through);
+            // Shafts of rain under the deck are denser curtains of it: they
+            // darken the distance and the rain haze before it alike.
+            c = c * (1.0 - self.virga(d));
         }
         if self.effects.fog > 0.0 {
             let through = (-self.fog_depth(d)).exp();
-            // Fog is lit by the sky's ambient (half greyed, as clouds are) and
-            // by the sun: evenly, from the many scatterings inside it, and
-            // with a glow toward the sun.
-            let sky = ambient.mix(vec3f(grey, grey, grey), 0.5);
+            // Fog is lit by the sky's ambient, greyed as the clouds grey it
+            // (half on a clear day, all of it under a closed deck), and by
+            // the sun: evenly, from the many scatterings inside it, and with
+            // a glow toward the sun.
+            let sky = ambient.mix(vec3f(grey, grey, grey), 0.5 + 0.5 * self.coverage);
             let even = FOG_DIFFUSE * self.sun_dir.y.max(0.0) / std::f32::consts::PI;
             let glow = hg_phase(d.dot(self.sun_dir), FOG_G);
             c = c * through + (sky + sun_irradiance * (even + glow)) * (1.0 - through);
@@ -860,6 +866,32 @@ mod env_tests {
             let (above, below) = (mean(0.5), mean(-0.5));
             assert!((below / above - 1.0).abs() < 0.25, "{kind}: {above} above the horizon, {below} below it");
         }
+    }
+
+    /// Under a closed deck the veil is grey: the fog's light is greyed as the
+    /// deck greys the dome's (B17's visual check: every horizon read sky blue
+    /// under the fixed half greying, blue over red 1.47 to 1.63).
+    #[test]
+    fn the_veil_under_a_closed_deck_is_grey() {
+        for kind in ["overcast", "fog", "rain", "storm", "snow"] {
+            let env = Env::new(&sky_params(Some(kind)));
+            for az in [30.0f32, 120.0, 300.0] {
+                let c = env.radiance(dir_from_az_el(az, 1.0));
+                assert!(c.z < 1.15 * c.x, "{kind} at the horizon, azimuth {az}: {c:?}");
+            }
+        }
+    }
+
+    /// The virga shows in the map: the shafts darken the rain haze in front of
+    /// the distance too, not only the distance behind it, which the haze hides
+    /// (B17's visual check: 2 to 5 % along the ring when they stood behind it).
+    #[test]
+    fn rain_hangs_visible_shafts_under_the_deck() {
+        let env = Env::new(&sky_params(Some("rain")));
+        let ring: Vec<f32> = (0..360).map(|az| luminance(env.radiance(dir_from_az_el(az as f32, 15.0)))).collect();
+        let lo = ring.iter().cloned().fold(f32::MAX, f32::min);
+        let hi = ring.iter().cloned().fold(0.0, f32::max);
+        assert!(hi > 1.08 * lo, "shafts and gaps 15 degrees up: {lo}..{hi}");
     }
 
     /// The wet ground mirrors the sky as the weather shows it, through the

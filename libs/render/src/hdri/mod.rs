@@ -301,7 +301,7 @@ impl Env {
                     // takes out exactly what the key carries, no more).
                     let seen = |v: Vec3f| weather.veil(v, self.sky_layers(v, atmo, None, cache), self.weather_sun, self.cloud_ambient);
                     let c = weather.ground(d, dry(d), &seen);
-                    // Virga, rain haze and fog between the eye and all of it; then
+                    // Rain haze, its virga and fog between the eye and all of it; then
                     // the bolt and its flash, which stand inside the rain.
                     weather.veil(d, c, self.weather_sun, self.cloud_ambient) + weather.lightning(d)
                 }
