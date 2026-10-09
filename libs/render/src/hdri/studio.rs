@@ -234,6 +234,10 @@ impl Studio {
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
         let prepared: Vec<PreparedLight> = enabled.iter().map(|l| PreparedLight::new(l, images)).collect();
         let key_index = enabled.iter().position(|l| l.key && l.blend() == Blend::Add);
+        // What hangs in front of each light, built for the same lights in the
+        // same order as the prepared lights above. Before the key: a flag's
+        // gobo cuts what the flag takes out of the key (B8).
+        let fx: Vec<LightFx> = enabled.iter().map(|l| LightFx::new(l, images)).collect();
         let key = key_index.map(|i| {
             let l = enabled[i];
             if let Some(shaped) = &prepared[i].shaped {
@@ -243,7 +247,7 @@ impl Studio {
                 }
             }
             let radius = (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians();
-            let integral = key_emission(&prepared[i..], KEY_GRID);
+            let integral = key_emission(&prepared[i..], &fx[i..], KEY_GRID);
             EnvSun {
                 dir: dir_from_az_el(l.azimuth_deg, l.elevation_deg),
                 // Over the cone the f32 cosine names, the one every consumer of
@@ -258,9 +262,6 @@ impl Studio {
                 cos_cover: integral.cos_cover.min(radius.cos()),
             }
         });
-        // What hangs in front of each light, built for the same lights in the
-        // same order as the prepared lights above.
-        let fx: Vec<LightFx> = enabled.iter().map(|l| LightFx::new(l, images)).collect();
         let any_fx = fx.iter().any(|fx| !fx.is_plain());
         let mut built = Studio {
             top: rgb(studio.top),
@@ -292,7 +293,7 @@ impl Studio {
     /// cone.
     fn key_share(&self, index: usize, key: &EnvSun) -> f32 {
         let light = &self.lights[index];
-        let flags = dimmers(&self.lights[index + 1..]);
+        let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);
         let drawn = |dir: Vec3f| luminance(dimmed(&flags, dir, self.draw_lights(index..index + 1, dir, Vec3f::default(), None)));
         if light.shaped.as_ref().is_some_and(|s| s.key_spread().is_some()) {
             let (azimuth_deg, elevation_deg) = az_el_from_dir(key.dir);
@@ -459,6 +460,9 @@ struct KeyIntegral {
 ///   scrim's cloth (B5), the one Add light that hides what is behind it
 ///   (`ShapedLight::hide`). Any other Add light after it is a light of its own, and a
 ///   light before it touches only what came before.
+/// - What hangs in front of each of those (`fx`, in step with `lights`) scales what it
+///   does, as in the map: a flag with a gobo dims the key only behind the gobo's
+///   opaque parts (B8).
 ///
 /// A midpoint grid of n x n points over the key's reach box in its own tangent plane,
 /// where dΩ = dx dy / (1 + x² + y²)^(3/2) and the cosine of the angle from the centre
@@ -466,11 +470,11 @@ struct KeyIntegral {
 /// missed, and the farthest point of the box is its corner: the covering cone's
 /// cosine is 1 / sqrt(1 + rx² + ry²), no smaller than `project`'s 0.05 limit, past
 /// which nothing is drawn.
-fn key_emission(lights: &[PreparedLight], n: usize) -> KeyIntegral {
+fn key_emission(lights: &[PreparedLight], fx: &[LightFx], n: usize) -> KeyIntegral {
     let Some((key, after)) = lights.split_first() else {
         return KeyIntegral { emission: Vec3f::default(), facing: 1.0, cos_cover: 1.0 };
     };
-    let flags = dimmers(after);
+    let flags = dimmers(after, fx.get(1..).unwrap_or(&[]));
     let n = n.max(1);
     let cell = vec2f(2.0 * key.reach.x / n as f32, 2.0 * key.reach.y / n as f32);
     let mut sum = [0.0f64; 3];
@@ -524,29 +528,37 @@ fn key_emission(lights: &[PreparedLight], n: usize) -> KeyIntegral {
 }
 
 /// What dims the key as the map draws it, of the lights listed after it: the
-/// flags and gels, and the scrims' cloth in front of it.
-fn dimmers(after: &[PreparedLight]) -> Vec<&PreparedLight> {
+/// flags and gels, and the scrims' cloth in front of it, each with what hangs
+/// in front of it (`fx`, in step with `after`).
+fn dimmers<'a>(after: &'a [PreparedLight], fx: &'a [LightFx]) -> Vec<(&'a PreparedLight, &'a LightFx)> {
     after
         .iter()
-        .filter(|l| l.blend == Blend::Multiply || l.shaped.as_ref().is_some_and(|s| s.hides_behind()))
+        .zip(fx)
+        .filter(|(l, _)| l.blend == Blend::Multiply || l.shaped.as_ref().is_some_and(|s| s.hides_behind()))
         .collect()
 }
 
 /// `w`, the key's light along `dir`, as the lights in `flags` ([`dimmers`])
 /// leave it in the map.
-fn dimmed(flags: &[&PreparedLight], dir: Vec3f, w: Vec3f) -> Vec3f {
+fn dimmed(flags: &[(&PreparedLight, &LightFx)], dir: Vec3f, w: Vec3f) -> Vec3f {
     let mut w = w;
-    for flag in flags {
+    for &(flag, fx) in flags {
+        let before = w;
         // As `apply_lights` draws the flag: a shaped one through the shape
         // core, and a scrim's cloth without its own glow.
         if let Some(shaped) = &flag.shaped {
             w = if flag.blend == Blend::Multiply { shaped.compose(dir, w, flag.color) } else { shaped.hide(dir, w) };
-            continue;
+        } else if let Some(q) = project(&flag.frame, dir) {
+            let f = flag.mask(q);
+            if f > 0.0 {
+                w *= Vec3f::all(1.0) + (flag.color - Vec3f::all(1.0)) * f;
+            }
         }
-        let Some(q) = project(&flag.frame, dir) else { continue };
-        let f = flag.mask(q);
-        if f > 0.0 {
-            w *= Vec3f::all(1.0) + (flag.color - Vec3f::all(1.0)) * f;
+        // Then what hangs in front of it scales what it did, as
+        // `apply_lights_sky` does: a flag's gobo leaves the key through its
+        // open parts (B8).
+        if !fx.is_plain() {
+            w = fx.apply(dir, before, w);
         }
     }
     w
@@ -1314,7 +1326,7 @@ mod tests {
         let studio = Studio::new(&black_studio(), lights);
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
         let i = enabled.iter().position(|l| l.key && l.blend() == Blend::Add).expect("a key light");
-        key_emission(&studio.lights[i..], n).emission
+        key_emission(&studio.lights[i..], &studio.fx[i..], n).emission
     }
 
     #[test]

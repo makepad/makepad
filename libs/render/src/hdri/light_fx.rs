@@ -127,10 +127,15 @@ impl LightFx {
         1.0
     }
 
-    /// The share 0..=1 of a flag that darkens at `dir`. A flag is solid
-    /// until B8 lets a gobo cut it.
-    fn blocks(&self, _dir: Vec3f) -> f32 {
-        1.0
+    /// The share 0..=1 of a flag that darkens at `dir`. A flag with a gobo
+    /// is cut by it: only the gobo's opaque parts darken, as window bars or
+    /// a leaf canopy against whatever is behind. Doors, grids and wear
+    /// belong to emitters and leave flags alone.
+    fn blocks(&self, dir: Vec3f) -> f32 {
+        match (&self.gobo, self.face(dir)) {
+            (Some(gobo), Some(q)) => 1.0 - gobo.transmission(q),
+            _ => 1.0,
+        }
     }
 
     /// What the light really does at `dir`, given the map `before` it and
@@ -377,7 +382,12 @@ mod tests {
     /// over the key's covering cone (which holds all of its drawing, N3),
     /// over radiance x 2π(1 - cos_radius).
     fn map_over_key(light: &LightParams) -> f32 {
-        let p = studio(vec![light.clone()]);
+        map_over_key_among(vec![light.clone()])
+    }
+
+    /// `map_over_key` for a key among other lights (a flag after it).
+    fn map_over_key_among(lights: Vec<LightParams>) -> f32 {
+        let p = studio(lights);
         let studio = Studio::new(&p.studio, &p.lights);
         let key = studio.key().expect("a key light");
         let (azimuth_deg, elevation_deg) = az_el_from_dir(key.dir);
@@ -454,5 +464,83 @@ mod tests {
         let mut off = p.clone();
         off.lights[0].enabled = false;
         assert!(baked.keyless.as_ref() == Some(&Env::new(&off).bake(64)), "the keyless copy is the map without the barred key");
+    }
+
+    #[test]
+    fn a_flag_with_a_gobo_only_darkens_where_the_gobo_is_opaque() {
+        let flag = LightParams {
+            elevation_deg: 20.0,
+            width_deg: 60.0,
+            height_deg: 40.0,
+            blend: "multiply".to_string(),
+            rgb: Some([0.0, 0.0, 0.0]),
+            ..front_light()
+        };
+        let mut cut = flag.clone();
+        cut.gobo = Some(GoboParams { kind: "blinds".to_string(), slats: 6, tilt_deg: 30.0, ..GoboParams::default() });
+        // Sky mode: the flag hangs against the sky.
+        let bake_with = |light: Option<LightParams>| {
+            let mut p = HdriParams::default();
+            p.lights = light.into_iter().collect();
+            Env::new(&p).bake(64)
+        };
+        let (sky, solid, blinds) = (bake_with(None), bake_with(Some(flag)), bake_with(Some(cut)));
+        let mut through = 0;
+        for i in 0..sky.data.len() {
+            for k in 0..3 {
+                let (open, dark, slats) = (sky.data[i][k], solid.data[i][k], blinds.data[i][k]);
+                assert!(slats <= open * (1.0 + 1.0e-5) + 1.0e-6, "a flag never brightens");
+                assert!(slats + 1.0e-6 >= dark, "the cut flag is never darker than the solid one");
+                if slats > dark + 1.0e-4 {
+                    through += 1;
+                }
+            }
+        }
+        assert!(through > 0, "the sky shows between the slats");
+    }
+
+    /// A flag cut by a gobo takes out of the engine's key light what it
+    /// takes out of the map: only its gobo's opaque parts dim the key, in
+    /// the key's emission (`key_emission`) and in what weighs the key's own
+    /// gobo (`key_share`) alike, as `apply_lights` draws the flag.
+    #[test]
+    fn a_cut_flag_dims_the_key_as_it_dims_the_map() {
+        let key = LightParams {
+            key: true,
+            azimuth_deg: 0.0,
+            elevation_deg: 20.0,
+            width_deg: 60.0,
+            height_deg: 45.0,
+            ..LightParams::default()
+        };
+        // A black flag over the key's right half and past its top.
+        let flag = LightParams {
+            azimuth_deg: 15.0,
+            elevation_deg: 25.0,
+            width_deg: 40.0,
+            height_deg: 40.0,
+            blend: "multiply".to_string(),
+            rgb: Some([0.0, 0.0, 0.0]),
+            ..front_light()
+        };
+        let blinds = GoboParams { kind: "blinds".to_string(), slats: 6, tilt_deg: 30.0, ..GoboParams::default() };
+        let leaves = GoboParams { kind: "leaves".to_string(), density: 0.4, distance: 0.3, seed: 2, ..GoboParams::default() };
+        let cases = [
+            ("solid flag", key.clone(), flag.clone()),
+            ("flag cut by blinds", key.clone(), LightParams { gobo: Some(blinds.clone()), ..flag.clone() }),
+            ("flag cut by a window", key.clone(), LightParams { gobo: Some(GoboParams::default()), ..flag.clone() }),
+            ("key behind leaves, flag cut by blinds", LightParams { gobo: Some(leaves.clone()), ..key.clone() }, LightParams { gobo: Some(blinds), ..flag }),
+        ];
+        let mut off = Vec::new();
+        for (name, key_light, flag_light) in cases {
+            // The key's own ratio without the flag, so the test weighs only the flag.
+            let alone = map_over_key(&key_light);
+            let ratio = map_over_key_among(vec![key_light, flag_light]) / alone;
+            println!("{name}: {ratio:.4}");
+            if (ratio - 1.0).abs() > 0.02 {
+                off.push(format!("{name}: the map draws {ratio:.4} of what the key carries"));
+            }
+        }
+        assert!(off.is_empty(), "{}", off.join("\n"));
     }
 }

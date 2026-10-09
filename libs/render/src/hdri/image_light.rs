@@ -61,18 +61,23 @@ impl ImageSet {
 
 /// Every image key the params name, sorted and without repeats; "" (no
 /// picture) is left out. Lights that are switched off count too: they can be
-/// switched back on. A later task adds its own keys here (image gobos), so
-/// the app has one list of light pictures to load and to check. The base
-/// image (B15) is NOT listed: it is an equirect with its own loader, and
+/// switched back on. So does the name on a gobo of another kind: the person
+/// can switch the kind back to an image. The app loads these and holds the
+/// assistant to them, so every place the params can name a light's picture
+/// is listed here: image lights (B14) and image gobos (B8). The base image
+/// (B15) is NOT listed: it is an equirect with its own loader, and
 /// everything on this list is loaded as a light's picture.
 pub fn referenced_keys(params: &HdriParams) -> Vec<String> {
-    let mut keys: Vec<String> = params
-        .lights
-        .iter()
-        .filter_map(|light| light.image.as_ref())
-        .map(|image| image.key.clone())
-        .filter(|key| !key.is_empty())
-        .collect();
+    let mut keys: Vec<String> = Vec::new();
+    for light in &params.lights {
+        if let Some(image) = &light.image {
+            keys.push(image.key.clone());
+        }
+        if let Some(gobo) = &light.gobo {
+            keys.push(gobo.image.clone());
+        }
+    }
+    keys.retain(|key| !key.is_empty());
     keys.sort();
     keys.dedup();
     keys

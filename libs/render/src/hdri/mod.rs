@@ -115,6 +115,9 @@ pub struct Env {
     /// sky there) and when no light asks for it, so every other map costs
     /// what it did before.
     window_sky: Option<Box<Env>>,
+    /// The shadow a light's gobo throws onto the studio backdrop (Studio
+    /// mode only: a sky has no floor for it to fall on).
+    backdrop_gobo: Option<gobo::BackdropGobo>,
 }
 
 impl Env {
@@ -161,7 +164,8 @@ impl Env {
         } else {
             None
         };
-        Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient, window_sky }
+        let backdrop_gobo = if params.mode() == Mode::Studio { gobo::BackdropGobo::new(&params.lights, images) } else { None };
+        Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient, window_sky, backdrop_gobo }
     }
 
     pub fn params(&self) -> &HdriParams {
@@ -171,7 +175,8 @@ impl Env {
     /// Linear radiance arriving from `dir` (unit, world space, as displayed:
     /// rotation already applied). Order: undo the rotation, base layer (Sky:
     /// atmosphere + disc + stars + moon + glow + night ground, then the clouds
-    /// over it; Studio: backdrop), lights overlay, x 2^intensity_ev.
+    /// over it; Studio: backdrop, under any gobo shadow cast onto it), lights
+    /// overlay, x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
         self.radiance_with(dir, None)
     }
@@ -216,7 +221,14 @@ impl Env {
                 }
                 c + discs
             }
-            None => self.studio.backdrop(d),
+            None => {
+                let backdrop = self.studio.backdrop(d);
+                // A gobo cast from its light darkens the floor and the walls under it.
+                match &self.backdrop_gobo {
+                    Some(cast) => backdrop * cast.shade(d),
+                    None => backdrop,
+                }
+            }
         };
         // A light filled with sky (GoboParams::fill_sky) is a window: it shows
         // the sky along the same direction. In Sky mode that sky is the base

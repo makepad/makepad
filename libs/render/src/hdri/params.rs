@@ -36,12 +36,10 @@ pub const BLEND_NAMES: &[&str] = &["add", "multiply"];
 /// Accepted values of `GoboParams::kind`; the first is the fallback.
 pub const GOBO_KIND_NAMES: &[&str] = &["window", "blinds", "leaves", "fern", "grid", "image"];
 
-/// Longest gobo image name kept, in characters (a Windows path fits).
-const GOBO_IMAGE_NAME_LIMIT: usize = 260;
-
 /// Accepted values of `LightImageParams::fit`; the first is the fallback.
 pub const IMAGE_FIT_NAMES: &[&str] = &["stretch", "fit", "fill"];
-/// Longest image key kept, in characters: a path, with room to spare.
+/// Longest image key kept, in characters: a path, with room to spare. A
+/// light's picture (`LightImageParams::key`) and a gobo's (`GoboParams::image`).
 const IMAGE_KEY_LIMIT: usize = 1024;
 
 /// Longest light name kept, in characters; a list row has no room for more.
@@ -514,8 +512,10 @@ impl GoboParams {
         f.range(prefix, "density", &mut self.density, 0.0, 1.0, d.density);
         f.range(prefix, "scale", &mut self.scale, 0.1, 10.0, d.scale);
         f.range(prefix, "distance", &mut self.distance, 0.0, 1.0, d.distance);
-        if self.image.chars().count() > GOBO_IMAGE_NAME_LIMIT {
-            self.image = self.image.chars().take(GOBO_IMAGE_NAME_LIMIT).collect();
+        // The same kind of key as an image light's (a path into the ImageSet),
+        // so the same limit: a name cut shorter than its key is no gobo.
+        if self.image.chars().count() > IMAGE_KEY_LIMIT {
+            self.image = self.image.chars().take(IMAGE_KEY_LIMIT).collect();
             f.push(prefix, "image");
         }
     }
@@ -2215,5 +2215,19 @@ mod fx_param_tests {
         let plain = HdriParams { lights: vec![LightParams::default()], ..HdriParams::default() };
         assert!(!plain.to_json().contains("gobo"), "an absent gobo is not written");
         assert_eq!(HdriParams::from_json(&plain.to_json()).expect("loads").lights[0].gobo, None);
+    }
+
+    #[test]
+    fn a_gobo_picture_name_is_kept_as_long_as_a_light_pictures_key() {
+        // Both are keys of the same ImageSet (a path as text): a name cut
+        // shorter than the key the picture was loaded under is no gobo.
+        let mut p = HdriParams::default();
+        let long = format!("C:\\{}\\mask.png", "d".repeat(990));
+        p.lights.push(LightParams { gobo: Some(GoboParams { kind: "image".to_string(), image: long.clone(), ..GoboParams::default() }), ..LightParams::default() });
+        assert!(p.clamp().is_empty());
+        assert_eq!(p.lights[0].gobo.as_ref().unwrap().image, long);
+        p.lights[0].gobo.as_mut().unwrap().image = "k".repeat(2000);
+        assert_eq!(p.clamp(), ["lights[0].gobo.image"]);
+        assert_eq!(p.lights[0].gobo.as_ref().unwrap().image.len(), IMAGE_KEY_LIMIT);
     }
 }

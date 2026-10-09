@@ -16,9 +16,13 @@
 //! so the blurred window is exactly the product of two one-axis filters.
 //! Leaves and fern (`foliage.rs`) soften each blade's and stem's edge
 //! instead, so a canopy passes somewhat less of its light as it moves away.
+//! An image mask (B8) is blurred by the mean of 3 x 3 taps, a coarse box
+//! filter of the picture.
 
 use super::*;
 use super::foliage::Foliage;
+use super::light_fx::face_axes;
+use std::sync::Arc;
 
 /// Half-width, in s-units, of the penumbra of a gobo hanging `distance` 0..=1
 /// in front of its light. Against the light (0) its edges are sharp; far off
@@ -85,17 +89,18 @@ pub struct Gobo {
     vertical: bool,
     /// Leaves or fern fronds, scattered once from the seed (B7).
     foliage: Option<Foliage>,
+    /// The image mask, shared with the app's ImageSet (B8).
+    image: Option<Arc<EnvMap>>,
 }
 
 impl Gobo {
     /// The gobo of `p` over a light with tangent half extents `half`. None
-    /// when the kind draws nothing: image masks (which `images` resolves)
-    /// arrive with B8.
-    pub fn new(p: &GoboParams, half: Vec2f, _images: &ImageSet) -> Option<Gobo> {
+    /// for an image gobo whose name is not in `images`: the map is built
+    /// from the parameters and the set alone and never reads a file, so a
+    /// name the app has not loaded is simply no gobo.
+    pub fn new(p: &GoboParams, half: Vec2f, images: &ImageSet) -> Option<Gobo> {
         let kind = p.kind();
-        if kind == GoboKind::Image {
-            return None;
-        }
+        let image = if kind == GoboKind::Image { Some(images.get(&p.image)?.clone()) } else { None };
         let half = vec2f(half.x.max(1.0e-4), half.y.max(1.0e-4));
         let s = half.x.min(half.y);
         let rect = vec2f(half.x / s, half.y / s);
@@ -121,6 +126,7 @@ impl Gobo {
             tilt_cos,
             vertical: p.vertical,
             foliage,
+            image,
         })
     }
 
@@ -136,13 +142,34 @@ impl Gobo {
             GoboKind::Grid => self.window(p, false),
             GoboKind::Blinds => self.blinds(p, q),
             GoboKind::Leaves | GoboKind::Fern => self.foliage.as_ref().map_or(1.0, |f| f.transmission(p)),
-            GoboKind::Image => 1.0,
+            GoboKind::Image => self.image.as_ref().map_or(1.0, |img| self.image_at(img, p)),
         };
         if t.is_finite() {
             t.max(0.0).min(1.0)
         } else {
             1.0
         }
+    }
+
+    /// An image mask at `p` (s-units), stretched over the light's rectangle.
+    /// Against the light it is as sharp as the image; further off it is the
+    /// mean of 3 x 3 taps two thirds of a penumbra apart, a small box blur
+    /// that keeps the light the mask passes.
+    fn image_at(&self, img: &EnvMap, p: Vec2f) -> f32 {
+        // The unit box: -1..1 over the light's rectangle.
+        let b = vec2f(p.x / self.rect.x, p.y / self.rect.y);
+        if self.soft <= 0.004 {
+            return image_mask(img, b);
+        }
+        let dx = 0.67 * self.soft / self.rect.x;
+        let dy = 0.67 * self.soft / self.rect.y;
+        let mut sum = 0.0;
+        for j in -1..=1 {
+            for i in -1..=1 {
+                sum += image_mask(img, vec2f(b.x + i as f32 * dx, b.y + j as f32 * dy));
+            }
+        }
+        sum / 9.0
     }
 
     /// A window at `p` (s-units): a frame `frame` wide inside the light's
@@ -197,6 +224,126 @@ impl Gobo {
         };
         let u = a + h + gap;
         (open_up_to(u + w) - open_up_to(u - w)) / (2.0 * w)
+    }
+}
+
+/// What one texel of an image mask passes, 0..=1.
+/// - An opaque texel passes its linear luminance, clamped to 0..=1, so an HDR
+///   picture only blocks light and never adds any.
+/// - A transparent texel passes everything, whatever its colour: since B14
+///   an 8-bit file keeps its alpha (straight), so a cut-out PNG masks as it
+///   is drawn.
+fn texel_passes(t: &[f32; 4]) -> f32 {
+    // max/min, not clamp: a NaN reads as 0, so a NaN alpha is transparent.
+    let pass = crate::sky::luminance(vec3f(t[0], t[1], t[2])).max(0.0).min(1.0);
+    let alpha = t[3].max(0.0).min(1.0);
+    1.0 - alpha * (1.0 - pass)
+}
+
+/// Transmission of an image mask at unit-box point `b` (-1..1 each way, x to
+/// the viewer's right, y up; the image's top row is the light's top).
+/// Bilinear in what the texels pass (`texel_passes`), not in their colours:
+/// a colour kept under a transparent texel then never fringes an opaque
+/// edge (as B14's premultiplied lookup does for a light's picture), and a
+/// bright HDR texel next to a black one dims to their mean instead of
+/// passing everything. Held inside the texel centres rather than wrapped:
+/// a mask has edges, an equirect does not.
+fn image_mask(img: &EnvMap, b: Vec2f) -> f32 {
+    let (w, h) = (img.width, img.height);
+    if w == 0 || h == 0 || img.data.len() != w * h {
+        return 1.0;
+    }
+    // Texel space, texel centres on the integers; max/min keep a NaN at 0.
+    let fx = ((0.5 + 0.5 * b.x) * w as f32 - 0.5).max(0.0).min((w - 1) as f32);
+    let fy = ((0.5 - 0.5 * b.y) * h as f32 - 0.5).max(0.0).min((h - 1) as f32);
+    let (x0, y0) = (fx.floor() as usize, fy.floor() as usize);
+    let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+    let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+    let at = |x: usize, y: usize| texel_passes(&img.data[y * w + x]);
+    let top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * tx;
+    let bottom = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * tx;
+    top + (bottom - top) * ty
+}
+
+/// The studio a projected gobo lands on, in units of the camera's height
+/// above the floor: the floor is the plane one unit below the camera, the
+/// cyc wall a cylinder WALL_RADIUS round it, and the projector hangs
+/// PROJECTOR_DISTANCE out along its light's direction, looking back at the
+/// centre. At that distance a 40 degree light throws its gobo over a floor
+/// patch a few units across, around the camera.
+pub const FLOOR_HEIGHT: f32 = 1.0;
+pub const WALL_RADIUS: f32 = 4.0;
+pub const PROJECTOR_DISTANCE: f32 = 6.0;
+/// How dark a projected gobo's shadow gets: the studio's fill keeps it off black.
+pub const SHADOW_DEPTH: f32 = 0.8;
+
+/// A light whose gobo is cast: an enabled emitter that asks for it.
+fn casts(l: &LightParams) -> bool {
+    l.enabled && l.blend() == Blend::Add && l.gobo.as_ref().map_or(false, |g| g.project_on_backdrop)
+}
+
+/// A gobo's shadow on the studio backdrop, thrown from its light's own
+/// direction: the key light when it casts, else the first light that does.
+/// An environment map has no geometry, so this paints the shadow a cookie
+/// would throw onto a floor and a cyc wall. It cannot fall across a subject
+/// in the scene; that is the engine light-cookie stretch goal.
+#[derive(Clone, Debug)]
+pub struct BackdropGobo {
+    /// Toward the light; the light's right as the viewer facing it sees it; its up.
+    center: Vec3f,
+    right: Vec3f,
+    up: Vec3f,
+    /// The light's tangent half extents: the beam's rectangle.
+    half: Vec2f,
+    gobo: Gobo,
+}
+
+impl BackdropGobo {
+    /// The shadow of the key light's gobo when the key casts one, else of the
+    /// first light that does. None when no light casts, or the caster's gobo
+    /// draws nothing (an image whose name is not in `images`).
+    pub fn new(lights: &[LightParams], images: &ImageSet) -> Option<BackdropGobo> {
+        let light = lights.iter().find(|l| l.key && casts(l)).or_else(|| lights.iter().find(|l| casts(l)))?;
+        let (frame, sx, half) = face_axes(light);
+        let gobo = Gobo::new(light.gobo.as_ref()?, half, images)?;
+        Some(BackdropGobo { center: frame.center, right: frame.right * sx, up: frame.up, half, gobo })
+    }
+
+    /// The factor 1 - SHADOW_DEPTH ..= 1 by which the backdrop seen along
+    /// `d` (unit, in the map's own frame) is darkened.
+    pub fn shade(&self, d: Vec3f) -> f32 {
+        // Where the view ray meets the floor or the wall, whichever is nearer.
+        let horizontal = (d.x * d.x + d.z * d.z).sqrt();
+        let t_floor = if d.y < -1.0e-4 { FLOOR_HEIGHT / -d.y } else { f32::INFINITY };
+        let t_wall = if horizontal > 1.0e-4 { WALL_RADIUS / horizontal } else { f32::INFINITY };
+        let t = t_floor.min(t_wall);
+        if !t.is_finite() {
+            return 1.0;
+        }
+        let p = d * t;
+        // A surface turned away from the light gets none of it, so no shadow either.
+        let normal = if t_floor <= t_wall { vec3f(0.0, 1.0, 0.0) } else { vec3f(-p.x, 0.0, -p.z).normalize() };
+        if !(normal.dot(self.center) > 0.0) {
+            return 1.0;
+        }
+        // The projector sits at center x PROJECTOR_DISTANCE and looks back at
+        // the camera. Its slide is the gobo as the viewer sees it on the
+        // light, so a surface point's place on the slide is its offset across
+        // the beam over its depth along it: the pattern lands on the floor
+        // the way the light shows it, right side to the right.
+        let depth = PROJECTOR_DISTANCE - p.dot(self.center);
+        if depth < 0.1 {
+            return 1.0;
+        }
+        let q = vec2f(p.dot(self.right) / depth, p.dot(self.up) / depth);
+        // The cookie fades out over the last tenth of the beam, so the
+        // shadow has no hard border where the beam ends.
+        let rim = (q.x.abs() / self.half.x).max(q.y.abs() / self.half.y);
+        let inside = 1.0 - smoothstep(0.9, 1.0, rim);
+        if !(inside > 0.0) {
+            return 1.0;
+        }
+        1.0 - SHADOW_DEPTH * inside * (1.0 - self.gobo.transmission(q))
     }
 }
 
@@ -340,11 +487,166 @@ mod tests {
         assert_eq!(penumbra(f32::NAN), penumbra(0.0));
     }
 
+    fn studio(lights: Vec<LightParams>) -> HdriParams {
+        let mut p = HdriParams::default();
+        p.mode = "studio".to_string();
+        p.lights = lights;
+        p
+    }
+
+    /// One picture under the name "mask": grey `value(x, y)`, alpha `alpha(x, y)`.
+    fn mask_set(width: usize, height: usize, value: impl Fn(usize, usize) -> f32, alpha: impl Fn(usize, usize) -> f32) -> ImageSet {
+        let data = (0..width * height)
+            .map(|i| {
+                let v = value(i % width, i / width);
+                [v, v, v, alpha(i % width, i / width)]
+            })
+            .collect();
+        let mut images = ImageSet::default();
+        images.insert("mask", EnvMap { width, height, data });
+        images
+    }
+
+    fn image_gobo(images: &ImageSet, distance: f32) -> Gobo {
+        let p = GoboParams { kind: "image".to_string(), image: "mask".to_string(), distance, ..GoboParams::default() };
+        Gobo::new(&p, vec2f(0.3, 0.2), images).expect("the name is loaded")
+    }
+
     #[test]
-    fn the_kinds_not_drawn_yet_are_no_gobo() {
-        // Image masks arrive with B8.
+    fn an_image_gobo_hangs_the_way_the_image_reads() {
+        // Left half black, right half white.
+        let g = image_gobo(&mask_set(4, 2, |x, _| if x < 2 { 0.0 } else { 1.0 }, |_, _| 1.0), 0.0);
+        assert!(g.transmission(vec2f(-0.25, 0.0)) < 0.01, "the image's left is the viewer's left: black blocks");
+        assert!(g.transmission(vec2f(0.25, 0.0)) > 0.99, "white passes");
+        let mid = g.transmission(vec2f(0.0, 0.0));
+        assert!(mid > 0.3 && mid < 0.7, "bilinear between them: {mid}");
+        // Top row white, bottom row black: the image's top is the light's top.
+        let g = image_gobo(&mask_set(2, 2, |_, y| if y == 0 { 1.0 } else { 0.0 }, |_, _| 1.0), 0.0);
+        assert!(g.transmission(vec2f(0.0, 0.15)) > 0.99);
+        assert!(g.transmission(vec2f(0.0, -0.15)) < 0.01);
+    }
+
+    #[test]
+    fn a_missing_image_is_no_gobo() {
+        let images = mask_set(4, 2, |_, _| 1.0, |_, _| 1.0);
+        let p = GoboParams { kind: "image".to_string(), image: "nowhere.png".to_string(), ..GoboParams::default() };
+        assert!(Gobo::new(&p, vec2f(0.3, 0.2), &images).is_none(), "Env reads no files: a name the app has not loaded is no gobo");
         let p = GoboParams { kind: "image".to_string(), ..GoboParams::default() };
-        assert!(Gobo::new(&p, vec2f(0.3, 0.2), &ImageSet::default()).is_none());
+        assert!(Gobo::new(&p, vec2f(0.3, 0.2), &images).is_none(), "an empty name");
+    }
+
+    #[test]
+    fn an_image_gobo_only_blocks_and_a_transparent_texel_passes() {
+        // An HDR picture brighter than 1 passes everything, and no more.
+        let g = image_gobo(&mask_set(2, 2, |_, _| 5.0, |_, _| 1.0), 0.0);
+        assert_eq!(g.transmission(vec2f(0.1, 0.05)), 1.0);
+        // A black cut-out: opaque on the left, transparent on the right.
+        let g = image_gobo(&mask_set(4, 2, |_, _| 0.0, |x, _| if x < 2 { 1.0 } else { 0.0 }), 0.0);
+        assert!(g.transmission(vec2f(-0.25, 0.0)) < 0.01, "opaque black blocks");
+        assert!(g.transmission(vec2f(0.25, 0.0)) > 0.99, "transparent passes, whatever its colour");
+    }
+
+    #[test]
+    fn a_distant_image_gobo_is_blurred() {
+        // A hard edge down the middle of a 64 wide mask; just right of it.
+        let images = mask_set(64, 2, |x, _| if x < 32 { 0.0 } else { 1.0 }, |_, _| 1.0);
+        let q = vec2f(0.006, 0.0);
+        assert!(image_gobo(&images, 0.0).transmission(q) > 0.99, "against the light the edge is as sharp as the image");
+        let soft = image_gobo(&images, 1.0).transmission(q);
+        assert!(soft > 0.4 && soft < 0.9, "far from it the black half bleeds over: {soft}");
+    }
+
+    #[test]
+    fn a_gobo_image_is_one_of_the_keys_the_app_loads() {
+        use crate::hdri::image_light::referenced_keys;
+        let mut p = studio(vec![
+            LightParams { gobo: Some(GoboParams { kind: "image".to_string(), image: "b.png".to_string(), ..GoboParams::default() }), ..LightParams::default() },
+            // A name on a gobo of another kind counts too: the person may switch the kind back.
+            LightParams { gobo: Some(GoboParams { image: "a.png".to_string(), ..GoboParams::default() }), ..LightParams::default() },
+            LightParams { gobo: Some(GoboParams::default()), ..LightParams::default() },
+        ]);
+        assert_eq!(referenced_keys(&p), ["a.png", "b.png"]);
+        p.lights[0].gobo = None;
+        assert_eq!(referenced_keys(&p), ["a.png"]);
+    }
+
+    /// A key light up in the east, its window gobo cast onto the backdrop.
+    fn projecting_key() -> LightParams {
+        LightParams {
+            azimuth_deg: 90.0,
+            elevation_deg: 45.0,
+            width_deg: 40.0,
+            height_deg: 40.0,
+            key: true,
+            gobo: Some(GoboParams { panes_x: 3, panes_y: 3, bar: 0.4, project_on_backdrop: true, ..GoboParams::default() }),
+            ..LightParams::default()
+        }
+    }
+
+    #[test]
+    fn a_projected_gobo_darkens_the_floor_under_its_light() {
+        let cast = BackdropGobo::new(&[projecting_key()], &ImageSet::default()).expect("a casting light");
+        let mut darker = 0;
+        for j in 0..16 {
+            for i in 0..32 {
+                let d = dir_from_az_el(i as f32 * 11.25, -90.0 + 60.0 * (j as f32 + 0.5) / 16.0);
+                let s = cast.shade(d);
+                assert!(s <= 1.0 && s >= 1.0 - SHADOW_DEPTH - 1.0e-6, "{s}");
+                if s < 0.9 {
+                    darker += 1;
+                }
+            }
+        }
+        assert!(darker > 0, "the bars fall somewhere on the floor");
+        assert_eq!(cast.shade(vec3f(0.0, 1.0, 0.0)), 1.0, "straight up meets no backdrop surface");
+        // Not asked to cast, switched off, or a flag: no projection.
+        let mut plain = projecting_key();
+        plain.gobo.as_mut().unwrap().project_on_backdrop = false;
+        assert!(BackdropGobo::new(&[plain], &ImageSet::default()).is_none());
+        let off = LightParams { enabled: false, ..projecting_key() };
+        assert!(BackdropGobo::new(&[off], &ImageSet::default()).is_none());
+        let flag = LightParams { blend: "multiply".to_string(), ..projecting_key() };
+        assert!(BackdropGobo::new(&[flag], &ImageSet::default()).is_none());
+    }
+
+    #[test]
+    fn the_key_light_is_the_one_that_casts() {
+        let images = ImageSet::default();
+        let key = projecting_key();
+        let other = LightParams { key: false, azimuth_deg: 270.0, ..projecting_key() };
+        let both = BackdropGobo::new(&[other.clone(), key.clone()], &images).expect("casts");
+        let only_key = BackdropGobo::new(&[key], &images).expect("casts");
+        let only_other = BackdropGobo::new(&[other], &images).expect("the first light that casts, when no key does");
+        let mut differs = false;
+        for i in 0..64 {
+            let d = dir_from_az_el(i as f32 * 5.625, -50.0);
+            assert_eq!(both.shade(d), only_key.shade(d));
+            differs |= both.shade(d) != only_other.shade(d);
+        }
+        assert!(differs);
+    }
+
+    #[test]
+    fn projection_only_darkens_the_studio() {
+        let mut plain = projecting_key();
+        plain.gobo.as_mut().unwrap().project_on_backdrop = false;
+        let a = Env::new(&studio(vec![plain])).bake(64);
+        let b = Env::new(&studio(vec![projecting_key()])).bake(64);
+        let mut darker = 0;
+        for (x, y) in a.data.iter().zip(b.data.iter()) {
+            for k in 0..3 {
+                assert!(y[k] <= x[k] + 1.0e-6);
+                if y[k] < x[k] * 0.9 {
+                    darker += 1;
+                }
+            }
+        }
+        assert!(darker > 0, "the default backdrop is not black, so the shadow shows");
+        // A sky has no floor: nothing changes there.
+        let sky = |light: LightParams| Env::new(&HdriParams { lights: vec![light], ..HdriParams::default() }).bake(32);
+        let mut unprojected = projecting_key();
+        unprojected.gobo.as_mut().unwrap().project_on_backdrop = false;
+        assert_eq!(sky(projecting_key()), sky(unprojected));
     }
 
     #[test]
