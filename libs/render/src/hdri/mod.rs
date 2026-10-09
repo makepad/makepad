@@ -134,6 +134,10 @@ pub struct Env {
     /// The sun's light under the clouds, for the fog: its irradiance at the
     /// ground times the cover along the sun.
     weather_sun: Vec3f,
+    /// The dome's light under the clouds, for the rain haze and the fog: the
+    /// dry sky's mean radiance as this map draws it (`dome_light`). Zero
+    /// without weather.
+    weather_dome: Vec3f,
 }
 
 impl Env {
@@ -223,8 +227,15 @@ impl Env {
             volumetric,
             weather,
             weather_sun,
+            weather_dome: Vec3f::default(),
             base_image: None,
         };
+        // The weather's veil is lit by the dome as this map draws it, so the
+        // dome is measured once its layers are in place (and before a base
+        // image meters the base, the veil included).
+        if env.weather.is_some() {
+            env.weather_dome = env.dome_light();
+        }
         if let Some(base) = env.params.base_image.clone() {
             // Sky replacement matches the image's exposure to the base it is
             // composited over, so the base is metered first (base_image is
@@ -289,9 +300,9 @@ impl Env {
     fn base_layer(&self, d: Vec3f, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
         match &self.atmo {
             Some(atmo) => match &self.weather {
-                None => self.sky_layers(d, atmo, without, cache),
+                None => self.sky_layers(d, atmo, without, cache, true),
                 Some(weather) => {
-                    let dry = |v: Vec3f| self.sky_layers(v, atmo, without, cache);
+                    let dry = |v: Vec3f| self.sky_layers(v, atmo, without, cache, true);
                     // Below the horizon: the light a closed deck leaves, and the wet
                     // ground's mirror of the sky above it.
                     // The mirror shows the sky as the weather shows it: through the rain and fog.
@@ -299,11 +310,12 @@ impl Env {
                     // map without its key: the reflection is light from below, which
                     // the engine's directional light does not carry (plan 2's N3
                     // takes out exactly what the key carries, no more).
-                    let seen = |v: Vec3f| weather.veil(v, self.sky_layers(v, atmo, None, cache), self.weather_sun, self.cloud_ambient);
+                    let seen = |v: Vec3f| weather.veil(v, self.sky_layers(v, atmo, None, cache, true), self.weather_sun, self.weather_dome);
                     let c = weather.ground(d, dry(d), &seen);
-                    // Rain haze, its virga and fog between the eye and all of it; then
-                    // the bolt and its flash, which stand inside the rain.
-                    weather.veil(d, c, self.weather_sun, self.cloud_ambient) + weather.lightning(d)
+                    // Rain haze, its virga and fog between the eye and all of it, lit
+                    // by the dome above them; then the bolt and its flash, which stand
+                    // inside the rain.
+                    weather.veil(d, c, self.weather_sun, self.weather_dome) + weather.lightning(d)
                 }
             },
             None => {
@@ -323,7 +335,16 @@ impl Env {
     /// night ground and the volume's bases have the weathered ground colour.
     /// `without` leaves the key's disc out (plan 2's N3: no sun disc under
     /// `KeyTerm::Sun`, the moon's key share off under `KeyTerm::Moon`).
-    fn sky_layers(&self, d: Vec3f, atmo: &atmosphere::Atmosphere, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
+    /// `points` false leaves out the discs and the stars as well, which a mean
+    /// over a few hundred directions cannot sample (`dome_light`).
+    fn sky_layers(
+        &self,
+        d: Vec3f,
+        atmo: &atmosphere::Atmosphere,
+        without: Option<KeyTerm>,
+        cache: Option<&volumetric::CloudCache>,
+        points: bool,
+    ) -> Vec3f {
         // The ground under the sky, as the weather leaves it (snow is white).
         let g = self
             .weather
@@ -334,13 +355,16 @@ impl Env {
         // The sun's and the moon's discs are blocked by the unfaded
         // cover, like their keys in `sun`; the rest of the sky by the
         // visible deck, which thins into the haze at the horizon.
-        let mut discs = if without == Some(KeyTerm::Sun) { Vec3f::default() } else { atmo.sun_disc(d) };
+        let mut discs = if without == Some(KeyTerm::Sun) || !points { Vec3f::default() } else { atmo.sun_disc(d) };
         if let Some(night) = &self.night {
-            c += night.stars(d) + night.glow(d) + night.ground(d, ground_color);
-            discs += match without {
-                Some(KeyTerm::Moon(share)) => night.moon(d) * (1.0 - share),
-                _ => night.moon(d),
-            };
+            let stars = if points { night.stars(d) } else { Vec3f::default() };
+            c += stars + night.glow(d) + night.ground(d, ground_color);
+            if points {
+                discs += match without {
+                    Some(KeyTerm::Moon(share)) => night.moon(d) * (1.0 - share),
+                    _ => night.moon(d),
+                };
+            }
         }
         // 1 in fair weather, so nothing changes there bit for bit.
         let gain = self.weather.as_ref().map_or(1.0, |weather| weather.cloud_gain());
@@ -377,6 +401,34 @@ impl Env {
             }
         }
         c
+    }
+
+    /// The light the weather's veil gets from the sky above it (B17's fix
+    /// round): the solid-angle mean of the dry sky over the upper hemisphere,
+    /// as this map draws it, without the discs and the stars (the sun reaches
+    /// the veil on its own, through the cover, as `weather_sun`). On a fair
+    /// sky this is the open dome's mean (`cloud_ambient`) to within the
+    /// sampling; under a deck it is the light the deck passes down, its sunlit
+    /// undersides and the kind's cloud light included, so the fog and the rain
+    /// haze are lit as the clouds above them are. Eight rows equally spaced in
+    /// the sine of the elevation (equal solid angles) of 32 directions each,
+    /// every other row turned by half a column; a volume is marched along each.
+    fn dome_light(&self) -> Vec3f {
+        const ROWS: usize = 8;
+        const COLUMNS: usize = 32;
+        let Some(atmo) = &self.atmo else {
+            return Vec3f::default();
+        };
+        let mut sum = Vec3f::default();
+        for j in 0..ROWS {
+            let elevation = ((j as f32 + 0.5) / ROWS as f32).asin().to_degrees();
+            let turn = if j % 2 == 0 { 0.5 } else { 0.0 };
+            for i in 0..COLUMNS {
+                let azimuth = (i as f32 + turn) * 360.0 / COLUMNS as f32;
+                sum += self.sky_layers(dir_from_az_el(azimuth, elevation), atmo, None, None, false);
+            }
+        }
+        sum * (1.0 / (ROWS * COLUMNS) as f32)
     }
 
     /// The luminance a level surface receives from the mode's own base (its

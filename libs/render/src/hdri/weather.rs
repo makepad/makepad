@@ -13,11 +13,16 @@
 //!   colour). Wet ground mirrors the sky by water's Fresnel reflectance, as a
 //!   dull sheen on damp ground and as a flat mirror in fbm puddles.
 //! - **Rain.** Haze that greys the distance, with virga: shafts hanging under
-//!   the deck toward the horizon. An environment map holds no streaks.
+//!   the deck toward the horizon, darker curtains over the haze and what is
+//!   behind it. An environment map holds no streaks.
 //! - **Fog.** A veil lying on the ground: thin overhead, opaque toward the
-//!   horizon, lit by the sky and glowing toward the sun.
+//!   horizon, glowing toward the sun; dense at 1, when only the ground at the
+//!   feet shows through it.
 //! - **Lightning.** One seeded bolt from the deck to the horizon and a flash
 //!   lobe around its top, standing inside the rain.
+//!
+//! The rain haze and the fog are lit by the dome as the map draws it (under a
+//! deck, the deck's own light), greyed as the clouds grey it.
 //!
 //! Directions are in the map's own frame (before the map rotation); radiance
 //! is in the atmosphere's units.
@@ -32,11 +37,17 @@ const SNOW_ALBEDO: [f32; 3] = [0.8, 0.8, 0.8];
 /// The viewer's height above the ground: how near the ground below is.
 const EYE_M: f32 = 2.0;
 
-/// Fog 1 has this optical depth straight up; the layer is FOG_HEIGHT_M thick
-/// and a level path through it is capped at FOG_RANGE_M (the Earth curves away).
+/// Fog's optical depth straight up is FOG_ZENITH times its thickened amount
+/// (`thickened`); the layer is FOG_HEIGHT_M thick and a level path through it
+/// is capped at FOG_RANGE_M (the Earth curves away).
 const FOG_ZENITH: f32 = 2.5;
 const FOG_HEIGHT_M: f32 = 150.0;
 const FOG_RANGE_M: f32 = 6000.0;
+/// Fog thickens steeply over the last stretch of its range: its depth goes
+/// with fog x (1 + FOG_DENSE x fog^16). The kinds' amounts (0.7 and under)
+/// stay within 2.5 % of linear, about 330 m of sight at the ground at 0.7,
+/// and fog 1 is dense fog, 11 times as deep as 0.7: about 30 m of sight.
+const FOG_DENSE: f32 = 7.0;
 /// Fog's forward scattering (Henyey-Greenstein g) and the share of the sun's
 /// light it spreads evenly by its many scatterings.
 const FOG_G: f32 = 0.6;
@@ -48,7 +59,7 @@ const RAIN_RANGE_M: f32 = 12_000.0;
 /// Rain is a dull grey of the ambient; falling snow is nearly white.
 const RAIN_ALBEDO: f32 = 0.6;
 const SNOWFALL_ALBEDO: f32 = 0.9;
-/// The most a shaft of virga darkens what is behind it.
+/// The most a shaft of virga darkens the rain haze and what is behind it.
 const VIRGA_DARKEN: f32 = 0.5;
 /// Radius of the circle the shaft noise is read on (cells): the azimuth wraps
 /// around it without a seam. 5 gives shafts some ten degrees apart.
@@ -438,15 +449,17 @@ impl Weather {
         vec3f(BOLT_COLOR[0], BOLT_COLOR[1], BOLT_COLOR[2]) * (light * self.transmittance_toward(d).sqrt())
     }
 
-    /// The veil between the eye and what is drawn along `d`: rain haze and its
-    /// virga shafts, then fog. `sun_irradiance` is the sun's light under the
-    /// clouds (already through the cover along the sun), `ambient` the sky's
-    /// mean radiance.
+    /// The veil between the eye and what is drawn along `d`: rain haze, its
+    /// virga shafts over the haze and what is behind it, then fog.
+    /// `sun_irradiance` is the sun's light under the clouds (already through
+    /// the cover along the sun), `ambient` the mean radiance of the dome above
+    /// the veil as the map draws it, the clouds and their light included
+    /// (`Env` measures it once per map).
     pub fn veil(&self, d: Vec3f, c: Vec3f, sun_irradiance: Vec3f, ambient: Vec3f) -> Vec3f {
         let mut c = c;
-        // The air under a rain or storm deck is lit by what that deck passes,
-        // as the clouds' own undersides are: a storm's rain is dark.
-        let ambient = ambient * self.cloud_gain;
+        // The air under a deck is lit by what that deck passes down, as the
+        // clouds' own undersides are: `ambient` is that deck's light, the
+        // kind's cloud light included, so a storm's rain is dark.
         let grey = luminance(ambient);
         if self.effects.rain > 0.0 {
             let through = (-self.rain_depth(d)).exp();
@@ -458,10 +471,10 @@ impl Weather {
         }
         if self.effects.fog > 0.0 {
             let through = (-self.fog_depth(d)).exp();
-            // Fog is lit by the sky's ambient, greyed as the clouds grey it
-            // (half on a clear day, all of it under a closed deck), and by
-            // the sun: evenly, from the many scatterings inside it, and with
-            // a glow toward the sun.
+            // Fog is lit by the dome, greyed as the clouds grey it (half on a
+            // clear day, all of it under a closed deck), and by the sun:
+            // evenly, from the many scatterings inside it, and with a glow
+            // toward the sun.
             let sky = ambient.mix(vec3f(grey, grey, grey), 0.5 + 0.5 * self.coverage);
             let even = FOG_DIFFUSE * self.sun_dir.y.max(0.0) / std::f32::consts::PI;
             let glow = hg_phase(d.dot(self.sun_dir), FOG_G);
@@ -477,7 +490,7 @@ impl Weather {
     }
 
     fn fog_depth(&self, d: Vec3f) -> f32 {
-        slab_depth(d.y, self.effects.fog * FOG_ZENITH, FOG_HEIGHT_M, FOG_RANGE_M)
+        slab_depth(d.y, thickened(self.effects.fog) * FOG_ZENITH, FOG_HEIGHT_M, FOG_RANGE_M)
     }
 
     fn rain_depth(&self, d: Vec3f) -> f32 {
@@ -521,6 +534,12 @@ fn slab_depth(sin_elevation: f32, zenith_depth: f32, height_m: f32, range_m: f32
         range_m + (ground - range_m) * smooth(0.0, GROUND_BLEND, -sin_elevation)
     };
     zenith_depth / height_m * path
+}
+
+/// A fog amount as the depth it gives, per FOG_ZENITH: linear over the kinds'
+/// amounts, then steeply denser toward 1 (FOG_DENSE).
+fn thickened(fog: f32) -> f32 {
+    fog * (1.0 + FOG_DENSE * fog.powi(16))
 }
 
 /// Distance from point `p` to the segment a-b, all in the bolt's plane.
@@ -682,6 +701,29 @@ mod tests {
         assert!(unlit.x > 0.2 && unlit.x < 0.5 && unlit.z > unlit.x, "{unlit:?}");
     }
 
+    /// Fog 1 is dense fog, about 30 m of sight at the ground: the deck
+    /// overhead and the ground past ten metres or so are lost in it, and only
+    /// the ground at the feet shows (an eye 2 m up looks down through 2 m of
+    /// it). The kinds' own amounts, 0.7 and under, keep their depth (B17's fix
+    /// round: fog 1 was only 1.4 times as deep as fog 0.7, and hid nothing more).
+    #[test]
+    fn the_densest_fog_leaves_only_the_ground_at_the_feet() {
+        let mut sky = sky_with("fog");
+        sky.weather.as_mut().unwrap().fog = 1.0;
+        let dense = Weather::new(&sky, sun()).unwrap();
+        let up = vec3f(0.0, 1.0, 0.0);
+        let overhead = dense.transmittance_toward(up);
+        assert!(overhead < 1.0e-3, "the deck overhead is lost: {overhead}");
+        let (ten, five) = (dense.transmittance_toward(dir_from_az_el(0.0, -10.0)), dense.transmittance_toward(dir_from_az_el(0.0, -5.0)));
+        assert!(ten < 0.35 && five < 0.1, "the ground 11 m and 23 m off: {ten}, {five}");
+        let feet = dense.transmittance_toward(vec3f(0.0, -1.0, 0.0));
+        assert!(feet > 0.5, "the ground at the feet still shows: {feet}");
+        // The kind's own fog 0.7 is within 3 % of its linear depth.
+        let kind = weather("fog").fog_depth(up);
+        let linear = slab_depth(1.0, 0.7 * FOG_ZENITH, FOG_HEIGHT_M, FOG_RANGE_M);
+        assert!((kind / linear - 1.0).abs() < 0.03, "{kind} vs {linear}");
+    }
+
     #[test]
     fn rain_greys_the_distance_and_hangs_virga_under_the_deck() {
         let rain = weather("rain");
@@ -773,7 +815,7 @@ mod tests {
 #[cfg(test)]
 mod env_tests {
     use super::*;
-    use crate::hdri::{az_el_from_dir, vec, Env, HdriParams, WEATHER_KIND_NAMES};
+    use crate::hdri::{az_el_from_dir, vec, Env, HdriParams, KeyTerm, WEATHER_KIND_NAMES};
 
     fn sky_params(kind: Option<&str>) -> HdriParams {
         let mut p = HdriParams::default();
@@ -880,6 +922,68 @@ mod env_tests {
                 assert!(c.z < 1.15 * c.x, "{kind} at the horizon, azimuth {az}: {c:?}");
             }
         }
+    }
+
+    /// The veil is lit by the dome as the map draws it (B17's fix round): on a
+    /// fair sky that is the open dome's mean, as the brief's veil had it, and
+    /// under a deck it is the deck's light, measured here on a finer grid of
+    /// the dry sky than the map's own.
+    #[test]
+    fn the_veil_is_lit_by_the_dome_as_the_map_draws_it() {
+        let hazy = Env::new(&sky_params(Some("hazy")));
+        let (dome, open) = (luminance(hazy.weather_dome), luminance(hazy.cloud_ambient));
+        assert!((dome / open - 1.0).abs() < 0.02, "a fair sky's dome is the open dome: {dome} vs {open}");
+        for kind in ["overcast", "fog", "rain", "storm", "snow"] {
+            let env = Env::new(&sky_params(Some(kind)));
+            let atmo = env.atmo.as_ref().unwrap();
+            let (rows, columns) = (24, 96);
+            let mut sum = Vec3f::default();
+            for j in 0..rows {
+                let elevation = ((j as f32 + 0.5) / rows as f32).asin().to_degrees();
+                for i in 0..columns {
+                    sum += env.sky_layers(dir_from_az_el((i as f32 + 0.25) * 360.0 / columns as f32, elevation), atmo, Some(KeyTerm::Sun), None, true);
+                }
+            }
+            let fine = luminance(sum * (1.0 / (rows * columns) as f32));
+            let dome = luminance(env.weather_dome);
+            assert!((dome / fine - 1.0).abs() < 0.05, "{kind}: the veil's dome {dome}, the dry sky's mean {fine}");
+        }
+    }
+
+    /// Kind fog: the horizon is the fog's own light all round, no darker than
+    /// the sky overhead, where the deck still shows through the thinner fog
+    /// (B17's fix round: lit by the clear dome under a deck 45 % brighter than
+    /// that, the horizon was the darkest band of the sky, sRGB 141 against
+    /// 160 at the zenith).
+    #[test]
+    fn fog_lies_white_on_the_horizon() {
+        let env = Env::new(&sky_params(Some("fog")));
+        let ring = |el: f32| (0..36).map(|i| luminance(env.radiance(dir_from_az_el(i as f32 * 10.0 + 3.0, el)))).sum::<f32>() / 36.0;
+        let (horizon, overhead) = (ring(1.0), ring(80.0));
+        assert!(horizon > 0.98 * overhead, "{horizon} at the horizon, {overhead} overhead");
+    }
+
+    /// Fog 1 hides everything but its own light, its glow and the ground at
+    /// the feet: wet ground no longer shows 3 degrees down (38 m off), which
+    /// it brightens by about a quarter under the kind's own fog, and on a fair
+    /// sky the sun's key is gone into it.
+    #[test]
+    fn fog_one_hides_the_distance_and_the_key() {
+        let foggy = |kind: Option<&str>, fog: f32, wet: f32| {
+            let mut p = sky_params(kind);
+            let w = p.sky.weather.get_or_insert_with(WeatherParams::default);
+            w.fog = fog;
+            w.wet_ground = wet;
+            Env::new(&p)
+        };
+        let ring = |env: &Env, el: f32| (0..36).map(|i| luminance(env.radiance(dir_from_az_el(i as f32 * 10.0 + 3.0, el)))).sum::<f32>() / 36.0;
+        let change = |fog: f32| ring(&foggy(Some("fog"), fog, 1.0), -3.0) / ring(&foggy(Some("fog"), fog, 0.0), -3.0) - 1.0;
+        let (kind, dense) = (change(0.0), change(1.0));
+        assert!(kind.abs() > 0.05, "the kind's own fog shows the puddles: {kind}");
+        assert!(dense.abs() < 0.01, "fog 1 hides them: {dense}");
+        let clear = luminance(Env::new(&sky_params(None)).sun().unwrap().radiance);
+        let key = foggy(Some("clear"), 1.0, 0.0).sun().map_or(0.0, |sun| luminance(sun.radiance));
+        assert!(key < 1.0e-3 * clear, "{key} against {clear} on a clear day");
     }
 
     /// The virga shows in the map: the shafts darken the rain haze in front of
