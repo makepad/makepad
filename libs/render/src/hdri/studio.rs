@@ -25,6 +25,7 @@ use super::shaped::ShapedLight;
 use super::gels::{gel_stack, shifted_kelvin};
 use super::spectrum::light_source_rgb;
 use super::image_light::{ImageSet, LightImage};
+use super::light_fx::LightFx;
 
 /// Strength of a full ±1 tint: at +1 green is cut to about a third of red and blue.
 const TINT_STRENGTH: f32 = 0.4;
@@ -202,6 +203,11 @@ pub struct Studio {
     key: Option<EnvSun>,
     /// The key's place in `lights`: the light a lookup without the key skips.
     key_index: Option<usize>,
+    /// What hangs in front of each light (1b: gobo, doors and grid, wear),
+    /// in step with `lights`.
+    fx: Vec<LightFx>,
+    /// False while no light has any: `apply_lights` then runs the loop as it was.
+    any_fx: bool,
 }
 
 impl Studio {
@@ -252,6 +258,17 @@ impl Studio {
                 cos_cover: integral.cos_cover.min(radius.cos()),
             }
         });
+        // What hangs in front of each light, built for the same lights in the
+        // same order as the prepared lights above.
+        let fx: Vec<LightFx> = enabled.iter().map(|l| LightFx::new(l, images)).collect();
+        let any_fx = fx.iter().any(|fx| !fx.is_plain());
+        // The engine's key light carries what gets past its own gobo, doors and
+        // grid (its radiance; its cone, facing share and covering cone are its
+        // shape's, which the extras only cut).
+        let key = key.map(|key: EnvSun| match key_index {
+            Some(i) => EnvSun { radiance: key.radiance * fx[i].key_scale(), ..key },
+            None => key,
+        });
         Studio {
             top: rgb(studio.top),
             horizon: rgb(studio.horizon),
@@ -260,6 +277,8 @@ impl Studio {
             lights: prepared,
             key,
             key_index,
+            fx,
+            any_fx,
         }
     }
 
@@ -276,7 +295,72 @@ impl Studio {
         }
     }
 
-    /// Draws the lights over `base` in list order.
+    /// Draws the lights over `base` in list order. A window filled with sky
+    /// shows `base` through it here; `Env` calls `apply_lights_sky` with the
+    /// map's real sky.
+    pub fn apply_lights(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
+        self.apply_lights_sky(dir, base, &|_| base, false)
+    }
+
+    /// [`Self::apply_lights`] without the key light (N3: the map without its
+    /// key is the source of the engine's lighting copy). Skipping it is the
+    /// map with the key disabled, except that a scrim key's cloth stays
+    /// (`PreparedLight::hide`): every other light, the flags after the key
+    /// included, draws as before.
+    pub fn apply_lights_without_key(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
+        self.apply_lights_sky(dir, base, &|_| base, true)
+    }
+
+    /// `apply_lights` with `sky(dir)`, the sky a window filled with sky
+    /// (`GoboParams::fill_sky`) shows. `sky` is called only for a direction
+    /// such a window covers. `without_key` leaves the key light out (plan 2's
+    /// N3, `apply_lights_without_key`; `Env::radiance_with` under
+    /// `KeyTerm::Light`).
+    ///
+    /// Each light is drawn by its own code (`draw_lights`); what hangs in
+    /// front of it then scales what it did (`LightFx::apply`), so a key left
+    /// out leaves what it hides scaled as in the map and nothing of its own.
+    pub(super) fn apply_lights_sky(&self, dir: Vec3f, base: Vec3f, sky: &dyn Fn(Vec3f) -> Vec3f, without_key: bool) -> Vec3f {
+        let skip = if without_key { self.key_index } else { None };
+        if !self.any_fx {
+            return self.draw_lights(0..self.lights.len(), dir, base, skip);
+        }
+        let mut c = base;
+        for (i, fx) in self.fx.iter().enumerate() {
+            if fx.is_plain() {
+                c = self.draw_lights(i..i + 1, dir, c, skip);
+            } else if fx.fills_with_sky() {
+                // A window is its glass showing the sky: left out as the key, it is not there.
+                if skip == Some(i) {
+                    continue;
+                }
+                let cover = self.cover(i, dir);
+                if cover > 0.0 {
+                    c = fx.window(dir, cover, c, sky(dir));
+                }
+            } else {
+                let after = self.draw_lights(i..i + 1, dir, c, skip);
+                c = fx.apply(dir, c, after);
+            }
+        }
+        c
+    }
+
+    /// How much of light `index` covers `dir`, 0..=1, whatever its colour:
+    /// the glass of a window filled with sky. A plain light drawn in white
+    /// over black is its own coverage (shape, soft edge and hotspot). A
+    /// shaped light is asked directly: a stroke with a ramp carries its own
+    /// colour, so drawing it in white would not give its coverage.
+    fn cover(&self, index: usize, dir: Vec3f) -> f32 {
+        let light = &self.lights[index];
+        match &light.shaped {
+            Some(shaped) if shaped.cull().contains(dir) => shaped.sample(dir).emit,
+            Some(_) => 0.0,
+            None => light.over(dir, Vec3f::default(), Vec3f::all(1.0)).x,
+        }
+    }
+
+    /// Draws the lights `range` of the list over `base`, in order, each with its own shape, content and blend.
     /// - **Add** accumulates the light's colour.
     /// - **Multiply** scales everything drawn so far by its colour: fully at the core,
     ///   not at all outside. That is how a black flag cuts a softbox or the sky.
@@ -284,21 +368,11 @@ impl Studio {
     ///   except that an Add scrim is cloth: it hides what is behind it, then glows.
     /// - An image light's colour is its picture at that point of its box, times
     ///   the light's colour; the picture's alpha, when it masks, fades the light in.
-    pub fn apply_lights(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
-        self.apply_lights_skipping(dir, base, None)
-    }
-
-    /// [`Self::apply_lights`] without the key light (N3: the map without its
-    /// key is the source of the engine's lighting copy). Skipping it is
-    /// exactly the map with the key disabled: every other light, the flags
-    /// after the key included, draws as before.
-    pub fn apply_lights_without_key(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
-        self.apply_lights_skipping(dir, base, self.key_index)
-    }
-
-    fn apply_lights_skipping(&self, dir: Vec3f, base: Vec3f, skip: Option<usize>) -> Vec3f {
+    /// - The light at `skip` (the key, for plan 2's keyless copy) loses its own light
+    ///   and keeps what it hides (`PreparedLight::hide`).
+    fn draw_lights(&self, range: std::ops::Range<usize>, dir: Vec3f, base: Vec3f, skip: Option<usize>) -> Vec3f {
         let mut c = base;
-        for (i, light) in self.lights.iter().enumerate() {
+        for (i, light) in self.lights.iter().enumerate().skip(range.start).take(range.len()) {
             // The key left out (`skip`, N3) loses its own light, while whatever
             // it hides stays hidden (B5's scrim): `PreparedLight::hide`. For a
             // light that hides nothing (an A3 light, a polygon, a stroke, a

@@ -33,6 +33,11 @@ pub const SUN_MODE_NAMES: &[&str] = &["time", "manual"];
 pub const LIGHT_SHAPE_NAMES: &[&str] = &["rect", "disc", "ring", "polygon", "stroke", "scrim"];
 /// Accepted values of `LightParams::blend`; the first is the fallback.
 pub const BLEND_NAMES: &[&str] = &["add", "multiply"];
+/// Accepted values of `GoboParams::kind`; the first is the fallback.
+pub const GOBO_KIND_NAMES: &[&str] = &["window", "blinds", "leaves", "fern", "grid", "image"];
+
+/// Longest gobo image name kept, in characters (a Windows path fits).
+const GOBO_IMAGE_NAME_LIMIT: usize = 260;
 
 /// Accepted values of `LightImageParams::fit`; the first is the fallback.
 pub const IMAGE_FIT_NAMES: &[&str] = &["stretch", "fit", "fill"];
@@ -227,6 +232,9 @@ pub struct LightParams {
     pub source_quality: Option<f32>,
     /// A picture as the light's content (1b): see `LightImageParams`.
     pub image: Option<LightImageParams>,
+    /// A pattern hung in front of the light (1b): a window, blinds, leaves,
+    /// a fern, a grid of bars or an image mask. None: nothing.
+    pub gobo: Option<GoboParams>,
 }
 
 /// A picture shown by a light: it fills the light's box, is cut by the
@@ -376,6 +384,140 @@ fn unit_box_points(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
         Vec::new()
     } else {
         kept
+    }
+}
+
+/// A pattern hung in front of a light (a gobo, or cookie), laid out in the
+/// light's own rectangle: its azimuth, elevation, width, height and roll.
+/// Fields a kind does not use are kept, so switching kinds loses nothing.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct GoboParams {
+    /// "window" | "blinds" | "leaves" | "fern" | "grid" | "image".
+    pub kind: String,
+    /// 1..=16 panes across (window, grid).
+    pub panes_x: u32,
+    /// 1..=16 panes down (window, grid).
+    pub panes_y: u32,
+    /// 0..=0.5: the muntin bars' width, as a fraction of the smaller pane pitch.
+    pub bar: f32,
+    /// 0..=0.5: the window frame's width, as a fraction of the light's smaller half size.
+    pub frame: f32,
+    /// 2..=64 blind slats across the light.
+    pub slats: u32,
+    /// 0..=90 degrees: the slats' tilt from edge-on. 0 is open, 90 shut.
+    pub tilt_deg: f32,
+    /// 0.5..=1.5: a slat's width (its depth when open), in slat pitches. The
+    /// pitch is the light's size over `slats`, so this also sets the gap:
+    /// above 1 shut blinds overlap and pass nothing, below 1 a gap of
+    /// (1 - slat_width) pitches stays open even when they are shut.
+    pub slat_width: f32,
+    /// Vertical slats; horizontal otherwise.
+    pub vertical: bool,
+    /// 0..=1: how much of the light leaves or fern fronds cover.
+    pub density: f32,
+    /// 0.1..=10: the size of leaves and fronds (1: a leaf about a sixth of the light's smaller side).
+    pub scale: f32,
+    /// Where leaves and fronds fall and how they turn.
+    pub seed: u32,
+    /// 0..=1: how far in front of the light the gobo hangs. 0 gives sharp
+    /// edges, 1 a penumbra about an eighth of the light's smaller half size.
+    pub distance: f32,
+    /// Image gobo: the name of an image the app has loaded; "" is none.
+    pub image: String,
+    /// The light is a window: it shows the map's own sky through the gobo
+    /// instead of its colour. At intensity_ev 0 the sky shows as it is outside.
+    pub fill_sky: bool,
+    /// Studio mode: the gobo's shadow also falls on the backdrop's floor and walls.
+    pub project_on_backdrop: bool,
+}
+
+impl Default for GoboParams {
+    fn default() -> Self {
+        GoboParams {
+            kind: "window".to_string(),
+            panes_x: 3,
+            panes_y: 2,
+            bar: 0.06,
+            frame: 0.08,
+            slats: 12,
+            tilt_deg: 30.0,
+            slat_width: 1.08,
+            vertical: false,
+            density: 0.5,
+            scale: 1.0,
+            seed: 1,
+            distance: 0.1,
+            image: String::new(),
+            fill_sky: false,
+            project_on_backdrop: false,
+        }
+    }
+}
+
+/// Typed view of `GoboParams::kind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoboKind {
+    /// A frame and muntin bars between panes.
+    Window,
+    /// Venetian blinds.
+    Blinds,
+    /// Scattered leaves (foliage.rs).
+    Leaves,
+    /// Fern fronds (foliage.rs).
+    Fern,
+    /// Bars between panes, without a frame.
+    Grid,
+    /// An image mask from the app's ImageSet.
+    Image,
+}
+
+impl GoboKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            GoboKind::Window => "window",
+            GoboKind::Blinds => "blinds",
+            GoboKind::Leaves => "leaves",
+            GoboKind::Fern => "fern",
+            GoboKind::Grid => "grid",
+            GoboKind::Image => "image",
+        }
+    }
+}
+
+impl GoboParams {
+    pub fn kind(&self) -> GoboKind {
+        if is_choice(&self.kind, "blinds") {
+            GoboKind::Blinds
+        } else if is_choice(&self.kind, "leaves") {
+            GoboKind::Leaves
+        } else if is_choice(&self.kind, "fern") {
+            GoboKind::Fern
+        } else if is_choice(&self.kind, "grid") {
+            GoboKind::Grid
+        } else if is_choice(&self.kind, "image") {
+            GoboKind::Image
+        } else {
+            GoboKind::Window
+        }
+    }
+
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = GoboParams::default();
+        f.choice(prefix, "kind", &mut self.kind, GOBO_KIND_NAMES);
+        f.int(prefix, "panes_x", &mut self.panes_x, 1, 16);
+        f.int(prefix, "panes_y", &mut self.panes_y, 1, 16);
+        f.range(prefix, "bar", &mut self.bar, 0.0, 0.5, d.bar);
+        f.range(prefix, "frame", &mut self.frame, 0.0, 0.5, d.frame);
+        f.int(prefix, "slats", &mut self.slats, 2, 64);
+        f.range(prefix, "tilt_deg", &mut self.tilt_deg, 0.0, 90.0, d.tilt_deg);
+        f.range(prefix, "slat_width", &mut self.slat_width, 0.5, 1.5, d.slat_width);
+        f.range(prefix, "density", &mut self.density, 0.0, 1.0, d.density);
+        f.range(prefix, "scale", &mut self.scale, 0.1, 10.0, d.scale);
+        f.range(prefix, "distance", &mut self.distance, 0.0, 1.0, d.distance);
+        if self.image.chars().count() > GOBO_IMAGE_NAME_LIMIT {
+            self.image = self.image.chars().take(GOBO_IMAGE_NAME_LIMIT).collect();
+            f.push(prefix, "image");
+        }
     }
 }
 
@@ -723,6 +865,7 @@ impl Default for LightParams {
             source: None,
             source_quality: None,
             image: None,
+            gobo: None,
         }
     }
 }
@@ -1015,6 +1158,9 @@ impl LightParams {
         if let Some(image) = self.image.as_mut() {
             image.clamp_fields(&join_path(prefix, "image"), f);
         }
+        if let Some(gobo) = self.gobo.as_mut() {
+            gobo.clamp_fields(&join_path(prefix, "gobo"), f);
+        }
     }
 }
 
@@ -1154,6 +1300,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "lights[].stroke" => json_tree(&StrokeParams::default()).ok(),
         "lights[].scrim" => json_tree(&ScrimParams::default()).ok(),
         "lights[].image" => json_tree(&LightImageParams::default()).ok(),
+        "lights[].gobo" => json_tree(&GoboParams::default()).ok(),
         _ => None,
     }
 }
@@ -1165,6 +1312,7 @@ fn integer_range(schema: &str) -> Option<(f64, f64)> {
     match schema {
         "version" | "seed" | "sky.sun.month" | "sky.sun.day" | "lights[].polygon.sides" => Some((0.0, u32::MAX as f64)),
         "sky.sun.year" => Some((i32::MIN as f64, i32::MAX as f64)),
+        "lights[].gobo.panes_x" | "lights[].gobo.panes_y" | "lights[].gobo.slats" | "lights[].gobo.seed" => Some((0.0, u32::MAX as f64)),
         _ => None,
     }
 }
@@ -2008,5 +2156,64 @@ mod source_param_tests {
         let (merged, report) = merged.merge_json(r#"{"lights": [{"image": {"key": "a.png", "fit": "fit", "zoom": 2}}]}"#).unwrap();
         assert_eq!(merged.lights[0].image.as_ref().unwrap().fit(), ImageFit::Fit);
         assert_eq!(report, ["ignored: lights[0].image.zoom"]);
+    }
+}
+
+#[cfg(test)]
+mod fx_param_tests {
+    use super::*;
+
+    #[test]
+    fn clamp_fixes_gobo_fields() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams {
+            gobo: Some(GoboParams { kind: "portal".to_string(), panes_x: 99, bar: f32::NAN, tilt_deg: 400.0, slat_width: 3.0, ..GoboParams::default() }),
+            ..LightParams::default()
+        });
+        let changed = p.clamp();
+        let g = p.lights[0].gobo.as_ref().expect("the gobo stays");
+        assert_eq!(g.kind, "window", "an unknown kind falls back to the first");
+        assert_eq!(g.panes_x, 16);
+        assert_eq!(g.bar, GoboParams::default().bar, "NaN becomes the default");
+        assert_eq!(g.tilt_deg, 90.0);
+        assert_eq!(g.slat_width, 1.5);
+        assert_eq!(
+            changed,
+            ["lights[0].gobo.kind", "lights[0].gobo.panes_x", "lights[0].gobo.bar", "lights[0].gobo.tilt_deg", "lights[0].gobo.slat_width"]
+        );
+        // The typed accessor reads a loose spelling before clamp() fixes it.
+        let loose = GoboParams { kind: " Blinds".to_string(), ..GoboParams::default() };
+        assert_eq!(loose.kind(), GoboKind::Blinds);
+        for (name, kind) in GOBO_KIND_NAMES.iter().zip([GoboKind::Window, GoboKind::Blinds, GoboKind::Leaves, GoboKind::Fern, GoboKind::Grid, GoboKind::Image]) {
+            assert_eq!(GoboParams { kind: name.to_string(), ..GoboParams::default() }.kind(), kind);
+            assert_eq!(kind.as_str(), *name);
+        }
+    }
+
+    #[test]
+    fn a_partial_gobo_patch_is_completed_from_the_defaults() {
+        let patch = r#"{"lights": [{"name": "Window", "gobo": {"kind": "blinds", "slats": 20.4}}]}"#;
+        let (merged, report) = HdriParams::default().merge_json(patch).expect("the patch merges");
+        let g = merged.lights[0].gobo.as_ref().expect("a gobo");
+        assert_eq!(g.kind, "blinds");
+        assert_eq!(g.slats, 20);
+        assert_eq!(g.panes_x, GoboParams::default().panes_x, "a field left out takes its default");
+        assert_eq!(report, ["lights[0].gobo.slats"], "20.4 was rounded to a whole number of slats");
+        // null takes the gobo away again.
+        let (cleared, _) = merged.merge_json(r#"{"lights": [{"gobo": null}]}"#).expect("null merges");
+        assert_eq!(cleared.lights[0].gobo, None);
+    }
+
+    #[test]
+    fn a_gobo_round_trips_through_json() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams {
+            gobo: Some(GoboParams { kind: "blinds".to_string(), slats: 20, vertical: true, fill_sky: true, ..GoboParams::default() }),
+            ..LightParams::default()
+        });
+        assert_eq!(HdriParams::from_json(&p.to_json()).expect("loads"), p);
+        let plain = HdriParams { lights: vec![LightParams::default()], ..HdriParams::default() };
+        assert!(!plain.to_json().contains("gobo"), "an absent gobo is not written");
+        assert_eq!(HdriParams::from_json(&plain.to_json()).expect("loads").lights[0].gobo, None);
     }
 }

@@ -53,6 +53,8 @@ pub mod gels;
 pub mod spectrum;
 pub mod cri;
 pub mod image_light;
+pub mod gobo;
+pub mod light_fx;
 
 pub use params::*;
 pub use image_light::ImageSet;
@@ -106,6 +108,12 @@ pub struct Env {
     /// of the day sky plus the night (glow and moonlit air).
     cloud_sun: Vec3f,
     cloud_ambient: Vec3f,
+    /// The sky a window filled with sky (GoboParams::fill_sky) looks out at
+    /// in Studio mode: a Sky-mode Env of the same parameters with no lights,
+    /// no rotation and no intensity. None in Sky mode (the base layer is the
+    /// sky there) and when no light asks for it, so every other map costs
+    /// what it did before.
+    window_sky: Option<Box<Env>>,
 }
 
 impl Env {
@@ -135,7 +143,24 @@ impl Env {
             }
             Mode::Studio => (None, None, None, Vec3f::default(), Vec3f::default()),
         };
-        Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient }
+        // A window filled with sky looks out at this map's own sky settings.
+        // In Studio mode that sky is a second, lightless Sky-mode Env, built
+        // only when a light asks for it. Its lights are cleared, so it never
+        // nests further, and it is made from the parameters alone: new_with
+        // stays pure.
+        let window_sky = if params.mode() == Mode::Studio
+            && params.lights.iter().any(|l| l.enabled && l.blend() == Blend::Add && l.gobo.as_ref().is_some_and(|g| g.fill_sky))
+        {
+            let mut outside = params.clone();
+            outside.mode = "sky".to_string();
+            outside.lights.clear();
+            outside.intensity_ev = 0.0;
+            outside.rotation_deg = 0.0;
+            Some(Box::new(Env::new_with(&outside, images)))
+        } else {
+            None
+        };
+        Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient, window_sky }
     }
 
     pub fn params(&self) -> &HdriParams {
@@ -192,8 +217,18 @@ impl Env {
             }
             None => self.studio.backdrop(d),
         };
-        let lit = if without == Some(KeyTerm::Light) { self.studio.apply_lights_without_key(d, base) } else { self.studio.apply_lights(d, base) };
-        lit * self.scale
+        // A light filled with sky (GoboParams::fill_sky) is a window: it shows
+        // the sky along the same direction. In Sky mode that sky is the base
+        // layer itself; in Studio mode the lightless Sky-mode copy works it
+        // out, and only for the pixels such a window covers. The map without
+        // its key (N3) leaves the key light out here.
+        let sky = |w: Vec3f| -> Vec3f {
+            match &self.window_sky {
+                Some(outside) => outside.radiance(w),
+                None => base,
+            }
+        };
+        self.studio.apply_lights_sky(d, base, &sky, without == Some(KeyTerm::Light)) * self.scale
     }
 
     /// Key light for the engine, in world space, already x 2^intensity_ev
@@ -293,6 +328,7 @@ impl Env {
     /// The sun's and the moon's discs, in world space, for the bake's
     /// refinement: below 4K both are smaller than or comparable to a texel, so
     /// their texels are area-averaged (A1's `refine_hot_spots`).
+    /// In Studio mode the discs of the sky behind the windows count too.
     fn hot_spots(&self) -> Vec<(Vec3f, f32)> {
         let mut hot = Vec::new();
         if let Some(atmo) = &self.atmo {
@@ -302,6 +338,12 @@ impl Env {
         }
         if let Some((dir, radius)) = self.night.as_ref().and_then(|night| night.moon_disc()) {
             if dir.y > -0.1 {
+                hot.push((rotate_y(dir, self.params.rotation_deg), radius));
+            }
+        }
+        if let Some(outside) = &self.window_sky {
+            // The copy has no rotation, so its world frame is this map's own frame.
+            for (dir, radius) in outside.hot_spots() {
                 hot.push((rotate_y(dir, self.params.rotation_deg), radius));
             }
         }
