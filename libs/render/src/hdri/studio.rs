@@ -275,8 +275,8 @@ impl Studio {
             any_fx,
         };
         // The engine's key light carries what gets past its own gobo, doors and
-        // grid (its radiance; its cone, facing share and covering cone are its
-        // shape's, which the extras only cut).
+        // grid, times its face's wear (its radiance; its cone, facing share and
+        // covering cone are its shape's, which the extras only cut).
         if let (Some(i), Some(key)) = (key_index, built.key) {
             built.key = Some(EnvSun { radiance: key.radiance * built.key_share(i, &key), ..key });
         }
@@ -284,13 +284,13 @@ impl Studio {
     }
 
     /// The share of the key's emission that gets past its gobo, doors and
-    /// grid: `LightFx::key_share`, weighted by what the key puts into the
-    /// map, its own drawing (shape, soft edge, hotspot, picture, a stroke's
-    /// ramp) under the flags and the cloth after it, as `key_emission` dims
-    /// it. So the engine's key light loses what the map loses (plan 2's N3
-    /// removes exactly that). Sampled over the key's reach box, or, for a
-    /// stroke, which its points place, over the square round its covering
-    /// cone.
+    /// grid, times its wear (B10): `LightFx::key_share`, weighted by what the
+    /// key puts into the map, its own drawing (shape, soft edge, hotspot,
+    /// picture, a stroke's ramp) under the flags and the cloth after it, as
+    /// `key_emission` dims it. So the engine's key light loses what the map
+    /// loses (plan 2's N3 removes exactly that). Sampled over the key's reach
+    /// box, or, for a stroke, which its points place, over the square round
+    /// its covering cone.
     fn key_share(&self, index: usize, key: &EnvSun) -> f32 {
         let light = &self.lights[index];
         let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);

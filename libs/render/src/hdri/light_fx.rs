@@ -21,6 +21,7 @@
 use super::*;
 use super::aim::Aim;
 use super::gobo::Gobo;
+use super::imperfections::Imperfections;
 use super::noise::hash01;
 use super::shaped::{half_extents, unit_to_dir};
 use super::studio::{light_frame, project, LightFrame};
@@ -72,6 +73,8 @@ pub struct LightFx {
     gobo: Option<Gobo>,
     /// The aimed face with its grid and doors (B9).
     aim: Option<Aim>,
+    /// The wear of the face (B10).
+    surface: Option<Imperfections>,
 }
 
 impl LightFx {
@@ -88,6 +91,7 @@ impl LightFx {
             fill_sky: gobo.is_some_and(|g| g.fill_sky),
             gobo: gobo.and_then(|g| Gobo::new(g, half, images)),
             aim: light.aim.as_ref().and_then(|a| Aim::new(a, frame.center, frame.right * sx, frame.up, half, light.softness)),
+            surface: light.imperfections.as_ref().and_then(|p| Imperfections::new(p, half)),
         }
     }
 
@@ -98,7 +102,7 @@ impl LightFx {
 
     /// The face itself is worn (B10).
     fn has_surface(&self) -> bool {
-        false
+        self.surface.is_some()
     }
 
     /// True when nothing is in front of the light: `Studio` then draws it
@@ -136,9 +140,13 @@ impl LightFx {
     }
 
     /// The brightness of the face itself at `dir`, around 1 with mean 1 over
-    /// the face (B10's imperfections). 1 until then.
-    pub fn glow(&self, _dir: Vec3f) -> f32 {
-        1.0
+    /// the face: its wrinkles, dust and weave. 1 where the frame cannot
+    /// place `dir`.
+    pub fn glow(&self, dir: Vec3f) -> f32 {
+        match (&self.surface, self.face(dir)) {
+            (Some(surface), Some(q)) => surface.factor(q),
+            _ => 1.0,
+        }
     }
 
     /// The share 0..=1 of a flag that darkens at `dir`. A flag with a gobo
@@ -182,12 +190,12 @@ impl LightFx {
     }
 
     /// The share of a key light's emission that gets past everything in front
-    /// of it, for the engine's key light: the mean of `passes`, weighted by
-    /// what the light puts into the map along each direction, `drawn(dir)`
-    /// (its own drawing in luminance, under whatever dims it in the map), and
-    /// by dΩ, over the box within `reach` of `frame`'s centre in its tangent
-    /// plane, which must hold all of that drawing. The gnomonic plane's dΩ is
-    /// dA / (1 + |q|²)^(3/2).
+    /// of it, times the face's own wear, for the engine's key light: the mean
+    /// of `passes x glow`, weighted by what the light puts into the map along
+    /// each direction, `drawn(dir)` (its own drawing in luminance, under
+    /// whatever dims it in the map), and by dΩ, over the box within `reach`
+    /// of `frame`'s centre in its tangent plane, which must hold all of that
+    /// drawing. The gnomonic plane's dΩ is dA / (1 + |q|²)^(3/2).
     ///
     /// Weighted, because the map draws the light's emission times what
     /// passes: a disc leaves its rectangle's corners dark, a hotspot its
@@ -195,16 +203,23 @@ impl LightFx {
     /// over the rectangle misses the key by up to a factor of two there (a
     /// fern over a hotspot).
     ///
+    /// The wear (B10) has mean 1 over the light's rectangle, so it keeps the
+    /// key of a light that glows evenly over it. Weighted by a hotspot, a
+    /// ring, a scrim's glow or a stroke, or by what a gobo lets through, its
+    /// mean is not 1: the map drew such keys up to 9 % off the clean key (a
+    /// stroke with full wrinkles behind leaves). So the wear is sampled with
+    /// what passes, and the share can be a little above 1.
+    ///
     /// A light can fill little of its box (a thin stroke in the square round
     /// its cone), so a scan first finds the part it draws in, grown by one
     /// scan cell so that an edge between two scan points stays inside, and
     /// the strata cover only that. A drawing so thin that the scan misses it
     /// keeps the whole box.
     ///
-    /// Wear averages to 1 by construction, so it is not sampled. 1 when
-    /// nothing opaque hangs in front of the light or it draws nothing.
+    /// 1 when nothing hangs in front of the light and its face is clean, or
+    /// when it draws nothing.
     pub fn key_share(&self, frame: &LightFrame, reach: Vec2f, drawn: &dyn Fn(Vec3f) -> f32) -> f32 {
-        if !self.has_opaque() {
+        if !self.has_opaque() && !self.has_surface() {
             return 1.0;
         }
         let dir_at = |q: Vec2f| (frame.center + frame.right * q.x + frame.up * q.y).normalize();
@@ -240,14 +255,16 @@ impl LightFx {
                 if !(w > 0.0) {
                     continue;
                 }
-                sum += (w * self.passes(dir)) as f64;
+                sum += (w * self.passes(dir) * self.glow(dir)) as f64;
                 weight += w as f64;
             }
         }
-        if !(weight > 0.0) {
+        let share = (sum / weight) as f32;
+        if !(weight > 0.0 && share.is_finite()) {
             return 1.0;
         }
-        ((sum / weight) as f32).max(0.0).min(1.0)
+        // What passes is at most 1; only the wear lifts the share above it.
+        share.max(0.0)
     }
 }
 
@@ -611,6 +628,89 @@ mod tests {
                 let ratio = map_over_key(&LightParams { aim: Some(aim.clone()), ..light.clone() }) / plain;
                 if (ratio - 1.0).abs() > 0.02 {
                     off.push(format!("{key_name} with {aim_name}: the map draws {ratio:.4} of what the key carries"));
+                }
+            }
+        }
+        assert!(off.is_empty(), "{}", off.join("\n"));
+    }
+
+    #[test]
+    fn imperfections_keep_the_light_s_power() {
+        // A big light, so a 64 x 32 bake samples its face a few hundred times.
+        let plain = LightParams { width_deg: 120.0, height_deg: 90.0, elevation_deg: 0.0, ..front_light() };
+        let mut worn = plain.clone();
+        worn.imperfections = Some(ImperfectionParams { wrinkle: 0.5, dust: 0.5, weave: 0.5, seed: 5 });
+        // Power = radiance x solid angle over the map; the backdrop cancels out.
+        let power = |lights: Vec<LightParams>| {
+            let map = Env::new(&studio(lights)).bake(64);
+            let mut sum = 0.0f64;
+            for y in 0..map.height {
+                let theta = std::f64::consts::PI * (y as f64 + 0.5) / map.height as f64;
+                for x in 0..map.width {
+                    sum += map.data[y * map.width + x][1] as f64 * theta.sin();
+                }
+            }
+            sum
+        };
+        let backdrop = power(Vec::new());
+        let a = power(vec![plain.clone()]) - backdrop;
+        let b = power(vec![worn.clone()]) - backdrop;
+        assert!(a > 0.0);
+        assert!((b / a - 1.0).abs() < 0.03, "plain {a}, worn {b}");
+        // The key light is the mean, and the mean is kept: on a light that
+        // glows evenly over its face the worn key is the clean one to within
+        // the sampling of its share (`LightFx::key_share`, which weighs the
+        // wear as the map draws it).
+        let key = |mut light: LightParams| {
+            light.key = true;
+            Env::new(&studio(vec![light])).sun().expect("a key light").radiance
+        };
+        let kept = luminance(key(worn.clone())) / luminance(key(plain));
+        assert!((kept - 1.0).abs() < 0.01, "the worn key carries {kept} of the clean one");
+        // The map itself does differ: the wear is there.
+        let fx = LightFx::new(&worn, &ImageSet::default());
+        assert!(!fx.is_plain());
+        let glows: Vec<f32> = (0..50).map(|k| fx.glow(dir_from_az_el(60.0 + k as f32 * 1.2, 3.0))).collect();
+        assert!(glows.iter().any(|g| *g > 1.05) && glows.iter().any(|g| *g < 0.95), "{glows:?}");
+    }
+
+    /// The wear has mean 1 over the light's rectangle, but a key that does
+    /// not glow evenly over it (a hotspot, a ring, a scrim's glow, a stroke)
+    /// or that a gobo cuts weighs it unevenly: the map draws the key times
+    /// its wear, and the engine's key light must carry that, not the clean
+    /// key (plan 2's N3 removes what the map draws).
+    #[test]
+    fn a_worn_key_hands_the_engine_what_the_map_draws() {
+        let key = LightParams {
+            key: true,
+            azimuth_deg: 0.0,
+            elevation_deg: 20.0,
+            width_deg: 60.0,
+            height_deg: 45.0,
+            ..LightParams::default()
+        };
+        let keys = [
+            ("hotspot 1 rect", LightParams { hotspot: 1.0, ..key.clone() }),
+            ("ring", LightParams { shape: "ring".to_string(), softness: 0.15, ..key.clone() }),
+            ("scrim", LightParams { shape: "scrim".to_string(), ..key.clone() }),
+            ("stroke", LightParams { shape: "stroke".to_string(), ..key }),
+        ];
+        let leaves = GoboParams { kind: "leaves".to_string(), density: 0.4, distance: 0.3, seed: 2, ..GoboParams::default() };
+        let wears = [
+            ("wrinkles", ImperfectionParams { wrinkle: 1.0, seed: 9, ..ImperfectionParams::default() }),
+            ("worn", ImperfectionParams { wrinkle: 0.8, dust: 0.4, weave: 0.5, seed: 1 }),
+        ];
+        let mut off = Vec::new();
+        for (key_name, light) in &keys {
+            for (gobo_name, gobo) in [("bare", None), ("behind leaves", Some(leaves.clone()))] {
+                let clean = LightParams { gobo, ..light.clone() };
+                // The clean key's own ratio, so the test weighs only the wear.
+                let plain = map_over_key(&clean);
+                for (wear_name, wear) in &wears {
+                    let ratio = map_over_key(&LightParams { imperfections: Some(wear.clone()), ..clean.clone() }) / plain;
+                    if (ratio - 1.0).abs() > 0.02 {
+                        off.push(format!("{key_name} {gobo_name}, {wear_name}: the map draws {ratio:.4} of what the key carries"));
+                    }
                 }
             }
         }

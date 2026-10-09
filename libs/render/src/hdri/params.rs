@@ -235,6 +235,8 @@ pub struct LightParams {
     pub gobo: Option<GoboParams>,
     /// Which way the light's face points, and its grid and barn doors (1b). None: facing the centre, bare.
     pub aim: Option<AimParams>,
+    /// The wear of the light's diffuser: wrinkles, dust and weave (1b). None: a clean face.
+    pub imperfections: Option<ImperfectionParams>,
 }
 
 /// A picture shown by a light: it fills the light's box, is cut by the
@@ -558,6 +560,39 @@ impl AimParams {
         for (i, door) in self.barn_doors.iter_mut().enumerate() {
             f.range(prefix, &format!("barn_doors[{i}]"), door, 0.0, 90.0, 0.0);
         }
+    }
+}
+
+/// The wear of a light's diffuser. The patterns vary the light around its
+/// mean, which stays true, so intensity_ev keeps its meaning.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ImperfectionParams {
+    /// 0..=1: folds in the cloth.
+    pub wrinkle: f32,
+    /// 0..=1: specks and smudges.
+    pub dust: f32,
+    /// 0..=1: the cloth's weave.
+    pub weave: f32,
+    /// Where the folds and the specks fall.
+    pub seed: u32,
+}
+
+impl Default for ImperfectionParams {
+    fn default() -> Self {
+        ImperfectionParams { wrinkle: 0.0, dust: 0.0, weave: 0.0, seed: 1 }
+    }
+}
+
+impl ImperfectionParams {
+    /// True when nothing is set: the face is clean.
+    pub fn is_clear(&self) -> bool {
+        !(self.wrinkle > 0.0) && !(self.dust > 0.0) && !(self.weave > 0.0)
+    }
+
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        f.range(prefix, "wrinkle", &mut self.wrinkle, 0.0, 1.0, 0.0);
+        f.range(prefix, "dust", &mut self.dust, 0.0, 1.0, 0.0);
+        f.range(prefix, "weave", &mut self.weave, 0.0, 1.0, 0.0);
     }
 }
 
@@ -907,6 +942,7 @@ impl Default for LightParams {
             image: None,
             gobo: None,
             aim: None,
+            imperfections: None,
         }
     }
 }
@@ -1205,6 +1241,9 @@ impl LightParams {
         if let Some(aim) = self.aim.as_mut() {
             aim.clamp_fields(&join_path(prefix, "aim"), f);
         }
+        if let Some(imperfections) = self.imperfections.as_mut() {
+            imperfections.clamp_fields(&join_path(prefix, "imperfections"), f);
+        }
     }
 }
 
@@ -1346,6 +1385,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "lights[].image" => json_tree(&LightImageParams::default()).ok(),
         "lights[].gobo" => json_tree(&GoboParams::default()).ok(),
         "lights[].aim" => json_tree(&AimParams::default()).ok(),
+        "lights[].imperfections" => json_tree(&ImperfectionParams::default()).ok(),
         _ => None,
     }
 }
@@ -1358,6 +1398,7 @@ fn integer_range(schema: &str) -> Option<(f64, f64)> {
         "version" | "seed" | "sky.sun.month" | "sky.sun.day" | "lights[].polygon.sides" => Some((0.0, u32::MAX as f64)),
         "sky.sun.year" => Some((i32::MIN as f64, i32::MAX as f64)),
         "lights[].gobo.panes_x" | "lights[].gobo.panes_y" | "lights[].gobo.slats" | "lights[].gobo.seed" => Some((0.0, u32::MAX as f64)),
+        "lights[].imperfections.seed" => Some((0.0, u32::MAX as f64)),
         _ => None,
     }
 }
@@ -2299,5 +2340,23 @@ mod fx_param_tests {
         assert_eq!(HdriParams::from_json(&merged.to_json()).expect("loads"), merged);
         // Four doors, no fewer: a short list does not fit.
         assert!(HdriParams::default().merge_json(r#"{"lights": [{"aim": {"barn_doors": [90, 0]}}]}"#).is_err());
+    }
+
+    #[test]
+    fn imperfection_params_clamp_merge_and_round_trip() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams {
+            imperfections: Some(ImperfectionParams { wrinkle: 3.0, dust: f32::NAN, weave: -1.0, seed: 4 }),
+            ..LightParams::default()
+        });
+        let changed = p.clamp();
+        let im = p.lights[0].imperfections.clone().expect("it stays");
+        assert_eq!((im.wrinkle, im.dust, im.weave, im.seed), (1.0, 0.0, 0.0, 4));
+        assert_eq!(changed, ["lights[0].imperfections.wrinkle", "lights[0].imperfections.dust", "lights[0].imperfections.weave"]);
+        assert!(!im.is_clear() && ImperfectionParams::default().is_clear());
+        let (merged, report) = HdriParams::default().merge_json(r#"{"lights": [{"imperfections": {"dust": 0.3, "seed": 8.2}}]}"#).expect("merges");
+        assert_eq!(merged.lights[0].imperfections, Some(ImperfectionParams { dust: 0.3, seed: 8, ..ImperfectionParams::default() }));
+        assert_eq!(report, ["lights[0].imperfections.seed"], "8.2 was rounded");
+        assert_eq!(HdriParams::from_json(&merged.to_json()).expect("loads"), merged);
     }
 }
