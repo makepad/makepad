@@ -293,9 +293,10 @@ impl Env {
                             None => volume.march(d),
                         };
                         if m.alpha > 0.0 {
-                            // The ground under the layer, lit by the same dome, lights the bases.
+                            // The ground under the layer, lit by the same dome (as the
+                            // clouds see it, greyed by their cover), lights the bases.
                             let g = self.params.sky.atmosphere.ground_color;
-                            let ground = vec3f(g[0], g[1], g[2]) * self.cloud_ambient;
+                            let ground = vec3f(g[0], g[1], g[2]) * volume.sky_light(self.cloud_ambient);
                             c = c * (1.0 - m.alpha) + volume.shade(&m, self.cloud_sun, self.cloud_ambient, ground);
                         }
                     }

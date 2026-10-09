@@ -380,6 +380,9 @@ pub struct VolumetricClouds {
     /// Extinction per metre at density 1.
     sigma: f32,
     erosion: f32,
+    /// How far the dome's light is greyed (`sky_light`): 0.5 + 0.5 x coverage,
+    /// as the 2D deck greys it.
+    greyed: f32,
     /// The step budget toward the horizon.
     steps: usize,
     /// Tiles per metre of the two noise volumes.
@@ -418,6 +421,7 @@ impl VolumetricClouds {
             top,
             sigma: SIGMA * density,
             erosion: finite_or(vol.erosion, 0.5).clamp(0.0, 1.0),
+            greyed: 0.5 + 0.5 * finite_or(clouds.coverage, 0.0).clamp(0.0, 1.0),
             steps: (vol.steps as usize).clamp(16, 96),
             shape_scale: 1.0 / (SHAPE_TILE_M * scale),
             detail_scale: 1.0 / (DETAIL_TILE_M * scale),
@@ -431,18 +435,26 @@ impl VolumetricClouds {
         self.march_inner(dir, true)
     }
 
-    /// The colours on a march: sunlight, the sky's ambient half greyed as the
-    /// 2D deck greys it (clouds are white; the underside sees the blue dome),
-    /// and `ground`, the radiance of the ground under the layer, which lights
-    /// the bases from below (green over grass, white over snow). The two
-    /// ambient terms are the sky table taken by direction: `ambient` is the
-    /// dome above (A4's hemisphere mean), `ground` what that dome and the
-    /// shade leave on the ground. Premultiplied by the opacity: add it to
-    /// `base x (1 - alpha)`.
+    /// The colours on a march: sunlight, the sky's ambient greyed as the 2D
+    /// deck greys it (`sky_light`), and `ground`, the radiance of the ground
+    /// under the layer, which lights the bases from below (green over grass,
+    /// white over snow). The two ambient terms are the sky table taken by
+    /// direction: `ambient` is the dome above (A4's hemisphere mean), `ground`
+    /// what that dome (as `sky_light` greys it) and the shade leave on the
+    /// ground. Premultiplied by the opacity: add it to `base x (1 - alpha)`.
     pub fn shade(&self, m: &CloudMarch, sun_irradiance: Vec3f, ambient: Vec3f, ground: Vec3f) -> Vec3f {
+        sun_irradiance * m.sun + self.sky_light(ambient) * m.ambient + ground * m.bounce
+    }
+
+    /// The dome's light (`ambient`, the sky table's hemisphere mean) as it
+    /// reaches the clouds and the ground under them, greyed as the 2D deck
+    /// greys it: clouds are white, and the dome is blue only through the gaps,
+    /// other cloud everywhere else, so half greyed under a few clouds and
+    /// fully under a closed layer (an overcast is grey, not the clear sky's
+    /// blue turned down). Its luminance is the dome's.
+    pub fn sky_light(&self, ambient: Vec3f) -> Vec3f {
         let grey = luminance(ambient);
-        let sky = ambient.mix(vec3f(grey, grey, grey), 0.5);
-        sun_irradiance * m.sun + sky * m.ambient + ground * m.bounce
+        ambient.mix(vec3f(grey, grey, grey), self.greyed)
     }
 
     /// The fraction of light that passes the volume along `dir`: 1 - alpha.
@@ -1080,6 +1092,24 @@ mod env_tests {
         let (snow, soil) = (underside(0.8), underside(0.05));
         assert!(snow.is_finite() && soil > 0.0, "{snow} {soil}");
         assert!(snow > 1.2 * soil, "snow {snow} vs dark ground {soil}");
+    }
+
+    #[test]
+    fn a_closed_volume_is_grey_as_a_closed_deck_is() {
+        // A closed layer sees no blue sky: the 2D deck greys the dome it
+        // scatters by its cover, and the volume greys it the same way, both
+        // the dome on the cloud and the dome that lights the ground under it.
+        // So an overcast's underside is grey, not the clear sky's blue turned
+        // down. Blue over red at the zenith, with a neutral ground under it:
+        let tint = |volumetric: bool| {
+            let mut p = cloudy(1.0, volumetric);
+            p.sky.sun_disc.visible = false;
+            p.sky.atmosphere.ground_color = [0.5; 3];
+            let c = Env::new(&p).radiance(vec3f(0.0, 1.0, 0.0));
+            c.z / c.x
+        };
+        let (deck, volume) = (tint(false), tint(true));
+        assert!(volume.is_finite() && volume < 1.2 && (volume - deck).abs() < 0.2, "deck {deck}, volume {volume}");
     }
 
     #[test]
