@@ -214,22 +214,47 @@ impl LightImage {
                 }
             }
         }
-        // Clamp to the texel centres of the border: `sample_uv` wraps u (it
-        // is made for equirects), and a picture must not bleed its left edge
-        // into its right.
+        // Clamp to the texel centres of the border: a picture must not bleed
+        // its left edge into its right (`EnvMap::sample_uv` wraps u, it is
+        // made for equirects).
         let (w, h) = (self.map.width as f32, self.map.height as f32);
         let u = u.max(0.5 / w).min(1.0 - 0.5 / w);
         let v = v.max(0.5 / h).min(1.0 - 0.5 / h);
-        let t = self.map.sample_uv([u, v]);
-        let clean = |x: f32| if x.is_finite() && x > 0.0 { x * self.gain } else { 0.0 };
-        let alpha = if !self.mask {
-            1.0
-        } else if t[3].is_finite() {
-            t[3].clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        (vec3f(clean(t[0]), clean(t[1]), clean(t[2])), alpha)
+        let (rgb, alpha) = self.bilinear(u, v);
+        (rgb * self.gain, alpha)
+    }
+
+    /// The bilinear lookup at (u, v), inside the texel centres: the colour
+    /// weighted by alpha when the picture masks (premultiplied, then divided
+    /// out), so a transparent texel's colour, which a PNG keeps, never
+    /// fringes an edge; NaN and negatives read as 0, a NaN alpha as clear.
+    fn bilinear(&self, u: f32, v: f32) -> (Vec3f, f32) {
+        let (width, height) = (self.map.width, self.map.height);
+        let fx = (u * width as f32 - 0.5).max(0.0);
+        let fy = (v * height as f32 - 0.5).max(0.0);
+        let (x0, y0) = ((fx as usize).min(width - 1), (fy as usize).min(height - 1));
+        let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
+        let (x1, y1) = ((x0 + 1).min(width - 1), (y0 + 1).min(height - 1));
+        let clean = |x: f32| if x.is_finite() && x > 0.0 { x } else { 0.0 };
+        let (mut rgb, mut alpha) = (Vec3f::default(), 0.0);
+        for (x, y, weight) in [(x0, y0, (1.0 - tx) * (1.0 - ty)), (x1, y0, tx * (1.0 - ty)), (x0, y1, (1.0 - tx) * ty), (x1, y1, tx * ty)] {
+            let t = self.map.data[y * width + x];
+            let a = if !self.mask {
+                1.0
+            } else if t[3].is_finite() {
+                t[3].clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            rgb += vec3f(clean(t[0]), clean(t[1]), clean(t[2])) * (a * weight);
+            alpha += a * weight;
+        }
+        if !(alpha > 0.0) {
+            return (Vec3f::default(), 0.0);
+        }
+        // Without the mask the weights sum to 1 but for rounding; the alpha
+        // is exactly 1 there.
+        (rgb / alpha, if self.mask { alpha.min(1.0) } else { 1.0 })
     }
 }
 
@@ -398,6 +423,19 @@ mod tests {
         let flag = Env::new_with(&p, &set_of("cutout", cutout()));
         assert_eq!(flag.radiance(left), Vec3f::default());
         assert_eq!(flag.radiance(right), Vec3f::all(0.25));
+    }
+
+    #[test]
+    fn a_transparent_texels_colour_never_shows_at_an_edge() {
+        // Opaque white beside a transparent texel whose (straight) colour is
+        // magenta, as a PNG keeps it: the magenta must not fringe the edge.
+        let map = picture(2, 1, |x, _| if x == 0 { [1.0, 1.0, 1.0, 1.0] } else { [1.0, 0.0, 1.0, 0.0] });
+        let params = LightImageParams { key: "edge".to_string(), fit: "stretch".to_string(), alpha_as_mask: true };
+        let image = LightImage::new(&params, &set_of("edge", map)).unwrap();
+        // Halfway between the two texel centres: half covered, and white.
+        let (colour, alpha) = image.shade(vec2f(0.0, 0.0), vec2f(0.5, 0.5));
+        assert!((alpha - 0.5).abs() < 1.0e-6, "{alpha}");
+        assert!((colour - Vec3f::all(1.0)).length() < 1.0e-6, "{colour:?}");
     }
 
     #[test]
