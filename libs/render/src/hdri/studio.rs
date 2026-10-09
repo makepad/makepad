@@ -396,7 +396,9 @@ impl PreparedLight {
         // so "fully soft" means the same thing for a wide softbox and a thin ring.
         let inradius = match shape {
             LightShape::Ring => ring_half * short,
-            LightShape::Rect | LightShape::Disc => short,
+            // The shape core draws polygons, strokes and scrims (shaped.rs, B2-B5);
+            // this value is unused for them.
+            LightShape::Rect | LightShape::Disc | LightShape::Polygon | LightShape::Stroke | LightShape::Scrim => short,
         };
         let band = (sane(l.softness, 0.0, 1.0) * inradius).max(MIN_EDGE);
         PreparedLight {
@@ -439,6 +441,9 @@ impl PreparedLight {
                 let across = off / self.ring_half;
                 ((off - self.ring_half) * scale, across * across)
             }
+            // Drawn by the shape core. Reaching here means its outline could not
+            // be built (a stroke with fewer than two points): it covers nothing.
+            LightShape::Polygon | LightShape::Stroke | LightShape::Scrim => return 0.0,
         };
         let edge = 1.0 - smoothstep(-0.5 * self.band, 0.5 * self.band, distance);
         if edge <= 0.0 {

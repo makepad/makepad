@@ -20,16 +20,17 @@
 use makepad_draw::makepad_micro_serde::*;
 use std::collections::{HashMap, HashSet};
 
-/// Most lights a map holds; phase 1b (task B1) raises it to 16.
-pub const LIGHT_LIMIT: usize = 8;
+/// Most lights a map holds (16 since phase 1b).
+pub const LIGHT_LIMIT: usize = 16;
 /// The params format this build reads and writes; clamp() pins `version` to it.
 pub const PARAMS_VERSION: u32 = 1;
 /// Accepted values of `HdriParams::mode`; the first is where unknown strings fall back to.
 pub const MODE_NAMES: &[&str] = &["sky", "studio"];
 /// Accepted values of `SunParams::mode`; the first is the fallback.
 pub const SUN_MODE_NAMES: &[&str] = &["time", "manual"];
-/// Accepted values of `LightParams::shape`; the first is the fallback. Phase 1b appends shapes.
-pub const LIGHT_SHAPE_NAMES: &[&str] = &["rect", "disc", "ring"];
+/// Accepted values of `LightParams::shape`; the first is the fallback. Phase 1b
+/// added polygon, stroke and scrim, which the shape core draws (hdri/shape.rs).
+pub const LIGHT_SHAPE_NAMES: &[&str] = &["rect", "disc", "ring", "polygon", "stroke", "scrim"];
 /// Accepted values of `LightParams::blend`; the first is the fallback.
 pub const BLEND_NAMES: &[&str] = &["add", "multiply"];
 
@@ -216,12 +217,18 @@ pub enum SunMode {
     Manual,
 }
 
-/// Typed view of `LightParams::shape`; phase 1b adds variants.
+/// Typed view of `LightParams::shape`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LightShape {
     Rect,
     Disc,
     Ring,
+    /// A regular polygon, a star, or up to 64 points (shaped.rs).
+    Polygon,
+    /// A Lumi-curve: a stroke through (azimuth, elevation) points (shaped.rs).
+    Stroke,
+    /// A rect of diffusion cloth lit from behind (shaped.rs).
+    Scrim,
 }
 
 /// Typed view of `LightParams::blend`.
@@ -256,6 +263,9 @@ impl LightShape {
             LightShape::Rect => "rect",
             LightShape::Disc => "disc",
             LightShape::Ring => "ring",
+            LightShape::Polygon => "polygon",
+            LightShape::Stroke => "stroke",
+            LightShape::Scrim => "scrim",
         }
     }
 }
@@ -573,6 +583,12 @@ impl LightParams {
             LightShape::Disc
         } else if is_choice(&self.shape, "ring") {
             LightShape::Ring
+        } else if is_choice(&self.shape, "polygon") {
+            LightShape::Polygon
+        } else if is_choice(&self.shape, "stroke") {
+            LightShape::Stroke
+        } else if is_choice(&self.shape, "scrim") {
+            LightShape::Scrim
         } else {
             LightShape::Rect
         }
@@ -1201,9 +1217,11 @@ mod tests {
                 SunMode::Time | SunMode::Manual => assert!(SUN_MODE_NAMES.contains(&m.as_str()), "{m:?}"),
             }
         }
-        for s in [LightShape::Rect, LightShape::Disc, LightShape::Ring] {
+        for s in [LightShape::Rect, LightShape::Disc, LightShape::Ring, LightShape::Polygon, LightShape::Stroke, LightShape::Scrim] {
             match s {
-                LightShape::Rect | LightShape::Disc | LightShape::Ring => assert!(LIGHT_SHAPE_NAMES.contains(&s.as_str()), "{s:?}"),
+                LightShape::Rect | LightShape::Disc | LightShape::Ring | LightShape::Polygon | LightShape::Stroke | LightShape::Scrim => {
+                    assert!(LIGHT_SHAPE_NAMES.contains(&s.as_str()), "{s:?}")
+                }
             }
         }
         for b in [Blend::Add, Blend::Multiply] {
@@ -1216,7 +1234,7 @@ mod tests {
     #[test]
     fn lights_are_capped_and_only_the_first_key_survives() {
         let mut p = HdriParams::default();
-        for i in 0..10 {
+        for i in 0..(LIGHT_LIMIT + 2) {
             p.lights.push(LightParams { name: format!("L{i}"), key: i == 0 || i == 2, ..LightParams::default() });
         }
         p.lights[1].name = "x".repeat(100);
@@ -1327,5 +1345,34 @@ mod tests {
         let err = base.merge_json(r#"{"sky": {"atmosphere": {"ground_color": ["a", "b", "c"]}}}"#).unwrap_err();
         assert!(err.contains("ground_color"), "{err}");
         assert!(base.merge_json(r#"{"intensity_ev": null}"#).is_err(), "null only clears optional fields");
+    }
+}
+
+#[cfg(test)]
+mod shape_param_tests {
+    use super::*;
+
+    #[test]
+    fn a_map_holds_sixteen_lights() {
+        assert_eq!(LIGHT_LIMIT, 16);
+        let mut p = HdriParams::default();
+        p.lights = vec![LightParams::default(); 20];
+        let changed = p.clamp();
+        assert_eq!(p.lights.len(), 16);
+        assert_eq!(changed, ["lights"]);
+    }
+
+    #[test]
+    fn the_shaped_light_names_are_choices() {
+        assert_eq!(LIGHT_SHAPE_NAMES, &["rect", "disc", "ring", "polygon", "stroke", "scrim"]);
+        for (name, shape) in [("polygon", LightShape::Polygon), ("stroke", LightShape::Stroke), ("scrim", LightShape::Scrim)] {
+            let mut p = HdriParams::default();
+            p.lights.push(LightParams { shape: name.to_ascii_uppercase(), ..LightParams::default() });
+            assert_eq!(p.lights[0].shape(), shape, "the accessor reads a loose spelling");
+            let changed = p.clamp();
+            assert_eq!(p.lights[0].shape, name);
+            assert_eq!(changed, ["lights[0].shape"], "only the spelling was fixed");
+            assert_eq!(shape.as_str(), name);
+        }
     }
 }

@@ -45,6 +45,7 @@ pub mod clouds;
 pub mod night;
 pub mod image;
 pub mod export;
+pub mod shape;
 pub mod envmap;
 pub mod prepare;
 
