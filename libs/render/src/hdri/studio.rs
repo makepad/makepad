@@ -19,7 +19,7 @@
 //! Kelvin/tint colour (luminance 1) or an explicit rgb, times 2^intensity_ev.
 
 use makepad_draw::*;
-use super::{dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams};
+use super::{az_el_from_dir, dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams};
 use crate::sky::luminance;
 use super::shaped::ShapedLight;
 use super::gels::{gel_stack, shifted_kelvin};
@@ -262,14 +262,7 @@ impl Studio {
         // same order as the prepared lights above.
         let fx: Vec<LightFx> = enabled.iter().map(|l| LightFx::new(l, images)).collect();
         let any_fx = fx.iter().any(|fx| !fx.is_plain());
-        // The engine's key light carries what gets past its own gobo, doors and
-        // grid (its radiance; its cone, facing share and covering cone are its
-        // shape's, which the extras only cut).
-        let key = key.map(|key: EnvSun| match key_index {
-            Some(i) => EnvSun { radiance: key.radiance * fx[i].key_scale(), ..key },
-            None => key,
-        });
-        Studio {
+        let mut built = Studio {
             top: rgb(studio.top),
             horizon: rgb(studio.horizon),
             floor: rgb(studio.floor),
@@ -279,7 +272,38 @@ impl Studio {
             key_index,
             fx,
             any_fx,
+        };
+        // The engine's key light carries what gets past its own gobo, doors and
+        // grid (its radiance; its cone, facing share and covering cone are its
+        // shape's, which the extras only cut).
+        if let (Some(i), Some(key)) = (key_index, built.key) {
+            built.key = Some(EnvSun { radiance: key.radiance * built.key_share(i, &key), ..key });
         }
+        built
+    }
+
+    /// The share of the key's emission that gets past its gobo, doors and
+    /// grid: `LightFx::key_share`, weighted by what the key puts into the
+    /// map, its own drawing (shape, soft edge, hotspot, picture, a stroke's
+    /// ramp) under the flags and the cloth after it, as `key_emission` dims
+    /// it. So the engine's key light loses what the map loses (plan 2's N3
+    /// removes exactly that). Sampled over the key's reach box, or, for a
+    /// stroke, which its points place, over the square round its covering
+    /// cone.
+    fn key_share(&self, index: usize, key: &EnvSun) -> f32 {
+        let light = &self.lights[index];
+        let flags = dimmers(&self.lights[index + 1..]);
+        let drawn = |dir: Vec3f| luminance(dimmed(&flags, dir, self.draw_lights(index..index + 1, dir, Vec3f::default(), None)));
+        if light.shaped.as_ref().is_some_and(|s| s.key_spread().is_some()) {
+            let (azimuth_deg, elevation_deg) = az_el_from_dir(key.dir);
+            // A tangent plane reaches to a cosine of 0.05 (`project`'s limit): a
+            // stroke that winds further round the sky gives the share of its
+            // part inside that.
+            let c = key.cos_cover.max(0.05);
+            let reach = (1.0 - c * c).sqrt() / c;
+            return self.fx[index].key_share(&light_frame(azimuth_deg, elevation_deg, 0.0), vec2f(reach, reach), &drawn);
+        }
+        self.fx[index].key_share(&light.frame, light.reach, &drawn)
     }
 
     /// The vertical gradient.
@@ -446,12 +470,7 @@ fn key_emission(lights: &[PreparedLight], n: usize) -> KeyIntegral {
     let Some((key, after)) = lights.split_first() else {
         return KeyIntegral { emission: Vec3f::default(), facing: 1.0, cos_cover: 1.0 };
     };
-    // What dims the key as the map draws it: the flags and gels, and the scrims'
-    // cloth in front of it.
-    let flags: Vec<&PreparedLight> = after
-        .iter()
-        .filter(|l| l.blend == Blend::Multiply || l.shaped.as_ref().is_some_and(|s| s.hides_behind()))
-        .collect();
+    let flags = dimmers(after);
     let n = n.max(1);
     let cell = vec2f(2.0 * key.reach.x / n as f32, 2.0 * key.reach.y / n as f32);
     let mut sum = [0.0f64; 3];
@@ -481,20 +500,7 @@ fn key_emission(lights: &[PreparedLight], n: usize) -> KeyIntegral {
             let cos = 1.0 / r2.sqrt();
             let mut w = Vec3f::all(m * cos / r2);
             if !flags.is_empty() {
-                let dir = dir();
-                for flag in &flags {
-                    // As `apply_lights` draws the flag: a shaped one through the shape
-                    // core, and a scrim's cloth without its own glow.
-                    if let Some(shaped) = &flag.shaped {
-                        w = if flag.blend == Blend::Multiply { shaped.compose(dir, w, flag.color) } else { shaped.hide(dir, w) };
-                        continue;
-                    }
-                    let Some(q) = project(&flag.frame, dir) else { continue };
-                    let f = flag.mask(q);
-                    if f > 0.0 {
-                        w *= Vec3f::all(1.0) + (flag.color - Vec3f::all(1.0)) * f;
-                    }
-                }
+                w = dimmed(&flags, dir(), w);
             }
             row += w;
             row_weighted += w * cos;
@@ -515,6 +521,35 @@ fn key_emission(lights: &[PreparedLight], n: usize) -> KeyIntegral {
     let facing = if total > 0.0 { (cosine / total).clamp(0.0, 1.0) } else { 1.0 };
     let cos_cover = (1.0 / (1.0 + key.reach.x * key.reach.x + key.reach.y * key.reach.y).sqrt()).max(0.05);
     KeyIntegral { emission, facing, cos_cover }
+}
+
+/// What dims the key as the map draws it, of the lights listed after it: the
+/// flags and gels, and the scrims' cloth in front of it.
+fn dimmers(after: &[PreparedLight]) -> Vec<&PreparedLight> {
+    after
+        .iter()
+        .filter(|l| l.blend == Blend::Multiply || l.shaped.as_ref().is_some_and(|s| s.hides_behind()))
+        .collect()
+}
+
+/// `w`, the key's light along `dir`, as the lights in `flags` ([`dimmers`])
+/// leave it in the map.
+fn dimmed(flags: &[&PreparedLight], dir: Vec3f, w: Vec3f) -> Vec3f {
+    let mut w = w;
+    for flag in flags {
+        // As `apply_lights` draws the flag: a shaped one through the shape
+        // core, and a scrim's cloth without its own glow.
+        if let Some(shaped) = &flag.shaped {
+            w = if flag.blend == Blend::Multiply { shaped.compose(dir, w, flag.color) } else { shaped.hide(dir, w) };
+            continue;
+        }
+        let Some(q) = project(&flag.frame, dir) else { continue };
+        let f = flag.mask(q);
+        if f > 0.0 {
+            w *= Vec3f::all(1.0) + (flag.color - Vec3f::all(1.0)) * f;
+        }
+    }
+    w
 }
 
 /// One enabled light, reduced to what the per-pixel evaluation needs.
