@@ -16,8 +16,8 @@
 //! so the blurred window is exactly the product of two one-axis filters.
 //! Leaves and fern (`foliage.rs`) soften each blade's and stem's edge
 //! instead, so a canopy passes somewhat less of its light as it moves away.
-//! An image mask (B8) is blurred by the mean of 3 x 3 taps, a coarse box
-//! filter of the picture.
+//! An image mask (B8) is box-filtered too, exactly, through a summed-area
+//! table of what its texels pass.
 
 use super::*;
 use super::foliage::Foliage;
@@ -89,9 +89,23 @@ pub struct Gobo {
     vertical: bool,
     /// Leaves or fern fronds, scattered once from the seed (B7).
     foliage: Option<Foliage>,
-    /// The image mask, shared with the app's ImageSet (B8).
-    image: Option<Arc<EnvMap>>,
+    /// The image mask (B8).
+    image: Option<ImageMask>,
 }
+
+/// An image gobo's picture, as the gobo reads it.
+#[derive(Clone, Debug)]
+enum ImageMask {
+    /// Against the light: the picture itself, shared with the app's
+    /// ImageSet and read bilinearly (`image_mask`).
+    Sharp(Arc<EnvMap>),
+    /// Further off: the summed-area table that box-filters it.
+    Soft(Arc<PassTable>),
+}
+
+/// The penumbra up to which an image gobo is read as sharp as the picture:
+/// `penumbra` of a distance of 1/60 or less.
+const SHARP_SOFT: f32 = 0.004;
 
 impl Gobo {
     /// The gobo of `p` over a light with tangent half extents `half`. None
@@ -100,11 +114,17 @@ impl Gobo {
     /// name the app has not loaded is simply no gobo.
     pub fn new(p: &GoboParams, half: Vec2f, images: &ImageSet) -> Option<Gobo> {
         let kind = p.kind();
-        let image = if kind == GoboKind::Image { Some(images.get(&p.image)?.clone()) } else { None };
+        let picture = if kind == GoboKind::Image { Some(images.get(&p.image)?.clone()) } else { None };
         let half = vec2f(half.x.max(1.0e-4), half.y.max(1.0e-4));
         let s = half.x.min(half.y);
         let rect = vec2f(half.x / s, half.y / s);
         let soft = penumbra(p.distance);
+        let image = match picture {
+            Some(img) if soft <= SHARP_SOFT => Some(ImageMask::Sharp(img)),
+            // A picture without texels masks nothing (as `image_mask` reads it).
+            Some(img) => PassTable::new(&img).map(|table| ImageMask::Soft(Arc::new(table))),
+            None => None,
+        };
         let foliage = match kind {
             GoboKind::Leaves => Some(Foliage::leaves(rect, p.density, p.scale, p.seed, soft)),
             GoboKind::Fern => Some(Foliage::fern(rect, p.density, p.scale, p.seed, soft)),
@@ -142,7 +162,7 @@ impl Gobo {
             GoboKind::Grid => self.window(p, false),
             GoboKind::Blinds => self.blinds(p, q),
             GoboKind::Leaves | GoboKind::Fern => self.foliage.as_ref().map_or(1.0, |f| f.transmission(p)),
-            GoboKind::Image => self.image.as_ref().map_or(1.0, |img| self.image_at(img, p)),
+            GoboKind::Image => self.image.as_ref().map_or(1.0, |mask| self.image_at(mask, p)),
         };
         if t.is_finite() {
             t.max(0.0).min(1.0)
@@ -152,24 +172,17 @@ impl Gobo {
     }
 
     /// An image mask at `p` (s-units), stretched over the light's rectangle.
-    /// Against the light it is as sharp as the image; further off it is the
-    /// mean of 3 x 3 taps two thirds of a penumbra apart, a small box blur
-    /// that keeps the light the mask passes.
-    fn image_at(&self, img: &EnvMap, p: Vec2f) -> f32 {
+    /// Against the light it is as sharp as the image. Further off it is the
+    /// mean of the mask over the penumbra's box, soft s-units each way, as a
+    /// window's is: a box filter moves light about and loses none, and it
+    /// blurs fine detail away instead of ghosting it.
+    fn image_at(&self, mask: &ImageMask, p: Vec2f) -> f32 {
         // The unit box: -1..1 over the light's rectangle.
         let b = vec2f(p.x / self.rect.x, p.y / self.rect.y);
-        if self.soft <= 0.004 {
-            return image_mask(img, b);
+        match mask {
+            ImageMask::Sharp(img) => image_mask(img, b),
+            ImageMask::Soft(table) => table.box_mean(b, vec2f(self.soft / self.rect.x, self.soft / self.rect.y)),
         }
-        let dx = 0.67 * self.soft / self.rect.x;
-        let dy = 0.67 * self.soft / self.rect.y;
-        let mut sum = 0.0;
-        for j in -1..=1 {
-            for i in -1..=1 {
-                sum += image_mask(img, vec2f(b.x + i as f32 * dx, b.y + j as f32 * dy));
-            }
-        }
-        sum / 9.0
     }
 
     /// A window at `p` (s-units): a frame `frame` wide inside the light's
@@ -265,15 +278,95 @@ fn image_mask(img: &EnvMap, b: Vec2f) -> f32 {
     top + (bottom - top) * ty
 }
 
+/// Prefix sums of what an image mask's texels pass (`texel_passes`): entry
+/// (x, y) of the (width + 1) x (height + 1) table sums the texels left of
+/// column x and above row y. Built once per gobo that hangs off its light,
+/// it gives the exact mean of the mask over a box of any size from sixteen
+/// reads. In f64: a 2048 x 2048 mask sums to four million, where f32 would
+/// already lose a texel's own fractions.
+#[derive(Debug)]
+struct PassTable {
+    width: usize,
+    height: usize,
+    sums: Vec<f64>,
+}
+
+impl PassTable {
+    /// None for a picture without texels.
+    fn new(img: &EnvMap) -> Option<PassTable> {
+        let (w, h) = (img.width, img.height);
+        if w == 0 || h == 0 || img.data.len() != w * h {
+            return None;
+        }
+        let stride = w + 1;
+        let mut sums = vec![0.0f64; stride * (h + 1)];
+        for (y, texels) in img.data.chunks_exact(w).enumerate() {
+            // Row y + 1 of the table is row y plus the running sum along texel row y.
+            let (above, below) = sums.split_at_mut((y + 1) * stride);
+            let mut row = 0.0f64;
+            for ((t, up), out) in texels.iter().zip(&above[y * stride + 1..]).zip(&mut below[1..stride]) {
+                row += texel_passes(t) as f64;
+                *out = up + row;
+            }
+        }
+        Some(PassTable { width: w, height: h, sums })
+    }
+
+    /// The mask integrated over 0..x by 0..y, in texels (texel (i, j) covers
+    /// i..i+1 by j..j+1), with the edge texels held past the picture's
+    /// border, so that it runs on linearly outside it (negative left of and
+    /// above the picture). Inside a texel the integral is exactly the
+    /// bilinear blend of the table at the texel's corners, and an edge
+    /// texel's blend carried on past the border is exactly the held edge.
+    fn integral(&self, x: f64, y: f64) -> f64 {
+        let stride = self.width + 1;
+        // `as usize` saturates: left of or above the picture is texel 0.
+        let i = (x.floor() as usize).min(self.width - 1);
+        let j = (y.floor() as usize).min(self.height - 1);
+        let (tx, ty) = (x - i as f64, y - j as f64);
+        let at = |i: usize, j: usize| self.sums[j * stride + i];
+        let top = at(i, j) + (at(i + 1, j) - at(i, j)) * tx;
+        let bottom = at(i, j + 1) + (at(i + 1, j + 1) - at(i, j + 1)) * tx;
+        top + (bottom - top) * ty
+    }
+
+    /// The mean of the mask over the box round unit-box point `b` (placed
+    /// as `image_mask` places it) with half-widths `r`, in unit-box units.
+    /// The box is never narrower than a texel: one texel across, its mean
+    /// is the bilinear lookup itself, so a soft gobo is never blockier than
+    /// a sharp one.
+    fn box_mean(&self, b: Vec2f, r: Vec2f) -> f32 {
+        let (w, h) = (self.width as f64, self.height as f64);
+        let rx = (0.5 * r.x as f64 * w).max(0.5);
+        let ry = (0.5 * r.y as f64 * h).max(0.5);
+        // A box wholly past the border sees the held edge alone, as it does
+        // at the border plus its half-width: holding the centre there keeps
+        // the sums small. max/min hold a NaN at the near side.
+        let x = ((0.5 + 0.5 * b.x as f64) * w).max(-rx).min(w + rx);
+        let y = ((0.5 - 0.5 * b.y as f64) * h).max(-ry).min(h + ry);
+        let sum = self.integral(x + rx, y + ry) - self.integral(x - rx, y + ry) - self.integral(x + rx, y - ry) + self.integral(x - rx, y - ry);
+        (sum / (4.0 * rx * ry)) as f32
+    }
+}
+
 /// The studio a projected gobo lands on, in units of the camera's height
 /// above the floor: the floor is the plane one unit below the camera, the
-/// cyc wall a cylinder WALL_RADIUS round it, and the projector hangs
-/// PROJECTOR_DISTANCE out along its light's direction, looking back at the
-/// centre. At that distance a 40 degree light throws its gobo over a floor
-/// patch a few units across, around the camera.
+/// cyc wall a cylinder WALL_RADIUS round it.
+///
+/// A light in a map is infinitely far off, so its rays arrive parallel: its
+/// gobo's shadow is the light's rectangle laid along them onto the floor,
+/// round the spot the camera sees under the light, as far below the horizon
+/// as the light is above it (held three quarters of the way to the wall,
+/// SPOT_REACH, so a low light's shadow stays in the room). The rectangle is
+/// the light as wide as it looks from PROJECTOR_DISTANCE: a 40 degree light
+/// throws a pattern 1.1 units across its beam, stretched along the floor by
+/// 1 / sin(elevation). At 45 degrees that is a patch under the light from
+/// about 30 to 77 degrees down, a tenth of the lower half's solid angle; the
+/// rest of the backdrop is untouched.
 pub const FLOOR_HEIGHT: f32 = 1.0;
 pub const WALL_RADIUS: f32 = 4.0;
-pub const PROJECTOR_DISTANCE: f32 = 6.0;
+pub const PROJECTOR_DISTANCE: f32 = 1.5;
+const SPOT_REACH: f32 = 0.75 * WALL_RADIUS;
 /// How dark a projected gobo's shadow gets: the studio's fill keeps it off black.
 pub const SHADOW_DEPTH: f32 = 0.8;
 
@@ -295,6 +388,8 @@ pub struct BackdropGobo {
     up: Vec3f,
     /// The light's tangent half extents: the beam's rectangle.
     half: Vec2f,
+    /// The point of the floor under the light that the beam is centred on.
+    spot: Vec3f,
     gobo: Gobo,
 }
 
@@ -306,7 +401,15 @@ impl BackdropGobo {
         let light = lights.iter().find(|l| l.key && casts(l)).or_else(|| lights.iter().find(|l| casts(l)))?;
         let (frame, sx, half) = face_axes(light);
         let gobo = Gobo::new(light.gobo.as_ref()?, half, images)?;
-        Some(BackdropGobo { center: frame.center, right: frame.right * sx, up: frame.up, half, gobo })
+        // The spot is where a ray as far below the horizon as the light is
+        // above it meets the floor: FLOOR_HEIGHT / tan(elevation) out.
+        let c = frame.center;
+        let toward = vec3f(c.x, 0.0, c.z);
+        let h = toward.length();
+        let out = if c.y > 1.0e-4 { (FLOOR_HEIGHT * h / c.y).min(SPOT_REACH) } else { SPOT_REACH };
+        let under = if h > 1.0e-6 { toward * (out / h) } else { Vec3f::default() };
+        let spot = under + vec3f(0.0, -FLOOR_HEIGHT, 0.0);
+        Some(BackdropGobo { center: c, right: frame.right * sx, up: frame.up, half, spot, gobo })
     }
 
     /// The factor 1 - SHADOW_DEPTH ..= 1 by which the backdrop seen along
@@ -326,16 +429,13 @@ impl BackdropGobo {
         if !(normal.dot(self.center) > 0.0) {
             return 1.0;
         }
-        // The projector sits at center x PROJECTOR_DISTANCE and looks back at
-        // the camera. Its slide is the gobo as the viewer sees it on the
-        // light, so a surface point's place on the slide is its offset across
-        // the beam over its depth along it: the pattern lands on the floor
-        // the way the light shows it, right side to the right.
-        let depth = PROJECTOR_DISTANCE - p.dot(self.center);
-        if depth < 0.1 {
-            return 1.0;
-        }
-        let q = vec2f(p.dot(self.right) / depth, p.dot(self.up) / depth);
+        // The rays are parallel, so a surface point's place in the beam is
+        // its offset from the spot across them, in the light's rectangle as
+        // it looks PROJECTOR_DISTANCE away. The pattern lands the way the
+        // light shows it, right side to the right; its top falls furthest
+        // from the light, as a shadow's does.
+        let o = p - self.spot;
+        let q = vec2f(o.dot(self.right), o.dot(self.up)) / PROJECTOR_DISTANCE;
         // The cookie fades out over the last tenth of the beam, so the
         // shadow has no hard border where the beam ends.
         let rim = (q.x.abs() / self.half.x).max(q.y.abs() / self.half.y);
@@ -556,6 +656,101 @@ mod tests {
         assert!(soft > 0.4 && soft < 0.9, "far from it the black half bleeds over: {soft}");
     }
 
+    /// The mean of what a mask's texels pass over the box centred on unit-box
+    /// point `b` with half-widths `r` (unit-box units, at least half a texel
+    /// each way), the edge texels held past the picture's border. By brute
+    /// force: each texel weighs the length of the box it covers on each axis.
+    fn box_mean_by_overlap(img: &EnvMap, b: Vec2f, r: Vec2f) -> f64 {
+        let (w, h) = (img.width, img.height);
+        let x = (0.5 + 0.5 * b.x as f64) * w as f64;
+        let y = (0.5 - 0.5 * b.y as f64) * h as f64;
+        let rx = (0.5 * r.x as f64 * w as f64).max(0.5);
+        let ry = (0.5 * r.y as f64 * h as f64).max(0.5);
+        // How much of lo..hi lies on texel i of n; the edge texels run on past the border.
+        let cover = |lo: f64, hi: f64, i: usize, n: usize| {
+            let start = if i == 0 { f64::NEG_INFINITY } else { i as f64 };
+            let end = if i + 1 == n { f64::INFINITY } else { (i + 1) as f64 };
+            (hi.min(end) - lo.max(start)).max(0.0)
+        };
+        let mut sum = 0.0;
+        for j in 0..h {
+            let down = cover(y - ry, y + ry, j, h);
+            for i in 0..w {
+                sum += texel_passes(&img.data[j * w + i]) as f64 * cover(x - rx, x + rx, i, w) * down;
+            }
+        }
+        sum / (4.0 * rx * ry)
+    }
+
+    #[test]
+    fn a_distant_image_gobo_is_a_box_filter_of_its_texels() {
+        // Noise with HDR texels and cut-out holes. Off the light the gobo is
+        // the exact mean of what the texels pass over its penumbra's box, as a
+        // window's is of its panes, wherever the box falls: across the
+        // picture's border too.
+        let hash = |x: usize, y: usize| ((x * 7919 + y * 104729) % 1009) as f32 / 1008.0;
+        let images = mask_set(96, 64, |x, y| 1.5 * hash(x, y), |x, y| if hash(y, x) < 0.2 { 0.0 } else { 1.0 });
+        let img = images.get("mask").expect("the mask").clone();
+        for distance in [0.1f32, 0.5, 1.0] {
+            let g = image_gobo(&images, distance);
+            let r = vec2f(g.soft / g.rect.x, g.soft / g.rect.y);
+            for j in 0..23 {
+                for i in 0..31 {
+                    // Over the light (0.3 x 0.2) and a little past its edges.
+                    let q = vec2f(-0.33 + 0.66 * i as f32 / 30.0, -0.22 + 0.44 * j as f32 / 22.0);
+                    let b = vec2f(q.x / g.s / g.rect.x, q.y / g.s / g.rect.y);
+                    let (got, want) = (g.transmission(q) as f64, box_mean_by_overlap(&img, b, r));
+                    assert!((got - want).abs() < 1.0e-5, "distance {distance} at {q:?}: {got}, the box mean is {want}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_distant_image_gobo_blurs_fine_detail_instead_of_ghosting_it() {
+        // At distance 1 on this light the penumbra's box is 20.8 texels of a
+        // 256 wide mask, and taps two thirds of a penumbra apart would be 7.
+        let soft = |images: &ImageSet, b: f32| image_gobo(images, 1.0).transmission(vec2f(b * 0.3, 0.0));
+        // Stripes 7 texels apart: the box all but evens them out. Taps one
+        // period apart all see the same phase and keep the stripes whole.
+        let stripes = mask_set(256, 128, |x, _| if x % 7 < 3 { 0.0 } else { 1.0 }, |_, _| 1.0);
+        let ts: Vec<f32> = (0..200).map(|i| soft(&stripes, -0.5 + i as f32 / 199.0)).collect();
+        let contrast = ts.iter().cloned().fold(0.0f32, f32::max) - ts.iter().cloned().fold(1.0f32, f32::min);
+        assert!(contrast < 0.1, "stripes finer than the penumbra blur away: contrast {contrast}");
+        // A thin black line blurs into one dip, not into offset copies of itself.
+        let line = mask_set(256, 128, |x, _| if x == 127 || x == 128 { 0.0 } else { 1.0 }, |_, _| 1.0);
+        let ts: Vec<f32> = (0..401).map(|i| soft(&line, -0.3 + 0.6 * i as f32 / 400.0)).collect();
+        let lowest = (0..ts.len()).min_by(|&a, &b| ts[a].total_cmp(&ts[b])).expect("samples");
+        assert!(ts[lowest] < 0.95, "the line still shows: {}", ts[lowest]);
+        for i in 1..ts.len() {
+            if i <= lowest {
+                assert!(ts[i] <= ts[i - 1] + 1.0e-6, "one dip: rising toward the line at {i}: {ts:?}");
+            } else {
+                assert!(ts[i] + 1.0e-6 >= ts[i - 1], "one dip: falling past the line at {i}: {ts:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_colour_under_a_transparent_texel_never_darkens_its_edge() {
+        // A black texel kept under full transparency beside opaque white:
+        // between them the mask passes everything, sharp and soft alike.
+        let images = mask_set(4, 2, |x, _| if x < 2 { 1.0 } else { 0.0 }, |x, _| if x < 2 { 1.0 } else { 0.0 });
+        for distance in [0.0f32, 1.0] {
+            let g = image_gobo(&images, distance);
+            for i in 0..21 {
+                let q = vec2f(-0.3 + 0.6 * i as f32 / 20.0, 0.0);
+                let t = g.transmission(q);
+                assert!(t > 1.0 - 1.0e-6, "distance {distance} at {q:?}: {t}");
+            }
+        }
+        // A bright HDR texel beside a black one dims to the mean of what they
+        // pass, not to all of the light.
+        let g = image_gobo(&mask_set(2, 1, |x, _| if x == 0 { 5.0 } else { 0.0 }, |_, _| 1.0), 0.0);
+        let mid = g.transmission(vec2f(0.0, 0.0));
+        assert!((mid - 0.5).abs() < 1.0e-6, "{mid}");
+    }
+
     #[test]
     fn a_gobo_image_is_one_of_the_keys_the_app_loads() {
         use crate::hdri::image_light::referenced_keys;
@@ -607,6 +802,43 @@ mod tests {
         assert!(BackdropGobo::new(&[off], &ImageSet::default()).is_none());
         let flag = LightParams { blend: "multiply".to_string(), ..projecting_key() };
         assert!(BackdropGobo::new(&[flag], &ImageSet::default()).is_none());
+    }
+
+    #[test]
+    fn a_cast_is_a_patch_of_floor_under_its_light() {
+        // The shadow lands round the spot the camera sees under the light, as
+        // far below the horizon as the light is above it (held three quarters
+        // of the way to the wall for a low light). It covers the beam's
+        // rectangle there, stretched along the floor by 1 / sin(elevation):
+        // not the floor all round the camera, and no wall.
+        for (azimuth_deg, elevation_deg) in [(90.0f32, 45.0f32), (0.0, 30.0), (200.0, 65.0), (300.0, 12.0)] {
+            let light = LightParams { azimuth_deg, elevation_deg, ..projecting_key() };
+            let cast = BackdropGobo::new(&[light], &ImageSet::default()).expect("casts");
+            let toward = dir_from_az_el(azimuth_deg, 0.0);
+            let out = (FLOOR_HEIGHT / elevation_deg.to_radians().tan()).min(0.75 * WALL_RADIUS);
+            let spot = vec3f(toward.x * out, -FLOOR_HEIGHT, toward.z * out);
+            // Half the beam's diagonal on the floor: across it as wide as the
+            // light seen PROJECTOR_DISTANCE away, along it stretched.
+            let across = PROJECTOR_DISTANCE * 20f32.to_radians().tan();
+            let reach = across * (1.0 + 1.0 / elevation_deg.to_radians().sin().powi(2)).sqrt();
+            let mut darker = 0;
+            for j in 0..90 {
+                for i in 0..180 {
+                    let d = dir_from_az_el(2.0 * i as f32 + 1.0, -90.0 + 2.0 * j as f32 + 1.0);
+                    let s = cast.shade(d);
+                    if s >= 1.0 {
+                        continue;
+                    }
+                    darker += 1;
+                    assert!(d.y < 0.0, "light at ({azimuth_deg}, {elevation_deg}): the sky side is never shaded: {d:?}");
+                    let hit = d * (FLOOR_HEIGHT / -d.y);
+                    assert!(vec3f(hit.x, 0.0, hit.z).length() < WALL_RADIUS, "light at ({azimuth_deg}, {elevation_deg}): no wall is shaded: {d:?}");
+                    let off = (hit - spot).length();
+                    assert!(off <= reach * 1.01, "light at ({azimuth_deg}, {elevation_deg}): shaded {off} from the spot under the light, the beam reaches {reach}: {d:?}");
+                }
+            }
+            assert!(darker > 20, "light at ({azimuth_deg}, {elevation_deg}): the bars fall under it: {darker}");
+        }
     }
 
     #[test]

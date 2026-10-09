@@ -425,7 +425,8 @@ pub struct GoboParams {
     /// The light is a window: it shows the map's own sky through the gobo
     /// instead of its colour. At intensity_ev 0 the sky shows as it is outside.
     pub fill_sky: bool,
-    /// Studio mode: the gobo's shadow also falls on the backdrop's floor and walls.
+    /// Studio mode: the gobo's shadow also falls on the backdrop, on the
+    /// floor under the light (`gobo::BackdropGobo`).
     pub project_on_backdrop: bool,
 }
 
