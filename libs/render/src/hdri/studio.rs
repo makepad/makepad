@@ -22,6 +22,7 @@ use makepad_draw::*;
 use super::{dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams};
 use crate::sky::luminance;
 use super::shaped::ShapedLight;
+use super::gels::{gel_stack, shifted_kelvin};
 
 /// Strength of a full ±1 tint: at +1 green is cut to about a third of red and blue.
 const TINT_STRENGTH: f32 = 0.4;
@@ -79,19 +80,35 @@ pub fn tint_rgb(tint: f32) -> Vec3f {
     m / luminance(m)
 }
 
-/// A light's peak radiance, times 2^intensity_ev.
+/// A light's peak radiance, times 2^intensity_ev, behind its gels.
 /// - With `rgb` set, that explicit colour is used as given.
 /// - Otherwise the colour is Kelvin times tint, renormalised to luminance 1 so
 ///   the tint cannot change the brightness of a coloured light either.
+/// - Gels (1b) filter the result. A conversion gel moves a Kelvin light's
+///   Kelvin by its mireds and takes the light an ideal filter of that shift
+///   costs; every other gel, and a conversion gel on an explicit colour, is
+///   an RGB transmission (gels.rs).
 pub fn light_color(light: &LightParams) -> Vec3f {
+    let gels = gel_stack(light.gels.as_deref().unwrap_or(&[]));
     let base = match light.rgb {
-        Some(rgb) => vec3f(rgb[0].max(0.0), rgb[1].max(0.0), rgb[2].max(0.0)),
+        // An explicit colour has no Kelvin to move: a conversion gel filters it.
+        Some(rgb) => vec3f(rgb[0].max(0.0), rgb[1].max(0.0), rgb[2].max(0.0)) * gels.conversion,
         None => {
-            let c = kelvin_to_rgb(light.kelvin) * tint_rgb(light.tint);
-            c / luminance(c).max(1.0e-6)
+            let kelvin = sane(light.kelvin, 1000.0, 20000.0);
+            // A conversion gel moves the Kelvin by its mireds, so the hue is
+            // exactly the shifted blackbody's.
+            let c = kelvin_to_rgb(shifted_kelvin(kelvin, gels.mired)) * tint_rgb(light.tint);
+            let c = c / luminance(c).max(1.0e-6);
+            if gels.mired == 0.0 {
+                c
+            } else {
+                // The light the gel costs: what its filter passes of this
+                // source (kelvin_to_rgb has luminance 1).
+                c * luminance(kelvin_to_rgb(kelvin) * gels.conversion)
+            }
         }
     };
-    base * 2.0f32.powf(sane(light.intensity_ev, -10.0, 20.0))
+    base * gels.filter * 2.0f32.powf(sane(light.intensity_ev, -10.0, 20.0))
 }
 
 /// A light's angular frame. `center` points at the light. `right` and `up` span the

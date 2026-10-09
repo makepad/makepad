@@ -208,6 +208,9 @@ pub struct LightParams {
     pub stroke: Option<StrokeParams>,
     /// Shape "scrim" (1b): the source behind the cloth and the frame. None is ScrimParams::default().
     pub scrim: Option<ScrimParams>,
+    /// Gels in front of the light (1b): up to `gels::GEL_LIMIT` names from
+    /// `gels::GEL_NAMES`. None or an empty list is a bare light.
+    pub gels: Option<Vec<String>>,
 }
 
 /// Widest a polygon or a scrim may be, each way, in degrees. clamp() holds
@@ -640,6 +643,7 @@ impl Default for LightParams {
             polygon: None,
             stroke: None,
             scrim: None,
+            gels: None,
         }
     }
 }
@@ -909,6 +913,14 @@ impl LightParams {
         if matches!(self.shape(), LightShape::Polygon | LightShape::Scrim) {
             f.range(prefix, "width_deg", &mut self.width_deg, 0.1, SHAPED_SPAN_MAX_DEG, d.width_deg);
             f.range(prefix, "height_deg", &mut self.height_deg, 0.1, SHAPED_SPAN_MAX_DEG, d.height_deg);
+        }
+        if let Some(gels) = self.gels.as_mut() {
+            // Known names only, spelled as the table spells them, at most GEL_LIMIT.
+            let clean = super::gels::clean_names(gels);
+            if clean != *gels {
+                *gels = clean;
+                f.push(prefix, "gels");
+            }
         }
     }
 }
@@ -1786,5 +1798,44 @@ mod shape_param_tests {
             .merge_json(r#"{"lights": [{"shape": "scrim", "scrim": {"frame": 0.1}}]}"#)
             .unwrap();
         assert_eq!(merged.lights[0].scrim, Some(ScrimParams { source_size: 0.5, frame: 0.1 }));
+    }
+}
+
+#[cfg(test)]
+mod source_param_tests {
+    use super::*;
+
+    #[test]
+    fn gel_lists_are_cleaned_and_round_trip() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams {
+            gels: Some(vec![" CTO_Half".to_string(), "fog".to_string(), "nd_0.3".to_string(), "red".to_string()]),
+            ..LightParams::default()
+        });
+        assert_eq!(p.clamp(), ["lights[0].gels"]);
+        assert_eq!(p.lights[0].gels, Some(vec!["cto_half".to_string(), "nd_0.3".to_string()]));
+        assert!(p.clamp().is_empty(), "a clean list stays as it is");
+        // An empty list is a bare light and is left alone, so a patch can clear the gels.
+        p.lights[0].gels = Some(Vec::new());
+        assert!(p.clamp().is_empty());
+        p.lights[0].gels = Some(vec!["amber".to_string()]);
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
+        // A light without gels writes no key, so 1a files and 1b files look alike.
+        let plain = HdriParams { lights: vec![LightParams::default()], ..HdriParams::default() };
+        assert!(!plain.to_json().contains("gels"));
+        assert_eq!(HdriParams::from_json(&plain.to_json()).unwrap().lights[0].gels, None);
+    }
+
+    #[test]
+    fn a_patch_sets_and_clears_gels() {
+        let base = HdriParams::default();
+        let (merged, report) = base.merge_json(r#"{"lights": [{"gels": ["ctb_quarter", "Blue", "pink"]}]}"#).unwrap();
+        assert_eq!(merged.lights[0].gels, Some(vec!["ctb_quarter".to_string(), "blue".to_string()]));
+        assert_eq!(report, ["lights[0].gels"], "the spelling fix and the dropped third gel are reported once");
+        let (cleared, report) = merged.merge_json(r#"{"lights": [{"gels": []}]}"#).unwrap();
+        assert_eq!(cleared.lights[0].gels, Some(Vec::new()));
+        assert!(report.is_empty(), "{report:?}");
+        let err = base.merge_json(r#"{"lights": [{"gels": "red"}]}"#).unwrap_err();
+        assert!(err.contains("do not fit"), "{err}");
     }
 }
