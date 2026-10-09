@@ -18,7 +18,7 @@
 # textures and the pixel shader does the colour conversion.
 
 [package]
-name = "makepad-video"
+name = "makepad-app-video"
 version = "0.1.0"
 edition = "2021"
 default-run = "video"
