@@ -211,6 +211,15 @@ pub struct LightParams {
     /// Gels in front of the light (1b): up to `gels::GEL_LIMIT` names from
     /// `gels::GEL_NAMES`. None or an empty list is a bare light.
     pub gels: Option<Vec<String>>,
+    /// A named light source from `spectrum::SOURCE_NAMES` (1b): its spectrum
+    /// gives the colour, in place of `kelvin`. `tint` still applies; `rgb`
+    /// still wins. None = the Kelvin blackbody. The source `led` is the
+    /// parametric LED: it keeps `kelvin` and reads `source_quality`.
+    pub source: Option<String>,
+    /// The parametric LED's quality knob, 0..=1 (1b): 0 a cheap LED (CRI
+    /// about 53), 0.5 about 80, 1 a full-spectrum one (about 95). Only the
+    /// source `led` reads it. None = `spectrum::LED_QUALITY_DEFAULT`.
+    pub source_quality: Option<f32>,
 }
 
 /// Widest a polygon or a scrim may be, each way, in degrees. clamp() holds
@@ -644,6 +653,8 @@ impl Default for LightParams {
             stroke: None,
             scrim: None,
             gels: None,
+            source: None,
+            source_quality: None,
         }
     }
 }
@@ -921,6 +932,17 @@ impl LightParams {
                 *gels = clean;
                 f.push(prefix, "gels");
             }
+        }
+        if let Some(name) = self.source.take() {
+            // A known source, spelled as the table spells it. An unknown one
+            // hands the colour back to the Kelvin.
+            self.source = super::spectrum::source(&name).map(|row| row.name.to_string());
+            if self.source.as_deref() != Some(name.as_str()) {
+                f.push(prefix, "source");
+            }
+        }
+        if let Some(quality) = self.source_quality.as_mut() {
+            f.range(prefix, "source_quality", quality, 0.0, 1.0, super::spectrum::LED_QUALITY_DEFAULT);
         }
     }
 }
@@ -1837,5 +1859,47 @@ mod source_param_tests {
         assert!(report.is_empty(), "{report:?}");
         let err = base.merge_json(r#"{"lights": [{"gels": "red"}]}"#).unwrap_err();
         assert!(err.contains("do not fit"), "{err}");
+    }
+
+    #[test]
+    fn sources_are_known_names_or_nothing() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams { source: Some(" Sodium_Low_Pressure".to_string()), ..LightParams::default() });
+        p.lights.push(LightParams { source: Some("candle".to_string()), ..LightParams::default() });
+        p.lights.push(LightParams { source: Some("halogen".to_string()), ..LightParams::default() });
+        // The parametric LED's knob is held to 0..1; NaN is the default quality.
+        p.lights.push(LightParams { source: Some("led".to_string()), source_quality: Some(1.5), ..LightParams::default() });
+        p.lights.push(LightParams { source: Some("led".to_string()), source_quality: Some(f32::NAN), ..LightParams::default() });
+        assert_eq!(p.clamp(), ["lights[0].source", "lights[1].source", "lights[3].source_quality", "lights[4].source_quality"]);
+        assert_eq!(p.lights[0].source.as_deref(), Some("sodium_low_pressure"));
+        assert_eq!(p.lights[1].source, None, "an unknown source hands the colour back to the Kelvin");
+        assert_eq!(p.lights[2].source.as_deref(), Some("halogen"));
+        assert_eq!(p.lights[3].source_quality, Some(1.0));
+        assert_eq!(p.lights[4].source_quality, Some(crate::hdri::spectrum::LED_QUALITY_DEFAULT));
+        assert!(p.clamp().is_empty());
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
+        let plain = HdriParams { lights: vec![LightParams::default()], ..HdriParams::default() };
+        assert!(!plain.to_json().contains("source"));
+    }
+
+    #[test]
+    fn a_patch_sets_and_clears_the_source() {
+        let (merged, report) = HdriParams::default()
+            .merge_json(r#"{"lights": [{"source": "led_warm_cri95", "tint": 0.1}]}"#)
+            .unwrap();
+        assert_eq!(merged.lights[0].source.as_deref(), Some("led_warm_cri95"));
+        assert!(report.is_empty(), "{report:?}");
+        // A lights array replaces the list, so leaving the key out clears it; so does null.
+        let (cleared, _) = merged.merge_json(r#"{"lights": [{"source": null}]}"#).unwrap();
+        assert_eq!(cleared.lights[0].source, None);
+        let (unknown, report) = merged.merge_json(r#"{"lights": [{"source": "candle"}]}"#).unwrap();
+        assert_eq!(unknown.lights[0].source, None);
+        assert_eq!(report, ["lights[0].source"]);
+        // The parametric LED with its knob.
+        let (knob, report) = HdriParams::default()
+            .merge_json(r#"{"lights": [{"source": "led", "kelvin": 3000.0, "source_quality": 0.9}]}"#)
+            .unwrap();
+        assert!(report.is_empty(), "{report:?}");
+        assert_eq!((knob.lights[0].source.as_deref(), knob.lights[0].source_quality), (Some("led"), Some(0.9)));
     }
 }

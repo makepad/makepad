@@ -50,6 +50,7 @@ pub mod shaped;
 pub mod envmap;
 pub mod prepare;
 pub mod gels;
+pub mod spectrum;
 
 pub use params::*;
 // hdri::bake_env_map, load_env_map, detect_sun, remove_sun, as the spec names them.
