@@ -396,8 +396,10 @@ impl PreparedLight {
         // so "fully soft" means the same thing for a wide softbox and a thin ring.
         let inradius = match shape {
             LightShape::Ring => ring_half * short,
-            // The shape core draws polygons, strokes and scrims (shaped.rs, B2-B5);
-            // this value is unused for them.
+            // The shape core draws polygons, strokes and scrims (shaped.rs, B2-B5).
+            // `short` still sizes the band, and so the reach box key_emission
+            // integrates a polygon or scrim key over, which must hold its soft
+            // edge (B2, B5). A stroke never reads it: its points place it.
             LightShape::Rect | LightShape::Disc | LightShape::Polygon | LightShape::Stroke | LightShape::Scrim => short,
         };
         let band = (sane(l.softness, 0.0, 1.0) * inradius).max(MIN_EDGE);
