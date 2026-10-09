@@ -31,8 +31,10 @@ use super::{HdriParams, ImageFit, LightImageParams};
 pub const MAX_LIGHT_IMAGE_SIDE: usize = 2048;
 
 /// The loaded pictures an `Env` may use, by key. The maps are in the FILE
-/// orientation `image::load_image` returns: row 0 on top, no column roll.
-/// Cloning is cheap: the pixels are shared.
+/// orientation `image::load_image` returns: row 0 on top, no column roll;
+/// only the base image (B15, `BaseImageParams::key`) is an equirect in the
+/// engine convention (`image::load_equirect`). Cloning is cheap: the pixels
+/// are shared.
 #[derive(Clone, Debug, Default)]
 pub struct ImageSet {
     pub images: HashMap<String, Arc<EnvMap>>,

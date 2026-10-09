@@ -249,17 +249,16 @@ pub fn load_image(path: &Path) -> Result<EnvMap, String> {
     decode_image(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Like `load_image`, but only accepts an equirect map, twice as wide as it is tall (one pixel
+/// Like `decode_image`, but only accepts an equirect map, twice as wide as it is tall (one pixel
 /// off is tolerated: cropped downloads are common), and rolls it from the file convention into
 /// the engine convention, ready for `Env`, `ibl::ibl_texture` and `Renderer::register_environment`.
-pub fn load_equirect(path: &Path) -> Result<EnvMap, String> {
-    let file = load_image(path)?;
+/// For a file already in memory (the web's file dialog); `load_equirect` reads one from disk.
+pub fn decode_equirect(bytes: &[u8]) -> Result<EnvMap, String> {
+    let file = decode_image(bytes)?;
     if (file.width as i64 - 2 * file.height as i64).abs() > 1 {
         return Err(format!(
-            "{}: {}x{} is not an equirect map; it must be twice as wide as it is tall (2:1)",
-            path.display(),
-            file.width,
-            file.height
+            "{}x{} is not an equirect map; it must be twice as wide as it is tall (2:1)",
+            file.width, file.height
         ));
     }
     let mut map = roll_quarter(&file, false);
@@ -267,9 +266,15 @@ pub fn load_equirect(path: &Path) -> Result<EnvMap, String> {
     Ok(map)
 }
 
+/// `decode_equirect` of a file; errors name the path.
+pub fn load_equirect(path: &Path) -> Result<EnvMap, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    decode_equirect(&bytes).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Makes a loaded environment opaque: a partly covered texel shows its colour over black, as a
 /// premultiplied EXR stores it. Alpha only means something for the pictures of image lights (1b),
-/// which come through `load_image`. `load_equirect` ends with this, and so must a host that
+/// which come through `load_image`. `decode_equirect` ends with this, and so must a host that
 /// decodes an equirect itself (the sandbox's bounded read: `decode_image`, `roll_quarter`, this).
 pub fn make_opaque(map: &mut EnvMap) {
     for texel in &mut map.data {
@@ -662,6 +667,22 @@ mod tests {
         let mut row: Vec<f32> = (0..4).map(|x| texel(&environment, x, 0)[0]).collect();
         row.sort_by(|a, b| a.partial_cmp(b).unwrap());
         assert_eq!(row, [0.0, 1.0, 3.0, 3.0]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_equirect_decodes_from_bytes_as_from_its_file() {
+        let bytes = flat_hdr(8, 4, |x, _| if x == 4 { [255, 255, 255, 129] } else { GREY });
+        let dir = scratch_dir("equirect_bytes");
+        let path = dir.join("pano.hdr");
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(decode_equirect(&bytes).unwrap(), load_equirect(&path).unwrap());
+        // The 2:1 rule holds for bytes too; with no path, the message names none.
+        let error = decode_equirect(&flat_hdr(6, 4, |_, _| GREY)).unwrap_err();
+        assert!(error.contains("2:1") && !error.contains(".hdr"), "{error}");
+        // A file still names itself in its errors, as before.
+        let error = load_equirect(&dir.join("missing.hdr")).unwrap_err();
+        assert!(error.contains("missing.hdr"), "{error}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

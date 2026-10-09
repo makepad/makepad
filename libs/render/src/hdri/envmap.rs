@@ -100,10 +100,28 @@ impl ImageStore {
     /// folder) and bounds the read; an `Err` (a missing file, a key the host
     /// refuses) is a failed file. A light's picture is decoded as the app
     /// decodes it (`image::decode_image`: the file's orientation, its alpha),
-    /// shrunk to `MAX_LIGHT_IMAGE_SIDE`. Returns one line per file that
-    /// failed in this call.
+    /// shrunk to `MAX_LIGHT_IMAGE_SIDE`; a base image as an equirect
+    /// (`image::decode_equirect`: 2:1, rolled to the engine convention,
+    /// opaque). Returns one line per file that failed in this call.
     pub fn load_missing(&mut self, params: &HdriParams, read: &dyn Fn(&str) -> Result<Vec<u8>, String>) -> Vec<String> {
         let mut problems = Vec::new();
+        // The base image (1b, B15): an equirect, rolled to the engine
+        // convention, at full size (`image::decode_equirect`). Before the
+        // light pictures, so a file named both as the base image and as a
+        // light's picture is the panorama, as in the app.
+        if let Some(key) = params.base_image.as_ref().map(|base| base.key.clone()).filter(|key| !key.is_empty()) {
+            if !self.set.contains(&key) && !self.failed.contains(&key) {
+                match read(&key).and_then(|bytes| super::image::decode_equirect(&bytes)) {
+                    Ok(map) => {
+                        self.set.insert(key, map);
+                    }
+                    Err(error) => {
+                        problems.push(format!("base image {key}: {error}"));
+                        self.failed.insert(key);
+                    }
+                }
+            }
+        }
         for key in super::image_light::referenced_keys(params) {
             if self.set.contains(&key) || self.failed.contains(&key) {
                 continue;
@@ -789,6 +807,38 @@ mod tests {
         let problems = store.load_missing(&outside, &refuse);
         assert!(problems.len() == 1 && problems[0].contains("inside the game's folder"), "{problems:?}");
         assert!(!store.set.contains("../outside.png"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_host_reads_the_base_image_its_params_name() {
+        let dir = std::env::temp_dir().join(format!("makepad_hdri_envmap_base_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A panorama: bright above the horizon, dark below it.
+        let pano = EnvMap::from_fn(32, |d| if d[1] > 0.0 { [3.0, 3.0, 3.0] } else { [0.2, 0.2, 0.2] });
+        std::fs::write(dir.join("pano.hdr"), crate::hdri::export::encode_hdr(&pano)).unwrap();
+        let mut params = HdriParams::default();
+        params.mode = "studio".to_string();
+        params.base_image = Some(BaseImageParams { key: "pano.hdr".to_string(), ..BaseImageParams::default() });
+        let read = |key: &str| std::fs::read(dir.join(key)).map_err(|e| e.to_string());
+        let mut store = ImageStore::default();
+        assert!(store.load_missing(&params, &read).is_empty());
+        // Loaded as an equirect: 2:1, in the engine convention (up is still the bright half).
+        let map = store.set.get("pano.hdr").expect("the base image is in the set");
+        assert_eq!((map.width, map.height), (32, 16));
+        assert!(map.sample([0.0, 1.0, 0.0])[1] > 2.5 && map.sample([0.0, -1.0, 0.0])[1] < 0.5);
+        // The bake shows it; without the set the studio backdrop shows.
+        let with = bake_generated_env_map_with(&params, &store.set, 64, serial).map;
+        assert!(with != bake_generated_env_map(&params, 64, serial).map, "the base image shows in the bake");
+        let up = with.sample([0.0, 1.0, 0.0]);
+        assert!((up[1] - 3.0).abs() < 0.1, "{up:?}");
+        // A file that is not there is reported once.
+        params.base_image.as_mut().unwrap().key = "gone.hdr".to_string();
+        let problems = store.load_missing(&params, &read);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("gone.hdr"), "{problems:?}");
+        assert!(store.load_missing(&params, &read).is_empty(), "a failed file is not tried again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

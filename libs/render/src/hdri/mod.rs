@@ -58,6 +58,7 @@ pub mod light_fx;
 pub mod foliage;
 pub mod aim;
 pub mod imperfections;
+pub mod composite;
 
 pub use params::*;
 pub use image_light::ImageSet;
@@ -120,6 +121,9 @@ pub struct Env {
     /// The shadow a light's gobo throws onto the studio backdrop (Studio
     /// mode only: a sky has no floor for it to fall on).
     backdrop_gobo: Option<gobo::BackdropGobo>,
+    /// A loaded image as the base, or as its part below the horizon (1b).
+    /// None when the params name none or the caller's ImageSet lacks it.
+    base_image: Option<composite::BaseImage>,
 }
 
 impl Env {
@@ -162,12 +166,22 @@ impl Env {
             outside.lights.clear();
             outside.intensity_ev = 0.0;
             outside.rotation_deg = 0.0;
+            // The window looks out at the generated sky, not at a base image.
+            outside.base_image = None;
             Some(Box::new(Env::new_with(&outside, images)))
         } else {
             None
         };
         let backdrop_gobo = if params.mode() == Mode::Studio { gobo::BackdropGobo::new(&params.lights, images) } else { None };
-        Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient, window_sky, backdrop_gobo }
+        let mut env = Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient, window_sky, backdrop_gobo, base_image: None };
+        if let Some(base) = env.params.base_image.clone() {
+            // Sky replacement matches the image's exposure to the base it is
+            // composited over, so the base is metered first (base_image is
+            // still None here, so it meters the mode's own base).
+            let sky_irradiance = if base.replace_sky { Some(env.base_irradiance()) } else { None };
+            env.base_image = composite::BaseImage::new(&base, images, sky_irradiance);
+        }
+        env
     }
 
     pub fn params(&self) -> &HdriParams {
@@ -177,8 +191,8 @@ impl Env {
     /// Linear radiance arriving from `dir` (unit, world space, as displayed:
     /// rotation already applied). Order: undo the rotation, base layer (Sky:
     /// atmosphere + disc + stars + moon + glow + night ground, then the clouds
-    /// over it; Studio: backdrop, under any gobo shadow cast onto it), lights
-    /// overlay, x 2^intensity_ev.
+    /// over it; Studio: backdrop, under any gobo shadow cast onto it; or a base
+    /// image, the whole base or below its mask), lights overlay, x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
         self.radiance_with(dir, None)
     }
@@ -188,12 +202,39 @@ impl Env {
     /// the key carries taken off it. Everything else (the sky around a disc,
     /// the light it puts on the clouds, every other light) is drawn as before,
     /// so this is the map without exactly its key's light (N3). `None` is
-    /// `radiance`, bit for bit.
+    /// `radiance`, bit for bit. The base is the mode's own, a base image, or
+    /// both through the image's mask.
     fn radiance_with(&self, dir: Vec3f, without: Option<KeyTerm>) -> Vec3f {
         // The layers live in the map's own frame; turning the map by
         // rotation_deg (ibl's sign) is turning the lookup the other way.
         let d = rotate_y(dir, -self.params.rotation_deg);
-        let base = match &self.atmo {
+        let base = match &self.base_image {
+            // An image that is the whole base: the sky under it is never seen, so it is not drawn.
+            Some(image) if !image.replaces_sky() => image.radiance(d),
+            // Sky replacement: the image below its mask, the mode's own base above.
+            Some(image) => image.compose(d, self.base_layer(d, without)),
+            None => self.base_layer(d, without),
+        };
+        // A light filled with sky (GoboParams::fill_sky) is a window: it shows
+        // the sky along the same direction. In Sky mode that sky is the base
+        // layer itself; in Studio mode the lightless Sky-mode copy works it
+        // out, and only for the pixels such a window covers. The map without
+        // its key (N3) leaves the key light out here.
+        let sky = |w: Vec3f| -> Vec3f {
+            match &self.window_sky {
+                Some(outside) => outside.radiance(w),
+                None => base,
+            }
+        };
+        self.studio.apply_lights_sky(d, base, &sky, without == Some(KeyTerm::Light)) * self.scale
+    }
+
+    /// The mode's own base layer under the lights, in the map's own frame: the sky
+    /// (atmosphere + disc + stars + moon + glow + night ground, then the clouds over
+    /// it; the discs under the unfaded cover) or the studio backdrop, under any gobo
+    /// shadow cast onto it. `without` leaves the key's disc out (plan 2's N3).
+    fn base_layer(&self, d: Vec3f, without: Option<KeyTerm>) -> Vec3f {
+        match &self.atmo {
             Some(atmo) => {
                 let mut c = atmo.sky(d);
                 // The sun's and the moon's discs are blocked by the unfaded
@@ -231,28 +272,33 @@ impl Env {
                     None => backdrop,
                 }
             }
-        };
-        // A light filled with sky (GoboParams::fill_sky) is a window: it shows
-        // the sky along the same direction. In Sky mode that sky is the base
-        // layer itself; in Studio mode the lightless Sky-mode copy works it
-        // out, and only for the pixels such a window covers. The map without
-        // its key (N3) leaves the key light out here.
-        let sky = |w: Vec3f| -> Vec3f {
-            match &self.window_sky {
-                Some(outside) => outside.radiance(w),
-                None => base,
-            }
-        };
-        self.studio.apply_lights_sky(d, base, &sky, without == Some(KeyTerm::Light)) * self.scale
+        }
+    }
+
+    /// The luminance a level surface receives from the mode's own base (its
+    /// upper hemisphere), metered the way a base image is: a 64 x 32 bake of
+    /// the base layer, the sun's and moon's texels area-averaged as in any
+    /// bake, read by `composite::irradiance_above`.
+    fn base_irradiance(&self) -> f32 {
+        let layer = |d: Vec3f| if d.y > 0.0 { self.base_layer(d, None) } else { Vec3f::default() };
+        let mut map = bake_with(composite::SKY_METER_WIDTH, &layer);
+        // hot_spots() are in world space; the base layer lives in the map's own frame.
+        let hot: Vec<(Vec3f, f32)> = self
+            .hot_spots()
+            .into_iter()
+            .map(|(dir, radius)| (rotate_y(dir, -self.params.rotation_deg), radius))
+            .collect();
+        refine_hot_spots(&mut map, &layer, &hot);
+        composite::irradiance_above(&map, 0.0)
     }
 
     /// Key light for the engine, in world space, already x 2^intensity_ev
     /// (every layer's key goes through `key_to_world`, which turns it with the
     /// map and applies the intensity). In order: the key light (both modes);
-    /// Sky mode only: the sun while any of its disc is above the horizon, else the
-    /// moon once the sun is 6 degrees down and it is risen, else None. Both are
-    /// dimmed by the cloud cover along them (unfaded: a full overcast hides a 2
-    /// degree sun too).
+    /// the sun of an image that is the whole base; Sky mode only: the sun while
+    /// any of its disc is above the horizon, else the moon once the sun is 6
+    /// degrees down and it is risen, else None. Both are dimmed by the cloud
+    /// cover along them (unfaded: a full overcast hides a 2 degree sun too).
     ///
     /// The sun and the moon fade instead of switching: the key is a continuous
     /// function of the hour, so a host that samples it finely (a slider, a day
@@ -283,6 +329,14 @@ impl Env {
     fn key(&self) -> Option<(KeyTerm, EnvSun)> {
         if let Some(key) = self.studio.key() {
             return Some((KeyTerm::Light, self.key_to_world(key)));
+        }
+        // An image that is the whole base brings its own sun, or none: the
+        // generated sky is not drawn under it. (With sky replacement the image
+        // sits below the horizon and the generated sun stays the key.)
+        if let Some(image) = &self.base_image {
+            if !image.replaces_sky() {
+                return image.sun().map(|sun| (KeyTerm::Image, self.key_to_world(sun)));
+            }
         }
         // Studio mode has no sky and no sun.
         let atmo = self.atmo.as_ref()?;
@@ -322,8 +376,13 @@ impl Env {
     /// World-space sun direction in Sky mode (also below the horizon), None
     /// in Studio mode. This is the environment's own sun the engine's "is it
     /// day?" switches read (`Environment.daylight_sun`), whatever the key in
-    /// [`Self::sun`] is: the sun itself, the moon, or none at twilight.
+    /// [`Self::sun`] is: the sun itself, the moon, or none at twilight. None
+    /// too under an image that is the whole base (1b): the generated sky is not
+    /// shown, and a photograph reports no sun of its own, as a loaded file does.
     pub fn sun_dir(&self) -> Option<Vec3f> {
+        if self.base_image.as_ref().is_some_and(|image| !image.replaces_sky()) {
+            return None;
+        }
         self.atmo
             .as_ref()
             .map(|atmo| rotate_y(atmo.sun_dir(), self.params.rotation_deg))
@@ -418,6 +477,13 @@ impl Env {
     /// cancelled bake does; the caller drops the copy with the bake.
     pub fn bake_keyless_par(&self, map: &EnvMap, run: impl FnOnce(usize, &(dyn Fn(usize) + Sync))) -> Option<EnvMap> {
         let (term, key) = self.key()?;
+        // A base image's sun is a file's sun: what lies behind it in the
+        // photograph is unknown, so there is no map without it to bake; the
+        // renderer fills its covering cone with the sky around it (N3's rule
+        // for a sun found in a file).
+        if term == KeyTerm::Image {
+            return None;
+        }
         let (w, h) = (map.width, map.height);
         if w < 2 || h < 1 || map.data.len() != w * h {
             return None;
@@ -445,6 +511,9 @@ impl Env {
     /// equal.
     fn bake_without_key(&self, width: usize) -> Option<EnvMap> {
         let (term, _) = self.key()?;
+        if term == KeyTerm::Image {
+            return None;
+        }
         let radiance = |d: Vec3f| self.radiance_with(d, Some(term));
         let mut map = bake_with(width, &radiance);
         refine_hot_spots(&mut map, &radiance, &self.hot_spots());
@@ -463,6 +532,9 @@ enum KeyTerm {
     /// The moon's disc, of which the key carries this share (its fade-in
     /// after dusk): that share is the key's light, the rest stays the sky's.
     Moon(f32),
+    /// The sun found in an image that is the whole base (1b, B15): a file's
+    /// sun, whose covering cone the renderer fills; no keyless bake.
+    Image,
 }
 
 /// Unit direction for an azimuth (degrees clockwise from north) and an

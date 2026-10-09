@@ -39,7 +39,8 @@ pub const GOBO_KIND_NAMES: &[&str] = &["window", "blinds", "leaves", "fern", "gr
 /// Accepted values of `LightImageParams::fit`; the first is the fallback.
 pub const IMAGE_FIT_NAMES: &[&str] = &["stretch", "fit", "fill"];
 /// Longest image key kept, in characters: a path, with room to spare. A
-/// light's picture (`LightImageParams::key`) and a gobo's (`GoboParams::image`).
+/// light's picture (`LightImageParams::key`), a gobo's (`GoboParams::image`)
+/// and the base image (`BaseImageParams::key`).
 const IMAGE_KEY_LIMIT: usize = 1024;
 
 /// Longest light name kept, in characters; a list row has no room for more.
@@ -65,6 +66,69 @@ pub struct HdriParams {
     pub studio: StudioParams,
     /// At most LIGHT_LIMIT. An overlay over the base layer in both modes, evaluated in list order.
     pub lights: Vec<LightParams>,
+    /// A loaded equirect as the base under the lights (1b): the whole base, or
+    /// only its part below the horizon with the generated sky above. None = off.
+    pub base_image: Option<BaseImageParams>,
+}
+
+/// A loaded equirect (a photographed panorama, a render) as the base layer
+/// under the lights. `hdri/composite.rs` draws it.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct BaseImageParams {
+    /// A key of the caller's `ImageSet`. "" or a key the set lacks: no base
+    /// image. The model reads no files; the app's keys are the paths of the
+    /// files the person picked. Up to 1024 characters.
+    pub key: String,
+    /// -180..=180, wrapped. Turns the image about +Y with the map rotation's
+    /// sign: content at azimuth a shows at a - yaw_deg.
+    pub yaw_deg: f32,
+    /// -10..=10 stops on the image.
+    pub ev: f32,
+    /// Cut the image's own sun out of the map (its cone filled with the sky
+    /// around it). `Env::sun` reports that sun either way.
+    pub remove_sun: bool,
+    /// Sky replacement: above the mask's line the mode's own base shows (the
+    /// generated sky), below it the image, its exposure matched to the new sky.
+    /// Off: the image is the whole base.
+    pub replace_sky: bool,
+    /// -45..=45 degrees of elevation: the mask's line.
+    pub horizon_deg: f32,
+    /// 0..=45 degrees: the width of the soft hand-over, centred on the line.
+    pub feather_deg: f32,
+    /// 0..=1: how much the image's own look decides what counts as sky above
+    /// the line. 0: elevation only. 1: only bright, blue or neutral texels are
+    /// replaced, so trees and roofs standing against the sky stay.
+    pub sky_key: f32,
+}
+
+impl Default for BaseImageParams {
+    fn default() -> Self {
+        BaseImageParams {
+            key: String::new(),
+            yaw_deg: 0.0,
+            ev: 0.0,
+            remove_sun: false,
+            replace_sky: false,
+            horizon_deg: 0.0,
+            feather_deg: 4.0,
+            sky_key: 0.0,
+        }
+    }
+}
+
+impl BaseImageParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = BaseImageParams::default();
+        if self.key.chars().count() > IMAGE_KEY_LIMIT {
+            self.key = self.key.chars().take(IMAGE_KEY_LIMIT).collect();
+            f.push(prefix, "key");
+        }
+        f.wrap180(prefix, "yaw_deg", &mut self.yaw_deg, d.yaw_deg);
+        f.range(prefix, "ev", &mut self.ev, -10.0, 10.0, d.ev);
+        f.range(prefix, "horizon_deg", &mut self.horizon_deg, -45.0, 45.0, d.horizon_deg);
+        f.range(prefix, "feather_deg", &mut self.feather_deg, 0.0, 45.0, d.feather_deg);
+        f.range(prefix, "sky_key", &mut self.sky_key, 0.0, 1.0, d.sky_key);
+    }
 }
 
 /// The outdoor base layer.
@@ -851,6 +915,7 @@ impl Default for HdriParams {
             sky: SkyParams::default(),
             studio: StudioParams::default(),
             lights: Vec::new(),
+            base_image: None,
         }
     }
 }
@@ -999,6 +1064,9 @@ impl HdriParams {
                 }
                 have_key = true;
             }
+        }
+        if let Some(base) = self.base_image.as_mut() {
+            base.clamp_fields("base_image", &mut f);
         }
         f.changed
     }
@@ -1386,6 +1454,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "lights[].gobo" => json_tree(&GoboParams::default()).ok(),
         "lights[].aim" => json_tree(&AimParams::default()).ok(),
         "lights[].imperfections" => json_tree(&ImperfectionParams::default()).ok(),
+        "base_image" => json_tree(&BaseImageParams::default()).ok(),
         _ => None,
     }
 }
@@ -2358,5 +2427,62 @@ mod fx_param_tests {
         assert_eq!(merged.lights[0].imperfections, Some(ImperfectionParams { dust: 0.3, seed: 8, ..ImperfectionParams::default() }));
         assert_eq!(report, ["lights[0].imperfections.seed"], "8.2 was rounded");
         assert_eq!(HdriParams::from_json(&merged.to_json()).expect("loads"), merged);
+    }
+}
+
+#[cfg(test)]
+mod base_image_param_tests {
+    use super::*;
+
+    #[test]
+    fn base_image_params_clamp_and_round_trip() {
+        let mut p = HdriParams::default();
+        assert_eq!(p.base_image, None);
+        assert!(!p.to_json().contains("base_image"), "an absent base image is not written");
+        p.base_image = Some(BaseImageParams {
+            key: "C:/maps/field.hdr".to_string(),
+            yaw_deg: 190.0,
+            ev: 99.0,
+            remove_sun: true,
+            replace_sky: true,
+            horizon_deg: -80.0,
+            feather_deg: f32::NAN,
+            sky_key: 3.0,
+        });
+        let changed = p.clamp();
+        assert_eq!(
+            changed,
+            ["base_image.yaw_deg", "base_image.ev", "base_image.horizon_deg", "base_image.feather_deg", "base_image.sky_key"]
+        );
+        let base = p.base_image.clone().unwrap();
+        assert_eq!(base.key, "C:/maps/field.hdr");
+        assert_eq!(
+            (base.yaw_deg, base.ev, base.horizon_deg, base.feather_deg, base.sky_key),
+            (-170.0, 10.0, -45.0, BaseImageParams::default().feather_deg, 1.0)
+        );
+        assert!(base.remove_sun && base.replace_sky);
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
+        assert!(p.clamp().is_empty(), "clamping twice changes nothing");
+        // A key longer than any path is cut, and that is reported.
+        p.base_image.as_mut().unwrap().key = "k".repeat(2000);
+        assert_eq!(p.clamp(), ["base_image.key"]);
+        assert_eq!(p.base_image.as_ref().unwrap().key.len(), 1024);
+    }
+
+    #[test]
+    fn a_partial_base_image_patch_is_completed_and_null_removes_it() {
+        let (merged, report) = HdriParams::default()
+            .merge_json(r#"{"base_image": {"key": "field.hdr", "replace_sky": true}}"#)
+            .unwrap();
+        assert_eq!(
+            merged.base_image,
+            Some(BaseImageParams { key: "field.hdr".to_string(), replace_sky: true, ..BaseImageParams::default() })
+        );
+        assert!(report.is_empty(), "{report:?}");
+        let (cleared, _) = merged.merge_json(r#"{"base_image": null}"#).unwrap();
+        assert_eq!(cleared.base_image, None);
+        let (same, report) = merged.merge_json(r#"{"base_image": {"flavour": 1}}"#).unwrap();
+        assert_eq!(same, merged);
+        assert_eq!(report, ["ignored: base_image.flavour"]);
     }
 }
