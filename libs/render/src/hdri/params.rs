@@ -33,6 +33,10 @@ pub const SUN_MODE_NAMES: &[&str] = &["time", "manual"];
 pub const LIGHT_SHAPE_NAMES: &[&str] = &["rect", "disc", "ring", "polygon", "stroke", "scrim"];
 /// Accepted values of `LightParams::blend`; the first is the fallback.
 pub const BLEND_NAMES: &[&str] = &["add", "multiply"];
+/// Accepted values of `WeatherParams::kind`; the first is the fallback. The
+/// kinds follow apps/weather's SkyKind classes (clear, overcast, rain, snow,
+/// fog, thunder as "storm"), plus "hazy".
+pub const WEATHER_KIND_NAMES: &[&str] = &["clear", "hazy", "overcast", "fog", "rain", "storm", "snow"];
 /// Accepted values of `GoboParams::kind`; the first is the fallback.
 pub const GOBO_KIND_NAMES: &[&str] = &["window", "blinds", "leaves", "fern", "grid", "image"];
 
@@ -142,6 +146,9 @@ pub struct SkyParams {
     /// Volumetric clouds (1b): Some marches a cloud volume that stands on the
     /// 2D deck's footprint; None keeps the flat 2D deck.
     pub volumetric: Option<VolumetricParams>,
+    /// Weather (1b): a kind that presets the sky's own fields when the map is
+    /// built, plus fog, rain, wet ground, snow and lightning. None = fair.
+    pub weather: Option<WeatherParams>,
 }
 
 /// Where the sun is: from a date, time and place (NOAA), or set by hand.
@@ -238,6 +245,98 @@ impl VolumetricParams {
         f.range(prefix, "top_m", &mut self.top_m, lowest, 12_000.0, (self.base_m + 2500.0).min(12_000.0));
         f.range(prefix, "erosion", &mut self.erosion, 0.0, 1.0, d.erosion);
         f.int(prefix, "steps", &mut self.steps, 16, 96);
+    }
+}
+
+/// Weather over the sky (`hdri/weather.rs`). The kind is a preset over the
+/// sky's existing fields, applied when the map is built and never written
+/// back: it raises the haze and the cloud cover and brings its own fog, rain,
+/// wet ground, snow or lightning. The numbers and ticks here only add to what
+/// the kind brings; with kind "clear" they act alone.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct WeatherParams {
+    /// "clear" | "hazy" | "overcast" | "fog" | "rain" | "storm" | "snow".
+    pub kind: String,
+    /// 0..=1, a fog veil: 0.05 whitens the horizon, 0.7 hides the sky.
+    pub fog: f32,
+    /// 0..=1, rain as haze with virga under the deck (in the snow kind: the snowfall's haze).
+    pub rain: f32,
+    /// 0..=1, wet ground below the horizon: a mirror of the sky with puddles.
+    pub wet_ground: f32,
+    /// Snow on the ground (albedo 0.8).
+    pub snow: bool,
+    /// One lightning bolt with its flash.
+    pub lightning: bool,
+    /// Seed of the bolt, the virga and the puddles.
+    pub seed: u32,
+}
+
+impl Default for WeatherParams {
+    fn default() -> Self {
+        WeatherParams {
+            kind: "clear".to_string(),
+            fog: 0.0,
+            rain: 0.0,
+            wet_ground: 0.0,
+            snow: false,
+            lightning: false,
+            seed: 1,
+        }
+    }
+}
+
+/// Typed view of `WeatherParams::kind`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WeatherKind {
+    Clear,
+    Hazy,
+    Overcast,
+    Fog,
+    Rain,
+    Storm,
+    Snow,
+}
+
+impl WeatherKind {
+    /// The string stored in `WeatherParams::kind`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WeatherKind::Clear => "clear",
+            WeatherKind::Hazy => "hazy",
+            WeatherKind::Overcast => "overcast",
+            WeatherKind::Fog => "fog",
+            WeatherKind::Rain => "rain",
+            WeatherKind::Storm => "storm",
+            WeatherKind::Snow => "snow",
+        }
+    }
+}
+
+impl WeatherParams {
+    pub fn kind(&self) -> WeatherKind {
+        if is_choice(&self.kind, "hazy") {
+            WeatherKind::Hazy
+        } else if is_choice(&self.kind, "overcast") {
+            WeatherKind::Overcast
+        } else if is_choice(&self.kind, "fog") {
+            WeatherKind::Fog
+        } else if is_choice(&self.kind, "rain") {
+            WeatherKind::Rain
+        } else if is_choice(&self.kind, "storm") {
+            WeatherKind::Storm
+        } else if is_choice(&self.kind, "snow") {
+            WeatherKind::Snow
+        } else {
+            WeatherKind::Clear
+        }
+    }
+
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = WeatherParams::default();
+        f.choice(prefix, "kind", &mut self.kind, WEATHER_KIND_NAMES);
+        f.range(prefix, "fog", &mut self.fog, 0.0, 1.0, d.fog);
+        f.range(prefix, "rain", &mut self.rain, 0.0, 1.0, d.rain);
+        f.range(prefix, "wet_ground", &mut self.wet_ground, 0.0, 1.0, d.wet_ground);
     }
 }
 
@@ -1177,6 +1276,9 @@ impl SkyParams {
         if let Some(volumetric) = self.volumetric.as_mut() {
             volumetric.clamp_fields(&join_path(prefix, "volumetric"), f);
         }
+        if let Some(weather) = self.weather.as_mut() {
+            weather.clamp_fields(&join_path(prefix, "weather"), f);
+        }
     }
 }
 
@@ -1499,6 +1601,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "lights[].imperfections" => json_tree(&ImperfectionParams::default()).ok(),
         "base_image" => json_tree(&BaseImageParams::default()).ok(),
         "sky.volumetric" => json_tree(&VolumetricParams::default()).ok(),
+        "sky.weather" => json_tree(&WeatherParams::default()).ok(),
         _ => None,
     }
 }
@@ -1513,6 +1616,7 @@ fn integer_range(schema: &str) -> Option<(f64, f64)> {
         "lights[].gobo.panes_x" | "lights[].gobo.panes_y" | "lights[].gobo.slats" | "lights[].gobo.seed" => Some((0.0, u32::MAX as f64)),
         "lights[].imperfections.seed" => Some((0.0, u32::MAX as f64)),
         "sky.volumetric.steps" => Some((0.0, u32::MAX as f64)),
+        "sky.weather.seed" => Some((0.0, u32::MAX as f64)),
         _ => None,
     }
 }
@@ -2578,5 +2682,67 @@ mod volumetric_param_tests {
         assert_eq!(report, ["sky.volumetric.steps"], "40.4 was rounded to a whole number of steps");
         let (flat, _) = merged.merge_json(r#"{"sky": {"volumetric": null}}"#).unwrap();
         assert_eq!(flat.sky.volumetric, None);
+    }
+}
+
+#[cfg(test)]
+mod weather_param_tests {
+    use super::*;
+
+    #[test]
+    fn every_weather_kind_round_trips() {
+        assert_eq!(WEATHER_KIND_NAMES.len(), 7);
+        for (i, name) in WEATHER_KIND_NAMES.iter().enumerate() {
+            let mut p = HdriParams::default();
+            p.sky.weather = Some(WeatherParams {
+                kind: name.to_string(),
+                fog: 0.25,
+                rain: 0.5,
+                wet_ground: 0.75,
+                snow: i % 2 == 0,
+                lightning: i % 3 == 0,
+                seed: 7 + i as u32,
+            });
+            assert!(p.clamp().is_empty(), "{name} is a documented kind");
+            assert_eq!(p.sky.weather.as_ref().unwrap().kind().as_str(), *name);
+            assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()), "{name}");
+        }
+        assert_eq!(WeatherParams::default().kind(), WeatherKind::Clear);
+        assert_eq!(WeatherKind::Storm.as_str(), "storm");
+        assert!(!HdriParams::default().to_json().contains("weather"), "no weather writes nothing");
+    }
+
+    #[test]
+    fn weather_params_clamp_and_forgive_spelling() {
+        let mut p = HdriParams::default();
+        p.sky.weather = Some(WeatherParams {
+            kind: " Storm".to_string(),
+            fog: 4.0,
+            rain: -1.0,
+            wet_ground: f32::NAN,
+            ..WeatherParams::default()
+        });
+        assert_eq!(p.sky.weather.as_ref().unwrap().kind(), WeatherKind::Storm, "the accessor reads loose spellings");
+        let changed = p.clamp();
+        assert_eq!(changed, ["sky.weather.kind", "sky.weather.fog", "sky.weather.rain", "sky.weather.wet_ground"]);
+        let w = p.sky.weather.clone().unwrap();
+        assert_eq!((w.kind.as_str(), w.fog, w.rain, w.wet_ground), ("storm", 1.0, 0.0, 0.0));
+        // An unknown kind falls back to clear.
+        p.sky.weather.as_mut().unwrap().kind = "monsoon".to_string();
+        assert_eq!(p.clamp(), ["sky.weather.kind"]);
+        assert_eq!(p.sky.weather.as_ref().unwrap().kind, "clear");
+    }
+
+    #[test]
+    fn a_kind_alone_is_a_complete_weather_patch() {
+        let (merged, report) = HdriParams::default().merge_json(r#"{"sky": {"weather": {"kind": "rain"}}}"#).unwrap();
+        assert_eq!(merged.sky.weather, Some(WeatherParams { kind: "rain".to_string(), ..WeatherParams::default() }));
+        assert!(report.is_empty(), "{report:?}");
+        let (seeded, report) = merged.merge_json(r#"{"sky": {"weather": {"seed": 12.4}}}"#).unwrap();
+        assert_eq!(seeded.sky.weather.as_ref().unwrap().seed, 12);
+        assert_eq!(seeded.sky.weather.as_ref().unwrap().kind, "rain", "the rest of the block stays");
+        assert_eq!(report, ["sky.weather.seed"]);
+        let (off, _) = seeded.merge_json(r#"{"sky": {"weather": null}}"#).unwrap();
+        assert_eq!(off.sky.weather, None);
     }
 }

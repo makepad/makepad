@@ -60,6 +60,7 @@ pub mod aim;
 pub mod imperfections;
 pub mod composite;
 pub mod volumetric;
+pub mod weather;
 
 pub use params::*;
 pub use image_light::ImageSet;
@@ -128,6 +129,11 @@ pub struct Env {
     /// The marched cloud volume (1b); Some in Sky mode when `sky.volumetric`
     /// is set and there is coverage. `clouds` is then the cirrus veil alone.
     volumetric: Option<volumetric::VolumetricClouds>,
+    /// The weather drawn over the dry sky (1b); None in fair weather.
+    weather: Option<weather::Weather>,
+    /// The sun's light under the clouds, for the fog: its irradiance at the
+    /// ground times the cover along the sun.
+    weather_sun: Vec3f,
 }
 
 impl Env {
@@ -145,9 +151,15 @@ impl Env {
         let scale = 2.0f32.powf(params.intensity_ev);
         let studio = studio::Studio::new_with(&params.studio, &params.lights, images);
         let mut volumetric = None;
+        let mut weather = None;
+        let mut weather_sun = Vec3f::default();
         let (atmo, clouds, night, cloud_sun, cloud_ambient) = match params.mode() {
             Mode::Sky => {
-                let sky = &params.sky;
+                // Weather kinds are presets over the sky's own fields (1b): the
+                // layers are built from the weathered copy, the stored params
+                // stay the user's.
+                let weathered = weather::weathered_sky(&params.sky);
+                let sky = &weathered;
                 let sun_dir = atmosphere::sun_direction(&sky.sun);
                 let atmo = atmosphere::Atmosphere::new(sun_dir, &sky.atmosphere, &sky.sun_disc);
                 // Volumetric mode (1b): the marched volume replaces the 2D deck
@@ -165,6 +177,14 @@ impl Env {
                 let night = night::NightSky::new(&sky.night, params.seed, atmo.sun_dir(), night::star_hours(&sky.sun), sky.sun.latitude);
                 let cloud_sun = atmo.sun_irradiance();
                 let cloud_ambient = atmo.ambient() + night.ambient();
+                // The weather itself works its floors out from the user's block.
+                weather = weather::Weather::new(&params.sky, atmo.sun_dir());
+                // The sun under the clouds, as the key is dimmed in `sun`: the 2D
+                // layer's UNFADED cover (1a's fix round; a 2 degree sun behind a
+                // full overcast is hidden, not 80 % through) and the volume.
+                let sun_cover = clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(atmo.sun_dir()))
+                    * volumetric.as_ref().map_or(1.0, |volume| volume.transmittance_toward(atmo.sun_dir()));
+                weather_sun = cloud_sun * sun_cover;
                 (Some(atmo), clouds, Some(night), cloud_sun, cloud_ambient)
             }
             Mode::Studio => (None, None, None, Vec3f::default(), Vec3f::default()),
@@ -189,7 +209,22 @@ impl Env {
             None
         };
         let backdrop_gobo = if params.mode() == Mode::Studio { gobo::BackdropGobo::new(&params.lights, images) } else { None };
-        let mut env = Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient, window_sky, backdrop_gobo, volumetric, base_image: None };
+        let mut env = Env {
+            params,
+            scale,
+            studio,
+            atmo,
+            clouds,
+            night,
+            cloud_sun,
+            cloud_ambient,
+            window_sky,
+            backdrop_gobo,
+            volumetric,
+            weather,
+            weather_sun,
+            base_image: None,
+        };
         if let Some(base) = env.params.base_image.clone() {
             // Sky replacement matches the image's exposure to the base it is
             // composited over, so the base is metered first (base_image is
@@ -207,8 +242,9 @@ impl Env {
     /// Linear radiance arriving from `dir` (unit, world space, as displayed:
     /// rotation already applied). Order: undo the rotation, base layer (Sky:
     /// atmosphere + disc + stars + moon + glow + night ground, then the clouds
-    /// over it; Studio: backdrop, under any gobo shadow cast onto it; or a base
-    /// image, the whole base or below its mask), lights overlay, x 2^intensity_ev.
+    /// over it, then the weather; Studio: backdrop, under any gobo shadow cast
+    /// onto it; or a base image, the whole base or below its mask), lights
+    /// overlay, x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
         self.radiance_with(dir, None, None)
     }
@@ -247,62 +283,29 @@ impl Env {
     }
 
     /// The mode's own base layer under the lights, in the map's own frame: the sky
-    /// (atmosphere + disc + stars + moon + glow + night ground, then the clouds over
-    /// it; the discs under the unfaded cover; in volumetric mode the marched volume
-    /// over all of it) or the studio backdrop, under any gobo shadow cast onto it.
-    /// `without` leaves the key's disc out (plan 2's N3); `cache` is a bake's
-    /// cloud march, when it has one.
+    /// (the dry sky, then the weather over it) or the studio backdrop, under any gobo
+    /// shadow cast onto it. `without` leaves the key's disc out (plan 2's N3);
+    /// `cache` is a bake's cloud march, when it has one.
     fn base_layer(&self, d: Vec3f, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
         match &self.atmo {
-            Some(atmo) => {
-                let mut c = atmo.sky(d);
-                // The sun's and the moon's discs are blocked by the unfaded
-                // cover, like their keys in `sun`; the rest of the sky by the
-                // visible deck, which thins into the haze at the horizon.
-                let mut discs = if without == Some(KeyTerm::Sun) { Vec3f::default() } else { atmo.sun_disc(d) };
-                if let Some(night) = &self.night {
-                    let g = self.params.sky.atmosphere.ground_color;
-                    c += night.stars(d) + night.glow(d) + night.ground(d, vec3f(g[0], g[1], g[2]));
-                    discs += match without {
-                        Some(KeyTerm::Moon(share)) => night.moon(d) * (1.0 - share),
-                        _ => night.moon(d),
-                    };
+            Some(atmo) => match &self.weather {
+                None => self.sky_layers(d, atmo, without, cache),
+                Some(weather) => {
+                    let dry = |v: Vec3f| self.sky_layers(v, atmo, without, cache);
+                    // Below the horizon: the light a closed deck leaves, and the wet
+                    // ground's mirror of the sky above it.
+                    // The mirror shows the sky as the weather shows it: through the rain and fog.
+                    // It reflects the whole sky, the key's disc included, also in the
+                    // map without its key: the reflection is light from below, which
+                    // the engine's directional light does not carry (plan 2's N3
+                    // takes out exactly what the key carries, no more).
+                    let seen = |v: Vec3f| weather.veil(v, self.sky_layers(v, atmo, None, cache), self.weather_sun, self.cloud_ambient);
+                    let c = weather.ground(d, dry(d), &seen);
+                    // Virga, rain haze and fog between the eye and all of it; then
+                    // the bolt and its flash, which stand inside the rain.
+                    weather.veil(d, c, self.weather_sun, self.cloud_ambient) + weather.lightning(d)
                 }
-                // Clouds are in front of everything in the sky: the stars, the
-                // moon and the sun's disc. In volumetric mode this layer is the
-                // cirrus veil alone.
-                if let Some(layer) = &self.clouds {
-                    let s = layer.sample(d);
-                    if s.alpha > 0.0 {
-                        let lit = layer.shade(&s, self.cloud_sun, self.cloud_ambient);
-                        c = c * (1.0 - s.alpha) + lit * s.alpha;
-                    }
-                    // Only a texel on a disc pays for the second cloud lookup.
-                    if discs.max_elem() > 0.0 {
-                        discs *= 1.0 - layer.cover_toward(d);
-                    }
-                }
-                // The discs, under the 2D layer's unfaded cover, join the sky behind
-                // the volume: the marched volume is the lower layer, so it goes over
-                // the veil and the discs.
-                c += discs;
-                if let Some(volume) = &self.volumetric {
-                    if d.y > 0.0 {
-                        let m = match cache {
-                            Some(cache) => cache.sample(volume, d),
-                            None => volume.march(d),
-                        };
-                        if m.alpha > 0.0 {
-                            // The ground under the layer, lit by the same dome (as the
-                            // clouds see it, greyed by their cover), lights the bases.
-                            let g = self.params.sky.atmosphere.ground_color;
-                            let ground = vec3f(g[0], g[1], g[2]) * volume.sky_light(self.cloud_ambient);
-                            c = c * (1.0 - m.alpha) + volume.shade(&m, self.cloud_sun, self.cloud_ambient, ground);
-                        }
-                    }
-                }
-                c
-            }
+            },
             None => {
                 let backdrop = self.studio.backdrop(d);
                 // A gobo cast from its light darkens the floor and the walls under it.
@@ -312,6 +315,68 @@ impl Env {
                 }
             }
         }
+    }
+
+    /// The dry sky: atmosphere + disc + stars + moon + glow + night ground, then the
+    /// clouds over it (the discs under the unfaded cover), then the marched volume.
+    /// Under weather the clouds keep only the light the kind's deck passes, and the
+    /// night ground and the volume's bases have the weathered ground colour.
+    /// `without` leaves the key's disc out (plan 2's N3: no sun disc under
+    /// `KeyTerm::Sun`, the moon's key share off under `KeyTerm::Moon`).
+    fn sky_layers(&self, d: Vec3f, atmo: &atmosphere::Atmosphere, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
+        // The ground under the sky, as the weather leaves it (snow is white).
+        let g = self
+            .weather
+            .as_ref()
+            .map_or(self.params.sky.atmosphere.ground_color, |weather| weather.ground_color());
+        let ground_color = vec3f(g[0], g[1], g[2]);
+        let mut c = atmo.sky(d);
+        // The sun's and the moon's discs are blocked by the unfaded
+        // cover, like their keys in `sun`; the rest of the sky by the
+        // visible deck, which thins into the haze at the horizon.
+        let mut discs = if without == Some(KeyTerm::Sun) { Vec3f::default() } else { atmo.sun_disc(d) };
+        if let Some(night) = &self.night {
+            c += night.stars(d) + night.glow(d) + night.ground(d, ground_color);
+            discs += match without {
+                Some(KeyTerm::Moon(share)) => night.moon(d) * (1.0 - share),
+                _ => night.moon(d),
+            };
+        }
+        // 1 in fair weather, so nothing changes there bit for bit.
+        let gain = self.weather.as_ref().map_or(1.0, |weather| weather.cloud_gain());
+        // Clouds are in front of everything in the sky: the stars, the
+        // moon and the sun's disc. In volumetric mode this layer is the
+        // cirrus veil alone.
+        if let Some(layer) = &self.clouds {
+            let s = layer.sample(d);
+            if s.alpha > 0.0 {
+                let lit = layer.shade(&s, self.cloud_sun, self.cloud_ambient);
+                c = c * (1.0 - s.alpha) + lit * (s.alpha * gain);
+            }
+            // Only a texel on a disc pays for the second cloud lookup.
+            if discs.max_elem() > 0.0 {
+                discs *= 1.0 - layer.cover_toward(d);
+            }
+        }
+        // The discs, under the 2D layer's unfaded cover, join the sky behind
+        // the volume: the marched volume is the lower layer, so it goes over
+        // the veil and the discs.
+        c += discs;
+        if let Some(volume) = &self.volumetric {
+            if d.y > 0.0 {
+                let m = match cache {
+                    Some(cache) => cache.sample(volume, d),
+                    None => volume.march(d),
+                };
+                if m.alpha > 0.0 {
+                    // The ground under the layer, lit by the same dome (as the
+                    // clouds see it, greyed by their cover), lights the bases.
+                    let ground = ground_color * volume.sky_light(self.cloud_ambient);
+                    c = c * (1.0 - m.alpha) + volume.shade(&m, self.cloud_sun, self.cloud_ambient, ground) * gain;
+                }
+            }
+        }
+        c
     }
 
     /// The luminance a level surface receives from the mode's own base (its
@@ -337,7 +402,8 @@ impl Env {
     /// the sun of an image that is the whole base; Sky mode only: the sun while
     /// any of its disc is above the horizon, else the moon once the sun is 6
     /// degrees down and it is risen, else None. Both are dimmed by the cloud
-    /// cover along them (unfaded: a full overcast hides a 2 degree sun too).
+    /// cover along them (unfaded: a full overcast hides a 2 degree sun too)
+    /// and by the weather's rain and fog.
     ///
     /// The sun and the moon fade instead of switching: the key is a continuous
     /// function of the hour, so a host that samples it finely (a slider, a day
@@ -380,11 +446,12 @@ impl Env {
         // Studio mode has no sky and no sun.
         let atmo = self.atmo.as_ref()?;
         // The same cover that hides the discs in the map dims the key: the 2D
-        // layer's unfaded cover (in volumetric mode the cirrus veil's) and the
-        // marched volume.
+        // layer's unfaded cover (in volumetric mode the cirrus veil's), the
+        // marched volume, and the weather's rain and fog.
         let cover = |dir: Vec3f| {
             self.clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(dir))
                 * self.volumetric.as_ref().map_or(1.0, |volume| volume.transmittance_toward(dir))
+                * self.weather.as_ref().map_or(1.0, |weather| weather.transmittance_toward(dir))
         };
         let sun = atmo.sun_dir();
         let elevation = sun.y.clamp(-1.0, 1.0).asin();
@@ -446,7 +513,8 @@ impl Env {
     /// The sun's and the moon's discs, in world space, for the bake's
     /// refinement: below 4K both are smaller than or comparable to a texel, so
     /// their texels are area-averaged (A1's `refine_hot_spots`).
-    /// In Studio mode the discs of the sky behind the windows count too.
+    /// In Studio mode the discs of the sky behind the windows count too, and
+    /// over wet ground the discs' reflections.
     fn hot_spots(&self) -> Vec<(Vec3f, f32)> {
         let mut hot = Vec::new();
         if let Some(atmo) = &self.atmo {
@@ -464,6 +532,13 @@ impl Env {
             for (dir, radius) in outside.hot_spots() {
                 hot.push((rotate_y(dir, self.params.rotation_deg), radius));
             }
+        }
+        // Wet ground mirrors the discs: their reflections are as small as they
+        // are, so their texels are area-averaged too. (Mirroring in the ground
+        // plane commutes with the map's rotation about +Y.)
+        if self.weather.as_ref().is_some_and(|weather| weather.mirrors()) {
+            let mirrored: Vec<(Vec3f, f32)> = hot.iter().map(|&(dir, radius)| (vec3f(dir.x, -dir.y, dir.z), radius)).collect();
+            hot.extend(mirrored);
         }
         hot
     }
