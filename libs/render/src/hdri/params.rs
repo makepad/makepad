@@ -233,6 +233,8 @@ pub struct LightParams {
     /// A pattern hung in front of the light (1b): a window, blinds, leaves,
     /// a fern, a grid of bars or an image mask. None: nothing.
     pub gobo: Option<GoboParams>,
+    /// Which way the light's face points, and its grid and barn doors (1b). None: facing the centre, bare.
+    pub aim: Option<AimParams>,
 }
 
 /// A picture shown by a light: it fills the light's box, is cut by the
@@ -518,6 +520,43 @@ impl GoboParams {
         if self.image.chars().count() > IMAGE_KEY_LIMIT {
             self.image = self.image.chars().take(IMAGE_KEY_LIMIT).collect();
             f.push(prefix, "image");
+        }
+    }
+}
+
+/// Which way a light's face points, and what hangs on it.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct AimParams {
+    /// -90..=90 degrees: the face turned off the direction to the centre,
+    /// positive toward the viewer's right.
+    pub yaw_deg: f32,
+    /// -90..=90 degrees: the face tilted, positive upward.
+    pub pitch_deg: f32,
+    /// 0..=1: a honeycomb grid on the face, from none (0) to a 15 degree grid (1).
+    pub grid: f32,
+    /// Barn doors top, right, bottom, left as the viewer sees the light,
+    /// each 0..=90: 0 folded flat (no door), 45 straight out, 90 closed.
+    pub barn_doors: [f32; 4],
+}
+
+impl Default for AimParams {
+    fn default() -> Self {
+        AimParams { yaw_deg: 0.0, pitch_deg: 0.0, grid: 0.0, barn_doors: [0.0; 4] }
+    }
+}
+
+impl AimParams {
+    /// True when the aim changes nothing: facing the centre, no grid, no doors.
+    pub fn is_neutral(&self) -> bool {
+        self.yaw_deg == 0.0 && self.pitch_deg == 0.0 && self.grid == 0.0 && self.barn_doors.iter().all(|d| *d == 0.0)
+    }
+
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        f.range(prefix, "yaw_deg", &mut self.yaw_deg, -90.0, 90.0, 0.0);
+        f.range(prefix, "pitch_deg", &mut self.pitch_deg, -90.0, 90.0, 0.0);
+        f.range(prefix, "grid", &mut self.grid, 0.0, 1.0, 0.0);
+        for (i, door) in self.barn_doors.iter_mut().enumerate() {
+            f.range(prefix, &format!("barn_doors[{i}]"), door, 0.0, 90.0, 0.0);
         }
     }
 }
@@ -867,6 +906,7 @@ impl Default for LightParams {
             source_quality: None,
             image: None,
             gobo: None,
+            aim: None,
         }
     }
 }
@@ -1162,6 +1202,9 @@ impl LightParams {
         if let Some(gobo) = self.gobo.as_mut() {
             gobo.clamp_fields(&join_path(prefix, "gobo"), f);
         }
+        if let Some(aim) = self.aim.as_mut() {
+            aim.clamp_fields(&join_path(prefix, "aim"), f);
+        }
     }
 }
 
@@ -1302,6 +1345,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "lights[].scrim" => json_tree(&ScrimParams::default()).ok(),
         "lights[].image" => json_tree(&LightImageParams::default()).ok(),
         "lights[].gobo" => json_tree(&GoboParams::default()).ok(),
+        "lights[].aim" => json_tree(&AimParams::default()).ok(),
         _ => None,
     }
 }
@@ -2230,5 +2274,30 @@ mod fx_param_tests {
         p.lights[0].gobo.as_mut().unwrap().image = "k".repeat(2000);
         assert_eq!(p.clamp(), ["lights[0].gobo.image"]);
         assert_eq!(p.lights[0].gobo.as_ref().unwrap().image.len(), IMAGE_KEY_LIMIT);
+    }
+
+    #[test]
+    fn clamp_fixes_aim_fields() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams {
+            aim: Some(AimParams { yaw_deg: 200.0, grid: -1.0, barn_doors: [0.0, 120.0, f32::NAN, 45.0], ..AimParams::default() }),
+            ..LightParams::default()
+        });
+        let changed = p.clamp();
+        let a = p.lights[0].aim.clone().expect("the aim stays");
+        assert_eq!((a.yaw_deg, a.grid, a.barn_doors), (90.0, 0.0, [0.0, 90.0, 0.0, 45.0]));
+        assert_eq!(changed, ["lights[0].aim.yaw_deg", "lights[0].aim.grid", "lights[0].aim.barn_doors[1]", "lights[0].aim.barn_doors[2]"]);
+        assert!(!a.is_neutral());
+        assert!(AimParams::default().is_neutral());
+    }
+
+    #[test]
+    fn a_partial_aim_patch_is_completed_and_round_trips() {
+        let (merged, report) = HdriParams::default().merge_json(r#"{"lights": [{"aim": {"grid": 0.5, "barn_doors": [90, 0, 0, 0]}}]}"#).expect("merges");
+        assert_eq!(merged.lights[0].aim, Some(AimParams { grid: 0.5, barn_doors: [90.0, 0.0, 0.0, 0.0], ..AimParams::default() }));
+        assert!(report.is_empty(), "{report:?}");
+        assert_eq!(HdriParams::from_json(&merged.to_json()).expect("loads"), merged);
+        // Four doors, no fewer: a short list does not fit.
+        assert!(HdriParams::default().merge_json(r#"{"lights": [{"aim": {"barn_doors": [90, 0]}}]}"#).is_err());
     }
 }

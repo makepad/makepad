@@ -19,6 +19,7 @@
 //! as the viewer at the centre sees the light, in tangent units.
 
 use super::*;
+use super::aim::Aim;
 use super::gobo::Gobo;
 use super::noise::hash01;
 use super::shaped::{half_extents, unit_to_dir};
@@ -30,6 +31,12 @@ use super::studio::{light_frame, project, LightFrame};
 /// fern and windows (80 lights and gobos: at most 1.6 %, 0.4 % on average);
 /// 48 strata left up to 3.3 %.
 const KEY_SAMPLES: i32 = 64;
+/// Strata per axis for a key with a honeycomb on its face (B9). Turned off
+/// its axis, a grid passes only a small spot of each cell (at grid 0.6
+/// tilted 20 degrees, about a tenth of it), which 64 strata hit too seldom:
+/// the key missed the map by up to 13 % there. 256 keep it within 0.6 %, for
+/// about 12 ms more per map, so only a gridded key pays them.
+const KEY_SAMPLES_GRID: i32 = 256;
 /// The jitter's seed: fixed, so the same light always gives the same key.
 const KEY_JITTER_SEED: u32 = 0x6b65_7921;
 /// Midpoints per axis of the scan that finds where in its box a key draws,
@@ -63,6 +70,8 @@ pub struct LightFx {
     gain: f32,
     fill_sky: bool,
     gobo: Option<Gobo>,
+    /// The aimed face with its grid and doors (B9).
+    aim: Option<Aim>,
 }
 
 impl LightFx {
@@ -78,12 +87,13 @@ impl LightFx {
             gain: 2.0f32.powf(light.intensity_ev.max(-10.0).min(20.0)),
             fill_sky: gobo.is_some_and(|g| g.fill_sky),
             gobo: gobo.and_then(|g| Gobo::new(g, half, images)),
+            aim: light.aim.as_ref().and_then(|a| Aim::new(a, frame.center, frame.right * sx, frame.up, half, light.softness)),
         }
     }
 
-    /// Something opaque hangs in front of the face.
+    /// Something opaque hangs in front of the face: a gobo, doors or a grid.
     fn has_opaque(&self) -> bool {
-        self.gobo.is_some()
+        self.gobo.is_some() || self.aim.is_some()
     }
 
     /// The face itself is worn (B10).
@@ -109,7 +119,8 @@ impl LightFx {
     }
 
     /// The share 0..=1 of an emitting face that shows at `dir` past
-    /// everything opaque in front of it. 1 where the frame cannot place `dir`.
+    /// everything opaque in front of it: its gobo, then its doors and grid.
+    /// 1 where the frame cannot place `dir`.
     pub fn passes(&self, dir: Vec3f) -> f32 {
         let Some(q) = self.face(dir) else {
             return 1.0;
@@ -117,6 +128,9 @@ impl LightFx {
         let mut t = 1.0;
         if let Some(gobo) = &self.gobo {
             t *= gobo.transmission(q);
+        }
+        if let Some(aim) = &self.aim {
+            t *= aim.transmission(dir, q);
         }
         t
     }
@@ -210,7 +224,7 @@ impl LightFx {
         if !(lo.x < hi.x && lo.y < hi.y) {
             (lo, hi) = (-reach, reach);
         }
-        let n = KEY_SAMPLES;
+        let n = if self.aim.as_ref().is_some_and(|a| a.has_grid()) { KEY_SAMPLES_GRID } else { KEY_SAMPLES };
         let (mut sum, mut weight) = (0.0f64, 0.0f64);
         for j in 0..n {
             for i in 0..n {
@@ -539,6 +553,65 @@ mod tests {
             println!("{name}: {ratio:.4}");
             if (ratio - 1.0).abs() > 0.02 {
                 off.push(format!("{name}: the map draws {ratio:.4} of what the key carries"));
+            }
+        }
+        assert!(off.is_empty(), "{}", off.join("\n"));
+    }
+
+    #[test]
+    fn a_grid_turned_away_dims_the_key() {
+        let mut key = front_light();
+        key.key = true;
+        let open = Env::new(&studio(vec![key.clone()])).sun().expect("a key light").radiance;
+        key.aim = Some(AimParams { yaw_deg: 30.0, grid: 1.0, ..AimParams::default() });
+        let fx = LightFx::new(&key, &ImageSet::default());
+        assert!(!fx.is_plain());
+        let gridded = Env::new(&studio(vec![key.clone()])).sun().expect("a key light").radiance;
+        assert!(luminance(gridded) < 0.05 * luminance(open), "a 15 degree grid turned 30 degrees away: {gridded:?}");
+        // The aim leaves a flag alone.
+        key.blend = "multiply".to_string();
+        let flag = LightFx::new(&key, &ImageSet::default());
+        let d = dir_from_az_el(90.0, 5.0);
+        assert_eq!(flag.apply(d, vec3f(1.0, 1.0, 1.0), vec3f(0.2, 0.2, 0.2)), vec3f(0.2, 0.2, 0.2));
+    }
+
+    /// The doors and the grid take out of the engine's key light what they
+    /// take out of the map, as a gobo does. A grid turned well off its axis
+    /// passes only a small spot of each cell, which the key's strata must
+    /// still find.
+    #[test]
+    fn a_keys_grid_and_doors_take_from_the_key_what_they_take_from_the_map() {
+        let key = LightParams {
+            key: true,
+            azimuth_deg: 0.0,
+            elevation_deg: 20.0,
+            width_deg: 60.0,
+            height_deg: 45.0,
+            ..LightParams::default()
+        };
+        let keys = [
+            ("rect", key.clone()),
+            ("hotspot 1 rect", LightParams { hotspot: 1.0, ..key.clone() }),
+            ("disc", LightParams { shape: "disc".to_string(), ..key.clone() }),
+            ("stroke", LightParams { shape: "stroke".to_string(), ..key }),
+        ];
+        let aims = [
+            ("grid 0.3 turned 10", AimParams { grid: 0.3, yaw_deg: 10.0, ..AimParams::default() }),
+            ("grid 1", AimParams { grid: 1.0, ..AimParams::default() }),
+            ("grid 0.6 tilted -20", AimParams { grid: 0.6, pitch_deg: -20.0, ..AimParams::default() }),
+            ("top door shut", AimParams { barn_doors: [90.0, 0.0, 0.0, 0.0], ..AimParams::default() }),
+            ("top door out, tilted -30", AimParams { pitch_deg: -30.0, barn_doors: [45.0, 0.0, 0.0, 0.0], ..AimParams::default() }),
+            ("side doors and grid 0.2", AimParams { grid: 0.2, barn_doors: [0.0, 60.0, 0.0, 90.0], ..AimParams::default() }),
+        ];
+        let mut off = Vec::new();
+        for (key_name, light) in &keys {
+            // The plain key's own ratio, so the test weighs only the aim.
+            let plain = map_over_key(light);
+            for (aim_name, aim) in &aims {
+                let ratio = map_over_key(&LightParams { aim: Some(aim.clone()), ..light.clone() }) / plain;
+                if (ratio - 1.0).abs() > 0.02 {
+                    off.push(format!("{key_name} with {aim_name}: the map draws {ratio:.4} of what the key carries"));
+                }
             }
         }
         assert!(off.is_empty(), "{}", off.join("\n"));

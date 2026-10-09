@@ -56,6 +56,7 @@ pub mod image_light;
 pub mod gobo;
 pub mod light_fx;
 pub mod foliage;
+pub mod aim;
 
 pub use params::*;
 pub use image_light::ImageSet;
