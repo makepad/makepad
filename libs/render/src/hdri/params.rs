@@ -206,6 +206,8 @@ pub struct LightParams {
     /// Shape "stroke" (1b), a Lumi-curve. None, or a block with fewer than
     /// two points, draws the arch `StrokeParams::around` the light's place.
     pub stroke: Option<StrokeParams>,
+    /// Shape "scrim" (1b): the source behind the cloth and the frame. None is ScrimParams::default().
+    pub scrim: Option<ScrimParams>,
 }
 
 /// Widest a polygon or a scrim may be, each way, in degrees. clamp() holds
@@ -441,6 +443,31 @@ impl SerJson for StrokeParams {
     }
 }
 
+/// A scrim light: a rect of diffusion cloth lit from behind.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ScrimParams {
+    /// 0.05..=1: the spread of the glow the light behind the cloth makes, as a
+    /// fraction of the half size (a Gaussian's sigma). 0.05 is a tight hot
+    /// spot, 1 nearly even.
+    pub source_size: f32,
+    /// 0..=0.2: a dark frame inside the outline, as a fraction of the shorter half size.
+    pub frame: f32,
+}
+
+impl Default for ScrimParams {
+    fn default() -> Self {
+        ScrimParams { source_size: 0.5, frame: 0.0 }
+    }
+}
+
+impl ScrimParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = ScrimParams::default();
+        f.range(prefix, "source_size", &mut self.source_size, 0.05, 1.0, d.source_size);
+        f.range(prefix, "frame", &mut self.frame, 0.0, 0.2, d.frame);
+    }
+}
+
 /// Typed view of `HdriParams::mode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -612,6 +639,7 @@ impl Default for LightParams {
             rgb: None,
             polygon: None,
             stroke: None,
+            scrim: None,
         }
     }
 }
@@ -871,6 +899,9 @@ impl LightParams {
         if let Some(stroke) = self.stroke.as_mut() {
             stroke.clamp_fields(&join_path(prefix, "stroke"), f);
         }
+        if let Some(scrim) = self.scrim.as_mut() {
+            scrim.clamp_fields(&join_path(prefix, "scrim"), f);
+        }
         // A polygon or a scrim is drawn in the light's gnomonic box, which
         // stretches toward its edges: past about 120 degrees across a shape
         // distorts (the spec's limit for one shaped light). A stroke may be
@@ -1016,6 +1047,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "lights[]" => json_tree(&LightParams::default()).ok(),
         "lights[].polygon" => json_tree(&PolygonParams::default()).ok(),
         "lights[].stroke" => json_tree(&StrokeParams::default()).ok(),
+        "lights[].scrim" => json_tree(&ScrimParams::default()).ok(),
         _ => None,
     }
 }
@@ -1736,5 +1768,23 @@ mod shape_param_tests {
         let got = merged.lights[0].stroke.clone().unwrap();
         assert_eq!((got.width_deg, got.end_kelvin, got.end_rgb), (5.0, Some(3000.0), None));
         assert!(got.points.is_empty(), "no points were given: the rest is the default block");
+    }
+
+    #[test]
+    fn scrim_params_clamp_and_round_trip() {
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams {
+            shape: "scrim".to_string(),
+            scrim: Some(ScrimParams { source_size: 0.0, frame: f32::NAN }),
+            ..LightParams::default()
+        });
+        let changed = p.clamp();
+        assert_eq!(p.lights[0].scrim, Some(ScrimParams { source_size: 0.05, frame: 0.0 }));
+        assert_eq!(changed, ["lights[0].scrim.source_size", "lights[0].scrim.frame"]);
+        assert_eq!(HdriParams::from_json(&p.to_json()).unwrap(), p);
+        let (merged, _) = HdriParams::default()
+            .merge_json(r#"{"lights": [{"shape": "scrim", "scrim": {"frame": 0.1}}]}"#)
+            .unwrap();
+        assert_eq!(merged.lights[0].scrim, Some(ScrimParams { source_size: 0.5, frame: 0.1 }));
     }
 }

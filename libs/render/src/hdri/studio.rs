@@ -245,7 +245,8 @@ impl Studio {
     /// - **Add** accumulates the light's colour.
     /// - **Multiply** scales everything drawn so far by its colour: fully at the core,
     ///   not at all outside. That is how a black flag cuts a softbox or the sky.
-    /// - Polygons, strokes and scrims follow the same rules through the shape core.
+    /// - Polygons, strokes and scrims follow the same rules through the shape core,
+    ///   except that an Add scrim is cloth: it hides what is behind it, then glows.
     pub fn apply_lights(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
         self.apply_lights_skipping(dir, base, None)
     }
@@ -317,8 +318,10 @@ struct KeyIntegral {
 ///   of A3's mask, and a shaped flag dims the key through `ShapedLight::compose`, as
 ///   `apply_lights` draws both. Its outline lies inside its box, so the grid holds it
 ///   and the box's corner cone (`cos_cover`) covers it.
-/// - Every Multiply light after it scales it as it does in the map. An Add light after
-///   it is a light of its own, and a light before it touches only what came before.
+/// - Every Multiply light after it scales it as it does in the map, and so does a
+///   scrim's cloth (B5), the one Add light that hides what is behind it
+///   (`ShapedLight::hide`). Any other Add light after it is a light of its own, and a
+///   light before it touches only what came before.
 ///
 /// A midpoint grid of n x n points over the key's reach box in its own tangent plane,
 /// where dΩ = dx dy / (1 + x² + y²)^(3/2) and the cosine of the angle from the centre
@@ -330,7 +333,12 @@ fn key_emission(lights: &[PreparedLight], n: usize) -> KeyIntegral {
     let Some((key, after)) = lights.split_first() else {
         return KeyIntegral { emission: Vec3f::default(), facing: 1.0, cos_cover: 1.0 };
     };
-    let flags: Vec<&PreparedLight> = after.iter().filter(|l| l.blend == Blend::Multiply).collect();
+    // What dims the key as the map draws it: the flags and gels, and the scrims'
+    // cloth in front of it.
+    let flags: Vec<&PreparedLight> = after
+        .iter()
+        .filter(|l| l.blend == Blend::Multiply || l.shaped.as_ref().is_some_and(|s| s.hides_behind()))
+        .collect();
     let n = n.max(1);
     let cell = vec2f(2.0 * key.reach.x / n as f32, 2.0 * key.reach.y / n as f32);
     let mut sum = [0.0f64; 3];
@@ -362,9 +370,10 @@ fn key_emission(lights: &[PreparedLight], n: usize) -> KeyIntegral {
             if !flags.is_empty() {
                 let dir = dir();
                 for flag in &flags {
-                    // As `apply_lights` draws the flag: a shaped one through the shape core.
+                    // As `apply_lights` draws the flag: a shaped one through the shape
+                    // core, and a scrim's cloth without its own glow.
                     if let Some(shaped) = &flag.shaped {
-                        w = shaped.compose(dir, w, flag.color);
+                        w = if flag.blend == Blend::Multiply { shaped.compose(dir, w, flag.color) } else { shaped.hide(dir, w) };
                         continue;
                     }
                     let Some(q) = project(&flag.frame, dir) else { continue };
@@ -907,12 +916,23 @@ mod tests {
     }
 
     /// `params` with the backdrop black and every Add light but the key taken out:
-    /// what is left is the key as `apply_lights` paints it, behind the flags.
+    /// what is left is the key as `apply_lights` paints it, behind the flags. A
+    /// scrim (B5) stays as bare cloth, its colour black: it hides what is behind
+    /// it, the key too when it is listed after it, and adds nothing.
     fn the_key_alone(params: &HdriParams) -> HdriParams {
         let key = params.lights.iter().position(|l| l.enabled && l.key && l.blend() == Blend::Add).expect("a key light");
+        let kept = |(i, l): (usize, &LightParams)| {
+            if i == key || l.blend() == Blend::Multiply {
+                Some(l.clone())
+            } else if l.shape() == LightShape::Scrim {
+                Some(LightParams { rgb: Some([0.0; 3]), ..l.clone() })
+            } else {
+                None
+            }
+        };
         HdriParams {
             studio: black_studio(),
-            lights: params.lights.iter().enumerate().filter(|(i, l)| *i == key || l.blend() == Blend::Multiply).map(|(_, l)| l.clone()).collect(),
+            lights: params.lights.iter().enumerate().filter_map(kept).collect(),
             ..params.clone()
         }
     }
@@ -1022,6 +1042,33 @@ mod tests {
             polygon: Some(crate::hdri::PolygonParams { sides: 5, star: 0.5, points: Vec::new() }),
             ..Default::default()
         };
+        // 1b (B5): a soft, rolled rect key whose northern half (toward increasing
+        // azimuth) is behind a scrim listed after it. A scrim is the one Add light
+        // that hides what is behind it, so the map shows only the key's other half,
+        // and the key carries only that.
+        let screened = LightParams {
+            key: true,
+            azimuth_deg: 300.0,
+            elevation_deg: 20.0,
+            width_deg: 40.0,
+            height_deg: 24.0,
+            roll_deg: 15.0,
+            softness: 0.3,
+            hotspot: 0.4,
+            ..Default::default()
+        };
+        let scrim = LightParams {
+            name: "Scrim".to_string(),
+            shape: "scrim".to_string(),
+            azimuth_deg: 314.0,
+            elevation_deg: 24.0,
+            width_deg: 30.0,
+            height_deg: 30.0,
+            corner: 0.3,
+            softness: 0.4,
+            scrim: Some(crate::hdri::ScrimParams { source_size: 0.4, frame: 0.1 }),
+            ..Default::default()
+        };
         vec![
             ("a hard elliptical ring, rolled", vec![ring]),
             (
@@ -1029,6 +1076,7 @@ mod tests {
                 vec![flag_at(250.0, 10.0, 30.0), strip, flag_at(250.0, 10.0, 8.0), gel, over],
             ),
             ("a rolled hexagon key under a star-shaped gel", vec![hexagon, star_gel]),
+            ("a rolled rect key half behind a scrim listed after it", vec![screened, scrim]),
         ]
     }
 
@@ -1376,6 +1424,43 @@ mod tests {
             assert!(baked.keyless.as_ref() == Some(&Env::new(&off).bake(128)), "{name}: the keyless copy is not the map without the stroke");
             assert!(baked.keyless.as_ref() != Some(&baked.map), "{name}: the stroke drew nothing");
         }
+    }
+
+    /// A scrim listed after the key hides it as a flag would (B5): a key wholly
+    /// behind the cloth draws nothing in the map, so it hands the engine no light.
+    #[test]
+    fn a_key_behind_a_scrim_carries_nothing() {
+        let key = LightParams { key: true, azimuth_deg: 90.0, elevation_deg: 0.0, width_deg: 20.0, height_deg: 20.0, ..Default::default() };
+        let scrim = LightParams { shape: "scrim".to_string(), azimuth_deg: 90.0, elevation_deg: 0.0, width_deg: 40.0, height_deg: 40.0, softness: 0.0, ..Default::default() };
+        let sun = Studio::new(&black_studio(), &[key, scrim]).key().expect("the rect is the key");
+        assert_eq!(sun.radiance, Vec3f::default(), "{sun:?}");
+        assert!(sun.validate().is_ok(), "{sun:?}");
+    }
+
+    /// N3 for a scrim key (B5): the engine's lighting copy loses the cloth's
+    /// glow and keeps the cloth, so what the scrim hides stays hidden: the copy
+    /// is the map with the scrim's colour black, not the map without the scrim.
+    #[test]
+    fn a_scrim_keys_lighting_copy_keeps_its_cloth() {
+        let behind = LightParams { azimuth_deg: 90.0, elevation_deg: 0.0, width_deg: 30.0, height_deg: 30.0, ..Default::default() };
+        let scrim = LightParams {
+            key: true,
+            shape: "scrim".to_string(),
+            azimuth_deg: 90.0,
+            elevation_deg: 0.0,
+            width_deg: 40.0,
+            height_deg: 40.0,
+            scrim: Some(crate::hdri::ScrimParams { source_size: 0.5, frame: 0.05 }),
+            ..Default::default()
+        };
+        let p = studio_params(vec![behind, scrim]);
+        let baked = crate::hdri::envmap::bake_generated_env_map(&p, 64, on_all_cores);
+        let mut dark = p.clone();
+        dark.lights[1].rgb = Some([0.0; 3]);
+        assert!(baked.keyless.as_ref() == Some(&Env::new(&dark).bake(64)), "the copy is the map with the glow gone and the cloth kept");
+        let mut off = p.clone();
+        off.lights[1].enabled = false;
+        assert!(baked.keyless.as_ref() != Some(&Env::new(&off).bake(64)), "the light behind the cloth stays hidden in the copy");
     }
 
     #[test]

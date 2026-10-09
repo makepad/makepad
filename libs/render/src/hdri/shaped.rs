@@ -23,6 +23,12 @@
 //! distances are true angles on the sphere and its half width is its inside
 //! depth. Its key light is integrated here (`ShapedLight::key_color`), not in
 //! the light's box as a polygon's is.
+//!
+//! A scrim is a rect in the light's box (A3's rounding and soft edge) of
+//! diffusion cloth lit from behind: it glows with a Gaussian from its middle,
+//! which stands in for the hotspot, and it is the one Add light that hides
+//! what is behind it (`acc × (1 − mask) + colour × glow`). With Multiply it is
+//! a flag of its shape, by the rule above.
 
 use super::*;
 use super::shape::*;
@@ -51,12 +57,15 @@ pub struct ShapedLight {
     kind: ShapedKind,
     cull: CullCone,
     blend: Blend,
+    /// A scrim hides what is behind it; the other shapes add, as A3's lights do.
+    occludes: bool,
 }
 
 #[derive(Clone, Debug)]
 enum ShapedKind {
     Fill(FillLight),
     Stroke(StrokeLight),
+    Scrim(ScrimLight),
 }
 
 impl ShapedLight {
@@ -78,9 +87,15 @@ impl ShapedLight {
                 let cull = stroke.path.cull();
                 (ShapedKind::Stroke(stroke), cull)
             }
+            LightShape::Scrim => {
+                let scrim = ScrimLight::new(light);
+                let cull = scrim.cull();
+                (ShapedKind::Scrim(scrim), cull)
+            }
             _ => return None,
         };
-        Some(ShapedLight { kind, cull, blend: light.blend() })
+        let occludes = matches!(kind, ShapedKind::Scrim(_));
+        Some(ShapedLight { kind, cull, blend: light.blend(), occludes })
     }
 
     /// Every direction the light can touch lies in this cone.
@@ -93,6 +108,7 @@ impl ShapedLight {
         match &self.kind {
             ShapedKind::Fill(fill) => fill.sample(dir),
             ShapedKind::Stroke(stroke) => stroke.sample_at(dir).0,
+            ShapedKind::Scrim(scrim) => scrim.sample(dir),
         }
     }
 
@@ -109,22 +125,34 @@ impl ShapedLight {
                 let (s, t) = stroke.sample_at(dir);
                 (s, stroke.color_at(t, color))
             }
+            ShapedKind::Scrim(scrim) => (scrim.sample(dir), color),
         };
         match self.blend {
-            Blend::Add => acc + color * s.emit,
             // studio.rs's rule: where the shape covers, what is behind is scaled by the colour.
             Blend::Multiply => acc * (Vec3f::all(1.0) + (color - Vec3f::all(1.0)) * s.mask),
+            // Cloth in front of what is behind it: it hides that, then glows.
+            Blend::Add if self.occludes => acc * (1.0 - s.mask) + color * s.emit,
+            Blend::Add => acc + color * s.emit,
         }
     }
 
     /// This light over `acc` with its own light left out: what the key leaves
     /// of the map in the engine's keyless lighting copy (plan 2's N3). A
-    /// polygon only adds light over what is behind it, so it leaves `acc` as
-    /// it was; B5's scrim keeps its cloth here. It is not `compose` in black:
-    /// a stroke with a colour ramp (B3) takes its colour from the ramp, not
-    /// from the colour it is handed, and would stay in the copy.
-    pub fn hide(&self, _dir: Vec3f, acc: Vec3f) -> Vec3f {
-        acc
+    /// scrim's cloth still hides what is behind it and its glow is gone
+    /// (`compose` without its `color * s.emit` term); a polygon or a stroke
+    /// leaves `acc` as it was. Only the key, an Add light, is ever left out.
+    pub fn hide(&self, dir: Vec3f, acc: Vec3f) -> Vec3f {
+        if !self.hides_behind() || !self.cull.contains(dir) {
+            return acc;
+        }
+        acc * (1.0 - self.sample(dir).mask)
+    }
+
+    /// Whether this is an Add light that hides what is behind it (a scrim):
+    /// the one Add light that dims the lights listed before it, by `hide`'s
+    /// factor, so `studio::key_emission` takes it as it takes a flag.
+    pub fn hides_behind(&self) -> bool {
+        self.occludes && self.blend == Blend::Add
     }
 
     /// The direction and cos(angular radius) the engine's key light takes.
@@ -132,6 +160,7 @@ impl ShapedLight {
         match &self.kind {
             ShapedKind::Fill(fill) => (fill.frame.center, fill.key_cos),
             ShapedKind::Stroke(stroke) => stroke.key,
+            ShapedKind::Scrim(scrim) => (scrim.frame.center, scrim.key_cos),
         }
     }
 
@@ -140,24 +169,23 @@ impl ShapedLight {
     /// `EnvSun`'s meaning: radiance x the solid angle of `key_cone` is the
     /// light's whole emission. A stroke's points place it, not its frame, so
     /// studio.rs takes its cone and this radiance: its mean colour times the
-    /// share of the cone it covers. A filled shape lies in its light's box,
-    /// where `studio::key_emission` integrates it like a rect.
+    /// share of the cone it covers. A filled shape and a scrim lie in their
+    /// light's box, where `studio::key_emission` integrates them like a rect
+    /// (a scrim's glow from its middle included).
     pub fn key_color(&self, color: Vec3f) -> Option<Vec3f> {
         match &self.kind {
-            ShapedKind::Fill(_) => None,
+            ShapedKind::Fill(_) | ShapedKind::Scrim(_) => None,
             ShapedKind::Stroke(stroke) => Some(stroke.mean_color(color) * stroke.key_fill),
         }
     }
 
     /// Plan 2's two other key fields for a stroke, `(facing, cos_cover)`, or
-    /// None for a shape studio.rs integrates itself (`KeyIntegral` gives those
-    /// theirs). `facing`: the share of the stroke's emission a surface facing
-    /// the key's axis receives. `cos_cover`: the cone round that axis that
-    /// holds the whole stroke, soft edge included, which the engine's
-    /// keyless copy re-evaluates without it (N3).
+    /// None for a shape studio.rs integrates itself: a filled shape and a scrim
+    /// lie in their light's box, whose integral (`KeyIntegral`) gives their
+    /// facing share and whose corner cone covers them.
     pub fn key_spread(&self) -> Option<(f32, f32)> {
         match &self.kind {
-            ShapedKind::Fill(_) => None,
+            ShapedKind::Fill(_) | ShapedKind::Scrim(_) => None,
             ShapedKind::Stroke(stroke) => Some((stroke.key_facing, stroke.key_cos_cover)),
         }
     }
@@ -594,6 +622,72 @@ fn stroke_centre_line(s: &StrokeParams) -> Vec<Vec3f> {
         }
     }
     out
+}
+
+/// A scrim: a rounded rect of cloth, glowing where the source behind it
+/// shines through, with an optional dark frame.
+#[derive(Clone, Debug)]
+struct ScrimLight {
+    frame: LightFrame,
+    /// Half extents tan(w/2), tan(h/2).
+    half: Vec2f,
+    /// Corner radius, tangent units (studio.rs's rect rounding).
+    round: f32,
+    /// Half the soft band, tangent units.
+    edge: f32,
+    /// The frame's width, tangent units.
+    frame_w: f32,
+    /// 1 / (2 sigma²), sigma = source_size in unit-box units.
+    inv_two_sigma2: f32,
+    key_cos: f32,
+}
+
+impl ScrimLight {
+    fn new(light: &LightParams) -> ScrimLight {
+        let scrim = light.scrim.clone().unwrap_or_default();
+        let (hx, hy) = half_extents(light);
+        let short = hx.min(hy);
+        let sigma = if scrim.source_size.is_finite() { scrim.source_size.clamp(0.05, 1.0) } else { 0.5 };
+        let frame = if scrim.frame.is_finite() { scrim.frame.clamp(0.0, 0.2) } else { 0.0 };
+        let frame_w = frame * short;
+        let inv_two_sigma2 = 1.0 / (2.0 * sigma * sigma);
+        ScrimLight {
+            frame: light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg),
+            half: vec2f(hx, hy),
+            round: clamp01(light.corner) * short,
+            // A rect's inside depth is its shorter half extent, as in studio.rs.
+            edge: 0.5 * (clamp01(light.softness) * short).max(EDGE_MIN),
+            frame_w,
+            inv_two_sigma2,
+            key_cos: key_cos(light),
+        }
+    }
+
+    fn cull(&self) -> CullCone {
+        // The corner of the box is the farthest point from the centre.
+        CullCone::new(self.frame.center, (self.half.x.hypot(self.half.y) + self.edge).atan())
+    }
+
+    fn sample(&self, dir: Vec3f) -> ShapeSample {
+        let Some(t) = project(&self.frame, dir) else {
+            return ShapeSample::default();
+        };
+        // iq's rounded box, as studio.rs draws a rect.
+        let qx = t.x.abs() - self.half.x + self.round;
+        let qy = t.y.abs() - self.half.y + self.round;
+        let (ox, oy) = (qx.max(0.0), qy.max(0.0));
+        let d = (ox * ox + oy * oy).sqrt() + qx.max(qy).min(0.0) - self.round;
+        let mask = 1.0 - smoothstep(-self.edge, self.edge, d);
+        if !(mask > 0.0) {
+            return ShapeSample::default();
+        }
+        // The cloth inside the frame glows; the frame itself is dark.
+        let cloth = 1.0 - smoothstep(-self.edge, self.edge, d + self.frame_w);
+        let ux = t.x / self.half.x;
+        let uy = t.y / self.half.y;
+        let glow = (-(ux * ux + uy * uy) * self.inv_two_sigma2).exp();
+        ShapeSample { mask, emit: cloth * glow }
+    }
 }
 
 /// 0..1, with NaN as 0.
@@ -1081,5 +1175,71 @@ mod tests {
         let side = LightParams { azimuth_deg: 0.0, elevation_deg: 30.0, ..polygon_light() };
         assert_eq!(dir_to_unit(&side, dir_from_az_el(90.0, 0.0))[0], 1.0);
         assert_eq!(dir_to_unit(&side, dir_from_az_el(270.0, 0.0))[0], -1.0);
+    }
+
+    /// A hard 40x40° scrim due east with a small source and a frame a tenth of its half size.
+    fn scrim_light() -> LightParams {
+        LightParams {
+            shape: "scrim".to_string(),
+            polygon: None,
+            scrim: Some(ScrimParams { source_size: 0.3, frame: 0.1 }),
+            ..polygon_light()
+        }
+    }
+
+    #[test]
+    fn a_scrim_glows_from_its_middle_and_hides_what_is_behind() {
+        let light = scrim_light();
+        let color = light_color(&light);
+        let mut p = dark_studio(vec![light.clone()]);
+        p.studio.top = [2.0; 3];
+        p.studio.horizon = [2.0; 3];
+        p.studio.floor = [2.0; 3];
+        let env = Env::new(&p);
+        let centre = env.radiance(unit_to_dir(&light, [0.0, 0.0]));
+        assert!((centre - color).length() < 1.0e-3 * color.length(), "the cloth hides the backdrop and peaks at the colour: {centre:?}");
+        let edge = env.radiance(unit_to_dir(&light, [0.8, 0.0]));
+        assert!(edge.x < 0.1 * centre.x, "a small source leaves the edge dim: {edge:?}");
+        let frame = env.radiance(unit_to_dir(&light, [0.97, 0.0]));
+        assert!(frame.length() < 1.0e-4, "the frame is dark and hides the backdrop: {frame:?}");
+        let outside = env.radiance(unit_to_dir(&light, [1.3, 0.0]));
+        assert!((outside - vec3f(2.0, 2.0, 2.0)).length() < 1.0e-3, "{outside:?}");
+    }
+
+    #[test]
+    fn a_larger_source_spreads_the_glow() {
+        let mut tight = scrim_light();
+        tight.scrim = Some(ScrimParams { source_size: 0.1, frame: 0.0 });
+        let mut broad = tight.clone();
+        broad.scrim = Some(ScrimParams { source_size: 1.0, frame: 0.0 });
+        let at = |l: &LightParams| ShapedLight::new(l).unwrap().sample(unit_to_dir(l, [0.6, 0.0])).emit;
+        assert!(at(&tight) < 1.0e-6, "{}", at(&tight));
+        assert!((at(&broad) - (-0.18f32).exp()).abs() < 1.0e-3, "{}", at(&broad));
+    }
+
+    #[test]
+    fn a_key_scrim_hands_the_engine_its_glow() {
+        let key_of = |source_size: f32| {
+            let mut light = scrim_light();
+            light.key = true;
+            light.scrim = Some(ScrimParams { source_size, frame: 0.0 });
+            let sun = super::super::studio::Studio::new(&dark_studio(Vec::new()).studio, &[light.clone()])
+                .key()
+                .expect("the scrim is the key light");
+            (sun, crate::sky::luminance(light_color(&light)))
+        };
+        let (even, level) = key_of(1.0);
+        assert!((even.dir - dir_from_az_el(90.0, 0.0)).length() < 1.0e-5, "{:?}", even.dir);
+        assert!((even.cos_radius - 20.0f32.to_radians().cos()).abs() < 1.0e-6, "a rect's cone: {}", even.cos_radius);
+        // EnvSun's meaning: radiance x the cone's solid angle is the cloth's whole
+        // glow. exp(-(u² + v²) / 2) over the 40° square, with u, v = x, y / tan 20°
+        // and dΩ = dx dy / (1 + x² + y²)^(3/2), is 0.3485 sr (a 1000 x 1000 midpoint
+        // sum); the 20° cone is 2π(1 - cos 20°) = 0.3789 sr; so 0.920 of the colour.
+        let fill = crate::sky::luminance(even.radiance) / level;
+        assert!((fill - 0.920).abs() < 0.01, "{fill}");
+        // A tight source glows over far less of the cloth (0.0219 of the colour by
+        // the same sum).
+        let (tight, level) = key_of(0.1);
+        assert!(crate::sky::luminance(tight.radiance) < 0.03 * level);
     }
 }
