@@ -233,6 +233,20 @@ impl CloudLayer {
         density + (1.0 - density) * close
     }
 
+    /// The deck's density (0..1) at a point of its plane, in noise cells east
+    /// and south of the point overhead. The volumetric clouds (volumetric.rs)
+    /// stand on this footprint, so both modes put their clouds in the same
+    /// places. Four octaves, as the deck's own self-shadow reads it: the
+    /// volume adds the finer detail itself.
+    pub(crate) fn deck_density(&self, cells: Vec2f) -> f32 {
+        self.cover(fbm2(cells.x, cells.y, SHADOW_OCTAVES, self.seed))
+    }
+
+    /// Metres per noise cell of the deck.
+    pub(crate) fn cell_m(&self) -> f32 {
+        self.cell
+    }
+
     /// iq's 2D self-shadow: the mean density met a few steps toward the sun.
     fn self_shadow(&self, p: Vec2f) -> f32 {
         if self.shadow_step.x == 0.0 && self.shadow_step.y == 0.0 {

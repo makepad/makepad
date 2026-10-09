@@ -139,6 +139,9 @@ pub struct SkyParams {
     pub sun_disc: SunDiscParams,
     pub clouds: CloudParams,
     pub night: NightParams,
+    /// Volumetric clouds (1b): Some marches a cloud volume that stands on the
+    /// 2D deck's footprint; None keeps the flat 2D deck.
+    pub volumetric: Option<VolumetricParams>,
 }
 
 /// Where the sun is: from a date, time and place (NOAA), or set by hand.
@@ -199,6 +202,43 @@ pub struct CloudParams {
     pub altitude_m: f32,
     /// 0..=1, high wispy cloud.
     pub cirrus: f32,
+}
+
+/// The marched cloud volume (`hdri/volumetric.rs`). `clouds.coverage`,
+/// `sharpness` and `scale` still say where the clouds are and how large;
+/// these say how the volume stands on that footprint.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct VolumetricParams {
+    /// 0..=4, 1 = a fair-weather cumulus. Scales the extinction; 0 draws no volume.
+    pub density: f32,
+    /// 200..=8000 metres: the cloud base.
+    pub base_m: f32,
+    /// base_m + 200..=12000 metres: the highest tops.
+    pub top_m: f32,
+    /// 0..=1: how deep the fine detail eats into the edges.
+    pub erosion: f32,
+    /// 16..=96: the march's step budget toward the horizon (half of it overhead).
+    pub steps: u32,
+}
+
+impl Default for VolumetricParams {
+    fn default() -> Self {
+        VolumetricParams { density: 1.0, base_m: 1500.0, top_m: 4000.0, erosion: 0.5, steps: 64 }
+    }
+}
+
+impl VolumetricParams {
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = VolumetricParams::default();
+        f.range(prefix, "density", &mut self.density, 0.0, 4.0, d.density);
+        f.range(prefix, "base_m", &mut self.base_m, 200.0, 8000.0, d.base_m);
+        // After the base: the top is only valid above it. A NaN top lands a
+        // default layer's thickness over the base.
+        let lowest = self.base_m + 200.0;
+        f.range(prefix, "top_m", &mut self.top_m, lowest, 12_000.0, (self.base_m + 2500.0).min(12_000.0));
+        f.range(prefix, "erosion", &mut self.erosion, 0.0, 1.0, d.erosion);
+        f.int(prefix, "steps", &mut self.steps, 16, 96);
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
@@ -1134,6 +1174,9 @@ impl SkyParams {
         self.sun_disc.clamp_fields(&join_path(prefix, "sun_disc"), f);
         self.clouds.clamp_fields(&join_path(prefix, "clouds"), f);
         self.night.clamp_fields(&join_path(prefix, "night"), f);
+        if let Some(volumetric) = self.volumetric.as_mut() {
+            volumetric.clamp_fields(&join_path(prefix, "volumetric"), f);
+        }
     }
 }
 
@@ -1455,6 +1498,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
         "lights[].aim" => json_tree(&AimParams::default()).ok(),
         "lights[].imperfections" => json_tree(&ImperfectionParams::default()).ok(),
         "base_image" => json_tree(&BaseImageParams::default()).ok(),
+        "sky.volumetric" => json_tree(&VolumetricParams::default()).ok(),
         _ => None,
     }
 }
@@ -1468,6 +1512,7 @@ fn integer_range(schema: &str) -> Option<(f64, f64)> {
         "sky.sun.year" => Some((i32::MIN as f64, i32::MAX as f64)),
         "lights[].gobo.panes_x" | "lights[].gobo.panes_y" | "lights[].gobo.slats" | "lights[].gobo.seed" => Some((0.0, u32::MAX as f64)),
         "lights[].imperfections.seed" => Some((0.0, u32::MAX as f64)),
+        "sky.volumetric.steps" => Some((0.0, u32::MAX as f64)),
         _ => None,
     }
 }
@@ -2484,5 +2529,54 @@ mod base_image_param_tests {
         let (same, report) = merged.merge_json(r#"{"base_image": {"flavour": 1}}"#).unwrap();
         assert_eq!(same, merged);
         assert_eq!(report, ["ignored: base_image.flavour"]);
+    }
+}
+
+#[cfg(test)]
+mod volumetric_param_tests {
+    use super::*;
+
+    #[test]
+    fn volumetric_params_clamp_and_round_trip() {
+        let mut p = HdriParams::default();
+        assert_eq!(p.sky.volumetric, None);
+        assert!(!p.to_json().contains("volumetric"), "the 2D layer is the default and writes nothing");
+        p.sky.volumetric = Some(VolumetricParams { density: 9.0, base_m: 50.0, top_m: 100.0, erosion: f32::NAN, steps: 500 });
+        let changed = p.clamp();
+        assert_eq!(
+            changed,
+            [
+                "sky.volumetric.density",
+                "sky.volumetric.base_m",
+                "sky.volumetric.top_m",
+                "sky.volumetric.erosion",
+                "sky.volumetric.steps"
+            ]
+        );
+        let v = p.sky.volumetric.clone().unwrap();
+        assert_eq!(
+            (v.density, v.base_m, v.top_m, v.erosion, v.steps),
+            (4.0, 200.0, 400.0, VolumetricParams::default().erosion, 96)
+        );
+        assert_eq!(HdriParams::from_json(&p.to_json()), Ok(p.clone()));
+        assert!(p.clamp().is_empty(), "clamping twice changes nothing");
+        // The top clears the base by 200 m wherever the base is dragged.
+        p.sky.volumetric = Some(VolumetricParams { base_m: 8000.0, top_m: 3000.0, ..VolumetricParams::default() });
+        assert_eq!(p.clamp(), ["sky.volumetric.top_m"]);
+        assert_eq!(p.sky.volumetric.as_ref().unwrap().top_m, 8200.0);
+        // The defaults are inside their own ranges.
+        p.sky.volumetric = Some(VolumetricParams::default());
+        assert!(p.clamp().is_empty());
+    }
+
+    #[test]
+    fn a_partial_volumetric_patch_is_completed_and_rounds_its_steps() {
+        let (merged, report) = HdriParams::default()
+            .merge_json(r#"{"sky": {"volumetric": {"density": 2, "steps": 40.4}}}"#)
+            .unwrap();
+        assert_eq!(merged.sky.volumetric, Some(VolumetricParams { density: 2.0, steps: 40, ..VolumetricParams::default() }));
+        assert_eq!(report, ["sky.volumetric.steps"], "40.4 was rounded to a whole number of steps");
+        let (flat, _) = merged.merge_json(r#"{"sky": {"volumetric": null}}"#).unwrap();
+        assert_eq!(flat.sky.volumetric, None);
     }
 }

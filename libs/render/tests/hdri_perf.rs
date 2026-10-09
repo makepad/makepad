@@ -16,7 +16,7 @@
 
 use makepad_draw::*;
 use makepad_render::hdri::presets::{preset, PRESET_NAMES};
-use makepad_render::hdri::{Env, HdriParams};
+use makepad_render::hdri::{Env, HdriParams, VolumetricParams};
 use makepad_render_material::ibl::{self, EnvMap};
 use std::time::Instant;
 
@@ -195,5 +195,38 @@ fn ibl_texture_of_a_1024_map_under_1_s() {
         assert!(texture.data.iter().all(|v| v.is_finite()), "the atlas holds a non-finite value");
         println!("hdri_perf: ibl_texture of 1024x512 {ms:7.1} ms, budget {budget_ms:.0} ms");
         assert!(ms < budget_ms, "ibl_texture took {ms:.0} ms, over {budget_ms:.0} ms");
+    });
+}
+
+/// Volumetric clouds (plan 1b, B16): the spec's target is a 4K map in 60 s
+/// on 8 cores. The bake marches the volume at 2K at most and reads it
+/// bilinearly (`volumetric::MARCH_MAX_WIDTH`); the time includes the first
+/// build of the seed's noise volume and the light grid.
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn a_volumetric_sky_bakes_4096_under_60_s() {
+    let budget = budget_ms(60_000.0);
+    with_pool(|pool| {
+        // Warm the pool with the flat sky, so everything the volume costs
+        // (the noise, the light grid, the march) is inside the timing.
+        let _ = timed_bake(pool, &cloudy_sky(), 512);
+        let mut params = cloudy_sky();
+        // A seed no other test in this binary bakes: its noise is built here.
+        params.seed = 0x0b16_5eed;
+        params.sky.volumetric = Some(VolumetricParams::default());
+        let t = timed_bake(pool, &params, 4096);
+        check_map(&t.map, 4096, "volumetric sky");
+        println!(
+            "hdri_perf: 4096x2048 volumetric sky {:8.1} ms (Env::new {:5.2} ms), budget {budget:.0} ms",
+            t.total_ms, t.env_ms
+        );
+        assert!(t.total_ms < budget, "the volumetric 4096x2048 bake took {:.0} ms, over {budget:.0} ms", t.total_ms);
+        // The volume was really marched: a small bake of the same settings
+        // differs from the flat deck's.
+        let small = timed_bake(pool, &params, 512);
+        let mut flat_params = params.clone();
+        flat_params.sky.volumetric = None;
+        // (assert!, not assert_ne!: a failure must not print two whole maps.)
+        assert!(small.map != timed_bake(pool, &flat_params, 512).map, "the volume is not the 2D deck");
     });
 }

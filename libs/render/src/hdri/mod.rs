@@ -59,6 +59,7 @@ pub mod foliage;
 pub mod aim;
 pub mod imperfections;
 pub mod composite;
+pub mod volumetric;
 
 pub use params::*;
 pub use image_light::ImageSet;
@@ -124,6 +125,9 @@ pub struct Env {
     /// A loaded image as the base, or as its part below the horizon (1b).
     /// None when the params name none or the caller's ImageSet lacks it.
     base_image: Option<composite::BaseImage>,
+    /// The marched cloud volume (1b); Some in Sky mode when `sky.volumetric`
+    /// is set and there is coverage. `clouds` is then the cirrus veil alone.
+    volumetric: Option<volumetric::VolumetricClouds>,
 }
 
 impl Env {
@@ -140,12 +144,24 @@ impl Env {
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
         let studio = studio::Studio::new_with(&params.studio, &params.lights, images);
+        let mut volumetric = None;
         let (atmo, clouds, night, cloud_sun, cloud_ambient) = match params.mode() {
             Mode::Sky => {
                 let sky = &params.sky;
                 let sun_dir = atmosphere::sun_direction(&sky.sun);
                 let atmo = atmosphere::Atmosphere::new(sun_dir, &sky.atmosphere, &sky.sun_disc);
-                let clouds = clouds::CloudLayer::new(&sky.clouds, params.seed, atmo.sun_dir());
+                // Volumetric mode (1b): the marched volume replaces the 2D deck
+                // and stands on its footprint; the cirrus veil above it stays
+                // the 2D one.
+                volumetric = sky
+                    .volumetric
+                    .as_ref()
+                    .and_then(|vol| volumetric::VolumetricClouds::new(&sky.clouds, vol, params.seed, atmo.sun_dir()));
+                let clouds = if volumetric.is_some() {
+                    clouds::CloudLayer::new(&CloudParams { coverage: 0.0, ..sky.clouds.clone() }, params.seed, atmo.sun_dir())
+                } else {
+                    clouds::CloudLayer::new(&sky.clouds, params.seed, atmo.sun_dir())
+                };
                 let night = night::NightSky::new(&sky.night, params.seed, atmo.sun_dir(), night::star_hours(&sky.sun), sky.sun.latitude);
                 let cloud_sun = atmo.sun_irradiance();
                 let cloud_ambient = atmo.ambient() + night.ambient();
@@ -173,7 +189,7 @@ impl Env {
             None
         };
         let backdrop_gobo = if params.mode() == Mode::Studio { gobo::BackdropGobo::new(&params.lights, images) } else { None };
-        let mut env = Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient, window_sky, backdrop_gobo, base_image: None };
+        let mut env = Env { params, scale, studio, atmo, clouds, night, cloud_sun, cloud_ambient, window_sky, backdrop_gobo, volumetric, base_image: None };
         if let Some(base) = env.params.base_image.clone() {
             // Sky replacement matches the image's exposure to the base it is
             // composited over, so the base is metered first (base_image is
@@ -194,7 +210,7 @@ impl Env {
     /// over it; Studio: backdrop, under any gobo shadow cast onto it; or a base
     /// image, the whole base or below its mask), lights overlay, x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
-        self.radiance_with(dir, None)
+        self.radiance_with(dir, None, None)
     }
 
     /// [`Self::radiance`] with the key's own term left out (`Some`): the key
@@ -203,8 +219,9 @@ impl Env {
     /// the light it puts on the clouds, every other light) is drawn as before,
     /// so this is the map without exactly its key's light (N3). `None` is
     /// `radiance`, bit for bit. The base is the mode's own, a base image, or
-    /// both through the image's mask.
-    fn radiance_with(&self, dir: Vec3f, without: Option<KeyTerm>) -> Vec3f {
+    /// both through the image's mask. `cache` is a bake's cloud march, when it
+    /// has one.
+    fn radiance_with(&self, dir: Vec3f, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
         // The layers live in the map's own frame; turning the map by
         // rotation_deg (ibl's sign) is turning the lookup the other way.
         let d = rotate_y(dir, -self.params.rotation_deg);
@@ -212,8 +229,8 @@ impl Env {
             // An image that is the whole base: the sky under it is never seen, so it is not drawn.
             Some(image) if !image.replaces_sky() => image.radiance(d),
             // Sky replacement: the image below its mask, the mode's own base above.
-            Some(image) => image.compose(d, self.base_layer(d, without)),
-            None => self.base_layer(d, without),
+            Some(image) => image.compose(d, self.base_layer(d, without, cache)),
+            None => self.base_layer(d, without, cache),
         };
         // A light filled with sky (GoboParams::fill_sky) is a window: it shows
         // the sky along the same direction. In Sky mode that sky is the base
@@ -231,9 +248,11 @@ impl Env {
 
     /// The mode's own base layer under the lights, in the map's own frame: the sky
     /// (atmosphere + disc + stars + moon + glow + night ground, then the clouds over
-    /// it; the discs under the unfaded cover) or the studio backdrop, under any gobo
-    /// shadow cast onto it. `without` leaves the key's disc out (plan 2's N3).
-    fn base_layer(&self, d: Vec3f, without: Option<KeyTerm>) -> Vec3f {
+    /// it; the discs under the unfaded cover; in volumetric mode the marched volume
+    /// over all of it) or the studio backdrop, under any gobo shadow cast onto it.
+    /// `without` leaves the key's disc out (plan 2's N3); `cache` is a bake's
+    /// cloud march, when it has one.
+    fn base_layer(&self, d: Vec3f, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
         match &self.atmo {
             Some(atmo) => {
                 let mut c = atmo.sky(d);
@@ -250,7 +269,8 @@ impl Env {
                     };
                 }
                 // Clouds are in front of everything in the sky: the stars, the
-                // moon and the sun's disc.
+                // moon and the sun's disc. In volumetric mode this layer is the
+                // cirrus veil alone.
                 if let Some(layer) = &self.clouds {
                     let s = layer.sample(d);
                     if s.alpha > 0.0 {
@@ -262,7 +282,25 @@ impl Env {
                         discs *= 1.0 - layer.cover_toward(d);
                     }
                 }
-                c + discs
+                // The discs, under the 2D layer's unfaded cover, join the sky behind
+                // the volume: the marched volume is the lower layer, so it goes over
+                // the veil and the discs.
+                c += discs;
+                if let Some(volume) = &self.volumetric {
+                    if d.y > 0.0 {
+                        let m = match cache {
+                            Some(cache) => cache.sample(volume, d),
+                            None => volume.march(d),
+                        };
+                        if m.alpha > 0.0 {
+                            // The ground under the layer, lit by the same dome, lights the bases.
+                            let g = self.params.sky.atmosphere.ground_color;
+                            let ground = vec3f(g[0], g[1], g[2]) * self.cloud_ambient;
+                            c = c * (1.0 - m.alpha) + volume.shade(&m, self.cloud_sun, self.cloud_ambient, ground);
+                        }
+                    }
+                }
+                c
             }
             None => {
                 let backdrop = self.studio.backdrop(d);
@@ -280,7 +318,7 @@ impl Env {
     /// the base layer, the sun's and moon's texels area-averaged as in any
     /// bake, read by `composite::irradiance_above`.
     fn base_irradiance(&self) -> f32 {
-        let layer = |d: Vec3f| if d.y > 0.0 { self.base_layer(d, None) } else { Vec3f::default() };
+        let layer = |d: Vec3f| if d.y > 0.0 { self.base_layer(d, None, None) } else { Vec3f::default() };
         let mut map = bake_with(composite::SKY_METER_WIDTH, &layer);
         // hot_spots() are in world space; the base layer lives in the map's own frame.
         let hot: Vec<(Vec3f, f32)> = self
@@ -340,8 +378,13 @@ impl Env {
         }
         // Studio mode has no sky and no sun.
         let atmo = self.atmo.as_ref()?;
-        // The same cover that hides the disc in the map dims the key.
-        let cover = |dir: Vec3f| self.clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(dir));
+        // The same cover that hides the discs in the map dims the key: the 2D
+        // layer's unfaded cover (in volumetric mode the cirrus veil's) and the
+        // marched volume.
+        let cover = |dir: Vec3f| {
+            self.clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(dir))
+                * self.volumetric.as_ref().map_or(1.0, |volume| volume.transmittance_toward(dir))
+        };
         let sun = atmo.sun_dir();
         let elevation = sun.y.clamp(-1.0, 1.0).asin();
         let outer = atmo.sun_outer_radius();
@@ -427,12 +470,11 @@ impl Env {
     /// Serial bake of the whole map (tests, small previews): `EnvMap::from_fn`
     /// over `radiance`, so the map is in ibl's convention by construction;
     /// then the texels on the hot spots (the sun's and moon's discs) are
-    /// replaced by their area average.
+    /// replaced by their area average. A volumetric sky wider than
+    /// `volumetric::MARCH_MAX_WIDTH` marches its clouds at that width and
+    /// reads them bilinearly.
     pub fn bake(&self, width: usize) -> EnvMap {
-        let radiance = |d: Vec3f| self.radiance(d);
-        let mut map = bake_with(width, &radiance);
-        refine_hot_spots(&mut map, &radiance, &self.hot_spots());
-        map
+        self.bake_marched(width, volumetric::MARCH_MAX_WIDTH)
     }
 
     /// Row-parallel bake. `run(n, f)` must call f(i) for every i in 0..n
@@ -440,7 +482,41 @@ impl Env {
     /// UI thread run it serially, as `render_kernels::task_pool_executor` does).
     /// A skipped row (cancelled) stays black. Equals `bake` bit for bit.
     pub fn bake_par(&self, width: usize, run: impl FnOnce(usize, &(dyn Fn(usize) + Sync))) -> EnvMap {
-        let radiance = |d: Vec3f| self.radiance(d);
+        self.bake_par_marched(width, volumetric::MARCH_MAX_WIDTH, run)
+    }
+
+    /// The cloud march a bake of `width` reads: None when it marches every
+    /// texel itself (no volume, or a map no wider than `march_max`).
+    fn cloud_cache(&self, width: usize, march_max: usize) -> Option<volumetric::CloudCache> {
+        if self.volumetric.is_some() && width.max(2) > march_max {
+            Some(volumetric::CloudCache::new(march_max))
+        } else {
+            None
+        }
+    }
+
+    /// `bake` with the march's width cap as a parameter, so a test can
+    /// exercise the upsampling at a tiny size.
+    fn bake_marched(&self, width: usize, march_max: usize) -> EnvMap {
+        let cache = self.cloud_cache(width, march_max);
+        let radiance = |d: Vec3f| self.radiance_with(d, None, cache.as_ref());
+        let mut map = bake_with(width, &radiance);
+        refine_hot_spots(&mut map, &radiance, &self.hot_spots());
+        map
+    }
+
+    /// `bake_par` with the march's width cap as a parameter. The cache's rows
+    /// are marched by whichever baking thread first needs them, each exactly
+    /// once and by the same function, so the result still equals the serial
+    /// bake bit for bit.
+    fn bake_par_marched(
+        &self,
+        width: usize,
+        march_max: usize,
+        run: impl FnOnce(usize, &(dyn Fn(usize) + Sync)),
+    ) -> EnvMap {
+        let cache = self.cloud_cache(width, march_max);
+        let radiance = |d: Vec3f| self.radiance_with(d, None, cache.as_ref());
         // Count the rows the runner really baked: a cancelled bake keeps its
         // skipped rows black, so it gets no refinement either.
         let baked = AtomicUsize::new(0);
@@ -464,7 +540,8 @@ impl Env {
     /// atlas, the meter, the fog band) is made from this copy, while the dome
     /// shows `map`. Every other light stays as the map draws it: a wide studio
     /// key's neighbours, the moon beside a sun, the sky's own glow around the
-    /// disc. `None` when the map has no key, or `map` is not a whole map.
+    /// disc. `None` when the map has no key, the key is a base image's sun (a
+    /// file's sun: the renderer fills its cone), or `map` is not a whole map.
     ///
     /// Sampled as the map is, so the two differ by the key's light and nothing
     /// else: a bake through the lookup without the key whose texels on and
@@ -474,8 +551,19 @@ impl Env {
     /// spread by `run` as for [`Self::bake_par`], then the discs' texels are
     /// refined again; outside the cone the key draws nothing, so the map's
     /// texels are the answer there. A cancelled `run` skips rows, as a
-    /// cancelled bake does; the caller drops the copy with the bake.
+    /// cancelled bake does; the caller drops the copy with the bake. A
+    /// volumetric sky reads the same cloud march as the map's bake
+    /// ([`Self::bake_keyless_marched`]).
     pub fn bake_keyless_par(&self, map: &EnvMap, run: impl FnOnce(usize, &(dyn Fn(usize) + Sync))) -> Option<EnvMap> {
+        self.bake_keyless_marched(map, volumetric::MARCH_MAX_WIDTH, run)
+    }
+
+    /// `bake_keyless_par` with the march's width cap as a parameter: the
+    /// texels the key can reach are evaluated again through the lookup without
+    /// it, reading a cloud cache built as the map's bake built it (the same
+    /// rows, marched by the same function), then the discs' texels are refined
+    /// as the map's are; outside the key's reach the map's texels are the answer.
+    fn bake_keyless_marched(&self, map: &EnvMap, march_max: usize, run: impl FnOnce(usize, &(dyn Fn(usize) + Sync))) -> Option<EnvMap> {
         let (term, key) = self.key()?;
         // A base image's sun is a file's sun: what lies behind it in the
         // photograph is unknown, so there is no map without it to bake; the
@@ -489,7 +577,8 @@ impl Env {
             return None;
         }
         let without = Some(term);
-        let radiance = |d: Vec3f| self.radiance_with(d, without);
+        let cache = self.cloud_cache(w, march_max);
+        let radiance = |d: Vec3f| self.radiance_with(d, without, cache.as_ref());
         // The key's reach: its covering cone (a disc's outer limb, a light's
         // reach box) and two texels past it, which holds the refinement's 1.5
         // around a disc.
@@ -514,7 +603,8 @@ impl Env {
         if term == KeyTerm::Image {
             return None;
         }
-        let radiance = |d: Vec3f| self.radiance_with(d, Some(term));
+        let cache = self.cloud_cache(width, volumetric::MARCH_MAX_WIDTH);
+        let radiance = |d: Vec3f| self.radiance_with(d, Some(term), cache.as_ref());
         let mut map = bake_with(width, &radiance);
         refine_hot_spots(&mut map, &radiance, &self.hot_spots());
         Some(map)
@@ -1212,13 +1302,13 @@ mod tests {
         assert!((share - smoothstep(6.0, 8.0, 7.0)).abs() < 1.0e-3, "half way in: {share}");
         let d = key.dir.normalize();
         let all = env.radiance(d);
-        let without = env.radiance_with(d, Some(KeyTerm::Moon(1.0)));
-        let kept = env.radiance_with(d, Some(term));
+        let without = env.radiance_with(d, Some(KeyTerm::Moon(1.0)), None);
+        let kept = env.radiance_with(d, Some(term), None);
         let disc = all - without;
         assert!(disc.y > without.y, "premise: the disc outshines the twilight behind it: {all:?} {without:?}");
         assert!(((all - kept) - disc * share).length() <= 1.0e-4 * disc.length(), "{all:?} - {kept:?} vs {share} x {disc:?}");
         let beside = rotate_y(d, 5.0);
-        assert_eq!(env.radiance_with(beside, Some(term)), env.radiance(beside), "nothing beside the disc changes");
+        assert_eq!(env.radiance_with(beside, Some(term), None), env.radiance(beside), "nothing beside the disc changes");
         // The keyless bake against a whole bake through the same lookup.
         let map = env.bake(64);
         assert_eq!(env.bake_keyless_par(&map, |n, f| (0..n).for_each(f)), env.bake_without_key(64));
