@@ -577,7 +577,8 @@ mod tests {
     /// D1: a key the map does not show carries no light, so it casts no
     /// shadows from a light nobody sees: a stroke under a black flag, a
     /// picture that is all transparent, a sun behind opaque cloth or under
-    /// the base image's horizon line, the moon behind a flag. Each against
+    /// the base image's horizon line, the moon behind a flag, a photographed
+    /// sun behind a flag (a whole-base image's key). Each against
     /// the same set-up with nothing hiding the key, whose key has light.
     #[test]
     fn a_key_the_map_hides_carries_no_light() {
@@ -615,6 +616,9 @@ mod tests {
         let night = crate::hdri::presets::preset("Moonlit night").unwrap();
         let (moon_az, moon_el) = (night.sky.night.moon_azimuth_deg, night.sky.night.moon_elevation_deg);
         cases.push(("the moon behind a black flag", HdriParams { lights: vec![flag(moon_az, moon_el, 10.0)], ..night.clone() }, night, &photo));
+        // A whole-base image brings its own sun: a flag over it in the map hides it from the key too.
+        let photo_sun = HdriParams { base_image: Some(BaseImageParams { key: "photo_sun".to_string(), ..BaseImageParams::default() }), ..HdriParams::default() };
+        cases.push(("the photographed sun behind a black flag", HdriParams { lights: vec![flag(120.0, 30.0, 10.0)], ..photo_sun.clone() }, photo_sun, &photo));
         let mut off = Vec::new();
         for (name, hidden, open, images) in cases {
             let seen = Env::new_with(&open, images).sun().map_or(0.0, |k| crate::sky::luminance(k.irradiance()));
@@ -686,8 +690,9 @@ mod tests {
     /// The pictures the 1b cases name: "frame", a window frame whose frame
     /// and cross bars are transparent and whose glass runs warm to cool;
     /// "stripes", vertical opaque stripes on a transparent ground (a cut-out
-    /// flag); "clear", all transparent; and "photo", a 256 x 128 equirect of
-    /// a blue sky over brown ground.
+    /// flag); "clear", all transparent; "photo", a 256 x 128 equirect of a
+    /// blue sky over brown ground; and "photo_sun", the same with a 3 degree
+    /// sun at azimuth 120, 30 degrees up.
     fn images_1b() -> ImageSet {
         let picture = |w: usize, h: usize, texel: &dyn Fn(usize, usize) -> [f32; 4]| EnvMap {
             width: w,
@@ -706,6 +711,8 @@ mod tests {
         images.insert("stripes", picture(32, 32, &|x, _| [0.0, 0.0, 0.0, if (x / 4) % 2 == 0 { 1.0 } else { 0.0 }]));
         images.insert("clear", picture(8, 8, &|_, _| [1.0, 1.0, 1.0, 0.0]));
         images.insert("photo", EnvMap::from_fn(256, |d| if d[1] > 0.0 { [0.6, 0.7, 0.9] } else { [0.12, 0.1, 0.08] }));
+        let sun = dir_from_az_el(120.0, 30.0);
+        images.insert("photo_sun", EnvMap::from_fn(256, |d| if vec(d).dot(sun) > 1.5f32.to_radians().cos() { [2.0e4; 3] } else if d[1] > 0.0 { [0.6, 0.7, 0.9] } else { [0.12, 0.1, 0.08] }));
         images
     }
 
