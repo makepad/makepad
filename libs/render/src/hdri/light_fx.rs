@@ -185,8 +185,22 @@ impl LightFx {
     /// `sky`, the map's sky along `dir`, at 2^intensity_ev. The frame and the
     /// bars leave what is behind them as it was.
     pub fn window(&self, dir: Vec3f, cover: f32, behind: Vec3f, sky: Vec3f) -> Vec3f {
-        let glass = (cover * self.passes(dir)).max(0.0).min(1.0);
-        behind * (1.0 - glass) + sky * (self.gain * glass * self.glow(dir))
+        let glass = self.glass(dir, cover);
+        behind * (1.0 - glass) + self.through_glass(dir, glass, sky)
+    }
+
+    /// How much of a window filled with sky is glass at `dir`, 0..=1: where
+    /// its shape covers (`cover`) and its gobo passes. The rest is its frame
+    /// and bars, or not the window at all.
+    pub fn glass(&self, dir: Vec3f, cover: f32) -> f32 {
+        (cover * self.passes(dir)).max(0.0).min(1.0)
+    }
+
+    /// The sky a window lets in at `dir` through `glass` of glass: `sky` at
+    /// 2^intensity_ev, times the face's wear. What the window adds to the map,
+    /// and so what it carries as the key (D1).
+    pub fn through_glass(&self, dir: Vec3f, glass: f32, sky: Vec3f) -> Vec3f {
+        sky * (self.gain * glass * self.glow(dir))
     }
 
     /// The share of a key light's emission that gets past everything in front
@@ -394,6 +408,32 @@ mod tests {
         let (a, b) = (through.data[texel][1], sky.data[texel][1]);
         assert!(b > 10.0, "the sun's texel is bright: {b}");
         assert!((a - b).abs() <= 0.01 * b, "through the window {a}, outside {b}");
+    }
+
+    /// D1 (L:136): a window filled with sky as the key hands the engine the
+    /// sky it lets in, not its own Kelvin colour: the key is as blue as the
+    /// sky through the glass. Its lighting copy keeps the glass and lets no
+    /// sky in, as a scrim key keeps its cloth, so what is behind the glass
+    /// stays hidden and the copy lacks exactly the light the key carries.
+    #[test]
+    fn a_window_key_carries_the_sky_it_lets_in() {
+        let mut window = front_light();
+        window.key = true;
+        window.kelvin = 2000.0;
+        window.gobo = Some(GoboParams { panes_x: 1, panes_y: 1, frame: 0.0, fill_sky: true, ..GoboParams::default() });
+        let p = studio(vec![window]);
+        let key = Env::new(&p).sun().expect("the window is the key");
+        assert!(key.validate().is_ok(), "{key:?}");
+        assert!(key.radiance.z > key.radiance.x, "the sky's blue, not 2000 K: {:?}", key.radiance);
+        let serial = |n: usize, f: &(dyn Fn(usize) + Sync)| (0..n).for_each(f);
+        let baked = crate::hdri::envmap::bake_generated_env_map(&p, 64, serial);
+        let keyless = baked.keyless.expect("a keyless copy");
+        let centre = arr(dir_from_az_el(90.0, 5.0));
+        let rgb = |t: [f32; 4]| vec3f(t[0], t[1], t[2]);
+        assert!(luminance(rgb(baked.map.sample(centre))) > 0.0, "the window shows the sky");
+        // The glass passes 1 to the float's rounding: a few 1e-8 of the backdrop at most.
+        let behind = luminance(rgb(baked.map.sample(arr(dir_from_az_el(180.0, 5.0)))));
+        assert!(luminance(rgb(keyless.sample(centre))) < 1.0e-6 * behind, "the glass hides the backdrop and lets no sky in: {:?}", keyless.sample(centre));
     }
 
     #[test]

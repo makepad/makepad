@@ -446,7 +446,7 @@ impl Weather {
         if !(light > 0.0) {
             return Vec3f::default();
         }
-        vec3f(BOLT_COLOR[0], BOLT_COLOR[1], BOLT_COLOR[2]) * (light * self.transmittance_toward(d).sqrt())
+        vec3f(BOLT_COLOR[0], BOLT_COLOR[1], BOLT_COLOR[2]) * (light * self.haze_transmittance(d).sqrt())
     }
 
     /// The veil between the eye and what is drawn along `d`: rain haze, its
@@ -483,9 +483,18 @@ impl Weather {
         c
     }
 
-    /// The fraction of light that passes the rain and the fog along `d`
-    /// (virga apart): what dims the key light.
+    /// The fraction of light that passes the veil along `d`: the rain, the
+    /// shaft of virga hanging there and the fog, as `veil` dims what is behind
+    /// them. It dims the key light, so a sun behind a shaft hands the engine
+    /// what the map shows of it (D1).
     pub fn transmittance_toward(&self, d: Vec3f) -> f32 {
+        self.haze_transmittance(d) * (1.0 - self.virga(d))
+    }
+
+    /// The fraction of light that passes the rain and the fog along `d`, the
+    /// shafts apart. Half its depth dims the bolt, which stands inside the
+    /// rain, shafts and all.
+    fn haze_transmittance(&self, d: Vec3f) -> f32 {
         (-(self.fog_depth(d) + self.rain_depth(d))).exp()
     }
 
@@ -809,6 +818,25 @@ mod tests {
         let hazy = weather("hazy").transmittance_toward(toward_sun);
         assert!(hazy > 0.6 && hazy < 1.0, "{hazy}");
         assert!(weather("storm").transmittance_toward(toward_sun) < weather("rain").transmittance_toward(toward_sun));
+    }
+
+    /// D1 (L:260): a rain shaft in front of a low sun dims its disc in the
+    /// map (`veil`), so it dims the key by as much: what passes the veil
+    /// along a direction is what `transmittance_toward` gives, shaft and all.
+    /// The bolt keeps its own dimming (the haze alone, as before).
+    #[test]
+    fn a_rain_shaft_dims_the_key_as_it_dims_the_disc() {
+        let mut sky = SkyParams::default();
+        sky.weather = Some(WeatherParams { rain: 0.8, fog: 0.2, ..WeatherParams::default() });
+        let rain = Weather::new(&sky, sun()).expect("rain is weather");
+        let ring: Vec<Vec3f> = (0..360).map(|az| dir_from_az_el(az as f32, 8.0)).collect();
+        let shaft = ring.iter().copied().max_by(|a, b| rain.virga(*a).total_cmp(&rain.virga(*b))).unwrap();
+        assert!(rain.virga(shaft) > 0.1, "a shaft hangs on the ring: {}", rain.virga(shaft));
+        for d in ring {
+            let through = rain.veil(d, vec3f(1.0, 1.0, 1.0), Vec3f::default(), Vec3f::default()).y;
+            assert!((rain.transmittance_toward(d) - through).abs() < 1.0e-6, "{through} through the veil, {} toward the key", rain.transmittance_toward(d));
+        }
+        assert!(rain.transmittance_toward(shaft) < (-(rain.fog_depth(shaft) + rain.rain_depth(shaft))).exp() * 0.95);
     }
 }
 

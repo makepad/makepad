@@ -21,8 +21,10 @@
 //! A stroke is placed by its own points (`stroke_of`): a spline through
 //! (azimuth, elevation) directions, cut into great-circle pieces, so its
 //! distances are true angles on the sphere and its half width is its inside
-//! depth. Its key light is integrated here (`ShapedLight::key_color`), not in
-//! the light's box as a polygon's is.
+//! depth. Its key light is not integrated in the light's box, as a polygon's
+//! is, but over the cones round its centre line (`ShapedLight::stroke_cones`),
+//! where studio.rs samples the map's drawing of it along its band
+//! (`ShapedLight::stroke_path`).
 //!
 //! A scrim is a rect in the light's box (A3's rounding and soft edge) of
 //! diffusion cloth lit from behind: it glows with a Gaussian from its middle,
@@ -155,38 +157,29 @@ impl ShapedLight {
         self.occludes && self.blend == Blend::Add
     }
 
-    /// The direction and cos(angular radius) the engine's key light takes.
-    pub fn key_cone(&self) -> (Vec3f, f32) {
+    /// A stroke's cones round its centre line, `(axis, cos_radius,
+    /// cos_cover)`: the line's mean direction, the key cone (the line's
+    /// widest angle from it plus the widest half width: how far the stroke
+    /// spreads from its middle) and the cone that holds everything it draws,
+    /// soft edge included (at most the key cone's cosine). None for a filled
+    /// shape and a scrim, which lie in their light's box, where studio.rs
+    /// integrates them like a rect (a scrim's glow from its middle included).
+    /// A stroke's points place it, not its frame, so studio.rs integrates its
+    /// key over `cos_cover` instead (`studio::over_cone`).
+    pub fn stroke_cones(&self) -> Option<(Vec3f, f32, f32)> {
         match &self.kind {
-            ShapedKind::Fill(fill) => (fill.frame.center, fill.key_cos),
-            ShapedKind::Stroke(stroke) => stroke.key,
-            ShapedKind::Scrim(scrim) => (scrim.frame.center, scrim.key_cos),
+            ShapedKind::Fill(_) | ShapedKind::Scrim(_) => None,
+            ShapedKind::Stroke(stroke) => Some((stroke.key.0, stroke.key.1, stroke.key_cos_cover)),
         }
     }
 
-    /// The radiance the engine's key light takes for a stroke, given the
-    /// light's `light_color`, or None for a shape studio.rs integrates itself.
-    /// `EnvSun`'s meaning: radiance x the solid angle of `key_cone` is the
-    /// light's whole emission. A stroke's points place it, not its frame, so
-    /// studio.rs takes its cone and this radiance: its mean colour times the
-    /// share of the cone it covers. A filled shape and a scrim lie in their
-    /// light's box, where `studio::key_emission` integrates them like a rect
-    /// (a scrim's glow from its middle included).
-    pub fn key_color(&self, color: Vec3f) -> Option<Vec3f> {
+    /// A stroke's centre line, with its reach (how far from the line it
+    /// draws, soft edge included): what tells the key's integral where along
+    /// its cone the stroke is. None for the other shapes.
+    pub fn stroke_path(&self) -> Option<&ArcPath> {
         match &self.kind {
             ShapedKind::Fill(_) | ShapedKind::Scrim(_) => None,
-            ShapedKind::Stroke(stroke) => Some(stroke.mean_color(color) * stroke.key_fill),
-        }
-    }
-
-    /// Plan 2's two other key fields for a stroke, `(facing, cos_cover)`, or
-    /// None for a shape studio.rs integrates itself: a filled shape and a scrim
-    /// lie in their light's box, whose integral (`KeyIntegral`) gives their
-    /// facing share and whose corner cone covers them.
-    pub fn key_spread(&self) -> Option<(f32, f32)> {
-        match &self.kind {
-            ShapedKind::Fill(_) | ShapedKind::Scrim(_) => None,
-            ShapedKind::Stroke(stroke) => Some((stroke.key_facing, stroke.key_cos_cover)),
+            ShapedKind::Stroke(stroke) => Some(&stroke.path),
         }
     }
 }
@@ -201,7 +194,6 @@ struct FillLight {
     /// Half the soft band, tangent units.
     edge: f32,
     hotspot: f32,
-    key_cos: f32,
 }
 
 impl FillLight {
@@ -229,7 +221,6 @@ impl FillLight {
             half: vec2f(hx, hy),
             edge,
             hotspot: HOTSPOT_FALLOFF * clamp01(light.hotspot),
-            key_cos: key_cos(light),
         })
     }
 
@@ -268,12 +259,6 @@ const PROFILE_LIMIT: usize = 32;
 /// Taps of a stroke's colour ramp, joined by straight lines. Kelvin to RGB is
 /// smooth, so 32 steps are far below a visible band.
 const RAMP_TAPS: usize = 33;
-/// Steps along the stroke at which the key's integral takes the stroke's
-/// cross-section; between them it is interpolated (a profile has at most 32 taps).
-const KEY_SAMPLES: usize = 64;
-/// Midpoint samples over each of the two parts of a stroke's cross-section,
-/// its core and its soft edge, in the key's integral.
-const CROSS_SAMPLES: usize = 48;
 
 /// A Lumi-curve: a stroke of light along great-circle pieces.
 #[derive(Clone, Debug)]
@@ -289,16 +274,6 @@ struct StrokeLight {
     ramp: Option<Vec<Vec3f>>,
     /// The key cone: the centre line's mean direction and cos of its radius.
     key: (Vec3f, f32),
-    /// The share of the key cone's solid angle the stroke covers, weighted as
-    /// the map draws it (soft edge, hotspot, the taper's dimming); a soft edge
-    /// past the cone counts in it, as it does for every key.
-    key_fill: f32,
-    /// The ramp's colour averaged as the stroke sends it out (`mean_color`),
-    /// or None without a ramp (or with nothing lit, where `key_fill` is 0).
-    key_mean: Option<Vec3f>,
-    /// Plan 2's `EnvSun.facing` for the stroke: the share of its emission a
-    /// surface facing the key's axis receives, 0..=1.
-    key_facing: f32,
     /// Plan 2's `EnvSun.cos_cover`: the cone round the key's axis that holds
     /// the whole stroke (at most the key cone's cosine).
     key_cos_cover: f32,
@@ -333,84 +308,19 @@ impl StrokeLight {
         let key_cos = cone.cos_max.max(-1.0);
         let hotspot = HOTSPOT_FALLOFF * clamp01(light.hotspot);
         let ramp = stroke_ramp(light, &stroke);
-        // The key's integral of the stroke as `sample_at` draws it, so the key
-        // carries what the map draws, as studio.rs's integral does for every
-        // other key: the band along the centre line piece by piece, and the
-        // round caps at the two ends of an open stroke (past an end the nearest
-        // point is the end itself, so each end draws half a disc). Each part
-        // is weighted by its cross-section (soft edge and hotspot included),
-        // the taper's dimming (min(w, 1)) and the ramp's colour there. A band
-        // about a curving line needs no curvature term: the inside of a bend
-        // loses what the outside gains, until a bend is tighter than the half
-        // width and the band laps over itself there.
-        let sections: Vec<(f32, f32)> = (0..=KEY_SAMPLES)
-            .map(|j| {
-                let w = profile_at(&profile, j as f32 / KEY_SAMPLES as f32);
-                let (band, disc) = cross_section(half_width * w, softness, hotspot);
-                (band * w.min(1.0), disc * w.min(1.0))
-            })
-            .collect();
-        let band_at = |t: f32| {
-            let x = t.max(0.0).min(1.0) * KEY_SAMPLES as f32;
-            let j = (x.floor() as usize).min(KEY_SAMPLES - 1);
-            sections[j].0 + (sections[j + 1].0 - sections[j].0) * (x - j as f32)
-        };
-        // The key's facing share (plan 2's `facing`) comes from the same sum:
-        // each part's light, in luminance, times its cosine to the axis, a
-        // piece's taken at its middle (the band is symmetric about its line,
-        // so across it the cosine averages to the middle's to second order in
-        // the half width) and a cap's at its end point.
-        let (mut area, mut tinted, mut level, mut facing_sum) = (0.0f32, Vec3f::default(), 0.0f32, 0.0f32);
-        let mut add = |e: f32, t: f32, dir: Vec3f| {
-            let c = ramp.as_ref().map_or(Vec3f::all(1.0), |r| ramp_at(r, t));
-            let l = e * crate::sky::luminance(c);
-            area += e;
-            tinted += c * e;
-            level += l;
-            facing_sum += l * dir.dot(cone.axis);
-        };
-        let arc = |a: Vec3f, b: Vec3f| a.dot(b).clamp(-1.0, 1.0).acos();
-        let total: f32 = line.windows(2).map(|w| arc(w[0], w[1])).sum();
-        let mut along = 0.0f32;
-        for w in line.windows(2) {
-            let len = arc(w[0], w[1]);
-            let t = if total > 0.0 { (along + 0.5 * len) / total } else { 0.5 };
-            along += len;
-            add(len * band_at(t), t, (w[0] + w[1]).normalize());
-        }
-        let (first, last) = (line[0], line[line.len() - 1]);
-        // A closed stroke ends where it starts, in its band: no caps.
-        if (first - last).length() > 1.0e-4 {
-            add(0.5 * sections[0].1, 0.0, first);
-            add(0.5 * sections[KEY_SAMPLES].1, 1.0, last);
-        }
-        // The key cone's solid angle from its f32 cosine, the cone every
-        // consumer of the key computes (plan 2's `EnvSun::cone_radiance`), so
-        // radiance x cone gives back exactly the light handed over.
-        let cone_solid = std::f32::consts::TAU * (1.0 - key_cos);
-        let key_fill = if cone_solid > 1.0e-6 { area / cone_solid } else { 1.0 };
-        let key_mean = ramp.as_ref().filter(|_| area > 0.0).map(|_| tinted * (1.0 / area));
-        let key_facing = if level > 0.0 { (facing_sum / level).clamp(0.0, 1.0) } else { 1.0 };
         // The covering cone (plan 2's `cos_cover`): every lit direction lies
         // within `reach` of the centre line, and a great-circle piece bows at
         // most half its length from its ends, so the line's widest angle from
         // the key's axis plus both holds the whole stroke, soft edge included.
-        // `around` over the same line gives the same axis as `cone`.
+        // `around` over the same line gives the same axis as `cone`. The key's
+        // own light is not summed here: studio.rs integrates the map's drawing
+        // of the stroke over this cone (D1), its band lapping over itself in a
+        // tight bend, the flags after it and what hangs in front of it all
+        // included.
+        let arc = |a: Vec3f, b: Vec3f| a.dot(b).clamp(-1.0, 1.0).acos();
         let piece = line.windows(2).fold(0.0f32, |m, w| m.max(arc(w[0], w[1])));
         let key_cos_cover = CullCone::around(&line, reach + 0.5 * piece).cos_max.max(-1.0).min(key_cos);
-        Some(StrokeLight {
-            path,
-            half_width,
-            softness,
-            hotspot,
-            profile,
-            ramp,
-            key: (cone.axis, key_cos),
-            key_fill,
-            key_mean,
-            key_facing,
-            key_cos_cover,
-        })
+        Some(StrokeLight { path, half_width, softness, hotspot, profile, ramp, key: (cone.axis, key_cos), key_cos_cover })
     }
 
     /// Mask and emission at `dir`, and how far along the stroke the nearest
@@ -446,44 +356,6 @@ impl StrokeLight {
             None => color,
         }
     }
-
-    /// The stroke's colour as its emission averages it: the ramp weighted by
-    /// what each part of the stroke sends out (its width, the taper's dimming,
-    /// its round ends), so that this times `key_fill` times the key cone is
-    /// the stroke's whole emission. `color` (the light's one colour) without
-    /// a ramp.
-    fn mean_color(&self, color: Vec3f) -> Vec3f {
-        self.key_mean.unwrap_or(color)
-    }
-}
-
-/// What a stroke's cross-section of half width `hw` (radians) sends out per
-/// unit of its colour, `(band, disc)`: the solid angle per radian of its
-/// length (a band about a great circle, area element cos x dx on either
-/// side) and over a whole disc round a point (its two end caps together,
-/// area element 2π sin x dx). Each distance x from the centre line weighs
-/// as `sample_at` draws it: the soft edge's coverage times the hotspot's
-/// dimming. The core and the soft band are summed apart, so a hard edge's
-/// step falls between them and costs no accuracy.
-fn cross_section(hw: f32, softness: f32, hotspot: f32) -> (f32, f32) {
-    let edge = 0.5 * (softness * hw).max(EDGE_MIN);
-    let unit = hw.max(EDGE_MIN);
-    let core = (hw - edge).max(0.0);
-    let (mut band, mut disc) = (0.0f32, 0.0f32);
-    for (lo, hi) in [(0.0, core), (core, hw + edge)] {
-        let step = (hi - lo) / CROSS_SAMPLES as f32;
-        for i in 0..CROSS_SAMPLES {
-            let x = lo + (i as f32 + 0.5) * step;
-            let mut weight = (1.0 - smoothstep(hw - edge, hw + edge, x)) * step;
-            if hotspot > 0.0 {
-                weight *= (-hotspot * (x / unit) * (x / unit)).exp();
-            }
-            // Nothing lies farther than a right angle from a great circle.
-            band += weight * x.cos().max(0.0);
-            disc += weight * x.sin().max(0.0);
-        }
-    }
-    (2.0 * band, std::f32::consts::TAU * disc)
 }
 
 /// The stroke a light draws: its own block, with the arch over the light's
@@ -639,7 +511,6 @@ struct ScrimLight {
     frame_w: f32,
     /// 1 / (2 sigma²), sigma = source_size in unit-box units.
     inv_two_sigma2: f32,
-    key_cos: f32,
 }
 
 impl ScrimLight {
@@ -659,7 +530,6 @@ impl ScrimLight {
             edge: 0.5 * (clamp01(light.softness) * short).max(EDGE_MIN),
             frame_w,
             inv_two_sigma2,
-            key_cos: key_cos(light),
         }
     }
 
@@ -695,11 +565,6 @@ fn clamp01(x: f32) -> f32 {
     x.max(0.0).min(1.0)
 }
 
-/// The key cone's cosine for a light of this size: cos(max(w, h) / 2), as
-/// studio.rs gives a rect.
-fn key_cos(light: &LightParams) -> f32 {
-    (0.5 * light.width_deg.max(light.height_deg).max(0.1).min(170.0)).to_radians().cos()
-}
 
 /// The sign that turns the frame's `right` into the box's +x, which points to
 /// increasing azimuth: the viewer's right on the panorama. A3 builds its frame
@@ -1149,12 +1014,15 @@ mod tests {
         // The engine lights with radiance x the cone's solid angle. A 60° x 4° stroke
         // covers 2 * 60° * sin(2°) = 0.0731 sr, and its two round ends together a
         // 2° disc, 2π (1 - cos 2°) = 0.0038 sr: 0.0769 sr of the 0.955 sr cone, 8.05 %.
+        // studio.rs measures it from the stroke's drawing, jittered along its hard
+        // edge (D1), to within a few tenths of a per cent.
         let fill = crate::sky::luminance(sun.radiance) / crate::sky::luminance(light_color(&light));
         assert!((fill - 0.0805).abs() < 0.001, "{fill}");
-        // Plan 2's other two fields come from the shape core too: the 60° arc faces
-        // its axis with the mean cosine over ±30°, sin 30° / (π/6) = 0.955, its ends
-        // with cos 30°, together 0.950 (the map's, baked at 4K: 0.9500), and its
-        // covering cone reaches past the key cone by its edge and half a piece.
+        // Plan 2's other two fields come from the same integral and the shape core:
+        // the 60° arc faces its axis with the mean cosine over ±30°, sin 30° / (π/6)
+        // = 0.955, its ends with cos 30°, together 0.950 (the map's, baked at 4K:
+        // 0.9500), and its covering cone reaches past the key cone by its edge and
+        // half a piece.
         assert!(sun.validate().is_ok(), "{sun:?}");
         assert!((sun.facing - 0.950).abs() < 0.002, "{}", sun.facing);
         assert!(sun.cos_cover < sun.cos_radius && sun.cos_cover > 33.5f32.to_radians().cos(), "{} vs {}", sun.cos_cover, sun.cos_radius);

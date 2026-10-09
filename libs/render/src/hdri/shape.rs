@@ -596,6 +596,17 @@ impl ArcPath {
         self.reach
     }
 
+    /// The same arcs with `margin` radians more reach: `nearest` then finds
+    /// every direction within that much more of the path, which tells a scan
+    /// whether a cell of that radius round a direction may touch the stroke.
+    pub fn widened(&self, margin: f32) -> ArcPath {
+        let mut points: Vec<Vec3f> = self.arcs.iter().map(|g| g.a).collect();
+        if let Some(last) = self.arcs.last() {
+            points.push(last.b);
+        }
+        ArcPath::new(&points, false, self.reach + margin.max(0.0))
+    }
+
     /// Every direction within reach of the path lies in this cone.
     pub fn cull(&self) -> CullCone {
         self.cull

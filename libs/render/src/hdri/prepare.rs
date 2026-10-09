@@ -524,19 +524,34 @@ mod tests {
     /// the key stays in the copy (no double count) and nothing else leaves it
     /// (no loss); a key the clouds hide entirely (the Overcast preset's)
     /// takes nothing. Measured on 1024 wide maps, the engine's bake width.
-    /// The tolerances are the bake's own sampling of the key, which N3 does
-    /// not change: a studio key's texels hold its integral to 0.17 % at 1024
-    /// (the thin ring; the broad keys to 0.003 %), a disc a fraction of a
-    /// degree wide is area-averaged to a few percent (the moon's 0.52 degree
-    /// disc, the worst, to 2.2 %). The cone fill fails it: the Overcast
+    ///
+    /// Every preset, and every kind of key plan 1b brings ([`keys_1b`], the
+    /// plan owner's D1: the key is measured from the map's own drawing), so
+    /// the next feature cannot break it silently. Each case names its
+    /// tolerance, the sampling of the key by the bake and by the key's own
+    /// integral, which N3 does not change: a studio key's texels hold its
+    /// integral to 0.17 % at 1024 (the thin ring; the broad keys to 0.003 %),
+    /// a disc a fraction of a degree wide is area-averaged to a few percent
+    /// (the moon's 0.52 degree disc, the worst, to 2.2 %), and a key whose
+    /// integral is jittered (a stroke's, a window's, what hangs in front of a
+    /// key) holds it to its strata. The cone fill fails it: the Overcast
     /// dome's cover held 13-16 % of the light beside the key.
     #[test]
     fn a_generated_keys_light_reaches_the_engine_once() {
         use crate::hdri::presets::{preset, PRESET_NAMES};
+        let mut cases: Vec<KeyCase> = PRESET_NAMES
+            .iter()
+            .map(|name| {
+                let params = preset(name).unwrap();
+                let disc = matches!(Env::new(&params).key(), Some((KeyTerm::Sun | KeyTerm::Moon(_), _)));
+                KeyCase { name: name.to_string(), params, images: ImageSet::default(), tolerance: if disc { 0.03 } else { 0.002 } }
+            })
+            .collect();
+        cases.extend(keys_1b());
         let mut off = Vec::new();
-        for name in PRESET_NAMES {
-            let params = preset(name).unwrap();
-            let baked = super::super::envmap::bake_generated_env_map(&params, 1024, all_cores);
+        for case in &cases {
+            let name = &case.name;
+            let baked = super::super::envmap::bake_generated_env_map_with(&case.params, &case.images, 1024, all_cores);
             let Some(key) = baked.sun else { continue };
             let removal = baked.keyless.as_ref().map_or(KeyRemoval::Nothing, KeyRemoval::Exact);
             let (map, lit) = (emission(&baked.map), emission(&lighting_copy(&baked.map, removal, LIGHTING_MAX_WIDTH)));
@@ -549,14 +564,329 @@ mod tests {
                 }
                 continue;
             }
-            let disc = matches!(Env::new(&params).key(), Some((KeyTerm::Sun | KeyTerm::Moon(_), _)));
-            let tolerance = if disc { 0.03 } else { 0.002 };
+            let tolerance = case.tolerance;
             let ratio = [removed[0] / light[0], removed[1] / light[1], removed[2] / light[2]];
+            println!("{name}: {:.4} {:.4} {:.4}", ratio[0], ratio[1], ratio[2]);
             if !ratio.iter().all(|r| (r - 1.0).abs() < tolerance) {
                 off.push(format!("{name}: the copy lacks {:.4} {:.4} {:.4} of the key's light (within {tolerance})", ratio[0], ratio[1], ratio[2]));
             }
         }
         assert!(off.is_empty(), "the light the copy lacks vs the light the key carries:\n{}", off.join("\n"));
+    }
+
+    /// D1: a key the map does not show carries no light, so it casts no
+    /// shadows from a light nobody sees: a stroke under a black flag, a
+    /// picture that is all transparent, a sun behind opaque cloth or under
+    /// the base image's horizon line, the moon behind a flag. Each against
+    /// the same set-up with nothing hiding the key, whose key has light.
+    #[test]
+    fn a_key_the_map_hides_carries_no_light() {
+        let flag = |azimuth_deg: f32, elevation_deg: f32, size_deg: f32| LightParams {
+            name: "Flag".to_string(),
+            azimuth_deg,
+            elevation_deg,
+            width_deg: size_deg,
+            height_deg: size_deg,
+            corner: 0.0,
+            softness: 0.0,
+            blend: "multiply".to_string(),
+            rgb: Some([0.0; 3]),
+            ..LightParams::default()
+        };
+        let cloth = |azimuth_deg: f32, elevation_deg: f32| LightParams {
+            name: "Scrim".to_string(),
+            shape: "scrim".to_string(),
+            azimuth_deg,
+            elevation_deg,
+            width_deg: 16.0,
+            height_deg: 16.0,
+            softness: 0.0,
+            ..LightParams::default()
+        };
+        let photo = images_1b();
+        let mut cases: Vec<(&str, HdriParams, HdriParams, &ImageSet)> = Vec::new();
+        let open = studio_1b(vec![arch_key()]);
+        cases.push(("a stroke under a black flag", studio_1b(vec![arch_key(), flag(90.0, 10.0, 90.0)]), open, &photo));
+        let clear = LightParams { image: Some(LightImageParams { key: "clear".to_string(), fit: "stretch".to_string(), alpha_as_mask: true }), ..picture_key() };
+        cases.push(("an all-transparent picture", studio_1b(vec![clear]), studio_1b(vec![picture_key()]), &photo));
+        let sun = manual_sun(150.0, 35.0);
+        cases.push(("the sun behind opaque cloth", HdriParams { lights: vec![cloth(150.0, 35.0)], ..sun.clone() }, sun.clone(), &photo));
+        cases.push(("the sun under the image's horizon line", HdriParams { base_image: Some(replace_sky(45.0, 0.0)), ..sun.clone() }, sun.clone(), &photo));
+        let night = crate::hdri::presets::preset("Moonlit night").unwrap();
+        let (moon_az, moon_el) = (night.sky.night.moon_azimuth_deg, night.sky.night.moon_elevation_deg);
+        cases.push(("the moon behind a black flag", HdriParams { lights: vec![flag(moon_az, moon_el, 10.0)], ..night.clone() }, night, &photo));
+        let mut off = Vec::new();
+        for (name, hidden, open, images) in cases {
+            let seen = Env::new_with(&open, images).sun().map_or(0.0, |k| crate::sky::luminance(k.irradiance()));
+            assert!(seen > 0.0, "{name}: the open set-up has a lit key");
+            let hidden = Env::new_with(&hidden, images).sun().map_or(0.0, |k| crate::sky::luminance(k.irradiance()));
+            if !(hidden <= 1.0e-6 * seen) {
+                off.push(format!("{name}: the key carries {:.3e} of what it carries in the open", hidden / seen));
+            }
+        }
+        assert!(off.is_empty(), "keys the map hides:\n{}", off.join("\n"));
+    }
+
+    /// One map of the end-to-end key test: its params, the pictures it
+    /// names, and the tolerance its key is held to.
+    struct KeyCase {
+        name: String,
+        params: HdriParams,
+        images: ImageSet,
+        tolerance: f64,
+    }
+
+    /// A studio of the given lights over the default grey backdrop, which a
+    /// window or a scrim key hides where it hangs.
+    fn studio_1b(lights: Vec<LightParams>) -> HdriParams {
+        HdriParams { mode: "studio".to_string(), lights, ..HdriParams::default() }
+    }
+
+    /// The default sky with a manual sun.
+    fn manual_sun(azimuth_deg: f32, elevation_deg: f32) -> HdriParams {
+        let mut p = HdriParams::default();
+        p.sky.sun.mode = "manual".to_string();
+        p.sky.sun.azimuth_deg = azimuth_deg;
+        p.sky.sun.elevation_deg = elevation_deg;
+        p
+    }
+
+    /// A soft 4 degree arch as the key, with a hotspot.
+    fn arch_key() -> LightParams {
+        LightParams {
+            key: true,
+            shape: "stroke".to_string(),
+            softness: 0.6,
+            hotspot: 0.3,
+            stroke: Some(StrokeParams { points: vec![[60.0, 5.0], [90.0, 15.0], [120.0, 5.0]], width_deg: 4.0, ..StrokeParams::default() }),
+            ..LightParams::default()
+        }
+    }
+
+    /// A 60 x 40 degree soft rect key showing the picture "frame".
+    fn picture_key() -> LightParams {
+        LightParams {
+            key: true,
+            azimuth_deg: 200.0,
+            elevation_deg: 20.0,
+            width_deg: 60.0,
+            height_deg: 40.0,
+            softness: 0.1,
+            image: Some(LightImageParams { key: "frame".to_string(), fit: "stretch".to_string(), alpha_as_mask: true }),
+            ..LightParams::default()
+        }
+    }
+
+    /// Sky replacement over the photograph "photo": its line at `horizon_deg`
+    /// with a soft hand-over `feather_deg` wide.
+    fn replace_sky(horizon_deg: f32, feather_deg: f32) -> BaseImageParams {
+        BaseImageParams { key: "photo".to_string(), replace_sky: true, horizon_deg, feather_deg, ..BaseImageParams::default() }
+    }
+
+    /// The pictures the 1b cases name: "frame", a window frame whose frame
+    /// and cross bars are transparent and whose glass runs warm to cool;
+    /// "stripes", vertical opaque stripes on a transparent ground (a cut-out
+    /// flag); "clear", all transparent; and "photo", a 256 x 128 equirect of
+    /// a blue sky over brown ground.
+    fn images_1b() -> ImageSet {
+        let picture = |w: usize, h: usize, texel: &dyn Fn(usize, usize) -> [f32; 4]| EnvMap {
+            width: w,
+            height: h,
+            data: (0..w * h).map(|i| texel(i % w, i / w)).collect(),
+        };
+        let mut images = ImageSet::default();
+        images.insert(
+            "frame",
+            picture(48, 32, &|x, y| {
+                let bar = x < 4 || x >= 44 || y < 4 || y >= 28 || (22..26).contains(&x) || (14..18).contains(&y);
+                let t = x as f32 / 47.0;
+                [1.5 - t, 1.0, 0.5 + t, if bar { 0.0 } else { 1.0 }]
+            }),
+        );
+        images.insert("stripes", picture(32, 32, &|x, _| [0.0, 0.0, 0.0, if (x / 4) % 2 == 0 { 1.0 } else { 0.0 }]));
+        images.insert("clear", picture(8, 8, &|_, _| [1.0, 1.0, 1.0, 0.0]));
+        images.insert("photo", EnvMap::from_fn(256, |d| if d[1] > 0.0 { [0.6, 0.7, 0.9] } else { [0.12, 0.1, 0.08] }));
+        images
+    }
+
+    /// Every kind of key plan 1b brings, each where the map does something
+    /// to it that the key must follow (D1): strokes under flags, gels and
+    /// cloth, a wide stroke, pictures, what hangs in front of a key, a window
+    /// filled with sky as the key, and the sun and the moon behind lights,
+    /// under the base image's line, behind a rain shaft, in fog and under a
+    /// cloud volume.
+    fn keys_1b() -> Vec<KeyCase> {
+        let images = images_1b();
+        let soft_flag = |azimuth_deg: f32, elevation_deg: f32, size_deg: f32, rgb: [f32; 3]| LightParams {
+            name: "Flag".to_string(),
+            azimuth_deg,
+            elevation_deg,
+            width_deg: size_deg,
+            height_deg: size_deg,
+            softness: 0.6,
+            blend: "multiply".to_string(),
+            rgb: Some(rgb),
+            ..LightParams::default()
+        };
+        let scrim = |azimuth_deg: f32, elevation_deg: f32, size_deg: f32, softness: f32| LightParams {
+            name: "Scrim".to_string(),
+            shape: "scrim".to_string(),
+            azimuth_deg,
+            elevation_deg,
+            width_deg: size_deg,
+            height_deg: size_deg,
+            softness,
+            scrim: Some(ScrimParams { source_size: 0.5, frame: 0.0 }),
+            ..LightParams::default()
+        };
+        let with_stroke = |edit: &dyn Fn(&mut StrokeParams)| {
+            let mut light = arch_key();
+            edit(light.stroke.as_mut().unwrap());
+            light
+        };
+        let sun = manual_sun(150.0, 35.0);
+        let night = crate::hdri::presets::preset("Moonlit night").unwrap();
+        let (moon_az, moon_el) = (night.sky.night.moon_azimuth_deg, night.sky.night.moon_elevation_deg);
+        let weather = |edit: &dyn Fn(&mut WeatherParams)| {
+            let mut w = WeatherParams::default();
+            edit(&mut w);
+            w
+        };
+        // A low sun behind the densest rain shaft along its circle.
+        let virga_sun = {
+            let mut p = manual_sun(0.0, 8.0);
+            p.sky.weather = Some(weather(&|w| w.rain = 0.8));
+            let rain = crate::hdri::weather::Weather::new(&p.sky, dir_from_az_el(0.0, 8.0)).expect("rain is weather");
+            let through = |az: f32| rain.veil(dir_from_az_el(az, 8.0), vec3f(1.0, 1.0, 1.0), Vec3f::default(), Vec3f::default()).y;
+            let az = (0..360).map(|a| a as f32).min_by(|a, b| through(*a).total_cmp(&through(*b))).unwrap();
+            assert!(through(az) < 0.95 * (0..360).map(|a| through(a as f32)).fold(0.0, f32::max), "a shaft darkens the sun's circle");
+            p.sky.sun.azimuth_deg = az;
+            p
+        };
+        let window = LightParams {
+            key: true,
+            azimuth_deg: 0.0,
+            elevation_deg: 20.0,
+            width_deg: 40.0,
+            height_deg: 30.0,
+            softness: 0.05,
+            intensity_ev: 1.0,
+            gobo: Some(GoboParams { fill_sky: true, ..GoboParams::default() }),
+            ..LightParams::default()
+        };
+        let sky_window = LightParams {
+            key: false,
+            azimuth_deg: 150.0,
+            elevation_deg: 35.0,
+            width_deg: 20.0,
+            height_deg: 20.0,
+            softness: 0.0,
+            intensity_ev: 1.0,
+            gobo: Some(GoboParams { panes_x: 1, panes_y: 1, frame: 0.0, fill_sky: true, ..GoboParams::default() }),
+            ..LightParams::default()
+        };
+        let case = |name: &str, params: HdriParams, tolerance: f64| KeyCase { name: name.to_string(), params, images: images.clone(), tolerance };
+        vec![
+            case("1b: a stroke key half under a soft black flag", studio_1b(vec![arch_key(), soft_flag(112.0, 8.0, 24.0, [0.0; 3])]), 0.01),
+            case("1b: a stroke key under a blue gel", studio_1b(vec![arch_key(), soft_flag(80.0, 12.0, 30.0, [0.3, 0.5, 1.0])]), 0.01),
+            case(
+                "1b: a ramped stroke key half behind a scrim",
+                studio_1b(vec![with_stroke(&|s| s.end_rgb = Some([0.2, 0.4, 1.0])), scrim(72.0, 8.0, 30.0, 0.5)]),
+                0.01,
+            ),
+            case(
+                "1b: a wide closed stroke key (45 degrees)",
+                studio_1b(vec![with_stroke(&|s| {
+                    s.points = vec![[80.0, 0.0], [100.0, 0.0], [90.0, 15.0]];
+                    s.width_deg = 45.0;
+                    s.closed = true;
+                })]),
+                0.01,
+            ),
+            case(
+                "1b: a stroke key behind leaves, worn",
+                studio_1b(vec![LightParams {
+                    gobo: Some(GoboParams { kind: "leaves".to_string(), density: 0.4, distance: 0.3, seed: 2, ..GoboParams::default() }),
+                    imperfections: Some(ImperfectionParams { wrinkle: 0.8, dust: 0.4, weave: 0.5, seed: 1 }),
+                    ..arch_key()
+                }]),
+                0.02,
+            ),
+            case("1b: a picture key with a masked window frame", studio_1b(vec![picture_key()]), 0.005),
+            case(
+                "1b: a picture key behind a cut-out flag",
+                studio_1b(vec![
+                    picture_key(),
+                    LightParams {
+                        image: Some(LightImageParams { key: "stripes".to_string(), fit: "stretch".to_string(), alpha_as_mask: true }),
+                        softness: 0.0,
+                        ..soft_flag(210.0, 25.0, 30.0, [1.0; 3])
+                    },
+                ]),
+                0.01,
+            ),
+            case(
+                "1b: a rect key behind a window gobo, with barn doors, a grid and wear",
+                studio_1b(vec![LightParams {
+                    key: true,
+                    azimuth_deg: 30.0,
+                    elevation_deg: 25.0,
+                    width_deg: 50.0,
+                    height_deg: 40.0,
+                    gobo: Some(GoboParams::default()),
+                    aim: Some(AimParams { yaw_deg: 8.0, grid: 0.3, barn_doors: [30.0, 0.0, 45.0, 0.0], ..AimParams::default() }),
+                    imperfections: Some(ImperfectionParams { wrinkle: 0.6, dust: 0.3, weave: 0.3, seed: 3 }),
+                    ..LightParams::default()
+                }]),
+                0.02,
+            ),
+            case(
+                "1b: a hexagon key and a scrim key's cloth over it",
+                studio_1b(vec![
+                    LightParams { key: true, shape: "polygon".to_string(), azimuth_deg: 300.0, elevation_deg: 15.0, width_deg: 40.0, height_deg: 30.0, softness: 0.3, ..LightParams::default() },
+                    scrim(310.0, 20.0, 24.0, 0.4),
+                ]),
+                0.002,
+            ),
+            case("1b: a window filled with sky as the key", studio_1b(vec![window.clone()]), 0.02),
+            case(
+                // The sun's disc is a fraction of a degree: the window's integral
+                // must find it as the bake's refinement does.
+                "1b: a window filled with sky as the key, the sun in it",
+                {
+                    let sun_dir = Env::new(&HdriParams::default()).sun_dir().expect("the default sky has a sun");
+                    let (azimuth_deg, elevation_deg) = az_el_from_dir(sun_dir);
+                    studio_1b(vec![LightParams { azimuth_deg, elevation_deg: elevation_deg - 4.0, intensity_ev: 0.0, ..window.clone() }])
+                },
+                0.03,
+            ),
+            case("1b: the sun in a soft scrim's edge", HdriParams { lights: vec![scrim(160.0, 35.0, 20.0, 1.0)], ..sun.clone() }, 0.03),
+            case("1b: the sun behind a soft coloured gel", HdriParams { lights: vec![soft_flag(150.0, 36.0, 16.0, [0.6, 0.4, 0.2])], ..sun.clone() }, 0.03),
+            case("1b: the sun in a window filled with sky at +1 EV", HdriParams { lights: vec![sky_window], ..sun.clone() }, 0.03),
+            case("1b: the moon in a soft scrim's edge", HdriParams { lights: vec![scrim(moon_az, moon_el + 9.0, 16.0, 1.0)], ..night.clone() }, 0.03),
+            case(
+                "1b: the sun half under the image's horizon line",
+                HdriParams { base_image: Some(replace_sky(6.0, 8.0)), ..manual_sun(120.0, 6.0) },
+                0.03,
+            ),
+            case("1b: the sun behind a rain shaft", virga_sun, 0.03),
+            case(
+                "1b: the sun in fog",
+                HdriParams { sky: SkyParams { weather: Some(weather(&|w| w.fog = 0.4)), ..sun.sky.clone() }, ..sun.clone() },
+                0.03,
+            ),
+            case(
+                // At the edge of a cloud: about half of the sun gets through.
+                "1b: the sun at the edge of a cloud volume",
+                {
+                    let mut p = manual_sun(220.0, 35.0);
+                    p.sky.clouds.coverage = 0.4;
+                    p.sky.volumetric = Some(VolumetricParams::default());
+                    p
+                },
+                0.03,
+            ),
+        ]
     }
 
     #[test]

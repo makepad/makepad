@@ -22,6 +22,8 @@ use makepad_draw::*;
 use super::{az_el_from_dir, dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams};
 use crate::sky::luminance;
 use super::shaped::ShapedLight;
+use super::shape::ArcPath;
+use super::noise::hash01;
 use super::gels::{gel_stack, shifted_kelvin};
 use super::spectrum::light_source_rgb;
 use super::image_light::{ImageSet, LightImage};
@@ -191,6 +193,56 @@ const HOTSPOT_FALLOFF: f32 = 4.0;
 /// by 0.09 %.
 const KEY_GRID: usize = 256;
 
+/// D2: the furthest a stroke may spread from its middle and still be the key,
+/// in degrees: the widest key cone a rect gets (half its 170 degree limit).
+/// A stroke round the whole horizon has no middle to light from: the engine's
+/// light would come from straight up, lighting almost nothing, while all of
+/// the stroke's light left the map's lighting.
+pub const KEY_MAX_SPREAD_DEG: f32 = 85.0;
+
+/// D2: whether `light` is a stroke that spreads more than
+/// [`KEY_MAX_SPREAD_DEG`] from its middle (its centre line's widest angle from
+/// its mean direction, plus its widest half width), so that marked as the key
+/// it is not handed to the engine: it stays a light of the map, lighting the
+/// scene through the map like any other, and under a sky the sun leads. The
+/// panel says so where the key is chosen. False for every other light.
+pub fn spreads_too_wide_to_be_key(light: &LightParams) -> bool {
+    ShapedLight::new(&LightParams { enabled: true, ..light.clone() }).is_some_and(|shaped| too_wide_to_lead(&shaped))
+}
+
+/// [`spreads_too_wide_to_be_key`] for a light the shape core draws.
+fn too_wide_to_lead(shaped: &ShapedLight) -> bool {
+    shaped.stroke_cones().is_some_and(|(_, cos_radius, _)| !(cos_radius >= KEY_MAX_SPREAD_DEG.to_radians().cos()))
+}
+
+/// Coarse cells per axis of [`over_cone`]'s grid over a key's covering cone.
+const CONE_CELLS: usize = 64;
+/// The most samples [`over_cone`] takes in all: past it every cell it refines
+/// gets fewer, in proportion.
+const CONE_BUDGET: usize = 1 << 18;
+/// The most jittered samples per axis one coarse cell takes.
+const CONE_FINE_MAX: usize = 64;
+/// [`over_cone`]'s jitter seed: fixed, so the same light always gives the same key.
+const CONE_JITTER_SEED: u32 = 0x636f_6e65;
+/// Samples per stroke reach (half its width, soft edge included) along each
+/// axis of a cell a stroke key draws in: a hard edge then averages out along
+/// the stroke (a hard straight 4 degree stroke gives 0.08049 of its cone
+/// against the exact 0.0805), and a tapering tip is still seen.
+const STROKE_SAMPLES_PER_REACH: f32 = 8.0;
+/// The most samples per axis a cell of a stroke key takes. A stroke thinner
+/// than a cell's side over 2 (0.3 degrees on a 60 degree arch) gets fewer per
+/// reach, which the jitter along its length still averages (13 ms for that
+/// key in release, against 55 ms at 32).
+const STROKE_FINE_MAX: usize = 16;
+/// Samples per axis of every cell of a window filled with sky as the key (D1):
+/// the sky is smooth, and the glass's frame and bars, hard edges at any
+/// angle, average out under the jitter (the default window within 0.1 % of
+/// what a 1024 wide map draws).
+const WINDOW_FINE: usize = 2;
+/// Samples per disc radius along each axis of a cell a disc (the sun or the
+/// moon) shows through a window in: the disc is far smaller than a cell.
+const DISC_SAMPLES_PER_RADIUS: f32 = 8.0;
+
 /// The backdrop gradient and the enabled lights, prepared once per map.
 #[derive(Clone, Debug)]
 pub struct Studio {
@@ -212,16 +264,25 @@ pub struct Studio {
 
 impl Studio {
     /// `lights` are taken in list order; disabled ones are dropped here. The key is the
-    /// first enabled Add light marked `key`. A flag (Multiply) never leads the lighting.
+    /// first enabled Add light marked `key`, unless it is a stroke that spreads too wide
+    /// to lead (D2, [`spreads_too_wide_to_be_key`]). A flag (Multiply) never leads the
+    /// lighting.
     ///
-    /// The key's cone covers the larger of width and height, and its radiance is the
-    /// light's emission spread over that cone ([`EnvSun`]'s one meaning), integrated
-    /// here once per map by [`key_emission`], which also gives the share a surface
-    /// facing the key receives (`facing`) and the cone that holds the whole reach
-    /// (`cos_cover`).
-    /// A stroke (1b) is placed by its points, not by its azimuth and elevation, so its
-    /// cone, its radiance (the same meaning), its facing share and its covering cone
-    /// come from the shape core instead.
+    /// The key carries exactly the light the map draws of it (D1), measured from the
+    /// map's own drawing once per map: its shape, soft edge, hotspot, picture and ramp,
+    /// what hangs in front of it, and the flags, gels and cloth after it. The key's
+    /// cone covers the larger of width and height, and its radiance is that emission
+    /// spread over the cone ([`EnvSun`]'s one meaning), from the same integral as the
+    /// share a surface facing the key receives (`facing`) and the cone that holds its
+    /// whole reach (`cos_cover`):
+    /// - a light in its own box (a rect, disc, ring, polygon or scrim, with or without a
+    ///   picture) by [`key_emission`] over that box, times what passes what hangs in
+    ///   front of it (`key_share`);
+    /// - a stroke (1b), which its points place, over the cones round its centre line,
+    ///   by [`over_cone`], where its band runs;
+    /// - a window filled with sky, whose light is the sky, by `Env`, which knows that
+    ///   sky (`measured_window_key`): until then `key()` is None.
+    ///
     /// No pictures: an image light is drawn plain (see `new_with`).
     pub fn new(studio: &StudioParams, lights: &[LightParams]) -> Studio {
         Studio::new_with(studio, lights, &ImageSet::default())
@@ -233,35 +294,14 @@ impl Studio {
         let rgb = |c: [f32; 3]| vec3f(c[0].max(0.0), c[1].max(0.0), c[2].max(0.0));
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
         let prepared: Vec<PreparedLight> = enabled.iter().map(|l| PreparedLight::new(l, images)).collect();
-        let key_index = enabled.iter().position(|l| l.key && l.blend() == Blend::Add);
+        let key_index = enabled
+            .iter()
+            .zip(&prepared)
+            .position(|(l, p)| l.key && l.blend() == Blend::Add && !p.shaped.as_ref().is_some_and(too_wide_to_lead));
         // What hangs in front of each light, built for the same lights in the
         // same order as the prepared lights above. Before the key: a flag's
         // gobo cuts what the flag takes out of the key (B8).
         let fx: Vec<LightFx> = enabled.iter().map(|l| LightFx::new(l, images)).collect();
-        let key = key_index.map(|i| {
-            let l = enabled[i];
-            if let Some(shaped) = &prepared[i].shaped {
-                if let (Some(radiance), Some((facing, cos_cover))) = (shaped.key_color(prepared[i].color), shaped.key_spread()) {
-                    let (dir, cos_radius) = shaped.key_cone();
-                    return EnvSun { dir, radiance, cos_radius, facing, cos_cover: cos_cover.min(cos_radius) };
-                }
-            }
-            let radius = (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians();
-            let integral = key_emission(&prepared[i..], &fx[i..], KEY_GRID);
-            EnvSun {
-                dir: dir_from_az_el(l.azimuth_deg, l.elevation_deg),
-                // Over the cone the f32 cosine names, the one every consumer of
-                // the key computes, so the emission comes back exactly however
-                // small the light (`EnvSun::cone_radiance`).
-                radiance: EnvSun::cone_radiance(integral.emission, radius.cos()),
-                cos_radius: radius.cos(),
-                facing: integral.facing,
-                // The reach box's cone can only be wider than the nominal one
-                // (it holds the half-size on both sides); the min keeps rounding
-                // from putting it above.
-                cos_cover: integral.cos_cover.min(radius.cos()),
-            }
-        });
         let any_fx = fx.iter().any(|fx| !fx.is_plain());
         let mut built = Studio {
             top: rgb(studio.top),
@@ -269,41 +309,130 @@ impl Studio {
             floor: rgb(studio.floor),
             soft_deg: sane(studio.horizon_softness, 0.01, 1.0) * 90.0,
             lights: prepared,
-            key,
+            key: None,
             key_index,
             fx,
             any_fx,
         };
+        built.key = key_index.and_then(|i| built.measured_key(i));
+        built
+    }
+
+    /// The key light `index` hands the engine, measured from what the map
+    /// draws of it (D1). None for a window filled with sky: its light is the
+    /// sky, which `Env` measures it against (`measured_window_key`).
+    fn measured_key(&self, index: usize) -> Option<EnvSun> {
+        let light = &self.lights[index];
+        let fx = &self.fx[index];
+        if fx.fills_with_sky() {
+            return None;
+        }
+        let stroke = light.shaped.as_ref().and_then(|s| Some((s.stroke_cones()?, s.stroke_path()?)));
+        if let Some(((axis, cos_radius, cos_cover), path)) = stroke {
+            // A stroke's own light, after what hangs in front of it, under the
+            // lights after it: what the map draws of it, sampled where its band
+            // runs (its extras are not taken as a share apart, as a boxed key's
+            // are: the samples along its band see them).
+            let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);
+            let black = Vec3f::default();
+            let drawn = |d: Vec3f| dimmed(&flags, d, fx.apply(d, black, light.draw(d, black, false)));
+            let integral = over_cone(axis, cos_cover, &stroke_cells(path, cos_cover), &drawn);
+            return Some(EnvSun { dir: axis, radiance: EnvSun::cone_radiance(integral.emission, cos_radius), cos_radius, facing: integral.facing, cos_cover });
+        }
+        let integral = key_emission(&self.lights[index..], &self.fx[index..], KEY_GRID);
+        let key = EnvSun {
+            dir: light.frame.center,
+            // Over the cone the f32 cosine names, the one every consumer of
+            // the key computes, so the emission comes back exactly however
+            // small the light (`EnvSun::cone_radiance`).
+            radiance: EnvSun::cone_radiance(integral.emission, light.key_cos),
+            cos_radius: light.key_cos,
+            facing: integral.facing,
+            // The reach box's cone can only be wider than the nominal one
+            // (it holds the half-size on both sides); the min keeps rounding
+            // from putting it above.
+            cos_cover: integral.cos_cover.min(light.key_cos),
+        };
         // The engine's key light carries what gets past its own gobo, doors and
         // grid, times its face's wear (its radiance; its cone, facing share and
         // covering cone are its shape's, which the extras only cut).
-        if let (Some(i), Some(key)) = (key_index, built.key) {
-            built.key = Some(EnvSun { radiance: key.radiance * built.key_share(i, &key), ..key });
+        Some(EnvSun { radiance: key.radiance * self.key_share(index), ..key })
+    }
+
+    /// Whether the key is a window filled with sky that `Env` has yet to
+    /// measure against its sky ([`Self::measured_window_key`]).
+    pub(super) fn key_waits_for_sky(&self) -> bool {
+        self.key.is_none() && self.key_index.is_some_and(|i| self.fx[i].fills_with_sky())
+    }
+
+    /// The key when it is a window filled with sky (D1, L:136): the sky it
+    /// lets in, through its glass at 2^intensity_ev and its gobo, times its
+    /// face's wear, under the lights after it, exactly the light the map shows
+    /// through it and the keyless copy lacks (the copy keeps the glass and lets
+    /// no sky in: `apply_lights_sky`). Not its own Kelvin colour, which the
+    /// window never shows. `sky(d)` is the sky the window shows along `d` (the
+    /// map's own frame): the map's base in Sky mode, the lightless sky behind
+    /// a studio. `hot` are the discs in it (direction, angular radius), which
+    /// a bake area-averages and this integral samples finely too. None when
+    /// the key is no such window.
+    pub(super) fn measured_window_key(&self, sky: &dyn Fn(Vec3f) -> Vec3f, hot: &[(Vec3f, f32)]) -> Option<EnvSun> {
+        let index = self.key_index.filter(|&i| self.fx[i].fills_with_sky())?;
+        let (light, fx) = (&self.lights[index], &self.fx[index]);
+        let (axis, cos_radius, cos_cover) = light.key_cones();
+        let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);
+        let drawn = |d: Vec3f| {
+            let glass = fx.glass(d, self.cover(index, d));
+            // Only the glass is looked through: the sky is worked out nowhere else.
+            if !(glass > 0.0) {
+                return Vec3f::default();
+            }
+            dimmed(&flags, d, fx.through_glass(d, glass, sky(d)))
+        };
+        let stroke = light.shaped.as_ref().and_then(|s| s.stroke_path()).map(|path| stroke_cells(path, cos_cover));
+        let side = cone_cell(cos_cover);
+        let cells = |centre: Vec3f| {
+            let own = match &stroke {
+                Some(stroke) => stroke(centre),
+                None => WINDOW_FINE,
+            };
+            // A disc behind the glass: its cell is sampled finely enough to find it.
+            let disc = hot
+                .iter()
+                .filter(|(dir, r)| centre.dot(*dir).clamp(-1.0, 1.0).acos() < side * std::f32::consts::FRAC_1_SQRT_2 + r)
+                .map(|(_, r)| (side / (r / DISC_SAMPLES_PER_RADIUS)).ceil() as usize)
+                .max()
+                .unwrap_or(0);
+            own.max(disc)
+        };
+        let integral = over_cone(axis, cos_cover, &cells, &drawn);
+        Some(EnvSun { dir: axis, radiance: EnvSun::cone_radiance(integral.emission, cos_radius), cos_radius, facing: integral.facing, cos_cover })
+    }
+
+    /// Takes the key `measured_window_key` measured; a key of any other kind
+    /// was measured when the studio was built and is kept.
+    pub(super) fn set_window_key(&mut self, key: Option<EnvSun>) {
+        if self.key_waits_for_sky() {
+            self.key = key;
         }
-        built
+    }
+
+    /// Whether any light is drawn over the base: with none, nothing stands in
+    /// front of the sun or the moon.
+    pub(super) fn has_lights(&self) -> bool {
+        !self.lights.is_empty()
     }
 
     /// The share of the key's emission that gets past its gobo, doors and
     /// grid, times its wear (B10): `LightFx::key_share`, weighted by what the
     /// key puts into the map, its own drawing (shape, soft edge, hotspot,
-    /// picture, a stroke's ramp) under the flags and the cloth after it, as
-    /// `key_emission` dims it. So the engine's key light loses what the map
-    /// loses (plan 2's N3 removes exactly that). Sampled over the key's reach
-    /// box, or, for a stroke, which its points place, over the square round
-    /// its covering cone.
-    fn key_share(&self, index: usize, key: &EnvSun) -> f32 {
+    /// picture) under the flags and the cloth after it, as `key_emission` dims
+    /// it. So the engine's key light loses what the map loses (plan 2's N3
+    /// removes exactly that). Sampled over the key's reach box. (A stroke's
+    /// key samples its extras with its own drawing, along its band.)
+    fn key_share(&self, index: usize) -> f32 {
         let light = &self.lights[index];
         let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);
-        let drawn = |dir: Vec3f| luminance(dimmed(&flags, dir, self.draw_lights(index..index + 1, dir, Vec3f::default(), None)));
-        if light.shaped.as_ref().is_some_and(|s| s.key_spread().is_some()) {
-            let (azimuth_deg, elevation_deg) = az_el_from_dir(key.dir);
-            // A tangent plane reaches to a cosine of 0.05 (`project`'s limit): a
-            // stroke that winds further round the sky gives the share of its
-            // part inside that.
-            let c = key.cos_cover.max(0.05);
-            let reach = (1.0 - c * c).sqrt() / c;
-            return self.fx[index].key_share(&light_frame(azimuth_deg, elevation_deg, 0.0), vec2f(reach, reach), &drawn);
-        }
+        let drawn = |dir: Vec3f| luminance(dimmed(&flags, dir, light.draw(dir, Vec3f::default(), false)));
         self.fx[index].key_share(&light.frame, light.reach, &drawn)
     }
 
@@ -330,8 +459,9 @@ impl Studio {
     /// [`Self::apply_lights`] without the key light (N3: the map without its
     /// key is the source of the engine's lighting copy). Skipping it is the
     /// map with the key disabled, except that a scrim key's cloth stays
-    /// (`PreparedLight::hide`): every other light, the flags after the key
-    /// included, draws as before.
+    /// (`PreparedLight::hide`) and so does a sky window's glass, letting no
+    /// sky in: every other light, the flags after the key included, draws as
+    /// before.
     pub fn apply_lights_without_key(&self, dir: Vec3f, base: Vec3f) -> Vec3f {
         self.apply_lights_sky(dir, base, &|_| base, true)
     }
@@ -355,13 +485,13 @@ impl Studio {
             if fx.is_plain() {
                 c = self.draw_lights(i..i + 1, dir, c, skip);
             } else if fx.fills_with_sky() {
-                // A window is its glass showing the sky: left out as the key, it is not there.
-                if skip == Some(i) {
-                    continue;
-                }
+                // A window is its glass showing the sky. Left out as the key it
+                // keeps its glass and lets no sky in, as a scrim key keeps its
+                // cloth: what is behind the glass stays hidden, and the map
+                // without it lacks exactly the sky the key carries (D1).
                 let cover = self.cover(i, dir);
                 if cover > 0.0 {
-                    c = fx.window(dir, cover, c, sky(dir));
+                    c = if skip == Some(i) { c * (1.0 - fx.glass(dir, cover)) } else { fx.window(dir, cover, c, sky(dir)) };
                 }
             } else {
                 let after = self.draw_lights(i..i + 1, dir, c, skip);
@@ -398,38 +528,20 @@ impl Studio {
     fn draw_lights(&self, range: std::ops::Range<usize>, dir: Vec3f, base: Vec3f, skip: Option<usize>) -> Vec3f {
         let mut c = base;
         for (i, light) in self.lights.iter().enumerate().skip(range.start).take(range.len()) {
-            // The key left out (`skip`, N3) loses its own light, while whatever
-            // it hides stays hidden (B5's scrim): `PreparedLight::hide`. For a
-            // light that hides nothing (an A3 light, a polygon, a stroke, a
-            // picture) that is the same as skipping it.
-            let left_out = skip == Some(i);
-            let Some(image) = &light.image else {
-                c = if left_out { light.hide(dir, c) } else { light.over(dir, c, light.color) };
-                continue;
-            };
-            // The picture is only looked up where the light can reach.
-            let Some(p) = project(&light.frame, dir) else { continue };
-            if !light.reaches(dir, p) {
-                continue;
-            }
-            let (texel, alpha) = image.shade(p, light.half);
-            if !(alpha > 0.0) {
-                continue;
-            }
-            let lit = if left_out { light.hide(dir, c) } else { light.over(dir, c, light.color * texel) };
-            // Alpha fades the whole light in. For Add and Multiply alike that
-            // is a mix toward what the light makes of the pixel.
-            c = if alpha >= 1.0 { lit } else { c + (lit - c) * alpha };
+            c = light.draw(dir, c, skip == Some(i));
         }
         c
     }
 
     /// The key light in the map's own frame (unrotated, unscaled). Its cone covers the
-    /// larger of width and height, and its radiance is the light's whole emission over
-    /// that cone, not its peak colour: a thin strip or a ring that fills a tenth of its
-    /// cone hands over about a tenth of its colour. `facing` is the share of that
-    /// emission a surface facing the key receives (a wide softbox's is below 1) and
-    /// `cos_cover` the cone around the key's centre that holds its reach box.
+    /// larger of width and height (a stroke's, its centre line and half width), and its
+    /// radiance is the light's whole emission as the map draws it, over that cone, not
+    /// its peak colour: a thin strip or a ring that fills a tenth of its cone hands over
+    /// about a tenth of its colour, and a key half under a flag half of it. `facing` is
+    /// the share of that emission a surface facing the key receives (a wide softbox's is
+    /// below 1) and `cos_cover` the cone around the key's centre that holds its reach.
+    /// None without a key, and for a window filled with sky until `Env` has measured it
+    /// against its sky.
     pub fn key(&self) -> Option<EnvSun> {
         self.key
     }
@@ -456,10 +568,12 @@ struct KeyIntegral {
 ///   of A3's mask, and a shaped flag dims the key through `ShapedLight::compose`, as
 ///   `apply_lights` draws both. Its outline lies inside its box, so the grid holds it
 ///   and the box's corner cone (`cos_cover`) covers it.
-/// - Every Multiply light after it scales it as it does in the map, and so does a
-///   scrim's cloth (B5), the one Add light that hides what is behind it
-///   (`ShapedLight::hide`). Any other Add light after it is a light of its own, and a
-///   light before it touches only what came before.
+/// - A key with a picture (1b, B14) weighs each point by its drawing there, the
+///   picture's colour and alpha included (D1, L:123), not by its shape alone.
+/// - Every Multiply light after it scales it as it does in the map (its picture,
+///   cut-out alpha and all), and so does a scrim's cloth (B5), the one Add light that
+///   hides what is behind it (`ShapedLight::hide`). Any other Add light after it is a
+///   light of its own, and a light before it touches only what came before.
 /// - What hangs in front of each of those (`fx`, in step with `lights`) scales what it
 ///   does, as in the map: a flag with a gobo dims the key only behind the gobo's
 ///   opaque parts (B8).
@@ -467,14 +581,16 @@ struct KeyIntegral {
 /// A midpoint grid of n x n points over the key's reach box in its own tangent plane,
 /// where dΩ = dx dy / (1 + x² + y²)^(3/2) and the cosine of the angle from the centre
 /// is 1 / sqrt(1 + x² + y²). Outside that box the mask is exactly zero, so nothing is
-/// missed, and the farthest point of the box is its corner: the covering cone's
-/// cosine is 1 / sqrt(1 + rx² + ry²), no smaller than `project`'s 0.05 limit, past
-/// which nothing is drawn.
+/// missed, and the farthest point of the box is its corner: the covering cone
+/// (`PreparedLight::box_cover`).
 fn key_emission(lights: &[PreparedLight], fx: &[LightFx], n: usize) -> KeyIntegral {
     let Some((key, after)) = lights.split_first() else {
         return KeyIntegral { emission: Vec3f::default(), facing: 1.0, cos_cover: 1.0 };
     };
     let flags = dimmers(after, fx.get(1..).unwrap_or(&[]));
+    // A picture gives the key its colour point by point: its drawing over black,
+    // colour and all, is the weight, and the sum is not scaled by the colour again.
+    let pictured = key.image.is_some();
     let n = n.max(1);
     let cell = vec2f(2.0 * key.reach.x / n as f32, 2.0 * key.reach.y / n as f32);
     let mut sum = [0.0f64; 3];
@@ -492,17 +608,24 @@ fn key_emission(lights: &[PreparedLight], fx: &[LightFx], n: usize) -> KeyIntegr
                 continue;
             }
             let dir = || (key.frame.center + key.frame.right * x + key.frame.up * y).normalize();
-            // The weight `apply_lights` gives the key's colour here: A3's mask, or the
-            // shape core's emission for a light it draws (1b: a polygon, B5's scrim).
-            let m = match &key.shaped {
-                Some(shaped) => shaped.sample(dir()).emit,
-                None => key.mask(vec2f(x, y)),
+            // The weight `apply_lights` gives the key's colour here: A3's mask, the
+            // shape core's emission for a light it draws (1b: a polygon, B5's scrim),
+            // or the whole drawing of a key with a picture.
+            let (m, tint) = if pictured {
+                let drawn = key.draw(dir(), Vec3f::default(), false);
+                (if drawn.max_elem() > 0.0 { 1.0 } else { 0.0 }, drawn)
+            } else {
+                let m = match &key.shaped {
+                    Some(shaped) => shaped.sample(dir()).emit,
+                    None => key.mask(vec2f(x, y)),
+                };
+                (m, Vec3f::all(1.0))
             };
             if !(m > 0.0) {
                 continue;
             }
             let cos = 1.0 / r2.sqrt();
-            let mut w = Vec3f::all(m * cos / r2);
+            let mut w = Vec3f::all(m * cos / r2) * tint;
             if !flags.is_empty() {
                 w = dimmed(&flags, dir(), w);
             }
@@ -517,14 +640,14 @@ fn key_emission(lights: &[PreparedLight], fx: &[LightFx], n: usize) -> KeyIntegr
         weighted[2] += row_weighted.z as f64;
     }
     let area = (cell.x * cell.y) as f64;
-    let scaled = |s: [f64; 3]| key.color * vec3f((s[0] * area) as f32, (s[1] * area) as f32, (s[2] * area) as f32);
+    let color = if pictured { Vec3f::all(1.0) } else { key.color };
+    let scaled = |s: [f64; 3]| color * vec3f((s[0] * area) as f32, (s[1] * area) as f32, (s[2] * area) as f32);
     let emission = scaled(sum);
     // Luminance weighs the channels as the eye does: a coloured gel's key still
     // gets one share.
     let (total, cosine) = (luminance(emission), luminance(scaled(weighted)));
     let facing = if total > 0.0 { (cosine / total).clamp(0.0, 1.0) } else { 1.0 };
-    let cos_cover = (1.0 / (1.0 + key.reach.x * key.reach.x + key.reach.y * key.reach.y).sqrt()).max(0.05);
-    KeyIntegral { emission, facing, cos_cover }
+    KeyIntegral { emission, facing, cos_cover: key.box_cover() }
 }
 
 /// What dims the key as the map draws it, of the lights listed after it: the
@@ -544,16 +667,10 @@ fn dimmed(flags: &[(&PreparedLight, &LightFx)], dir: Vec3f, w: Vec3f) -> Vec3f {
     let mut w = w;
     for &(flag, fx) in flags {
         let before = w;
-        // As `apply_lights` draws the flag: a shaped one through the shape
-        // core, and a scrim's cloth without its own glow.
-        if let Some(shaped) = &flag.shaped {
-            w = if flag.blend == Blend::Multiply { shaped.compose(dir, w, flag.color) } else { shaped.hide(dir, w) };
-        } else if let Some(q) = project(&flag.frame, dir) {
-            let f = flag.mask(q);
-            if f > 0.0 {
-                w *= Vec3f::all(1.0) + (flag.color - Vec3f::all(1.0)) * f;
-            }
-        }
+        // As `apply_lights` draws the flag (`PreparedLight::draw`): its shape,
+        // its picture and the picture's alpha, and a scrim's cloth without its
+        // own glow (the scrim left out, so only what it hides is drawn).
+        w = flag.draw(dir, w, flag.blend != Blend::Multiply);
         // Then what hangs in front of it scales what it did, as
         // `apply_lights_sky` does: a flag's gobo leaves the key through its
         // open parts (B8).
@@ -562,6 +679,112 @@ fn dimmed(flags: &[(&PreparedLight, &LightFx)], dir: Vec3f, w: Vec3f) -> Vec3f {
         }
     }
     w
+}
+
+/// For [`over_cone`] over the covering cone (`cos_cover`) of the stroke whose
+/// centre line is `path`: how many samples per axis the cell round a direction
+/// takes. Where the stroke may draw (its path widened by a cell's reach finds
+/// the cell), enough for STROKE_SAMPLES_PER_REACH of them per stroke reach;
+/// elsewhere none.
+fn stroke_cells(path: &ArcPath, cos_cover: f32) -> impl Fn(Vec3f) -> usize {
+    let side = cone_cell(cos_cover);
+    let fine = ((side * STROKE_SAMPLES_PER_REACH / path.reach()).ceil() as usize).clamp(1, STROKE_FINE_MAX);
+    let scan = path.widened(side * std::f32::consts::FRAC_1_SQRT_2);
+    move |centre: Vec3f| if scan.nearest(centre).dist < scan.reach() { fine } else { 0 }
+}
+
+/// The side of one of [`over_cone`]'s coarse cells over the cone of
+/// `cos_cover`, in radians. Every direction in a cell lies within
+/// side / sqrt(2) of its centre.
+fn cone_cell(cos_cover: f32) -> f32 {
+    2.0 * cos_cover.clamp(-1.0, 1.0).acos() / CONE_CELLS as f32
+}
+
+/// ∫ light(d) dΩ over the cone of `cos_cover` round `axis`, which must hold
+/// everything `light` draws, with its cosine-weighted share about `axis`: a
+/// key as the map draws it, for the keys that do not lie in a box of their
+/// own frame (a stroke, which its points place) or whose light is not their
+/// colour (a window filled with sky).
+///
+/// The cone is laid flat by the azimuthal equidistant projection round
+/// `axis`, (u, v) = θ (cos φ, sin φ) with θ the angle from it, so its cells
+/// are even in angle however wide it is (a tangent plane stretches them past
+/// 60 degrees and ends at 90), and dΩ = sin θ / θ du dv. A grid of
+/// CONE_CELLS x CONE_CELLS cells ([`cone_cell`]) covers the square round it;
+/// `cells(centre)` says how many jittered samples along each axis a cell
+/// takes: 0 where nothing is drawn within side / sqrt(2) of its centre, which
+/// holds the whole cell (the projection never stretches an angle). So a thin
+/// stroke is sampled finely along its band and nowhere else. Over
+/// CONE_BUDGET samples in all, every cell takes fewer, in proportion.
+fn over_cone(axis: Vec3f, cos_cover: f32, cells: &dyn Fn(Vec3f) -> usize, light: &dyn Fn(Vec3f) -> Vec3f) -> KeyIntegral {
+    let (azimuth_deg, elevation_deg) = az_el_from_dir(axis);
+    let frame = light_frame(azimuth_deg, elevation_deg, 0.0);
+    let reach = cos_cover.clamp(-1.0, 1.0).acos();
+    let side = cone_cell(cos_cover);
+    let at = |u: f32, v: f32| {
+        let theta = (u * u + v * v).sqrt();
+        if !(theta > 1.0e-9) {
+            return frame.center;
+        }
+        let (sin, cos) = theta.sin_cos();
+        frame.center * cos + (frame.right * u + frame.up * v) * (sin / theta)
+    };
+    let corner = |k: usize| -reach + k as f32 * side;
+    let mut visited = Vec::new();
+    let mut total = 0usize;
+    for j in 0..CONE_CELLS {
+        for i in 0..CONE_CELLS {
+            let (u, v) = (corner(i) + 0.5 * side, corner(j) + 0.5 * side);
+            // A cell wholly outside the cone holds nothing.
+            if (u * u + v * v).sqrt() - side * std::f32::consts::FRAC_1_SQRT_2 > reach {
+                continue;
+            }
+            let m = cells(at(u, v)).min(CONE_FINE_MAX);
+            if m > 0 {
+                visited.push((i, j, m));
+                total += m * m;
+            }
+        }
+    }
+    let thin = if total > CONE_BUDGET { (CONE_BUDGET as f32 / total as f32).sqrt() } else { 1.0 };
+    let (mut sum, mut weighted) = ([0.0f64; 3], [0.0f64; 3]);
+    for (i, j, m) in visited {
+        let m = ((m as f32 * thin) as usize).max(1);
+        let step = side / m as f32;
+        let (mut cell_sum, mut cell_weighted) = (Vec3f::default(), Vec3f::default());
+        for b in 0..m {
+            for a in 0..m {
+                // Every sample of the grid has its own place in the hash.
+                let (hx, hy) = ((i * CONE_FINE_MAX + a) as i32, (j * CONE_FINE_MAX + b) as i32);
+                let u = corner(i) + (a as f32 + hash01(hx, hy, 0, CONE_JITTER_SEED)) * step;
+                let v = corner(j) + (b as f32 + hash01(hx, hy, 1, CONE_JITTER_SEED)) * step;
+                let theta = (u * u + v * v).sqrt();
+                // Nothing is drawn past the cone.
+                if !(theta <= reach) {
+                    continue;
+                }
+                let c = light(at(u, v));
+                if !(c.max_elem() > 0.0) {
+                    continue;
+                }
+                let w = if theta > 1.0e-6 { c * (theta.sin() / theta) } else { c };
+                cell_sum += w;
+                cell_weighted += w * theta.cos();
+            }
+        }
+        let area = (step * step) as f64;
+        for (s, c) in sum.iter_mut().zip([cell_sum.x, cell_sum.y, cell_sum.z]) {
+            *s += c as f64 * area;
+        }
+        for (s, c) in weighted.iter_mut().zip([cell_weighted.x, cell_weighted.y, cell_weighted.z]) {
+            *s += c as f64 * area;
+        }
+    }
+    let emission = vec3f(sum[0] as f32, sum[1] as f32, sum[2] as f32);
+    let cosine = luminance(vec3f(weighted[0] as f32, weighted[1] as f32, weighted[2] as f32));
+    let total = luminance(emission);
+    let facing = if total > 0.0 { (cosine / total).clamp(0.0, 1.0) } else { 1.0 };
+    KeyIntegral { emission, facing, cos_cover }
 }
 
 /// One enabled light, reduced to what the per-pixel evaluation needs.
@@ -583,6 +806,9 @@ struct PreparedLight {
     reach: Vec2f,
     /// Exponent scale of the Gaussian centre falloff (HOTSPOT_FALLOFF x hotspot).
     hotspot: f32,
+    /// The key cone's cosine when this light is the key in its own box: the
+    /// cone over the larger of width and height.
+    key_cos: f32,
     color: Vec3f,
     /// Polygons, strokes and scrims (1b): the shape core draws the light.
     shaped: Option<ShapedLight>,
@@ -621,9 +847,53 @@ impl PreparedLight {
             band,
             reach: vec2f(half.x + band, half.y + band),
             hotspot: HOTSPOT_FALLOFF * sane(l.hotspot, 0.0, 1.0),
+            key_cos: (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians().cos(),
             color: light_color(l),
             shaped: ShapedLight::new(l),
             image: l.image.as_ref().and_then(|image| LightImage::new(image, images)),
+        }
+    }
+
+    /// This light drawn over `acc` as the map draws it: its shape, content and
+    /// blend, and a picture faded in by its alpha. `left_out` draws it as the
+    /// key left out of the map (`skip`, N3): it loses its own light, while
+    /// whatever it hides stays hidden (B5's scrim, `hide`); for a light that
+    /// hides nothing (an A3 light, a polygon, a stroke, a picture) that is the
+    /// same as skipping it.
+    fn draw(&self, dir: Vec3f, acc: Vec3f, left_out: bool) -> Vec3f {
+        let Some(image) = &self.image else {
+            return if left_out { self.hide(dir, acc) } else { self.over(dir, acc, self.color) };
+        };
+        // The picture is only looked up where the light can reach.
+        let Some(p) = project(&self.frame, dir) else { return acc };
+        if !self.reaches(dir, p) {
+            return acc;
+        }
+        let (texel, alpha) = image.shade(p, self.half);
+        if !(alpha > 0.0) {
+            return acc;
+        }
+        let lit = if left_out { self.hide(dir, acc) } else { self.over(dir, acc, self.color * texel) };
+        // Alpha fades the whole light in. For Add and Multiply alike that
+        // is a mix toward what the light makes of the pixel.
+        if alpha >= 1.0 { lit } else { acc + (lit - acc) * alpha }
+    }
+
+    /// The cone that holds this light's reach box, corners and soft edge
+    /// included: 1 / sqrt(1 + rx² + ry²), no smaller than `project`'s 0.05
+    /// limit, past which nothing is drawn.
+    fn box_cover(&self) -> f32 {
+        (1.0 / (1.0 + self.reach.x * self.reach.x + self.reach.y * self.reach.y).sqrt()).max(0.05)
+    }
+
+    /// The key's cones when this light is the key, `(axis, cos_radius,
+    /// cos_cover)`: a stroke's round its centre line, any other light's round
+    /// the centre of its box (the larger of width and height, and the box's
+    /// corner).
+    fn key_cones(&self) -> (Vec3f, f32, f32) {
+        match self.shaped.as_ref().and_then(|s| s.stroke_cones()) {
+            Some(cones) => cones,
+            None => (self.frame.center, self.key_cos, self.box_cover().min(self.key_cos)),
         }
     }
 
@@ -1567,7 +1837,45 @@ mod tests {
             ),
             ("a dot: two points half a degree apart", stroke(vec![[90.0, 20.0], [90.5, 20.0]], 8.0, 0.5, 0.4)),
             ("the arch over a light without points", LightParams { key: true, shape: "stroke".to_string(), ..Default::default() }),
+            // D1 (L:40): a band wider than the loop it runs round laps over
+            // itself, so it draws more than its length times its width.
+            (
+                "a closed loop 45 degrees wide",
+                with(stroke(vec![[80.0, 0.0], [100.0, 0.0], [90.0, 15.0]], 45.0, 0.5, 0.0), &|s| s.closed = true),
+            ),
         ]
+    }
+
+    /// D2: a stroke that spreads more than 85 degrees from its middle (the
+    /// widest a rect's key cone gets) is not handed to the engine as the key:
+    /// a strip round the whole horizon has no middle to light from. Its light
+    /// stays in the map's lighting, and under a sky the sun leads again. An
+    /// arch that spreads just under the limit is still the key.
+    #[test]
+    fn a_stroke_that_circles_the_sky_is_not_the_key() {
+        let strip = |points: Vec<[f32; 2]>, closed: bool| LightParams {
+            key: true,
+            shape: "stroke".to_string(),
+            stroke: Some(crate::hdri::StrokeParams { points, closed, width_deg: 4.0, ..crate::hdri::StrokeParams::default() }),
+            ..Default::default()
+        };
+        let round = strip((0..6).map(|i| [i as f32 * 60.0, 0.0]).collect(), true);
+        let half = strip(vec![[0.0, 5.0], [90.0, 5.0], [180.0, 5.0]], false);
+        let arch = strip(vec![[10.0, 0.0], [90.0, 0.0], [170.0, 0.0]], false);
+        for (name, light, on_line) in [("round the horizon", &round, 0.0), ("half way round", &half, 5.0)] {
+            assert!(spreads_too_wide_to_be_key(light), "{name}");
+            assert!(Studio::new(&black_studio(), std::slice::from_ref(light)).key().is_none(), "{name}: not the key");
+            let sky = HdriParams { lights: vec![light.clone()], ..Default::default() };
+            assert!(matches!(Env::new(&sky).key(), Some((crate::hdri::KeyTerm::Sun, _))), "{name}: the sun leads under a sky");
+            // Drawn as before: it is a light, only not the key.
+            assert!(Env::new(&studio_params(vec![light.clone()])).radiance(dir_from_az_el(90.0, on_line)) != Vec3f::default(), "{name}");
+        }
+        assert!(!spreads_too_wide_to_be_key(&arch), "82 degrees from its middle");
+        let key = Studio::new(&black_studio(), &[arch]).key().expect("the arch is the key");
+        assert!(key.validate().is_ok() && key.cos_radius > 85f32.to_radians().cos(), "{key:?}");
+        // Only a stroke spreads: a rect as wide as a light may be still leads.
+        let wide = LightParams { key: true, width_deg: 170.0, height_deg: 170.0, ..Default::default() };
+        assert!(!spreads_too_wide_to_be_key(&wide) && Studio::new(&black_studio(), &[wide]).key().is_some());
     }
 
     /// `EnvSun`'s one meaning for a stroke key: radiance x the key cone is the

@@ -243,6 +243,19 @@ impl Env {
             let sky_irradiance = if base.replace_sky { Some(env.base_irradiance()) } else { None };
             env.base_image = composite::BaseImage::new(&base, images, sky_irradiance);
         }
+        // A window filled with sky as the key carries the sky it lets in
+        // (D1), so it is measured once that sky is in place: the base in Sky
+        // mode, the lightless copy behind a studio, with its discs (map frame).
+        if env.studio.key_waits_for_sky() {
+            let hot: Vec<(Vec3f, f32)> = env
+                .hot_spots()
+                .into_iter()
+                .map(|(dir, radius)| (rotate_y(dir, -env.params.rotation_deg), radius))
+                .collect();
+            let sky = |d: Vec3f| env.window_sky_at(d, env.base_at(d, None, None));
+            let key = env.studio.measured_window_key(&sky, &hot);
+            env.studio.set_window_key(key);
+        }
         env
     }
 
@@ -272,25 +285,41 @@ impl Env {
         // The layers live in the map's own frame; turning the map by
         // rotation_deg (ibl's sign) is turning the lookup the other way.
         let d = rotate_y(dir, -self.params.rotation_deg);
-        let base = match &self.base_image {
+        let base = self.base_at(d, without, cache);
+        // The map without its key (N3) leaves the key light out here.
+        self.lights_over(d, base, without == Some(KeyTerm::Light)) * self.scale
+    }
+
+    /// The base under the lights along `d`, in the map's own frame: the
+    /// mode's own base layer, a base image, or both through the image's mask.
+    fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
+        match &self.base_image {
             // An image that is the whole base: the sky under it is never seen, so it is not drawn.
             Some(image) if !image.replaces_sky() => image.radiance(d),
             // Sky replacement: the image below its mask, the mode's own base above.
             Some(image) => image.compose(d, self.base_layer(d, without, cache)),
             None => self.base_layer(d, without, cache),
-        };
-        // A light filled with sky (GoboParams::fill_sky) is a window: it shows
-        // the sky along the same direction. In Sky mode that sky is the base
-        // layer itself; in Studio mode the lightless Sky-mode copy works it
-        // out, and only for the pixels such a window covers. The map without
-        // its key (N3) leaves the key light out here.
-        let sky = |w: Vec3f| -> Vec3f {
-            match &self.window_sky {
-                Some(outside) => outside.radiance(w),
-                None => base,
-            }
-        };
-        self.studio.apply_lights_sky(d, base, &sky, without == Some(KeyTerm::Light)) * self.scale
+        }
+    }
+
+    /// The lights drawn over `base` along `d`, in the map's own frame. A light
+    /// filled with sky (GoboParams::fill_sky) is a window: it shows the sky
+    /// along the same direction ([`Self::window_sky_at`]). `without_key`
+    /// leaves the key light out (N3).
+    fn lights_over(&self, d: Vec3f, base: Vec3f, without_key: bool) -> Vec3f {
+        let sky = |w: Vec3f| self.window_sky_at(w, base);
+        self.studio.apply_lights_sky(d, base, &sky, without_key)
+    }
+
+    /// The sky a window shows along `d` (map frame) over `base`, the base
+    /// there: in Sky mode the base itself; in Studio mode the lightless
+    /// Sky-mode copy works it out, and only for the directions such a window
+    /// covers.
+    fn window_sky_at(&self, d: Vec3f, base: Vec3f) -> Vec3f {
+        match &self.window_sky {
+            Some(outside) => outside.radiance(d),
+            None => base,
+        }
     }
 
     /// The mode's own base layer under the lights, in the map's own frame: the sky
@@ -453,9 +482,12 @@ impl Env {
     /// map and applies the intensity). In order: the key light (both modes);
     /// the sun of an image that is the whole base; Sky mode only: the sun while
     /// any of its disc is above the horizon, else the moon once the sun is 6
-    /// degrees down and it is risen, else None. Both are dimmed by the cloud
-    /// cover along them (unfaded: a full overcast hides a 2 degree sun too)
-    /// and by the weather's rain and fog.
+    /// degrees down and it is risen, else None. Every key carries exactly the
+    /// light the map draws of it (the plan owner's D1): the sun and the moon
+    /// are dimmed by the cloud cover along them (unfaded: a full overcast
+    /// hides a 2 degree sun too), by the weather's rain, its shafts and fog,
+    /// and by what stands in front of their discs in the map (the lights over
+    /// the sky, a base image's line: `disc_share`), as an image's own sun is.
     ///
     /// The sun and the moon fade instead of switching: the key is a continuous
     /// function of the hour, so a host that samples it finely (a slider, a day
@@ -489,17 +521,24 @@ impl Env {
         }
         // An image that is the whole base brings its own sun, or none: the
         // generated sky is not drawn under it. (With sky replacement the image
-        // sits below the horizon and the generated sun stays the key.)
+        // sits below the horizon and the generated sun stays the key.) The
+        // lights in front of the photographed sun dim it as they dim it in
+        // the map, weighed by the photograph itself.
         if let Some(image) = &self.base_image {
             if !image.replaces_sky() {
-                return image.sun().map(|sun| (KeyTerm::Image, self.key_to_world(sun)));
+                return image.sun().map(|sun| {
+                    let radiance = sun.radiance * self.disc_share(&sun, &|d| image.radiance(d));
+                    (KeyTerm::Image, self.key_to_world(EnvSun { radiance, ..sun }))
+                });
             }
         }
         // Studio mode has no sky and no sun.
         let atmo = self.atmo.as_ref()?;
         // The same cover that hides the discs in the map dims the key: the 2D
         // layer's unfaded cover (in volumetric mode the cirrus veil's), the
-        // marched volume, and the weather's rain and fog.
+        // marched volume, and the weather's rain, its shafts and fog. What
+        // stands in front of the disc after that, the lights and a base
+        // image's mask, is `disc_share`.
         let cover = |dir: Vec3f| {
             self.clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(dir))
                 * self.volumetric.as_ref().map_or(1.0, |volume| volume.transmittance_toward(dir))
@@ -515,7 +554,7 @@ impl Env {
             // A disc under a degree wide: a surface facing it gets all of its
             // emission (facing 1), and its outer limb, soft edge included, is
             // the cone that holds it.
-            return Some((KeyTerm::Sun, self.key_to_world(EnvSun {
+            let key = EnvSun {
                 dir: sun,
                 radiance: atmo.sun_cone_radiance() * (cover(sun) * visible),
                 cos_radius: atmo.sun_cos_radius(),
@@ -523,17 +562,70 @@ impl Env {
                 // The two cosines are separately rounded: the min keeps a tiny soft
                 // edge from putting the covering cone's above the cone's own.
                 cos_cover: outer.cos().min(atmo.sun_cos_radius()),
-            })));
+            };
+            let radiance = key.radiance * self.disc_share(&key, &|d| atmo.sun_disc(d));
+            return Some((KeyTerm::Sun, self.key_to_world(EnvSun { radiance, ..key })));
         }
         // After dark the risen moon takes over, once the sun is 6 degrees down.
-        let moon = self.night.as_ref()?.moon_key()?;
+        let night = self.night.as_ref()?;
+        let moon = night.moon_key()?;
         let arrived = smoothstep(6.0, 8.0, -elevation.to_degrees());
         if !(arrived > 0.0) {
             return None;
         }
         // The map draws the whole disc while the key carries `arrived` of it:
         // that share is the key's own light.
-        Some((KeyTerm::Moon(arrived), self.key_to_world(EnvSun { radiance: moon.radiance * (cover(moon.dir) * arrived), ..moon })))
+        let radiance = moon.radiance * (cover(moon.dir) * arrived) * self.disc_share(&moon, &|d| night.moon(d));
+        Some((KeyTerm::Moon(arrived), self.key_to_world(EnvSun { radiance, ..moon })))
+    }
+
+    /// What stands in front of a disc in the map leaves of it, per channel
+    /// (D1): the lights drawn over the sky (flags and gels, a scrim's cloth, a
+    /// window's glass at its own exposure) and, under sky replacement, the
+    /// base image below its line. `key` is the disc's key in the map's own
+    /// frame, and `disc(d)` the disc as the map draws it along `d`, which
+    /// weighs each direction: the soft limb, and a hard edge across the disc,
+    /// count as they show. Each is affine in the base it is drawn over, so
+    /// what the map makes of a white base less what it makes of a black one is
+    /// the share that reaches the eye, the lights' own light cancelling. 1,
+    /// exactly, when nothing stands in front of any disc.
+    ///
+    /// A midpoint grid of DISC_GRID x DISC_GRID points over the tangent plane
+    /// round the disc's covering cone, as `studio::key_emission` takes a key.
+    fn disc_share(&self, key: &EnvSun, disc: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
+        const DISC_GRID: usize = 64;
+        let replaced = self.base_image.as_ref().filter(|image| image.replaces_sky());
+        if !self.studio.has_lights() && replaced.is_none() {
+            return Vec3f::all(1.0);
+        }
+        let through = |d: Vec3f, v: Vec3f| {
+            let base = match replaced {
+                Some(image) => image.compose(d, v),
+                None => v,
+            };
+            self.lights_over(d, base, false)
+        };
+        let (azimuth_deg, elevation_deg) = az_el_from_dir(key.dir);
+        let frame = studio::light_frame(azimuth_deg, elevation_deg, 0.0);
+        let c = key.cos_cover.min(key.cos_radius).clamp(0.05, 1.0);
+        let reach = (1.0 - c * c).sqrt() / c;
+        let cell = 2.0 * reach / DISC_GRID as f32;
+        let (mut drawn, mut passed) = (Vec3f::default(), Vec3f::default());
+        for j in 0..DISC_GRID {
+            let y = -reach + (j as f32 + 0.5) * cell;
+            for i in 0..DISC_GRID {
+                let x = -reach + (i as f32 + 0.5) * cell;
+                let d = (frame.center + frame.right * x + frame.up * y).normalize();
+                let w = disc(d) * (1.0 + x * x + y * y).powf(-1.5);
+                if !(w.max_elem() > 0.0) {
+                    continue;
+                }
+                drawn += w;
+                passed += w * (through(d, Vec3f::all(1.0)) - through(d, Vec3f::default()));
+            }
+        }
+        let share = |p: f32, w: f32| if w > 0.0 { (p / w).max(0.0) } else { 1.0 };
+        vec3f(share(passed.x, drawn.x), share(passed.y, drawn.y), share(passed.z, drawn.z))
     }
 
     /// World-space sun direction in Sky mode (also below the horizon), None
