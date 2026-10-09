@@ -764,6 +764,8 @@ pub struct TextFlow {
     pub strikethrough: StackCounter,
     #[rust]
     pub inline_code: StackCounter,
+    #[rust]
+    pub code_block: StackCounter,
 
     /// (Ascender, descender) in ems per style slot (normal/bold/italic/
     /// bold_italic/fixed), probed lazily via a tiny layout call. Used to
@@ -1501,6 +1503,7 @@ impl TextFlow {
         self.underline.clear();
         self.strikethrough.clear();
         self.inline_code.clear();
+        self.code_block.clear();
         self.font_sizes.clear();
         self.y_shift_scales.clear();
         self.font_colors.clear();
@@ -1857,6 +1860,7 @@ impl TextFlow {
         let walk = self.begin_block_box(cx, self.code_walk);
         self.draw_block.begin(cx, walk, self.code_layout);
         self.area_stack.push(self.draw_block.draw_vars.area);
+        self.code_block.push();
         self.first_thing_on_a_line = true;
         self.is_at_block_start = true;
     }
@@ -1868,6 +1872,7 @@ impl TextFlow {
         let Some(area) = self.area_stack.pop() else {
             return;
         };
+        self.code_block.pop();
         self.draw_block.draw_vars.area = area;
         self.draw_block.end(cx);
         self.end_block_box(cx, self.code_walk);

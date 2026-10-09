@@ -520,7 +520,10 @@ impl Html {
             some_id!(code) => {
                 tf.push_size_rel_scale(tf.fixed_font_size_scale);
                 tf.fixed.push();
-                tf.inline_code.push();
+                // A code block already draws its own background, so its `<code>` doesn't get an inline box too.
+                if tf.code_block.value() == 0 {
+                    tf.inline_code.push();
+                }
             }
             some_id!(pre) => {
                 tf.new_line_collapsed(cx);
@@ -729,7 +732,9 @@ impl Html {
                 tf.end_quote(cx);
             }
             some_id!(code) => {
-                tf.inline_code.pop();
+                if tf.code_block.value() == 0 {
+                    tf.inline_code.pop();
+                }
                 tf.font_sizes.pop();
                 tf.fixed.pop();
             }
