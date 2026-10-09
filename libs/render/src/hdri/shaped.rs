@@ -636,6 +636,27 @@ pub fn unit_to_dir(light: &LightParams, unit: [f32; 2]) -> Vec3f {
     (f.center + f.right * (box_x_sign() * unit[0] * hx) + f.up * (unit[1] * hy)).normalize()
 }
 
+/// The inverse of `unit_to_dir`, held inside the light's box: a direction off
+/// the box comes back on the edge nearest to it. Behind the light's tangent
+/// plane there is no gnomonic point, so such a direction is first pushed far
+/// out along its bearing.
+pub fn dir_to_unit(light: &LightParams, dir: Vec3f) -> [f32; 2] {
+    let f = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
+    let (hx, hy) = half_extents(light);
+    let c = dir.dot(f.center);
+    // The box's +x runs toward increasing azimuth; the frame's `right` may
+    // point the other way (box_x_sign), exactly as unit_to_dir applies it.
+    let (x, y) = (box_x_sign() * dir.dot(f.right), dir.dot(f.up));
+    let (tx, ty) = if c > 1.0e-3 {
+        (x / c, y / c)
+    } else {
+        let l = (x * x + y * y).sqrt().max(1.0e-9);
+        (x / l * 1.0e3, y / l * 1.0e3)
+    };
+    let hold = |v: f32| if v.is_finite() { v.max(-1.0).min(1.0) } else { 0.0 };
+    [hold(tx / hx), hold(ty / hy)]
+}
+
 /// The polygon's corners in the unit box, before rounding: the explicit
 /// points when there are at least three, else the regular polygon or star,
 /// counter-clockwise from the corner straight up.
@@ -1043,5 +1064,22 @@ mod tests {
         assert!(sun.validate().is_ok(), "{sun:?}");
         assert!((sun.facing - 0.950).abs() < 0.002, "{}", sun.facing);
         assert!(sun.cos_cover < sun.cos_radius && sun.cos_cover > 33.5f32.to_radians().cos(), "{} vs {}", sun.cos_cover, sun.cos_radius);
+    }
+
+    #[test]
+    fn a_direction_maps_back_into_the_light_box() {
+        let mut light = polygon_light();
+        light.roll_deg = 20.0;
+        light.width_deg = 60.0;
+        for u in [[0.0, 0.0], [0.5, -0.25], [-0.9, 0.9]] {
+            let back = dir_to_unit(&light, unit_to_dir(&light, u));
+            assert!((back[0] - u[0]).abs() < 1.0e-4 && (back[1] - u[1]).abs() < 1.0e-4, "{u:?} -> {back:?}");
+        }
+        // Far to the east of a light facing north, even behind its tangent plane,
+        // the corner holds on the box's east edge: x = +1, whichever way the
+        // frame's `right` points.
+        let side = LightParams { azimuth_deg: 0.0, elevation_deg: 30.0, ..polygon_light() };
+        assert_eq!(dir_to_unit(&side, dir_from_az_el(90.0, 0.0))[0], 1.0);
+        assert_eq!(dir_to_unit(&side, dir_from_az_el(270.0, 0.0))[0], -1.0);
     }
 }
