@@ -185,6 +185,9 @@ impl Studio {
     /// here once per map by [`key_emission`], which also gives the share a surface
     /// facing the key receives (`facing`) and the cone that holds the whole reach
     /// (`cos_cover`).
+    /// A stroke (1b) is placed by its points, not by its azimuth and elevation, so its
+    /// cone, its radiance (the same meaning), its facing share and its covering cone
+    /// come from the shape core instead.
     pub fn new(studio: &StudioParams, lights: &[LightParams]) -> Studio {
         let rgb = |c: [f32; 3]| vec3f(c[0].max(0.0), c[1].max(0.0), c[2].max(0.0));
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
@@ -192,6 +195,12 @@ impl Studio {
         let key_index = enabled.iter().position(|l| l.key && l.blend() == Blend::Add);
         let key = key_index.map(|i| {
             let l = enabled[i];
+            if let Some(shaped) = &prepared[i].shaped {
+                if let (Some(radiance), Some((facing, cos_cover))) = (shaped.key_color(prepared[i].color), shaped.key_spread()) {
+                    let (dir, cos_radius) = shaped.key_cone();
+                    return EnvSun { dir, radiance, cos_radius, facing, cos_cover: cos_cover.min(cos_radius) };
+                }
+            }
             let radius = (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians();
             let integral = key_emission(&prepared[i..], KEY_GRID);
             EnvSun {
@@ -1235,6 +1244,137 @@ mod tests {
             off.lights[key].enabled = false;
             assert!(baked.keyless.as_ref() == Some(&Env::new(&off).bake(64)), "{name}: the keyless copy is not the map without its key");
             assert!(baked.keyless.as_ref() != Some(&baked.map), "{name}: the key drew nothing");
+        }
+    }
+
+    /// A stroke key (1b, B3): a soft 60 degree arch with a hotspot and a
+    /// brightness ramp to a third.
+    fn arch_stroke() -> LightParams {
+        LightParams {
+            key: true,
+            shape: "stroke".to_string(),
+            softness: 0.6,
+            hotspot: 0.3,
+            stroke: Some(crate::hdri::StrokeParams {
+                points: vec![[60.0, 0.0], [90.0, 8.0], [120.0, 0.0]],
+                width_deg: 4.0,
+                end_rgb: Some([0.3, 0.3, 0.3]),
+                ..crate::hdri::StrokeParams::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Plan 2's `facing` and `cos_cover` for a stroke key come from the shape
+    /// core, and they are the map's: the facing share within 0.01 of the baked
+    /// map's cosine share, and no lit direction outside the covering cone.
+    #[test]
+    fn a_stroke_keys_facing_and_covering_cone_are_the_maps() {
+        let env = Env::new(&the_key_alone(&studio_params(vec![arch_stroke()])));
+        let key = env.sun().expect("the stroke is the key light");
+        assert!(key.validate().is_ok(), "{key:?}");
+        assert!(key.cos_cover < key.cos_radius, "the soft edge reaches past the key cone: {key:?}");
+        let want = map_facing(&env.bake_par(1024, on_all_cores), key.dir);
+        assert!((key.facing - want).abs() < 0.01, "facing {} vs the map's {want}", key.facing);
+        for iy in 0..180 {
+            for ix in 0..360 {
+                let d = dir_from_az_el(ix as f32 + 0.5, iy as f32 - 89.5);
+                assert!(env.radiance(d) == Vec3f::default() || d.dot(key.dir) >= key.cos_cover, "lit at {:?}, outside the covering cone", az_el_from_dir(d));
+            }
+        }
+    }
+
+    /// Stroke keys that exercise every term of the shape core's key integral,
+    /// each soft enough for a 2K bake to resolve its edge (a hard edge lying
+    /// along a texel row is off by a few per cent at 2K, and the other way at 4K).
+    fn stroke_keys() -> Vec<(&'static str, LightParams)> {
+        let stroke = |points: Vec<[f32; 2]>, width_deg: f32, softness: f32, hotspot: f32| LightParams {
+            key: true,
+            shape: "stroke".to_string(),
+            softness,
+            hotspot,
+            stroke: Some(crate::hdri::StrokeParams { points, width_deg, ..crate::hdri::StrokeParams::default() }),
+            ..Default::default()
+        };
+        let with = |mut light: LightParams, edit: &dyn Fn(&mut crate::hdri::StrokeParams)| {
+            edit(light.stroke.as_mut().expect("a stroke block"));
+            light
+        };
+        vec![
+            ("a soft arch with a hotspot and a brightness ramp", arch_stroke()),
+            ("a glowing tube: fully soft, with a full hotspot", stroke(vec![[60.0, -5.0], [120.0, -5.0]], 6.0, 1.0, 1.0)),
+            ("a short wide stroke, a third of it its round ends", stroke(vec![[80.0, 10.0], [100.0, 10.0]], 10.0, 0.5, 0.5)),
+            (
+                "a taper to nothing that also fades to black",
+                with(stroke(vec![[60.0, 5.0], [120.0, 5.0]], 6.0, 0.4, 0.0), &|s| {
+                    s.profile = vec![1.0, 0.0];
+                    s.end_rgb = Some([0.0; 3]);
+                }),
+            ),
+            (
+                "a closed loop with a Kelvin ramp",
+                with(stroke(vec![[80.0, 0.0], [100.0, 0.0], [90.0, 15.0]], 3.0, 0.5, 0.0), &|s| {
+                    s.closed = true;
+                    s.end_kelvin = Some(2000.0);
+                }),
+            ),
+            ("a dot: two points half a degree apart", stroke(vec![[90.0, 20.0], [90.5, 20.0]], 8.0, 0.5, 0.4)),
+            ("the arch over a light without points", LightParams { key: true, shape: "stroke".to_string(), ..Default::default() }),
+        ]
+    }
+
+    /// `EnvSun`'s one meaning for a stroke key: radiance x the key cone is the
+    /// stroke's whole emission as the map draws it, its round ends, soft edge,
+    /// hotspot, taper and ramp included (to half a per cent: the shape core's
+    /// sum comes within 0.2 % of a 2K bake for each of these), and its facing
+    /// share is the map's.
+    #[test]
+    fn a_stroke_key_carries_its_emission_over_its_cone() {
+        let mut off = Vec::new();
+        for (name, light) in stroke_keys() {
+            let p = studio_params(vec![light]);
+            let key = Env::new(&p).sun().expect("the stroke is the key light");
+            assert!(key.validate().is_ok(), "{name}: {key:?}");
+            let map = Env::new(&the_key_alone(&p)).bake_par(2048, on_all_cores);
+            let got = key.radiance * (std::f32::consts::TAU * (1.0 - key.cos_radius));
+            let want = map_emission(&map);
+            let ratio = [got.x / want.x, got.y / want.y, got.z / want.z];
+            let facing = map_facing(&map, key.dir);
+            if !ratio.iter().all(|r| (r - 1.0).abs() < 0.005) || (key.facing - facing).abs() > 0.01 {
+                off.push(format!("{name}: emission {:.4} {:.4} {:.4}, facing {:.4} vs the map's {facing:.4}", ratio[0], ratio[1], ratio[2], key.facing));
+            }
+        }
+        assert!(off.is_empty(), "the stroke key over its cone vs the map (r g b):\n{}", off.join("\n"));
+    }
+
+    /// N3 for a stroke key: the engine's lighting copy is the map with the stroke
+    /// switched off, texel for texel, and a rect inside the stroke's covering
+    /// cone (under the arch) stays in it. The arch is taken with each of its
+    /// colourings: a ramped stroke takes its colour from its ramp, not from the
+    /// colour the light loop hands it, so a ramped key leaves the copy only
+    /// through B2's `ShapedLight::hide`.
+    #[test]
+    fn a_stroke_keys_lighting_copy_is_the_map_with_the_stroke_switched_off() {
+        let with_ramp = |end_kelvin: Option<f32>, end_rgb: Option<[f32; 3]>| {
+            let mut arch = arch_stroke();
+            let stroke = arch.stroke.as_mut().expect("the arch is a stroke");
+            stroke.end_kelvin = end_kelvin;
+            stroke.end_rgb = end_rgb;
+            arch
+        };
+        let arches = [
+            ("the arch's brightness ramp (end_rgb)", arch_stroke()),
+            ("a Kelvin ramp (end_kelvin)", with_ramp(Some(2000.0), None)),
+            ("one colour all along", with_ramp(None, None)),
+        ];
+        for (name, arch) in arches {
+            let rect = LightParams { azimuth_deg: 90.0, elevation_deg: 12.0, width_deg: 10.0, height_deg: 6.0, ..Default::default() };
+            let p = studio_params(vec![arch, rect]);
+            let baked = crate::hdri::envmap::bake_generated_env_map(&p, 128, on_all_cores);
+            let mut off = p.clone();
+            off.lights[0].enabled = false;
+            assert!(baked.keyless.as_ref() == Some(&Env::new(&off).bake(128)), "{name}: the keyless copy is not the map without the stroke");
+            assert!(baked.keyless.as_ref() != Some(&baked.map), "{name}: the stroke drew nothing");
         }
     }
 

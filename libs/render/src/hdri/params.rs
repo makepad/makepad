@@ -203,6 +203,9 @@ pub struct LightParams {
     pub rgb: Option<[f32; 3]>,
     /// Shape "polygon" (1b): the outline. None draws the default hexagon.
     pub polygon: Option<PolygonParams>,
+    /// Shape "stroke" (1b), a Lumi-curve. None, or a block with fewer than
+    /// two points, draws the arch `StrokeParams::around` the light's place.
+    pub stroke: Option<StrokeParams>,
 }
 
 /// Widest a polygon or a scrim may be, each way, in degrees. clamp() holds
@@ -292,6 +295,149 @@ fn unit_box_points(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
         Vec::new()
     } else {
         kept
+    }
+}
+
+/// A stroke light (a Lumi-curve): a smooth curve through directions on the sky.
+#[derive(Clone, Debug, PartialEq, DeJson)]
+pub struct StrokeParams {
+    /// Up to 64 (azimuth, elevation) directions in degrees, in the map's own
+    /// frame, that the curve passes through. Azimuth wraps into 0..360,
+    /// elevation is -90..=90. Fewer than two draw the arch over the light's
+    /// place instead (`shaped::stroke_of`).
+    pub points: Vec<[f32; 2]>,
+    /// 0..=2: 0 straight lines between the points, 1 a natural curve, 2 a loose one.
+    pub curviness: f32,
+    /// 0.1..=45 degrees, the full width.
+    pub width_deg: f32,
+    /// Joins the last point back to the first.
+    pub closed: bool,
+    /// Up to 32 width multipliers 0..=4, spread evenly along the stroke;
+    /// empty is 1 all along. The brightness follows min(multiplier, 1).
+    pub profile: Vec<f32>,
+    /// 1000..=20000. A Kelvin ramp: the colour temperature slides from the
+    /// light's `kelvin` at the first point to this at the last, evenly in
+    /// mired, at the light's tint and brightness. None is one colour all along.
+    pub end_kelvin: Option<f32>,
+    /// Linear 0..=1 per channel. A colour ramp: the light's colour at the
+    /// first point blends to this one at the last, at the light's level.
+    /// Wins over `end_kelvin` when both are set.
+    pub end_rgb: Option<[f32; 3]>,
+}
+
+impl Default for StrokeParams {
+    /// No points: the arch over the light's place is drawn until some are
+    /// given, so a block made by a width slider or by a partial patch does
+    /// not move the stroke away from its light.
+    fn default() -> Self {
+        StrokeParams {
+            points: Vec::new(),
+            curviness: 1.0,
+            width_deg: 2.0,
+            closed: false,
+            profile: Vec::new(),
+            end_kelvin: None,
+            end_rgb: None,
+        }
+    }
+}
+
+/// An azimuth folded into 0..360.
+fn wrap_azimuth(azimuth_deg: f32) -> f32 {
+    let wrapped = azimuth_deg.rem_euclid(360.0);
+    // rem_euclid rounds up to exactly 360 for tiny negative inputs.
+    if wrapped >= 360.0 {
+        0.0
+    } else {
+        wrapped
+    }
+}
+
+impl StrokeParams {
+    /// The default stroke with a gentle arch of three points centred on
+    /// (azimuth, elevation) and `span_deg` wide: what a stroke light draws
+    /// until it has points of its own.
+    pub fn around(azimuth_deg: f32, elevation_deg: f32, span_deg: f32) -> StrokeParams {
+        let az = if azimuth_deg.is_finite() { azimuth_deg } else { 0.0 };
+        let el = if elevation_deg.is_finite() { elevation_deg } else { 30.0 };
+        let half = if span_deg.is_finite() { (0.5 * span_deg).clamp(1.0, 80.0) } else { 15.0 };
+        let lift = 0.2 * half;
+        StrokeParams {
+            points: vec![
+                [wrap_azimuth(az - half), (el - lift).clamp(-90.0, 90.0)],
+                [wrap_azimuth(az), (el + lift).clamp(-90.0, 90.0)],
+                [wrap_azimuth(az + half), (el - lift).clamp(-90.0, 90.0)],
+            ],
+            ..StrokeParams::default()
+        }
+    }
+
+    fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
+        let d = StrokeParams::default();
+        let points: Vec<[f32; 2]> = self
+            .points
+            .iter()
+            .filter(|p| p[0].is_finite() && p[1].is_finite())
+            .take(64)
+            .map(|p| [wrap_azimuth(p[0]), p[1].clamp(-90.0, 90.0)])
+            .collect();
+        if points != self.points {
+            self.points = points;
+            f.push(prefix, "points");
+        }
+        f.range(prefix, "curviness", &mut self.curviness, 0.0, 2.0, d.curviness);
+        f.range(prefix, "width_deg", &mut self.width_deg, 0.1, 45.0, d.width_deg);
+        let profile: Vec<f32> = self
+            .profile
+            .iter()
+            .take(32)
+            .map(|v| if v.is_finite() { v.clamp(0.0, 4.0) } else { 1.0 })
+            .collect();
+        // NaN never equals itself, so a profile holding one is replaced too.
+        if profile != self.profile {
+            self.profile = profile;
+            f.push(prefix, "profile");
+        }
+        if let Some(kelvin) = self.end_kelvin.as_mut() {
+            f.range(prefix, "end_kelvin", kelvin, 1000.0, 20_000.0, 6500.0);
+        }
+        if let Some(rgb) = self.end_rgb.as_mut() {
+            f.color(prefix, "end_rgb", rgb, 1.0, [1.0; 3]);
+        }
+    }
+}
+
+/// Written by hand for the `Vec<[f32; 2]>` field, as for PolygonParams. The
+/// two optional ends are written only when set, the way the derive writes an
+/// `Option` field, so a stroke without a ramp stays as short as before.
+impl SerJson for StrokeParams {
+    fn ser_json(&self, d: usize, s: &mut SerJsonState) {
+        s.st_pre();
+        s.field(d + 1, "points");
+        ser_points(&self.points, d + 1, s);
+        s.conl();
+        s.field(d + 1, "curviness");
+        self.curviness.ser_json(d + 1, s);
+        s.conl();
+        s.field(d + 1, "width_deg");
+        self.width_deg.ser_json(d + 1, s);
+        s.conl();
+        s.field(d + 1, "closed");
+        self.closed.ser_json(d + 1, s);
+        s.conl();
+        s.field(d + 1, "profile");
+        self.profile.ser_json(d + 1, s);
+        if let Some(kelvin) = &self.end_kelvin {
+            s.conl();
+            s.field(d + 1, "end_kelvin");
+            kelvin.ser_json(d + 1, s);
+        }
+        if let Some(rgb) = &self.end_rgb {
+            s.conl();
+            s.field(d + 1, "end_rgb");
+            rgb[..].ser_json(d + 1, s);
+        }
+        s.st_post(d);
     }
 }
 
@@ -465,6 +611,7 @@ impl Default for LightParams {
             key: false,
             rgb: None,
             polygon: None,
+            stroke: None,
         }
     }
 }
@@ -721,6 +868,9 @@ impl LightParams {
         if let Some(polygon) = self.polygon.as_mut() {
             polygon.clamp_fields(&join_path(prefix, "polygon"), f);
         }
+        if let Some(stroke) = self.stroke.as_mut() {
+            stroke.clamp_fields(&join_path(prefix, "stroke"), f);
+        }
         // A polygon or a scrim is drawn in the light's gnomonic box, which
         // stretches toward its edges: past about 120 degrees across a shape
         // distorts (the spec's limit for one shaped light). A stroke may be
@@ -865,6 +1015,7 @@ fn template_for(schema: &str) -> Option<JsonValue> {
     match schema {
         "lights[]" => json_tree(&LightParams::default()).ok(),
         "lights[].polygon" => json_tree(&PolygonParams::default()).ok(),
+        "lights[].stroke" => json_tree(&StrokeParams::default()).ok(),
         _ => None,
     }
 }
@@ -1531,5 +1682,59 @@ mod shape_param_tests {
         assert_eq!(span(2), (150.0, 130.0));
         assert_eq!(span(3), (150.0, 130.0));
         assert_eq!(changed, ["lights[0].width_deg", "lights[0].height_deg", "lights[1].width_deg", "lights[1].height_deg"]);
+    }
+
+    #[test]
+    fn stroke_params_clamp_and_round_trip() {
+        let stroke = StrokeParams {
+            points: (0..70).map(|i| [400.0 + i as f32, 100.0]).collect(),
+            curviness: 5.0,
+            width_deg: 0.0,
+            closed: true,
+            profile: (0..40).map(|i| if i == 0 { f32::NAN } else { -1.0 }).collect(),
+            end_kelvin: Some(500.0),
+            end_rgb: Some([2.0, f32::NAN, -1.0]),
+        };
+        let mut p = HdriParams::default();
+        p.lights.push(LightParams { shape: "stroke".to_string(), stroke: Some(stroke), ..LightParams::default() });
+        let changed = p.clamp();
+        let s = p.lights[0].stroke.clone().unwrap();
+        assert_eq!(s.points.len(), 64);
+        assert_eq!(s.points[0], [40.0, 90.0], "azimuth wrapped, elevation held");
+        assert_eq!((s.curviness, s.width_deg), (2.0, 0.1));
+        assert_eq!(s.profile.len(), 32);
+        assert_eq!((s.profile[0], s.profile[1]), (1.0, 0.0), "NaN becomes 1, negatives 0");
+        assert_eq!(s.end_kelvin, Some(1000.0));
+        assert_eq!(s.end_rgb, Some([1.0, 1.0, 0.0]), "each channel into 0..1, NaN to 1");
+        assert_eq!(
+            changed,
+            [
+                "lights[0].stroke.points",
+                "lights[0].stroke.curviness",
+                "lights[0].stroke.width_deg",
+                "lights[0].stroke.profile",
+                "lights[0].stroke.end_kelvin",
+                "lights[0].stroke.end_rgb"
+            ]
+        );
+        assert_eq!(HdriParams::from_json(&p.to_json()).unwrap(), p);
+        assert_eq!(StrokeParams::deserialize_json(&s.serialize_json()).unwrap(), s);
+        // The default block has no points (the arch over the light is drawn) and
+        // no ramp: it writes neither end, and loads back as it was.
+        let plain = StrokeParams::default();
+        assert!(plain.points.is_empty());
+        assert!(!plain.serialize_json().contains("end_"), "{}", plain.serialize_json());
+        assert_eq!(StrokeParams::deserialize_json(&plain.serialize_json()).unwrap(), plain);
+        let arch = StrokeParams::around(350.0, 85.0, 40.0);
+        assert_eq!(arch.points.len(), 3);
+        assert!(arch.points.iter().all(|q| (0.0..360.0).contains(&q[0]) && q[1] <= 90.0), "{:?}", arch.points);
+        assert_eq!(StrokeParams { points: Vec::new(), ..arch }, plain, "the arch is the default plus its points");
+        // A partial patch makes a block without points, so the stroke stays over its light.
+        let (merged, _) = HdriParams::default()
+            .merge_json(r#"{"lights": [{"shape": "stroke", "stroke": {"width_deg": 5, "end_kelvin": 3000}}]}"#)
+            .unwrap();
+        let got = merged.lights[0].stroke.clone().unwrap();
+        assert_eq!((got.width_deg, got.end_kelvin, got.end_rgb), (5.0, Some(3000.0), None));
+        assert!(got.points.is_empty(), "no points were given: the rest is the default block");
     }
 }
