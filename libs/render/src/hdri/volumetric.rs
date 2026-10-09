@@ -3,7 +3,10 @@
 //!
 //! - **Where.** The deck's own density map (`CloudLayer::deck_density`) is
 //!   the coverage: a cloud stands wherever the 2D layer would draw one, between
-//!   `base_m` and `top_m`, taller where the cover is solid.
+//!   `base_m` and `top_m`, taller where the cover is solid, and a column hides
+//!   the sky as the deck does on its footprint (`deck_opacity`): a thin
+//!   footprint, which the deck draws translucent, stands as a veil at the
+//!   bottom of the layer, and solid cloud takes over as the footprint thickens.
 //! - **Shape.** A tiling 3D "Perlin-Worley" volume (Schneider, "The Real-time
 //!   Volumetric Cloudscapes of Horizon Zero Dawn", 2015: Perlin fbm dilated by
 //!   Worley noise and cut by a finer Worley fbm) decides how much of that
@@ -29,7 +32,7 @@
 
 use makepad_draw::*;
 use makepad_render_material::ibl;
-use super::clouds::CloudLayer;
+use super::clouds::{deck_opacity, CloudLayer};
 use super::noise::hash01;
 use super::{arr, vec, CloudParams, HdriParams, VolumetricParams};
 use crate::sky::luminance;
@@ -73,6 +76,17 @@ const DETAIL_TILE_M: f32 = 1400.0;
 const SIGMA: f32 = 0.03;
 /// How far full erosion cuts into the density.
 const EROSION_DEPTH: f32 = 0.35;
+/// Footprints up to SOLID_FROM (the deck's density) stand as a translucent
+/// veil, from SOLID_AT on as solid cloud, and in between as a mix of the two:
+/// the deck draws 0.15 about 53 % opaque and 0.4 about 87 %.
+const SOLID_FROM: f32 = 0.15;
+const SOLID_AT: f32 = 0.4;
+/// The veil fills the layer from its base to this height (0..1 through the
+/// layer). VEIL_LENGTH is the slab's length along a vertical ray as a share
+/// of the layer: its two soft edges (the bottom 0.1 of the layer, the top
+/// 40 % of the slab) count half.
+const VEIL_TOP: f32 = 0.4;
+const VEIL_LENGTH: f32 = 0.8 * VEIL_TOP - 0.05;
 /// Below this transmittance the march stops and the ray counts as opaque.
 const MIN_TRANSMITTANCE: f32 = 0.01;
 /// Multiple-scattering octaves (Wrenninge's approximation): each sees half
@@ -451,8 +465,10 @@ impl VolumetricClouds {
     /// greys it: clouds are white, and the dome is blue only through the gaps,
     /// other cloud everywhere else, so half greyed under a few clouds and
     /// fully under a closed layer (an overcast is grey, not the clear sky's
-    /// blue turned down). Its luminance is the dome's.
-    pub fn sky_light(&self, ambient: Vec3f) -> Vec3f {
+    /// blue turned down). Its luminance is the dome's. Crate-private: `shade`
+    /// applies it, and `Env::base_layer` lights the ground under the layer
+    /// with it.
+    pub(crate) fn sky_light(&self, ambient: Vec3f) -> Vec3f {
         let grey = luminance(ambient);
         ambient.mix(vec3f(grey, grey, grey), self.greyed)
     }
@@ -561,31 +577,57 @@ impl VolumetricClouds {
         footprint * (1.0 - smooth(0.75 * RANGE_M, RANGE_M, distance))
     }
 
-    /// Cloud density 0..1 at a point: `h01` is its height through the layer,
-    /// `cov` the footprint under it. `detail` adds the edge erosion (the light
-    /// grid does without it).
+    /// Cloud density at a point, 1 for solid cloud (SIGMA's extinction; a veil
+    /// squeezed into a thin layer can go past it): `h01` is its height through
+    /// the layer, `cov` the footprint under it. `detail` adds the edge erosion
+    /// (the light grid does without it).
     fn density(&self, x: f32, z: f32, h01: f32, cov: f32, detail: bool) -> f32 {
-        // Taller where the cover is solid, low toward a cloud's edge; a round
-        // base and a top that thins out.
+        // A column hides the sky as the deck does on its footprint. The deck
+        // draws a thin footprint translucent (0.1 is 40 % opaque); solid cloud
+        // is opaque wherever it stands (SIGMA), so on a thin footprint it would
+        // either vanish or open the deck's veil into blue gaps, and the sky
+        // overhead opened when a held 2D preview was released. So a thin
+        // footprint stands as a veil of the deck's own optical depth, and the
+        // solid cloud takes over as the footprint thickens.
+        let solid_share = smooth(SOLID_FROM, SOLID_AT, cov);
+        // The solid cloud is taller where the cover is solid, low toward a
+        // cloud's edge; a round base and a top that thins out.
         let top = 0.35 + 0.65 * cov;
-        let profile = smooth(0.0, 0.1, h01) * (1.0 - smooth(0.5 * top, top, h01));
-        if profile <= 0.0 {
+        let profile = if solid_share > 0.0 { smooth(0.0, 0.1, h01) * (1.0 - smooth(0.5 * top, top, h01)) } else { 0.0 };
+        // The veil fills the bottom of the layer, with soft edges.
+        let slab = if solid_share < 1.0 { smooth(0.0, 0.1, h01) * (1.0 - smooth(0.6 * VEIL_TOP, VEIL_TOP, h01)) } else { 0.0 };
+        if profile <= 0.0 && slab <= 0.0 {
             return 0.0;
         }
         let h = self.base + h01 * (self.top - self.base);
         let shape = self.noise.shape.sample(x * self.shape_scale, h * self.shape_scale, z * self.shape_scale);
-        // Schneider's remap: the coverage sets how much of the shape noise
-        // survives. Even solid cover keeps a threshold, so the tops are carved
-        // into billows instead of ending in a flat fade.
-        let mut d = remap01(shape * profile, 1.0 - 0.9 * cov, 1.0) * cov;
-        if d <= 0.0 {
-            return 0.0;
+        let opacity = deck_opacity(cov);
+        let mut d = 0.0;
+        if profile > 0.0 {
+            // Schneider's remap: the coverage sets how much of the shape noise
+            // survives. Even solid cover keeps a threshold, so the tops are
+            // carved into billows instead of ending in a flat fade. It reads
+            // the deck's opacity, so as much of the sky is hidden as the deck
+            // hides (through the density itself a footprint under 0.3 stood
+            // almost nowhere).
+            let mut solid = remap01(shape * profile, 1.0 - 0.9 * opacity, 1.0) * opacity;
+            if solid > 0.0 && detail && self.erosion > 0.0 {
+                let fine = self.noise.detail.sample(x * self.detail_scale, h * self.detail_scale, z * self.detail_scale);
+                // Wispy at the base, billowy higher up: the detail turns over with height.
+                let fine = mix_f32(fine, 1.0 - fine, (4.0 * h01).min(1.0));
+                solid = remap01(solid, self.erosion * EROSION_DEPTH * fine, 1.0);
+            }
+            d += solid * solid_share;
         }
-        if detail && self.erosion > 0.0 {
-            let fine = self.noise.detail.sample(x * self.detail_scale, h * self.detail_scale, z * self.detail_scale);
-            // Wispy at the base, billowy higher up: the detail turns over with height.
-            let fine = mix_f32(fine, 1.0 - fine, (4.0 * h01).min(1.0));
-            d = remap01(d, self.erosion * EROSION_DEPTH * fine, 1.0);
+        if slab > 0.0 {
+            // The deck's optical depth at this footprint, -ln(1 - opacity),
+            // spread through the slab (whose length is VEIL_LENGTH of the
+            // layer) at density 1, and lumped by the shape noise (2 x shape
+            // averages about 1). The erosion leaves it alone: it would cut a
+            // density this thin away whole.
+            let depth = -(1.0 - opacity.min(0.999)).ln();
+            let veil = depth / (SIGMA * VEIL_LENGTH * (self.top - self.base)) * slab * 2.0 * shape;
+            d += veil * (1.0 - solid_share);
         }
         d
     }
@@ -922,6 +964,104 @@ mod tests {
         // Past the range there is no cloud at all.
         assert_eq!(clouds.coverage(RANGE_M, 0.0), 0.0);
         assert_eq!(clouds.coverage(0.0, -2.0 * RANGE_M), 0.0);
+    }
+
+    /// What a vertical column of the volume over the ground point (x, z) hides
+    /// of the sky straight above it: its optical depth as an opacity.
+    fn column_alpha(clouds: &VolumetricClouds, x: f32, z: f32) -> f32 {
+        let cov = clouds.coverage(x, z);
+        if cov <= 0.0 {
+            return 0.0;
+        }
+        const LEVELS: usize = 48;
+        let dh = (clouds.top - clouds.base) / LEVELS as f32;
+        let density: f32 = (0..LEVELS).map(|i| clouds.density(x, z, (i as f32 + 0.5) / LEVELS as f32, cov, true)).sum();
+        1.0 - (-density * clouds.sigma * dh).exp()
+    }
+
+    /// An opacity that reads as cloud: it hides more than a quarter of the sky behind it.
+    const SEEN: f32 = 0.25;
+
+    /// What the deck and the volume hide, summed over samples: the opacities,
+    /// and how many of them read as cloud.
+    #[derive(Default)]
+    struct Hidden {
+        deck: f32,
+        volume: f32,
+        deck_seen: f32,
+        volume_seen: f32,
+    }
+
+    impl Hidden {
+        fn add(&mut self, deck: f32, volume: f32) {
+            self.deck += deck;
+            self.volume += volume;
+            self.deck_seen += (deck > SEEN) as u32 as f32;
+            self.volume_seen += (volume > SEEN) as u32 as f32;
+        }
+
+        /// The volume over the deck: (opacity, share read as cloud).
+        fn ratios(&self) -> (f32, f32) {
+            (self.volume / self.deck, self.volume_seen / self.deck_seen)
+        }
+    }
+
+    #[test]
+    fn a_footprint_hides_as_much_sky_as_the_deck_draws_on_it() {
+        // Column by column, the volume hides the sky above it as the deck does
+        // on the same footprint: as much light, and as much that reads as
+        // cloud. A thin footprint, which the deck draws translucent, must not
+        // vanish (the sky would open on release) nor stand as fewer solid
+        // clouds (the deck's veil would open into blue gaps). Columns 1 km
+        // apart across the middle of the range, inside its fade; seeds 1 and 2
+        // only (the noise keeps two).
+        for coverage in [0.3f32, 0.5, 0.75] {
+            let mut hidden = Hidden::default();
+            for seed in [1u32, 2] {
+                let clouds = VolumetricClouds::new(&cover(coverage), &quick(), seed, sun()).unwrap();
+                for i in -16..=16 {
+                    for j in -16..=16 {
+                        let (x, z) = (i as f32 * 1000.0, j as f32 * 1000.0);
+                        hidden.add(deck_opacity(clouds.coverage(x, z)), column_alpha(&clouds, x, z));
+                    }
+                }
+            }
+            let (opacity, seen) = hidden.ratios();
+            assert!((opacity - 1.0).abs() < 0.1 && (seen - 1.0).abs() < 0.1, "coverage {coverage}: volume over deck {opacity} (opacity), {seen} (read as cloud)");
+        }
+    }
+
+    #[test]
+    fn the_upper_sky_is_as_cloudy_as_the_decks() {
+        // A held drag shows the 2D deck and its release the volume, on the same
+        // footprint, so the sky overhead must neither open nor close on
+        // release. Above 45 degrees a ray crosses about one column of the
+        // layer, so the volume hides there what the deck hides, sky by sky
+        // (lower down it hides more: the towers' sides, seen across the field,
+        // close the sky toward the horizon).
+        let mut off = Vec::new();
+        for seed in [1u32, 2] {
+            for coverage in [0.35f32, 0.5, 0.65, 0.75] {
+                let layer = CloudLayer::new(&cover(coverage), seed, sun()).unwrap();
+                let clouds = VolumetricClouds::new(&cover(coverage), &quick(), seed, sun()).unwrap();
+                let mut hidden = Hidden::default();
+                for el in (45..=85).step_by(5) {
+                    for az in (0..360).step_by(10) {
+                        let dir = dir_from_az_el(az as f32, el as f32);
+                        hidden.add(layer.sample(dir).alpha, 1.0 - clouds.transmittance_toward(dir));
+                    }
+                }
+                let n = 9.0 * 36.0;
+                let (deck, volume) = (hidden.deck / n, hidden.volume / n);
+                let (deck_seen, volume_seen) = (hidden.deck_seen / n, hidden.volume_seen / n);
+                if (volume - deck).abs() > 0.12 || (volume_seen - deck_seen).abs() > 0.1 {
+                    off.push(format!(
+                        "seed {seed} coverage {coverage}: opacity {deck:.2} deck, {volume:.2} volume; read as cloud {deck_seen:.2} deck, {volume_seen:.2} volume"
+                    ));
+                }
+            }
+        }
+        assert!(off.is_empty(), "{off:#?}");
     }
 
     #[test]

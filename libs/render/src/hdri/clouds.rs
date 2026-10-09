@@ -175,9 +175,7 @@ impl CloudLayer {
             let p = deck_point(d, sin_el, self.altitude, self.cell);
             let density = self.cumulus_density(p);
             if density > 0.0 {
-                // Beer-Lambert through the deck, rescaled so density 1 is opaque.
-                let opacity = (1.0 - (-CUMULUS_THICKNESS * density).exp()) / (1.0 - (-CUMULUS_THICKNESS).exp());
-                alpha = opacity.min(1.0) * fade;
+                alpha = deck_opacity(density) * fade;
                 if shaded {
                     light = self.self_shadow(p);
                 }
@@ -276,6 +274,15 @@ impl CloudLayer {
         let threshold = 0.7 - 0.25 * self.cirrus;
         smoothstep(threshold, threshold + 0.2, noise) * (0.4 + 0.6 * self.cirrus)
     }
+}
+
+/// The deck's opacity at a density (0..1): Beer-Lambert through the deck,
+/// rescaled so density 1 is opaque. A thin footprint draws translucent (0.1
+/// is 40 % opaque). The volume (volumetric.rs) reads it too, so that its
+/// columns hide as much of the sky as the deck draws on their footprint.
+pub(crate) fn deck_opacity(density: f32) -> f32 {
+    let opacity = (1.0 - (-CUMULUS_THICKNESS * density).exp()) / (1.0 - (-CUMULUS_THICKNESS).exp());
+    opacity.min(1.0)
 }
 
 /// Where a view ray meets a flat deck `altitude` metres up, in noise cells.
