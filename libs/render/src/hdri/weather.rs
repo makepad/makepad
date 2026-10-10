@@ -10,10 +10,11 @@
 //! The effects, in the order they are drawn over the dry sky:
 //! - **Ground.** The ground is lit by the sky the map draws: under a closed
 //!   deck by the deck's light, not by the clear sky's sun (`Env` measures the
-//!   gain once per map, the plan owner's D7). Snow is a ground albedo of 0.8
-//!   (through the weathered ground colour). Wet ground mirrors the sky by
-//!   water's Fresnel reflectance, the bolt included, as a dull sheen on damp
-//!   ground and as a flat mirror in fbm puddles.
+//!   gain once per map, the plan owner's D7, wherever anything covers the
+//!   sky, with or without a weather: [`relit_ground`]). Snow is a ground
+//!   albedo of 0.8 (through the weathered ground colour). Wet ground mirrors
+//!   the sky by water's Fresnel reflectance, the bolt included, as a dull
+//!   sheen on damp ground and as a flat mirror in fbm puddles.
 //! - **Rain.** Haze that greys the distance, with virga: shafts hanging under
 //!   the deck toward the horizon, darker curtains over the haze and what is
 //!   behind it. An environment map holds no streaks.
@@ -92,6 +93,24 @@ const CORE_SIGMA: f32 = 0.0021;
 const HALO_SIGMA: f32 = 0.009;
 /// Nothing of the channel lies further than this from the bolt's azimuth (radians).
 const BOLT_REACH: f32 = 0.6;
+/// How a sum over directions (a window key's integral, D1) reads the channel:
+/// as a bake of texels CHANNEL_FOOTPRINT wide draws it (`lightning`'s
+/// `texel`), the pieces added up as every bake adds them (a point lookup
+/// joins them with round caps, which holds less light where the channel kinks
+/// sharply: 1.5 % less of one seed's bolt), sampled CHANNEL_STEP apart where
+/// it runs (`fine_step_near`). Averaged over four times the spacing, jittered
+/// samples hold the bolt's light to 0.6 % for ten seeds; at half the core's
+/// width for both they hold it to 0.55 % for four times the cost, and over the
+/// footprint alone, at a key's own spacing, to 3 %. CHANNEL_REACH is how far
+/// from the centre line the averaged core reaches: e^-16 of its peak 4 widths
+/// out, plus half the footprint (the halo is smooth at a key's own spacing).
+pub const CHANNEL_FOOTPRINT: f32 = 4.0 * CORE_SIGMA;
+const CHANNEL_STEP: f32 = CORE_SIGMA;
+const CHANNEL_REACH: f32 = 4.0 * CORE_SIGMA + 0.5 * CHANNEL_FOOTPRINT;
+/// The bolt's plane (x = turn x cos(elevation), y = elevation) shears the sky
+/// by turn x sin(elevation), under 0.5 where the channel runs: a distance in
+/// it is at most this many times the angle between the two directions.
+const CHANNEL_PLANE_SLACK: f32 = 1.5;
 /// The flash: the cloud around the channel's top, lit from inside. Radiance at
 /// its centre, its width (14 degrees) and the cosine past which it is nothing.
 const FLASH: f32 = 3.0;
@@ -119,7 +138,7 @@ const GROUND_BLEND: f32 = 0.0523;
 /// What a kind asks of the sky: floors and a ceiling over the sky's own
 /// fields, floors under the weather's effects, and how much light the deck
 /// passes to the clouds' undersides. (The ground is lit by the sky the map
-/// draws: `Env::ground_gain`.)
+/// draws: `Env::measure_ground_gain`, `relit_ground`.)
 struct KindPreset {
     haze_min: f32,
     coverage_min: f32,
@@ -465,11 +484,7 @@ impl Weather {
             return ground;
         }
         let down = (-d.y).min(1.0);
-        // The atmosphere and the night lit their ground with the clear sky and
-        // its discs; the gain takes it to this sky's light, following the
-        // atmosphere's own blend from horizon haze to ground.
-        let one = Vec3f::all(1.0);
-        let c = ground * (one + (gain - one) * smooth(0.0, GROUND_BLEND, down));
+        let c = relit_ground(d, ground, gain);
         let wet = self.effects.wet_ground;
         if wet <= 0.0 {
             return c;
@@ -579,6 +594,29 @@ impl Weather {
         vec3f(BOLT_COLOR[0], BOLT_COLOR[1], BOLT_COLOR[2]) * light
     }
 
+    /// The spacing a sum over directions must sample this weather's drawing
+    /// at within `radius` (radians) of `d`: the channel's (`CHANNEL_STEP`)
+    /// where the bolt's channel, or its mirror image in wet ground, may pass;
+    /// None where the weather draws nothing thinner than its haze and flash.
+    /// A window filled with sky as the key integrates the sky it lets in so
+    /// (D1, the review's item 4), reading it averaged over
+    /// `CHANNEL_FOOTPRINT`: at its cells' own spacing, 0.3 degrees, the 0.12
+    /// degree channel held 0.95 to 1.06 of the light the bake draws.
+    /// Conservative: it may say Some a little further out.
+    pub fn fine_step_near(&self, d: Vec3f, radius: f32) -> Option<f32> {
+        let bolt = self.bolt.as_ref()?;
+        let within = CHANNEL_PLANE_SLACK * radius.max(0.0) + CHANNEL_REACH;
+        let near = |d: Vec3f| {
+            let elevation = d.y.clamp(-1.0, 1.0).asin();
+            let tau = std::f32::consts::TAU;
+            let mut turn = d.x.atan2(-d.z) - bolt.azimuth;
+            turn -= tau * (turn / tau).round();
+            let p = [turn * elevation.cos(), elevation];
+            bolt.segments.iter().any(|segment| segment_distance(p, segment.a, segment.b) < within)
+        };
+        (near(d) || (self.mirrors() && near(vec3f(d.x, -d.y, d.z)))).then_some(CHANNEL_STEP)
+    }
+
     /// The veil between the eye and what is drawn along `d`: rain haze, its
     /// virga shafts over the haze and what is behind it, then fog.
     /// `sun_irradiance` is the sun's light under the clouds (already through
@@ -660,6 +698,23 @@ impl Weather {
         let noise = fbm2(VIRGA_RING * azimuth.cos(), VIRGA_RING * azimuth.sin(), 4, self.seed ^ 0x51a_f7);
         VIRGA_DARKEN * self.effects.rain.min(1.0) * smooth(0.5, 0.72, noise) * band
     }
+}
+
+/// The ground the dry sky drew along `d` (`ground`), lit by the clear sky,
+/// taken to this map's light by `gain` (`Env` measures it once per map: under
+/// a closed deck the deck's light over the clear sky's, D7; exactly 1 when
+/// nothing covers the sky). The atmosphere and the night lit their ground
+/// with the clear sky and its discs; the gain follows the atmosphere's own
+/// blend from the horizon haze into the ground. Above the horizon `ground`
+/// passes unchanged. With or without a weather: the clouds alone can close
+/// the deck.
+pub fn relit_ground(d: Vec3f, ground: Vec3f, gain: Vec3f) -> Vec3f {
+    if !(d.y < 0.0) {
+        return ground;
+    }
+    let down = (-d.y).min(1.0);
+    let one = Vec3f::all(1.0);
+    ground * (one + (gain - one) * smooth(0.0, GROUND_BLEND, down))
 }
 
 /// Optical depth along a ray of elevation sine `sin_elevation` through a level
@@ -1009,8 +1064,9 @@ mod tests {
     /// texel centres alone it held -41 to +23 % of it from 256 to 512 wide
     /// (the review's probe; 0.45 at 64 wide here). The light of the bolt and
     /// its flash in a bake of each width from 96 to 1024, against a 2048
-    /// wide one, for six seeds. (At 64 wide, 5.6 degree texels, it holds 0.94
-    /// to 1.03: the channel kinks more finely than such a texel.)
+    /// wide one, for six seeds, and what a studio window filled with sky shows
+    /// of it from 128 to 1024, for two. (At 64 wide, 5.6 degree texels, it
+    /// holds 0.94 to 1.03: the channel kinks more finely than such a texel.)
     #[test]
     fn the_bolts_light_does_not_change_with_the_bake_width() {
         /// How far a bake's bolt may stray from the finest one's: a straight
@@ -1040,6 +1096,63 @@ mod tests {
             for width in [96usize, 128, 192, 256, 384, 512, 1024] {
                 let ratio = light(width) / finest;
                 assert!((ratio - 1.0).abs() < BOLT_LIGHT_TOLERANCE, "seed {seed}, {width} wide: {ratio:.4} of the bolt's light");
+            }
+        }
+        // And through a studio window filled with sky, which shows the
+        // lightless Sky-mode copy behind the studio (the review's item 4): a
+        // bake hands the copy its texel too. Point-sampled there, the window
+        // held 0.59 to 1.16 of the finest bake's light from 128 to 1024 wide
+        // (0.975 to 1.002 now). The light over the window's box (a black
+        // backdrop, one pane, no frame: the sky and the bolt it shows), at each
+        // width against the finest.
+        for seed in [1u32, 2] {
+            let mut sky = sky_with("storm");
+            sky.weather.as_mut().unwrap().seed = seed;
+            let bolt = Weather::new(&sky, sun()).unwrap().bolt.unwrap();
+            let (azimuth, elevation) = (bolt.azimuth.to_degrees(), 17.0f32);
+            let mut p = crate::hdri::HdriParams { mode: "studio".to_string(), sky, ..crate::hdri::HdriParams::default() };
+            p.studio.top = [0.0; 3];
+            p.studio.horizon = [0.0; 3];
+            p.studio.floor = [0.0; 3];
+            p.lights = vec![crate::hdri::LightParams {
+                azimuth_deg: azimuth,
+                elevation_deg: elevation,
+                width_deg: 36.0,
+                height_deg: 40.0,
+                softness: 0.05,
+                intensity_ev: 0.0,
+                gobo: Some(crate::hdri::GoboParams { panes_x: 1, panes_y: 1, frame: 0.0, fill_sky: true, ..crate::hdri::GoboParams::default() }),
+                ..crate::hdri::LightParams::default()
+            }];
+            let env = crate::hdri::Env::new(&p);
+            let light = |width: usize| -> f64 {
+                let height = width / 2;
+                let texel = std::f32::consts::TAU / width as f32;
+                let at = crate::hdri::Sampling::bake(width, None);
+                let mut sum = 0.0f64;
+                for y in 0..height {
+                    let v = (y as f32 + 0.5) / height as f32;
+                    let el = 90.0 - v * 180.0;
+                    if !(-5.0..=elevation + 24.0).contains(&el) {
+                        continue;
+                    }
+                    let area = (texel * (pi / height as f32) * (v * pi).sin()) as f64;
+                    for x in 0..width {
+                        let d = vec3f_of(makepad_render_material::ibl::equirect_uv_to_dir([(x as f32 + 0.5) / width as f32, v]));
+                        let mut turn = d.x.atan2(-d.z).to_degrees() - azimuth;
+                        turn -= 360.0 * (turn / 360.0).round();
+                        if turn.abs() > 24.0 {
+                            continue;
+                        }
+                        sum += luminance(env.radiance_with(d, None, at)) as f64 * area;
+                    }
+                }
+                sum
+            };
+            let finest = light(2048);
+            for width in [128usize, 256, 512, 1024] {
+                let ratio = light(width) / finest;
+                assert!((ratio - 1.0).abs() < BOLT_LIGHT_TOLERANCE, "seed {seed}, a studio window {width} wide: {ratio:.4} of its light");
             }
         }
     }
@@ -1233,7 +1346,7 @@ mod env_tests {
     #[test]
     fn dome_light_is_the_dry_skys_mean_over_the_upper_hemisphere() {
         let hazy = Env::new(&sky_params(Some("hazy")));
-        let (dome, open) = (luminance(hazy.weather_dome), luminance(hazy.cloud_ambient));
+        let (dome, open) = (luminance(hazy.dome), luminance(hazy.cloud_ambient));
         assert!((dome / open - 1.0).abs() < 0.02, "a fair sky's dome is the open dome: {dome} vs {open}");
         for kind in ["overcast", "fog", "rain", "storm", "snow"] {
             let env = Env::new(&sky_params(Some(kind)));
@@ -1247,7 +1360,7 @@ mod env_tests {
                 }
             }
             let fine = luminance(sum * (1.0 / (rows * columns) as f32));
-            let dome = luminance(env.weather_dome);
+            let dome = luminance(env.dome);
             assert!((dome / fine - 1.0).abs() < 0.05, "{kind}: the veil's dome {dome}, the dry sky's mean {fine}");
         }
     }
@@ -1270,13 +1383,13 @@ mod env_tests {
             let mut fog = Weather::new(&p.sky, atmo.sun_dir()).unwrap();
             fog.effects.rain = 0.0;
             let albedo = if kind == "snow" { SNOWFALL_ALBEDO } else { RAIN_ALBEDO };
-            let haze = albedo * luminance(env.weather_dome);
+            let haze = albedo * luminance(env.dome);
             for el in [90.0f32, 30.0] {
                 let d = dir_from_az_el(17.0, el);
                 let through = (-weather.rain_depth(d)).exp();
                 let dry = env.sky_layers(d, atmo, None, None, true);
                 let rained = (dry * through + vec3f(haze, haze, haze) * (1.0 - through)) * (1.0 - weather.virga(d));
-                let want = fog.veil(d, rained, env.weather_sun, env.weather_dome) + weather.lightning(d, 0.0);
+                let want = fog.veil(d, rained, env.weather_sun, env.dome) + weather.lightning(d, 0.0);
                 let got = env.radiance(d);
                 assert!((got - want).length() <= 1.0e-4 * want.length(), "{kind} at {el} degrees: {got:?} vs {want:?}");
                 assert!(through < 0.9, "{kind} at {el} degrees: the rain hazes the sky ({through})");
@@ -1336,15 +1449,65 @@ mod env_tests {
     /// deck passes down, the dome the map draws (`dome_light`), not by the
     /// clear sky's sun: it read about 0.8 of its sky under overcast and 9
     /// times it under snow (0.46 against 0.05). A Lambert ground of albedo a
-    /// under a dome of mean radiance L reads about a x L.
+    /// under a dome of mean radiance L reads about a x L. Whatever closes the
+    /// deck: a kind, or the shipped Overcast preset's own coverage with no
+    /// weather at all (its ground read 0.282 under a dome of 0.45).
     #[test]
     fn the_ground_under_a_closed_deck_is_lit_by_the_deck() {
-        for kind in ["overcast", "snow"] {
-            let env = Env::new(&sky_params(Some(kind)));
-            let albedo = luminance(vec(env.weather.as_ref().unwrap().ground_color()));
+        let mut decks: Vec<(&str, HdriParams)> = ["overcast", "snow"].iter().map(|kind| (*kind, sky_params(Some(kind)))).collect();
+        decks.push(("the Overcast preset", crate::hdri::presets::preset("Overcast").unwrap()));
+        for (name, p) in decks {
+            let env = Env::new(&p);
+            let albedo = env.weather.as_ref().map_or(p.sky.atmosphere.ground_color, |weather| weather.ground_color());
+            let albedo = luminance(vec(albedo));
             let ground = luminance(env.radiance(vec3f(0.0, -1.0, 0.0)));
-            let lit = albedo * luminance(env.weather_dome);
-            assert!(ground > 0.7 * lit && ground < 1.3 * lit, "{kind}: the ground {ground} under a dome of {} (albedo {albedo})", luminance(env.weather_dome));
+            let dome = luminance(env.dome_light().mean);
+            let lit = albedo * dome;
+            assert!(ground > 0.7 * lit && ground < 1.3 * lit, "{name}: the ground {ground} under a dome of {dome} (albedo {albedo})");
+        }
+    }
+
+    /// D7 (L:261), the review's Important 1: the ground is lit by the deck
+    /// with or without a weather block. It was so only where a Weather was
+    /// built, so a deck closed by the Clouds coverage, or by the volume under
+    /// Clear, kept the clear sky's sun-lit ground, and the first 0.01 of Fog
+    /// then dropped it at once to the deck's light, about 5 times darker (the
+    /// Overcast preset 10 degrees down: 0.462 with fog 0, 0.0836 with fog
+    /// 0.01). Each deck with fog 0 against fog 0.01, 10 to 90 degrees down:
+    /// the ground with fog 0.01 is the ground with fog 0 seen through that
+    /// fog's veil: the few metres of fog down to the ground, whose own light
+    /// brightens a ground as dark as the Overcast preset's by 1.4 % 10
+    /// degrees down, and by no more than 2 % anywhere here.
+    #[test]
+    fn a_closed_deck_lights_the_ground_with_or_without_weather() {
+        let mut coverage = sky_params(None);
+        coverage.sky.clouds.coverage = 1.0;
+        let mut volume = sky_params(Some("clear"));
+        volume.sky.clouds.coverage = 1.0;
+        volume.sky.volumetric = Some(crate::hdri::VolumetricParams::default());
+        let decks = [("the Overcast preset", crate::hdri::presets::preset("Overcast").unwrap()), ("Clouds coverage 1", coverage), ("a closed volume under Clear", volume)];
+        for (name, p) in decks {
+            let fogged = |fog: f32| {
+                let mut p = p.clone();
+                if fog > 0.0 {
+                    p.sky.weather.get_or_insert_with(WeatherParams::default).fog = fog;
+                }
+                Env::new(&p)
+            };
+            let (dry, misty) = (fogged(0.0), fogged(0.01));
+            let fog = misty.weather.as_ref().expect("fog 0.01 is a weather");
+            for el in [-10.0f32, -30.0, -60.0, -90.0] {
+                for az in [10.0f32, 100.0, 190.0, 280.0] {
+                    let d = dir_from_az_el(az, el);
+                    let (a, b) = (dry.radiance(d), misty.radiance(d));
+                    let veiled = fog.veil(d, a, misty.weather_sun, misty.dome);
+                    let (a, b, veiled) = (luminance(a), luminance(b), luminance(veiled));
+                    assert!(
+                        (b / veiled - 1.0).abs() < 1.0e-4 && (b / a - 1.0).abs() < 0.02,
+                        "{name} at ({az}, {el}): the ground {a} with fog 0 is {veiled} through fog 0.01, which draws {b}"
+                    );
+                }
+            }
         }
     }
 

@@ -796,7 +796,7 @@ mod env_tests {
         assert!(whole_base(&p, &images));
         let env = Env::new_with(&p, &images);
         assert!(env.weather.is_none() && env.volumetric.is_none(), "neither is built under the photograph");
-        assert_eq!(env.weather_dome, Vec3f::default(), "and no dome is measured for them");
+        assert_eq!(env.dome, Vec3f::default(), "and no dome is measured for them");
         // Not loaded here: the generated sky shows, with its weather and its volume.
         assert!(!whole_base(&p, &ImageSet::default()));
         let unloaded = Env::new(&p);
@@ -831,7 +831,7 @@ mod env_tests {
             // Below the line: the photograph through the veil, exactly.
             for &(az, el) in &[(30.0f32, -2.0f32), (150.0, -20.0), (260.0, -60.0)] {
                 let d = dir_from_az_el(az, el);
-                let want = weather.veil(d, image.radiance(d), env.weather_sun, env.weather_dome);
+                let want = weather.veil(d, image.radiance(d), env.weather_sun, env.dome);
                 assert!(close3(env.radiance(d), want, 1.0e-5), "{kind} ({az}, {el}): {:?} vs {want:?}", env.radiance(d));
             }
             // At the line the two sides are the veil's own light.

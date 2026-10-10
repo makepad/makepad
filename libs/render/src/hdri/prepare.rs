@@ -733,7 +733,8 @@ mod tests {
     /// Every kind of key plan 1b brings, each where the map does something
     /// to it that the key must follow (D1): keys behind a window filled with
     /// sky, strokes under flags, gels and cloth, a wide stroke, pictures,
-    /// what hangs in front of a key, a window filled with sky as the key, and
+    /// what hangs in front of a key, a window filled with sky as the key (a
+    /// storm's bolt in it too, in both modes), and
     /// the sun and the moon behind lights, under the base image's line,
     /// behind a rain shaft, in fog and under a cloud volume.
     fn keys_1b() -> Vec<KeyCase> {
@@ -821,6 +822,36 @@ mod tests {
             ..LightParams::default()
         };
         let softbox = LightParams { key: true, azimuth_deg: 0.0, elevation_deg: 25.0, width_deg: 40.0, height_deg: 30.0, softness: 0.3, ..LightParams::default() };
+        // A window filled with sky as the key, 3 degrees beside a storm's
+        // bolt (rain with the Lightning tick), in Sky or Studio mode: the
+        // channel, 0.12 degrees across, is far thinner than the key's samples
+        // and the bake's texels alike (the review's item 4: these two held
+        // 1.056 and 0.972 of the key; ten seeds now hold it within 0.6 %).
+        let storm_window = |mode: &str, seed: u32, gobo: GoboParams| {
+            let mut p = HdriParams { mode: mode.to_string(), ..HdriParams::default() };
+            p.sky.weather = Some(weather(&|w| {
+                w.kind = "rain".to_string();
+                w.lightning = true;
+                w.seed = seed;
+            }));
+            // Where the bolt stands: the brightest azimuth 10 degrees up.
+            let storm = crate::hdri::weather::Weather::new(&p.sky, dir_from_az_el(180.0, 40.0)).expect("rain is weather");
+            let channel = |az: f32| luminance(storm.lightning(dir_from_az_el(az, 10.0), 0.0));
+            let bolt_az = (0..3600).map(|a| a as f32 * 0.1).max_by(|a, b| channel(*a).total_cmp(&channel(*b))).unwrap();
+            p.lights = vec![LightParams {
+                key: true,
+                azimuth_deg: bolt_az + 3.0,
+                elevation_deg: 14.0,
+                width_deg: 30.0,
+                height_deg: 30.0,
+                softness: 0.05,
+                intensity_ev: 0.0,
+                gobo: Some(GoboParams { fill_sky: true, ..gobo }),
+                ..LightParams::default()
+            }];
+            p
+        };
+        let one_pane = GoboParams { panes_x: 1, panes_y: 1, frame: 0.0, ..GoboParams::default() };
         let case = |name: &str, params: HdriParams, tolerance: f64| KeyCase { name: name.to_string(), params, images: images.clone(), tolerance };
         vec![
             case("1b: a softbox key half behind a window filled with sky", studio_1b(vec![softbox.clone(), window_over(18.0, 25.0, 30.0, 40.0)]), 0.01),
@@ -906,6 +937,8 @@ mod tests {
             case("1b: the sun in a soft scrim's edge", HdriParams { lights: vec![scrim(160.0, 35.0, 20.0, 1.0)], ..sun.clone() }, 0.03),
             case("1b: the sun behind a soft coloured gel", HdriParams { lights: vec![soft_flag(150.0, 36.0, 16.0, [0.6, 0.4, 0.2])], ..sun.clone() }, 0.03),
             case("1b: the sun in a window filled with sky at +1 EV", HdriParams { lights: vec![sky_window], ..sun.clone() }, 0.03),
+            case("1b: a window filled with sky as the key beside a storm's bolt (Sky mode)", storm_window("sky", 2, one_pane.clone()), 0.02),
+            case("1b: a window filled with sky as the key beside a storm's bolt (Studio mode)", storm_window("studio", 1, GoboParams::default()), 0.02),
             case("1b: the moon in a soft scrim's edge", HdriParams { lights: vec![scrim(moon_az, moon_el + 9.0, 16.0, 1.0)], ..night.clone() }, 0.03),
             case(
                 "1b: the sun half under the image's horizon line",

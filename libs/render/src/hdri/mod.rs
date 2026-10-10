@@ -134,18 +134,22 @@ pub struct Env {
     /// The weather drawn over the dry sky (1b); None in fair weather and
     /// under an image that is the whole base (D6).
     weather: Option<weather::Weather>,
-    /// The sun's light under the clouds, for the fog: its irradiance at the
-    /// ground times the cover along the sun.
+    /// The sun's light under the clouds, for the fog and the ground's gain:
+    /// its irradiance at the ground times the cover along the sun.
     weather_sun: Vec3f,
     /// The dome's light under the clouds, for the rain haze and the fog: the
-    /// dry sky's mean radiance as this map draws it (`dome_light`). Zero
-    /// without weather.
-    weather_dome: Vec3f,
-    /// What the weather does to the light on the ground, per channel: the
+    /// dry sky's mean radiance as this map draws it (`dome_light`). Measured
+    /// with `ground_gain`; zero where that is not measured.
+    dome: Vec3f,
+    /// What the sky's cover does to the light on the ground, per channel: the
     /// light this map's sky puts on it (the dome as drawn, the sun and the
     /// moon through the cover) over the light the clear sky lit it with
-    /// (D7). 1 without weather, and exactly 1 when nothing covers the sky.
-    weather_ground: Vec3f,
+    /// (D7). Measured wherever clouds, a volume or a weather stand over the
+    /// generated ground, whether or not a weather is built (the Overcast
+    /// preset closes its deck with the Clouds alone); exactly 1 when nothing
+    /// covers the sky, and 1 where it is not measured (Studio mode, a fair sky
+    /// with no clouds, an image that is the whole base).
+    ground_gain: Vec3f,
 }
 
 /// What one bake hands each of its lookups: the cloud march it reads, when it
@@ -261,17 +265,20 @@ impl Env {
             volumetric,
             weather,
             weather_sun,
-            weather_dome: Vec3f::default(),
-            weather_ground: Vec3f::all(1.0),
+            dome: Vec3f::default(),
+            ground_gain: Vec3f::all(1.0),
             base_image: None,
         };
-        // The weather's veil and the ground under it are lit by the dome as
-        // this map draws it, so the dome is measured once its layers are in
-        // place (and before a base image meters the base, the veil included).
-        if env.weather.is_some() {
+        // The weather's veil and the ground are lit by the dome as this map
+        // draws it, so the dome is measured once its layers are in place (and
+        // before a base image meters the base, the veil included): wherever
+        // anything covers the sky over the generated ground, a weather or not
+        // (D7). Under an image that is the whole base no ground is drawn.
+        let covered = env.weather.is_some() || env.clouds.is_some() || env.volumetric.is_some();
+        if covered && !whole_base {
             let dome = env.dome_light();
-            env.weather_dome = dome.mean;
-            env.weather_ground = env.ground_gain(&dome);
+            env.dome = dome.mean;
+            env.ground_gain = env.measure_ground_gain(&dome);
         }
         if let Some(base) = env.params.base_image.clone() {
             // Sky replacement matches the image's exposure to the base it is
@@ -282,15 +289,20 @@ impl Env {
         }
         // A window filled with sky as the key carries the sky it lets in
         // (D1), so it is measured once that sky is in place: the base in Sky
-        // mode, the lightless copy behind a studio, with its discs (map frame).
+        // mode, the lightless copy behind a studio, with its discs (map frame)
+        // and the lines thinner than its samples (a storm's bolt), which it
+        // samples finely where they run, reading the bolt as a bake of fine
+        // texels draws it (the bake's own channel, `weather::CHANNEL_FOOTPRINT`).
         if env.studio.key_waits_for_sky() {
             let hot: Vec<(Vec3f, f32)> = env
                 .hot_spots()
                 .into_iter()
                 .map(|(dir, radius)| (rotate_y(dir, -env.params.rotation_deg), radius))
                 .collect();
-            let sky = |d: Vec3f| env.window_sky_at(d, env.base_at(d, None, Sampling::default()));
-            let key = env.studio.measured_window_key(&sky, &hot);
+            let fine_texels = Sampling { cache: None, texel: weather::CHANNEL_FOOTPRINT };
+            let sky = |d: Vec3f| env.window_sky_at(d, env.base_at(d, None, fine_texels), fine_texels);
+            let fine = |d: Vec3f, radius: f32| env.window_sky_step_near(d, radius);
+            let key = env.studio.measured_window_key(&sky, &hot, &fine);
             env.studio.set_window_key(key);
         }
         env
@@ -324,7 +336,7 @@ impl Env {
         let d = rotate_y(dir, -self.params.rotation_deg);
         let base = self.base_at(d, without, at);
         // The map without its key (N3) leaves the key light out here.
-        self.lights_over(d, base, without == Some(KeyTerm::Light)) * self.scale
+        self.lights_over(d, base, without == Some(KeyTerm::Light), at) * self.scale
     }
 
     /// The base under the lights along `d`, in the map's own frame: the
@@ -340,7 +352,7 @@ impl Env {
             Some(image) => {
                 let sky = self.base_layer(d, without, at);
                 match &self.weather {
-                    Some(weather) => image.compose_veiled(d, sky, &|photo| weather.veil(d, photo, self.weather_sun, self.weather_dome)),
+                    Some(weather) => image.compose_veiled(d, sky, &|photo| weather.veil(d, photo, self.weather_sun, self.dome)),
                     None => image.compose(d, sky),
                 }
             }
@@ -350,32 +362,50 @@ impl Env {
 
     /// The lights drawn over `base` along `d`, in the map's own frame. A light
     /// filled with sky (GoboParams::fill_sky) is a window: it shows the sky
-    /// along the same direction ([`Self::window_sky_at`]). `without_key`
-    /// leaves the key light out (N3).
-    fn lights_over(&self, d: Vec3f, base: Vec3f, without_key: bool) -> Vec3f {
-        let sky = |w: Vec3f| self.window_sky_at(w, base);
+    /// along the same direction ([`Self::window_sky_at`]), sampled as `at`
+    /// samples this map. `without_key` leaves the key light out (N3).
+    fn lights_over(&self, d: Vec3f, base: Vec3f, without_key: bool, at: Sampling) -> Vec3f {
+        let sky = |w: Vec3f| self.window_sky_at(w, base, at);
         self.studio.apply_lights_sky(d, base, &sky, without_key)
     }
 
     /// The sky a window shows along `d` (map frame) over `base`, the base
     /// there: in Sky mode the base itself; in Studio mode the lightless
     /// Sky-mode copy works it out, and only for the directions such a window
-    /// covers.
-    fn window_sky_at(&self, d: Vec3f, base: Vec3f) -> Vec3f {
+    /// covers. A window shows the sky along its texel's own directions, so the
+    /// copy is read with this lookup's texel (a bake's bolt is averaged over
+    /// it there too, D7); it marches its own volume, the cache in `at` being
+    /// this map's.
+    fn window_sky_at(&self, d: Vec3f, base: Vec3f, at: Sampling) -> Vec3f {
         match &self.window_sky {
-            Some(outside) => outside.radiance(d),
+            Some(outside) => outside.radiance_with(d, None, Sampling { cache: None, texel: at.texel }),
             None => base,
         }
     }
 
+    /// The spacing the key's integral over a window filled with sky must
+    /// sample the sky it lets in at within `radius` (radians) of `d` (map
+    /// frame), where that sky draws a line thinner than the integral's own
+    /// samples: a storm's bolt (`Weather::fine_step_near`). None where it is
+    /// smooth at their spacing. The sky behind a studio is the lightless copy's.
+    fn window_sky_step_near(&self, d: Vec3f, radius: f32) -> Option<f32> {
+        match &self.window_sky {
+            Some(outside) => outside.window_sky_step_near(d, radius),
+            None => self.weather.as_ref().and_then(|weather| weather.fine_step_near(d, radius)),
+        }
+    }
+
     /// The mode's own base layer under the lights, in the map's own frame: the sky
-    /// (the dry sky, then the weather over it) or the studio backdrop, under any gobo
-    /// shadow cast onto it. `without` leaves the key's disc out (plan 2's N3);
-    /// `at` is what the bake hands its lookups (its cloud march, its texels).
+    /// (the dry sky, its ground lit by this map's own sky, then the weather over it)
+    /// or the studio backdrop, under any gobo shadow cast onto it. `without` leaves
+    /// the key's disc out (plan 2's N3); `at` is what the bake hands its lookups (its
+    /// cloud march, its texels).
     fn base_layer(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
         match &self.atmo {
             Some(atmo) => match &self.weather {
-                None => self.sky_layers(d, atmo, without, at.cache, true),
+                // Below the horizon the ground lit by this map's own sky (D7): a
+                // deck the Clouds or the volume close lights it with no weather too.
+                None => weather::relit_ground(d, self.sky_layers(d, atmo, without, at.cache, true), self.ground_gain),
                 Some(weather) => {
                     let dry = |v: Vec3f| self.sky_layers(v, atmo, without, at.cache, true);
                     // Below the horizon: the ground lit by this map's own sky (D7),
@@ -387,14 +417,14 @@ impl Env {
                     // light does not carry (plan 2's N3 takes out exactly what the key
                     // carries, no more).
                     let seen = |v: Vec3f| {
-                        weather.veil(v, self.sky_layers(v, atmo, None, at.cache, true), self.weather_sun, self.weather_dome)
+                        weather.veil(v, self.sky_layers(v, atmo, None, at.cache, true), self.weather_sun, self.dome)
                             + weather.lightning(v, at.texel)
                     };
-                    let c = weather.ground(d, dry(d), self.weather_ground, &seen);
+                    let c = weather.ground(d, dry(d), self.ground_gain, &seen);
                     // Rain haze, its virga and fog between the eye and all of it, lit
                     // by the dome above them; then the bolt and its flash, which stand
                     // inside the rain.
-                    weather.veil(d, c, self.weather_sun, self.weather_dome) + weather.lightning(d, at.texel)
+                    weather.veil(d, c, self.weather_sun, self.dome) + weather.lightning(d, at.texel)
                 }
             },
             None => {
@@ -523,14 +553,14 @@ impl Env {
         dome
     }
 
-    /// The weather's gain on the ground's light (D7): what this map's sky puts
+    /// The cover's gain on the ground's light (D7): what this map's sky puts
     /// on a level surface (the dome as drawn, `dome_light`, and the sun and
     /// the moon through the clouds) over what the clear sky put there, which
     /// the atmosphere and the night lit their ground with. So the ground under
     /// a closed deck is lit by the deck's light, not by the clear sky's sun,
     /// and a sky nothing covers leaves it exactly as it was. Per channel; 1
     /// where the clear sky put no light.
-    fn ground_gain(&self, dome: &Dome) -> Vec3f {
+    fn measure_ground_gain(&self, dome: &Dome) -> Vec3f {
         let Some(atmo) = &self.atmo else {
             return Vec3f::all(1.0);
         };
@@ -695,7 +725,7 @@ impl Env {
                 Some(image) => image.compose(d, v),
                 None => v,
             };
-            self.lights_over(d, base, false)
+            self.lights_over(d, base, false, Sampling::default())
         };
         let (azimuth_deg, elevation_deg) = az_el_from_dir(key.dir);
         let frame = studio::light_frame(azimuth_deg, elevation_deg, 0.0);

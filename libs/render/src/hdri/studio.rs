@@ -401,9 +401,18 @@ impl Studio {
     /// window never shows. `sky(d)` is the sky the window shows along `d` (the
     /// map's own frame): the map's base in Sky mode, the lightless sky behind
     /// a studio. `hot` are the discs in it (direction, angular radius), which
-    /// a bake area-averages and this integral samples finely too. None when
-    /// the key is no such window.
-    pub(super) fn measured_window_key(&self, sky: &dyn Fn(Vec3f) -> Vec3f, hot: &[(Vec3f, f32)]) -> Option<EnvSun> {
+    /// a bake area-averages and this integral samples finely too. `fine(d,
+    /// radius)` is the spacing the sky must be sampled at within `radius` of
+    /// `d` where it draws a line thinner than a cell's samples (a storm's
+    /// bolt, which a bake averages over its texels), None where it is smooth:
+    /// a cell the line may cross takes that spacing. None when the key is no
+    /// such window.
+    pub(super) fn measured_window_key(
+        &self,
+        sky: &dyn Fn(Vec3f) -> Vec3f,
+        hot: &[(Vec3f, f32)],
+        fine: &dyn Fn(Vec3f, f32) -> Option<f32>,
+    ) -> Option<EnvSun> {
         let index = self.key_index.filter(|&i| self.fx[i].fills_with_sky())?;
         let (light, fx) = (&self.lights[index], &self.fx[index]);
         let (axis, cos_radius, cos_cover) = light.key_cones();
@@ -430,7 +439,9 @@ impl Studio {
                 .map(|(_, r)| (side / (r / DISC_SAMPLES_PER_RADIUS)).ceil() as usize)
                 .max()
                 .unwrap_or(0);
-            own.max(disc)
+            // A line behind the glass that may cross the cell: sampled at its own spacing.
+            let line = fine(centre, side * std::f32::consts::FRAC_1_SQRT_2).map_or(0, |step| (side / step).ceil() as usize);
+            own.max(disc).max(line)
         };
         let integral = over_cone(axis, cos_cover, &cells, &drawn);
         Some(EnvSun { dir: axis, radiance: EnvSun::cone_radiance(integral.emission, cos_radius), cos_radius, facing: integral.facing, cos_cover })
