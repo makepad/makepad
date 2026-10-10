@@ -1237,7 +1237,9 @@ impl HdriParams {
     /// is completed from LightParams::default().
     ///
     /// A value of the wrong JSON kind (a string for a number, a scalar for an
-    /// object) is an error naming its path. Numbers aimed at integer fields are
+    /// object) is an error naming its path, and so is a list of another length
+    /// where the type fixes it (a colour, the barn doors, a point's [x, y]:
+    /// `fixed_length`). Numbers aimed at integer fields are
     /// rounded (a rounding counts as a clamp). `null` clears an optional field
     /// such as a light's `rgb`; on a required field it is an error.
     pub fn merge_json(&self, patch: &str) -> Result<(HdriParams, Vec<String>), String> {
@@ -1628,6 +1630,39 @@ fn integer_range(schema: &str) -> Option<(f64, f64)> {
     }
 }
 
+/// Lists of numbers whose length their Rust type fixes (`[f32; N]`), with
+/// that length: the colours, the barn doors and each [x, y] of a point list.
+/// micro-serde refuses another length with a token at a position in the
+/// merged text, so `check_length` names the field instead (M13).
+fn fixed_length(schema: &str) -> Option<usize> {
+    match schema {
+        "sky.atmosphere.ground_color" | "sky.night.glow_color" | "studio.top" | "studio.horizon" | "studio.floor" => Some(3),
+        "lights[].rgb" | "lights[].stroke.end_rgb" => Some(3),
+        "lights[].aim.barn_doors" => Some(4),
+        "lights[].polygon.points[]" | "lights[].stroke.points[]" => Some(2),
+        _ => None,
+    }
+}
+
+/// A value given for a fixed-length list (`fixed_length`) must be a list of
+/// that many numbers, and so must each item of a point list; the error names
+/// the field, or the item. Anything else passes through.
+fn check_length(value: &JsonValue, schema: &str, path: &str) -> Result<(), String> {
+    if let Some(n) = fixed_length(schema) {
+        return match value.as_array() {
+            Some(items) if items.len() == n && items.iter().all(|item| item.is_number()) => Ok(()),
+            _ => Err(format!("{path} must be a list of {n} numbers")),
+        };
+    }
+    let item_schema = format!("{schema}[]");
+    if let (Some(items), Some(_)) = (value.as_array(), fixed_length(&item_schema)) {
+        for (i, item) in items.iter().enumerate() {
+            check_length(item, &item_schema, &format!("{path}[{i}]"))?;
+        }
+    }
+    Ok(())
+}
+
 /// Keys in sorted order, so reports come out the same every time.
 fn sorted_keys(map: &HashMap<String, JsonValue>) -> Vec<&String> {
     let mut keys: Vec<&String> = map.keys().collect();
@@ -1726,6 +1761,7 @@ fn merge_object(
                 }
                 (existing, value) => {
                     check_kind(existing, value, &path)?;
+                    check_length(value, &schema, &path)?;
                     *existing = coerce_number(value, &schema, &path, report);
                 }
             },
@@ -1740,7 +1776,12 @@ fn merge_object(
                         }
                         template
                     }
-                    _ => coerce_number(value, &schema, &path, report),
+                    _ => {
+                        if !value.is_null() {
+                            check_length(value, &schema, &path)?;
+                        }
+                        coerce_number(value, &schema, &path, report)
+                    }
                 };
                 base.insert(key.clone(), fresh);
             }
@@ -2198,6 +2239,96 @@ mod tests {
         let err = base.merge_json(r#"{"sky": {"atmosphere": {"ground_color": ["a", "b", "c"]}}}"#).unwrap_err();
         assert!(err.contains("ground_color"), "{err}");
         assert!(base.merge_json(r#"{"intensity_ev": null}"#).is_err(), "null only clears optional fields");
+    }
+
+    /// Every list of numbers in `value` (each item of a list of lists too), by path.
+    fn number_lists(value: &JsonValue, path: &str, out: &mut Vec<String>) {
+        match value {
+            JsonValue::Object(fields) => {
+                for (key, field) in fields {
+                    number_lists(field, &join_path(path, key), out);
+                }
+            }
+            JsonValue::Array(items) if items.first().is_some_and(|item| item.is_number()) => out.push(path.to_string()),
+            JsonValue::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    number_lists(item, &format!("{path}[{i}]"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// The value at `path` ("lights[0].stroke.points[1]") in `tree`.
+    fn value_at<'a>(tree: &'a mut JsonValue, path: &str) -> &'a mut JsonValue {
+        path.split('.').fold(tree, |node, part| match part.split_once('[') {
+            Some((key, index)) => {
+                let i: usize = index.trim_end_matches(']').parse().unwrap();
+                &mut node.get_mut(key).unwrap().as_array_mut().unwrap()[i]
+            }
+            None => node.get_mut(part).unwrap(),
+        })
+    }
+
+    /// M13: a list whose length its type fixes (a colour, the barn doors, a
+    /// point) given another length is refused naming its field, not by the
+    /// typed parse's token at a position in an internal string. Every list of
+    /// numbers a full map holds is tried one longer and one shorter, so a
+    /// fixed-size field added without its length fails here; a list of any
+    /// length (a stroke's profile) merges.
+    #[test]
+    fn a_list_of_the_wrong_length_is_refused_naming_its_field() {
+        let mut full = HdriParams::default();
+        full.lights.push(LightParams {
+            rgb: Some([0.5, 0.4, 0.3]),
+            polygon: Some(PolygonParams { points: vec![[0.0, 1.0], [-1.0, -1.0], [1.0, -1.0]], ..Default::default() }),
+            stroke: Some(StrokeParams {
+                points: vec![[10.0, 20.0], [40.0, 30.0]],
+                profile: vec![1.0, 0.5],
+                end_kelvin: Some(3000.0),
+                end_rgb: Some([1.0, 0.5, 0.2]),
+                ..Default::default()
+            }),
+            aim: Some(AimParams { barn_doors: [10.0, 0.0, 0.0, 0.0], ..Default::default() }),
+            ..LightParams::default()
+        });
+        let tree = json_tree(&full).unwrap();
+        let mut lists = Vec::new();
+        number_lists(&tree, "", &mut lists);
+        lists.sort();
+        assert!(lists.len() >= 12, "{lists:?}");
+        for path in &lists {
+            for longer in [true, false] {
+                let mut patch = tree.clone();
+                let list = value_at(&mut patch, path).as_array_mut().unwrap();
+                if longer {
+                    list.push(JsonValue::F64(0.5));
+                } else {
+                    list.pop();
+                }
+                match full.merge_json(&patch.serialize_json()) {
+                    Ok(_) => assert_eq!(schema_path(path), "lights[].stroke.profile", "{path} took a list of another length"),
+                    Err(err) => assert!(err.starts_with(&format!("{path} must be a list of ")), "{path}: {err}"),
+                }
+            }
+        }
+        // The fields a model most often gets wrong, on a fresh light too.
+        for (patch, says) in [
+            (r#"{"lights": [{"aim": {"barn_doors": [90, 0]}}]}"#, "lights[0].aim.barn_doors must be a list of 4 numbers"),
+            (r#"{"lights": [{"rgb": [1, 0.5]}]}"#, "lights[0].rgb must be a list of 3 numbers"),
+            (r#"{"lights": [{"rgb": "red"}]}"#, "lights[0].rgb must be a list of 3 numbers"),
+            (r#"{"lights": [{"polygon": {"points": [[0, 1], [1, -1, 0], [-1, -1]]}}]}"#, "lights[0].polygon.points[1] must be a list of 2 numbers"),
+            (r#"{"lights": [{"stroke": {"points": [10, 20, 30, 40]}}]}"#, "lights[0].stroke.points[0] must be a list of 2 numbers"),
+            (r#"{"lights": [{"stroke": {"end_rgb": [1, 1]}}]}"#, "lights[0].stroke.end_rgb must be a list of 3 numbers"),
+            (r#"{"studio": {"top": [1, 1, 1, 1]}}"#, "studio.top must be a list of 3 numbers"),
+        ] {
+            let err = HdriParams::default().merge_json(patch).unwrap_err();
+            assert_eq!(err, says, "{patch}");
+        }
+        // A list of the right length, and null on an optional one, still merge.
+        let (merged, _) = HdriParams::default().merge_json(r#"{"lights": [{"rgb": [1, 0.5, 0.25], "aim": {"barn_doors": [90, 0, 0, 0]}}]}"#).unwrap();
+        assert_eq!(merged.lights[0].rgb, Some([1.0, 0.5, 0.25]));
+        assert!(full.merge_json(r#"{"lights": [{"rgb": null}]}"#).is_ok());
     }
 }
 
