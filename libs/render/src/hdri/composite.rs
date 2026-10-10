@@ -4,19 +4,24 @@
 //! layer under the lights, in one of two ways:
 //!
 //! - **Compositing** (`replace_sky` off): the image is the whole base, in
-//!   either mode, and the lights are drawn over it.
+//!   either mode, and the lights are drawn over it. The generated sky is not
+//!   seen, so its weather and its cloud volume are not built ([`whole_base`],
+//!   the plan owner's D6).
 //! - **Sky replacement** (`replace_sky` on): above a horizon line the mode's
 //!   own base shows (the generated sky), below it the image. The line is an
 //!   elevation mask with a feather, optionally times a sky key that keeps
 //!   whatever in the image stands against its sky. The image's exposure is
 //!   matched to the new sky: its ground was lit by its own sky, so both skies
 //!   are metered as the light a level surface receives and the image is
-//!   scaled by the ratio.
+//!   scaled by the ratio. The weather's rain haze and fog lie over the image
+//!   below the line as over the sky above it (D6).
 //!
 //! The image's sun is found with `envmap::detect_sun`. `remove_sun` cuts it
 //! out of the map (`envmap::remove_sun`, run on a small copy, supplies what
 //! goes in its place), and "match sun" writes its direction into the manual
-//! sun, so the generated sky's sun stands where the photograph's did.
+//! sun, so the generated sky's sun stands where the photograph's did. Left
+//! in, its texels are area-averaged by the bake as the generated sun's are
+//! (`BaseImage::drawn_sun`, D6).
 //!
 //! `Env::new_with` runs per preview bake, so nothing here may read every
 //! texel of a large image each time: the sun search and the small copies are
@@ -248,6 +253,13 @@ impl BaseImage {
 
     /// The image under the mask, `base` over it: mix(image, base, mask).
     pub fn compose(&self, d: Vec3f, base: Vec3f) -> Vec3f {
+        self.compose_veiled(d, base, &|photo| photo)
+    }
+
+    /// `compose` with the image seen through `veil` (the weather's rain haze
+    /// and fog, D6): mix(veil(image), base, mask). The mask reads the image
+    /// itself, so the sky key keeps what it kept.
+    pub fn compose_veiled(&self, d: Vec3f, base: Vec3f, veil: &dyn Fn(Vec3f) -> Vec3f) -> Vec3f {
         let above = self.above(d);
         // All base and no key to consult: the image is not even read.
         if above >= 1.0 && self.sky_key <= 0.0 {
@@ -255,7 +267,7 @@ impl BaseImage {
         }
         let texel = self.texel(d);
         let mask = above * self.keyed(texel);
-        (texel * self.gain).mix(base, mask)
+        veil(texel * self.gain).mix(base, mask)
     }
 
     /// The image's sun in the map's own frame (its yaw applied), at the
@@ -270,6 +282,17 @@ impl BaseImage {
             radiance: sun.radiance * self.gain,
             ..*sun
         })
+    }
+
+    /// The image's sun as the map draws it, for the bake's refinement (D6): its
+    /// direction in the map's own frame and the radius of the cone that holds
+    /// its reach (`detect_sun`'s, at most its own cone). None without a sun,
+    /// or when it is cut from the map.
+    pub fn drawn_sun(&self) -> Option<(Vec3f, f32)> {
+        if self.cut.is_some() {
+            return None;
+        }
+        self.sun().map(|sun| (sun.dir, sun.cos_cover.min(sun.cos_radius).clamp(-1.0, 1.0).acos()))
     }
 
     /// The image's own value along `d`, in the image's units.
@@ -313,6 +336,18 @@ impl BaseImage {
         let likeness = bright * (0.4 + 0.6 * cool);
         1.0 - self.sky_key * (1.0 - likeness)
     }
+}
+
+/// True when the params' base image is the whole base and `images` holds it
+/// (well formed), so the map draws it in place of the mode's own base: the
+/// generated sky is not seen, and its weather and its cloud volume are
+/// neither built nor drawn (the plan owner's D6). Exactly when
+/// `BaseImage::new` makes an image without sky replacement. The panel greys
+/// the Weather and Volumetric controls by it.
+pub fn whole_base(params: &HdriParams, images: &ImageSet) -> bool {
+    params.base_image.as_ref().is_some_and(|base| {
+        !base.replace_sky && !base.key.is_empty() && images.images.get(&base.key).is_some_and(|map| well_formed(map))
+    })
 }
 
 /// Where the base image's sun stands in the map's own frame (the image's yaw
@@ -743,5 +778,110 @@ mod env_tests {
         // An image without a sun leaves no key: the generated sun is not drawn under it.
         p.base_image = Some(BaseImageParams { key: "photo".to_string(), ..BaseImageParams::default() });
         assert!(Env::new_with(&p, &images).sun().is_none());
+    }
+
+    /// D6 (M1): under an image that is the whole base the generated sky is
+    /// not drawn, so its weather and its cloud volume are not built (nor the
+    /// dome measured for them); `whole_base` says so, for the panel too. Under
+    /// sky replacement both are built, and so they are when the image is not
+    /// loaded (the mode's own base shows then).
+    #[test]
+    fn a_whole_base_image_builds_no_weather_and_no_volume() {
+        let images = images();
+        let mut p = sky_params();
+        p.sky.clouds.coverage = 0.5;
+        p.sky.volumetric = Some(VolumetricParams { steps: 16, ..VolumetricParams::default() });
+        p.sky.weather = Some(WeatherParams { kind: "storm".to_string(), ..WeatherParams::default() });
+        p.base_image = Some(BaseImageParams { key: "photo".to_string(), ..BaseImageParams::default() });
+        assert!(whole_base(&p, &images));
+        let env = Env::new_with(&p, &images);
+        assert!(env.weather.is_none() && env.volumetric.is_none(), "neither is built under the photograph");
+        assert_eq!(env.weather_dome, Vec3f::default(), "and no dome is measured for them");
+        // Not loaded here: the generated sky shows, with its weather and its volume.
+        assert!(!whole_base(&p, &ImageSet::default()));
+        let unloaded = Env::new(&p);
+        assert!(unloaded.weather.is_some() && unloaded.volumetric.is_some());
+        // Sky replacement draws the generated sky above the line: both are built.
+        p.base_image.as_mut().unwrap().replace_sky = true;
+        assert!(!whole_base(&p, &images));
+        let replaced = Env::new_with(&p, &images);
+        assert!(replaced.weather.is_some() && replaced.volumetric.is_some());
+        // No key, or one naming nothing in the set, is no whole base.
+        p.base_image = Some(BaseImageParams::default());
+        assert!(!whole_base(&p, &images));
+        p.base_image = None;
+        assert!(!whole_base(&p, &images));
+    }
+
+    /// D6 (L:252): under sky replacement the weather's rain haze and fog lie
+    /// over the photograph too: what shows below the line is the photograph
+    /// through the veil, so on the horizon, where fog is opaque, the photo's
+    /// ground meets the fogged sky without a seam. It was drawn crisp under
+    /// an opaque fog horizon.
+    #[test]
+    fn the_fog_and_the_rain_haze_lie_over_the_photograph() {
+        let images = images();
+        for kind in ["fog", "rain"] {
+            let mut p = sky_params();
+            p.sky.weather = Some(WeatherParams { kind: kind.to_string(), ..WeatherParams::default() });
+            p.base_image = Some(BaseImageParams { key: "photo".to_string(), replace_sky: true, feather_deg: 0.0, ..BaseImageParams::default() });
+            let env = Env::new_with(&p, &images);
+            let image = env.base_image.as_ref().expect("the photograph is loaded");
+            let weather = env.weather.as_ref().expect("the weather is drawn");
+            // Below the line: the photograph through the veil, exactly.
+            for &(az, el) in &[(30.0f32, -2.0f32), (150.0, -20.0), (260.0, -60.0)] {
+                let d = dir_from_az_el(az, el);
+                let want = weather.veil(d, image.radiance(d), env.weather_sun, env.weather_dome);
+                assert!(close3(env.radiance(d), want, 1.0e-5), "{kind} ({az}, {el}): {:?} vs {want:?}", env.radiance(d));
+            }
+            // At the line the two sides are the veil's own light.
+            let ring = |el: f32| (0..36).map(|i| luminance(env.radiance(dir_from_az_el(i as f32 * 10.0 + 3.0, el)))).sum::<f32>() / 36.0;
+            let (above, below) = (ring(0.2), ring(-0.2));
+            assert!((below / above - 1.0).abs() < 0.1, "{kind}: {above} above the line, {below} below it");
+        }
+    }
+
+    /// D6 (L:220): an image's own sun is area-averaged as the generated one
+    /// is, so the map holds its energy whatever the bake's texels: a 4 degree
+    /// sun of a 512 wide photograph, sampled at the texel centres alone of a
+    /// 48 to 64 wide map (5.6 to 7.5 degree texels), held 2.71 times its
+    /// energy at 48 wide. Under the whole base the generated sun and moon,
+    /// which are not drawn, are no hot spots.
+    #[test]
+    fn the_photographed_sun_is_area_averaged() {
+        let sun = dir_from_az_el(100.0, 35.0);
+        let lit = |d: [f32; 3]| vec(d).dot(sun) > 2.0f32.to_radians().cos();
+        let sky = |d: [f32; 3]| if d[1] > 0.0 { [0.6, 0.7, 0.9] } else { [0.12, 0.1, 0.08] };
+        let mut images = ImageSet::default();
+        images.images.insert("sunny".to_string(), Arc::new(EnvMap::from_fn(512, |d| if lit(d) { [5.0e3; 3] } else { sky(d) })));
+        images.images.insert("dull".to_string(), Arc::new(EnvMap::from_fn(512, sky)));
+        let energy = |map: &EnvMap| -> f64 {
+            let (w, h) = (map.width, map.height);
+            (0..w * h)
+                .map(|i| {
+                    let theta = ((i / w) as f64 + 0.5) / h as f64 * std::f64::consts::PI;
+                    map.data[i][1] as f64 * theta.sin() * (std::f64::consts::TAU / w as f64) * (std::f64::consts::PI / h as f64)
+                })
+                .sum()
+        };
+        let own = energy(&images.images["sunny"]) - energy(&images.images["dull"]);
+        let mut p = sky_params();
+        for width in [48usize, 56, 64] {
+            for yaw in [0.0f32, 1.3, 2.9] {
+                p.base_image = Some(BaseImageParams { key: "sunny".to_string(), yaw_deg: yaw, ..BaseImageParams::default() });
+                let with = energy(&Env::new_with(&p, &images).bake(width));
+                p.base_image = Some(BaseImageParams { key: "dull".to_string(), yaw_deg: yaw, ..BaseImageParams::default() });
+                let without = energy(&Env::new_with(&p, &images).bake(width));
+                let ratio = (with - without) / own;
+                assert!((ratio - 1.0).abs() < 0.1, "{width} wide, yaw {yaw}: the map holds {ratio:.3} of the sun's energy");
+            }
+        }
+        p.base_image = Some(BaseImageParams { key: "sunny".to_string(), ..BaseImageParams::default() });
+        let hot = Env::new_with(&p, &images).hot_spots();
+        assert_eq!(hot.len(), 1, "the photograph's sun alone: {hot:?}");
+        assert!(hot[0].0.dot(sun) > 0.9999, "{hot:?}");
+        // Cut from the map, it is not drawn: nothing to refine.
+        p.base_image.as_mut().unwrap().remove_sun = true;
+        assert!(Env::new_with(&p, &images).hot_spots().is_empty());
     }
 }

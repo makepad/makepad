@@ -127,9 +127,12 @@ pub struct Env {
     /// None when the params name none or the caller's ImageSet lacks it.
     base_image: Option<composite::BaseImage>,
     /// The marched cloud volume (1b); Some in Sky mode when `sky.volumetric`
-    /// is set and there is coverage. `clouds` is then the cirrus veil alone.
+    /// is set and there is coverage and density, and no image is the whole
+    /// base. With the tick on `clouds` is the cirrus veil alone (D8), so a
+    /// volume of no density draws no clouds.
     volumetric: Option<volumetric::VolumetricClouds>,
-    /// The weather drawn over the dry sky (1b); None in fair weather.
+    /// The weather drawn over the dry sky (1b); None in fair weather and
+    /// under an image that is the whole base (D6).
     weather: Option<weather::Weather>,
     /// The sun's light under the clouds, for the fog: its irradiance at the
     /// ground times the cover along the sun.
@@ -138,6 +141,29 @@ pub struct Env {
     /// dry sky's mean radiance as this map draws it (`dome_light`). Zero
     /// without weather.
     weather_dome: Vec3f,
+    /// What the weather does to the light on the ground, per channel: the
+    /// light this map's sky puts on it (the dome as drawn, the sun and the
+    /// moon through the cover) over the light the clear sky lit it with
+    /// (D7). 1 without weather, and exactly 1 when nothing covers the sky.
+    weather_ground: Vec3f,
+}
+
+/// What one bake hands each of its lookups: the cloud march it reads, when it
+/// has one, and the angular size of its texels (radians; 0 for a lookup along
+/// one exact direction), over which a line thinner than a texel is averaged
+/// (the lightning's channel, D7).
+#[derive(Clone, Copy, Default)]
+struct Sampling<'a> {
+    cache: Option<&'a volumetric::CloudCache>,
+    texel: f32,
+}
+
+impl<'a> Sampling<'a> {
+    /// The lookups of a bake `width` wide (2:1, so a texel is as tall as it
+    /// is wide at the equator).
+    fn bake(width: usize, cache: Option<&'a volumetric::CloudCache>) -> Sampling<'a> {
+        Sampling { cache, texel: std::f32::consts::TAU / width.max(2) as f32 }
+    }
 }
 
 impl Env {
@@ -154,6 +180,9 @@ impl Env {
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
         let studio = studio::Studio::new_with(&params.studio, &params.lights, images);
+        // An image that is the whole base hides the generated sky: its weather
+        // and its cloud volume are not drawn, so they are not built (D6).
+        let whole_base = composite::whole_base(&params, images);
         let mut volumetric = None;
         let mut weather = None;
         let mut weather_sun = Vec3f::default();
@@ -168,12 +197,15 @@ impl Env {
                 let atmo = atmosphere::Atmosphere::new(sun_dir, &sky.atmosphere, &sky.sun_disc);
                 // Volumetric mode (1b): the marched volume replaces the 2D deck
                 // and stands on its footprint; the cirrus veil above it stays
-                // the 2D one.
-                volumetric = sky
-                    .volumetric
-                    .as_ref()
-                    .and_then(|vol| volumetric::VolumetricClouds::new(&sky.clouds, vol, params.seed, atmo.sun_dir()));
-                let clouds = if volumetric.is_some() {
+                // the 2D one. The tick chooses the mode (D8): a volume of no
+                // density draws no clouds, and the flat deck does not come back.
+                if !whole_base {
+                    volumetric = sky
+                        .volumetric
+                        .as_ref()
+                        .and_then(|vol| volumetric::VolumetricClouds::new(&sky.clouds, vol, params.seed, atmo.sun_dir()));
+                }
+                let clouds = if sky.volumetric.is_some() {
                     clouds::CloudLayer::new(&CloudParams { coverage: 0.0, ..sky.clouds.clone() }, params.seed, atmo.sun_dir())
                 } else {
                     clouds::CloudLayer::new(&sky.clouds, params.seed, atmo.sun_dir())
@@ -182,7 +214,9 @@ impl Env {
                 let cloud_sun = atmo.sun_irradiance();
                 let cloud_ambient = atmo.ambient() + night.ambient();
                 // The weather itself works its floors out from the user's block.
-                weather = weather::Weather::new(&params.sky, atmo.sun_dir());
+                if !whole_base {
+                    weather = weather::Weather::new(&params.sky, atmo.sun_dir());
+                }
                 // The sun under the clouds, as the key is dimmed in `sun`: the 2D
                 // layer's UNFADED cover (1a's fix round; a 2 degree sun behind a
                 // full overcast is hidden, not 80 % through) and the volume.
@@ -228,13 +262,16 @@ impl Env {
             weather,
             weather_sun,
             weather_dome: Vec3f::default(),
+            weather_ground: Vec3f::all(1.0),
             base_image: None,
         };
-        // The weather's veil is lit by the dome as this map draws it, so the
-        // dome is measured once its layers are in place (and before a base
-        // image meters the base, the veil included).
+        // The weather's veil and the ground under it are lit by the dome as
+        // this map draws it, so the dome is measured once its layers are in
+        // place (and before a base image meters the base, the veil included).
         if env.weather.is_some() {
-            env.weather_dome = env.dome_light();
+            let dome = env.dome_light();
+            env.weather_dome = dome.mean;
+            env.weather_ground = env.ground_gain(&dome);
         }
         if let Some(base) = env.params.base_image.clone() {
             // Sky replacement matches the image's exposure to the base it is
@@ -252,7 +289,7 @@ impl Env {
                 .into_iter()
                 .map(|(dir, radius)| (rotate_y(dir, -env.params.rotation_deg), radius))
                 .collect();
-            let sky = |d: Vec3f| env.window_sky_at(d, env.base_at(d, None, None));
+            let sky = |d: Vec3f| env.window_sky_at(d, env.base_at(d, None, Sampling::default()));
             let key = env.studio.measured_window_key(&sky, &hot);
             env.studio.set_window_key(key);
         }
@@ -267,10 +304,10 @@ impl Env {
     /// rotation already applied). Order: undo the rotation, base layer (Sky:
     /// atmosphere + disc + stars + moon + glow + night ground, then the clouds
     /// over it, then the weather; Studio: backdrop, under any gobo shadow cast
-    /// onto it; or a base image, the whole base or below its mask), lights
-    /// overlay, x 2^intensity_ev.
+    /// onto it; or a base image, the whole base or below its mask, the
+    /// weather's veil over it there too), lights overlay, x 2^intensity_ev.
     pub fn radiance(&self, dir: Vec3f) -> Vec3f {
-        self.radiance_with(dir, None, None)
+        self.radiance_with(dir, None, Sampling::default())
     }
 
     /// [`Self::radiance`] with the key's own term left out (`Some`): the key
@@ -279,26 +316,35 @@ impl Env {
     /// the light it puts on the clouds, every other light) is drawn as before,
     /// so this is the map without exactly its key's light (N3). `None` is
     /// `radiance`, bit for bit. The base is the mode's own, a base image, or
-    /// both through the image's mask. `cache` is a bake's cloud march, when it
-    /// has one.
-    fn radiance_with(&self, dir: Vec3f, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
+    /// both through the image's mask. `at` is what a bake hands its lookups:
+    /// its cloud march, when it has one, and its texel size.
+    fn radiance_with(&self, dir: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
         // The layers live in the map's own frame; turning the map by
         // rotation_deg (ibl's sign) is turning the lookup the other way.
         let d = rotate_y(dir, -self.params.rotation_deg);
-        let base = self.base_at(d, without, cache);
+        let base = self.base_at(d, without, at);
         // The map without its key (N3) leaves the key light out here.
         self.lights_over(d, base, without == Some(KeyTerm::Light)) * self.scale
     }
 
     /// The base under the lights along `d`, in the map's own frame: the
     /// mode's own base layer, a base image, or both through the image's mask.
-    fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
+    fn base_at(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
         match &self.base_image {
             // An image that is the whole base: the sky under it is never seen, so it is not drawn.
             Some(image) if !image.replaces_sky() => image.radiance(d),
-            // Sky replacement: the image below its mask, the mode's own base above.
-            Some(image) => image.compose(d, self.base_layer(d, without, cache)),
-            None => self.base_layer(d, without, cache),
+            // Sky replacement: the image below its mask, the mode's own base
+            // above. The weather's rain haze and fog lie between the eye and
+            // the photograph too, so its ground meets the veiled sky without a
+            // seam (D6); the bolt stands behind the photograph's line.
+            Some(image) => {
+                let sky = self.base_layer(d, without, at);
+                match &self.weather {
+                    Some(weather) => image.compose_veiled(d, sky, &|photo| weather.veil(d, photo, self.weather_sun, self.weather_dome)),
+                    None => image.compose(d, sky),
+                }
+            }
+            None => self.base_layer(d, without, at),
         }
     }
 
@@ -325,26 +371,30 @@ impl Env {
     /// The mode's own base layer under the lights, in the map's own frame: the sky
     /// (the dry sky, then the weather over it) or the studio backdrop, under any gobo
     /// shadow cast onto it. `without` leaves the key's disc out (plan 2's N3);
-    /// `cache` is a bake's cloud march, when it has one.
-    fn base_layer(&self, d: Vec3f, without: Option<KeyTerm>, cache: Option<&volumetric::CloudCache>) -> Vec3f {
+    /// `at` is what the bake hands its lookups (its cloud march, its texels).
+    fn base_layer(&self, d: Vec3f, without: Option<KeyTerm>, at: Sampling) -> Vec3f {
         match &self.atmo {
             Some(atmo) => match &self.weather {
-                None => self.sky_layers(d, atmo, without, cache, true),
+                None => self.sky_layers(d, atmo, without, at.cache, true),
                 Some(weather) => {
-                    let dry = |v: Vec3f| self.sky_layers(v, atmo, without, cache, true);
-                    // Below the horizon: the light a closed deck leaves, and the wet
-                    // ground's mirror of the sky above it.
-                    // The mirror shows the sky as the weather shows it: through the rain and fog.
-                    // It reflects the whole sky, the key's disc included, also in the
-                    // map without its key: the reflection is light from below, which
-                    // the engine's directional light does not carry (plan 2's N3
-                    // takes out exactly what the key carries, no more).
-                    let seen = |v: Vec3f| weather.veil(v, self.sky_layers(v, atmo, None, cache, true), self.weather_sun, self.weather_dome);
-                    let c = weather.ground(d, dry(d), &seen);
+                    let dry = |v: Vec3f| self.sky_layers(v, atmo, without, at.cache, true);
+                    // Below the horizon: the ground lit by this map's own sky (D7),
+                    // and the wet ground's mirror of the sky above it.
+                    // The mirror shows the sky as the weather shows it: through the
+                    // rain and fog, the bolt included (D7). It reflects the whole sky,
+                    // the key's disc included, also in the map without its key: the
+                    // reflection is light from below, which the engine's directional
+                    // light does not carry (plan 2's N3 takes out exactly what the key
+                    // carries, no more).
+                    let seen = |v: Vec3f| {
+                        weather.veil(v, self.sky_layers(v, atmo, None, at.cache, true), self.weather_sun, self.weather_dome)
+                            + weather.lightning(v, at.texel)
+                    };
+                    let c = weather.ground(d, dry(d), self.weather_ground, &seen);
                     // Rain haze, its virga and fog between the eye and all of it, lit
                     // by the dome above them; then the bolt and its flash, which stand
                     // inside the rain.
-                    weather.veil(d, c, self.weather_sun, self.weather_dome) + weather.lightning(d)
+                    weather.veil(d, c, self.weather_sun, self.weather_dome) + weather.lightning(d, at.texel)
                 }
             },
             None => {
@@ -442,22 +492,63 @@ impl Env {
     /// haze are lit as the clouds above them are. Eight rows equally spaced in
     /// the sine of the elevation (equal solid angles) of 32 directions each,
     /// every other row turned by half a column; a volume is marched along each.
-    fn dome_light(&self) -> Vec3f {
+    /// The same directions give the light the dome puts on the ground (D7),
+    /// and the light the open sky put there (its clouds left out), so the two
+    /// differ by the cover alone.
+    fn dome_light(&self) -> Dome {
         const ROWS: usize = 8;
         const COLUMNS: usize = 32;
         let Some(atmo) = &self.atmo else {
-            return Vec3f::default();
+            return Dome::default();
         };
-        let mut sum = Vec3f::default();
+        let mut dome = Dome::default();
+        // Each direction stands for an equal share of the hemisphere's 2 pi.
+        let share = std::f32::consts::TAU / (ROWS * COLUMNS) as f32;
         for j in 0..ROWS {
-            let elevation = ((j as f32 + 0.5) / ROWS as f32).asin().to_degrees();
+            let sine = (j as f32 + 0.5) / ROWS as f32;
+            let elevation = sine.asin().to_degrees();
             let turn = if j % 2 == 0 { 0.5 } else { 0.0 };
             for i in 0..COLUMNS {
                 let azimuth = (i as f32 + turn) * 360.0 / COLUMNS as f32;
-                sum += self.sky_layers(dir_from_az_el(azimuth, elevation), atmo, None, None, false);
+                let d = dir_from_az_el(azimuth, elevation);
+                let drawn = self.sky_layers(d, atmo, None, None, false);
+                // What sky_layers draws with no clouds, and without the points.
+                let open = atmo.sky(d) + self.night.as_ref().map_or(Vec3f::default(), |night| night.glow(d));
+                dome.mean += drawn;
+                dome.irradiance += drawn * (sine * share);
+                dome.open += open * (sine * share);
             }
         }
-        sum * (1.0 / (ROWS * COLUMNS) as f32)
+        dome.mean *= 1.0 / (ROWS * COLUMNS) as f32;
+        dome
+    }
+
+    /// The weather's gain on the ground's light (D7): what this map's sky puts
+    /// on a level surface (the dome as drawn, `dome_light`, and the sun and
+    /// the moon through the clouds) over what the clear sky put there, which
+    /// the atmosphere and the night lit their ground with. So the ground under
+    /// a closed deck is lit by the deck's light, not by the clear sky's sun,
+    /// and a sky nothing covers leaves it exactly as it was. Per channel; 1
+    /// where the clear sky put no light.
+    fn ground_gain(&self, dome: &Dome) -> Vec3f {
+        let Some(atmo) = &self.atmo else {
+            return Vec3f::all(1.0);
+        };
+        let rise = atmo.sun_dir().y.max(0.0);
+        let (moon, moon_through) = match &self.night {
+            Some(night) => {
+                let through = night.moon_disc().map_or(1.0, |(dir, _)| {
+                    self.clouds.as_ref().map_or(1.0, |layer| 1.0 - layer.cover_toward(dir))
+                        * self.volumetric.as_ref().map_or(1.0, |volume| volume.transmittance_toward(dir))
+                });
+                (night.moon_ground_irradiance(), through)
+            }
+            None => (Vec3f::default(), 1.0),
+        };
+        let open = dome.open + atmo.sun_irradiance() * rise + moon;
+        let lit = dome.irradiance + self.weather_sun * rise + moon * moon_through;
+        let gain = |lit: f32, open: f32| if open > 0.0 && lit.is_finite() { lit / open } else { 1.0 };
+        vec3f(gain(lit.x, open.x), gain(lit.y, open.y), gain(lit.z, open.z))
     }
 
     /// The luminance a level surface receives from the mode's own base (its
@@ -465,7 +556,8 @@ impl Env {
     /// the base layer, the sun's and moon's texels area-averaged as in any
     /// bake, read by `composite::irradiance_above`.
     fn base_irradiance(&self) -> f32 {
-        let layer = |d: Vec3f| if d.y > 0.0 { self.base_layer(d, None, None) } else { Vec3f::default() };
+        let at = Sampling::bake(composite::SKY_METER_WIDTH, None);
+        let layer = |d: Vec3f| if d.y > 0.0 { self.base_layer(d, None, at) } else { Vec3f::default() };
         let mut map = bake_with(composite::SKY_METER_WIDTH, &layer);
         // hot_spots() are in world space; the base layer lives in the map's own frame.
         let hot: Vec<(Vec3f, f32)> = self
@@ -658,15 +750,18 @@ impl Env {
     /// refinement: below 4K both are smaller than or comparable to a texel, so
     /// their texels are area-averaged (A1's `refine_hot_spots`).
     /// In Studio mode the discs of the sky behind the windows count too, and
-    /// over wet ground the discs' reflections.
+    /// over wet ground the discs' reflections. A base image's own sun, where
+    /// the map draws it, is as small (D6); under an image that is the whole
+    /// base the generated discs are not drawn, so they are not refined.
     fn hot_spots(&self) -> Vec<(Vec3f, f32)> {
         let mut hot = Vec::new();
-        if let Some(atmo) = &self.atmo {
+        let whole = self.base_image.as_ref().is_some_and(|image| !image.replaces_sky());
+        if let Some(atmo) = self.atmo.as_ref().filter(|_| !whole) {
             if self.params.sky.sun_disc.visible && atmo.sun_dir().y > -0.1 {
                 hot.push((rotate_y(atmo.sun_dir(), self.params.rotation_deg), atmo.sun_outer_radius()));
             }
         }
-        if let Some((dir, radius)) = self.night.as_ref().and_then(|night| night.moon_disc()) {
+        if let Some((dir, radius)) = self.night.as_ref().filter(|_| !whole).and_then(|night| night.moon_disc()) {
             if dir.y > -0.1 {
                 hot.push((rotate_y(dir, self.params.rotation_deg), radius));
             }
@@ -683,6 +778,9 @@ impl Env {
         if self.weather.as_ref().is_some_and(|weather| weather.mirrors()) {
             let mirrored: Vec<(Vec3f, f32)> = hot.iter().map(|&(dir, radius)| (vec3f(dir.x, -dir.y, dir.z), radius)).collect();
             hot.extend(mirrored);
+        }
+        if let Some((dir, radius)) = self.base_image.as_ref().and_then(|image| image.drawn_sun()) {
+            hot.push((rotate_y(dir, self.params.rotation_deg), radius));
         }
         hot
     }
@@ -719,7 +817,8 @@ impl Env {
     /// exercise the upsampling at a tiny size.
     fn bake_marched(&self, width: usize, march_max: usize) -> EnvMap {
         let cache = self.cloud_cache(width, march_max);
-        let radiance = |d: Vec3f| self.radiance_with(d, None, cache.as_ref());
+        let at = Sampling::bake(width, cache.as_ref());
+        let radiance = |d: Vec3f| self.radiance_with(d, None, at);
         let mut map = bake_with(width, &radiance);
         refine_hot_spots(&mut map, &radiance, &self.hot_spots());
         map
@@ -736,7 +835,8 @@ impl Env {
         run: impl FnOnce(usize, &(dyn Fn(usize) + Sync)),
     ) -> EnvMap {
         let cache = self.cloud_cache(width, march_max);
-        let radiance = |d: Vec3f| self.radiance_with(d, None, cache.as_ref());
+        let at = Sampling::bake(width, cache.as_ref());
+        let radiance = |d: Vec3f| self.radiance_with(d, None, at);
         // Count the rows the runner really baked: a cancelled bake keeps its
         // skipped rows black, so it gets no refinement either.
         let baked = AtomicUsize::new(0);
@@ -798,7 +898,8 @@ impl Env {
         }
         let without = Some(term);
         let cache = self.cloud_cache(w, march_max);
-        let radiance = |d: Vec3f| self.radiance_with(d, without, cache.as_ref());
+        let at = Sampling::bake(w, cache.as_ref());
+        let radiance = |d: Vec3f| self.radiance_with(d, without, at);
         // The key's reach: its covering cone (a disc's outer limb, a light's
         // reach box) and two texels past it, which holds the refinement's 1.5
         // around a disc.
@@ -824,11 +925,24 @@ impl Env {
             return None;
         }
         let cache = self.cloud_cache(width, volumetric::MARCH_MAX_WIDTH);
-        let radiance = |d: Vec3f| self.radiance_with(d, Some(term), cache.as_ref());
+        let at = Sampling::bake(width, cache.as_ref());
+        let radiance = |d: Vec3f| self.radiance_with(d, Some(term), at);
         let mut map = bake_with(width, &radiance);
         refine_hot_spots(&mut map, &radiance, &self.hot_spots());
         Some(map)
     }
+}
+
+/// The dome as `Env::dome_light` measures it (zero in Studio mode).
+#[derive(Clone, Copy, Default)]
+struct Dome {
+    /// The dry sky's mean radiance over the upper hemisphere: what lights the
+    /// weather's veil.
+    mean: Vec3f,
+    /// The light it puts on a level surface.
+    irradiance: Vec3f,
+    /// The light the open sky (its clouds left out) put there.
+    open: Vec3f,
 }
 
 /// The term of the map that is its key ([`Env::sun`]), for a lookup without
@@ -1522,13 +1636,13 @@ mod tests {
         assert!((share - smoothstep(6.0, 8.0, 7.0)).abs() < 1.0e-3, "half way in: {share}");
         let d = key.dir.normalize();
         let all = env.radiance(d);
-        let without = env.radiance_with(d, Some(KeyTerm::Moon(1.0)), None);
-        let kept = env.radiance_with(d, Some(term), None);
+        let without = env.radiance_with(d, Some(KeyTerm::Moon(1.0)), Sampling::default());
+        let kept = env.radiance_with(d, Some(term), Sampling::default());
         let disc = all - without;
         assert!(disc.y > without.y, "premise: the disc outshines the twilight behind it: {all:?} {without:?}");
         assert!(((all - kept) - disc * share).length() <= 1.0e-4 * disc.length(), "{all:?} - {kept:?} vs {share} x {disc:?}");
         let beside = rotate_y(d, 5.0);
-        assert_eq!(env.radiance_with(beside, Some(term), None), env.radiance(beside), "nothing beside the disc changes");
+        assert_eq!(env.radiance_with(beside, Some(term), Sampling::default()), env.radiance(beside), "nothing beside the disc changes");
         // The keyless bake against a whole bake through the same lookup.
         let map = env.bake(64);
         assert_eq!(env.bake_keyless_par(&map, |n, f| (0..n).for_each(f)), env.bake_without_key(64));

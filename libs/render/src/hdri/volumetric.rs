@@ -1205,6 +1205,25 @@ mod env_tests {
         assert_eq!(Env::new(&veil).bake(32), Env::new(&flat_veil).bake(32));
     }
 
+    /// D8: with the Volumetric tick on, Density 0 draws no clouds. The cloud
+    /// mode is the tick's, not whether a volume could be built, so dragging
+    /// Density to 0 no longer brings the flat deck back at full cover after
+    /// the volume thinned to nothing at 0.01 (L:237). The cirrus veil above
+    /// stays the 2D one, as at any density.
+    #[test]
+    fn density_zero_with_the_tick_on_draws_no_clouds() {
+        let mut thin = cloudy(0.6, true);
+        thin.sky.clouds.cirrus = 0.3;
+        thin.sky.volumetric.as_mut().unwrap().density = 0.0;
+        let mut veil = thin.clone();
+        veil.sky.volumetric = None;
+        veil.sky.clouds.coverage = 0.0;
+        let env = Env::new(&thin);
+        assert!(env.volumetric.is_none(), "nothing to march");
+        assert_eq!(env.bake(32), Env::new(&veil).bake(32), "the sky with its cirrus veil, no deck");
+        assert_eq!(env.sun(), Env::new(&veil).sun(), "and a key no deck dims");
+    }
+
     #[test]
     fn full_cover_dims_the_sun_key() {
         let clear = Env::new(&cloudy(0.0, true)).sun().expect("the sun is up");
@@ -1302,7 +1321,8 @@ mod env_tests {
         let without = Env::new(&off);
         let mut want = without.bake_marched(64, 32);
         let cache = without.cloud_cache(64, 32);
-        crate::hdri::refine_hot_spots(&mut want, &|d: Vec3f| without.radiance_with(d, None, cache.as_ref()), &env.hot_spots());
+        let at = crate::hdri::Sampling::bake(64, cache.as_ref());
+        crate::hdri::refine_hot_spots(&mut want, &|d: Vec3f| without.radiance_with(d, None, at), &env.hot_spots());
         assert!(keyless == want, "the keyless copy is the volumetric sky without its disc");
         assert!(keyless != map, "the disc left the copy");
     }

@@ -841,4 +841,31 @@ mod tests {
         assert!(store.load_missing(&params, &read).is_empty(), "a failed file is not tried again");
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// D13: an EXR whose alpha is 0 is a base image in the colour it stores
+    /// (it loaded black since B14, L:124), in the set and in the bake.
+    #[test]
+    fn a_base_image_with_alpha_0_keeps_its_colour() {
+        use makepad_openexr::{write_to_vec, Compression, ExrChannel, ExrImage, ExrPart};
+        // An 8 x 4 sky of colour 2.5, written with A = 0 everywhere.
+        let plane = vec![2.5f32; 32];
+        let part = ExrPart::new(None, 8, 4, Compression::None, vec![
+            ExrChannel::float("A", vec![0.0; 32]),
+            ExrChannel::float("B", plane.clone()),
+            ExrChannel::float("G", plane.clone()),
+            ExrChannel::float("R", plane),
+        ]);
+        let bytes = write_to_vec(&ExrImage::single(part)).unwrap();
+        let params = HdriParams {
+            mode: "studio".to_string(),
+            base_image: Some(BaseImageParams { key: "sky.exr".to_string(), ..BaseImageParams::default() }),
+            ..HdriParams::default()
+        };
+        let mut store = ImageStore::default();
+        assert!(store.load_missing(&params, &|_: &str| Ok(bytes.clone())).is_empty());
+        let map = store.set.get("sky.exr").expect("the base image is in the set");
+        assert!(map.data.iter().all(|t| *t == [2.5, 2.5, 2.5, 1.0]), "{:?}", map.data[0]);
+        let baked = bake_generated_env_map_with(&params, &store.set, 32, serial).map;
+        assert!(baked.data.iter().all(|t| (t[1] - 2.5).abs() < 1.0e-5), "{:?}", baked.data[0]);
+    }
 }

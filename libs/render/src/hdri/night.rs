@@ -193,6 +193,8 @@ pub struct NightSky {
     ambient: Vec3f,
     /// Irradiance on flat ground from the night sky and the moon.
     ground_irradiance: Vec3f,
+    /// The moon's own part of it, by the night factor.
+    moon_ground: Vec3f,
 }
 
 /// One star of the field, in star space.
@@ -319,11 +321,13 @@ impl NightSky {
             moon,
             ambient: Vec3f::default(),
             ground_irradiance: Vec3f::default(),
+            moon_ground: Vec3f::default(),
         };
         let (ambient, sky_irradiance) = sky.integrate_glow();
         let moon_direct = sky.moon.as_ref().map_or(Vec3f::default(), |m| m.irradiance * m.dir.y.max(0.0));
         sky.ambient = ambient;
-        sky.ground_irradiance = sky_irradiance + moon_direct * night_factor;
+        sky.moon_ground = moon_direct * night_factor;
+        sky.ground_irradiance = sky_irradiance + sky.moon_ground;
         sky
     }
 
@@ -389,6 +393,13 @@ impl NightSky {
         }
         let below = 1.0 - smoothstep(-0.03, 0.0, dir.y);
         ground_color * self.ground_irradiance * (below / PI)
+    }
+
+    /// The light the moon's disc puts on flat ground (its part of the ground's
+    /// irradiance, by the night factor): what a cloud deck in front of the
+    /// moon takes off the ground (the weather's ground, D7).
+    pub fn moon_ground_irradiance(&self) -> Vec3f {
+        self.moon_ground
     }
 
     /// Mean radiance of the night sky over the upper hemisphere, glow plus moonlit air.
