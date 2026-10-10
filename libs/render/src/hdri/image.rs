@@ -292,32 +292,37 @@ pub enum PathOrigin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PathKind {
     Local,
-    /// `\\host\share\...` (either separator) or `\\?\UNC\host\share\...`.
+    /// `\\host\share\...` (either separator), `\\?\UNC\host\share\...` or `\??\UNC\host\...`.
     Network,
-    /// The Win32 device namespaces: `\\.\...` (`\\.\COM1`, `\\.\PhysicalDrive0`) and `\\?\`
-    /// with anything but a drive (`\\?\GLOBALROOT\Device\...`). Never a picture.
+    /// The Win32 device namespaces: `\\.\...` (`\\.\COM1`, `\\.\PhysicalDrive0`), and `\\?\`
+    /// or `\??\` with anything but a drive or `UNC` (`\??\GLOBALROOT\Device\Mup\...`, the
+    /// network's own redirector). Never a picture.
     Device,
 }
 
 fn path_kind(path: &str) -> PathKind {
     let bytes = path.as_bytes();
     let sep = |i: usize| bytes.get(i).is_some_and(|&c| c == b'/' || c == b'\\');
+    // `\\?\` and `\??\` (the NT object manager's own prefix) both hand what follows to Windows
+    // verbatim, so they are read alike: a drive is local, `UNC\` the network, anything else a
+    // device. Either separator, as for `\\host`: refusing a spelling no picture has costs nothing.
+    let verbatim = sep(0) && bytes.get(2) == Some(&b'?') && sep(3) && (sep(1) || bytes.get(1) == Some(&b'?'));
+    if verbatim {
+        let rest = &bytes[4..];
+        return if rest.len() >= 2 && rest[0].is_ascii_alphabetic() && rest[1] == b':' {
+            // \\?\C:\..., a disk path spelled verbatim.
+            PathKind::Local
+        } else if rest.len() >= 3 && rest[..3].eq_ignore_ascii_case(b"UNC") && sep(7) {
+            PathKind::Network
+        } else {
+            PathKind::Device
+        };
+    }
     if !(sep(0) && sep(1)) {
         return PathKind::Local;
     }
     match bytes.get(2) {
         Some(b'.') if sep(3) => PathKind::Device,
-        Some(b'?') if sep(3) => {
-            let rest = &bytes[4..];
-            if rest.len() >= 2 && rest[0].is_ascii_alphabetic() && rest[1] == b':' {
-                // \\?\C:\..., a disk path spelled verbatim.
-                PathKind::Local
-            } else if rest.len() >= 3 && rest[..3].eq_ignore_ascii_case(b"UNC") && sep(7) {
-                PathKind::Network
-            } else {
-                PathKind::Device
-            }
-        }
         _ => PathKind::Network,
     }
 }
@@ -858,7 +863,7 @@ mod tests {
         }
         // The Win32 device namespaces are no picture whoever names them,
         // refused by their spelling alone.
-        for device in [r"\\.\COM1", r"\\.\PhysicalDrive0", r"//./pipe/x", r"\\?\GLOBALROOT\Device\Null"] {
+        for device in [r"\\.\COM1", r"\\.\PhysicalDrive0", r"//./pipe/x", r"\\?\GLOBALROOT\Device\Null", r"\??\GLOBALROOT\Device\Null", r"\??\pipe\x"] {
             let error = load_image(std::path::Path::new(device), PathOrigin::Picked).unwrap_err();
             assert!(error.contains("a device path"), "{device}: {error}");
         }
@@ -868,10 +873,20 @@ mod tests {
     /// D5 (M4): a network path a preset names is refused by its spelling,
     /// before anything touches the file system (opening one connects to the
     /// host as the preset loads); the person's own pick of one is opened.
-    /// Local paths load either way.
+    /// Local paths load either way. Windows opens `\??\` (the NT object
+    /// manager's own prefix) verbatim, as it does `\\?\`, so
+    /// `\??\UNC\host\share` reaches the host too (an SMB open, seen on
+    /// Windows in plan 1b's H5 review).
     #[test]
     fn a_network_path_from_a_preset_is_refused_and_a_picked_one_is_not() {
-        let network = [r"\\nohost.invalid\share\lamp.png", "//nohost.invalid/share/lamp.png", r"\\?\UNC\nohost.invalid\share\lamp.png", r"/\nohost.invalid\share\lamp.png"];
+        let network = [
+            r"\\nohost.invalid\share\lamp.png",
+            "//nohost.invalid/share/lamp.png",
+            r"\\?\UNC\nohost.invalid\share\lamp.png",
+            r"/\nohost.invalid\share\lamp.png",
+            r"\??\UNC\nohost.invalid\share\lamp.png",
+            r"\??\unc\nohost.invalid\share\lamp.png",
+        ];
         for key in network {
             let path = std::path::Path::new(key);
             let refusal = refused_path(path, PathOrigin::Preset).unwrap_or_else(|| panic!("{key} is not refused from a preset"));
@@ -883,7 +898,19 @@ mod tests {
             let error = load_equirect(path, PathOrigin::Preset).unwrap_err();
             assert!(error.contains("network path"), "{key}: {error}");
         }
-        for local in [r"C:\pics\lamp.png", "C:/pics/lamp.png", r"\\?\C:\pics\lamp.png", "/home/me/lamp.png", "lamp.png", r"pics\lamp.png"] {
+        // The network spelled through the object manager's device tree
+        // (the redirector behind every UNC path) is a device path: refused
+        // from a preset, and from the person too, whose dialog never gives one.
+        for key in [r"\??\GLOBALROOT\Device\Mup\nohost.invalid\share\lamp.png", r"\\?\GLOBALROOT\Device\Mup\nohost.invalid\share\lamp.png"] {
+            let path = std::path::Path::new(key);
+            for origin in [PathOrigin::Preset, PathOrigin::Picked] {
+                let refusal = refused_path(path, origin).unwrap_or_else(|| panic!("{key} is not refused, {origin:?}"));
+                assert!(refusal.contains("a device path"), "{key}, {origin:?}: {refusal}");
+            }
+            let error = load_image(path, PathOrigin::Preset).unwrap_err();
+            assert!(error.contains("a device path"), "{key}: {error}");
+        }
+        for local in [r"C:\pics\lamp.png", "C:/pics/lamp.png", r"\\?\C:\pics\lamp.png", r"\??\C:\pics\lamp.png", "/home/me/lamp.png", "lamp.png", r"pics\lamp.png"] {
             for origin in [PathOrigin::Picked, PathOrigin::Preset] {
                 assert_eq!(refused_path(std::path::Path::new(local), origin), None, "{local}, {origin:?}");
             }
