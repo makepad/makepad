@@ -576,10 +576,12 @@ mod tests {
 
     /// D1: a key the map does not show carries no light, so it casts no
     /// shadows from a light nobody sees: a stroke under a black flag, a
-    /// picture that is all transparent, a sun behind opaque cloth or under
-    /// the base image's horizon line, the moon behind a flag, a photographed
-    /// sun behind a flag (a whole-base image's key). Each against
-    /// the same set-up with nothing hiding the key, whose key has light.
+    /// softbox behind a window filled with sky (its glass shows the sky in
+    /// the key's place), a picture that is all transparent, a sun behind
+    /// opaque cloth or under the base image's horizon line, the moon behind a
+    /// flag, a photographed sun behind a flag (a whole-base image's key).
+    /// Each against the same set-up with nothing hiding the key, whose key
+    /// has light.
     #[test]
     fn a_key_the_map_hides_carries_no_light() {
         let flag = |azimuth_deg: f32, elevation_deg: f32, size_deg: f32| LightParams {
@@ -608,6 +610,18 @@ mod tests {
         let mut cases: Vec<(&str, HdriParams, HdriParams, &ImageSet)> = Vec::new();
         let open = studio_1b(vec![arch_key()]);
         cases.push(("a stroke under a black flag", studio_1b(vec![arch_key(), flag(90.0, 10.0, 90.0)]), open, &photo));
+        // A window's glass shows the sky in place of what is behind it: one
+        // pane, no frame, so all of it is glass where the softbox hangs.
+        let softbox = LightParams { key: true, ..LightParams::default() };
+        let pane = LightParams {
+            name: "Window".to_string(),
+            width_deg: 60.0,
+            height_deg: 50.0,
+            softness: 0.0,
+            gobo: Some(GoboParams { panes_x: 1, panes_y: 1, frame: 0.0, fill_sky: true, ..GoboParams::default() }),
+            ..LightParams::default()
+        };
+        cases.push(("a softbox behind a window filled with sky", studio_1b(vec![softbox.clone(), pane]), studio_1b(vec![softbox]), &photo));
         let clear = LightParams { image: Some(LightImageParams { key: "clear".to_string(), fit: "stretch".to_string(), alpha_as_mask: true }), ..picture_key() };
         cases.push(("an all-transparent picture", studio_1b(vec![clear]), studio_1b(vec![picture_key()]), &photo));
         let sun = manual_sun(150.0, 35.0);
@@ -717,11 +731,11 @@ mod tests {
     }
 
     /// Every kind of key plan 1b brings, each where the map does something
-    /// to it that the key must follow (D1): strokes under flags, gels and
-    /// cloth, a wide stroke, pictures, what hangs in front of a key, a window
-    /// filled with sky as the key, and the sun and the moon behind lights,
-    /// under the base image's line, behind a rain shaft, in fog and under a
-    /// cloud volume.
+    /// to it that the key must follow (D1): keys behind a window filled with
+    /// sky, strokes under flags, gels and cloth, a wide stroke, pictures,
+    /// what hangs in front of a key, a window filled with sky as the key, and
+    /// the sun and the moon behind lights, under the base image's line,
+    /// behind a rain shaft, in fog and under a cloud volume.
     fn keys_1b() -> Vec<KeyCase> {
         let images = images_1b();
         let soft_flag = |azimuth_deg: f32, elevation_deg: f32, size_deg: f32, rgb: [f32; 3]| LightParams {
@@ -792,8 +806,30 @@ mod tests {
             gobo: Some(GoboParams { panes_x: 1, panes_y: 1, frame: 0.0, fill_sky: true, ..GoboParams::default() }),
             ..LightParams::default()
         };
+        // A window filled with sky listed after a key: its glass replaces
+        // what is behind it, the key included, with the sky (its frame and
+        // bars leave the key as it was).
+        let window_over = |azimuth_deg: f32, elevation_deg: f32, width_deg: f32, height_deg: f32| LightParams {
+            name: "Window".to_string(),
+            azimuth_deg,
+            elevation_deg,
+            width_deg,
+            height_deg,
+            softness: 0.05,
+            intensity_ev: 0.0,
+            gobo: Some(GoboParams { fill_sky: true, ..GoboParams::default() }),
+            ..LightParams::default()
+        };
+        let softbox = LightParams { key: true, azimuth_deg: 0.0, elevation_deg: 25.0, width_deg: 40.0, height_deg: 30.0, softness: 0.3, ..LightParams::default() };
         let case = |name: &str, params: HdriParams, tolerance: f64| KeyCase { name: name.to_string(), params, images: images.clone(), tolerance };
         vec![
+            case("1b: a softbox key half behind a window filled with sky", studio_1b(vec![softbox.clone(), window_over(18.0, 25.0, 30.0, 40.0)]), 0.01),
+            case("1b: a stroke key half behind a window filled with sky", studio_1b(vec![arch_key(), window_over(110.0, 10.0, 30.0, 30.0)]), 0.01),
+            case(
+                "1b: a window filled with sky as the key, half behind another",
+                studio_1b(vec![window.clone(), window_over(15.0, 25.0, 30.0, 30.0)]),
+                0.02,
+            ),
             case("1b: a stroke key half under a soft black flag", studio_1b(vec![arch_key(), soft_flag(112.0, 8.0, 24.0, [0.0; 3])]), 0.01),
             case("1b: a stroke key under a blue gel", studio_1b(vec![arch_key(), soft_flag(80.0, 12.0, 30.0, [0.3, 0.5, 1.0])]), 0.01),
             case(

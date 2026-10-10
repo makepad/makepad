@@ -141,22 +141,45 @@ pub struct SunConfig {
 /// - `cos_cover` is the cosine of the half-angle of the smallest cone around
 ///   `dir` that holds the key's whole reach: a sun's or moon's outer limb
 ///   (soft edge included), a studio key's reach box with its corners and soft
-///   edge, a detected sun's grown cone. It is at most `cos_radius` (the cone
+///   edge (a stroke's: the cone round its centre line that holds its band),
+///   a detected sun's grown cone. It is at most `cos_radius` (the cone
 ///   `radiance` is averaged over lies inside it). Nothing of the key lies
 ///   outside it, so it bounds what the renderer takes out of the map's own
 ///   lighting (SH9, specular), where the directional light carries the
 ///   key's energy instead: no part of the key is lit twice.
 ///
-/// What each producer puts in `radiance`:
+/// What each producer puts in `radiance`. A generated map's key carries
+/// exactly the light the map draws of it (the generator's ruling D1), never
+/// light the map does not show:
 /// - a generated sun: its irradiance at the ground spread over the nominal
-///   disc's cone, the soft limb past it included;
-/// - the moon: the mean over its disc;
-/// - a studio key: the light integrated once per map over its own tangent
-///   plane (shape, corner, ring, soft edge, hotspot, roll, and the Multiply
-///   flags after it), so a thin strip or a ring carries only what it draws;
-///   part of a wide rect's or a soft light's emission lies outside the cone
-///   (up to about 8 % for the built-in studio presets) and is counted in it,
-///   and `cos_cover` is what holds it;
+///   disc's cone, the soft limb past it included, times the part of its disc
+///   above the horizon and the cover along it (the clouds, a cloud volume,
+///   the weather's rain, rain shafts and fog), times what stands in front of
+///   the disc in the map (the lights drawn over the sky: flags, gels, a
+///   scrim's cloth, a window filled with sky at its own exposure; a base
+///   image below its horizon line), per channel, weighed by the disc as it
+///   draws itself;
+/// - the moon: the mean over its disc, times the share of it the key carries
+///   as it arrives after dusk, the cover along it and what stands in front of
+///   it, as for the sun;
+/// - the sun of a base image that is the whole base: the sun found in the
+///   photograph (`hdri::detect_sun`) at the image's exposure, times what the
+///   lights in front of it leave of it, weighed by the photograph;
+/// - a studio key: its whole emission as the map draws it, integrated once
+///   per map: its shape, corner, ring, soft edge, hotspot, roll, picture and
+///   colour ramp, what hangs in front of it (a gobo, barn doors and a grid,
+///   the wear of its face), and the lights listed after it that dim it
+///   (flags and gels, a scrim's cloth, a window filled with sky, whose glass
+///   shows the sky in its place). A light in its own box (a rect, disc,
+///   ring, polygon or scrim) is integrated over its own tangent plane, a
+///   picture light weighed by its picture, and a stroke, which its points
+///   place, over the cones round its centre line. So a thin strip or a ring
+///   carries only what it draws, and part of a wide rect's or a soft light's
+///   emission lies outside the cone (up to about 8 % for the built-in studio
+///   presets) and is counted in it, and `cos_cover` is what holds it. A
+///   window filled with sky as the key carries the sky it lets in, measured
+///   against that sky, not its own colour. A stroke that spreads wider round
+///   its middle than an 85 degree key is never the key (the generator's D2);
 /// - a detected sun (`hdri::detect_sun`): the energy it gathered over the
 ///   cone's solid angle.
 ///
@@ -169,10 +192,13 @@ pub struct SunConfig {
 ///
 /// The renderer takes the key out of the lighting it derives from the map,
 /// because the directional light carries the energy: a generated map's
-/// exactly (the same map baked without it, which the renderer bakes for a
-/// procedural preset and a host registers beside its own bake), a file's
-/// detected sun by filling its covering cone with the sky around it. The
-/// drawn dome keeps the key.
+/// exactly, through the same map baked with the key's own light left out
+/// (which the renderer bakes for a procedural preset and a host registers
+/// beside its own bake; what the key hides stays hidden in it, so a scrim
+/// key keeps its cloth and a window key its glass, letting no sky in), and a
+/// file's detected sun, or a whole-base image's sun, whose photograph has
+/// nothing known behind it, by filling its covering cone with the sky around
+/// it. The drawn dome keeps the key.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EnvSun {
     pub dir: Vec3f,

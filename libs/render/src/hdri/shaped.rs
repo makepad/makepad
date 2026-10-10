@@ -151,8 +151,9 @@ impl ShapedLight {
     }
 
     /// Whether this is an Add light that hides what is behind it (a scrim):
-    /// the one Add light that dims the lights listed before it, by `hide`'s
-    /// factor, so `studio::key_emission` takes it as it takes a flag.
+    /// the one shape that dims the lights listed before it as an Add light,
+    /// by `hide`'s factor, so `studio::key_emission` takes it as it takes a
+    /// flag (and as it takes a window filled with sky, which its gobo makes).
     pub fn hides_behind(&self) -> bool {
         self.occludes && self.blend == Blend::Add
     }
@@ -170,6 +171,17 @@ impl ShapedLight {
         match &self.kind {
             ShapedKind::Fill(_) | ShapedKind::Scrim(_) => None,
             ShapedKind::Stroke(stroke) => Some((stroke.key.0, stroke.key.1, stroke.key_cos_cover)),
+        }
+    }
+
+    /// D2: the share of a thin line along a stroke's centre line that a
+    /// surface facing its key's axis receives (∫ cosθ dℓ / ∫ dℓ, θ from the
+    /// axis): how far out round its middle the stroke lies, whatever its
+    /// width. None for the other shapes.
+    pub fn stroke_line_facing(&self) -> Option<f32> {
+        match &self.kind {
+            ShapedKind::Fill(_) | ShapedKind::Scrim(_) => None,
+            ShapedKind::Stroke(stroke) => Some(stroke.line_facing),
         }
     }
 
@@ -277,6 +289,9 @@ struct StrokeLight {
     /// Plan 2's `EnvSun.cos_cover`: the cone round the key's axis that holds
     /// the whole stroke (at most the key cone's cosine).
     key_cos_cover: f32,
+    /// D2: the share of a thin line along the centre line that a surface
+    /// facing the key's axis receives, ∫ cosθ dℓ / ∫ dℓ with θ from the axis.
+    line_facing: f32,
 }
 
 impl StrokeLight {
@@ -320,7 +335,17 @@ impl StrokeLight {
         let arc = |a: Vec3f, b: Vec3f| a.dot(b).clamp(-1.0, 1.0).acos();
         let piece = line.windows(2).fold(0.0f32, |m, w| m.max(arc(w[0], w[1])));
         let key_cos_cover = CullCone::around(&line, reach + 0.5 * piece).cos_max.max(-1.0).min(key_cos);
-        Some(StrokeLight { path, half_width, softness, hotspot, profile, ramp, key: (cone.axis, key_cos), key_cos_cover })
+        // D2: how far out round the axis the line lies, by arc length (its
+        // pieces are only roughly even): a ring at elevation 10 gives 0.17,
+        // an arch through its own middle far more.
+        let (mut along, mut length) = (Vec3f::default(), 0.0f32);
+        for w in line.windows(2) {
+            let len = arc(w[0], w[1]);
+            along += (w[0] + w[1]) * (0.5 * len);
+            length += len;
+        }
+        let line_facing = if length > 0.0 { (along.dot(cone.axis) / length).max(0.0).min(1.0) } else { 1.0 };
+        Some(StrokeLight { path, half_width, softness, hotspot, profile, ramp, key: (cone.axis, key_cos), key_cos_cover, line_facing })
     }
 
     /// Mask and emission at `dir`, and how far along the stroke the nearest

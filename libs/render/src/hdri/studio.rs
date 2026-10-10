@@ -193,26 +193,43 @@ const HOTSPOT_FALLOFF: f32 = 4.0;
 /// by 0.09 %.
 const KEY_GRID: usize = 256;
 
-/// D2: the furthest a stroke may spread from its middle and still be the key,
-/// in degrees: the widest key cone a rect gets (half its 170 degree limit).
-/// A stroke round the whole horizon has no middle to light from: the engine's
-/// light would come from straight up, lighting almost nothing, while all of
-/// the stroke's light left the map's lighting.
+/// D2: the widest a stroke may spread round its middle and still be the key,
+/// in degrees: the widest key cone a rect or a disc gets (half their 170
+/// degree limit). A stroke round the whole horizon has no middle to light
+/// from, and a ring round the sky lies far out all round its middle: the
+/// engine's light would come from straight up, lighting little and no
+/// vertical surface, while all of the stroke's light left the map's lighting.
 pub const KEY_MAX_SPREAD_DEG: f32 = 85.0;
 
-/// D2: whether `light` is a stroke that spreads more than
-/// [`KEY_MAX_SPREAD_DEG`] from its middle (its centre line's widest angle from
-/// its mean direction, plus its widest half width), so that marked as the key
-/// it is not handed to the engine: it stays a light of the map, lighting the
-/// scene through the map like any other, and under a sky the sun leads. The
-/// panel says so where the key is chosen. False for every other light.
+/// D2: whether `light` is a stroke that spreads wider round its middle than a
+/// key of [`KEY_MAX_SPREAD_DEG`] can, so that marked as the key it is not
+/// handed to the engine: it stays a light of the map, lighting the scene
+/// through the map like any other, and under a sky the sun leads. The panel
+/// says so where the key is chosen. False for every other light.
+///
+/// A stroke spreads that wide in either of two ways, both measured on its
+/// centre line round its mean direction (its middle, the key's axis):
+/// - it reaches further than the limit from its middle (its widest angle from
+///   it, plus its widest half width: the key cone), as a strip round the
+///   horizon or a half circle does;
+/// - it lies all round its middle further out than the light of an even disc
+///   of the limit's radius does: a surface facing its middle receives less of
+///   a thin line along it than (1 + cos 85°) / 2 = 0.544, that disc's share.
+///   L:41's ring at elevation 10 reaches only 82 degrees, but every point of
+///   it is 80 degrees out (0.17); a ring is refused below about elevation 33,
+///   and a 160 degree arch, which runs through its middle, gives 0.71.
 pub fn spreads_too_wide_to_be_key(light: &LightParams) -> bool {
     ShapedLight::new(&LightParams { enabled: true, ..light.clone() }).is_some_and(|shaped| too_wide_to_lead(&shaped))
 }
 
 /// [`spreads_too_wide_to_be_key`] for a light the shape core draws.
 fn too_wide_to_lead(shaped: &ShapedLight) -> bool {
-    shaped.stroke_cones().is_some_and(|(_, cos_radius, _)| !(cos_radius >= KEY_MAX_SPREAD_DEG.to_radians().cos()))
+    let limit = KEY_MAX_SPREAD_DEG.to_radians().cos();
+    let reaches_too_far = shaped.stroke_cones().is_some_and(|(_, cos_radius, _)| !(cos_radius >= limit));
+    // An even disc of half-angle r: a surface facing it receives
+    // π sin²r / 2π(1 - cos r) = (1 + cos r) / 2 of its light.
+    let lies_too_far_out = shaped.stroke_line_facing().is_some_and(|facing| !(facing >= 0.5 * (1.0 + limit)));
+    reaches_too_far || lies_too_far_out
 }
 
 /// Coarse cells per axis of [`over_cone`]'s grid over a key's covering cone.
@@ -270,11 +287,11 @@ impl Studio {
     ///
     /// The key carries exactly the light the map draws of it (D1), measured from the
     /// map's own drawing once per map: its shape, soft edge, hotspot, picture and ramp,
-    /// what hangs in front of it, and the flags, gels and cloth after it. The key's
-    /// cone covers the larger of width and height, and its radiance is that emission
-    /// spread over the cone ([`EnvSun`]'s one meaning), from the same integral as the
-    /// share a surface facing the key receives (`facing`) and the cone that holds its
-    /// whole reach (`cos_cover`):
+    /// what hangs in front of it, and the flags, gels, cloth and windows filled with
+    /// sky after it. The key's cone covers the larger of width and height, and its
+    /// radiance is that emission spread over the cone ([`EnvSun`]'s one meaning), from
+    /// the same integral as the share a surface facing the key receives (`facing`) and
+    /// the cone that holds its whole reach (`cos_cover`):
     /// - a light in its own box (a rect, disc, ring, polygon or scrim, with or without a
     ///   picture) by [`key_emission`] over that box, times what passes what hangs in
     ///   front of it (`key_share`);
@@ -425,10 +442,11 @@ impl Studio {
     /// The share of the key's emission that gets past its gobo, doors and
     /// grid, times its wear (B10): `LightFx::key_share`, weighted by what the
     /// key puts into the map, its own drawing (shape, soft edge, hotspot,
-    /// picture) under the flags and the cloth after it, as `key_emission` dims
-    /// it. So the engine's key light loses what the map loses (plan 2's N3
-    /// removes exactly that). Sampled over the key's reach box. (A stroke's
-    /// key samples its extras with its own drawing, along its band.)
+    /// picture) under the flags, the cloth and the windows after it, as
+    /// `key_emission` dims it. So the engine's key light loses what the map
+    /// loses (plan 2's N3 removes exactly that). Sampled over the key's reach
+    /// box. (A stroke's key samples its extras with its own drawing, along
+    /// its band.)
     fn key_share(&self, index: usize) -> f32 {
         let light = &self.lights[index];
         let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);
@@ -501,18 +519,9 @@ impl Studio {
         c
     }
 
-    /// How much of light `index` covers `dir`, 0..=1, whatever its colour:
-    /// the glass of a window filled with sky. A plain light drawn in white
-    /// over black is its own coverage (shape, soft edge and hotspot). A
-    /// shaped light is asked directly: a stroke with a ramp carries its own
-    /// colour, so drawing it in white would not give its coverage.
+    /// How much of light `index` covers `dir` ([`PreparedLight::cover`]).
     fn cover(&self, index: usize, dir: Vec3f) -> f32 {
-        let light = &self.lights[index];
-        match &light.shaped {
-            Some(shaped) if shaped.cull().contains(dir) => shaped.sample(dir).emit,
-            Some(_) => 0.0,
-            None => light.over(dir, Vec3f::default(), Vec3f::all(1.0)).x,
-        }
+        self.lights[index].cover(dir)
     }
 
     /// Draws the lights `range` of the list over `base`, in order, each with its own shape, content and blend.
@@ -571,9 +580,10 @@ struct KeyIntegral {
 /// - A key with a picture (1b, B14) weighs each point by its drawing there, the
 ///   picture's colour and alpha included (D1, L:123), not by its shape alone.
 /// - Every Multiply light after it scales it as it does in the map (its picture,
-///   cut-out alpha and all), and so does a scrim's cloth (B5), the one Add light that
-///   hides what is behind it (`ShapedLight::hide`). Any other Add light after it is a
-///   light of its own, and a light before it touches only what came before.
+///   cut-out alpha and all), and so do the two Add lights that hide what is behind
+///   them: a scrim's cloth (B5, `ShapedLight::hide`) and a window filled with sky,
+///   whose glass shows the sky in its place ([`dimmers`]). Any other Add light after
+///   it is a light of its own, and a light before it touches only what came before.
 /// - What hangs in front of each of those (`fx`, in step with `lights`) scales what it
 ///   does, as in the map: a flag with a gobo dims the key only behind the gobo's
 ///   opaque parts (B8).
@@ -651,13 +661,14 @@ fn key_emission(lights: &[PreparedLight], fx: &[LightFx], n: usize) -> KeyIntegr
 }
 
 /// What dims the key as the map draws it, of the lights listed after it: the
-/// flags and gels, and the scrims' cloth in front of it, each with what hangs
-/// in front of it (`fx`, in step with `after`).
+/// flags and gels, the scrims' cloth and the windows filled with sky in front
+/// of it (a window's glass shows the sky in place of what is behind it), each
+/// with what hangs in front of it (`fx`, in step with `after`).
 fn dimmers<'a>(after: &'a [PreparedLight], fx: &'a [LightFx]) -> Vec<(&'a PreparedLight, &'a LightFx)> {
     after
         .iter()
         .zip(fx)
-        .filter(|(l, _)| l.blend == Blend::Multiply || l.shaped.as_ref().is_some_and(|s| s.hides_behind()))
+        .filter(|(l, fx)| l.blend == Blend::Multiply || l.shaped.as_ref().is_some_and(|s| s.hides_behind()) || fx.fills_with_sky())
         .collect()
 }
 
@@ -666,6 +677,16 @@ fn dimmers<'a>(after: &'a [PreparedLight], fx: &'a [LightFx]) -> Vec<(&'a Prepar
 fn dimmed(flags: &[(&PreparedLight, &LightFx)], dir: Vec3f, w: Vec3f) -> Vec3f {
     let mut w = w;
     for &(flag, fx) in flags {
+        if fx.fills_with_sky() {
+            // As `apply_lights_sky` draws a window: what is behind its glass
+            // (its shape's cover, past its gobo's bars) gives way to the sky,
+            // which is none of the key's light, so the key keeps 1 - glass.
+            let cover = flag.cover(dir);
+            if cover > 0.0 {
+                w = w * (1.0 - fx.glass(dir, cover));
+            }
+            continue;
+        }
         let before = w;
         // As `apply_lights` draws the flag (`PreparedLight::draw`): its shape,
         // its picture and the picture's alpha, and a scrim's cloth without its
@@ -877,6 +898,19 @@ impl PreparedLight {
         // Alpha fades the whole light in. For Add and Multiply alike that
         // is a mix toward what the light makes of the pixel.
         if alpha >= 1.0 { lit } else { acc + (lit - acc) * alpha }
+    }
+
+    /// How much of this light covers `dir`, 0..=1, whatever its colour: the
+    /// glass of a window filled with sky. A plain light drawn in white over
+    /// black is its own coverage (shape, soft edge and hotspot). A shaped
+    /// light is asked directly: a stroke with a ramp carries its own colour,
+    /// so drawing it in white would not give its coverage.
+    fn cover(&self, dir: Vec3f) -> f32 {
+        match &self.shaped {
+            Some(shaped) if shaped.cull().contains(dir) => shaped.sample(dir).emit,
+            Some(_) => 0.0,
+            None => self.over(dir, Vec3f::default(), Vec3f::all(1.0)).x,
+        }
     }
 
     /// The cone that holds this light's reach box, corners and soft edge
@@ -1846,11 +1880,16 @@ mod tests {
         ]
     }
 
-    /// D2: a stroke that spreads more than 85 degrees from its middle (the
-    /// widest a rect's key cone gets) is not handed to the engine as the key:
-    /// a strip round the whole horizon has no middle to light from. Its light
-    /// stays in the map's lighting, and under a sky the sun leads again. An
-    /// arch that spreads just under the limit is still the key.
+    /// D2: a stroke that spreads wider than an 85 degree key (the widest a
+    /// rect's or a disc's key cone gets) is not handed to the engine as the
+    /// key, whichever way it spreads: reaching more than 85 degrees from its
+    /// middle (a strip round the whole horizon, which has no middle to light
+    /// from, or half way round), or lying all round its middle further out
+    /// than an even 85 degree disc's light does (L:41's ring at elevation 10,
+    /// every point 80 degrees from the zenith it would light from, facing
+    /// 0.17). Its light stays in the map's lighting, and under a sky the sun
+    /// leads again. An arch that reaches just under the limit is still the
+    /// key, and so is a ring light drawn as a stroke overhead.
     #[test]
     fn a_stroke_that_circles_the_sky_is_not_the_key() {
         let strip = |points: Vec<[f32; 2]>, closed: bool| LightParams {
@@ -1859,10 +1898,12 @@ mod tests {
             stroke: Some(crate::hdri::StrokeParams { points, closed, width_deg: 4.0, ..crate::hdri::StrokeParams::default() }),
             ..Default::default()
         };
-        let round = strip((0..6).map(|i| [i as f32 * 60.0, 0.0]).collect(), true);
+        let ring = |elevation_deg: f32| strip((0..6).map(|i| [i as f32 * 60.0, elevation_deg]).collect(), true);
+        let round = ring(0.0);
         let half = strip(vec![[0.0, 5.0], [90.0, 5.0], [180.0, 5.0]], false);
         let arch = strip(vec![[10.0, 0.0], [90.0, 0.0], [170.0, 0.0]], false);
-        for (name, light, on_line) in [("round the horizon", &round, 0.0), ("half way round", &half, 5.0)] {
+        let low_ring = ring(10.0);
+        for (name, light, on_line) in [("round the horizon", &round, 0.0), ("half way round", &half, 5.0), ("a ring at elevation 10", &low_ring, 10.0)] {
             assert!(spreads_too_wide_to_be_key(light), "{name}");
             assert!(Studio::new(&black_studio(), std::slice::from_ref(light)).key().is_none(), "{name}: not the key");
             let sky = HdriParams { lights: vec![light.clone()], ..Default::default() };
@@ -1873,6 +1914,14 @@ mod tests {
         assert!(!spreads_too_wide_to_be_key(&arch), "82 degrees from its middle");
         let key = Studio::new(&black_studio(), &[arch]).key().expect("the arch is the key");
         assert!(key.validate().is_ok() && key.cos_radius > 85f32.to_radians().cos(), "{key:?}");
+        // A halo 60 degrees across overhead lights from the zenith as a ring
+        // light does: a surface facing up receives 0.87 of it.
+        let halo = ring(60.0);
+        assert!(!spreads_too_wide_to_be_key(&halo), "a ring at elevation 60");
+        // The even 85 degree disc's share, 0.544, is a ring's at elevation 33.
+        assert!(spreads_too_wide_to_be_key(&ring(31.0)) && !spreads_too_wide_to_be_key(&ring(35.0)), "the limit lies near elevation 33");
+        let key = Studio::new(&black_studio(), &[halo]).key().expect("the halo is the key");
+        assert!(key.validate().is_ok() && key.dir.y > 0.99 && key.facing > 0.8, "{key:?}");
         // Only a stroke spreads: a rect as wide as a light may be still leads.
         let wide = LightParams { key: true, width_deg: 170.0, height_deg: 170.0, ..Default::default() };
         assert!(!spreads_too_wide_to_be_key(&wide) && Studio::new(&black_studio(), &[wide]).key().is_some());
