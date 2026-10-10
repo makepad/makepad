@@ -2056,7 +2056,9 @@ impl Widget for Window {
                     if matches!(cx.os_type(), OsType::Macos) {
                         let new_buttons = ev.new_geom.window_chrome_buttons;
                         if new_buttons != Rect::default() {
-                            let h = (new_buttons.pos.y * 2.0 + new_buttons.size.y).ceil();
+                            // As the UI zooms in, the platform moves the traffic lights down,
+                            // so centering the bar on them zooms it too.
+                            let h = new_buttons.pos.y * 2.0 + new_buttons.size.y;
                             if self.system_caption_bar_height != Some(h) {
                                 self.system_caption_bar_height = Some(h);
                                 self.view(cx, ids!(caption_bar)).redraw(cx);
