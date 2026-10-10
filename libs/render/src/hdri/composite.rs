@@ -117,6 +117,16 @@ pub fn image_facts(map: &Arc<EnvMap>) -> Arc<ImageFacts> {
     facts
 }
 
+/// Drops the facts of every image whose last `Arc` is gone. `image_facts`
+/// does so whenever it adds an entry; a host that frees an image (the app's
+/// base images, the plan owner's D4) calls this, so the image's facts go with
+/// it, not at the next image's first bake.
+pub fn drop_dead_facts() {
+    if let Ok(mut memo) = FACTS.lock() {
+        memo.retain(|(image, _)| image.strong_count() > 0);
+    }
+}
+
 /// The luminance a level surface receives from the rows of `map` more than
 /// `min_elevation_deg` (never less than 0) above the horizon: the sum of
 /// L x cos(zenith angle) x solid angle. A constant sky of luminance L gives
@@ -649,6 +659,20 @@ mod tests {
         let twin = Arc::new(photo_with_sun(20, 6));
         assert!(!Arc::ptr_eq(&first, &image_facts(&twin)));
         assert_eq!(image_facts(&twin).sun, first.sun);
+    }
+
+    /// D4: an image's facts (its 8 MB patch at most) go with the image when
+    /// the host asks, not at the next image's first bake.
+    #[test]
+    fn a_freed_images_facts_go_when_asked() {
+        let map = Arc::new(photo_with_sun(20, 8));
+        let facts = Arc::downgrade(&image_facts(&map));
+        assert!(facts.upgrade().is_some(), "kept while the image lives");
+        drop_dead_facts();
+        assert!(facts.upgrade().is_some(), "a live image keeps its facts");
+        drop(map);
+        drop_dead_facts();
+        assert!(facts.upgrade().is_none(), "freed with the image");
     }
 }
 

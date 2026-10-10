@@ -937,6 +937,9 @@ mod tests {
             case("1b: the sun in a soft scrim's edge", HdriParams { lights: vec![scrim(160.0, 35.0, 20.0, 1.0)], ..sun.clone() }, 0.03),
             case("1b: the sun behind a soft coloured gel", HdriParams { lights: vec![soft_flag(150.0, 36.0, 16.0, [0.6, 0.4, 0.2])], ..sun.clone() }, 0.03),
             case("1b: the sun in a window filled with sky at +1 EV", HdriParams { lights: vec![sky_window], ..sun.clone() }, 0.03),
+            // D12 (M8): against the sky a window's frame and bars hide the sky
+            // behind them; its key is still exactly the sky its glass lets in.
+            case("1b: a framed window filled with sky as the key, against the sky (Sky mode)", HdriParams { lights: vec![window.clone()], ..HdriParams::default() }, 0.02),
             case("1b: a window filled with sky as the key beside a storm's bolt (Sky mode)", storm_window("sky", 2, one_pane.clone()), 0.02),
             case("1b: a window filled with sky as the key beside a storm's bolt (Studio mode)", storm_window("studio", 1, GoboParams::default()), 0.02),
             case("1b: the moon in a soft scrim's edge", HdriParams { lights: vec![scrim(moon_az, moon_el + 9.0, 16.0, 1.0)], ..night.clone() }, 0.03),

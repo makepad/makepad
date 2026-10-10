@@ -313,12 +313,15 @@ impl Studio {
     ///
     /// No pictures: an image light is drawn plain (see `new_with`).
     pub fn new(studio: &StudioParams, lights: &[LightParams]) -> Studio {
-        Studio::new_with(studio, lights, &ImageSet::default())
+        Studio::new_with(studio, lights, &ImageSet::default(), false)
     }
 
     /// `new` with the pictures image lights show (`Env::new_with` passes
     /// them through). A light whose key is not in `images` is drawn plain.
-    pub(super) fn new_with(studio: &StudioParams, lights: &[LightParams], images: &ImageSet) -> Studio {
+    /// `against_sky`: the lights hang against the sky (Sky mode), where a
+    /// window filled with sky hides what is behind its frame and bars
+    /// (`LightFx::against_sky`, D12).
+    pub(super) fn new_with(studio: &StudioParams, lights: &[LightParams], images: &ImageSet, against_sky: bool) -> Studio {
         let rgb = |c: [f32; 3]| vec3f(c[0].max(0.0), c[1].max(0.0), c[2].max(0.0));
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
         let prepared: Vec<PreparedLight> = enabled.iter().map(|l| PreparedLight::new(l, images)).collect();
@@ -329,7 +332,7 @@ impl Studio {
         // What hangs in front of each light, built for the same lights in the
         // same order as the prepared lights above. Before the key: a flag's
         // gobo cuts what the flag takes out of the key (B8).
-        let fx: Vec<LightFx> = enabled.iter().map(|l| LightFx::new(l, images)).collect();
+        let fx: Vec<LightFx> = enabled.iter().map(|l| LightFx::new(l, images).against_sky(against_sky)).collect();
         let any_fx = fx.iter().any(|fx| !fx.is_plain());
         let mut built = Studio {
             top: rgb(studio.top),
@@ -527,11 +530,12 @@ impl Studio {
             } else if fx.fills_with_sky() {
                 // A window is its glass showing the sky. Left out as the key it
                 // keeps its glass and lets no sky in, as a scrim key keeps its
-                // cloth: what is behind the glass stays hidden, and the map
-                // without it lacks exactly the sky the key carries (D1).
+                // cloth: what is behind the glass (and against the sky, behind
+                // its frame and bars: `LightFx::hides`) stays hidden, and the
+                // map without it lacks exactly the sky the key carries (D1).
                 let cover = self.cover(i, dir);
                 if cover > 0.0 {
-                    c = if skip == Some(i) { c * (1.0 - fx.glass(dir, cover)) } else { fx.window(dir, cover, c, sky(dir)) };
+                    c = if skip == Some(i) { c * (1.0 - fx.hides(dir, cover)) } else { fx.window(dir, cover, c, sky(dir)) };
                 }
             } else {
                 let after = self.draw_lights(i..i + 1, dir, c, skip);
@@ -702,10 +706,11 @@ fn dimmed(flags: &[(&PreparedLight, &LightFx)], dir: Vec3f, w: Vec3f) -> Vec3f {
         if fx.fills_with_sky() {
             // As `apply_lights_sky` draws a window: what is behind its glass
             // (its shape's cover, past its gobo's bars) gives way to the sky,
-            // which is none of the key's light, so the key keeps 1 - glass.
+            // and against the sky its frame and bars hide it too, none of it
+            // the key's light, so the key keeps 1 - what it hides.
             let cover = flag.cover(dir);
             if cover > 0.0 {
-                w = w * (1.0 - fx.glass(dir, cover));
+                w = w * (1.0 - fx.hides(dir, cover));
             }
             continue;
         }

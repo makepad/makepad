@@ -14,7 +14,7 @@
 
 use makepad_render_material::ibl::{self, EnvMap};
 use super::*;
-use super::image::load_equirect;
+use super::image::{load_equirect, PathOrigin};
 use crate::sky::luminance;
 
 /// Bakes `params` into an engine environment map `width` x `width / 2`
@@ -152,7 +152,8 @@ impl ImageStore {
 /// sun on `Environment.sun` instead; the renderer fills the cone in its
 /// lighting copy and the dome keeps the disc (the sandbox does this).
 pub fn load_env_map(path: &std::path::Path, detect: bool) -> Result<(EnvMap, Option<EnvSun>), String> {
-    let mut env = load_equirect(path)?;
+    // The host chose the path (D5: a preset's path rule is the app's to apply).
+    let mut env = load_equirect(path, PathOrigin::Picked)?;
     let sun = if detect { detect_sun(&env) } else { None };
     if let Some(sun) = &sun {
         remove_sun(&mut env, sun);

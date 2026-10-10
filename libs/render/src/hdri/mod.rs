@@ -183,7 +183,9 @@ impl Env {
         let mut params = params.clone();
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
-        let studio = studio::Studio::new_with(&params.studio, &params.lights, images);
+        // In Sky mode the lights hang against the sky itself (D12: a window
+        // filled with sky draws its frame and bars there).
+        let studio = studio::Studio::new_with(&params.studio, &params.lights, images, params.mode() == Mode::Sky);
         // An image that is the whole base hides the generated sky: its weather
         // and its cloud volume are not drawn, so they are not built (D6).
         let whole_base = composite::whole_base(&params, images);

@@ -7,6 +7,9 @@
 //! image lights (1b): `decode_image` keeps an 8-bit file's alpha and an EXR's A channel, straight.
 //! An environment (`decode_equirect`, `load_equirect`) is the colour its file stores, opaque: only
 //! a light's picture uses alpha (the plan owner's D13). sRGB appears only where 8-bit files come in.
+//! `load_image` and `load_equirect` read only a regular file of at most `MAX_IMAGE_FILE_BYTES`,
+//! and a network path only when the person picked it, not when a preset names it (`PathOrigin`,
+//! D5).
 //! Nothing here samples, resizes or decodes RGBE itself: `EnvMap` and `ibl` already do that.
 //!
 //! Two conventions meet here. The engine (`ibl::dir_to_equirect_uv`) puts −Z at the image centre
@@ -268,9 +271,114 @@ fn decode_with(bytes: &[u8], alpha: Alpha) -> Result<EnvMap, String> {
     Ok(EnvMap { width: buffer.width, height: buffer.height, data })
 }
 
-/// Reads and decodes a file (file convention); errors name the path.
-pub fn load_image(path: &Path) -> Result<EnvMap, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+/// The largest picture or environment file `load_image` and `load_equirect` read (D5): 1 GiB,
+/// what the decoded cap (`MAX_PIXELS` at 16 B a texel) holds. The size is checked from the open
+/// file before anything is read, and the read stops one byte past it.
+pub const MAX_IMAGE_FILE_BYTES: u64 = 1 << 30;
+
+/// Where a path to read came from, which decides how far it is trusted (the plan owner's D5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathOrigin {
+    /// The person picked the file in a file dialog, or the host chose the path itself.
+    Picked,
+    /// A loaded preset or settings file names it, and someone else may have written that file.
+    /// A network path (`\\host\share\...`) is not opened: opening one connects to that host as
+    /// soon as the preset loads. The person can still pick such a file themselves.
+    Preset,
+}
+
+/// What a path names, read from its spelling alone, before anything touches the file system.
+/// The same on every system: a preset written on Windows names Windows paths wherever it loads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PathKind {
+    Local,
+    /// `\\host\share\...` (either separator) or `\\?\UNC\host\share\...`.
+    Network,
+    /// The Win32 device namespaces: `\\.\...` (`\\.\COM1`, `\\.\PhysicalDrive0`) and `\\?\`
+    /// with anything but a drive (`\\?\GLOBALROOT\Device\...`). Never a picture.
+    Device,
+}
+
+fn path_kind(path: &str) -> PathKind {
+    let bytes = path.as_bytes();
+    let sep = |i: usize| bytes.get(i).is_some_and(|&c| c == b'/' || c == b'\\');
+    if !(sep(0) && sep(1)) {
+        return PathKind::Local;
+    }
+    match bytes.get(2) {
+        Some(b'.') if sep(3) => PathKind::Device,
+        Some(b'?') if sep(3) => {
+            let rest = &bytes[4..];
+            if rest.len() >= 2 && rest[0].is_ascii_alphabetic() && rest[1] == b':' {
+                // \\?\C:\..., a disk path spelled verbatim.
+                PathKind::Local
+            } else if rest.len() >= 3 && rest[..3].eq_ignore_ascii_case(b"UNC") && sep(7) {
+                PathKind::Network
+            } else {
+                PathKind::Device
+            }
+        }
+        _ => PathKind::Network,
+    }
+}
+
+/// Why `path` is not opened, decided from its spelling alone (nothing touches the file system,
+/// so a refused network path never reaches its host): a device path, whoever names it, and a
+/// network path that a preset names (D5). None when it may be opened.
+pub fn refused_path(path: &Path, origin: PathOrigin) -> Option<String> {
+    let text = path.to_string_lossy();
+    match (path_kind(&text), origin) {
+        (PathKind::Local, _) | (PathKind::Network, PathOrigin::Picked) => None,
+        (PathKind::Network, PathOrigin::Preset) => Some(format!(
+            "{}: a network path named by a preset is not opened; pick the file yourself to use it",
+            path.display()
+        )),
+        (PathKind::Device, _) => Some(format!("{}: a device path, not a picture file", path.display())),
+    }
+}
+
+/// Reads the whole of a regular file of at most `cap` bytes that `origin` lets be opened
+/// (`refused_path`). A folder, a device (`/dev/zero`, `NUL`, `COM1`) or a pipe is refused before
+/// it is opened, from its metadata (opening a pipe can block; reading `/dev/zero` never ends),
+/// and again from the open handle. The length is checked before the read, and the read stops one
+/// byte past the cap, so a file that grows while it is read is refused too. Errors name the path.
+fn read_image_file(path: &Path, origin: PathOrigin, cap: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    if let Some(refusal) = refused_path(path, origin) {
+        return Err(refusal);
+    }
+    let named = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let not_a_file = || named(&"not a regular file");
+    let regular = |meta: &std::fs::Metadata| -> Result<(), String> {
+        if !meta.is_file() {
+            return Err(not_a_file());
+        }
+        if meta.len() > cap {
+            return Err(named(&format!("{} bytes is over the {cap} byte limit for a picture", meta.len())));
+        }
+        Ok(())
+    };
+    match std::fs::metadata(path) {
+        Ok(meta) => regular(&meta)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(named(&e)),
+        // A Windows device (NUL, CON, COM1) has no file metadata at all.
+        Err(e) => return Err(named(&format!("not a regular file ({e})"))),
+    }
+    let file = std::fs::File::open(path).map_err(|e| named(&e))?;
+    // The path may have been swapped for something else since: the handle is what is read.
+    regular(&file.metadata().map_err(|e| named(&format!("not a regular file ({e})")))?)?;
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1)).read_to_end(&mut bytes).map_err(|e| named(&e))?;
+    if bytes.len() as u64 > cap {
+        return Err(named(&format!("grew past the {cap} byte limit for a picture while it was read")));
+    }
+    Ok(bytes)
+}
+
+/// Reads and decodes a file (file convention): a regular file of at most `MAX_IMAGE_FILE_BYTES`,
+/// and no network path when a preset names it (`PathOrigin`, D5). Errors name the path.
+pub fn load_image(path: &Path, origin: PathOrigin) -> Result<EnvMap, String> {
+    let bytes = read_image_file(path, origin, MAX_IMAGE_FILE_BYTES)?;
     decode_image(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -291,9 +399,10 @@ pub fn decode_equirect(bytes: &[u8]) -> Result<EnvMap, String> {
     Ok(roll_quarter(&file, false))
 }
 
-/// `decode_equirect` of a file; errors name the path.
-pub fn load_equirect(path: &Path) -> Result<EnvMap, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
+/// `decode_equirect` of a file, read as `load_image` reads one (`MAX_IMAGE_FILE_BYTES`, a regular
+/// file, no network path a preset names); errors name the path.
+pub fn load_equirect(path: &Path, origin: PathOrigin) -> Result<EnvMap, String> {
+    let bytes = read_image_file(path, origin, MAX_IMAGE_FILE_BYTES)?;
     decode_equirect(&bytes).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -564,20 +673,20 @@ mod tests {
         std::fs::write(&near, flat_hdr(7, 4, |_, _| GREY)).unwrap();
         std::fs::write(&bad, flat_hdr(6, 4, |_, _| GREY)).unwrap();
         // load_image keeps the file's columns; load_equirect rolls +X to the engine's u = 0.75.
-        let file = load_image(&good).unwrap();
+        let file = load_image(&good, PathOrigin::Picked).unwrap();
         assert_eq!((file.width, file.height), (8, 4));
         assert!(texel(&file, 4, 1)[0] > 1.5 && texel(&file, 6, 1)[0] < 0.6);
-        let engine = load_equirect(&good).unwrap();
+        let engine = load_equirect(&good, PathOrigin::Picked).unwrap();
         assert_eq!((engine.width, engine.height), (8, 4));
         assert!(texel(&engine, 6, 1)[0] > 1.5 && texel(&engine, 4, 1)[0] < 0.6);
         assert_eq!(engine, roll_quarter(&file, false));
         let x_plus = (ibl::dir_to_equirect_uv([1.0, 0.0, 0.0])[0] * 8.0).floor() as usize;
         assert_eq!(x_plus, 6);
         // One pixel off 2:1 is tolerated (a common crop); further off is not.
-        assert_eq!(load_equirect(&near).map(|e| (e.width, e.height)).unwrap(), (7, 4));
-        let error = load_equirect(&bad).unwrap_err();
+        assert_eq!(load_equirect(&near, PathOrigin::Picked).map(|e| (e.width, e.height)).unwrap(), (7, 4));
+        let error = load_equirect(&bad, PathOrigin::Picked).unwrap_err();
         assert!(error.contains("2:1"), "{error}");
-        let missing = load_equirect(&dir.join("missing.hdr")).unwrap_err();
+        let missing = load_equirect(&dir.join("missing.hdr"), PathOrigin::Picked).unwrap_err();
         assert!(missing.contains("missing.hdr"), "{missing}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -627,7 +736,7 @@ mod tests {
         let dir = scratch_dir("jpg");
         let path = dir.join("pano.jpg");
         std::fs::write(&path, TWO_BLOCK_JPG).unwrap();
-        assert_eq!(load_equirect(&path).unwrap(), roll_quarter(&env, false));
+        assert_eq!(load_equirect(&path, PathOrigin::Picked).unwrap(), roll_quarter(&env, false));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -644,8 +753,8 @@ mod tests {
         let dir = scratch_dir("alpha");
         let path = dir.join("cutout.png");
         std::fs::write(&path, &png).unwrap();
-        assert_eq!(load_image(&path).unwrap(), picture);
-        let environment = load_equirect(&path).unwrap();
+        assert_eq!(load_image(&path, PathOrigin::Picked).unwrap(), picture);
+        let environment = load_equirect(&path, PathOrigin::Picked).unwrap();
         assert!(environment.data.iter().all(|t| t[3] == 1.0), "{:?}", environment.data);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -672,7 +781,7 @@ mod tests {
         let dir = scratch_dir("exr_alpha");
         let path = dir.join("cutout.exr");
         std::fs::write(&path, &bytes).unwrap();
-        let environment = load_equirect(&path).unwrap();
+        let environment = load_equirect(&path, PathOrigin::Picked).unwrap();
         assert!(environment.data.iter().all(|t| t[3] == 1.0), "{:?}", environment.data);
         let mut row: Vec<f32> = (0..4).map(|x| texel(&environment, x, 0)[0]).collect();
         row.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -716,18 +825,90 @@ mod tests {
         assert_eq!(decode_image(&png).unwrap().data[0][3], 0.0, "the picture keeps its alpha");
     }
 
+    /// D5 (M4): a read stops at its byte cap, checked before the read. A
+    /// 1 GiB file is too heavy to write here, so the shared reader is pinned
+    /// with a small cap and the readers' own cap is pinned by its value.
+    #[test]
+    fn a_read_over_the_cap_is_refused() {
+        assert_eq!(MAX_IMAGE_FILE_BYTES, 1 << 30, "1 GiB, as the plan owner ruled");
+        let dir = scratch_dir("cap");
+        let path = dir.join("eleven.bin");
+        std::fs::write(&path, [7u8; 11]).unwrap();
+        let error = read_image_file(&path, PathOrigin::Picked, 10).unwrap_err();
+        assert!(error.contains("over the 10 byte limit") && error.contains("eleven.bin"), "{error}");
+        assert_eq!(read_image_file(&path, PathOrigin::Picked, 11).unwrap(), vec![7u8; 11]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// D5 (M4): a folder or a device is refused before anything is read
+    /// from it (`/dev/zero` would be read until memory runs out, a pipe can
+    /// block the reader). The null device stands in for every device: it is
+    /// the one a test can open without waiting or reading forever.
+    #[test]
+    fn a_device_or_a_folder_is_not_read() {
+        let dir = scratch_dir("device");
+        let device = if cfg!(windows) { std::path::PathBuf::from("NUL") } else { std::path::PathBuf::from("/dev/null") };
+        for (what, path) in [("the null device", device), ("a folder", dir.clone())] {
+            for origin in [PathOrigin::Picked, PathOrigin::Preset] {
+                let error = load_image(&path, origin).unwrap_err();
+                assert!(error.contains("not a regular file"), "{what}, {origin:?}: {error}");
+                let error = load_equirect(&path, origin).unwrap_err();
+                assert!(error.contains("not a regular file"), "{what}, {origin:?}: {error}");
+            }
+        }
+        // The Win32 device namespaces are no picture whoever names them,
+        // refused by their spelling alone.
+        for device in [r"\\.\COM1", r"\\.\PhysicalDrive0", r"//./pipe/x", r"\\?\GLOBALROOT\Device\Null"] {
+            let error = load_image(std::path::Path::new(device), PathOrigin::Picked).unwrap_err();
+            assert!(error.contains("a device path"), "{device}: {error}");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// D5 (M4): a network path a preset names is refused by its spelling,
+    /// before anything touches the file system (opening one connects to the
+    /// host as the preset loads); the person's own pick of one is opened.
+    /// Local paths load either way.
+    #[test]
+    fn a_network_path_from_a_preset_is_refused_and_a_picked_one_is_not() {
+        let network = [r"\\nohost.invalid\share\lamp.png", "//nohost.invalid/share/lamp.png", r"\\?\UNC\nohost.invalid\share\lamp.png", r"/\nohost.invalid\share\lamp.png"];
+        for key in network {
+            let path = std::path::Path::new(key);
+            let refusal = refused_path(path, PathOrigin::Preset).unwrap_or_else(|| panic!("{key} is not refused from a preset"));
+            assert!(refusal.contains("network path") && refusal.contains("pick the file yourself"), "{key}: {refusal}");
+            assert_eq!(refused_path(path, PathOrigin::Picked), None, "{key}: the person's own pick is opened");
+            // The loaders refuse it the same way, without a look on the network.
+            let error = load_image(path, PathOrigin::Preset).unwrap_err();
+            assert!(error.contains("network path"), "{key}: {error}");
+            let error = load_equirect(path, PathOrigin::Preset).unwrap_err();
+            assert!(error.contains("network path"), "{key}: {error}");
+        }
+        for local in [r"C:\pics\lamp.png", "C:/pics/lamp.png", r"\\?\C:\pics\lamp.png", "/home/me/lamp.png", "lamp.png", r"pics\lamp.png"] {
+            for origin in [PathOrigin::Picked, PathOrigin::Preset] {
+                assert_eq!(refused_path(std::path::Path::new(local), origin), None, "{local}, {origin:?}");
+            }
+        }
+        // A local file a preset names loads as a picked one does.
+        let dir = scratch_dir("preset_local");
+        let path = dir.join("pano.hdr");
+        std::fs::write(&path, flat_hdr(8, 4, |_, _| GREY)).unwrap();
+        assert_eq!(load_equirect(&path, PathOrigin::Preset).unwrap(), load_equirect(&path, PathOrigin::Picked).unwrap());
+        assert_eq!(load_image(&path, PathOrigin::Preset).unwrap(), load_image(&path, PathOrigin::Picked).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn an_equirect_decodes_from_bytes_as_from_its_file() {
         let bytes = flat_hdr(8, 4, |x, _| if x == 4 { [255, 255, 255, 129] } else { GREY });
         let dir = scratch_dir("equirect_bytes");
         let path = dir.join("pano.hdr");
         std::fs::write(&path, &bytes).unwrap();
-        assert_eq!(decode_equirect(&bytes).unwrap(), load_equirect(&path).unwrap());
+        assert_eq!(decode_equirect(&bytes).unwrap(), load_equirect(&path, PathOrigin::Picked).unwrap());
         // The 2:1 rule holds for bytes too; with no path, the message names none.
         let error = decode_equirect(&flat_hdr(6, 4, |_, _| GREY)).unwrap_err();
         assert!(error.contains("2:1") && !error.contains(".hdr"), "{error}");
         // A file still names itself in its errors, as before.
-        let error = load_equirect(&dir.join("missing.hdr")).unwrap_err();
+        let error = load_equirect(&dir.join("missing.hdr"), PathOrigin::Picked).unwrap_err();
         assert!(error.contains("missing.hdr"), "{error}");
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -516,7 +516,7 @@ fn remove_staged(staged: &[(PathBuf, PathBuf)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hdri::image::{load_equirect, load_image, read_exr};
+    use crate::hdri::image::{load_equirect, load_image, read_exr, PathOrigin};
     use crate::hdri::{Env, HdriParams, LightParams};
     use makepad_draw::makepad_platform::resource_resolver::DecodeBudget;
     use std::cell::{Cell, RefCell};
@@ -868,7 +868,7 @@ mod tests {
         let (paths, _) = export_all(&dir.join("sky"), &env, &opts, &|_| {}, &|| false).unwrap();
         assert_eq!(file_names(&paths), ["sky.exr", "sky.hdr", "sky.png"]);
         assert_eq!(listing(&dir), ["sky.exr", "sky.hdr", "sky.png"]);
-        assert_eq!(load_equirect(&dir.join("sky.exr")).unwrap(), env);
+        assert_eq!(load_equirect(&dir.join("sky.exr"), PathOrigin::Picked).unwrap(), env);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -900,7 +900,7 @@ mod tests {
         assert!(error.contains("sky.hdr"), "{error}");
         // sky.exr was renamed before the failure and is a whole file; the staged hdr and png are gone.
         assert_eq!(listing(&dir), ["sky.exr", "sky.hdr"]);
-        assert_eq!(load_equirect(&dir.join("sky.exr")).unwrap(), env);
+        assert_eq!(load_equirect(&dir.join("sky.exr"), PathOrigin::Picked).unwrap(), env);
         assert_eq!(std::fs::read(dir.join("sky.hdr").join("keep")).unwrap(), b"x");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -947,11 +947,11 @@ mod tests {
         assert_eq!(report.clipped, 0);
         // A float EXR is lossless, and at a width divisible by 4 the roll is a column copy:
         // the map comes back bit for bit.
-        assert_eq!(load_equirect(&paths[0]).unwrap(), env);
+        assert_eq!(load_equirect(&paths[0], PathOrigin::Picked).unwrap(), env);
         // The file itself holds the file convention, a quarter turn from the engine map.
-        assert_eq!(load_image(&paths[0]).unwrap(), roll_quarter(&env, true));
+        assert_eq!(load_image(&paths[0], PathOrigin::Picked).unwrap(), roll_quarter(&env, true));
         // Radiance keeps 8 bits under the brightest channel: within 1 % of it.
-        let hdr = load_equirect(&paths[1]).unwrap();
+        let hdr = load_equirect(&paths[1], PathOrigin::Picked).unwrap();
         assert_eq!((hdr.width, hdr.height), (16, 8));
         for (want, got) in env.data.iter().zip(&hdr.data) {
             let max = want[0].max(want[1]).max(want[2]);

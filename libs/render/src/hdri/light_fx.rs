@@ -75,6 +75,10 @@ pub struct LightFx {
     /// 2^intensity_ev: the gain a window filled with sky shows the sky at.
     gain: f32,
     fill_sky: bool,
+    /// A window filled with sky stands against the sky itself (Sky mode), so
+    /// its frame and bars hide what is behind them (D12, M8); behind a studio
+    /// they leave the backdrop as it was. Set by `against_sky`.
+    frame_hides: bool,
     gobo: Option<Gobo>,
     /// The aimed face with its grid and doors (B9).
     aim: Option<Aim>,
@@ -94,6 +98,7 @@ impl LightFx {
             blend: light.blend(),
             gain: 2.0f32.powf(light.intensity_ev.max(-10.0).min(20.0)),
             fill_sky: gobo.is_some_and(|g| g.fill_sky),
+            frame_hides: false,
             gobo: gobo.and_then(|g| Gobo::new(g, half, images)),
             aim: light.aim.as_ref().and_then(|a| Aim::new(a, frame.center, frame.right * sx, frame.up, half, light.softness)),
             surface: light.imperfections.as_ref().and_then(|p| Imperfections::new(p, half)),
@@ -119,6 +124,37 @@ impl LightFx {
     /// A window: an emitter that shows the map's sky instead of its colour.
     pub fn fills_with_sky(&self) -> bool {
         self.fill_sky && self.blend == Blend::Add
+    }
+
+    /// These extras with a window filled with sky standing against the sky
+    /// itself (`on`: Sky mode, D12/M8). There the sky it shows is the very
+    /// sky behind it, so at 0 EV a window whose frame and bars left what is
+    /// behind them as it was drew nothing at all, not even its bars: they
+    /// hide it instead, and read dark against the sky, as a window's frame
+    /// does from inside. Behind a studio (off) they leave the backdrop, the
+    /// wall the window is set in, as it was.
+    pub fn against_sky(mut self, on: bool) -> LightFx {
+        self.frame_hides = on;
+        self
+    }
+
+    /// How much of what is behind a window filled with sky it hides at
+    /// `dir`, given its shape's `cover`: its glass, which shows the sky in
+    /// its place, and against the sky (`against_sky`) its frame and bars too,
+    /// all it covers. What it hides is none of its own light, so the map
+    /// without it as the key keeps only `1 - hides` of what is behind it,
+    /// and so does a key behind it.
+    pub fn hides(&self, dir: Vec3f, cover: f32) -> f32 {
+        self.hidden(cover, self.glass(dir, cover))
+    }
+
+    /// `hides`, given the `glass` there already worked out.
+    fn hidden(&self, cover: f32, glass: f32) -> f32 {
+        if self.frame_hides {
+            cover.max(0.0).min(1.0)
+        } else {
+            glass
+        }
     }
 
     /// Face coordinates of `dir`: x to the viewer's right, y up, tangent
@@ -192,10 +228,11 @@ impl LightFx {
     /// A window filled with sky at `dir`: where the light's shape covers
     /// (`cover` 0..=1) and its gobo passes, what is `behind` gives way to
     /// `sky`, the map's sky along `dir`, at 2^intensity_ev. The frame and the
-    /// bars leave what is behind them as it was.
+    /// bars leave what is behind them as it was, or hide it against the sky
+    /// (`hides`).
     pub fn window(&self, dir: Vec3f, cover: f32, behind: Vec3f, sky: Vec3f) -> Vec3f {
         let glass = self.glass(dir, cover);
-        behind * (1.0 - glass) + self.through_glass(dir, glass, sky)
+        behind * (1.0 - self.hidden(cover, glass)) + self.through_glass(dir, glass, sky)
     }
 
     /// How much of a window filled with sky is glass at `dir`, 0..=1: where
@@ -367,6 +404,57 @@ mod tests {
             }
         }
         assert!(darker > 0, "the frame and the bars took out no light at all");
+    }
+
+    /// D12 (M8): in Sky mode a window filled with sky stands against the very
+    /// sky it shows, so at 0 EV it drew nothing at all, not even its bars.
+    /// Its frame and bars now hide the sky behind them and read dark, its
+    /// glass shows the sky as before, and nothing is brighter than the sky.
+    /// Behind a studio they still leave the backdrop as it was.
+    #[test]
+    fn a_sky_window_draws_its_frame_and_bars_in_sky_mode() {
+        let window = LightParams {
+            azimuth_deg: 200.0,
+            elevation_deg: 20.0,
+            width_deg: 40.0,
+            height_deg: 30.0,
+            softness: 0.0,
+            intensity_ev: 0.0,
+            gobo: Some(GoboParams { panes_x: 2, panes_y: 2, bar: 0.1, frame: 0.1, fill_sky: true, ..GoboParams::default() }),
+            ..LightParams::default()
+        };
+        let dirs: Vec<Vec3f> = (0..=36).flat_map(|i| (0..=26).map(move |j| dir_from_az_el(182.0 + i as f32, 7.0 + j as f32))).collect();
+        let classify = |base: &HdriParams| {
+            let with = Env::new(&HdriParams { lights: vec![window.clone()], ..base.clone() });
+            let without = Env::new(base);
+            // Directions the window turns black, dark (under 5 % of the sky) and leaves as the sky.
+            let (mut black, mut dark, mut same) = (Vec::new(), 0, 0);
+            for &d in &dirs {
+                let (a, b) = (luminance(with.radiance(d)), luminance(without.radiance(d)));
+                assert!(a <= b * (1.0 + 1.0e-4) + 1.0e-7, "brighter than the sky at {:?}: {a} over {b}", az_el_from_dir(d));
+                if a == 0.0 {
+                    black.push(d);
+                }
+                if a < 0.05 * b {
+                    dark += 1;
+                } else if (a - b).abs() <= 1.0e-4 * b {
+                    same += 1;
+                }
+            }
+            (black, dark, same)
+        };
+        let (black, dark, glass) = classify(&HdriParams::default());
+        assert!(dark > 40 && black.len() > 20, "the frame and bars draw dark against the sky: {dark} ({} black) of {} directions", black.len(), dirs.len());
+        assert!(glass > 200, "the glass shows the sky: {glass} of {}", dirs.len());
+        // The centre is where the two bars cross.
+        assert!(black.iter().any(|d| d.dot(dir_from_az_el(200.0, 20.0)) > 0.9999), "the bars' crossing is dark");
+        // Behind a studio, frame and bars leave the backdrop as it was.
+        let grey = HdriParams { studio: StudioParams { top: [0.2; 3], horizon: [0.2; 3], floor: [0.2; 3], ..StudioParams::default() }, ..studio(Vec::new()) };
+        let with = Env::new(&HdriParams { lights: vec![window.clone()], ..grey.clone() });
+        let without = Env::new(&grey);
+        for d in black {
+            assert_eq!(with.radiance(d), without.radiance(d), "behind a studio the bars show the backdrop at {:?}", az_el_from_dir(d));
+        }
     }
 
     #[test]
