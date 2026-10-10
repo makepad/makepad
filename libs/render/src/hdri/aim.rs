@@ -27,7 +27,9 @@ pub const GRID_CELLS: f32 = 12.0;
 /// atan(width / depth) off its axis: 1 / tan(15 degrees), a 15 degree grid.
 pub const GRID_DEPTH_MAX: f32 = 3.732;
 /// Half the thickness of a cell wall at full strength, and the softening of
-/// a cell's edge, both in cell widths.
+/// a cell's edge, both in cell widths. The softening is the honeycomb's only
+/// anti-aliasing (the bake point-samples it), so it keeps its width at every
+/// grid.
 const GRID_WALL: f32 = 0.04;
 const GRID_EDGE: f32 = 0.04;
 /// How far the face turns, as the cosine between its normal and the way back
@@ -48,8 +50,9 @@ pub struct Aim {
     grid_depth: f32,
     /// Half a cell wall's thickness, in cell widths.
     grid_wall: f32,
-    /// The softening of a cell's edge, in cell widths.
-    grid_edge: f32,
+    /// How much of its shadow the honeycomb casts, 0..=1: it fades in over
+    /// the first quarter of the grid.
+    grid_contrast: f32,
     /// What of the face the centre sees as it turns toward edge-on, 0..=1,
     /// the same all over it.
     fade: f32,
@@ -90,12 +93,13 @@ impl Aim {
             half,
             cell: 2.0 * half.x.min(half.y) / GRID_CELLS,
             grid_depth: grid * GRID_DEPTH_MAX,
-            // The walls thin out with the grid, and so does the softening of
-            // the edges they bound (D9, L:188): with the edge held at full
-            // width every cell edge darkened to half at grid 0.001 (the face
-            // 3 % darker), a full-contrast honeycomb at the slider's first step.
+            // The walls thin out with the grid, and the honeycomb fades in
+            // with them (D9, L:188): at full contrast every cell edge darkened
+            // to half at grid 0.001, and off the axis of a wide light a
+            // shallow grid's shadow bands, thinner than a texel, were drawn
+            // as a dotted honeycomb down to what is behind the light.
             grid_wall: GRID_WALL * (4.0 * grid).min(1.0),
-            grid_edge: (GRID_EDGE * (4.0 * grid).min(1.0)).max(1.0e-6),
+            grid_contrast: (4.0 * grid).min(1.0),
             // The face's own turn, n against the way back to the centre
             // (cos yaw x cos pitch), fades the whole face: per ray, a line swept
             // across a wide face from yaw 70 on and left its near half lit at 90.
@@ -144,13 +148,14 @@ impl Aim {
     /// that point is still inside the cell it started in. Both ends of the
     /// ray are measured against that one cell's walls, so the cell pattern
     /// and the falloff with the angle are the same computation, and a ray
-    /// along the axis sees the whole cell less its walls.
+    /// along the axis sees the whole cell less its walls. A shallow grid
+    /// casts only part of that shadow (`grid_contrast`).
     fn grid(&self, q: Vec2f, tx: f32, ty: f32) -> f32 {
         let at = hex_cell(q / self.cell);
         let out = vec2f(at.x + tx * self.grid_depth, at.y + ty * self.grid_depth);
         let worst = hex_dist(at).max(hex_dist(out));
         let open = 0.5 - self.grid_wall;
-        1.0 - smoothstep(open - self.grid_edge, open + self.grid_edge, worst)
+        1.0 - self.grid_contrast * smoothstep(open - GRID_EDGE, open + GRID_EDGE, worst)
     }
 }
 
@@ -329,9 +334,9 @@ mod tests {
     }
 
     /// D9 (L:188): the first steps of the Grid slider ease in from no grid.
-    /// The cells' edges soften with the walls they bound, so a grid of 0.01
-    /// does not draw a full-contrast honeycomb (every cell edge at 0.5, the
-    /// face 3 % darker) over the light.
+    /// The honeycomb fades in with the walls, so a grid of 0.01 does not draw
+    /// a full-contrast honeycomb (every cell edge at 0.5, the face 3 % darker)
+    /// over the light.
     #[test]
     fn the_first_grid_steps_ease_in_from_none() {
         // The mean over a face, and the share of it darker than 0.9.
@@ -344,9 +349,9 @@ mod tests {
         };
         // Along its axis (a 2 degree face, every ray within a degree of it) a
         // grid of 0.001 is all but none, and 0.01 dims the face by under a per
-        // cent (its walls, at 4 % of their full thickness, and their edges):
-        // both drew every cell edge at half, the face 3 % darker and a tenth
-        // of it under 0.9.
+        // cent (its walls, at 4 % of their full thickness, casting 4 % of
+        // their shadow): both drew every cell edge at half, the face 3 %
+        // darker and a tenth of it under 0.9.
         for (grid, least, most_lined) in [(0.001f32, 0.995f32, 0.01f32), (0.01, 0.99, 0.02)] {
             let (mean, lined) = measure(grid, 2.0);
             assert!(mean > least && lined < most_lined, "grid {grid}: mean {mean}, {:.1} % of the face on a cell edge", 100.0 * lined);
@@ -359,6 +364,73 @@ mod tests {
             assert!(w[0] >= w[1], "{means:?}");
         }
         assert!(means[5] < 0.97, "a grid of 0.5 has walls: {means:?}");
+    }
+
+    /// The face's transmission on an n x n raster over a square face
+    /// `size_deg` across (fractions -0.95..0.95 of its half size), row by row.
+    fn raster(grid: f32, size_deg: f32, n: usize) -> (Face, Vec<f32>) {
+        let face = Face::new(AimParams { grid, ..AimParams::default() }, size_deg);
+        let ts = (0..n * n).map(|k| face.at(raster_frac(k % n, n), raster_frac(k / n, n))).collect();
+        (face, ts)
+    }
+
+    /// The place of the raster's `i`th column or row, as a fraction of the half size.
+    fn raster_frac(i: usize, n: usize) -> f32 {
+        (i as f32 + 0.5) / n as f32 * 1.9 - 0.95
+    }
+
+    /// D9 (L:188) off the axis: on a wide light every ray but the middle's
+    /// is well off the grid's axis, and a shallow grid's walls cast shadow
+    /// bands thinner than a texel there. Point-sampled at full contrast they
+    /// drew a dotted honeycomb down to what is behind the light: on a 100
+    /// degree face at grid 0.001 and 0.01 the darkest point was 0, and grid
+    /// 0.01 lost 4.4 % of the light (3.7 % of the review's 100 x 80 light in
+    /// the app). The honeycomb fades in with the grid instead: nowhere on the
+    /// face is it darker than 1 - 4 grid.
+    #[test]
+    fn a_shallow_grid_draws_no_honeycomb_on_a_wide_light() {
+        for grid in [0.001f32, 0.01, 0.05, 0.1] {
+            let (_, ts) = raster(grid, 100.0, 240);
+            let darkest = ts.iter().cloned().fold(1.0f32, f32::min);
+            let mean = ts.iter().sum::<f32>() / ts.len() as f32;
+            assert!(darkest >= 1.0 - 4.0 * grid - 1.0e-5, "grid {grid}: darkest {darkest} on a 100 degree face, mean {mean}");
+            if grid <= 0.01 {
+                assert!(mean > 0.995, "grid {grid}: the face keeps {mean} of its light");
+            }
+        }
+    }
+
+    /// The softening of the cells' edges is the honeycomb's only
+    /// anti-aliasing, so it keeps its width at every grid: within a cell the
+    /// face never changes faster than the full-contrast edge's steepest slope
+    /// (1.5 / (2 GRID_EDGE) per cell width) times the honeycomb's contrast.
+    /// Thinned with the walls, the edge left grid 0.05's shadow bands as hard
+    /// sub-texel lines, broken where the bake's texels missed them.
+    #[test]
+    fn a_grid_s_shadows_keep_their_soft_edge() {
+        for grid in [0.01f32, 0.05, 0.1, 0.25, 0.5] {
+            let n = 600;
+            let (face, ts) = raster(grid, 100.0, n);
+            // The raster's step in cell widths, and the centre of each sample's cell.
+            let cells = face.half.x / face.aim.cell;
+            let step = 1.9 * cells / n as f32;
+            let cell_centre = |k: usize| {
+                let p = vec2f(raster_frac(k % n, n) * cells, raster_frac(k / n, n) * cells);
+                p - hex_cell(p)
+            };
+            let steepest = (4.0 * grid).min(1.0) * 1.5 / (2.0 * GRID_EDGE);
+            let mut worst = 0.0f32;
+            // Each sample against its right and upper neighbours in the same cell.
+            for k in 0..n * n {
+                for next in [k + 1, k + n] {
+                    if next >= n * n || (next == k + 1 && next % n == 0) || (cell_centre(k) - cell_centre(next)).length() > 1.0e-3 {
+                        continue;
+                    }
+                    worst = worst.max((ts[k] - ts[next]).abs() / step);
+                }
+            }
+            assert!(worst <= 1.01 * steepest, "grid {grid}: {worst} per cell width, at most {steepest}");
+        }
     }
 
     #[test]
