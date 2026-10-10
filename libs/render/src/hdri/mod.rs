@@ -189,9 +189,12 @@ impl Env {
     }
 
     /// [`Self::new_with`] for a job a newer request can overtake (the app's
-    /// preview and export): the slow part of building a map, the first build
-    /// of a seed's cloud volume noise (about 2.1 s in release, L:229), polls
-    /// `cancelled` and stops when it says so, and the map is then None (D15).
+    /// preview and export; a host's generated bake through
+    /// `envmap::bake_generated_env_map_cancellable`: the sandbox's map job,
+    /// the renderer's preset bake): the slow part of building a map, the
+    /// first build of a seed's cloud volume noise (about 2.1 s in release,
+    /// L:229), polls `cancelled` and stops when it says so, and the map is
+    /// then None (D15).
     /// The noise is not kept, so the next build of that seed starts it again.
     /// A map that was not stopped is `new_with`'s, bit for bit; a map with
     /// nothing slow to build (no volume, or a seed already built) is built

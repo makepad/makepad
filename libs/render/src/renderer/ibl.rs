@@ -445,12 +445,14 @@ pub fn hdri_procedural_name(preset: &str) -> String {
 /// The environment a procedural index names, baked or painted: an hdri
 /// preset with its key, the map without that key and its sky's own sun
 /// (`hdri::envmap::bake_generated_env_map`); render-material's looks have
-/// none of them. `run` spreads a bake's rows (the pool inside a job).
-fn procedural_env_map(i: u32, run: RowRunner, bake_width: usize) -> Option<GeneratedEnvMap> {
+/// none of them. `run` spreads a bake's rows (the pool inside a job). A bake
+/// stops in the first build of a seed's cloud noise when `stop` says so
+/// (`bake_generated_env_map_cancellable`, D15).
+fn procedural_env_map(i: u32, run: RowRunner, bake_width: usize, stop: &dyn Fn() -> bool) -> Option<GeneratedEnvMap> {
     let name = procedural_environment_name(i)?;
     if let Some(hdri_name) = name.strip_prefix(HDRI_PREFIX) {
         let params = crate::hdri::presets::preset(hdri_name)?;
-        Some(crate::hdri::envmap::bake_generated_env_map(&params, bake_width, run))
+        crate::hdri::envmap::bake_generated_env_map_cancellable(&params, &crate::hdri::ImageSet::default(), bake_width, run, stop)
     } else {
         let preset = EnvPreset::by_name(name)?;
         Some(GeneratedEnvMap { map: EnvMap::procedural(&preset, 256, 1.0, 0.0), keyless: None, sun: None, daylight: None })
@@ -482,7 +484,7 @@ fn build_ibl(
             (r.map, r.keyless, key.sun, None, None)
         }
         IblSource::Procedural(i) => {
-            let g = procedural_env_map(i, run, bake_width)?;
+            let g = procedural_env_map(i, run, bake_width, stop)?;
             (Arc::new(g.map), g.keyless.map(Arc::new), g.sun, g.sun, g.daylight)
         }
     };

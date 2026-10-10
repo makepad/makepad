@@ -75,10 +75,27 @@ pub fn bake_generated_env_map(params: &HdriParams, width: usize, run: impl Fn(us
 /// from `images` (1b: image lights). A key the set lacks draws as it does in
 /// the app: the plain light. [`ImageStore`] fills such a set from files.
 pub fn bake_generated_env_map_with(params: &HdriParams, images: &ImageSet, width: usize, run: impl Fn(usize, &(dyn Fn(usize) + Sync))) -> GeneratedEnvMap {
-    let env = Env::new_with(params, images);
+    // Nothing cancels it, so it is always made.
+    bake_generated_env_map_cancellable(params, images, width, run, &|| false).expect("a bake nothing cancels is made")
+}
+
+/// [`bake_generated_env_map_with`] for a job a newer request can overtake
+/// (the sandbox's map job): its `Env` is built through
+/// [`Env::new_cancellable`], so the first build of a seed's cloud volume
+/// noise (about 2.2 s in release) stops when `cancelled` says so, and the
+/// bake is then None (D15, L:229). The rows are `run`'s to skip; a bake that
+/// was not stopped is `bake_generated_env_map_with`'s, bit for bit.
+pub fn bake_generated_env_map_cancellable(
+    params: &HdriParams,
+    images: &ImageSet,
+    width: usize,
+    run: impl Fn(usize, &(dyn Fn(usize) + Sync)),
+    cancelled: &dyn Fn() -> bool,
+) -> Option<GeneratedEnvMap> {
+    let env = Env::new_cancellable(params, images, cancelled)?;
     let map = env.bake_par(width, &run);
     let keyless = env.bake_keyless_par(&map, &run);
-    GeneratedEnvMap { map, keyless, sun: env.sun(), daylight: env.sun_dir() }
+    Some(GeneratedEnvMap { map, keyless, sun: env.sun(), daylight: env.sun_dir() })
 }
 
 /// A host's loaded pictures: the set [`Env::new_with`] reads, and the keys
@@ -868,5 +885,27 @@ mod tests {
         assert!(map.data.iter().all(|t| *t == [2.5, 2.5, 2.5, 1.0]), "{:?}", map.data[0]);
         let baked = bake_generated_env_map_with(&params, &store.set, 32, serial).map;
         assert!(baked.data.iter().all(|t| (t[1] - 2.5).abs() < 1.0e-5), "{:?}", baked.data[0]);
+    }
+
+    /// D15 (L:229), the hosts' half: a generated bake a newer request
+    /// overtakes (the sandbox's map job) stops in the first build of its
+    /// seed's cloud noise, as the app's preview does (`Env::new_cancellable`),
+    /// and is None; one that is not stopped is `bake_generated_env_map_with`'s
+    /// to the bit. (A seed no other test uses: the kept noise is shared.)
+    #[test]
+    fn a_stopped_generated_bake_stops_in_its_first_cloud_noise() {
+        let mut sky = HdriParams { seed: 0x4837_0232, ..HdriParams::default() };
+        sky.sky.clouds.coverage = 0.6;
+        sky.sky.volumetric = Some(VolumetricParams { steps: 16, ..VolumetricParams::default() });
+        let images = ImageSet::default();
+        let asked = std::sync::atomic::AtomicUsize::new(0);
+        let stop = || {
+            asked.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            true
+        };
+        assert!(bake_generated_env_map_cancellable(&sky, &images, 16, serial, &stop).is_none(), "a stopped bake was made");
+        assert!(asked.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        let made = bake_generated_env_map_cancellable(&sky, &images, 16, serial, &|| false).expect("not stopped");
+        assert!(made == bake_generated_env_map_with(&sky, &images, 16, serial));
     }
 }
