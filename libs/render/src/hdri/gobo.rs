@@ -122,6 +122,8 @@ impl Gobo {
     /// from the parameters and the set alone and never reads a file, so a
     /// name the app has not loaded is simply no gobo.
     pub fn new(p: &GoboParams, half: Vec2f, images: &ImageSet) -> Option<Gobo> {
+        // As clamp() holds it: its ranges and defaults are written once (L:132).
+        let p = &p.clamped();
         let kind = p.kind();
         let picture = if kind == GoboKind::Image { Some(images.get(&p.image)?.clone()) } else { None };
         let half = vec2f(half.x.max(1.0e-4), half.y.max(1.0e-4));
@@ -139,22 +141,20 @@ impl Gobo {
             GoboKind::Fern => Some(Foliage::fern(rect, p.density, p.scale, p.seed, soft)),
             _ => None,
         };
-        let (tilt_sin, tilt_cos) = p.tilt_deg.max(0.0).min(90.0).to_radians().sin_cos();
+        let (tilt_sin, tilt_cos) = p.tilt_deg.to_radians().sin_cos();
         Some(Gobo {
             kind,
             s,
             rect,
             soft,
-            panes: [p.panes_x.clamp(1, 16), p.panes_y.clamp(1, 16)],
-            bar: p.bar.max(0.0).min(0.5),
-            frame: p.frame.max(0.0).min(0.5),
-            slats: p.slats.clamp(2, 64) as f32,
-            // max/min, not clamp: a NaN width reads as 0.5.
-            slat_half: 0.5 * p.slat_width.max(0.5).min(1.5),
+            panes: [p.panes_x, p.panes_y],
+            bar: p.bar,
+            frame: p.frame,
+            slats: p.slats as f32,
+            slat_half: 0.5 * p.slat_width,
             tilt_sin,
             tilt_cos,
-            // max/min, not clamp: a NaN distance reads as 0.
-            distance: p.distance.max(0.0).min(1.0),
+            distance: p.distance,
             vertical: p.vertical,
             foliage,
             image,

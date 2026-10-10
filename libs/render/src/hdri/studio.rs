@@ -19,8 +19,8 @@
 //! Kelvin/tint colour (luminance 1) or an explicit rgb, times 2^intensity_ev.
 
 use makepad_draw::*;
-use super::{az_el_from_dir, dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams};
-use crate::sky::luminance;
+use super::{az_el_from_dir, dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams, KELVIN_RANGE};
+use crate::sky::{luminance, xyz_to_linear_rgb};
 use super::shaped::{stroke_box, ShapedLight};
 use super::shape::ArcPath;
 use super::noise::hash01;
@@ -56,7 +56,7 @@ fn sane(x: f32, lo: f32, hi: f32) -> f32 {
 /// **Below about 1900 K** the locus leaves the Rec.709 gamut and blue goes
 /// negative. Blue is clipped to 0 and the colour rescaled, so the luminance stays 1.
 pub fn kelvin_to_rgb(kelvin: f32) -> Vec3f {
-    let t = sane(kelvin, 1000.0, 20000.0);
+    let t = sane(kelvin, KELVIN_RANGE.0, KELVIN_RANGE.1);
     let t2 = t * t;
     let u = (0.860_117_73 + 1.541_182_6e-4 * t + 1.286_412_2e-7 * t2)
         / (1.0 + 8.424_202e-4 * t + 7.081_451_4e-7 * t2);
@@ -67,11 +67,7 @@ pub fn kelvin_to_rgb(kelvin: f32) -> Vec3f {
     let y = 2.0 * v / d;
     let big_x = x / y;
     let big_z = (1.0 - x - y) / y;
-    let rgb = vec3f(
-        (3.2406 * big_x - 1.5372 - 0.4986 * big_z).max(0.0),
-        (-0.9689 * big_x + 1.8758 + 0.0415 * big_z).max(0.0),
-        (0.0557 * big_x - 0.2040 + 1.0570 * big_z).max(0.0),
-    );
+    let rgb = xyz_to_linear_rgb([big_x, 1.0, big_z]);
     rgb / luminance(rgb).max(1.0e-6)
 }
 
@@ -103,13 +99,24 @@ pub fn light_color(light: &LightParams) -> Vec3f {
     let base = if let Some(rgb) = light.rgb {
         vec3f(rgb[0].max(0.0), rgb[1].max(0.0), rgb[2].max(0.0))
     } else {
-        // A named source's spectrum gives the colour in place of the Kelvin's,
-        // tinted the same way (the knob LED's Kelvin is part of its spectrum).
-        let white = light_source_rgb(light).unwrap_or_else(|| kelvin_to_rgb(sane(light.kelvin, 1000.0, 20000.0)));
-        let c = white * tint_rgb(light.tint);
-        c / luminance(c).max(1.0e-6)
+        light_white(light)
     };
     base * gels.conversion * gels.filter * 2.0f32.powf(sane(light.intensity_ev, -10.0, 20.0))
+}
+
+/// The colour a light without an explicit `rgb` has before its gels and its
+/// level: its named source's spectrum (the knob LED's built at its Kelvin) or
+/// its Kelvin (`LightParams::held_kelvin`), times its tint, at luminance 1.
+/// `light_color` starts from it, and so does the panel's switch to RGB, so
+/// the switch keeps the light's colour exactly (D17, L:305).
+pub fn light_white(light: &LightParams) -> Vec3f {
+    // A named source's spectrum gives the colour in place of the Kelvin's,
+    // tinted the same way (the knob LED's Kelvin is part of its spectrum).
+    let white = light_source_rgb(light).unwrap_or_else(|| kelvin_to_rgb(light.held_kelvin()));
+    let c = white * tint_rgb(light.tint);
+    // Back to luminance 1: a tint on a coloured light (a sodium lamp, 3200 K)
+    // moves the product's luminance off 1.
+    c / luminance(c).max(1.0e-6)
 }
 
 /// A light's angular frame. `center` points at the light. `right` and `up` span the
@@ -951,10 +958,10 @@ impl PreparedLight {
     }
 
     /// The cone that holds this light's reach box, corners and soft edge
-    /// included: 1 / sqrt(1 + rx² + ry²), no smaller than `project`'s 0.05
-    /// limit, past which nothing is drawn.
+    /// included: 1 / sqrt(1 + rx² + ry²), no smaller than `project`'s limit
+    /// (`PROJECT_MIN_COS`), past which nothing is drawn.
     fn box_cover(&self) -> f32 {
-        (1.0 / (1.0 + self.reach.x * self.reach.x + self.reach.y * self.reach.y).sqrt()).max(0.05)
+        (1.0 / (1.0 + self.reach.x * self.reach.x + self.reach.y * self.reach.y).sqrt()).max(PROJECT_MIN_COS)
     }
 
     /// The key's cones when this light is the key, `(axis, cos_radius,

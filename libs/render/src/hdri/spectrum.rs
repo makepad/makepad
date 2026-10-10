@@ -37,7 +37,7 @@
 
 use makepad_draw::*;
 use super::LightParams;
-use crate::sky::luminance;
+use crate::sky::{luminance, xyz_to_linear_rgb};
 
 /// Bands in a spectrum: 380, 385, ... 780 nm.
 pub const SAMPLES: usize = 81;
@@ -197,16 +197,11 @@ pub fn xyz(s: &Spectrum) -> [f32; 3] {
     [sum[0] as f32, sum[1] as f32, sum[2] as f32]
 }
 
-/// CIE XYZ to linear Rec.709, the matrix of sky.rs's `linear_rgb`.
-/// Out-of-gamut colours (a sodium lamp's yellow) clip at 0 per channel, as
-/// they do there.
+/// CIE XYZ to linear Rec.709: sky.rs's matrix (`xyz_to_linear_rgb`), so the
+/// two cannot drift (L:94). Out-of-gamut colours (a sodium lamp's yellow)
+/// clip at 0 per channel, as they do there.
 pub fn xyz_to_rgb(xyz: [f32; 3]) -> Vec3f {
-    let [x, y, z] = xyz;
-    vec3f(
-        (3.2406 * x - 1.5372 * y - 0.4986 * z).max(0.0),
-        (-0.9689 * x + 1.8758 * y + 0.0415 * z).max(0.0),
-        (0.0557 * x - 0.2040 * y + 1.0570 * z).max(0.0),
-    )
+    xyz_to_linear_rgb(xyz)
 }
 
 /// The colour of a spectrum: linear Rec.709 at luminance 1. A spectrum with

@@ -32,7 +32,7 @@
 
 use makepad_draw::*;
 use makepad_render_material::ibl;
-use super::clouds::{deck_opacity, CloudLayer};
+use super::clouds::{deck_opacity, hg_phase, CloudLayer};
 use super::noise::hash01;
 use super::{arr, vec, CloudParams, HdriParams, VolumetricParams};
 use crate::sky::luminance;
@@ -172,7 +172,7 @@ struct NoiseVolume {
 impl NoiseVolume {
     /// The two volumes of `seed`, `size` texels along the shape's edge.
     /// `cancelled` is polled before each slice of either tile (D15): this is
-    /// about 2.1 s in a release build, the slowest part of building a
+    /// about 2.2 s in a release build, the slowest part of building a
     /// volumetric map, and a newer request must be able to stop it.
     fn build(seed: u32, size: usize, cancelled: &dyn Fn() -> bool) -> Result<NoiseVolume, Cancelled> {
         let size = size.max(4);
@@ -369,8 +369,8 @@ impl WorleyTile {
     }
 }
 
-/// The noise of the seeds used last. Building one takes about two seconds in
-/// a release build (2.2 s on this PC), and every `Env::new_with` of a
+/// The noise of the seeds used last. Building one takes about 2.2 s in
+/// a release build (2213 to 2345 ms measured), and every `Env::new_with` of a
 /// volumetric sky needs it.
 static NOISE: Mutex<Vec<(u32, Arc<NoiseVolume>)>> = Mutex::new(Vec::new());
 
@@ -441,11 +441,14 @@ impl VolumetricClouds {
     }
 
     /// [`Self::new`], stopped when `cancelled` says so while it builds the
-    /// seed's noise, the first time a seed is used (about 2.1 s in release,
+    /// seed's noise, the first time a seed is used (about 2.2 s in release,
     /// L:229; D15): `Err(Cancelled)`. A volume that was not stopped is
     /// `new`'s, and a seed already built has nothing to stop.
     pub fn build(clouds: &CloudParams, vol: &VolumetricParams, seed: u32, sun_dir: Vec3f, cancelled: &dyn Fn() -> bool) -> Result<Option<VolumetricClouds>, Cancelled> {
-        let density = finite_or(vol.density, 1.0).clamp(0.0, 4.0);
+        // Both as clamp() holds them: their ranges and defaults are written
+        // once (L:231), the top 200 m over the base included.
+        let (clouds, vol) = (&clouds.clamped(), &vol.clamped());
+        let density = vol.density;
         if density <= 0.0 {
             return Ok(None);
         }
@@ -456,9 +459,7 @@ impl VolumetricClouds {
         };
         let sun = sun_dir.normalize();
         let sun = if sun.is_finite() && sun.length() > 0.5 { sun } else { vec3f(0.0, 1.0, 0.0) };
-        let base = finite_or(vol.base_m, 1500.0).clamp(200.0, 8000.0);
-        let top = finite_or(vol.top_m, base + 2500.0).clamp(base + 200.0, 12_000.0);
-        let scale = finite_or(clouds.scale, 1.0).clamp(0.1, 10.0);
+        let (base, top, scale) = (vol.base_m, vol.top_m, clouds.scale);
         Ok(Some(VolumetricClouds {
             noise: noise_for(seed, cancelled)?,
             cell_m: deck.cell_m(),
@@ -468,9 +469,9 @@ impl VolumetricClouds {
             base,
             top,
             sigma: SIGMA * density,
-            erosion: finite_or(vol.erosion, 0.5).clamp(0.0, 1.0),
-            greyed: 0.5 + 0.5 * finite_or(clouds.coverage, 0.0).clamp(0.0, 1.0),
-            steps: (vol.steps as usize).clamp(16, 96),
+            erosion: vol.erosion,
+            greyed: 0.5 + 0.5 * clouds.coverage,
+            steps: vol.steps as usize,
             shape_scale: 1.0 / (SHAPE_TILE_M * scale),
             detail_scale: 1.0 / (DETAIL_TILE_M * scale),
             light: (0..LIGHT_XZ).map(|_| OnceLock::new()).collect(),
@@ -829,13 +830,6 @@ fn sun_light(tau: f32, phases: &[f32; OCTAVES], powder_weight: f32) -> f32 {
     SUN_GAIN * sum * (1.0 - powder_weight.clamp(0.0, 1.0) * (1.0 - powder))
 }
 
-/// Henyey-Greenstein phase function, normalised over the sphere (1/sr).
-fn hg_phase(cos_theta: f32, g: f32) -> f32 {
-    let gg = g * g;
-    let denom = (1.0 + gg - 2.0 * g * cos_theta).max(1.0e-6);
-    (1.0 - gg) / (4.0 * std::f32::consts::PI * denom * denom.sqrt())
-}
-
 /// (v - lo) / (hi - lo), clamped to 0..1; a step when the range is empty.
 fn remap01(v: f32, lo: f32, hi: f32) -> f32 {
     if !(hi - lo > 1.0e-6) {
@@ -848,10 +842,6 @@ fn remap01(v: f32, lo: f32, hi: f32) -> f32 {
 fn smooth(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
 }
 
 #[cfg(test)]
@@ -911,7 +901,7 @@ mod tests {
         assert!((a.shape.sample(0.9999, 0.3, 0.3) - a.shape.sample(0.0001, 0.3, 0.3)).abs() < 0.02);
     }
 
-    /// D15 (L:229): the first build of a seed's noise (about 2.1 s in
+    /// D15 (L:229): the first build of a seed's noise (about 2.2 s in
     /// release, inside `Env::new_with`, which the app's jobs checked their
     /// token only after) stops when its caller cancels: it polls before each
     /// slice of its two tiles and gives up at the first poll that says so.

@@ -175,15 +175,11 @@ impl BaseImage {
     /// with `replace_sky` on, the image is scaled so its own sky would have
     /// put the same light on the ground.
     pub fn new(p: &BaseImageParams, images: &ImageSet, sky_irradiance: Option<f32>) -> Option<BaseImage> {
-        if p.key.is_empty() {
-            return None;
-        }
-        let map = images.images.get(&p.key)?.clone();
-        if !well_formed(&map) {
-            return None;
-        }
+        // As clamp() holds it: its ranges and defaults are written once (L:231).
+        let p = &p.clamped();
+        let map = accepted(p, images)?.clone();
         let facts = image_facts(&map);
-        let mut gain = 2.0f32.powf(finite_or(p.ev, 0.0).clamp(-10.0, 10.0));
+        let mut gain = 2.0f32.powf(p.ev);
         if let (true, Some(sky)) = (p.replace_sky, sky_irradiance) {
             let own = facts.irradiance();
             if sky.is_finite() && sky > 0.0 && own > 1.0e-9 {
@@ -208,20 +204,19 @@ impl BaseImage {
             }
             _ => None,
         };
-        let horizon_deg = finite_or(p.horizon_deg, 0.0).clamp(-45.0, 45.0);
-        let feather_deg = finite_or(p.feather_deg, 0.0).clamp(0.0, 45.0);
+        let (horizon_deg, feather_deg) = (p.horizon_deg, p.feather_deg);
         let line = horizon_deg + 0.5 * feather_deg;
         let sky_level = band_luminance(&facts.meter, line, line + SKY_BAND_DEG);
         Some(BaseImage {
             map,
             facts,
-            yaw_deg: finite_or(p.yaw_deg, 0.0),
+            yaw_deg: p.yaw_deg,
             gain,
             cut,
             replace_sky: p.replace_sky,
             horizon_deg,
             feather_deg,
-            sky_key: finite_or(p.sky_key, 0.0).clamp(0.0, 1.0),
+            sky_key: p.sky_key,
             sky_level,
         })
     }
@@ -341,21 +336,28 @@ impl BaseImage {
 /// `BaseImage::new` makes an image without sky replacement. The panel greys
 /// the Weather and Volumetric controls by it.
 pub fn whole_base(params: &HdriParams, images: &ImageSet) -> bool {
-    params.base_image.as_ref().is_some_and(|base| {
-        !base.replace_sky && !base.key.is_empty() && images.images.get(&base.key).is_some_and(|map| well_formed(map))
-    })
+    params.base_image.as_ref().is_some_and(|base| !base.replace_sky && accepted(base, images).is_some())
+}
+
+/// The picture a base image block names, when `BaseImage::new` takes it: a
+/// key that is not empty, names a picture of `images`, and that picture is
+/// well formed. One test for `new`, `whole_base` and `image_sun_az_el`, so a
+/// condition added to one cannot leave the others drawing what it refuses
+/// (L:319).
+fn accepted<'a>(p: &BaseImageParams, images: &'a ImageSet) -> Option<&'a Arc<EnvMap>> {
+    if p.key.is_empty() {
+        return None;
+    }
+    images.images.get(&p.key).filter(|map| well_formed(map))
 }
 
 /// Where the base image's sun stands in the map's own frame (the image's yaw
 /// applied): (azimuth, elevation) in degrees, as `az_el_from_dir` gives them.
 /// None without an image in `images` or without a sun in it.
 pub fn image_sun_az_el(p: &BaseImageParams, images: &ImageSet) -> Option<(f32, f32)> {
-    let map = images.images.get(&p.key)?;
-    if !well_formed(map) {
-        return None;
-    }
-    let sun = image_facts(map).sun?;
-    Some(az_el_from_dir(rotate_y(sun.dir, finite_or(p.yaw_deg, 0.0))))
+    let p = &p.clamped();
+    let sun = image_facts(accepted(p, images)?).sun?;
+    Some(az_el_from_dir(rotate_y(sun.dir, p.yaw_deg)))
 }
 
 /// "Match sun": points the generated sky's sun at the base image's sun, in
@@ -416,10 +418,6 @@ fn smooth(a: f32, b: f32, x: f32) -> f32 {
     }
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
 }
 
 #[cfg(test)]

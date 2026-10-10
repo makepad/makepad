@@ -34,6 +34,7 @@
 //! is in the atmosphere's units.
 
 use makepad_draw::*;
+use super::clouds::hg_phase;
 use super::noise::{fbm2, hash01};
 use super::{dir_from_az_el, SkyParams, WeatherKind, WeatherParams};
 use crate::sky::luminance;
@@ -225,11 +226,13 @@ pub struct Effects {
 /// kind's own amount when that is more. So a kind alone is complete, and the
 /// numbers only add to it.
 pub fn effects(w: &WeatherParams) -> Effects {
+    // As clamp() holds it: its ranges and defaults are written once (L:231).
+    let w = &w.clamped();
     let kind = preset(w.kind());
     Effects {
-        fog: unit(w.fog).max(kind.fog),
-        rain: unit(w.rain).max(kind.rain),
-        wet_ground: unit(w.wet_ground).max(kind.wet_ground),
+        fog: w.fog.max(kind.fog),
+        rain: w.rain.max(kind.rain),
+        wet_ground: w.wet_ground.max(kind.wet_ground),
         snow: w.snow || kind.snow,
         lightning: w.lightning || kind.lightning,
     }
@@ -388,14 +391,16 @@ impl Weather {
         }
         let sun = sun_dir.normalize();
         let sun = if sun.is_finite() && sun.length() > 0.5 { sun } else { vec3f(0.0, 1.0, 0.0) };
-        // Rain falls from the cloud base: the volume's when there is one, else the deck's.
-        let base = sky.volumetric.as_ref().map_or(sky.clouds.altitude_m, |vol| vol.base_m);
+        // Rain falls from the cloud base: the volume's when there is one, else
+        // the deck's, each as clamp() holds it (L:231).
+        let clouds = sky.clouds.clamped();
+        let base = sky.volumetric.as_ref().map_or(clouds.altitude_m, |vol| vol.clamped().base_m);
         let mut weather = Weather {
             effects: drawn,
             cloud_gain: kind.cloud_gain,
             ground_color: if drawn.snow { SNOW_ALBEDO } else { sky.atmosphere.ground_color },
-            rain_height: if base.is_finite() { base.clamp(200.0, 12_000.0) } else { 2000.0 },
-            coverage: unit(sky.clouds.coverage).max(kind.coverage_min),
+            rain_height: base,
+            coverage: clouds.coverage.max(kind.coverage_min),
             sun_dir: sun,
             fog_glow: 0.0,
             seed: params.seed,
@@ -819,21 +824,10 @@ fn erf(x: f64) -> f64 {
     if x < 0.0 { -value } else { value }
 }
 
-/// Henyey-Greenstein phase function, normalised over the sphere (1/sr).
-fn hg_phase(cos_theta: f32, g: f32) -> f32 {
-    let gg = g * g;
-    let denom = (1.0 + gg - 2.0 * g * cos_theta).max(1.0e-6);
-    (1.0 - gg) / (4.0 * std::f32::consts::PI * denom * denom.sqrt())
-}
-
 /// smoothstep under its own name, so no glob can make it ambiguous.
 fn smooth(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-fn unit(x: f32) -> f32 {
-    if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
 }
 
 #[cfg(test)]

@@ -226,16 +226,16 @@ pub fn cri(s: &Spectrum) -> Option<Cri> {
 
 /// The spectrum a light's colour comes from: its named source (the
 /// parametric LED at the light's Kelvin and quality knob), else a blackbody
-/// at its Kelvin. None for a light with an explicit `rgb`: an RGB colour has
-/// no spectrum. Tint and gels are RGB corrections on top and are not part of
-/// the reading.
+/// at its Kelvin, read as its colour reads it (`LightParams::held_kelvin`).
+/// None for a light with an explicit `rgb`: an RGB colour has no spectrum.
+/// Tint and gels are RGB corrections on top and are not part of the reading.
 pub fn light_spectrum(light: &LightParams) -> Option<Spectrum> {
     if light.rgb.is_some() {
         return None;
     }
     match light_source_spectrum(light) {
         Some(spectrum) => Some(spectrum),
-        None => Some(planck(if light.kelvin.is_finite() { light.kelvin.clamp(1000.0, 20_000.0) } else { 6500.0 })),
+        None => Some(planck(light.held_kelvin())),
     }
 }
 
@@ -265,6 +265,72 @@ mod tests {
             assert_eq!(TCS[sample][band], value, "TCS{:02} at {} nm", sample + 1, 380 + 5 * band);
         }
         assert!(TCS.iter().all(|t| t.iter().all(|r| *r > 0.05 && *r < 0.75)));
+    }
+
+    /// CIE illuminant FL1, a daylight halophosphate tube, 380..=780 nm at
+    /// 5 nm: the CIE's own table (CIE 015:2018 table 10.1; the CIE dataset
+    /// "CIE_illum_FLs", DOI 10.25039/CIE.DS.ukaymjdn, its first column).
+    const FL1: Spectrum = [
+        1.87, 2.36, 2.94, 3.47, 5.17, 19.49, 6.13, 6.24, 7.01, 7.79, 8.56, 43.67, 16.94, 10.72, 11.35, 11.89, 12.37,
+        12.75, 13.00, 13.15, 13.23, 13.17, 13.13, 12.85, 12.52, 12.20, 11.83, 11.50, 11.22, 11.05, 11.03, 11.18, 11.53,
+        27.74, 17.05, 13.55, 14.33, 15.01, 15.52, 18.29, 19.55, 15.48, 14.91, 14.15, 13.22, 12.19, 11.12, 10.03, 8.95,
+        7.96, 7.02, 6.20, 5.42, 4.73, 4.15, 3.64, 3.20, 2.81, 2.47, 2.18, 1.93, 1.72, 1.67, 1.43, 1.29, 1.19, 1.08,
+        0.96, 0.88, 0.81, 0.77, 0.75, 0.73, 0.68, 0.69, 0.64, 0.68, 0.69, 0.61, 0.52, 0.43,
+    ];
+
+    /// D17 (L:103): the sample table is pinned against a published R1-R8
+    /// set, which a typo in any of its 648 reflectances would move.
+    ///
+    /// The set is FL1's special indices as colour-science publishes them for
+    /// CIE 13.3 (`colour/quality/tests/test_cri.py`, its FL1 specification,
+    /// to three decimals here): an implementation of its own, on the CIE's
+    /// FL1 table, whose Ra, 75.85, is the 76 the CIE gives FL1. This method
+    /// differs from it only in the CCT search (6429 K here) and in reading
+    /// the 5 nm daylight between the CIE's 10 nm rows, and lands within 0.06
+    /// of every index: R_TOLERANCE allows that and little more.
+    ///
+    /// An index compares a sample under the source with the same sample
+    /// under its reference, so a typo moves both and the index only by
+    /// their difference: a reflectance off by 0.01 moves it by up to about
+    /// 0.15, a swapped pair of digits by 0.15 to 0.4. The same specification
+    /// also publishes each sample's colour under FL1 alone (XYZ with the
+    /// source at Y = 100), which a typo moves directly: Y agrees here to
+    /// 0.005 and X and Z to 0.07 (the observer's 5 nm table against
+    /// colour-science's integration), so a reflectance 0.01 off where the
+    /// eye sees well, which moves Y by 0.03 to 0.06, fails as well. One 0.01
+    /// off in the deep blue or the deep red moves no reading that far.
+    #[test]
+    fn the_sample_table_renders_fl1_as_published() {
+        const PUBLISHED_R: [f32; 8] = [69.197, 83.651, 92.136, 72.666, 73.891, 79.619, 82.273, 53.391];
+        const PUBLISHED_XYZ: [[f64; 3]; 8] = [
+            [31.19561134, 29.74560797, 23.44190201],
+            [26.70829694, 29.25797165, 13.98804447],
+            [24.20150315, 31.45341032, 9.19170689],
+            [20.74577359, 29.44046997, 19.40749007],
+            [25.09405566, 30.60912259, 37.93634878],
+            [27.43598853, 28.84467787, 55.15209308],
+            [31.30354023, 28.49931283, 51.55875721],
+            [33.81156122, 29.92921717, 44.07459562],
+        ];
+        const R_TOLERANCE: f32 = 0.1;
+        const Y_TOLERANCE: f64 = 0.01;
+        const XZ_TOLERANCE: f64 = 0.1;
+        let c = cri(&FL1).expect("FL1 has a reading");
+        for (i, (got, want)) in c.samples.iter().zip(PUBLISHED_R).enumerate() {
+            assert!((got - want).abs() < R_TOLERANCE, "R{} of FL1 is {got}, published {want}", i + 1);
+        }
+        assert_eq!(c.ra.round(), 76.0, "the CIE gives FL1 Ra 76: {}", c.ra);
+        assert!((c.cct - 6430.0).abs() < 5.0, "the CIE gives FL1 6430 K: {}", c.cct);
+        let to_y100 = 100.0 / xyz64(&FL1)[1];
+        for (i, (reflectance, want)) in TCS.iter().zip(PUBLISHED_XYZ).enumerate() {
+            let got = reflected_xyz(&FL1, reflectance).map(|v| v * to_y100);
+            let off = [got[0] - want[0], got[1] - want[1], got[2] - want[2]];
+            assert!(
+                off[1].abs() < Y_TOLERANCE && off[0].abs() < XZ_TOLERANCE && off[2].abs() < XZ_TOLERANCE,
+                "TCS{:02} under FL1 is {got:?}, published {want:?}",
+                i + 1
+            );
+        }
     }
 
     #[test]

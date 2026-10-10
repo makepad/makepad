@@ -91,8 +91,10 @@ pub struct CloudLayer {
 impl CloudLayer {
     /// None when there is nothing to draw (coverage and cirrus both 0).
     pub fn new(p: &CloudParams, seed: u32, sun_dir: Vec3f) -> Option<CloudLayer> {
-        let coverage = unit(p.coverage);
-        let cirrus = unit(p.cirrus);
+        // As clamp() holds it: its ranges and defaults are written once (L:231).
+        let p = &p.clamped();
+        let coverage = p.coverage;
+        let cirrus = p.cirrus;
         if coverage <= 0.0 && cirrus <= 0.0 {
             return None;
         }
@@ -110,12 +112,12 @@ impl CloudLayer {
             vec2f(0.0, 0.0)
         };
         let wind_angle = hash01(0, 0, 0, hash_u32(seed ^ 0x5bd1_e995)) * std::f32::consts::TAU;
-        let altitude = finite_or(p.altitude_m, 2000.0).clamp(500.0, 12000.0);
+        let altitude = p.altitude_m;
         Some(CloudLayer {
             coverage,
-            sharpness: unit(p.sharpness),
+            sharpness: p.sharpness,
             cirrus,
-            cell: CELL_M * finite_or(p.scale, 1.0).clamp(0.1, 10.0),
+            cell: CELL_M * p.scale,
             altitude,
             cirrus_altitude: (altitude + CIRRUS_ABOVE_DECK_M).max(CIRRUS_MIN_ALTITUDE_M),
             seed,
@@ -309,8 +311,10 @@ fn fbm_lod(p: Vec2f, fine: u32, broad: u32, detail: f32, seed: u32) -> f32 {
     low + (fbm2(p.x, p.y, fine, seed) - low) * detail
 }
 
-/// Henyey-Greenstein phase function, normalised over the sphere (1/sr).
-fn hg_phase(cos_theta: f32, g: f32) -> f32 {
+/// Henyey-Greenstein phase function, normalised over the sphere (1/sr): the
+/// one the deck, the cloud volume (`volumetric.rs`) and the fog's glow
+/// (`weather.rs`) scatter by (L:231).
+pub(super) fn hg_phase(cos_theta: f32, g: f32) -> f32 {
     let gg = g * g;
     let denom = (1.0 + gg - 2.0 * g * cos_theta).max(1.0e-6);
     (1.0 - gg) / (4.0 * std::f32::consts::PI * denom * denom.sqrt())
@@ -320,14 +324,6 @@ fn hg_phase(cos_theta: f32, g: f32) -> f32 {
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-fn unit(x: f32) -> f32 {
-    if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 }
-}
-
-fn finite_or(x: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x } else { fallback }
 }
 
 #[cfg(test)]

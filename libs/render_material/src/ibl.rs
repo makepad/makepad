@@ -69,6 +69,24 @@ pub fn dir_to_equirect_uv(dir: [f32; 3]) -> [f32; 2] {
     [u.rem_euclid(1.0), v]
 }
 
+/// Equirect uv of the direction at `azimuth_deg`, the angle `atan2(x, -z)`
+/// in degrees (0 looks down -z, 90 at +x), and `elevation_deg` above the
+/// horizon (held to -90..=90): the module's mapping in angles, where it is
+/// linear, `u = 0.5 + azimuth / 360` (folded into 0..1) and `v = 0.5 -
+/// elevation / 180`. Unlike a direction, an angle pair keeps its azimuth at
+/// the poles, so a point an editor holds at the top row stays where it is.
+pub fn az_el_to_equirect_uv(azimuth_deg: f32, elevation_deg: f32) -> [f32; 2] {
+    let u = 0.5 + azimuth_deg / 360.0;
+    [u - u.floor(), 0.5 - elevation_deg.clamp(-90.0, 90.0) / 180.0]
+}
+
+/// The angles at equirect `uv`, `[azimuth, elevation]` in degrees, as
+/// [`az_el_to_equirect_uv`] takes them: the azimuth is -180..180 for u in
+/// 0..1 (any u maps, so a point dragged past the seam keeps going).
+pub fn equirect_uv_to_az_el(uv: [f32; 2]) -> [f32; 2] {
+    [(uv[0] - 0.5) * 360.0, (0.5 - uv[1]) * 180.0]
+}
+
 /// Equirect uv to a unit direction (the inverse of [`dir_to_equirect_uv`]).
 pub fn equirect_uv_to_dir(uv: [f32; 2]) -> [f32; 3] {
     let phi = (uv[0] - 0.5) * TAU;
@@ -1057,6 +1075,27 @@ mod tests {
             let back = dir_to_equirect_uv(equirect_uv_to_dir(uv));
             assert!((back[0] - uv[0]).abs() < 1e-4 && (back[1] - uv[1]).abs() < 1e-4, "{uv:?} {back:?}");
         }
+    }
+
+    /// The mapping in angles is the mapping of the direction the angles
+    /// name, and keeps the azimuth where the direction loses it (the poles).
+    #[test]
+    fn the_angles_map_as_their_direction_does() {
+        for i in 0..200 {
+            let (az, el) = (((i * 37) % 360) as f32 - 180.0 + 0.25, ((i * 13) % 179) as f32 - 89.0);
+            let (a, e) = (az.to_radians(), el.to_radians());
+            let dir = [a.sin() * e.cos(), e.sin(), -a.cos() * e.cos()];
+            let (uv, want) = (az_el_to_equirect_uv(az, el), dir_to_equirect_uv(dir));
+            let du = (uv[0] - want[0]).abs();
+            assert!(du.min(1.0 - du) < 1e-5 && (uv[1] - want[1]).abs() < 1e-5, "{az}, {el}: {uv:?} vs {want:?}");
+            let back = equirect_uv_to_az_el(uv);
+            let da = (back[0] - az).rem_euclid(360.0);
+            assert!(da.min(360.0 - da) < 1e-3 && (back[1] - el).abs() < 1e-3, "{az}, {el}: back at {back:?}");
+        }
+        assert_eq!(az_el_to_equirect_uv(0.0, 0.0), [0.5, 0.5]);
+        assert_eq!(az_el_to_equirect_uv(90.0, 90.0), [0.75, 0.0], "the zenith keeps its azimuth");
+        assert_eq!(az_el_to_equirect_uv(-90.0, -95.0), [0.25, 1.0]);
+        assert_eq!(equirect_uv_to_az_el([0.75, 0.0]), [90.0, 90.0]);
     }
 
     fn lum_stats(env: &EnvMap) -> (f32, f32) {

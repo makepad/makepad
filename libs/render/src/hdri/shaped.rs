@@ -152,11 +152,16 @@ impl ShapedLight {
         }
     }
 
-    /// This light over `acc` with its own light left out: what the key leaves
-    /// of the map in the engine's keyless lighting copy (plan 2's N3). A
-    /// scrim's cloth still hides what is behind it and its glow is gone
-    /// (`compose` without its `color * s.emit` term); a polygon or a stroke
-    /// leaves `acc` as it was. Only the key, an Add light, is ever left out.
+    /// This light over `acc` with its own light left out. That is what the
+    /// key leaves of the map in the engine's keyless lighting copy (plan 2's
+    /// N3), and what a scrim listed after the key leaves of the key's light
+    /// in its integral (`studio::key_emission`, B5's A1): only Add lights
+    /// are left out this way. A scrim's cloth still hides what is behind it
+    /// and its glow is gone (`compose` without its `color * s.emit` term); a
+    /// polygon or a stroke leaves `acc` as it was. It is not `compose` in
+    /// black: a stroke with a colour ramp (B3) takes its colour from the ramp
+    /// (`color_at`), not from the colour it is handed, so composed in black
+    /// it would stay in the keyless copy and the engine would light it twice.
     pub fn hide(&self, dir: Vec3f, acc: Vec3f) -> Vec3f {
         if !self.hides_behind() || !self.cull.contains(dir) {
             return acc;
@@ -233,7 +238,8 @@ impl FillLight {
         let sx = box_x_sign();
         // The box's x runs toward increasing azimuth; `project` measures along
         // the frame's `right`, so the outline is mirrored by the frame's sign.
-        let pts: Vec<Vec2f> = unit.iter().map(|p| vec2f(sx * p[0].clamp(-1.0, 1.0) * hx, p[1].clamp(-1.0, 1.0) * hy)).collect();
+        // The corners lie in the box already (`polygon_unit_points`).
+        let pts: Vec<Vec2f> = unit.iter().map(|p| vec2f(sx * p[0] * hx, p[1] * hy)).collect();
         let outline: Contours = vec![round_corners(&pts, clamp01(light.corner))];
         // Softness 1 ramps the edge right to the deepest point, as studio.rs
         // does: the band is softness × how deep the centre sits inside.
@@ -280,8 +286,6 @@ impl FillLight {
 const MAX_PIECE_DEG: f32 = 1.0;
 /// Most points a centre line is cut into; a very long stroke gets longer pieces.
 const MAX_LINE_POINTS: f32 = 4096.0;
-/// Most width multipliers a profile holds.
-const PROFILE_LIMIT: usize = 32;
 /// Taps of a stroke's colour ramp, joined by straight lines. Kelvin to RGB is
 /// smooth, so 32 steps are far below a visible band.
 const RAMP_TAPS: usize = 33;
@@ -325,21 +329,17 @@ struct StrokeLine {
 }
 
 impl StrokeLine {
-    /// None with fewer than two usable points.
+    /// None with fewer than two usable points. `stroke` is the light's
+    /// stroke as `stroke_of` gives it, held to its ranges by clamp()'s rule:
+    /// its width, curviness and profile are read as they are.
     fn new(light: &LightParams, stroke: &StrokeParams) -> Option<StrokeLine> {
         let line = stroke_centre_line(stroke);
         if line.len() < 2 {
             return None;
         }
-        let width = if stroke.width_deg.is_finite() { stroke.width_deg.clamp(0.1, 45.0) } else { 2.0 };
-        let half_width = (0.5 * width).to_radians();
+        let half_width = (0.5 * stroke.width_deg).to_radians();
         let softness = clamp01(light.softness);
-        let profile: Vec<f32> = stroke
-            .profile
-            .iter()
-            .take(PROFILE_LIMIT)
-            .map(|v| if v.is_finite() { v.clamp(0.0, 4.0) } else { 1.0 })
-            .collect();
+        let profile = stroke.profile.clone();
         let widest = if profile.is_empty() { 1.0 } else { profile.iter().fold(0.0f32, |m, v| m.max(*v)) };
         let widest_half = half_width * widest;
         // Past the widest half width plus half its soft band nothing is lit.
@@ -460,17 +460,19 @@ impl StrokeLight {
     }
 }
 
-/// The stroke a light draws: its own block, with the arch over the light's
-/// place standing in for points that are missing (no block, or a block with
-/// fewer than two points). The block's other settings are kept, so a stroke
-/// that was only given a width or a ramp still follows its light's azimuth,
-/// elevation and width. The renderer, the panel and the point editor all
-/// read a stroke through this.
+/// The stroke a light draws: its own block as clamp() holds it
+/// (`StrokeParams::clamped`: at most `POINT_LIMIT` finite points, the width,
+/// curviness, profile and ends in their ranges), with the arch over the
+/// light's place standing in for points that are missing (no block, or a
+/// block with fewer than two points). The block's other settings are kept,
+/// so a stroke that was only given a width or a ramp still follows its
+/// light's azimuth, elevation and width. The renderer, the panel and the
+/// point editor all read a stroke through this.
 pub fn stroke_of(light: &LightParams) -> StrokeParams {
     let arch = StrokeParams::around(light.azimuth_deg, light.elevation_deg, light.width_deg);
-    match &light.stroke {
-        Some(stroke) if stroke.points.len() >= 2 => stroke.clone(),
-        Some(stroke) => StrokeParams { points: arch.points, ..stroke.clone() },
+    match light.stroke.as_ref().map(StrokeParams::clamped) {
+        Some(stroke) if stroke.points.len() >= 2 => stroke,
+        Some(stroke) => StrokeParams { points: arch.points, ..stroke },
         None => arch,
     }
 }
@@ -529,12 +531,13 @@ fn stroke_ramp(light: &LightParams, stroke: &StrokeParams) -> Option<Vec<Vec3f>>
     if let Some(end) = stroke.end_rgb {
         return Some(blend_to(recolored(light, light.kelvin, Some(end))));
     }
-    let end_kelvin = stroke.end_kelvin.filter(|k| k.is_finite())?.clamp(1000.0, 20000.0);
+    // Held to the light Kelvin range by `stroke_of`.
+    let end_kelvin = stroke.end_kelvin?;
     if light.rgb.is_some() || fixed_source(light).is_some() {
         return Some(blend_to(recolored(light, end_kelvin, None)));
     }
-    // max/min rather than clamp: a NaN kelvin becomes 1000, as light_color reads it.
-    let start_kelvin = light.kelvin.max(1000.0).min(20000.0);
+    // The Kelvin light_color reads.
+    let start_kelvin = light.held_kelvin();
     let (m0, m1) = (1.0e6 / start_kelvin, 1.0e6 / end_kelvin);
     Some((0..RAMP_TAPS).map(|i| recolored(light, 1.0e6 / (m0 + (m1 - m0) * at(i)), None)).collect())
 }
@@ -553,20 +556,19 @@ fn piece_len(a: [f32; 2], b: [f32; 2]) -> f32 {
 
 /// The stroke's centre line as unit directions: the spline through its
 /// (azimuth, elevation) points, flattened, then cut into pieces of at most
-/// MAX_PIECE_DEG. Empty with fewer than two usable points.
+/// MAX_PIECE_DEG. Empty with fewer than two points. `s` is held to its
+/// ranges (`stroke_of`): its points are finite, at most `POINT_LIMIT`, with
+/// elevations inside -90..=90.
 fn stroke_centre_line(s: &StrokeParams) -> Vec<Vec3f> {
     // Azimuths unwrapped along the list: each point takes the turn nearest the
     // previous one, so 350 then 10 becomes 350 then 370.
     let mut pts: Vec<[f32; 2]> = Vec::with_capacity(s.points.len() + 1);
-    for p in s.points.iter().take(64) {
-        if !(p[0].is_finite() && p[1].is_finite()) {
-            continue;
-        }
+    for p in &s.points {
         let az = match pts.last() {
             Some(last) => last[0] + wrap180(p[0] - last[0]),
             None => p[0],
         };
-        pts.push([az, p[1].max(-90.0).min(90.0)]);
+        pts.push([az, p[1]]);
     }
     if pts.len() < 2 {
         return Vec::new();
@@ -581,8 +583,7 @@ fn stroke_centre_line(s: &StrokeParams) -> Vec<Vec3f> {
     }
     let longest = pts.windows(2).map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1])).fold(0.0f32, f32::max);
     let steps = ((longest / 2.0).ceil() as u32).clamp(4, 32);
-    let curviness = if s.curviness.is_finite() { s.curviness.clamp(0.0, 2.0) } else { 1.0 };
-    let curve = match flatten_through(&pts, curviness, steps) {
+    let curve = match flatten_through(&pts, s.curviness, steps) {
         Ok(curve) if curve.len() >= 2 => curve,
         _ => return Vec::new(),
     };
@@ -624,12 +625,12 @@ struct ScrimLight {
 
 impl ScrimLight {
     fn new(light: &LightParams) -> ScrimLight {
-        let scrim = light.scrim.clone().unwrap_or_default();
+        // As clamp() holds it, so its ranges and defaults are written once (L:71).
+        let scrim = light.scrim.as_ref().map(ScrimParams::clamped).unwrap_or_default();
         let (hx, hy) = half_extents(light);
         let short = hx.min(hy);
-        let sigma = if scrim.source_size.is_finite() { scrim.source_size.clamp(0.05, 1.0) } else { 0.5 };
-        let frame = if scrim.frame.is_finite() { scrim.frame.clamp(0.0, 0.2) } else { 0.0 };
-        let frame_w = frame * short;
+        let sigma = scrim.source_size;
+        let frame_w = scrim.frame * short;
         let inv_two_sigma2 = 1.0 / (2.0 * sigma * sigma);
         // A rect's inside depth is its shorter half extent, as in studio.rs.
         let edge = 0.5 * (clamp01(light.softness) * short).max(EDGE_MIN);
@@ -741,13 +742,16 @@ pub fn dir_to_unit(light: &LightParams, dir: Vec3f) -> [f32; 2] {
 
 /// The polygon's corners in the unit box, before rounding: the explicit
 /// points when there are at least three, else the regular polygon or star,
-/// counter-clockwise from the corner straight up.
+/// counter-clockwise from the corner straight up. The block is read as
+/// clamp() holds it (`PolygonParams::clamped`): finite points inside the box,
+/// 3..=64 sides, a star of at most 0.95.
 pub fn polygon_unit_points(p: &PolygonParams) -> Vec<[f32; 2]> {
+    let p = p.clamped();
     if p.points.len() >= 3 {
-        return p.points.clone();
+        return p.points;
     }
-    let n = p.sides.clamp(3, 64) as usize;
-    let star = if p.star.is_finite() { p.star.clamp(0.0, 0.95) } else { 0.0 };
+    let n = p.sides as usize;
+    let star = p.star;
     let step = std::f32::consts::TAU / n as f32;
     // The regular polygon's inner radius (its apothem, with corners on the unit circle).
     let inner = (std::f32::consts::PI / n as f32).cos() * (1.0 - star);

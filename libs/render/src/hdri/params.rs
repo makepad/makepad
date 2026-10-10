@@ -50,6 +50,50 @@ const IMAGE_KEY_LIMIT: usize = 1024;
 /// Longest light name kept, in characters; a list row has no room for more.
 const LIGHT_NAME_LIMIT: usize = 64;
 
+/// The colour temperatures a light takes, kelvin: its `kelvin` and a stroke's
+/// `end_kelvin`, the range `studio::kelvin_to_rgb`'s fit of the blackbody
+/// colours holds over. clamp() holds both to it, and the colour and the CRI
+/// readout read a light's Kelvin through `LightParams::held_kelvin`.
+pub const KELVIN_RANGE: (f32, f32) = (1000.0, 20_000.0);
+/// A light's Kelvin by default, and where clamp() puts a NaN one.
+pub const KELVIN_DEFAULT: f32 = 6500.0;
+/// Most points a polygon's outline or a stroke keeps; clamp() drops the rest,
+/// and the point editor adds no more.
+pub const POINT_LIMIT: usize = 64;
+/// Most width multipliers a stroke's profile keeps; clamp() drops the rest.
+pub const PROFILE_LIMIT: usize = 32;
+
+/// clamp()'s rule for one number: NaN is `fallback`, anything else
+/// (infinities too) is held into `lo..=hi`.
+fn hold(value: f32, (lo, hi): (f32, f32), fallback: f32) -> f32 {
+    if value.is_nan() {
+        fallback
+    } else {
+        value.clamp(lo, hi)
+    }
+}
+
+/// `clamped()` on the blocks the map's layers read. Each layer reads its
+/// block through it, never re-holding a field on its own, so a block's
+/// ranges, its defaults and its rule for NaN are written once, in its
+/// `clamp_fields` (D17). `Env` clamps its copy of the settings first, so in a
+/// map the copy is the block as it was; the panel, the assistant and a host
+/// that call a layer's reader directly get clamp()'s reading too.
+macro_rules! clamped_copy {
+    ($($block:ty),* $(,)?) => {
+        $(impl $block {
+            /// A copy of the block as clamp() leaves it (`clamped_copy!`).
+            pub fn clamped(&self) -> $block {
+                let mut held = self.clone();
+                held.clamp_fields("", &mut Fixes::default());
+                held
+            }
+        })*
+    };
+}
+
+clamped_copy!(BaseImageParams, VolumetricParams, WeatherParams, CloudParams, PolygonParams, GoboParams, StrokeParams, ScrimParams);
+
 /// Everything that defines one environment map.
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct HdriParams {
@@ -582,7 +626,7 @@ fn unit_box_points(points: &[[f32; 2]]) -> Vec<[f32; 2]> {
     let kept: Vec<[f32; 2]> = points
         .iter()
         .filter(|p| p[0].is_finite() && p[1].is_finite())
-        .take(64)
+        .take(POINT_LIMIT)
         .map(|p| [p[0].clamp(-1.0, 1.0), p[1].clamp(-1.0, 1.0)])
         .collect();
     if kept.len() < 3 {
@@ -886,7 +930,7 @@ impl StrokeParams {
             .points
             .iter()
             .filter(|p| p[0].is_finite() && p[1].is_finite())
-            .take(64)
+            .take(POINT_LIMIT)
             .map(|p| [wrap_azimuth(p[0]), p[1].clamp(-90.0, 90.0)])
             .collect();
         if points != self.points {
@@ -898,7 +942,7 @@ impl StrokeParams {
         let profile: Vec<f32> = self
             .profile
             .iter()
-            .take(32)
+            .take(PROFILE_LIMIT)
             .map(|v| if v.is_finite() { v.clamp(0.0, 4.0) } else { 1.0 })
             .collect();
         // NaN never equals itself, so a profile holding one is replaced too.
@@ -907,7 +951,7 @@ impl StrokeParams {
             f.push(prefix, "profile");
         }
         if let Some(kelvin) = self.end_kelvin.as_mut() {
-            f.range(prefix, "end_kelvin", kelvin, 1000.0, 20_000.0, 6500.0);
+            f.range(prefix, "end_kelvin", kelvin, KELVIN_RANGE.0, KELVIN_RANGE.1, KELVIN_DEFAULT);
         }
         if let Some(rgb) = self.end_rgb.as_mut() {
             f.color(prefix, "end_rgb", rgb, 1.0, [1.0; 3]);
@@ -1139,7 +1183,7 @@ impl Default for LightParams {
             softness: 0.2,
             hotspot: 0.0,
             intensity_ev: 3.0,
-            kelvin: 6500.0,
+            kelvin: KELVIN_DEFAULT,
             tint: 0.0,
             blend: "add".to_string(),
             key: false,
@@ -1395,6 +1439,13 @@ impl LightParams {
         }
     }
 
+    /// The light's Kelvin as clamp() holds it: what its colour
+    /// (`studio::light_color`) and its CRI readout (`cri::light_spectrum`)
+    /// read, so the two agree for any settings (L:104).
+    pub fn held_kelvin(&self) -> f32 {
+        hold(self.kelvin, KELVIN_RANGE, KELVIN_DEFAULT)
+    }
+
     fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
         let d = LightParams::default();
         if self.name.chars().count() > LIGHT_NAME_LIMIT {
@@ -1412,7 +1463,7 @@ impl LightParams {
         f.range(prefix, "softness", &mut self.softness, 0.0, 1.0, d.softness);
         f.range(prefix, "hotspot", &mut self.hotspot, 0.0, 1.0, d.hotspot);
         f.range(prefix, "intensity_ev", &mut self.intensity_ev, -10.0, 20.0, d.intensity_ev);
-        f.range(prefix, "kelvin", &mut self.kelvin, 1000.0, 20_000.0, d.kelvin);
+        f.range(prefix, "kelvin", &mut self.kelvin, KELVIN_RANGE.0, KELVIN_RANGE.1, d.kelvin);
         f.range(prefix, "tint", &mut self.tint, -1.0, 1.0, d.tint);
         f.choice(prefix, "blend", &mut self.blend, BLEND_NAMES);
         if let Some(rgb) = self.rgb.as_mut() {
@@ -1483,7 +1534,7 @@ impl Fixes {
     /// NaN becomes the field's default; everything else (infinities included) is clamped.
     fn range(&mut self, prefix: &str, field: &str, value: &mut f32, lo: f32, hi: f32, fallback: f32) {
         let old = *value;
-        let new = if old.is_nan() { fallback } else { old.clamp(lo, hi) };
+        let new = hold(old, (lo, hi), fallback);
         if old.is_nan() || new != old {
             *value = new;
             self.push(prefix, field);
@@ -2882,5 +2933,160 @@ mod weather_param_tests {
         assert_eq!(report, ["sky.weather.seed"]);
         let (off, _) = seeded.merge_json(r#"{"sky": {"weather": null}}"#).unwrap();
         assert_eq!(off.sky.weather, None);
+    }
+}
+
+/// D17 (L:31, :71, :104, :132, :231): every reader of a settings block reads
+/// the block as clamp() holds it, so a block's ranges, its defaults and its
+/// rule for NaN are written once, in its `clamp_fields`. `Env` clamps its own
+/// copy first, so inside a map this changes nothing; the panel, the assistant
+/// and a host call the readers directly, and they get clamp()'s reading too.
+#[cfg(test)]
+mod reader_tests {
+    use super::*;
+    use super::super::clouds::CloudLayer;
+    use super::super::composite::BaseImage;
+    use super::super::cri::light_spectrum;
+    use super::super::gobo::Gobo;
+    use super::super::shaped::{polygon_unit_points, stroke_of, ShapedLight};
+    use super::super::studio::light_color;
+    use super::super::weather::effects;
+    use super::super::{dir_from_az_el, ImageSet};
+    use makepad_draw::*;
+    use makepad_render_material::ibl::EnvMap;
+
+    /// The light as clamp() leaves it.
+    fn held(light: &LightParams) -> LightParams {
+        let mut p = HdriParams { lights: vec![light.clone()], ..HdriParams::default() };
+        p.clamp();
+        p.lights.remove(0)
+    }
+
+    /// Directions over the whole sphere, every 7.5 degrees of azimuth and elevation.
+    fn directions() -> Vec<Vec3f> {
+        let mut out = Vec::new();
+        for i in 0..48 {
+            for j in 0..23 {
+                out.push(dir_from_az_el(7.5 * i as f32, -82.5 + 7.5 * j as f32));
+            }
+        }
+        out
+    }
+
+    /// L:104: the render and the CRI readout read one Kelvin, clamp()'s.
+    #[test]
+    fn a_lights_colour_and_its_readout_read_one_kelvin() {
+        for kelvin in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 500.0, 30_000.0, 3200.0] {
+            let raw = LightParams { kelvin, ..LightParams::default() };
+            let clamped = held(&raw);
+            assert_eq!(light_color(&raw), light_color(&clamped), "the colour of a {kelvin} K light");
+            assert_eq!(light_spectrum(&raw), light_spectrum(&clamped), "the readout of a {kelvin} K light");
+        }
+    }
+
+    /// L:31, :71: a stroke's, a scrim's and a polygon's drawing.
+    #[test]
+    fn a_shaped_light_draws_as_clamp_holds_it() {
+        let arc: Vec<[f32; 2]> = (0..70).map(|i| [370.0 + 2.0 * i as f32, 10.0 + (i % 7) as f32]).collect();
+        let stroke = |s: StrokeParams| LightParams { shape: "stroke".to_string(), stroke: Some(s), ..LightParams::default() };
+        let scrim = |s: ScrimParams| LightParams { shape: "scrim".to_string(), width_deg: 60.0, height_deg: 40.0, scrim: Some(s), ..LightParams::default() };
+        let polygon = |p: PolygonParams| LightParams { shape: "polygon".to_string(), width_deg: 50.0, height_deg: 40.0, polygon: Some(p), ..LightParams::default() };
+        let lights = [
+            stroke(StrokeParams {
+                points: vec![[350.0, 10.0], [f32::NAN, 5.0], [20.0, 120.0], [40.0, 20.0]],
+                curviness: -3.0,
+                width_deg: f32::INFINITY,
+                profile: (0..40).map(|i| [f32::NAN, 9.0, -1.0, 0.5][i % 4]).collect(),
+                end_kelvin: Some(f32::NAN),
+                ..StrokeParams::default()
+            }),
+            stroke(StrokeParams { points: arc, curviness: f32::NAN, width_deg: f32::NAN, end_kelvin: Some(f32::INFINITY), ..StrokeParams::default() }),
+            stroke(StrokeParams { points: vec![[10.0, 5.0]], width_deg: 300.0, end_rgb: Some([2.0, f32::NAN, -1.0]), ..StrokeParams::default() }),
+            scrim(ScrimParams { source_size: f32::INFINITY, frame: 0.5 }),
+            scrim(ScrimParams { source_size: 0.0, frame: f32::NAN }),
+            polygon(PolygonParams { sides: 100, star: f32::NAN, points: vec![[f32::NAN, 0.0], [5.0, 0.0], [0.0, 1.0], [-1.0, -1.0]] }),
+            polygon(PolygonParams { sides: 1, star: 2.0, points: Vec::new() }),
+        ];
+        for (i, raw) in lights.iter().enumerate() {
+            let clamped = held(raw);
+            assert_eq!(stroke_of(raw), stroke_of(&clamped), "light {i}: the stroke it draws");
+            if let Some(p) = &raw.polygon {
+                assert_eq!(polygon_unit_points(p), polygon_unit_points(clamped.polygon.as_ref().unwrap()), "light {i}: the outline");
+            }
+            let (a, b) = (ShapedLight::new(raw), ShapedLight::new(&clamped));
+            assert_eq!(a.is_some(), b.is_some(), "light {i} builds as its clamped copy does");
+            let (Some(a), Some(b)) = (a, b) else { continue };
+            let (ca, cb) = (light_color(raw), light_color(&clamped));
+            for d in directions() {
+                let (sa, sb) = (a.sample(d), b.sample(d));
+                assert!(sa == sb, "light {i} at {d:?}: {sa:?} against {sb:?}");
+                let (pa, pb) = (a.compose(d, Vec3f::all(0.25), ca), b.compose(d, Vec3f::all(0.25), cb));
+                assert!(pa == pb, "light {i} at {d:?}: {pa:?} against {pb:?}");
+            }
+        }
+    }
+
+    /// L:132: a gobo's pattern.
+    #[test]
+    fn a_gobo_passes_as_clamp_holds_it() {
+        let bad = |kind: &str| GoboParams {
+            kind: kind.to_string(),
+            panes_x: 0,
+            panes_y: 40,
+            bar: f32::NAN,
+            frame: f32::INFINITY,
+            slats: 100,
+            tilt_deg: -10.0,
+            slat_width: f32::NAN,
+            density: f32::NAN,
+            scale: f32::INFINITY,
+            distance: 2.0,
+            ..GoboParams::default()
+        };
+        let images = ImageSet::default();
+        for kind in ["window", "blinds", "leaves", "fern", "grid"] {
+            for raw in [bad(kind), GoboParams { tilt_deg: f32::NAN, distance: f32::NAN, slats: 0, ..bad(kind) }] {
+                let light = held(&LightParams { gobo: Some(raw.clone()), ..LightParams::default() });
+                let clamped = light.gobo.unwrap();
+                let (a, b) = (Gobo::new(&raw, vec2f(0.3, 0.2), &images).unwrap(), Gobo::new(&clamped, vec2f(0.3, 0.2), &images).unwrap());
+                for i in 0..41 {
+                    for j in 0..41 {
+                        let q = vec2f(-0.33 + 0.0165 * i as f32, -0.22 + 0.011 * j as f32);
+                        assert_eq!(a.transmission(q), b.transmission(q), "{kind} at {q:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// L:231: the cloud deck, a base image and the weather.
+    #[test]
+    fn the_sky_blocks_read_as_clamp_holds_them() {
+        let mut raw = HdriParams::default();
+        raw.sky.clouds = CloudParams { coverage: f32::INFINITY, sharpness: f32::NAN, scale: f32::NAN, altitude_m: f32::INFINITY, cirrus: -2.0 };
+        raw.sky.weather = Some(WeatherParams { fog: f32::INFINITY, rain: f32::NAN, wet_ground: 3.0, ..WeatherParams::default() });
+        raw.base_image = Some(BaseImageParams {
+            key: "pano".to_string(),
+            yaw_deg: f32::NAN,
+            ev: f32::INFINITY,
+            horizon_deg: 90.0,
+            feather_deg: f32::NAN,
+            sky_key: f32::INFINITY,
+            replace_sky: true,
+            ..BaseImageParams::default()
+        });
+        let mut clamped = raw.clone();
+        clamped.clamp();
+        let sun = vec3f(0.3, 0.5, -0.8).normalize();
+        let (a, b) = (CloudLayer::new(&raw.sky.clouds, 7, sun).unwrap(), CloudLayer::new(&clamped.sky.clouds, 7, sun).unwrap());
+        let mut images = ImageSet::default();
+        images.insert("pano", EnvMap::from_fn(64, |d| [0.4 + 0.5 * d[1].max(0.0), 0.3, 0.6 + 0.2 * d[0]]));
+        let base = |p: &HdriParams| BaseImage::new(p.base_image.as_ref().unwrap(), &images, Some(2.0)).unwrap();
+        let (ia, ib) = (base(&raw), base(&clamped));
+        for d in directions() {
+            assert_eq!(format!("{:?}", a.sample(d)), format!("{:?}", b.sample(d)), "the deck at {d:?}");
+            assert_eq!(ia.compose(d, Vec3f::all(0.5)), ib.compose(d, Vec3f::all(0.5)), "the base image at {d:?}");
+        }
+        assert_eq!(effects(raw.sky.weather.as_ref().unwrap()), effects(clamped.sky.weather.as_ref().unwrap()));
     }
 }
