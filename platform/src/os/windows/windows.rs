@@ -991,7 +991,11 @@ impl Cx {
                     let mut d3d11_window = d3d11_window;
                     d3d11_window.win32_window.apply_window_visuals(visuals);
 
-                    window.window_geom = d3d11_window.window_geom.clone();
+                    // A Windows window has no OS caption, so we draw its caption buttons ourselves.
+                    window.draws_chrome_buttons = true;
+                    window.os_dpi_factor = Some(d3d11_window.window_geom.dpi_factor);
+                    window.window_geom =
+                        window.native_window_geom_to_layout(d3d11_window.window_geom.clone());
                     d3d11_windows.push(d3d11_window);
                     window.is_created = true;
                     geom_changes.push(WindowGeomChangeEvent {

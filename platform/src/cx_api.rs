@@ -1469,12 +1469,7 @@ impl Cx {
         let old_geom = window.window_geom.clone();
         let scale = current_dpi / target_dpi;
         window.dpi_override = dpi_override;
-        window.window_geom.inner_size *= scale;
-        window.window_geom.outer_size *= scale;
-        window.window_geom.safe_area_insets = window.window_geom.safe_area_insets.scale(scale);
-        window.window_geom.window_chrome_buttons =
-            CxWindow::scale_rect(window.window_geom.window_chrome_buttons, scale);
-        window.window_geom.dpi_factor = target_dpi;
+        window.window_geom = window.scale_window_geom(old_geom.clone(), scale, target_dpi);
         let new_geom = window.window_geom.clone();
 
         self.pending_window_geom_changes
