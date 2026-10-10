@@ -4,10 +4,12 @@
 //! no channel above 1: it can only take light away. Four families:
 //! - **Conversion** (CTO warms, CTB cools), stored as a mired shift. A mired
 //!   is 10^6 / kelvin, and a conversion gel adds the same number of mireds to
-//!   any source: that is why gaffers count in them. On a Kelvin light the
-//!   shift moves the Kelvin itself, so the hue is exact; the light it costs,
-//!   and its effect on RGB or spectral lights, come from the filter that
-//!   makes such a shift (see [`conversion_transmission`]).
+//!   any source: that is why gaffers count in them. It is the filter that
+//!   makes such a shift ([`conversion_transmission`]), on every light alike
+//!   (D10, L:86): a Kelvin light lands on the shifted Kelvin's colour to the
+//!   filter's accuracy, keeps its colour and level when switched to RGB, and
+//!   a strong CTB keeps cooling past the Kelvin colours' 20000 K end, as a
+//!   sheet in front of a lamp does.
 //! - **Green** (plus green, minus green), in units of the light's own `tint`
 //!   control, for matching fluorescent or LED casts.
 //! - **Neutral density**: optical density d passes 10^-d (0.3 is one stop).
@@ -136,16 +138,6 @@ pub fn conversion_transmission(mired: f32) -> Vec3f {
     vec3f((e[0] - top).exp(), (e[1] - top).exp(), (e[2] - top).exp())
 }
 
-/// `kelvin` moved by `mired` (10^6 / K), held in the 1000..=20000 K the
-/// Kelvin colours cover. No shift returns the Kelvin untouched, bit for bit.
-pub fn shifted_kelvin(kelvin: f32, mired: f32) -> f32 {
-    if mired == 0.0 || !mired.is_finite() {
-        return kelvin;
-    }
-    // 50 mired is 20000 K; the floor also keeps a strong CTB from dividing by zero.
-    (1.0e6 / (1.0e6 / kelvin.max(1.0) + mired).max(50.0)).clamp(1000.0, 20000.0)
-}
-
 impl Gel {
     /// Linear Rec.709 transmission; no channel is above 1.
     pub fn transmission(&self) -> Vec3f {
@@ -166,8 +158,6 @@ impl Gel {
 /// A light's gels, folded into what `studio::light_color` needs.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GelStack {
-    /// Sum of the conversion gels' mired shifts: a Kelvin light moves its Kelvin by this.
-    pub mired: f32,
     /// Product of the conversion gels' transmissions.
     pub conversion: Vec3f,
     /// Product of every other gel's transmission (green, density, colour).
@@ -176,7 +166,7 @@ pub struct GelStack {
 
 impl GelStack {
     /// No gels: everything passes.
-    pub const CLEAR: GelStack = GelStack { mired: 0.0, conversion: Vec3f::all(1.0), filter: Vec3f::all(1.0) };
+    pub const CLEAR: GelStack = GelStack { conversion: Vec3f::all(1.0), filter: Vec3f::all(1.0) };
 
     /// The whole stack as one RGB transmission.
     pub fn transmission(&self) -> Vec3f {
@@ -191,10 +181,7 @@ pub fn gel_stack(names: &[String]) -> GelStack {
     let mut stack = GelStack::CLEAR;
     for gel in names.iter().filter_map(|n| gel(n)).take(GEL_LIMIT) {
         match gel.kind {
-            GelKind::Conversion(mired) => {
-                stack.mired += mired;
-                stack.conversion = stack.conversion * gel.transmission();
-            }
+            GelKind::Conversion(_) => stack.conversion = stack.conversion * gel.transmission(),
             _ => stack.filter = stack.filter * gel.transmission(),
         }
     }
@@ -220,6 +207,12 @@ mod tests {
 
     fn kelvin_light(kelvin: f32) -> LightParams {
         LightParams { kelvin, intensity_ev: 0.0, ..LightParams::default() }
+    }
+
+    /// The exact shift a conversion gel's filter stands for: `kelvin` moved
+    /// by `mired` (10^6 / K).
+    fn shifted(kelvin: f32, mired: f32) -> f32 {
+        1.0e6 / (1.0e6 / kelvin + mired)
     }
 
     #[test]
@@ -264,24 +257,22 @@ mod tests {
     fn full_cto_takes_daylight_to_tungsten_and_full_ctb_back() {
         let daylight = kelvin_light(6500.0);
         let warm = with_gels(&daylight, &["cto_full"]);
-        let k = shifted_kelvin(6500.0, 159.0);
+        let k = shifted(6500.0, 159.0);
         assert!((3190.0..3205.0).contains(&k), "{k}");
-        assert!((chroma(warm) - kelvin_to_rgb(k)).length() < 1.0e-4, "the hue is the shifted Kelvin's: {warm:?}");
+        // The filter lands on the shifted Kelvin's hue to its own accuracy
+        // (MIRED_EXPONENT: 0.07 per channel from 2000 to 7000 K).
+        assert!((chroma(warm) - kelvin_to_rgb(k)).abs().max_elem() < 0.07, "the hue is the shifted Kelvin's: {warm:?}");
         let kept = luminance(warm) / luminance(light_color(&daylight));
         assert!((0.5..0.7).contains(&kept), "a full CTO passes about 60 %: {kept}");
 
         let tungsten = kelvin_light(3200.0);
         let cool = with_gels(&tungsten, &["ctb_full"]);
-        let k = shifted_kelvin(3200.0, -137.0);
+        let k = shifted(3200.0, -137.0);
         assert!((5680.0..5710.0).contains(&k), "{k}");
-        assert!((chroma(cool) - kelvin_to_rgb(k)).length() < 1.0e-4);
+        assert!((chroma(cool) - kelvin_to_rgb(k)).abs().max_elem() < 0.07, "{cool:?}");
         let kept = luminance(cool) / luminance(light_color(&tungsten));
         assert!((0.3..0.45).contains(&kept), "a full CTB passes about 36 %: {kept}");
-
-        // The ends are held: a strong CTB on a cool light stops at 20000 K.
-        assert_eq!(shifted_kelvin(15000.0, -137.0), 20000.0);
-        assert_eq!(shifted_kelvin(1200.0, 400.0), 1000.0);
-        assert_eq!(shifted_kelvin(5600.0, 0.0), 5600.0);
+        // No end to stop at (D10): a_conversion_gel_is_one_filter_on_every_light.
     }
 
     #[test]
@@ -329,10 +320,16 @@ mod tests {
                 assert!(c.is_finite() && c.min_elem() >= 0.0, "{name} at {kelvin} K: {c:?}");
                 assert!(luminance(c) <= luminance(bare) * 1.0001, "{name} at {kelvin} K: {} > {}", luminance(c), luminance(bare));
             }
-            // On an explicit colour the gel is a plain filter: no channel grows.
-            let rgb = LightParams { rgb: Some([0.9, 0.6, 0.3]), intensity_ev: 2.0, ..LightParams::default() };
-            let (bare, c) = (light_color(&rgb), with_gels(&rgb, &[name]));
-            assert!(c.x <= bare.x * 1.0001 && c.y <= bare.y * 1.0001 && c.z <= bare.z * 1.0001, "{name}: {c:?} vs {bare:?}");
+            // On every light the gel is a plain filter: no channel grows.
+            for light in [
+                LightParams { rgb: Some([0.9, 0.6, 0.3]), intensity_ev: 2.0, ..LightParams::default() },
+                kelvin_light(1200.0),
+                kelvin_light(1900.0),
+                kelvin_light(15000.0),
+            ] {
+                let (bare, c) = (light_color(&light), with_gels(&light, &[name]));
+                assert!(c.x <= bare.x * 1.0001 && c.y <= bare.y * 1.0001 && c.z <= bare.z * 1.0001, "{name}: {c:?} vs {bare:?}");
+            }
         }
     }
 
@@ -346,16 +343,17 @@ mod tests {
         let two = with_gels(&light, &["nd_0.3", "nd_0.6"]);
         let one = with_gels(&light, &["nd_0.9"]);
         assert!((two - one).length() < 1.0e-5, "{two:?} vs {one:?}");
-        // Two conversions add their mireds, and each takes its own light.
+        // Two conversions add their mireds (their filters multiply to the
+        // filter of the sum), and each takes its own light.
         let both = with_gels(&light, &["cto_half", "cto_quarter"]);
-        assert!((chroma(both) - kelvin_to_rgb(shifted_kelvin(5600.0, 109.0 + 64.0))).length() < 1.0e-4);
+        assert!((chroma(both) - chroma(kelvin_to_rgb(5600.0) * conversion_transmission(109.0 + 64.0))).length() < 1.0e-5);
         assert!(luminance(both) < luminance(with_gels(&light, &["cto_half"])));
         // Only GEL_LIMIT gels count, and unknown names do not use up a slot.
         assert_eq!(with_gels(&light, &["red", "nd_0.3", "blue"]), with_gels(&light, &["red", "nd_0.3"]));
         assert_eq!(with_gels(&light, &["gobo", "red"]), with_gels(&light, &["red"]));
         assert_eq!(gel_stack(&[]), GelStack::CLEAR);
         let stack = gel_stack(&["ctb_quarter".to_string(), "green".to_string()]);
-        assert_eq!(stack.mired, -35.0);
+        assert_eq!(stack.conversion, conversion_transmission(-35.0));
         assert!((stack.transmission() - stack.conversion * stack.filter).length() < 1.0e-7);
     }
 
@@ -375,13 +373,46 @@ mod tests {
         assert_eq!(c, kelvin_to_rgb(6500.0) * tint_rgb(0.0) / luminance(kelvin_to_rgb(6500.0) * tint_rgb(0.0)).max(1.0e-6) * 8.0);
     }
 
+    /// D10 (L:86): a conversion gel is one filter on every light. A Kelvin
+    /// light behind it keeps its colour and level when switched to RGB (its
+    /// luminance-1 colour, tint included, as an explicit colour: the panel's
+    /// switch), and a strong CTB is not stopped at 20000 K.
+    #[test]
+    fn a_conversion_gel_is_one_filter_on_every_light() {
+        for (kelvin, tint, gels) in [
+            (6500.0f32, 0.0f32, &["ctb_full"][..]),
+            (5600.0, 0.0, &["ctb_full"][..]),
+            (10000.0, 0.0, &["ctb_half"][..]),
+            (4500.0, 0.0, &["ctb_full"][..]),
+            (2700.0, 1.0, &["cto_full"][..]),
+            (3200.0, -0.5, &["ctb_half", "nd_0.3"][..]),
+            (15000.0, 0.3, &["ctb_eighth", "cto_quarter"][..]),
+        ] {
+            let light = LightParams { kelvin, tint, intensity_ev: 1.0, ..LightParams::default() };
+            let c = kelvin_to_rgb(kelvin) * tint_rgb(tint);
+            let c = c / luminance(c);
+            let switched = LightParams { rgb: Some([c.x, c.y, c.z]), ..light.clone() };
+            let (as_kelvin, as_rgb) = (with_gels(&light, gels), with_gels(&switched, gels));
+            assert!((as_kelvin - as_rgb).abs().max_elem() < 1.0e-5 * as_rgb.max_elem(), "{kelvin} K, tint {tint}, {gels:?}: {as_kelvin:?} as Kelvin, {as_rgb:?} as RGB");
+        }
+        // A full CTB keeps 5600, 6500 and 10000 K apart, each bluer than the
+        // last, and takes 6500 K past the bluest Kelvin colour, 20000 K.
+        let blue = |kelvin: f32| {
+            let c = with_gels(&kelvin_light(kelvin), &["ctb_full"]);
+            c.z / c.x
+        };
+        assert!(blue(5600.0) < blue(6500.0) && blue(6500.0) < blue(10000.0), "{} {} {}", blue(5600.0), blue(6500.0), blue(10000.0));
+        let end = kelvin_to_rgb(20000.0);
+        assert!(blue(6500.0) > 1.2 * end.z / end.x, "{} vs 20000 K's {}", blue(6500.0), end.z / end.x);
+    }
+
     #[test]
     fn the_conversion_filter_follows_the_planckian_locus() {
-        // The filter stands in for the exact Kelvin shift on RGB and spectral
-        // lights: it must land near the shifted Kelvin's colour.
+        // The filter stands in for the exact Kelvin shift on every light: it
+        // must land near the shifted Kelvin's colour.
         for (kelvin, mired) in [(6500.0f32, 159.0f32), (5600.0, 109.0), (3200.0, -137.0), (2700.0, -78.0), (4500.0, 64.0)] {
             let filtered = chroma(kelvin_to_rgb(kelvin) * conversion_transmission(mired));
-            let exact = kelvin_to_rgb(shifted_kelvin(kelvin, mired));
+            let exact = kelvin_to_rgb(shifted(kelvin, mired));
             assert!((filtered - exact).abs().max_elem() < 0.07, "{kelvin} K {mired:+}: {filtered:?} vs {exact:?}");
         }
         assert_eq!(conversion_transmission(0.0), Vec3f::all(1.0));

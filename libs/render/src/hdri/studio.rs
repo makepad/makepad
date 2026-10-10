@@ -24,7 +24,7 @@ use crate::sky::luminance;
 use super::shaped::{stroke_box, ShapedLight};
 use super::shape::ArcPath;
 use super::noise::hash01;
-use super::gels::{gel_stack, shifted_kelvin};
+use super::gels::gel_stack;
 use super::spectrum::light_source_rgb;
 use super::image_light::{ImageSet, LightImage};
 use super::light_fx::LightFx;
@@ -93,36 +93,23 @@ pub fn tint_rgb(tint: f32) -> Vec3f {
 ///   the `source_quality` knob.
 /// - Otherwise the colour is Kelvin times tint, renormalised to luminance 1 so
 ///   the tint cannot change the brightness of a coloured light either.
-/// - Gels (1b) filter the result. A conversion gel moves a Kelvin light's
-///   Kelvin by its mireds and takes the light an ideal filter of that shift
-///   costs; every other gel, and a conversion gel on an explicit colour or a
-///   named source, is an RGB transmission (gels.rs).
+/// - Gels (1b) filter the result, every gel and every light alike, as a sheet
+///   in front of a lamp does (gels.rs): a conversion gel is the filter that
+///   moves a blackbody by its mireds. So a Kelvin light keeps its colour and
+///   level when switched to RGB, and a strong CTB is not stopped at the
+///   Kelvin colours' 20000 K end (D10, L:86).
 pub fn light_color(light: &LightParams) -> Vec3f {
     let gels = gel_stack(light.gels.as_deref().unwrap_or(&[]));
     let base = if let Some(rgb) = light.rgb {
-        // An explicit colour has no Kelvin to move: a conversion gel filters it.
-        vec3f(rgb[0].max(0.0), rgb[1].max(0.0), rgb[2].max(0.0)) * gels.conversion
-    } else if let Some(source) = light_source_rgb(light) {
-        // A named source: its spectrum's colour in place of the Kelvin's,
-        // tinted the same way. It has no Kelvin to move either (the knob
-        // LED's Kelvin is part of its spectrum).
-        let c = source * tint_rgb(light.tint);
-        c / luminance(c).max(1.0e-6) * gels.conversion
+        vec3f(rgb[0].max(0.0), rgb[1].max(0.0), rgb[2].max(0.0))
     } else {
-        let kelvin = sane(light.kelvin, 1000.0, 20000.0);
-        // A conversion gel moves the Kelvin by its mireds, so the hue is
-        // exactly the shifted blackbody's.
-        let c = kelvin_to_rgb(shifted_kelvin(kelvin, gels.mired)) * tint_rgb(light.tint);
-        let c = c / luminance(c).max(1.0e-6);
-        if gels.mired == 0.0 {
-            c
-        } else {
-            // The light the gel costs: what its filter passes of this
-            // source (kelvin_to_rgb has luminance 1).
-            c * luminance(kelvin_to_rgb(kelvin) * gels.conversion)
-        }
+        // A named source's spectrum gives the colour in place of the Kelvin's,
+        // tinted the same way (the knob LED's Kelvin is part of its spectrum).
+        let white = light_source_rgb(light).unwrap_or_else(|| kelvin_to_rgb(sane(light.kelvin, 1000.0, 20000.0)));
+        let c = white * tint_rgb(light.tint);
+        c / luminance(c).max(1.0e-6)
     };
-    base * gels.filter * 2.0f32.powf(sane(light.intensity_ev, -10.0, 20.0))
+    base * gels.conversion * gels.filter * 2.0f32.powf(sane(light.intensity_ev, -10.0, 20.0))
 }
 
 /// A light's angular frame. `center` points at the light. `right` and `up` span the

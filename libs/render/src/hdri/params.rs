@@ -822,7 +822,10 @@ pub struct StrokeParams {
     pub profile: Vec<f32>,
     /// 1000..=20000. A Kelvin ramp: the colour temperature slides from the
     /// light's `kelvin` at the first point to this at the last, evenly in
-    /// mired, at the light's tint and brightness. None is one colour all along.
+    /// mired, at the light's tint and brightness. A light with an explicit
+    /// `rgb`, or a named lamp (any `source` but `led`), has a colour but no
+    /// temperature to slide from: it blends from that colour to this
+    /// temperature's. None is one colour all along.
     pub end_kelvin: Option<f32>,
     /// Linear 0..=1 per channel. A colour ramp: the light's colour at the
     /// first point blends to this one at the last, at the light's level.

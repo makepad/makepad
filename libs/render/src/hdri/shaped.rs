@@ -7,7 +7,9 @@
 //! - the same soft edge: a band of softness × the shape's inside depth,
 //!   centred on the edge;
 //! - the same hotspot: exp(-4 · hotspot · r²), with r = 1 at the edge;
-//! - the same Multiply rule: what is behind is scaled by the light's colour;
+//! - the same Multiply rule: what is behind is scaled by the light's colour,
+//!   as far as it covers (a polygon flag's coverage takes its hotspot in, as
+//!   A3's flags' does);
 //! - the same peak: the centre of an unshaded light is exactly its colour.
 //!
 //! A polygon lives in the light's unit box (-1..1 on both axes, y up, x
@@ -35,6 +37,7 @@
 use super::*;
 use super::shape::*;
 use super::studio::{light_color, light_frame, project, LightFrame};
+use super::spectrum::fixed_source;
 
 /// The narrowest soft edge, in tangent units or radians (about 0.006°). It
 /// is studio.rs's MIN_EDGE, so a hard shaped light is as hard as a hard rect.
@@ -46,10 +49,12 @@ const HOTSPOT_FALLOFF: f32 = 4.0;
 /// What a shaped light does at one direction.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ShapeSample {
-    /// How much of the light covers the direction, 0..1. Multiply uses it.
+    /// How much of the shape covers the direction, 0..1: what a scrim's cloth
+    /// hides, and how far a stroke or scrim flag (Multiply) scales what is behind.
     pub mask: f32,
     /// The weight that multiplies the light's colour: the mask shaped by the
-    /// hotspot (and, for strokes and scrims, by their own falloff).
+    /// hotspot (and, for strokes and scrims, by their own falloff). A polygon
+    /// flag covers by it, hotspot and all, as A3's flags do.
     pub emit: f32,
 }
 
@@ -121,17 +126,26 @@ impl ShapedLight {
         if !self.cull.contains(dir) {
             return acc;
         }
-        let (s, color) = match &self.kind {
-            ShapedKind::Fill(fill) => (fill.sample(dir), color),
+        // How much a flag of this shape covers: a polygon's coverage takes its
+        // hotspot in, as A3's flags' does (studio.rs's `mask`, D10, L:26); a
+        // stroke and a scrim flag by their bare shape.
+        let (s, color, flag) = match &self.kind {
+            ShapedKind::Fill(fill) => {
+                let s = fill.sample(dir);
+                (s, color, s.emit)
+            }
             ShapedKind::Stroke(stroke) => {
                 let (s, t) = stroke.sample_at(dir);
-                (s, stroke.color_at(t, color))
+                (s, stroke.color_at(t, color), s.mask)
             }
-            ShapedKind::Scrim(scrim) => (scrim.sample(dir), color),
+            ShapedKind::Scrim(scrim) => {
+                let s = scrim.sample(dir);
+                (s, color, s.mask)
+            }
         };
         match self.blend {
             // studio.rs's rule: where the shape covers, what is behind is scaled by the colour.
-            Blend::Multiply => acc * (Vec3f::all(1.0) + (color - Vec3f::all(1.0)) * s.mask),
+            Blend::Multiply => acc * (Vec3f::all(1.0) + (color - Vec3f::all(1.0)) * flag),
             // Cloth in front of what is behind it: it hides that, then glows.
             Blend::Add if self.occludes => acc * (1.0 - s.mask) + color * s.emit,
             Blend::Add => acc + color * s.emit,
@@ -488,12 +502,16 @@ fn ramp_at(ramp: &[Vec3f], t: f32) -> Vec3f {
     ramp[i] + (ramp[i + 1] - ramp[i]) * f
 }
 
-/// What `light_color` gives this light with another colour: the given Kelvin,
-/// or the explicit `rgb` when Some. Everything else that shapes a light's
-/// colour and level (tint, intensity, and what later tasks add: gels, a named
-/// source) stays the light's own, so a ramp is filtered like the light itself.
+/// What `light_color` gives this light with another colour: the explicit
+/// `rgb` when Some, else its colour at the Kelvin `kelvin`, which a named
+/// lamp with a temperature of its own does not read (`fixed_source`), so a
+/// Kelvin end is a blackbody's there, as on a Kelvin light (D10, L:99); the
+/// knob LED is built at it. Everything else that shapes a light's colour and
+/// level (tint, intensity, gels) stays the light's own, so a ramp is filtered
+/// like the light itself.
 fn recolored(light: &LightParams, kelvin: f32, rgb: Option<[f32; 3]>) -> Vec3f {
-    light_color(&LightParams { kelvin, rgb, ..light.clone() })
+    let source = if fixed_source(light).is_some() { None } else { light.source.clone() };
+    light_color(&LightParams { kelvin, rgb, source, ..light.clone() })
 }
 
 /// The colour along a stroke at RAMP_TAPS even taps, or None for one colour.
@@ -501,8 +519,9 @@ fn recolored(light: &LightParams, kelvin: f32, rgb: Option<[f32; 3]>) -> Vec3f {
 /// - `end_kelvin` slides the temperature evenly in mired (1e6 / K), the scale
 ///   on which equal steps look equal (it is what gels are rated in). Every
 ///   tap is a luminance-1 colour at the light's level, so the brightness
-///   holds along the whole ramp. A light with an explicit `rgb` has no
-///   temperature to slide from, so it blends to the end temperature's colour.
+///   holds along the whole ramp. A light with an explicit `rgb`, or a named
+///   lamp with its own colour temperature, has no temperature to slide from,
+///   so it blends from its colour to the end temperature's.
 fn stroke_ramp(light: &LightParams, stroke: &StrokeParams) -> Option<Vec<Vec3f>> {
     let start = light_color(light);
     let at = |i: usize| i as f32 / (RAMP_TAPS - 1) as f32;
@@ -511,7 +530,7 @@ fn stroke_ramp(light: &LightParams, stroke: &StrokeParams) -> Option<Vec<Vec3f>>
         return Some(blend_to(recolored(light, light.kelvin, Some(end))));
     }
     let end_kelvin = stroke.end_kelvin.filter(|k| k.is_finite())?.clamp(1000.0, 20000.0);
-    if light.rgb.is_some() {
+    if light.rgb.is_some() || fixed_source(light).is_some() {
         return Some(blend_to(recolored(light, end_kelvin, None)));
     }
     // max/min rather than clamp: a NaN kelvin becomes 1000, as light_color reads it.
@@ -951,6 +970,35 @@ mod tests {
         }
     }
 
+    /// D10 (L:26): a polygon flag takes its hotspot in as A3's flags do (their
+    /// coverage is the soft edge times exp(-4 hotspot r²)), so a square
+    /// polygon flag and a rect flag with the same settings pass the same light
+    /// everywhere, and Hotspot fades a polygon gel toward its edge.
+    #[test]
+    fn a_polygon_flag_honours_its_hotspot() {
+        let square = PolygonParams { sides: 4, star: 0.0, points: vec![[-1.0, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]] };
+        let flag = LightParams { blend: "multiply".to_string(), rgb: Some([0.0; 3]), intensity_ev: 0.0, hotspot: 0.5, polygon: Some(square), ..polygon_light() };
+        let rect = LightParams { shape: "rect".to_string(), polygon: None, ..flag.clone() };
+        let over_white = |light: &LightParams| {
+            let mut p = dark_studio(vec![light.clone()]);
+            p.studio.top = [1.0; 3];
+            p.studio.horizon = [1.0; 3];
+            p.studio.floor = [1.0; 3];
+            Env::new(&p)
+        };
+        let (polygon, rect) = (over_white(&flag), over_white(&rect));
+        for u in [[0.0, 0.0], [0.5, 0.0], [0.8, 0.3], [-0.6, -0.7], [0.95, 0.0], [0.0, 0.9]] {
+            let d = unit_to_dir(&flag, u);
+            let (a, b) = (polygon.radiance(d), rect.radiance(d));
+            assert!((a - b).abs().max_elem() < 1.0e-4, "{u:?}: the polygon flag passes {a:?}, the rect flag {b:?}");
+        }
+        // The middle is blacked out; at 0.8 of the way to the edge a hotspot of
+        // 0.5 (exp(-2 r²)) covers e^-1.28 and leaves the rest of what is behind.
+        assert!(polygon.radiance(unit_to_dir(&flag, [0.0, 0.0])).max_elem() < 1.0e-6);
+        let edge = polygon.radiance(unit_to_dir(&flag, [0.8, 0.0]));
+        assert!((edge.x - (1.0 - (-1.28f32).exp())).abs() < 1.0e-3, "{edge:?}");
+    }
+
     #[test]
     fn the_cull_cone_holds_every_lit_direction() {
         let mut light = polygon_light();
@@ -1083,6 +1131,56 @@ mod tests {
             let l = crate::sky::luminance(at(az));
             assert!((l - level).abs() < 1.0e-3 * level, "luminance {l} at {az}, {level} at the start");
         }
+    }
+
+    /// D10 (L:99): End Kelvin works on a named lamp. A lamp has its own colour
+    /// temperature (only the knob LED is built at the light's Kelvin), so, as
+    /// an explicit colour does, it blends from its own colour to the end
+    /// temperature's in linear RGB; and an RGB light that keeps a named source
+    /// under its colour ramps to the end temperature, not to that source.
+    #[test]
+    fn end_kelvin_works_on_a_named_lamp() {
+        let mut lamp = stroke_light(vec![[60.0, 0.0], [120.0, 0.0]]);
+        lamp.source = Some("sodium_low_pressure".to_string());
+        if let Some(stroke) = lamp.stroke.as_mut() {
+            stroke.end_kelvin = Some(9000.0);
+        }
+        let along = |light: &LightParams| {
+            let env = Env::new(&dark_studio(vec![light.clone()]));
+            move |az: f32| env.radiance(dir_from_az_el(az, 0.0))
+        };
+        let at = along(&lamp);
+        let start = light_color(&lamp);
+        let end = light_color(&LightParams { source: None, kelvin: 9000.0, ..lamp.clone() });
+        assert!(start.x > 2.0 * start.y && end.z > end.x, "sodium is orange, 9000 K blue-white: {start:?} {end:?}");
+        // Half a degree inside each end: the ends themselves are hard caps.
+        assert!((at(60.5) - start).length() < 0.02 * start.length(), "{:?} vs {start:?}", at(60.5));
+        assert!((at(119.5) - end).length() < 0.02 * end.length(), "{:?} vs {end:?}", at(119.5));
+        let middle = (start + end) * 0.5;
+        assert!((at(90.0) - middle).length() < 0.01 * middle.length(), "{:?} vs {middle:?}", at(90.0));
+
+        // B12's case: daylight D65 switched to RGB and set to blue, ending at
+        // 2000 K, ends amber, not at the D65 white still kept under the colour.
+        let mut blue = lamp.clone();
+        blue.source = Some("daylight_d65".to_string());
+        blue.rgb = Some([0.0, 0.0, 1.0]);
+        if let Some(stroke) = blue.stroke.as_mut() {
+            stroke.end_kelvin = Some(2000.0);
+        }
+        let amber = light_color(&LightParams { rgb: None, source: None, kelvin: 2000.0, ..blue.clone() });
+        let got = along(&blue)(119.5);
+        assert!((got - amber).length() < 0.02 * amber.length(), "{got:?} vs {amber:?}");
+
+        // The knob LED is built at the Kelvin, so its ramp slides the LED's own
+        // temperature, in mired, as a Kelvin light's does.
+        let mut knob = lamp.clone();
+        knob.source = Some(crate::hdri::spectrum::LED_KNOB.to_string());
+        knob.kelvin = 3000.0;
+        let led_end = light_color(&LightParams { kelvin: 9000.0, ..knob.clone() });
+        let led_middle = light_color(&LightParams { kelvin: 2.0e6 / (1.0e6 / 3000.0 + 1.0e6 / 9000.0), ..knob.clone() });
+        let at = along(&knob);
+        assert!((at(119.5) - led_end).length() < 0.02 * led_end.length(), "{:?} vs {led_end:?}", at(119.5));
+        assert!((at(90.0) - led_middle).length() < 0.01 * led_middle.length(), "{:?} vs {led_middle:?}", at(90.0));
     }
 
     #[test]

@@ -140,15 +140,41 @@ pub fn daylight(kelvin: f32) -> Spectrum {
     })
 }
 
-/// The white a lamp of colour temperature `kelvin` is built to match, and
-/// the CIE's reference illuminant for it: a blackbody below 5000 K, daylight
-/// from there up.
+/// The CIE's reference illuminant for a colour temperature `kelvin`, what
+/// CIE 13.3 renders the test colours under (cri.rs): a blackbody below
+/// 5000 K, daylight from there up.
 pub fn reference_white(kelvin: f32) -> Spectrum {
     if kelvin < 5000.0 {
         planck(kelvin)
     } else {
         daylight(kelvin)
     }
+}
+
+/// Where [`lamp_white`] slides from the blackbody to daylight, kelvin.
+const LAMP_WHITE_SLIDE: (f32, f32) = (4500.0, 5500.0);
+
+/// The white a lamp of colour temperature `kelvin` is built to match: the
+/// reference illuminant, a blackbody below 4500 K and daylight from 5500 K
+/// up, and between the two a mix at equal luminance that slides from one to
+/// the other (a smoothstep). So the knob LED, whose Kelvin is a slider, does
+/// not jump at 5000 K (D10, L:88), where `reference_white` switches by a
+/// duv of about 0.003, and every named lamp (3000, 4000, 5600, 6500 K) keeps
+/// its spectrum bit for bit.
+pub fn lamp_white(kelvin: f32) -> Spectrum {
+    let (lo, hi) = LAMP_WHITE_SLIDE;
+    if kelvin <= lo {
+        return planck(kelvin);
+    }
+    // Written negated so a NaN reads as daylight, as reference_white has it.
+    if !(kelvin < hi) {
+        return daylight(kelvin);
+    }
+    let w = smoothstep(lo, hi, kelvin);
+    let (warm, cool) = (planck(kelvin), daylight(kelvin));
+    // mix_to reads only the chromaticity: each at Y = 1, mixed by weight.
+    let (y_warm, y_cool) = (xyz(&warm)[1], xyz(&cool)[1]);
+    std::array::from_fn(|i| (1.0 - w) * warm[i] / y_warm + w * cool[i] / y_cool)
 }
 
 /// Adds a Gaussian emission band to `s`: `weight` at `centre_nm`, falling
@@ -218,7 +244,8 @@ fn mix_to(emitters: [&Spectrum; 3], target: &Spectrum) -> Spectrum {
 }
 
 /// A phosphor-converted white LED at colour temperature `cct` (held to
-/// 2000..=10000 K), sitting exactly on the white locus.
+/// 2000..=10000 K), sitting exactly on the white it is built to match
+/// ([`lamp_white`]).
 ///
 /// `quality` (0..=1) is the one knob. It moves the green phosphor from 560
 /// to 520 nm and the red one from 600 to 630 nm and widens both, which is
@@ -234,7 +261,7 @@ pub fn led(cct: f32, quality: f32) -> Spectrum {
     add_band(&mut green, 560.0 - 40.0 * q, 32.0 + 12.0 * q, 1.0);
     let mut red = [0.0; SAMPLES];
     add_band(&mut red, 600.0 + 30.0 * q, 30.0 + 26.0 * q, 1.0);
-    mix_to([&pump, &green, &red], &reference_white(cct))
+    mix_to([&pump, &green, &red], &lamp_white(cct))
 }
 
 /// A three-band fluorescent tube at colour temperature `cct` (held to
@@ -259,7 +286,7 @@ pub fn fluorescent_triband(cct: f32) -> Spectrum {
     add_band(&mut red, 628.0, 7.0, 0.3);
     add_band(&mut red, 650.0, 6.0, 0.1);
     add_band(&mut red, 705.0, 6.0, 0.1);
-    mix_to([&blue, &green, &red], &reference_white(cct))
+    mix_to([&blue, &green, &red], &lamp_white(cct))
 }
 
 /// A low-pressure sodium lamp: the D line at 589.3 nm and nothing else.
@@ -411,6 +438,15 @@ pub fn light_source_rgb(light: &LightParams) -> Option<Vec3f> {
     light_source_spectrum(light).map(|s| spectrum_rgb(&s))
 }
 
+/// The named lamp a light's colour comes from when the lamp has a colour
+/// temperature of its own: every source but the knob LED, which is built at
+/// the light's Kelvin. None for a Kelvin light, the knob LED and an unknown
+/// name. A stroke's Kelvin ramp on such a lamp has no temperature to slide
+/// from (D10, L:99). An explicit `rgb` is the caller's business.
+pub fn fixed_source(light: &LightParams) -> Option<&'static Source> {
+    source(light.source.as_deref()?).filter(|row| !matches!(row.kind, SourceKind::LedKnob))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -471,15 +507,15 @@ mod tests {
 
     #[test]
     fn leds_and_tubes_sit_on_the_white_locus() {
-        for (cct, quality) in [(2700.0f32, 0.0f32), (3000.0, 0.52), (4000.0, 1.0), (5600.0, 0.32), (6500.0, 1.0)] {
+        for (cct, quality) in [(2700.0f32, 0.0f32), (3000.0, 0.52), (4000.0, 1.0), (5000.0, 0.52), (5600.0, 0.32), (6500.0, 1.0)] {
             let got = spectrum_rgb(&led(cct, quality));
-            let want = spectrum_rgb(&reference_white(cct));
+            let want = spectrum_rgb(&lamp_white(cct));
             assert!((got - want).abs().max_elem() < 2.0e-3, "LED {cct} K q {quality}: {got:?} vs {want:?}");
             assert!(led(cct, quality).iter().all(|v| v.is_finite() && *v >= 0.0));
         }
         for cct in [3000.0f32, 4000.0, 6500.0] {
             let got = spectrum_rgb(&fluorescent_triband(cct));
-            let want = spectrum_rgb(&reference_white(cct));
+            let want = spectrum_rgb(&lamp_white(cct));
             assert!((got - want).abs().max_elem() < 2.0e-3, "tube {cct} K: {got:?} vs {want:?}");
         }
         // The quality knob changes the spectrum, not the colour: more red past 630 nm.
@@ -488,6 +524,40 @@ mod tests {
         // A tube is spiky: its green line stands far above the band beside it.
         let tube = fluorescent_triband(4000.0);
         assert!(tube[33] > 3.0 * tube[30], "545 nm vs 530 nm: {} vs {}", tube[33], tube[30]);
+    }
+
+    /// D10 (L:88): the knob LED's colour does not jump at 5000 K, where the
+    /// CIE's reference white switches from a blackbody to daylight. Dragged a
+    /// kelvin at a time from 4000 to 6000 K it moves by at most 1e-3 per
+    /// channel per step (the blackbody colours alone move about 2e-4).
+    #[test]
+    fn the_knob_led_has_no_step_at_5000_k() {
+        let colour = |kelvin: f32| {
+            let light = LightParams { source: Some(LED_KNOB.to_string()), kelvin, ..LightParams::default() };
+            light_source_rgb(&light).expect("the knob LED has a colour")
+        };
+        let (mut worst, mut at) = (0.0f32, 0.0f32);
+        let mut last = colour(4000.0);
+        for k in 4001..=6000 {
+            let c = colour(k as f32);
+            let step = (c - last).abs().max_elem();
+            if step > worst {
+                (worst, at) = (step, k as f32);
+            }
+            last = c;
+        }
+        assert!(worst < 1.0e-3, "the LED's colour steps by {worst} at {at} K");
+        // Outside the slide a lamp's white is the CIE's reference, bit for
+        // bit, so every named LED and tube keeps its spectrum; inside it the
+        // white lies between the blackbody and daylight.
+        for kelvin in [1000.0f32, 2000.0, 3000.0, 4000.0, 4500.0, 5500.0, 5600.0, 6500.0, 10000.0] {
+            assert_eq!(lamp_white(kelvin), reference_white(kelvin), "{kelvin} K");
+        }
+        assert_eq!(lamp_white(f32::NAN), reference_white(f32::NAN));
+        let (warm, mid, cool) = (spectrum_rgb(&planck(5000.0)), spectrum_rgb(&lamp_white(5000.0)), spectrum_rgb(&daylight(5000.0)));
+        for (w, m, c) in [(warm.x, mid.x, cool.x), (warm.y, mid.y, cool.y), (warm.z, mid.z, cool.z)] {
+            assert!(m > w.min(c) && m < w.max(c), "5000 K: {mid:?} between {warm:?} and {cool:?}");
+        }
     }
 
     #[test]
