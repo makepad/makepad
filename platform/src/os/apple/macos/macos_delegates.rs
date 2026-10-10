@@ -262,8 +262,8 @@ pub fn define_macos_window_delegate() -> *const Class {
     }
 
     extern "C" fn window_did_resize(this: &Object, _: Sel, _: ObjcId) {
-        let _cw = get_cocoa_window(this);
-        //cw.send_change_event();
+        let cw = get_cocoa_window(this);
+        cw.handle_titlebar_relayout();
     }
 
     extern "C" fn window_will_start_live_resize(this: &Object, _: Sel, _: ObjcId) {
@@ -290,6 +290,7 @@ pub fn define_macos_window_delegate() -> *const Class {
     // This will always be called before `window_did_change_screen`.
     extern "C" fn window_did_change_backing_properties(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
+        cw.position_window_buttons();
         cw.send_change_event();
     }
 
@@ -303,6 +304,7 @@ pub fn define_macos_window_delegate() -> *const Class {
             }
         });
         let cw = get_cocoa_window(this);
+        cw.handle_titlebar_relayout();
         cw.send_got_focus_event();
     }
 
@@ -316,6 +318,7 @@ pub fn define_macos_window_delegate() -> *const Class {
             }
         });
         let cw = get_cocoa_window(this);
+        cw.handle_titlebar_relayout();
         cw.send_lost_focus_event();
     }
 
@@ -366,17 +369,35 @@ pub fn define_macos_window_delegate() -> *const Class {
     extern "C" fn window_will_exit_fullscreen(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
         cw.is_fullscreen = false;
+        cw.is_exiting_fullscreen = true;
+        // AppKit keeps the traffic lights in its own spot until it's done animating,
+        // so we hide them until we can move them for the zoomed UI.
+        if cw.get_window_buttons_zoom() > 1.0 {
+            cw.set_titlebar_visible(false);
+        }
         cw.send_change_event();
     }
 
     extern "C" fn window_did_exit_fullscreen(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
+        cw.is_exiting_fullscreen = false;
+        cw.position_window_buttons();
+        cw.set_titlebar_visible(true);
         cw.send_change_event();
     }
 
     extern "C" fn window_did_fail_to_enter_fullscreen(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
         cw.is_fullscreen = false;
+        cw.position_window_buttons();
+        cw.send_change_event();
+    }
+
+    extern "C" fn window_did_fail_to_exit_fullscreen(this: &Object, _: Sel, _: ObjcId) {
+        let cw = get_cocoa_window(this);
+        cw.is_fullscreen = true;
+        cw.is_exiting_fullscreen = false;
+        cw.set_titlebar_visible(true);
         cw.send_change_event();
     }
 
@@ -477,6 +498,10 @@ pub fn define_macos_window_delegate() -> *const Class {
         decl.add_method(
             sel!(windowDidFailToEnterFullScreen:),
             window_did_fail_to_enter_fullscreen as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(windowDidFailToExitFullScreen:),
+            window_did_fail_to_exit_fullscreen as extern "C" fn(&Object, Sel, ObjcId),
         );
         // custom timer fn
         //decl.add_method(sel!(windowReceivedTimer:), window_received_timer as extern fn(&Object, Sel, id));
@@ -974,6 +999,14 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_change_event();
     }
 
+    // Switching between light and dark mode re-lays out the titlebar.
+    extern "C" fn view_did_change_effective_appearance(this: &Object, _: Sel) {
+        unsafe {
+            let () = msg_send![super(this, superclass(this)), viewDidChangeEffectiveAppearance];
+        }
+        get_cocoa_window(this).handle_titlebar_relayout();
+    }
+
     extern "C" fn dragging_session_ended_at_point_operation(
         this: &Object,
         _: Sel,
@@ -1321,6 +1354,10 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(
             sel!(displayLayer:),
             display_layer as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(viewDidChangeEffectiveAppearance),
+            view_did_change_effective_appearance as extern "C" fn(&Object, Sel),
         );
 
         #[cfg(target_os = "macos")]

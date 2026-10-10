@@ -13,7 +13,7 @@ use {
                 VideoSeekableRangesEvent, VideoTextureUpdatedEvent, VideoYuvTexturesReady,
             },
             Event, GameInputEventChannel, MouseButton, MouseUpEvent, QuitReason, VideoSource,
-            WindowGeom,
+            WindowGeom, WindowGeomChangeEvent,
         },
         makepad_live_id::*,
         makepad_math::*,
@@ -42,7 +42,7 @@ use {
         shared_framebuf::PollTimers,
         texture::{Texture, TextureFormat},
         thread::SignalToUI,
-        window::{CxWindowPool, MacosWindowConfig, WindowId},
+        window::{CxWindow, CxWindowPool, MacosWindowConfig, WindowId},
         PlaybackPrepared,
     },
     makepad_objc_sys::{msg_send, objc_block, sel, sel_impl},
@@ -1335,29 +1335,8 @@ impl Cx {
                     window.stop_resize();
                 }
             }
-            MacosEvent::WindowGeomChange(mut re) => {
-                // do this here because mac
-                if let Some(window) = metal_windows
-                    .iter_mut()
-                    .find(|w| w.window_id == re.window_id)
-                {
-                    {
-                        let cx_window = &mut self.windows[re.window_id];
-                        cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
-                        re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
-                    }
-                    window.window_geom = re.new_geom.clone();
-                    self.windows[re.window_id].window_geom = re.new_geom.clone();
-
-                    // redraw just this windows root draw list
-                    if re.old_geom.dpi_factor != re.new_geom.dpi_factor
-                        || re.old_geom.inner_size != re.new_geom.inner_size
-                    {
-                        if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                            self.redraw_pass_and_child_passes(main_pass_id);
-                        }
-                    }
-                }
+            MacosEvent::WindowGeomChange(re) => {
+                let re = self.update_window_geom(metal_windows, re);
                 // ok lets not redraw all, just this window
                 self.call_event_handler(&Event::WindowGeomChange(re));
             }
@@ -1789,6 +1768,39 @@ impl Cx {
         self.start_external_drag_now(metal_windows, window_id, items);
     }
 
+    fn update_window_geom(
+        &mut self,
+        metal_windows: &mut [MetalWindow],
+        mut re: WindowGeomChangeEvent,
+    ) -> WindowGeomChangeEvent {
+        // do this here because mac
+        if let Some(window) = metal_windows
+            .iter_mut()
+            .find(|w| w.window_id == re.window_id)
+        {
+            // Platform calls may have moved the traffic lights since this geometry was taken.
+            re.new_geom.window_chrome_buttons =
+                window.cocoa_window.traffic_lights_geom().unwrap_or_default();
+            {
+                let cx_window = &mut self.windows[re.window_id];
+                cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
+                re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
+            }
+            window.window_geom = re.new_geom.clone();
+            self.windows[re.window_id].window_geom = re.new_geom.clone();
+
+            // redraw just this windows root draw list
+            if re.old_geom.dpi_factor != re.new_geom.dpi_factor
+                || re.old_geom.inner_size != re.new_geom.inner_size
+            {
+                if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                    self.redraw_pass_and_child_passes(main_pass_id);
+                }
+            }
+        }
+        re
+    }
+
     fn handle_platform_ops(
         &mut self,
         metal_windows: &mut Vec<MetalWindow>,
@@ -1810,6 +1822,9 @@ impl Cx {
                     );
                     let visuals = window.window_visuals();
                     metal_window.cocoa_window.set_window_visuals(visuals);
+                    metal_window
+                        .cocoa_window
+                        .set_dpi_override(window.dpi_override.and_then(CxWindow::valid_dpi_factor));
                     let layer_opaque = if visuals.transparent { NO } else { YES };
                     let layer_alpha = if visuals.transparent { 0.0 } else { 1.0 };
                     let () = unsafe { msg_send![metal_window.ca_layer, setOpaque: layer_opaque] };
@@ -1946,6 +1961,23 @@ impl Cx {
                         metal_windows.iter_mut().find(|w| w.window_id == window_id)
                     {
                         metal_window.cocoa_window.set_title(&title);
+                    }
+                }
+                CxOsOp::SetWindowDpiOverride(window_id, dpi_override) => {
+                    let geom_change = metal_windows
+                        .iter_mut()
+                        .find(|w| w.window_id == window_id)
+                        .and_then(|metal_window| {
+                            let cocoa_window = &mut metal_window.cocoa_window;
+                            cocoa_window
+                                .set_dpi_override(dpi_override)
+                                .then(|| cocoa_window.take_window_geom_change())
+                        });
+                    // We queue the moved traffic lights behind any older geometry changes,
+                    // which all get reported once these platform calls are done.
+                    if let Some(geom_change) = geom_change {
+                        let geom_change = self.update_window_geom(metal_windows, geom_change);
+                        self.pending_window_geom_changes.push(geom_change);
                     }
                 }
                 CxOsOp::SetWindowVisuals(window_id, visuals) => {
@@ -2387,6 +2419,9 @@ impl Cx {
                 }
             }
         }
+        // Some of the above (like moving the traffic lights) change a window's geometry,
+        // so we report that before handling whatever event comes next.
+        self.handle_pending_window_geom_changes();
         EventFlow::Poll
     }
 
