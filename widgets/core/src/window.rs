@@ -14,6 +14,7 @@ use crate::{
     view::*,
     widget::*,
 };
+use unicode_segmentation::UnicodeSegmentation;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -454,6 +455,9 @@ pub struct Window {
     /// lookup and `set_text` when the title is unchanged.
     #[rust]
     last_synced_title: Option<String>,
+    /// How an `Overlay` caption label's title was last laid out.
+    #[rust]
+    caption_title_layout: Option<CaptionTitleLayout>,
     #[deref]
     view: View,
 
@@ -574,6 +578,26 @@ const CROSSFADE_SETTLE: u32 = 3;
 pub struct DrawSsaaResolve {
     #[deref]
     draw_super: DrawQuad,
+}
+
+/// The space between an `Overlay` caption label's title and anything else in the caption bar.
+const CAPTION_TITLE_SPACING: f64 = 6.0;
+
+/// How an `Overlay` caption label's title was last laid out, so we only redo that after something changes.
+#[derive(Clone, Debug, PartialEq)]
+struct CaptionTitleLayout {
+    /// The whole title, before any ellipsizing.
+    full_title: String,
+    /// The whole title's width, which changes along with the label's font.
+    full_title_width: f64,
+    /// The caption label's rect.
+    caption_label_rect: Rect,
+    /// The left and right edges of the gap that the title goes in.
+    gap: (f64, f64),
+    /// The title as shown, which is ellipsized if the whole one didn't fit.
+    shown_title: String,
+    /// The title label's left and right margins that put the shown title in place.
+    margins: (f64, f64),
 }
 
 /// Full-window supersampling (SSAA) factor: renders the whole UI at NxN device pixels and
@@ -1024,9 +1048,11 @@ impl Window {
         let mut rects = Vec::new();
         let stock_bar = |id: LiveId| matches!(id, id!(caption_label) | id!(voice_wave) | id!(windows_buttons) | id!(web_fullscreen));
         let stock_label = |id: LiveId| matches!(id, id!(caption_icon) | id!(label));
-        for (path, stock) in [(ids!(caption_bar), &stock_bar as &dyn Fn(LiveId) -> bool), (ids!(caption_label), &stock_label)] {
-            let view = self.view(cx, path);
-            let children: Vec<WidgetRef> = match view.borrow() {
+        // Both are direct children, which are much cheaper to get than searching the widget tree.
+        let caption_bar = self.view.child(id!(caption_bar));
+        let caption_label = caption_bar.child(id!(caption_label));
+        for (view, stock) in [(&caption_bar, &stock_bar as &dyn Fn(LiveId) -> bool), (&caption_label, &stock_label)] {
+            let children: Vec<WidgetRef> = match view.borrow::<View>() {
                 Some(view) => view.children.iter().filter(|(id, _)| !stock(*id)).map(|(_, c)| c.clone()).collect(),
                 None => continue,
             };
@@ -1054,13 +1080,138 @@ impl Window {
     /// centered in the full caption bar width when there's enough room.
     /// When the window is too narrow, the padding gracefully reduces to 0,
     /// transitioning to a left-aligned title.
+    /// An `Overlay` caption label's title instead stays clear of everything else in the bar,
+    /// and gets ellipsized if there isn't enough room for it.
     fn sync_caption_centering(&mut self, cx: &mut Cx) {
+        // This runs on every draw, so we get the caption bar's parts as the direct children that they are,
+        // which is much cheaper than searching the widget tree for each one.
+        let caption_bar = self.view.child(id!(caption_bar));
+        let caption_label = caption_bar.child(id!(caption_label));
+        // An Overlay caption label lays out its title apart from the app's controls, so we still center that title.
+        let overlay_align_x = caption_label.borrow::<View>()
+            .and_then(|view| (view.layout.flow == Flow::Overlay).then_some(view.layout.align.x));
+        if let Some(align_x) = overlay_align_x {
+            let bar_area = caption_bar.area();
+            let bar = bar_area.rect(cx);
+            let caption_label_rect = caption_label.area().rect(cx);
+            if bar.size.x <= 0.0 || caption_label_rect.size.x <= 0.0 {
+                return; // No area info yet (first frame)
+            }
+            // The title goes in the widest gap between everything else in the bar.
+            let mut obstacles = self.caption_app_rects(cx);
+            let windows_buttons = caption_bar.child(id!(windows_buttons));
+            for widget in [caption_bar.child(id!(voice_wave)), windows_buttons.clone(), caption_bar.child(id!(web_fullscreen))] {
+                if widget.visible() {
+                    obstacles.push(widget.area().rect(cx));
+                }
+            }
+            // The OS's own window buttons (e.g., macOS's traffic lights), unless those are the ones we draw.
+            if !windows_buttons.visible() {
+                obstacles.push(cx.windows[self.window.window_id()].window_geom.window_chrome_buttons);
+            }
+            let bar_right = bar.pos.x + bar.size.x;
+            let mut spans: Vec<(f64, f64)> = obstacles.iter()
+                .filter(|rect| rect.size.y > 0.0)
+                .map(|rect| (rect.pos.x.max(bar.pos.x), (rect.pos.x + rect.size.x).min(bar_right)))
+                .filter(|(start, end)| start < end)
+                .collect();
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let (mut left, mut right, mut gap_start) = (bar.pos.x, bar.pos.x, bar.pos.x);
+            for (start, end) in spans.into_iter().chain([(bar_right, bar_right)]) {
+                if start - gap_start > right - left {
+                    (left, right) = (gap_start, start);
+                }
+                gap_start = gap_start.max(end);
+            }
+            let (left, right) = (left + CAPTION_TITLE_SPACING, right - CAPTION_TITLE_SPACING);
+            let center = bar.pos.x + bar.size.x / 2.0;
+
+            let label = caption_label.child(id!(label));
+            let Some(mut inner) = label.borrow_mut::<Label>() else { return };
+            let label_text = inner.text();
+            let full_title = match self.last_synced_title.as_deref() {
+                Some(title) if !title.is_empty() => title.to_string(),
+                // Without a window title, the label's own text is the title, unless it's still the one we showed.
+                _ => match &self.caption_title_layout {
+                    Some(layout) if layout.shown_title == label_text => layout.full_title.clone(),
+                    _ => label_text.clone(),
+                },
+            };
+            // Measuring is cached by the text layout, so this is cheap enough to do on every draw.
+            let measure = |inner: &Label, cx: &mut Cx, text: &str| {
+                inner.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), text)
+                    .size_in_lpxs.width as f64 * inner.draw_text.font_scale as f64
+            };
+            let full_title_width = measure(&inner, cx, &full_title);
+            let is_laid_out = self.caption_title_layout.as_ref().is_some_and(|layout| {
+                layout.full_title == full_title
+                    && layout.full_title_width == full_title_width
+                    && layout.caption_label_rect == caption_label_rect
+                    && layout.gap == (left, right)
+            });
+            if !is_laid_out {
+                let available = (right - left).max(0.0);
+                let mut shown_title = full_title.clone();
+                let mut title_width = full_title_width;
+                if title_width > available {
+                    // Without enough room, we show the longest start of the title that fits with an ellipsis,
+                    // cut between graphemes so that we don't split up an emoji or an accented letter.
+                    let cuts: Vec<usize> = full_title.grapheme_indices(true).map(|(i, _)| i).collect();
+                    let truncated = |count: usize| format!("{}…", full_title[..cuts[count]].trim_end());
+                    let (mut low, mut high) = (0, cuts.len());
+                    while low < high {
+                        let mid = (low + high) / 2;
+                        if measure(&inner, cx, &truncated(mid)) <= available {
+                            low = mid + 1;
+                        } else {
+                            high = mid;
+                        }
+                    }
+                    // A label draws an empty text as a space anyway, so we show one directly,
+                    // which keeps the label's text the same as the title we showed.
+                    shown_title = if low == 0 { " ".to_string() } else { truncated(low - 1) };
+                    title_width = measure(&inner, cx, &shown_title);
+                }
+                let title_left = (center - title_width / 2.0).clamp(left, (right - title_width).max(left));
+                // A label's margins apply to its box and again to its text inside it,
+                // so we solve for the margins that put the title at `title_left` in this aligned overlay.
+                let shift = title_left - caption_label_rect.pos.x - align_x * (caption_label_rect.size.x - title_width);
+                let margins = match shift >= 0.0 {
+                    true if align_x < 1.0 => (shift / (2.0 * (1.0 - align_x)), 0.0),
+                    false if align_x > 0.0 => (0.0, -shift / (2.0 * align_x)),
+                    _ => (0.0, 0.0),
+                };
+                self.caption_title_layout = Some(CaptionTitleLayout {
+                    full_title,
+                    full_title_width,
+                    caption_label_rect,
+                    gap: (left, right),
+                    shown_title,
+                    margins,
+                });
+            }
+            // Something else can change the label in between, e.g., `set_title()` or a script reapply.
+            let Some(layout) = &self.caption_title_layout else { return };
+            if label_text != layout.shown_title
+                || (inner.walk.margin.left, inner.walk.margin.right) != layout.margins
+                || inner.walk.width != Size::fit()
+            {
+                inner.walk.width = Size::fit();
+                (inner.walk.margin.left, inner.walk.margin.right) = layout.margins;
+                inner.set_text(cx, &layout.shown_title);
+                // We're in the middle of drawing, which a plain redraw would ignore,
+                // so this draws the title in its new place on the next frame.
+                cx.redraw_area_in_draw(bar_area);
+            }
+            return;
+        }
         // App toolbars own their layout, including padding supplied by a theme.
         if self.caption_contains_app_content(cx) {
             return;
         }
-        let bar_width = self.view(cx, ids!(caption_bar)).area().rect(cx).size.x;
-        let buttons = self.view(cx, ids!(windows_buttons));
+        let bar_area = caption_bar.area();
+        let bar_width = bar_area.rect(cx).size.x;
+        let buttons = caption_bar.child(id!(windows_buttons));
         let buttons_width = if buttons.visible() { buttons.area().rect(cx).size.x } else { 0.0 };
 
         if bar_width <= 0.0 {
@@ -1074,16 +1225,12 @@ impl Window {
         // shifts left to maximize the available text space.
         let padding_left = buttons_width.min((fill_width - buttons_width).max(0.0));
 
-        let caption_label = self.view(cx, ids!(caption_label));
-        if let Some(mut inner) = caption_label.borrow_mut() {
-            // Redraw when the padding actually changes; nothing else re-lays-out
-            // the caption label now that the title sync skips unchanged titles.
-            if (inner.layout.padding.left - padding_left).abs() > 0.1 {
-                inner.layout.padding.left = padding_left;
-                inner.redraw(cx);
-            }
+        let Some(mut inner) = caption_label.borrow_mut::<View>() else { return };
+        // Redraw when the padding actually changes, on the next frame, as we're in the middle of drawing.
+        if (inner.layout.padding.left - padding_left).abs() > 0.1 {
+            inner.layout.padding.left = padding_left;
+            cx.redraw_area_in_draw(bar_area);
         }
-        drop(caption_label);
     }
 
     fn sync_caption_title(&mut self, cx: &mut Cx) {
@@ -1163,7 +1310,6 @@ impl Window {
         self.sync_caption_bar_state(cx);
         self.sync_caption_bar_height(cx);
         self.sync_caption_title(cx);
-        self.sync_caption_centering(cx);
         self.sync_system_bar_appearance(cx);
 
         if self.initialized {
@@ -1284,6 +1430,8 @@ impl Window {
     }
 
     pub fn end(&mut self, cx: &mut Cx2d) {
+        // Now that the caption bar's contents are drawn, we know where the title has room to go.
+        self.sync_caption_centering(cx);
         //while self.frame.draw_widget_continue(cx).is_not_done() {}
         //self.debug_view.draw(cx);
 
@@ -2183,7 +2331,11 @@ impl Widget for Window {
                             dq.response.set(WindowDragQueryResponse::Client);
                             cx.set_cursor(MouseCursor::Default);
                         }
-                        WindowDragQueryResponse::Caption if caption_is_clients || over_app_control => {
+                        // A control that the app put in the caption bar sets its own cursor when hovered.
+                        WindowDragQueryResponse::Caption if over_app_control => {
+                            dq.response.set(WindowDragQueryResponse::Client);
+                        }
+                        WindowDragQueryResponse::Caption if caption_is_clients => {
                             dq.response.set(WindowDragQueryResponse::Client);
                             cx.set_cursor(MouseCursor::Default);
                         }
