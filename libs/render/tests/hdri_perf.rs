@@ -16,7 +16,7 @@
 
 use makepad_draw::*;
 use makepad_render::hdri::presets::{preset, PRESET_NAMES};
-use makepad_render::hdri::{Env, HdriParams, VolumetricParams};
+use makepad_render::hdri::{Env, HdriParams, ImageSet, VolumetricParams};
 use makepad_render_material::ibl::{self, EnvMap};
 use std::time::Instant;
 
@@ -229,4 +229,126 @@ fn a_volumetric_sky_bakes_4096_under_60_s() {
         // (assert!, not assert_ne!: a failure must not print two whole maps.)
         assert!(small.map != timed_bake(pool, &flat_params, 512).map, "the volume is not the 2D deck");
     });
+}
+
+/// A picture as big as a light's picture is kept (`MAX_LIGHT_IMAGE_SIDE`,
+/// 2048), of soft blotches with a cut-out corner, so a gobo of it masks
+/// part of its light and its summed-area table is as large as one gets.
+fn gobo_picture() -> EnvMap {
+    let side = makepad_render::hdri::image_light::MAX_LIGHT_IMAGE_SIDE;
+    let data = (0..side * side)
+        .map(|i| {
+            let (x, y) = ((i % side) as f32 / side as f32, (i / side) as f32 / side as f32);
+            let v = 0.5 + 0.5 * ((x * 23.0).sin() * (y * 17.0).cos());
+            [v, v, v, if x + y < 0.3 { 0.0 } else { 1.0 }]
+        })
+        .collect();
+    EnvMap { width: side, height: side, data }
+}
+
+/// D15's heavy set-up: a studio whose key has a honeycomb grid, barn doors,
+/// a worn face and an image gobo off its face that it casts onto the
+/// backdrop, and four fills, each with an image gobo of the same picture at
+/// its own distance, one of them worn and one showing the picture as its
+/// content. `key_azimuth` is what the drag moves.
+fn heavy_studio(key_azimuth: f32) -> HdriParams {
+    use makepad_render::hdri::{AimParams, GoboParams, ImperfectionParams, LightImageParams, LightParams};
+    let gobo = |distance: f32| GoboParams { kind: "image".to_string(), image: "gobo.png".to_string(), distance, ..GoboParams::default() };
+    let worn = ImperfectionParams { wrinkle: 0.5, dust: 0.5, weave: 0.5, seed: 7 };
+    let mut p = HdriParams::default();
+    p.mode = "studio".to_string();
+    p.lights.push(LightParams {
+        key: true,
+        azimuth_deg: key_azimuth,
+        elevation_deg: 35.0,
+        width_deg: 40.0,
+        height_deg: 30.0,
+        aim: Some(AimParams { yaw_deg: 20.0, pitch_deg: 0.0, grid: 0.6, barn_doors: [30.0, 0.0, 20.0, 0.0] }),
+        gobo: Some(GoboParams { project_on_backdrop: true, ..gobo(0.5) }),
+        imperfections: Some(worn.clone()),
+        ..LightParams::default()
+    });
+    for (i, distance) in [0.2f32, 0.35, 0.5, 0.8].into_iter().enumerate() {
+        p.lights.push(LightParams {
+            azimuth_deg: 120.0 + 60.0 * i as f32,
+            elevation_deg: 15.0 + 5.0 * i as f32,
+            width_deg: 50.0,
+            height_deg: 35.0,
+            intensity_ev: 1.0,
+            gobo: Some(gobo(distance)),
+            imperfections: if i == 1 { Some(worn.clone()) } else { None },
+            image: if i == 2 { Some(LightImageParams { key: "gobo.png".to_string(), ..LightImageParams::default() }) } else { None },
+            ..LightParams::default()
+        });
+    }
+    p
+}
+
+/// D15 (M5, M6): a held drag on a heavy set-up stays fast. While a slider is
+/// held the app bakes 512 x 256 previews back to back, each a fresh
+/// `Env::new_with` and a row-parallel bake (`jobs::run_preview_bake`), and
+/// never asks for the key. Here the key's azimuth is dragged over twenty
+/// ticks after one untimed tick (the first build of the set-up's pictures'
+/// tables, as when they load); each tick's whole job is timed, and its
+/// median must be within the 512 preview budget.
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn a_held_drag_on_a_heavy_studio_stays_fast() {
+    let budget = budget_ms(50.0);
+    let mut images = ImageSet::default();
+    images.insert("gobo.png", gobo_picture());
+    with_pool(|pool| {
+        let tick = |azimuth: f32| {
+            let params = heavy_studio(azimuth);
+            let start = Instant::now();
+            let env = Env::new_with(&params, &images);
+            let env_ms = start.elapsed().as_secs_f64() * 1000.0;
+            let map = env.bake_par(512, |n, f| pool.fan_out(Lane::Heavy, n, f));
+            Timing { total_ms: start.elapsed().as_secs_f64() * 1000.0, env_ms, map }
+        };
+        let first = tick(30.0);
+        check_map(&first.map, 512, "heavy studio");
+        println!("hdri_perf: held drag, first tick {:7.1} ms (Env::new_with {:6.1} ms)", first.total_ms, first.env_ms);
+        let (mut totals, mut env_times) = (Vec::new(), Vec::new());
+        for step in 1..=20 {
+            let t = tick(30.0 + 0.5 * step as f32);
+            check_map(&t.map, 512, "heavy studio");
+            totals.push(t.total_ms);
+            env_times.push(t.env_ms);
+        }
+        let slowest = totals.iter().cloned().fold(0.0, f64::max);
+        let ms = median(totals);
+        println!(
+            "hdri_perf: held drag of a heavy studio, 512x256: median {ms:7.1} ms (Env::new_with {:6.1} ms), slowest {slowest:7.1} ms, budget {budget:.0} ms",
+            median(env_times)
+        );
+        assert!(ms < budget, "a held tick of the heavy studio took {ms:.1} ms, over {budget:.0} ms");
+    });
+}
+
+/// D15 (L:229): the first build of a seed's cloud noise, about 2 s of
+/// `Env::new_with` in release, stops soon after a newer request cancels the
+/// job: the app's released bake of a new seed is stopped by the next drag
+/// tick, and held a worker for the whole build before. The build polls
+/// before each slice of its noise tiles; here the poll turns true 200 ms in,
+/// and the build must be gone within 50 ms of that.
+#[test]
+#[ignore = "release timing; see the module comment"]
+fn a_cancelled_first_cloud_noise_build_stops_at_once() {
+    let mut params = cloudy_sky();
+    // A seed no other test in this binary bakes: its noise is built here.
+    params.seed = 0x4837_0d15;
+    params.sky.volumetric = Some(VolumetricParams::default());
+    let start = Instant::now();
+    let cancel_at = 0.2;
+    let cancelled = || start.elapsed().as_secs_f64() > cancel_at;
+    let env = Env::new_cancellable(&params, &ImageSet::default(), &cancelled);
+    let late_ms = (start.elapsed().as_secs_f64() - cancel_at) * 1000.0;
+    assert!(env.is_none(), "the build ran to its end ({late_ms:.0} ms after the cancel)");
+    println!("hdri_perf: the first cloud noise build stopped {late_ms:5.1} ms after its cancel");
+    assert!(late_ms < 50.0, "it stopped {late_ms:.0} ms after the cancel");
+    // Not cancelled, the same map builds whole (and keeps its noise).
+    let start = Instant::now();
+    assert!(Env::new_cancellable(&params, &ImageSet::default(), &|| false).is_some());
+    println!("hdri_perf: the same seed built whole in {:6.1} ms", start.elapsed().as_secs_f64() * 1000.0);
 }

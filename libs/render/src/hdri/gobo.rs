@@ -20,10 +20,12 @@
 //! the same share of its light as it moves away, to within a few per cent
 //! where blurred shades overlap.
 //! An image mask (B8) is box-filtered too, exactly, through a summed-area
-//! table of what its texels pass.
+//! table of what its texels pass, one per picture, shared by every light and
+//! map that shows it (D15).
 
 use super::*;
 use super::foliage::Foliage;
+use super::image_light::PictureMemo;
 use super::light_fx::face_axes;
 use std::sync::Arc;
 
@@ -105,7 +107,8 @@ enum ImageMask {
     /// Against the light: the picture itself, shared with the app's
     /// ImageSet and read bilinearly (`image_mask`).
     Sharp(Arc<EnvMap>),
-    /// Further off: the summed-area table that box-filters it.
+    /// Further off: the summed-area table that box-filters it, one per
+    /// picture (`PassTable::shared`).
     Soft(Arc<PassTable>),
 }
 
@@ -128,7 +131,7 @@ impl Gobo {
         let image = match picture {
             Some(img) if soft <= SHARP_SOFT => Some(ImageMask::Sharp(img)),
             // A picture without texels masks nothing (as `image_mask` reads it).
-            Some(img) => PassTable::new(&img).map(|table| ImageMask::Soft(Arc::new(table))),
+            Some(img) => PassTable::shared(&img).map(ImageMask::Soft),
             None => None,
         };
         let foliage = match kind {
@@ -294,10 +297,12 @@ fn image_mask(img: &EnvMap, b: Vec2f) -> f32 {
 
 /// Prefix sums of what an image mask's texels pass (`texel_passes`): entry
 /// (x, y) of the (width + 1) x (height + 1) table sums the texels left of
-/// column x and above row y. Built once per gobo that hangs off its light,
-/// it gives the exact mean of the mask over a box of any size from sixteen
-/// reads. In f64: a 2048 x 2048 mask sums to four million, where f32 would
-/// already lose a texel's own fractions.
+/// column x and above row y. It gives the exact mean of the mask over a box
+/// of any size from sixteen reads. In f64: a 2048 x 2048 mask sums to four
+/// million, where f32 would already lose a texel's own fractions. That is
+/// 33.6 MB and about 64 ms in release (L:174), so a picture has one table,
+/// built for the first gobo that hangs off its light and shared by every
+/// other light, cast and `Env` that shows it (`shared`, D15).
 #[derive(Debug)]
 struct PassTable {
     width: usize,
@@ -305,13 +310,31 @@ struct PassTable {
     sums: Vec<f64>,
 }
 
+/// The table of every live gobo picture (`image_light::PictureMemo`).
+static TABLES: PictureMemo<PassTable> = PictureMemo::new();
+
+/// Drops the table of every picture whose last `Arc` is gone
+/// (`composite::drop_dead_facts` calls this).
+pub(super) fn drop_dead_tables() {
+    TABLES.drop_dead();
+}
+
 impl PassTable {
-    /// None for a picture without texels.
-    fn new(img: &EnvMap) -> Option<PassTable> {
+    /// The table of `img`, built on the first call for the picture and
+    /// shared from then on. None for a picture without texels.
+    fn shared(img: &Arc<EnvMap>) -> Option<Arc<PassTable>> {
         let (w, h) = (img.width, img.height);
         if w == 0 || h == 0 || img.data.len() != w * h {
             return None;
         }
+        Some(TABLES.get(img, PassTable::build))
+    }
+
+    /// The table of a picture with texels (`shared` checks that it has).
+    fn build(img: &EnvMap) -> PassTable {
+        #[cfg(test)]
+        crate::hdri::probe::count(crate::hdri::probe::Work::PassTable);
+        let (w, h) = (img.width, img.height);
         let stride = w + 1;
         let mut sums = vec![0.0f64; stride * (h + 1)];
         for (y, texels) in img.data.chunks_exact(w).enumerate() {
@@ -323,7 +346,7 @@ impl PassTable {
                 *out = up + row;
             }
         }
-        Some(PassTable { width: w, height: h, sums })
+        PassTable { width: w, height: h, sums }
     }
 
     /// The mask integrated over 0..x by 0..y, in texels (texel (i, j) covers
@@ -840,6 +863,60 @@ mod tests {
         let g = image_gobo(&mask_set(2, 1, |x, _| if x == 0 { 5.0 } else { 0.0 }, |_, _| 1.0), 0.0);
         let mid = g.transmission(vec2f(0.0, 0.0));
         assert!((mid - 0.5).abs() < 1.0e-6, "{mid}");
+    }
+
+    /// D15 (M6): a picture's summed-area table is built once and shared. Two
+    /// lights showing the same picture as their gobo (of different sizes, at
+    /// different distances), the backdrop it is cast onto, and every later
+    /// `Env` (a held drag's bakes) read one table: at 2048 x 2048 one is
+    /// 33.6 MB and takes about 64 ms in release (L:174), and the review
+    /// measured 16 lights sharing one 2048 picture at 1076 ms and about 570 MB
+    /// per `Env`. Another picture with the same texels has its own, and a
+    /// table goes with its picture's last `Arc`.
+    #[test]
+    fn two_lights_with_the_same_picture_share_one_table() {
+        use crate::hdri::probe::{counted, Work};
+        let texels = |x: usize, y: usize| ((x * 7 + y * 3) % 5) as f32 / 4.0;
+        let images = mask_set(64, 32, texels, |_, _| 1.0);
+        let gobo = |distance: f32, cast: bool| GoboParams {
+            kind: "image".to_string(),
+            image: "mask".to_string(),
+            distance,
+            project_on_backdrop: cast,
+            ..GoboParams::default()
+        };
+        let lit = |azimuth_deg: f32, width_deg: f32, g: GoboParams| LightParams {
+            azimuth_deg,
+            elevation_deg: 30.0,
+            width_deg,
+            height_deg: 30.0,
+            gobo: Some(g),
+            ..LightParams::default()
+        };
+        let params = studio(vec![lit(60.0, 40.0, gobo(0.5, true)), lit(200.0, 20.0, gobo(0.9, false))]);
+        let before = counted(Work::PassTable);
+        let env = Env::new_with(&params, &images);
+        assert!(env.backdrop_gobo.is_some(), "the first light casts its gobo");
+        assert_eq!(counted(Work::PassTable), before + 1, "two lights and the cast share one table");
+        // A held drag builds its Env again for every bake.
+        let mut dragged = params.clone();
+        dragged.lights[0].azimuth_deg = 61.0;
+        let dragged = Env::new_with(&dragged, &images);
+        assert_eq!(counted(Work::PassTable), before + 1, "a later Env reads the same table");
+        drop((env, dragged));
+        let table = |g: Gobo| match g.image {
+            Some(ImageMask::Soft(table)) => table,
+            _ => panic!("a soft image gobo"),
+        };
+        let (a, b) = (table(image_gobo(&images, 0.5)), table(image_gobo(&images, 1.0)));
+        assert!(Arc::ptr_eq(&a, &b), "one table, whatever the distance");
+        let twin = table(image_gobo(&mask_set(64, 32, texels, |_, _| 1.0), 0.5));
+        assert!(!Arc::ptr_eq(&a, &twin), "another picture is another table");
+        assert_eq!(counted(Work::PassTable), before + 2);
+        let kept = Arc::downgrade(&a);
+        drop((a, b, images));
+        crate::hdri::composite::drop_dead_facts();
+        assert!(kept.upgrade().is_none(), "a freed picture's table is freed with it");
     }
 
     #[test]

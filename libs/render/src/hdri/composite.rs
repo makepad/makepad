@@ -34,8 +34,9 @@
 
 use makepad_render_material::ibl::EnvMap;
 use super::*;
+use super::image_light::PictureMemo;
 use crate::sky::luminance;
-use std::sync::{Arc, Mutex, Weak};
+use std::sync::Arc;
 
 /// The base layer is metered on a bake this wide (64 x 32) for the exposure
 /// match: `Env` bakes its own base at this size and `irradiance_above` reads it.
@@ -88,43 +89,27 @@ impl ImageFacts {
     }
 }
 
-/// One entry per live image, found by the address of its allocation. A dead
-/// `Weak` still holds that allocation, so an address is never reused while its
-/// entry is here; dead entries are dropped whenever a new one is added.
-static FACTS: Mutex<Vec<(Weak<EnvMap>, Arc<ImageFacts>)>> = Mutex::new(Vec::new());
+/// The facts of every live image (`image_light::PictureMemo`).
+static FACTS: PictureMemo<ImageFacts> = PictureMemo::new();
 
 /// The facts of one image: its sun, the sun-free patch and the meter copy.
 /// Worked out on the first call (it reads every texel) and kept while the
 /// image's `Arc` lives, so later `Env::new_with` calls with the same image
 /// cost a lookup. Call it once off the UI thread after loading an image.
 pub fn image_facts(map: &Arc<EnvMap>) -> Arc<ImageFacts> {
-    let address = Arc::as_ptr(map);
-    if let Ok(memo) = FACTS.lock() {
-        if let Some((_, facts)) = memo.iter().find(|(image, _)| image.as_ptr() == address) {
-            return facts.clone();
-        }
-    }
-    // Measured outside the lock: other images' lookups do not wait for it.
-    let facts = Arc::new(ImageFacts::measure(map));
-    if let Ok(mut memo) = FACTS.lock() {
-        memo.retain(|(image, _)| image.strong_count() > 0);
-        // Two threads may have measured the same image; the first one's facts stay.
-        if let Some((_, first)) = memo.iter().find(|(image, _)| image.as_ptr() == address) {
-            return first.clone();
-        }
-        memo.push((Arc::downgrade(map), facts.clone()));
-    }
-    facts
+    FACTS.get(map, ImageFacts::measure)
 }
 
-/// Drops the facts of every image whose last `Arc` is gone. `image_facts`
-/// does so whenever it adds an entry; a host that frees an image (the app's
-/// base images, the plan owner's D4) calls this, so the image's facts go with
-/// it, not at the next image's first bake.
+/// Drops what is kept of every picture whose last `Arc` is gone: a base
+/// image's facts, a gobo picture's summed-area table and a light picture's
+/// mean (`image_light::PictureMemo`). Each memo does so whenever it adds an
+/// entry; a host that frees a picture (the app's base images, the plan
+/// owner's D4) calls this, so what is kept of it goes with it, not at the
+/// next picture's first bake. A gobo's table of a 2048 picture is 33.6 MB.
 pub fn drop_dead_facts() {
-    if let Ok(mut memo) = FACTS.lock() {
-        memo.retain(|(image, _)| image.strong_count() > 0);
-    }
+    FACTS.drop_dead();
+    super::gobo::drop_dead_tables();
+    super::image_light::drop_dead_means();
 }
 
 /// The luminance a level surface receives from the rows of `map` more than

@@ -170,37 +170,56 @@ struct NoiseVolume {
 }
 
 impl NoiseVolume {
-    fn build(seed: u32, size: usize) -> NoiseVolume {
+    /// The two volumes of `seed`, `size` texels along the shape's edge.
+    /// `cancelled` is polled before each slice of either tile (D15): this is
+    /// about 2.1 s in a release build, the slowest part of building a
+    /// volumetric map, and a newer request must be able to stop it.
+    fn build(seed: u32, size: usize, cancelled: &dyn Fn() -> bool) -> Result<NoiseVolume, Cancelled> {
         let size = size.max(4);
         // One stream per lattice, so no two share their hashes.
         let stream = |k: u32| seed.wrapping_mul(16).wrapping_add(k);
         let perlin = [PerlinTile::new(4, stream(0)), PerlinTile::new(8, stream(1)), PerlinTile::new(16, stream(2))];
         let worley = [WorleyTile::new(4, stream(3)), WorleyTile::new(8, stream(4)), WorleyTile::new(16, stream(5))];
-        let shape = fill_tile(size, |x, y, z| {
-            let billows = (perlin[0].at(x, y, z) + 0.5 * perlin[1].at(x, y, z) + 0.25 * perlin[2].at(x, y, z)) / 1.75;
-            let soft = (0.5 + 0.8 * billows).clamp(0.0, 1.0);
-            let round = worley[0].at(x, y, z);
-            let cut = 0.65 * worley[1].at(x, y, z) + 0.35 * worley[2].at(x, y, z);
-            // Perlin dilated by Worley (round tops), then cut by the finer
-            // Worley fbm: remap(dilated, cut - 1, 1, 0, 1).
-            let dilated = round + soft * (1.0 - round);
-            (dilated + 1.0 - cut) / (2.0 - cut)
-        });
+        let shape = fill_tile(
+            size,
+            |x, y, z| {
+                let billows = (perlin[0].at(x, y, z) + 0.5 * perlin[1].at(x, y, z) + 0.25 * perlin[2].at(x, y, z)) / 1.75;
+                let soft = (0.5 + 0.8 * billows).clamp(0.0, 1.0);
+                let round = worley[0].at(x, y, z);
+                let cut = 0.65 * worley[1].at(x, y, z) + 0.35 * worley[2].at(x, y, z);
+                // Perlin dilated by Worley (round tops), then cut by the finer
+                // Worley fbm: remap(dilated, cut - 1, 1, 0, 1).
+                let dilated = round + soft * (1.0 - round);
+                (dilated + 1.0 - cut) / (2.0 - cut)
+            },
+            cancelled,
+        )?;
         let fine = [WorleyTile::new(6, stream(6)), WorleyTile::new(12, stream(7)), WorleyTile::new(24, stream(8))];
-        let detail = fill_tile((size / 2).max(2), |x, y, z| {
-            0.625 * fine[0].at(x, y, z) + 0.25 * fine[1].at(x, y, z) + 0.125 * fine[2].at(x, y, z)
-        });
-        NoiseVolume { shape, detail }
+        let detail = fill_tile(
+            (size / 2).max(2),
+            |x, y, z| 0.625 * fine[0].at(x, y, z) + 0.25 * fine[1].at(x, y, z) + 0.125 * fine[2].at(x, y, z),
+            cancelled,
+        )?;
+        Ok(NoiseVolume { shape, detail })
     }
 }
+
+/// A build of the cloud volume that its caller stopped (`VolumetricClouds::build`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Cancelled;
 
 /// Evaluates `f` at every texel centre of a size^3 tile (coordinates 0..1)
 /// and stores it stretched between its own 2nd and 98th percentiles, so the
 /// bytes use their whole range whatever the noise's own statistics are.
-fn fill_tile(size: usize, f: impl Fn(f32, f32, f32) -> f32) -> Tile3 {
+/// `cancelled` is polled before each of its `size` slices; the first poll
+/// that says so stops it.
+fn fill_tile(size: usize, f: impl Fn(f32, f32, f32) -> f32, cancelled: &dyn Fn() -> bool) -> Result<Tile3, Cancelled> {
     let step = 1.0 / size as f32;
     let mut values = Vec::with_capacity(size * size * size);
     for k in 0..size {
+        if cancelled() {
+            return Err(Cancelled);
+        }
         let z = (k as f32 + 0.5) * step;
         for j in 0..size {
             let y = (j as f32 + 0.5) * step;
@@ -233,7 +252,7 @@ fn fill_tile(size: usize, f: impl Fn(f32, f32, f32) -> f32) -> Tile3 {
     };
     let (lo, hi) = (quantile(0.02), quantile(0.98));
     let data = values.iter().map(|&v| (remap01(v, lo, hi) * 255.0 + 0.5) as u8).collect();
-    Tile3 { size, data }
+    Ok(Tile3 { size, data })
 }
 
 /// Index of lattice point (x, y, z) in a period^3 table, wrapping.
@@ -350,30 +369,34 @@ impl WorleyTile {
     }
 }
 
-/// The noise of the seeds used last. Building one takes about a second in a
-/// release build, and every `Env::new_with` of a volumetric sky needs it.
+/// The noise of the seeds used last. Building one takes about two seconds in
+/// a release build (2.2 s on this PC), and every `Env::new_with` of a
+/// volumetric sky needs it.
 static NOISE: Mutex<Vec<(u32, Arc<NoiseVolume>)>> = Mutex::new(Vec::new());
 
-/// The noise volumes for `seed`: built on first use, then shared.
-fn noise_for(seed: u32) -> Arc<NoiseVolume> {
+/// The noise volumes for `seed`: built on first use, then shared. The first
+/// build polls `cancelled` (`NoiseVolume::build`); a build it stops keeps
+/// nothing, so the next one of the seed starts again. A seed already built
+/// has nothing left to stop.
+fn noise_for(seed: u32, cancelled: &dyn Fn() -> bool) -> Result<Arc<NoiseVolume>, Cancelled> {
     if let Ok(cache) = NOISE.lock() {
         if let Some((_, volume)) = cache.iter().find(|(kept, _)| *kept == seed) {
-            return volume.clone();
+            return Ok(volume.clone());
         }
     }
     // Built outside the lock, so another seed's lookup does not wait for it.
-    let volume = Arc::new(NoiseVolume::build(seed, SHAPE_SIZE));
+    let volume = Arc::new(NoiseVolume::build(seed, SHAPE_SIZE, cancelled)?);
     if let Ok(mut cache) = NOISE.lock() {
         // Two threads may have built the same seed; the first one's stays.
         if let Some((_, first)) = cache.iter().find(|(kept, _)| *kept == seed) {
-            return first.clone();
+            return Ok(first.clone());
         }
         if cache.len() >= NOISE_KEEP {
             cache.remove(0);
         }
         cache.push((seed, volume.clone()));
     }
-    volume
+    Ok(volume)
 }
 
 /// A cloud volume, ready to march. Immutable after `new` apart from the light
@@ -413,20 +436,31 @@ impl VolumetricClouds {
     /// `clouds` places the footprint (coverage, sharpness, scale); `vol` says
     /// how the volume stands on it.
     pub fn new(clouds: &CloudParams, vol: &VolumetricParams, seed: u32, sun_dir: Vec3f) -> Option<VolumetricClouds> {
+        // Nothing cancels it.
+        VolumetricClouds::build(clouds, vol, seed, sun_dir, &|| false).unwrap_or(None)
+    }
+
+    /// [`Self::new`], stopped when `cancelled` says so while it builds the
+    /// seed's noise, the first time a seed is used (about 2.1 s in release,
+    /// L:229; D15): `Err(Cancelled)`. A volume that was not stopped is
+    /// `new`'s, and a seed already built has nothing to stop.
+    pub fn build(clouds: &CloudParams, vol: &VolumetricParams, seed: u32, sun_dir: Vec3f, cancelled: &dyn Fn() -> bool) -> Result<Option<VolumetricClouds>, Cancelled> {
         let density = finite_or(vol.density, 1.0).clamp(0.0, 4.0);
         if density <= 0.0 {
-            return None;
+            return Ok(None);
         }
         // The deck without its cirrus: None when there is no coverage, and
         // then there is no volume either.
-        let deck = CloudLayer::new(&CloudParams { cirrus: 0.0, ..clouds.clone() }, seed, sun_dir)?;
+        let Some(deck) = CloudLayer::new(&CloudParams { cirrus: 0.0, ..clouds.clone() }, seed, sun_dir) else {
+            return Ok(None);
+        };
         let sun = sun_dir.normalize();
         let sun = if sun.is_finite() && sun.length() > 0.5 { sun } else { vec3f(0.0, 1.0, 0.0) };
         let base = finite_or(vol.base_m, 1500.0).clamp(200.0, 8000.0);
         let top = finite_or(vol.top_m, base + 2500.0).clamp(base + 200.0, 12_000.0);
         let scale = finite_or(clouds.scale, 1.0).clamp(0.1, 10.0);
-        Some(VolumetricClouds {
-            noise: noise_for(seed),
+        Ok(Some(VolumetricClouds {
+            noise: noise_for(seed, cancelled)?,
             cell_m: deck.cell_m(),
             deck,
             sun_dir: sun,
@@ -441,7 +475,7 @@ impl VolumetricClouds {
             detail_scale: 1.0 / (DETAIL_TILE_M * scale),
             light: (0..LIGHT_XZ).map(|_| OnceLock::new()).collect(),
             seed,
-        })
+        }))
     }
 
     /// Marches the volume along `dir`. Nothing at and below the horizon.
@@ -855,11 +889,11 @@ mod tests {
 
     #[test]
     fn the_noise_tiles_spans_its_range_and_follows_its_seed() {
-        let a = NoiseVolume::build(3, 16);
-        let b = NoiseVolume::build(3, 16);
+        let a = NoiseVolume::build(3, 16, &|| false).unwrap();
+        let b = NoiseVolume::build(3, 16, &|| false).unwrap();
         assert_eq!(a.shape.data, b.shape.data, "the same seed builds the same bytes");
         assert_eq!(a.detail.data, b.detail.data);
-        assert_ne!(a.shape.data, NoiseVolume::build(4, 16).shape.data);
+        assert_ne!(a.shape.data, NoiseVolume::build(4, 16, &|| false).unwrap().shape.data);
         assert_eq!((a.shape.size, a.detail.size), (16, 8));
         for tile in [&a.shape, &a.detail] {
             let mean = tile.data.iter().map(|&v| v as f32).sum::<f32>() / tile.data.len() as f32 / 255.0;
@@ -875,6 +909,41 @@ mod tests {
             assert!((here - a.shape.sample(x + 1.0, y - 2.0, z + 3.0)).abs() < 1.0e-3);
         }
         assert!((a.shape.sample(0.9999, 0.3, 0.3) - a.shape.sample(0.0001, 0.3, 0.3)).abs() < 0.02);
+    }
+
+    /// D15 (L:229): the first build of a seed's noise (about 2.1 s in
+    /// release, inside `Env::new_with`, which the app's jobs checked their
+    /// token only after) stops when its caller cancels: it polls before each
+    /// slice of its two tiles and gives up at the first poll that says so.
+    /// It keeps nothing, so the next build of the seed builds it whole, the
+    /// same bytes as a build nothing stopped. A volume with nothing to march
+    /// builds no noise, so it has nothing to stop. (Seeds no other test uses:
+    /// the kept noise is shared by every thread.)
+    #[test]
+    fn the_first_noise_build_stops_when_cancelled() {
+        use std::cell::Cell;
+        let seed = 0x4837_0229;
+        let polls = Cell::new(0usize);
+        let at_the_third = || {
+            polls.set(polls.get() + 1);
+            polls.get() >= 3
+        };
+        assert_eq!(noise_for(seed, &at_the_third).err(), Some(Cancelled));
+        assert_eq!(polls.get(), 3, "it stops at the first poll that says so");
+        let whole = Cell::new(0usize);
+        let never = || {
+            whole.set(whole.get() + 1);
+            false
+        };
+        let noise = noise_for(seed, &never).expect("nothing stopped it");
+        assert_eq!(whole.get(), SHAPE_SIZE + SHAPE_SIZE / 2, "nothing was kept: one poll per slice of both tiles");
+        let unstopped = NoiseVolume::build(seed, SHAPE_SIZE, &|| false).unwrap();
+        assert_eq!((&noise.shape.data, &noise.detail.data), (&unstopped.shape.data, &unstopped.detail.data));
+        // The volume itself.
+        let fresh = seed + 1;
+        assert_eq!(VolumetricClouds::build(&cover(0.6), &quick(), fresh, sun(), &|| true).err(), Some(Cancelled));
+        assert!(matches!(VolumetricClouds::build(&cover(0.0), &quick(), fresh, sun(), &|| true), Ok(None)), "no cover: no noise to stop");
+        assert!(matches!(VolumetricClouds::build(&cover(0.6), &quick(), fresh, sun(), &|| false), Ok(Some(_))));
     }
 
     #[test]
@@ -1136,7 +1205,7 @@ mod tests {
     #[ignore = "timing: run with --release -- --ignored --nocapture"]
     fn building_and_marching_are_fast_enough() {
         let start = std::time::Instant::now();
-        let noise = NoiseVolume::build(7, SHAPE_SIZE);
+        let noise = NoiseVolume::build(7, SHAPE_SIZE, &|| false).unwrap();
         let build_ms = start.elapsed().as_secs_f64() * 1000.0;
         assert_eq!(noise.shape.size, SHAPE_SIZE);
         let clouds = VolumetricClouds::new(&cover(0.6), &VolumetricParams::default(), 7, sun()).unwrap();

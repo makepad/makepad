@@ -67,7 +67,7 @@ pub use image_light::ImageSet;
 // hdri::bake_env_map, load_env_map, detect_sun, remove_sun, as the spec names them.
 pub use envmap::*;
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// The strongest radiance a bake writes: far above any real sun, but finite,
@@ -150,6 +150,10 @@ pub struct Env {
     /// covers the sky, and 1 where it is not measured (Studio mode, a fair sky
     /// with no clouds, an image that is the whole base).
     ground_gain: Vec3f,
+    /// The key ([`Self::key`]), measured on the engine's first ask and kept
+    /// (D15, M5): the app's preview bakes never ask, and a held drag paid the
+    /// key's integrals on every bake.
+    measured_key: OnceLock<Option<(KeyTerm, EnvSun)>>,
 }
 
 /// What one bake hands each of its lookups: the cloud march it reads, when it
@@ -180,6 +184,19 @@ impl Env {
     /// the pictures the params name by key (image lights); a key that is not
     /// in it draws the plain light. Still pure: no file is opened here.
     pub fn new_with(params: &HdriParams, images: &ImageSet) -> Env {
+        // Nothing cancels it, so it is always built.
+        Env::new_cancellable(params, images, &|| false).expect("an Env nothing cancels is built")
+    }
+
+    /// [`Self::new_with`] for a job a newer request can overtake (the app's
+    /// preview and export): the slow part of building a map, the first build
+    /// of a seed's cloud volume noise (about 2.1 s in release, L:229), polls
+    /// `cancelled` and stops when it says so, and the map is then None (D15).
+    /// The noise is not kept, so the next build of that seed starts it again.
+    /// A map that was not stopped is `new_with`'s, bit for bit; a map with
+    /// nothing slow to build (no volume, or a seed already built) is built
+    /// whatever `cancelled` says, and the caller checks its token after.
+    pub fn new_cancellable(params: &HdriParams, images: &ImageSet, cancelled: &dyn Fn() -> bool) -> Option<Env> {
         let mut params = params.clone();
         params.clamp();
         let scale = 2.0f32.powf(params.intensity_ev);
@@ -206,10 +223,10 @@ impl Env {
                 // the 2D one. The tick chooses the mode (D8): a volume of no
                 // density draws no clouds, and the flat deck does not come back.
                 if !whole_base {
-                    volumetric = sky
-                        .volumetric
-                        .as_ref()
-                        .and_then(|vol| volumetric::VolumetricClouds::new(&sky.clouds, vol, params.seed, atmo.sun_dir()));
+                    volumetric = match sky.volumetric.as_ref() {
+                        Some(vol) => volumetric::VolumetricClouds::build(&sky.clouds, vol, params.seed, atmo.sun_dir(), cancelled).ok()?,
+                        None => None,
+                    };
                 }
                 let clouds = if sky.volumetric.is_some() {
                     clouds::CloudLayer::new(&CloudParams { coverage: 0.0, ..sky.clouds.clone() }, params.seed, atmo.sun_dir())
@@ -248,7 +265,7 @@ impl Env {
             outside.rotation_deg = 0.0;
             // The window looks out at the generated sky, not at a base image.
             outside.base_image = None;
-            Some(Box::new(Env::new_with(&outside, images)))
+            Some(Box::new(Env::new_cancellable(&outside, images, cancelled)?))
         } else {
             None
         };
@@ -270,6 +287,7 @@ impl Env {
             dome: Vec3f::default(),
             ground_gain: Vec3f::all(1.0),
             base_image: None,
+            measured_key: OnceLock::new(),
         };
         // The weather's veil and the ground are lit by the dome as this map
         // draws it, so the dome is measured once its layers are in place (and
@@ -289,25 +307,9 @@ impl Env {
             let sky_irradiance = if base.replace_sky { Some(env.base_irradiance()) } else { None };
             env.base_image = composite::BaseImage::new(&base, images, sky_irradiance);
         }
-        // A window filled with sky as the key carries the sky it lets in
-        // (D1), so it is measured once that sky is in place: the base in Sky
-        // mode, the lightless copy behind a studio, with its discs (map frame)
-        // and the lines thinner than its samples (a storm's bolt), which it
-        // samples finely where they run, reading the bolt as a bake of fine
-        // texels draws it (the bake's own channel, `weather::CHANNEL_FOOTPRINT`).
-        if env.studio.key_waits_for_sky() {
-            let hot: Vec<(Vec3f, f32)> = env
-                .hot_spots()
-                .into_iter()
-                .map(|(dir, radius)| (rotate_y(dir, -env.params.rotation_deg), radius))
-                .collect();
-            let fine_texels = Sampling { cache: None, texel: weather::CHANNEL_FOOTPRINT };
-            let sky = |d: Vec3f| env.window_sky_at(d, env.base_at(d, None, fine_texels), fine_texels);
-            let fine = |d: Vec3f, radius: f32| env.window_sky_step_near(d, radius);
-            let key = env.studio.measured_window_key(&sky, &hot, &fine);
-            env.studio.set_window_key(key);
-        }
-        env
+        // The key is not measured here: the engine's first `sun` does that,
+        // once (D15).
+        Some(env)
     }
 
     pub fn params(&self) -> &HdriParams {
@@ -632,15 +634,25 @@ impl Env {
     /// sky the quarter hour alone would step up to 25.5 % at the equator and
     /// 30 % at 35 S; on the halved grid the largest step is 8.2 % at 52 N and
     /// at most 15.9 % from 70 N to 45 S, and the sandbox's env_map tests pin it.
+    ///
+    /// The key is measured from the map's drawing on the first call (a key with
+    /// a grid, a picture or a window takes tens of milliseconds), and later calls
+    /// and [`Self::bake_keyless_par`] read that one key (D15, M5): a host that
+    /// never asks, as the app's preview bakes do not, never pays for it.
     pub fn sun(&self) -> Option<EnvSun> {
         self.key().map(|(_, key)| key)
     }
 
-    /// [`Self::sun`] with the term of the map it is: the choice is made here
-    /// once, so the key the engine lights with and the light a lookup without
-    /// it leaves out are always the same one.
+    /// [`Self::sun`] with the term of the map it is: the choice is made once,
+    /// on the first call (`measure_key`), so the key the engine lights with and
+    /// the light a lookup without it leaves out are always the same one.
     fn key(&self) -> Option<(KeyTerm, EnvSun)> {
-        if let Some(key) = self.studio.key() {
+        *self.measured_key.get_or_init(|| self.measure_key())
+    }
+
+    /// The choice and the measurement behind [`Self::key`].
+    fn measure_key(&self) -> Option<(KeyTerm, EnvSun)> {
+        if let Some(key) = self.studio_key() {
             return Some((KeyTerm::Light, self.key_to_world(key)));
         }
         // An image that is the whole base brings its own sun, or none: the
@@ -703,6 +715,28 @@ impl Env {
         Some((KeyTerm::Moon(arrived), self.key_to_world(EnvSun { radiance, ..moon })))
     }
 
+    /// The studio's key light in the map's own frame, as the map draws it
+    /// (D1, `Studio::key`). A window filled with sky as the key carries the
+    /// sky it lets in, so it is measured here, against that sky: the base in
+    /// Sky mode, the lightless copy behind a studio, with its discs (map
+    /// frame) and the lines thinner than its samples (a storm's bolt), which
+    /// it samples finely where they run, reading the bolt as a bake of fine
+    /// texels draws it (the bake's own channel, `weather::CHANNEL_FOOTPRINT`).
+    fn studio_key(&self) -> Option<EnvSun> {
+        if !self.studio.key_is_window() {
+            return self.studio.key();
+        }
+        let hot: Vec<(Vec3f, f32)> = self
+            .hot_spots()
+            .into_iter()
+            .map(|(dir, radius)| (rotate_y(dir, -self.params.rotation_deg), radius))
+            .collect();
+        let fine_texels = Sampling { cache: None, texel: weather::CHANNEL_FOOTPRINT };
+        let sky = |d: Vec3f| self.window_sky_at(d, self.base_at(d, None, fine_texels), fine_texels);
+        let fine = |d: Vec3f, radius: f32| self.window_sky_step_near(d, radius);
+        self.studio.measured_window_key(&sky, &hot, &fine)
+    }
+
     /// What stands in front of a disc in the map leaves of it, per channel
     /// (D1): the lights drawn over the sky (flags and gels, a scrim's cloth, a
     /// window's glass at its own exposure) and, under sky replacement, the
@@ -722,6 +756,8 @@ impl Env {
         if !self.studio.has_lights() && replaced.is_none() {
             return Vec3f::all(1.0);
         }
+        #[cfg(test)]
+        probe::count(probe::Work::Key);
         let through = |d: Vec3f, v: Vec3f| {
             let base = match replaced {
                 Some(image) => image.compose(d, v),
@@ -1179,6 +1215,44 @@ fn refine_hot_spots(map: &mut EnvMap, radiance: &dyn Fn(Vec3f) -> Vec3f, hot: &[
     }
 }
 
+/// Test probes (the plan owner's D15): how often this thread did each piece
+/// of the slow work a held drag must not repeat, so a test can say a piece
+/// ran once, or not at all. Per thread, so tests running side by side do not
+/// see each other's work; an `Env` is built and a serial bake runs on the
+/// calling thread.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::Cell;
+
+    /// The pieces counted.
+    #[derive(Clone, Copy, Debug)]
+    pub(crate) enum Work {
+        /// A key measured from the map's drawing: `Studio::measured_key`,
+        /// `Studio::measured_window_key`, `Env::disc_share`.
+        Key,
+        /// A gobo picture's summed-area table built (`gobo::PassTable::build`).
+        PassTable,
+        /// A light picture's texels walked for its mean (`image_light::PictureMeans`).
+        PictureMean,
+        /// A worn face's normaliser sampled (`Imperfections::mean_raw`).
+        WearNorm,
+    }
+
+    thread_local! {
+        static COUNTS: [Cell<usize>; 4] = const { [const { Cell::new(0) }; 4] };
+    }
+
+    /// One more of `work` on this thread.
+    pub(crate) fn count(work: Work) {
+        COUNTS.with(|counts| counts[work as usize].set(counts[work as usize].get() + 1));
+    }
+
+    /// How many of `work` this thread has done.
+    pub(crate) fn counted(work: Work) -> usize {
+        COUNTS.with(|counts| counts[work as usize].get())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1348,6 +1422,91 @@ mod tests {
         fn shareable<T: Send + Sync>() {}
         shareable::<Env>();
         shareable::<EnvSun>();
+    }
+
+    /// D15 (M5): the key is measured only when the engine asks for it. The
+    /// app's preview bakes never call `sun`, and a held drag of a gridded key
+    /// paid 50 ms and more per bake for a key nobody read (the review: 85 to
+    /// 90 ms held bakes of a key with fern, grid, doors and wear, against 9 to
+    /// 10 ms with the key off). Each kind of key that takes a measurement: a
+    /// studio key with everything hanging in front of it, a window filled
+    /// with sky as the key, and a sun with a gel in front of its disc. A bake
+    /// of either kind measures nothing; the first `sun` measures the key, and
+    /// later calls and the keyless copy read that same key.
+    #[test]
+    fn the_key_is_measured_only_when_the_engine_asks_for_it() {
+        use probe::{counted, Work};
+        let serial = |n: usize, f: &(dyn Fn(usize) + Sync)| (0..n).for_each(f);
+        let studio = |light: LightParams| HdriParams { mode: "studio".to_string(), lights: vec![light], ..HdriParams::default() };
+        let gridded = LightParams {
+            key: true,
+            azimuth_deg: 30.0,
+            elevation_deg: 35.0,
+            width_deg: 40.0,
+            height_deg: 30.0,
+            aim: Some(AimParams { yaw_deg: 20.0, pitch_deg: 0.0, grid: 0.6, barn_doors: [30.0, 0.0, 20.0, 0.0] }),
+            gobo: Some(GoboParams { kind: "fern".to_string(), distance: 0.3, ..GoboParams::default() }),
+            imperfections: Some(ImperfectionParams { wrinkle: 0.5, dust: 0.5, weave: 0.5, seed: 7 }),
+            ..LightParams::default()
+        };
+        let window = LightParams {
+            key: true,
+            azimuth_deg: 0.0,
+            elevation_deg: 20.0,
+            width_deg: 40.0,
+            height_deg: 30.0,
+            gobo: Some(GoboParams { fill_sky: true, ..GoboParams::default() }),
+            ..LightParams::default()
+        };
+        let mut gelled_sun = sun_at(30.0);
+        gelled_sun.lights.push(LightParams {
+            azimuth_deg: 200.0,
+            elevation_deg: 30.0,
+            width_deg: 10.0,
+            height_deg: 10.0,
+            blend: "multiply".to_string(),
+            rgb: Some([0.3, 0.5, 1.0]),
+            ..LightParams::default()
+        });
+        for (name, params) in [("a gridded key", studio(gridded)), ("a window as the key", studio(window)), ("a gelled sun", gelled_sun)] {
+            let before = counted(Work::Key);
+            let env = Env::new(&params);
+            let map = env.bake(32);
+            assert_eq!(env.bake_par(32, serial), map);
+            assert_eq!(counted(Work::Key), before, "{name}: a bake that never asks for the key measured it");
+            let key = env.sun().expect("a key");
+            let measured = counted(Work::Key);
+            assert!(measured > before, "{name}: the first sun() measures the key");
+            assert_eq!(env.sun(), Some(key), "{name}");
+            assert!(env.bake_keyless_par(&map, serial).is_some(), "{name}");
+            assert_eq!(counted(Work::Key), measured, "{name}: the key is measured once");
+        }
+    }
+
+    /// D15 (L:229): a map whose build a newer request cancels stops in the
+    /// first build of its seed's cloud noise and is None, in Sky mode and
+    /// behind a studio's window filled with sky alike (its sky is a nested
+    /// map of the same seed); one that is not cancelled is `new_with`'s, to
+    /// the bit. A map with nothing slow to stop is built whatever the poll
+    /// says. (Seeds no other test uses: the kept noise is shared.)
+    #[test]
+    fn a_cancelled_map_stops_in_its_first_cloud_noise() {
+        let images = ImageSet::default();
+        let volumetric = |seed: u32| {
+            let mut p = HdriParams { seed, ..HdriParams::default() };
+            p.sky.clouds.coverage = 0.6;
+            p.sky.volumetric = Some(VolumetricParams { steps: 16, ..VolumetricParams::default() });
+            p
+        };
+        let sky = volumetric(0x4837_0230);
+        assert!(Env::new_cancellable(&sky, &images, &|| true).is_none(), "cancelled in the noise");
+        let built = Env::new_cancellable(&sky, &images, &|| false).expect("not cancelled");
+        assert_eq!(built.bake(16), Env::new(&sky).bake(16));
+        let mut studio = volumetric(0x4837_0231);
+        studio.mode = "studio".to_string();
+        studio.lights.push(LightParams { gobo: Some(GoboParams { fill_sky: true, ..GoboParams::default() }), ..LightParams::default() });
+        assert!(Env::new_cancellable(&studio, &images, &|| true).is_none(), "cancelled in the window's sky");
+        assert!(Env::new_cancellable(&HdriParams::default(), &images, &|| true).is_some(), "nothing slow to stop");
     }
 
     #[test]

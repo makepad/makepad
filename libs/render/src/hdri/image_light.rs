@@ -21,7 +21,7 @@
 use makepad_draw::*;
 use makepad_render_material::ibl::EnvMap;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 use super::studio::light_frame;
 use super::{HdriParams, ImageFit, LightImageParams};
 
@@ -58,6 +58,54 @@ impl ImageSet {
         let mut keys: Vec<String> = self.images.keys().cloned().collect();
         keys.sort();
         keys
+    }
+}
+
+/// What is worked out once per loaded picture and kept while it lives: one
+/// entry per live picture, found by the address of its allocation, shared by
+/// every light, gobo and `Env` that shows the picture. `Env::new_with` runs
+/// per preview bake, so nothing may read every texel of a large picture each
+/// time (D15): a base image's facts (`composite::image_facts`), a gobo's
+/// summed-area table, a light picture's mean. A dead `Weak` still holds its
+/// allocation, so an address is never reused while its entry is here; dead
+/// entries are dropped whenever a new one is added, and by
+/// `composite::drop_dead_facts`, which a host that frees a picture calls.
+pub(crate) struct PictureMemo<T> {
+    entries: Mutex<Vec<(Weak<EnvMap>, Arc<T>)>>,
+}
+
+impl<T> PictureMemo<T> {
+    pub(crate) const fn new() -> PictureMemo<T> {
+        PictureMemo { entries: Mutex::new(Vec::new()) }
+    }
+
+    /// What is kept for `map`, made by `make` on the first call and shared
+    /// from then on. Made outside the lock, so other pictures' lookups do not
+    /// wait for it; two threads may make the same picture's at once, and the
+    /// first one's stays.
+    pub(crate) fn get(&self, map: &Arc<EnvMap>, make: impl FnOnce(&EnvMap) -> T) -> Arc<T> {
+        let address = Arc::as_ptr(map);
+        if let Ok(entries) = self.entries.lock() {
+            if let Some((_, kept)) = entries.iter().find(|(picture, _)| picture.as_ptr() == address) {
+                return kept.clone();
+            }
+        }
+        let made = Arc::new(make(map));
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.retain(|(picture, _)| picture.strong_count() > 0);
+            if let Some((_, first)) = entries.iter().find(|(picture, _)| picture.as_ptr() == address) {
+                return first.clone();
+            }
+            entries.push((Arc::downgrade(map), made.clone()));
+        }
+        made
+    }
+
+    /// Drops what is kept for every picture whose last `Arc` is gone.
+    pub(crate) fn drop_dead(&self) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.retain(|(picture, _)| picture.strong_count() > 0);
+        }
     }
 }
 
@@ -130,6 +178,45 @@ pub fn shrink_to(map: EnvMap, max_side: usize) -> EnvMap {
     EnvMap { width, height, data }
 }
 
+/// A light picture's mean luminance, which normalises it: over the whole
+/// picture, and over its visible part (weighted by alpha) for a light whose
+/// alpha masks it. Both from one walk over its texels, made once per picture
+/// and shared by every light and `Env` that shows it (D15, L:112: up to four
+/// million texels, serially, before a bake's rows fan out). 0 for a picture
+/// with nothing to weigh.
+struct PictureMeans {
+    whole: f64,
+    visible: f64,
+}
+
+/// The means of every live light picture (`PictureMemo`).
+static MEANS: PictureMemo<PictureMeans> = PictureMemo::new();
+
+/// Drops the means of every picture whose last `Arc` is gone
+/// (`composite::drop_dead_facts` calls this).
+pub(super) fn drop_dead_means() {
+    MEANS.drop_dead();
+}
+
+impl PictureMeans {
+    fn walk(map: &EnvMap) -> PictureMeans {
+        #[cfg(test)]
+        super::probe::count(super::probe::Work::PictureMean);
+        let (mut sum, mut count) = (0.0f64, 0.0f64);
+        let (mut visible, mut weight) = (0.0f64, 0.0f64);
+        for t in &map.data {
+            let alpha = if t[3].is_finite() { t[3].clamp(0.0, 1.0) as f64 } else { 0.0 };
+            let luminance = texel_luminance(t) as f64;
+            sum += luminance;
+            count += 1.0;
+            visible += luminance * alpha;
+            weight += alpha;
+        }
+        let mean = |sum: f64, weight: f64| if weight > 0.0 { sum / weight } else { 0.0 };
+        PictureMeans { whole: mean(sum, count), visible: mean(visible, weight) }
+    }
+}
+
 /// One light's picture, ready to sample.
 #[derive(Clone, Debug)]
 pub struct LightImage {
@@ -159,19 +246,8 @@ impl LightImage {
             return None;
         }
         let mask = params.alpha_as_mask;
-        let (mut sum, mut weight) = (0.0f64, 0.0f64);
-        for t in &map.data {
-            let w = if !mask {
-                1.0
-            } else if t[3].is_finite() {
-                t[3].clamp(0.0, 1.0) as f64
-            } else {
-                0.0
-            };
-            sum += texel_luminance(t) as f64 * w;
-            weight += w;
-        }
-        let mean = if weight > 0.0 { sum / weight } else { 0.0 };
+        let means = MEANS.get(&map, PictureMeans::walk);
+        let mean = if mask { means.visible } else { means.whole };
         Some(LightImage {
             fit: params.fit(),
             mask,
@@ -316,6 +392,46 @@ mod tests {
         let hx = (0.5 * light.width_deg).to_radians().tan();
         let hy = (0.5 * light.height_deg).to_radians().tan();
         (f.center + f.right * (sx * (2.0 * u - 1.0) * hx) + f.up * ((1.0 - 2.0 * v) * hy)).normalize()
+    }
+
+    /// D15 (L:112): a picture's mean is walked once, not by every light and
+    /// every `Env` that shows it (a 2048 x 2048 picture is four million
+    /// texels, walked serially before the rows fan out). Two lights showing
+    /// the same picture, one masked by its alpha, and a held drag's next
+    /// `Env` walk its texels once; each light's gain is still 1 over its own
+    /// mean (the whole picture's, or its visible part's), to the bit.
+    #[test]
+    fn a_pictures_mean_is_walked_once_for_every_light_and_env() {
+        use crate::hdri::probe::{counted, Work};
+        let map = picture(8, 4, |x, y| [0.1 + 0.2 * x as f32, 0.3 * y as f32, 1.0, if x < 3 { 0.0 } else { 1.0 }]);
+        let images = set_of("lamp", map.clone());
+        let plain = image_light("lamp");
+        let masked = LightParams {
+            azimuth_deg: 200.0,
+            image: Some(LightImageParams { key: "lamp".to_string(), alpha_as_mask: true, ..LightImageParams::default() }),
+            ..image_light("lamp")
+        };
+        let mut params = dark_studio(vec![plain.clone(), masked.clone()]);
+        let before = counted(Work::PictureMean);
+        let _ = Env::new_with(&params, &images);
+        params.lights[0].azimuth_deg = 91.0;
+        let _ = Env::new_with(&params, &images);
+        assert_eq!(counted(Work::PictureMean), before + 1, "two lights and two maps walk the picture once");
+        // The means, as the light worked them out before they were kept.
+        let mean = |mask: bool| {
+            let (mut sum, mut weight) = (0.0f64, 0.0f64);
+            for t in &map.data {
+                let w = if mask { t[3] as f64 } else { 1.0 };
+                sum += texel_luminance(t) as f64 * w;
+                weight += w;
+            }
+            (1.0 / (sum / weight)) as f32
+        };
+        let gain = |light: &LightParams| LightImage::new(light.image.as_ref().unwrap(), &images).expect("loaded").gain;
+        assert_eq!(gain(&plain), mean(false));
+        assert_eq!(gain(&masked), mean(true));
+        assert_ne!(mean(false), mean(true), "the visible part has a mean of its own");
+        assert_eq!(counted(Work::PictureMean), before + 1);
     }
 
     #[test]

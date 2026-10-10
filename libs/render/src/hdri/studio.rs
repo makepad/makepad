@@ -280,8 +280,8 @@ pub struct Studio {
     /// horizon_softness as degrees of elevation over which the horizon colour hands over.
     soft_deg: f32,
     lights: Vec<PreparedLight>,
-    key: Option<EnvSun>,
-    /// The key's place in `lights`: the light a lookup without the key skips.
+    /// The key's place in `lights`: the light a lookup without the key skips,
+    /// and the one `key` measures.
     key_index: Option<usize>,
     /// What hangs in front of each light (1b: gobo, doors and grid, wear),
     /// in step with `lights`.
@@ -297,19 +297,20 @@ impl Studio {
     /// lighting.
     ///
     /// The key carries exactly the light the map draws of it (D1), measured from the
-    /// map's own drawing once per map: its shape, soft edge, hotspot, picture and ramp,
-    /// what hangs in front of it, and the flags, gels, cloth and windows filled with
-    /// sky after it. The key's cone covers the larger of width and height, and its
-    /// radiance is that emission spread over the cone ([`EnvSun`]'s one meaning), from
-    /// the same integral as the share a surface facing the key receives (`facing`) and
-    /// the cone that holds its whole reach (`cos_cover`):
+    /// map's own drawing when it is asked for ([`Self::key`]; `Env` asks once, when the
+    /// engine does, D15): its shape, soft edge, hotspot, picture and ramp, what hangs in
+    /// front of it, and the flags, gels, cloth and windows filled with sky after it.
+    /// Building the studio measures nothing. The key's cone covers the larger of width
+    /// and height, and its radiance is that emission spread over the cone ([`EnvSun`]'s
+    /// one meaning), from the same integral as the share a surface facing the key
+    /// receives (`facing`) and the cone that holds its whole reach (`cos_cover`):
     /// - a light in its own box (a rect, disc, ring, polygon or scrim, with or without a
     ///   picture) by [`key_emission`] over that box, times what passes what hangs in
     ///   front of it (`key_share`);
     /// - a stroke (1b), which its points place, over the cones round its centre line,
     ///   by [`over_cone`], where its band runs;
     /// - a window filled with sky, whose light is the sky, by `Env`, which knows that
-    ///   sky (`measured_window_key`): until then `key()` is None.
+    ///   sky (`measured_window_key`): `key()` is None for it.
     ///
     /// No pictures: an image light is drawn plain (see `new_with`).
     pub fn new(studio: &StudioParams, lights: &[LightParams]) -> Studio {
@@ -334,19 +335,16 @@ impl Studio {
         // gobo cuts what the flag takes out of the key (B8).
         let fx: Vec<LightFx> = enabled.iter().map(|l| LightFx::new(l, images).against_sky(against_sky)).collect();
         let any_fx = fx.iter().any(|fx| !fx.is_plain());
-        let mut built = Studio {
+        Studio {
             top: rgb(studio.top),
             horizon: rgb(studio.horizon),
             floor: rgb(studio.floor),
             soft_deg: sane(studio.horizon_softness, 0.01, 1.0) * 90.0,
             lights: prepared,
-            key: None,
             key_index,
             fx,
             any_fx,
-        };
-        built.key = key_index.and_then(|i| built.measured_key(i));
-        built
+        }
     }
 
     /// The key light `index` hands the engine, measured from what the map
@@ -358,6 +356,8 @@ impl Studio {
         if fx.fills_with_sky() {
             return None;
         }
+        #[cfg(test)]
+        super::probe::count(super::probe::Work::Key);
         let stroke = light.shaped.as_ref().and_then(|s| Some((s.stroke_cones()?, s.stroke_path()?)));
         if let Some(((axis, cos_radius, cos_cover), path)) = stroke {
             // A stroke's own light, after what hangs in front of it, under the
@@ -390,10 +390,10 @@ impl Studio {
         Some(EnvSun { radiance: key.radiance * self.key_share(index), ..key })
     }
 
-    /// Whether the key is a window filled with sky that `Env` has yet to
-    /// measure against its sky ([`Self::measured_window_key`]).
-    pub(super) fn key_waits_for_sky(&self) -> bool {
-        self.key.is_none() && self.key_index.is_some_and(|i| self.fx[i].fills_with_sky())
+    /// Whether the key is a window filled with sky, which `Env` measures
+    /// against its sky ([`Self::measured_window_key`]).
+    pub(super) fn key_is_window(&self) -> bool {
+        self.key_index.is_some_and(|i| self.fx[i].fills_with_sky())
     }
 
     /// The key when it is a window filled with sky (D1, L:136): the sky it
@@ -417,6 +417,8 @@ impl Studio {
         fine: &dyn Fn(Vec3f, f32) -> Option<f32>,
     ) -> Option<EnvSun> {
         let index = self.key_index.filter(|&i| self.fx[i].fills_with_sky())?;
+        #[cfg(test)]
+        super::probe::count(super::probe::Work::Key);
         let (light, fx) = (&self.lights[index], &self.fx[index]);
         let (axis, cos_radius, cos_cover) = light.key_cones();
         let flags = dimmers(&self.lights[index + 1..], &self.fx[index + 1..]);
@@ -448,14 +450,6 @@ impl Studio {
         };
         let integral = over_cone(axis, cos_cover, &cells, &drawn);
         Some(EnvSun { dir: axis, radiance: EnvSun::cone_radiance(integral.emission, cos_radius), cos_radius, facing: integral.facing, cos_cover })
-    }
-
-    /// Takes the key `measured_window_key` measured; a key of any other kind
-    /// was measured when the studio was built and is kept.
-    pub(super) fn set_window_key(&mut self, key: Option<EnvSun>) {
-        if self.key_waits_for_sky() {
-            self.key = key;
-        }
     }
 
     /// Whether any light is drawn over the base: with none, nothing stands in
@@ -575,10 +569,14 @@ impl Studio {
     /// about a tenth of its colour, and a key half under a flag half of it. `facing` is
     /// the share of that emission a surface facing the key receives (a wide softbox's is
     /// below 1) and `cos_cover` the cone around the key's centre that holds its reach.
-    /// None without a key, and for a window filled with sky until `Env` has measured it
+    /// None without a key, and for a window filled with sky, which `Env` measures
     /// against its sky.
+    ///
+    /// Measured on every call (the integrals of `measured_key`: tens of milliseconds
+    /// for a key with a grid or a picture), so the preview's bakes, which never ask,
+    /// never pay for it (D15, M5); `Env` measures it once, on the engine's first ask.
     pub fn key(&self) -> Option<EnvSun> {
-        self.key
+        self.key_index.and_then(|index| self.measured_key(index))
     }
 }
 
