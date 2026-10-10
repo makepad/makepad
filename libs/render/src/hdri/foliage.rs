@@ -1,24 +1,47 @@
 //! Leaves and fern fronds for gobos (B7). A canopy is a list of primitives
-//! (leaf blades and stem capsules) in s-units, built once from a seed, then
-//! binned on a grid so a lookup visits only the few that can reach a point.
-//! A point's transmission is the product of (1 - coverage) over them, so
+//! (leaf blades and stems) in s-units, built once from a seed, then binned
+//! on a grid so a lookup visits only the few that can reach a point. A
+//! point's transmission is the product of (1 - coverage) over them, so
 //! overlapping soft edges darken each other the way two half-shadows do.
 //!
 //! A leaf is a lens: the shape between two circular arcs that meet in a tip
 //! at each end. Its signed distance is exact (the idea of iq's vesica,
-//! reimplemented), so its penumbra is equally wide all round. The lens is
-//! laid along a midrib that sags sideways as a parabola; teeth nibble at its
-//! edge; a short stalk runs back from its base.
+//! reimplemented). The lens is laid along a midrib that sags sideways as a
+//! parabola; teeth nibble at its edge; a short stalk runs back from its base.
+//!
+//! **The penumbra keeps the light (D9, L:146).** A primitive's coverage is
+//! B6's box filter of its sharp shape, taken as a strip: across it, the box
+//! filter of its cross-section, whose half-thickness is the shape's own
+//! averaged along it over the box. That keeps exactly the area of its shade
+//! whatever the penumbra (it moves its shadow about and never loses or adds
+//! any), so for leaves scattered at random the canopy passes the same share
+//! of its light at any distance; and a part thinner or shorter than the
+//! penumbra spreads its little shade thin. A soft edge on its distance
+//! darkened a band twice the penumbra wide by half instead, so a canopy lost
+//! a third of its light as it moved off, and the 14 tiny pinnules of a fern's
+//! pinna multiplied to a black dot.
 
 use makepad_draw::*;
 use super::noise::hash_u32;
 use makepad_tween::path::MotionPath;
 
-/// The most leaves one gobo scatters: a small leaf size at density 1 would
-/// ask for thousands. Past the cap a higher density adds nothing, so small
-/// leaves never close the canopy: on a 60 x 45 degree light leaf size 0.3
-/// reaches the cap by density 0.2, and density 1 still passes about half.
-pub const MAX_LEAVES: usize = 900;
+/// The most leaves one gobo scatters, about as many primitives as stay local
+/// in the bins (MAX_BINS): the smallest leaves at density 1 on a 60 x 45
+/// degree light ask for twice as many. Past the cap the leaves grow instead,
+/// so the canopy still covers what density asks (D9, L:148: at 900 leaves,
+/// density 0.5 and 1 gave the same canopy from leaf size 0.5 down).
+pub const MAX_LEAVES: usize = 40_000;
+/// The most fronds one fern gobo grows, about as many primitives as
+/// MAX_LEAVES (a frond is about 450). Past it the fronds grow instead.
+pub const MAX_FRONDS: usize = 90;
+/// How far past the light's rectangle the canopy reaches, in s-units: the
+/// most a light draws past its box, half its soft band at softness 1 (half
+/// its smaller half size: studio.rs's and B2's edge rule). Leaves are
+/// scattered and binned over it, so a soft light's glow shows them too (D9,
+/// L:147).
+pub const GLOW: f32 = 0.5;
+/// The most bins a side.
+const MAX_BINS: f32 = 160.0;
 /// Pinna pairs along a fern frond, and pinnule pairs along each pinna.
 pub const PAIRS: usize = 14;
 pub const LOBES: usize = 7;
@@ -31,11 +54,9 @@ const STALK: f32 = 0.22;
 const STALK_RADIUS: f32 = 0.012;
 /// Teeth along a leaf's edge.
 const TEETH: f32 = 14.0;
-/// The bins take a primitive's bounding circle padded by this many
-/// penumbrae. A soft edge ends one penumbra outside the shape, and the
-/// midrib's sag stretches distances by at most 1.27 (the norm of the shear
-/// that undoes a sag of 0.12), so nothing outside 1.3 can shade a point.
-const BIN_PAD: f32 = 1.3;
+/// A hair over 1, so a primitive's padded circle never misses a point its
+/// coverage reaches by rounding (`Prim::pad`).
+const BIN_PAD_SLACK: f32 = 1.01;
 
 /// A leaf blade: `origin` is its base, `axis` points to the tip (unit), `len`
 /// its length, `width` its widest half-width over `len` (at mid-length),
@@ -66,10 +87,21 @@ pub enum Prim {
 }
 
 impl Prim {
+    /// The sharp shape's signed distance, negative inside.
     pub fn sdf(&self, p: Vec2f) -> f32 {
         match self {
             Prim::Leaf(leaf) => leaf_sdf(leaf, p),
             Prim::Stem(stem) => stem_sdf(stem, p),
+        }
+    }
+
+    /// The share 0..=1 of the box `w` each way round `p` (the penumbra) that
+    /// the primitive covers: B6's box filter of its sharp shape, taken as a
+    /// strip (see the module notes). Exactly 0 past `pad` penumbrae from it.
+    pub fn coverage(&self, p: Vec2f, w: f32) -> f32 {
+        match self {
+            Prim::Leaf(leaf) => leaf_coverage(leaf, p, w),
+            Prim::Stem(stem) => stem_coverage(stem, p, w),
         }
     }
 
@@ -86,6 +118,20 @@ impl Prim {
             }
             Prim::Stem(s) => ((s.a + s.b) * 0.5, (s.b - s.a).length() * 0.5 + s.radius),
         }
+    }
+
+    /// How many penumbrae past its sharp shape the coverage reaches, which
+    /// the bins pad its bounding circle by. The coverage reaches one penumbra
+    /// past the shape along it and one across it: sqrt 2. Across a leaf it
+    /// is measured from the sagging midrib, whose slope (at most 4 x its sag
+    /// of 0.12) adds that much again over the penumbra along it, so a sagging
+    /// leaf reaches up to sqrt(1 + 1.48²) = 1.79.
+    fn pad(&self) -> f32 {
+        let across = match self {
+            Prim::Leaf(l) => 1.0 + 4.0 * l.bend.abs(),
+            Prim::Stem(_) => 1.0,
+        };
+        (1.0 + across * across).sqrt() * BIN_PAD_SLACK
     }
 }
 
@@ -142,6 +188,123 @@ pub fn stem_sdf(s: &StemPrim, p: Vec2f) -> f32 {
     seg_dist(p, s.a, s.b) - s.radius
 }
 
+/// The share 0..=1 of the box `w` each way round a point that a strip covers,
+/// across it: the box filter of a cross-section `h` thick each way whose
+/// middle lies `x` (>= 0) from the point. Its integral across is exactly
+/// 2h, so a strip thinner than the box spreads its shade over it instead of
+/// darkening the box's width by half. `h` is the strip's half-thickness
+/// averaged along it over the box, which carries the box filter along it.
+fn strip(x: f32, h: f32, w: f32) -> f32 {
+    if !(h > 0.0) {
+        return 0.0;
+    }
+    ((h.min(x + w) - (-h).max(x - w)).max(0.0) / (2.0 * w)).min(1.0)
+}
+
+/// How much of `a..b` lies in `lo..hi`.
+fn overlap(a: f32, b: f32, lo: f32, hi: f32) -> f32 {
+    (b.min(hi) - a.max(lo)).max(0.0)
+}
+
+/// The mean over `a..b` (in leaf lengths from the base; the blade runs from 0
+/// to 1) of the lens's half-width, in leaf lengths: the circles' arc
+/// sqrt(r² - u²) - d, u from the middle, integrated exactly, and 0 past the
+/// tips. Over a window a thousandth of a length or less, its value there.
+fn lens_mean(width: f32, a: f32, b: f32) -> f32 {
+    let w = width.max(1.0e-3).min(0.5);
+    // As sd_lens: r - d = w and r² - d² = 0.25, so r >= 0.5.
+    let r = 0.5 * (0.25 / w + w);
+    let d = 0.5 * (0.25 / w - w);
+    if !(b - a > 1.0e-3) {
+        let u = 0.5 * (a + b) - 0.5;
+        return if u.abs() < 0.5 { (r * r - u * u).max(0.0).sqrt() - d } else { 0.0 };
+    }
+    let integral = |x: f32| {
+        let u = (x - 0.5).max(-0.5).min(0.5);
+        0.5 * (u * (r * r - u * u).max(0.0).sqrt() + r * r * (u / r).max(-1.0).min(1.0).asin()) - d * u
+    };
+    ((integral(b) - integral(a)) / (b - a)).max(0.0)
+}
+
+/// The mean over `a..b` (leaf lengths from the base) of how deep a leaf's
+/// teeth bite into its edge, in leaf lengths: `leaf_sdf`'s sawtooth, the
+/// sawtooth averaged exactly over the window and its sqrt(4t(1 - t))
+/// envelope taken at the window's middle (its teeth are a few per cent of
+/// the blade, so that is close), and nothing past the tips.
+fn teeth_mean(l: &LeafPrim, a: f32, b: f32) -> f32 {
+    if !(l.serration > 0.0) {
+        return 0.0;
+    }
+    let (lo, hi) = (a.max(0.0), b.min(1.0));
+    if !(hi > lo) {
+        return 0.0;
+    }
+    let t = (0.5 * (a + b)).max(0.0).min(1.0);
+    let depth = l.serration * 0.3 * l.width * (4.0 * t * (1.0 - t)).sqrt();
+    // The integral of the sawtooth frac(TEETH x) from 0 to x.
+    let saw = |x: f32| {
+        let u = x * TEETH;
+        let f = u - u.floor();
+        (u.floor() + f * f) / (2.0 * TEETH)
+    };
+    let mean = if b - a > 1.0e-4 {
+        (saw(hi) - saw(lo)) / (b - a)
+    } else {
+        let x = 0.5 * (lo + hi) * TEETH;
+        x - x.floor()
+    };
+    depth * mean
+}
+
+/// A leaf's coverage of the box `w` each way round `p` (`Prim::coverage`):
+/// its blade a strip along the sagging midrib, as thick as the lens less the
+/// bite of its teeth (as in `leaf_sdf`, whose teeth nibble the edge), and its
+/// stalk a strip of its own; in leaf lengths throughout.
+pub fn leaf_coverage(l: &LeafPrim, p: Vec2f, w: f32) -> f32 {
+    let len = l.len.max(1.0e-6);
+    let rel = p - l.origin;
+    let x = (rel.x * l.axis.x + rel.y * l.axis.y) / len;
+    let y = (rel.y * l.axis.x - rel.x * l.axis.y) / len;
+    let wl = w.max(1.0e-6) / len;
+    let t = x.max(0.0).min(1.0);
+    let mid = l.bend * 4.0 * t * (1.0 - t);
+    let across = (y - mid).abs();
+    // Where the box cannot reach the blade (no thicker than its widest, nor
+    // past its tips) `strip` gives 0: skip its integrals there.
+    let blade = if across < l.width.max(1.0e-3).min(0.5) + wl && x + wl > 0.0 && x - wl < 1.0 {
+        // The teeth thin the blade by their mean bite over the box: sharp,
+        // the toothed edge itself; far off, half their depth, so their shade
+        // keeps its area too.
+        let thick = (lens_mean(l.width, x - wl, x + wl) - teeth_mean(l, x - wl, x + wl)).max(0.0);
+        strip(across, thick, wl)
+    } else {
+        0.0
+    };
+    // The stalk behind the base, overlapping the blade a little, as in leaf_sdf.
+    let stalk = if y.abs() < STALK_RADIUS + wl {
+        strip(y.abs(), STALK_RADIUS * overlap(x - wl, x + wl, -STALK, 0.02) / (2.0 * wl), wl)
+    } else {
+        0.0
+    };
+    1.0 - (1.0 - blade) * (1.0 - stalk)
+}
+
+/// A stem's coverage of the box `w` each way round `p` (`Prim::coverage`): a
+/// strip `radius` thick each way along the segment a-b.
+pub fn stem_coverage(s: &StemPrim, p: Vec2f, w: f32) -> f32 {
+    let w = w.max(1.0e-6);
+    let ab = s.b - s.a;
+    let length = ab.length();
+    let rel = p - s.a;
+    let (along, across) = if length > 1.0e-9 {
+        let d = ab * (1.0 / length);
+        (rel.x * d.x + rel.y * d.y, (rel.x * d.y - rel.y * d.x).abs())
+    } else {
+        (0.0, rel.length())
+    };
+    strip(across, s.radius * overlap(along - w, along + w, 0.0, length) / (2.0 * w), w)
+}
+
 /// A small deterministic generator over A2's integer hash: the same seed
 /// gives the same canopy on every machine.
 struct Rng(u32);
@@ -186,7 +349,8 @@ pub struct Foliage {
 }
 
 impl Foliage {
-    /// Leaves scattered over the light's rectangle `half` (s-units).
+    /// Leaves scattered over the light's rectangle `half` (s-units) and its
+    /// glow (GLOW past it).
     /// - `density` 0..=1 sets how many: 8 per leaf-length squared at 1,
     ///   which leaves about a tenth open.
     /// - `scale` sets their size: a leaf is 0.35·scale long.
@@ -194,14 +358,21 @@ impl Foliage {
     /// - `soft` is the penumbra half-width.
     ///
     /// Leaves are drawn in a fixed order, so for one seed a higher density
-    /// only adds leaves.
+    /// only adds leaves, up to MAX_LEAVES; past it the same leaves grow so
+    /// that they cover what density asks.
     pub fn leaves(half: Vec2f, density: f32, scale: f32, seed: u32, soft: f32) -> Foliage {
-        let len0 = 0.35 * scale.max(0.1).min(10.0);
-        // Scatter a leaf length past the edges too, so leaves cross them.
-        let ex = half.x + len0;
-        let ey = half.y + len0;
-        let area = 4.0 * ex * ey;
-        let n = ((density.max(0.0).min(1.0) * LEAVES_PER_AREA * area / (len0 * len0)).round() as usize).min(MAX_LEAVES);
+        let reach = vec2f(half.x + GLOW, half.y + GLOW);
+        let mut len0 = 0.35 * scale.max(0.1).min(10.0);
+        // Scatter a leaf length past the glow too, so leaves cross its edge.
+        let wanted = density.max(0.0).min(1.0) * LEAVES_PER_AREA * 4.0 * (reach.x + len0) * (reach.y + len0) / (len0 * len0);
+        let n = if wanted > MAX_LEAVES as f32 {
+            len0 *= (wanted / MAX_LEAVES as f32).sqrt();
+            MAX_LEAVES
+        } else {
+            wanted.round() as usize
+        };
+        let ex = reach.x + len0;
+        let ey = reach.y + len0;
         let mut rng = Rng::new(seed, 0x1ea5);
         let mut prims = Vec::with_capacity(n);
         for _ in 0..n {
@@ -216,18 +387,26 @@ impl Foliage {
                 serration: rng.range(0.0, 0.35),
             }));
         }
-        Foliage::from_prims(prims, half, soft)
+        Foliage::from_prims(prims, reach, soft)
     }
 
     /// Fern fronds rising from below the light and arching over it.
     /// - Each frond has a rachis: a smooth curve through four points (`MotionPath::through`).
     /// - Along it hang `PAIRS` pinnae a side, placed by arc length and sweeping toward the tip (level one).
     /// - Each pinna carries `LOBES` pinnules a side (level two).
-    /// - A frond is 1.6·scale long. The frond count follows `density` and how many frond-lengths the light holds.
+    /// - A frond is 1.6·scale long. The frond count follows `density` and how many frond-lengths the light
+    ///   holds, up to MAX_FRONDS; past it the fronds grow, so a fern covers a long light or a small frond size
+    ///   as densely as a square one (D9, L:148: held at 24 fronds and 6 frond-lengths, it thinned out).
     pub fn fern(half: Vec2f, density: f32, scale: f32, seed: u32, soft: f32) -> Foliage {
-        let len = 1.6 * scale.max(0.1).min(10.0);
-        let fit = ((2.0 * half.x) * (2.0 * half.y) / (len * len)).max(1.0).min(6.0);
-        let fronds = ((1.0 + density.max(0.0).min(1.0) * 4.0) * fit).round().max(1.0).min(24.0) as usize;
+        let mut len = 1.6 * scale.max(0.1).min(10.0);
+        let fit = ((2.0 * half.x) * (2.0 * half.y) / (len * len)).max(1.0);
+        let wanted = (1.0 + density.max(0.0).min(1.0) * 4.0) * fit;
+        let fronds = if wanted > MAX_FRONDS as f32 {
+            len *= (wanted / MAX_FRONDS as f32).sqrt();
+            MAX_FRONDS
+        } else {
+            wanted.round().max(1.0) as usize
+        };
         // Fronds shorter than the light stand at random heights, so small ones fill it.
         let room = (2.0 * half.y - 0.9 * len).max(0.0);
         let spread_x = if room > 0.0 { 0.9 } else { 0.3 };
@@ -288,19 +467,20 @@ impl Foliage {
                 }
             }
         }
-        Foliage::from_prims(prims, half, soft)
+        Foliage::from_prims(prims, vec2f(half.x + GLOW, half.y + GLOW), soft)
     }
 
-    /// Bins `prims` over the rectangle `half`: points outside it are never
-    /// asked (the light's mask is 0 there). A primitive goes into every cell
-    /// its bounding circle, padded by BIN_PAD penumbrae, touches.
+    /// Bins `prims` over the rectangle `half`: the light's rectangle and its
+    /// glow, past which no light draws, so points outside are never asked. A
+    /// primitive goes into every cell its bounding circle, padded by `pad`
+    /// penumbrae, touches.
     fn from_prims(prims: Vec<Prim>, half: Vec2f, soft: f32) -> Foliage {
         let soft = soft.max(1.0e-5);
         let half = vec2f(half.x.max(1.0e-4), half.y.max(1.0e-4));
         let min = vec2f(-half.x, -half.y);
         let size = half * 2.0;
-        // About 0.75 cells a side per sqrt(primitive), at most 48 cells a side.
-        let target = ((prims.len() as f32).sqrt() * 0.75).ceil().max(1.0).min(48.0);
+        // About 0.75 cells a side per sqrt(primitive), at most MAX_BINS a side.
+        let target = ((prims.len() as f32).sqrt() * 0.75).ceil().max(1.0).min(MAX_BINS);
         let (nx, ny) = if size.x >= size.y {
             (target as usize, ((target * size.y / size.x).ceil() as usize).max(1))
         } else {
@@ -310,7 +490,7 @@ impl Foliage {
         let mut bins = vec![Vec::new(); nx * ny];
         for (i, prim) in prims.iter().enumerate() {
             let (c, r) = prim.bounds();
-            let r = r + BIN_PAD * soft;
+            let r = r + prim.pad() * soft;
             let x0 = ((c.x - r - min.x) / cell.x).floor();
             let x1 = ((c.x + r - min.x) / cell.x).floor();
             let y0 = ((c.y - r - min.y) / cell.y).floor();
@@ -328,10 +508,10 @@ impl Foliage {
         Foliage { prims, bins, nx, ny, min, cell, soft }
     }
 
-    /// Coverage 0..=1 of one primitive at `p`: exactly 0 once `p` is a full
-    /// penumbra outside it.
+    /// Coverage 0..=1 of one primitive at `p` (`Prim::coverage`): exactly 0
+    /// once `p` is `Prim::pad` penumbrae outside it.
     fn coverage(&self, prim: &Prim, p: Vec2f) -> f32 {
-        1.0 - smoothstep(-self.soft, self.soft, prim.sdf(p))
+        prim.coverage(p, self.soft)
     }
 
     /// The product of (1 - coverage) over `prims`, in order. Below 1e-4
@@ -347,8 +527,9 @@ impl Foliage {
         t
     }
 
-    /// The fraction 0..=1 of light passing at `p` (s-units). Points just
-    /// outside the rectangle read the nearest edge cell.
+    /// The fraction 0..=1 of light passing at `p` (s-units). Points outside
+    /// the binned rectangle (past the glow, where no light draws) read the
+    /// nearest edge cell.
     pub fn transmission(&self, p: Vec2f) -> f32 {
         let fx = (p.x - self.min.x) / self.cell.x;
         let fy = (p.y - self.min.y) / self.cell.y;
@@ -432,16 +613,134 @@ mod tests {
 
     #[test]
     fn the_bins_give_the_brute_force_answer() {
+        // Over the rectangle and the glow a soft light draws past it (half its
+        // soft band, at most half an s-unit: D9, L:147), sharp and far off.
         let half = vec2f(1.5, 1.0);
-        for f in [Foliage::leaves(half, 0.6, 1.0, 3, 0.02), Foliage::fern(half, 0.5, 1.0, 3, 0.02)] {
-            assert!(f.len() > 10);
-            for j in 0..40 {
-                for i in 0..60 {
-                    let p = vec2f(-1.5 + 3.0 * (i as f32 + 0.5) / 60.0, -1.0 + 2.0 * (j as f32 + 0.5) / 40.0);
-                    assert_eq!(f.transmission(p), f.transmission_brute(p), "at {p:?}");
+        let glow = 0.5;
+        for soft in [0.02f32, penumbra(1.0)] {
+            for f in [Foliage::leaves(half, 0.6, 1.0, 3, soft), Foliage::fern(half, 0.5, 1.0, 3, soft), Foliage::leaves(half, 0.8, 0.5, 4, soft)] {
+                assert!(f.len() > 10);
+                for j in 0..34 {
+                    for i in 0..48 {
+                        let p = vec2f((half.x + glow) * (-1.0 + 2.0 * (i as f32 + 0.5) / 48.0), (half.y + glow) * (-1.0 + 2.0 * (j as f32 + 0.5) / 34.0));
+                        assert_eq!(f.transmission(p), f.transmission_brute(p), "soft {soft} at {p:?}");
+                    }
                 }
             }
         }
+    }
+
+    /// D9 (L:147): a soft light draws past its rectangle, up to half an
+    /// s-unit at softness 1, and its leaves must be there too: the canopy in
+    /// that glow is as thick as over the light.
+    #[test]
+    fn leaves_fill_a_soft_light_s_glow() {
+        let half = vec2f(1.33, 1.0);
+        let f = Foliage::leaves(half, 0.5, 1.0, 7, 0.01);
+        // The open share over a band, sampled on a fine grid.
+        let open_in = |inside: bool| {
+            let (mut sum, mut n) = (0.0f64, 0);
+            for j in 0..120 {
+                for i in 0..150 {
+                    let p = vec2f((half.x + 0.5) * (-1.0 + 2.0 * (i as f32 + 0.5) / 150.0), (half.y + 0.5) * (-1.0 + 2.0 * (j as f32 + 0.5) / 120.0));
+                    // The outer part of the glow: 0.3 to 0.5 s-units past an edge.
+                    let past = (p.x.abs() - half.x).max(p.y.abs() - half.y);
+                    if (inside && past < 0.0) || (!inside && past > 0.3) {
+                        sum += f.transmission(p) as f64;
+                        n += 1;
+                    }
+                }
+            }
+            (sum / n as f64) as f32
+        };
+        let (over, glow) = (open_in(true), open_in(false));
+        assert!((glow - over).abs() < 0.15, "the glow is {glow} open, the light {over}");
+    }
+
+    /// D9 (L:146): a leaf or a stem keeps the area of its shade however far
+    /// off it hangs, as B6's box filter keeps a window's: the blur moves its
+    /// shadow about and loses none, and a part thinner than the penumbra
+    /// spreads thin instead of darkening a band twice its penumbra wide.
+    #[test]
+    fn a_blurred_part_keeps_its_area() {
+        let parts = [
+            ("leaf", Prim::Leaf(LeafPrim { origin: vec2f(-0.15, 0.0), axis: vec2f(1.0, 0.0), len: 0.3, width: 0.22, bend: 0.08, serration: 0.3 })),
+            ("small leaf", Prim::Leaf(LeafPrim { origin: vec2f(-0.02, 0.0), axis: vec2f(0.6, 0.8), len: 0.04, width: 0.32, bend: 0.0, serration: 0.0 })),
+            ("stem", Prim::Stem(StemPrim { a: vec2f(-0.3, -0.1), b: vec2f(0.3, 0.1), radius: 0.006 })),
+        ];
+        for (name, prim) in parts {
+            // ∫ (1 - transmission) dA over the square round the part, at the sharpest penumbra and two softer ones.
+            let shade = |soft: f32| {
+                let f = Foliage::from_prims(vec![prim], vec2f(1.0, 1.0), soft);
+                let n = 600;
+                let cell = 1.2 / n as f32;
+                let mut sum = 0.0f64;
+                for j in 0..n {
+                    for i in 0..n {
+                        let p = vec2f(-0.6 + (i as f32 + 0.5) * cell, -0.6 + (j as f32 + 0.5) * cell);
+                        sum += (1.0 - f.transmission(p)) as f64;
+                    }
+                }
+                sum * (cell * cell) as f64
+            };
+            let sharp = shade(penumbra(0.0));
+            assert!(sharp > 0.0, "{name}");
+            for distance in [0.3f32, 1.0] {
+                let soft = shade(penumbra(distance));
+                assert!((soft / sharp - 1.0).abs() < 0.03, "{name} at distance {distance}: its shade is {soft}, sharp {sharp}");
+            }
+        }
+    }
+
+    /// D9 (L:146): tiny leaflets far smaller than the penumbra (a fern's
+    /// pinnules near its tip) spread their little shade over the blur instead
+    /// of multiplying their half-shadows to a black dot.
+    #[test]
+    fn tiny_leaflets_never_go_black() {
+        let soft = penumbra(1.0);
+        // A pinna's worth of leaflets a hundredth long, packed into a spot.
+        let leaflets: Vec<Prim> = (0..2 * LOBES)
+            .map(|j| {
+                let a = j as f32 * 0.9;
+                Prim::Leaf(LeafPrim { origin: vec2f(0.002 * j as f32, 0.0), axis: vec2f(a.cos(), a.sin()), len: 0.01, width: 0.32, bend: 0.0, serration: 0.0 })
+            })
+            .collect();
+        let f = Foliage::from_prims(leaflets.clone(), vec2f(1.0, 1.0), soft);
+        let darkest = (0..41 * 41)
+            .map(|k| f.transmission(vec2f(-0.1 + 0.005 * (k % 41) as f32, -0.1 + 0.005 * (k / 41) as f32)))
+            .fold(1.0f32, f32::min);
+        // Their whole area is about 14 x 0.46 x 0.01², 0.1 % of the penumbra's box (2 x 0.122)².
+        assert!(darkest > 0.95, "blurred, the leaflets shade at most a few per cent: {darkest}");
+        // Against the light they are sharp, and dark where they lie.
+        let sharp = Foliage::from_prims(leaflets, vec2f(1.0, 1.0), penumbra(0.0));
+        let darkest = (0..100 * 100)
+            .map(|k| sharp.transmission(vec2f(-0.012 + 0.0005 * (k % 100) as f32, -0.012 + 0.0005 * (k / 100) as f32)))
+            .fold(1.0f32, f32::min);
+        assert!(darkest < 0.05, "{darkest}");
+    }
+
+    /// D9 (L:148): Density acts at every leaf size. Capped at 900 leaves, a
+    /// 60 x 45 light gave the same canopy at density 0.5 and 1 from leaf size
+    /// 0.5 down, and size 0.1 stayed 81 % open; now the canopy covers what
+    /// density asks whatever the leaves' size, and a fern does not thin out
+    /// on a long light or at a small size either.
+    #[test]
+    fn density_acts_at_every_leaf_size() {
+        // The 60 x 45 degree light in s-units.
+        let light = vec2f(30f32.to_radians().tan() / 22.5f32.to_radians().tan(), 1.0);
+        for scale in [0.1f32, 0.3, 1.0] {
+            let open = |density: f32| mean_open(&Foliage::leaves(light, density, scale, 5, 0.01), light);
+            let (half_on, full) = (open(0.5), open(1.0));
+            assert!(full < 0.15, "leaf size {scale}: density 1 is a nearly closed canopy: {full}");
+            assert!(half_on > full + 0.12, "leaf size {scale}: density 0.5 leaves {half_on} open, density 1 {full}");
+        }
+        // Fern: density still acts at a small frond size, and a long light
+        // (120 x 20 degrees) is as covered as the 60 x 45 one.
+        let fern = |half: Vec2f, density: f32, scale: f32| mean_open(&Foliage::fern(half, density, scale, 2, 0.01), half);
+        assert!(fern(light, 0.75, 0.3) > fern(light, 1.0, 0.3) + 0.02, "{} against {}", fern(light, 0.75, 0.3), fern(light, 1.0, 0.3));
+        let long = vec2f(60f32.to_radians().tan() / 10f32.to_radians().tan(), 1.0);
+        let (wide, square) = (fern(long, 1.0, 1.0), fern(light, 1.0, 1.0));
+        assert!((wide - square).abs() < 0.1, "a long light's fern is {wide} open, the 60 x 45 one's {square}");
     }
 
     #[test]

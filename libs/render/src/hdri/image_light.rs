@@ -468,6 +468,33 @@ mod tests {
         shareable::<ImageSet>();
     }
 
+    /// D3 (L:119): a picture on a stroke placed by its points is laid in the
+    /// box round the stroke, as its gobo, aim and wear are: the light's own
+    /// azimuth no longer places it, and a stroke far from that azimuth is
+    /// drawn all along, not cut where the light's own plane ends.
+    #[test]
+    fn a_picture_on_a_stroke_follows_the_stroke() {
+        // A grey ramp from left to right, so the picture's place on the stroke shows.
+        let set = set_of("ramp", picture(8, 2, |x, _| [0.05 + 0.3 * x as f32, 0.05 + 0.3 * x as f32, 0.05 + 0.3 * x as f32, 1.0]));
+        // Along the horizon 10 degrees up, from azimuth 80 to 160.
+        let stroke = |azimuth_deg: f32| LightParams {
+            shape: "stroke".to_string(),
+            azimuth_deg,
+            stroke: Some(crate::hdri::StrokeParams { points: vec![[80.0, 10.0], [120.0, 10.0], [160.0, 10.0]], width_deg: 4.0, ..Default::default() }),
+            ..image_light("ramp")
+        };
+        let draw = |azimuth_deg: f32| {
+            let env = Env::new_with(&dark_studio(vec![stroke(azimuth_deg)]), &set);
+            (0..=80).map(|i| luminance(env.radiance(dir_from_az_el(80.0 + i as f32, 10.0)))).collect::<Vec<f32>>()
+        };
+        let (far, near) = (draw(0.0), draw(120.0));
+        assert_eq!(far, near, "the light's own azimuth places nothing");
+        let lit = far.iter().filter(|l| **l > 0.0).count();
+        assert!(lit > 75, "the stroke is drawn all along: {lit} of {} samples", far.len());
+        // The ramp runs along the stroke from its left end to its right.
+        assert!(far[70] > 1.5 * far[10], "{} against {}", far[70], far[10]);
+    }
+
     #[test]
     fn shrink_keeps_the_aspect_and_weights_by_alpha() {
         let map = picture(4, 2, |x, y| [x as f32, y as f32, 1.0, 1.0]);

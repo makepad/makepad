@@ -21,7 +21,7 @@
 use makepad_draw::*;
 use super::{az_el_from_dir, dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams};
 use crate::sky::luminance;
-use super::shaped::ShapedLight;
+use super::shaped::{stroke_box, ShapedLight};
 use super::shape::ArcPath;
 use super::noise::hash01;
 use super::gels::{gel_stack, shifted_kelvin};
@@ -170,15 +170,39 @@ pub fn light_frame(azimuth_deg: f32, elevation_deg: f32, roll_deg: f32) -> Light
 /// components divided by its component along the centre. Great circles through the
 /// frame map to straight lines, so a rect keeps straight sides.
 ///
-/// Returns None when `dir` is more than about 87 degrees from the centre (dot < 0.05),
-/// where the projection runs off to infinity.
+/// Returns None when `dir` is more than about 87 degrees from the centre (dot <
+/// [`PROJECT_MIN_COS`]), where the projection runs off to infinity.
 pub fn project(frame: &LightFrame, dir: Vec3f) -> Option<Vec2f> {
     let c = dir.dot(frame.center);
     // Written negated so a NaN direction is rejected too.
-    if !(c >= 0.05) {
+    if !(c >= PROJECT_MIN_COS) {
         return None;
     }
     Some(vec2f(dir.dot(frame.right) / c, dir.dot(frame.up) / c))
+}
+
+/// [`project`]'s limit: the smallest dot with the centre it places, about 87
+/// degrees out, where the tangent plane is already 20 units from the centre.
+pub const PROJECT_MIN_COS: f32 = 0.05;
+
+/// [`project`], held at its limit: a direction further out than the plane
+/// reaches comes back on the limit's circle, along its own bearing round the
+/// centre, so what is laid in the plane goes on continuously past it. Only a
+/// stroke draws that far from its middle (D3, L:180: a grid or a window there
+/// stepped to fully bright where the plane ended). None only straight behind
+/// the centre, where there is no bearing, and for NaN.
+pub fn project_held(frame: &LightFrame, dir: Vec3f) -> Option<Vec2f> {
+    if let Some(t) = project(frame, dir) {
+        return Some(t);
+    }
+    let (x, y) = (dir.dot(frame.right), dir.dot(frame.up));
+    let bearing = (x * x + y * y).sqrt();
+    if !(bearing > 1.0e-6) {
+        return None;
+    }
+    let c = PROJECT_MIN_COS;
+    let limit = (1.0 - c * c).sqrt() / c;
+    Some(vec2f(x, y) * (limit / bearing))
 }
 
 /// Narrowest soft edge, in tangent units (about 0.006 degrees). A "hard" edge still
@@ -811,10 +835,12 @@ fn over_cone(axis: Vec3f, cos_cover: f32, cells: &dyn Fn(Vec3f) -> usize, light:
 /// One enabled light, reduced to what the per-pixel evaluation needs.
 #[derive(Clone, Debug)]
 struct PreparedLight {
+    /// The light's frame; a stroke's is the box round it (`stroke_box`).
     frame: LightFrame,
     shape: LightShape,
     blend: Blend,
-    /// Half extents in the tangent plane: tan(width/2), tan(height/2).
+    /// Half extents in the tangent plane: tan(width/2), tan(height/2); a
+    /// stroke's are its box's.
     half: Vec2f,
     /// Rounded-rect corner radius, in tangent units.
     corner: f32,
@@ -841,7 +867,15 @@ impl PreparedLight {
     fn new(l: &LightParams, images: &ImageSet) -> PreparedLight {
         let width = sane(l.width_deg, 0.1, 170.0);
         let height = sane(l.height_deg, 0.1, 170.0);
-        let half = vec2f((0.5 * width).to_radians().tan(), (0.5 * height).to_radians().tan());
+        // A stroke's points place it, not its frame: its picture is laid in
+        // the box round the stroke itself (D3, L:119), as its gobo, aim and
+        // wear are (`light_fx::face_axes`). Nothing else of a stroke reads its
+        // frame or its box: the shape core draws it and its key is measured
+        // round its own cones.
+        let (frame, half) = match stroke_box(l) {
+            Some(stroke) => stroke,
+            None => (light_frame(l.azimuth_deg, l.elevation_deg, l.roll_deg), vec2f((0.5 * width).to_radians().tan(), (0.5 * height).to_radians().tan())),
+        };
         let short = half.x.min(half.y);
         let inner = sane(l.inner, 0.0, 0.95);
         let ring_half = 0.5 * (1.0 - inner);
@@ -858,7 +892,7 @@ impl PreparedLight {
         };
         let band = (sane(l.softness, 0.0, 1.0) * inradius).max(MIN_EDGE);
         PreparedLight {
-            frame: light_frame(l.azimuth_deg, l.elevation_deg, l.roll_deg),
+            frame,
             shape,
             blend: l.blend(),
             half,
@@ -885,8 +919,10 @@ impl PreparedLight {
         let Some(image) = &self.image else {
             return if left_out { self.hide(dir, acc) } else { self.over(dir, acc, self.color) };
         };
-        // The picture is only looked up where the light can reach.
-        let Some(p) = project(&self.frame, dir) else { return acc };
+        // The picture is only looked up where the light can reach. Held at the
+        // plane's limit: only a stroke reaches past it, and there its picture's
+        // edge goes on (a light in its own box draws nothing so far out).
+        let Some(p) = project_held(&self.frame, dir) else { return acc };
         if !self.reaches(dir, p) {
             return acc;
         }

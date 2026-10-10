@@ -294,10 +294,26 @@ struct StrokeLight {
     line_facing: f32,
 }
 
-impl StrokeLight {
-    fn new(light: &LightParams) -> Option<StrokeLight> {
-        let stroke = stroke_of(light);
-        let line = stroke_centre_line(&stroke);
+/// What places a stroke and how far from its centre line it draws: shared by
+/// its drawing (`StrokeLight`) and the box its extras are laid in
+/// (`stroke_box`), so the two always agree on where it is.
+struct StrokeLine {
+    /// The centre line, as unit directions.
+    line: Vec<Vec3f>,
+    /// Half the stroke's width before the profile, radians.
+    half_width: f32,
+    softness: f32,
+    profile: Vec<f32>,
+    /// The widest half width along it (the profile's widest), radians.
+    widest_half: f32,
+    /// How far from the line it draws, soft edge included.
+    reach: f32,
+}
+
+impl StrokeLine {
+    /// None with fewer than two usable points.
+    fn new(light: &LightParams, stroke: &StrokeParams) -> Option<StrokeLine> {
+        let line = stroke_centre_line(stroke);
         if line.len() < 2 {
             return None;
         }
@@ -314,38 +330,85 @@ impl StrokeLight {
         let widest_half = half_width * widest;
         // Past the widest half width plus half its soft band nothing is lit.
         let reach = widest_half + 0.5 * (softness * widest_half).max(EDGE_MIN) + 1.0e-6;
-        let path = ArcPath::new(&line, false, reach);
+        Some(StrokeLine { line, half_width, softness, profile, widest_half, reach })
+    }
+
+    /// The key's cones round the line, `(axis, cos_radius, cos_cover)`: the
+    /// line's mean direction, the key cone (its widest angle from it plus the
+    /// widest half width) and the covering cone (plan 2's `cos_cover`).
+    ///
+    /// Every lit direction lies within `reach` of the centre line, and a
+    /// great-circle piece bows at most half its length from its ends, so the
+    /// line's widest angle from the axis plus both holds the whole stroke,
+    /// soft edge included. `around` over the same line gives the same axis
+    /// for both cones. A stroke all round the sky has no cone: the whole
+    /// sphere then.
+    fn cones(&self) -> (Vec3f, f32, f32) {
+        let cone = CullCone::around(&self.line, self.widest_half);
+        let key_cos = cone.cos_max.max(-1.0);
+        let piece = self.line.windows(2).fold(0.0f32, |m, w| m.max(arc_between(w[0], w[1])));
+        let cos_cover = CullCone::around(&self.line, self.reach + 0.5 * piece).cos_max.max(-1.0).min(key_cos);
+        (cone.axis, key_cos, cos_cover)
+    }
+}
+
+/// The angle between two unit directions, radians.
+fn arc_between(a: Vec3f, b: Vec3f) -> f32 {
+    a.dot(b).clamp(-1.0, 1.0).acos()
+}
+
+/// D3 (I1): the box a stroke's extras are laid in, its gobo, aim, barn doors
+/// and wear, and a picture as its content: `(frame, half extents)` in the
+/// tangent plane of the stroke's own middle (its key's axis), turned by the
+/// light's roll, and the square there that holds its covering cone, which
+/// holds everything the stroke draws (as the key's share once laid a
+/// stroke's extras). A stroke's points place it, not the light's azimuth,
+/// elevation, width and height, so that nominal box is never used: laid in
+/// it, a framed window blacked the stroke out where the stroke left the box,
+/// and past 87 degrees from it left the stroke bare.
+///
+/// A stroke that reaches further than the tangent plane does (about 87
+/// degrees from its middle) gets the plane's widest square; past it the face
+/// is held at the plane's limit (`studio::project_held`). None for any other
+/// light, and for a stroke that cannot be built, which draws nothing.
+pub fn stroke_box(light: &LightParams) -> Option<(LightFrame, Vec2f)> {
+    if light.shape() != LightShape::Stroke {
+        return None;
+    }
+    let (axis, _, cos_cover) = StrokeLine::new(light, &stroke_of(light))?.cones();
+    let c = cos_cover.max(super::studio::PROJECT_MIN_COS);
+    let half = (1.0 - c * c).max(0.0).sqrt() / c;
+    let (azimuth_deg, elevation_deg) = az_el_from_dir(axis);
+    Some((light_frame(azimuth_deg, elevation_deg, light.roll_deg), vec2f(half, half)))
+}
+
+impl StrokeLight {
+    fn new(light: &LightParams) -> Option<StrokeLight> {
+        let stroke = stroke_of(light);
+        let geometry = StrokeLine::new(light, &stroke)?;
+        let path = ArcPath::new(&geometry.line, false, geometry.reach);
         if path.is_empty() {
             return None;
         }
-        let cone = CullCone::around(&line, widest_half);
-        // A stroke all round the sky has no cone: the whole sphere then.
-        let key_cos = cone.cos_max.max(-1.0);
+        // The key's own light is not summed here: studio.rs integrates the
+        // map's drawing of the stroke over its covering cone (D1), its band
+        // lapping over itself in a tight bend, the flags after it and what
+        // hangs in front of it all included.
+        let (axis, key_cos, key_cos_cover) = geometry.cones();
         let hotspot = HOTSPOT_FALLOFF * clamp01(light.hotspot);
         let ramp = stroke_ramp(light, &stroke);
-        // The covering cone (plan 2's `cos_cover`): every lit direction lies
-        // within `reach` of the centre line, and a great-circle piece bows at
-        // most half its length from its ends, so the line's widest angle from
-        // the key's axis plus both holds the whole stroke, soft edge included.
-        // `around` over the same line gives the same axis as `cone`. The key's
-        // own light is not summed here: studio.rs integrates the map's drawing
-        // of the stroke over this cone (D1), its band lapping over itself in a
-        // tight bend, the flags after it and what hangs in front of it all
-        // included.
-        let arc = |a: Vec3f, b: Vec3f| a.dot(b).clamp(-1.0, 1.0).acos();
-        let piece = line.windows(2).fold(0.0f32, |m, w| m.max(arc(w[0], w[1])));
-        let key_cos_cover = CullCone::around(&line, reach + 0.5 * piece).cos_max.max(-1.0).min(key_cos);
         // D2: how far out round the axis the line lies, by arc length (its
         // pieces are only roughly even): a ring at elevation 10 gives 0.17,
         // an arch through its own middle far more.
         let (mut along, mut length) = (Vec3f::default(), 0.0f32);
-        for w in line.windows(2) {
-            let len = arc(w[0], w[1]);
+        for w in geometry.line.windows(2) {
+            let len = arc_between(w[0], w[1]);
             along += (w[0] + w[1]) * (0.5 * len);
             length += len;
         }
-        let line_facing = if length > 0.0 { (along.dot(cone.axis) / length).max(0.0).min(1.0) } else { 1.0 };
-        Some(StrokeLight { path, half_width, softness, hotspot, profile, ramp, key: (cone.axis, key_cos), key_cos_cover, line_facing })
+        let line_facing = if length > 0.0 { (along.dot(axis) / length).max(0.0).min(1.0) } else { 1.0 };
+        let StrokeLine { half_width, softness, profile, .. } = geometry;
+        Some(StrokeLight { path, half_width, softness, hotspot, profile, ramp, key: (axis, key_cos), key_cos_cover, line_facing })
     }
 
     /// Mask and emission at `dir`, and how far along the stroke the nearest
@@ -534,6 +597,8 @@ struct ScrimLight {
     edge: f32,
     /// The frame's width, tangent units.
     frame_w: f32,
+    /// Half the band of the frame's inner edge, where the cloth starts.
+    inner_edge: f32,
     /// 1 / (2 sigma²), sigma = source_size in unit-box units.
     inv_two_sigma2: f32,
 }
@@ -547,13 +612,24 @@ impl ScrimLight {
         let frame = if scrim.frame.is_finite() { scrim.frame.clamp(0.0, 0.2) } else { 0.0 };
         let frame_w = frame * short;
         let inv_two_sigma2 = 1.0 / (2.0 * sigma * sigma);
+        // A rect's inside depth is its shorter half extent, as in studio.rs.
+        let edge = 0.5 * (clamp01(light.softness) * short).max(EDGE_MIN);
+        // D9 (L:70): the cloth meets a rigid frame, so the frame's inner edge
+        // is a quarter of its width, never softer than the outline: a frame
+        // thinner than the outline's soft band (0.1 of the shorter half size
+        // each way at the default softness) still reads as a border, dark
+        // across its width with the cloth glowing right inside it, where the
+        // outline's own band made it a dark gradient. Just past no frame the
+        // band hands over from the outline's own, falling three times as fast
+        // as the frame grows, so the Frame slider's first steps do not jump.
+        let inner_edge = (0.25 * frame_w).max(edge - 3.0 * frame_w).min(edge).max(0.5 * EDGE_MIN);
         ScrimLight {
             frame: light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg),
             half: vec2f(hx, hy),
             round: clamp01(light.corner) * short,
-            // A rect's inside depth is its shorter half extent, as in studio.rs.
-            edge: 0.5 * (clamp01(light.softness) * short).max(EDGE_MIN),
+            edge,
             frame_w,
+            inner_edge,
             inv_two_sigma2,
         }
     }
@@ -577,7 +653,7 @@ impl ScrimLight {
             return ShapeSample::default();
         }
         // The cloth inside the frame glows; the frame itself is dark.
-        let cloth = 1.0 - smoothstep(-self.edge, self.edge, d + self.frame_w);
+        let cloth = 1.0 - smoothstep(-self.inner_edge, self.inner_edge, d + self.frame_w);
         let ux = t.x / self.half.x;
         let uy = t.y / self.half.y;
         let glow = (-(ux * ux + uy * uy) * self.inv_two_sigma2).exp();
@@ -596,8 +672,11 @@ fn clamp01(x: f32) -> f32 {
 /// like ibl's softbox (`right = cross(+Y, center)`), and that vector points
 /// the other way, so the sign is measured from a reference light on the
 /// horizon rather than assumed: whichever way A3 turns `right`, a drawn point
-/// at x = +1 lands east of a light facing north.
-fn box_x_sign() -> f32 {
+/// at x = +1 lands east of a light facing north. Every frame `light_frame`
+/// builds turns its `right` the same way, rolled or not, so this is also the
+/// sign that turns any light's `right` into the viewer's right
+/// (`light_fx::face_axes`).
+pub fn box_x_sign() -> f32 {
     // A light due north on the horizon: increasing azimuth is +X there.
     if light_frame(0.0, 0.0, 0.0).right.x >= 0.0 {
         1.0
@@ -1097,6 +1176,37 @@ mod tests {
         assert!(frame.length() < 1.0e-4, "the frame is dark and hides the backdrop: {frame:?}");
         let outside = env.radiance(unit_to_dir(&light, [1.3, 0.0]));
         assert!((outside - vec3f(2.0, 2.0, 2.0)).length() < 1.0e-3, "{outside:?}");
+    }
+
+    /// D9 (L:70): a thin frame reads as a frame at the default softness: dark
+    /// across its width, the cloth glowing right inside it, not a dark
+    /// gradient from the outline's soft band (whose half, 0.1 of the shorter
+    /// half size at softness 0.2, is as wide as a 0.1 frame). The first steps
+    /// of the Frame slider still hand over smoothly from no frame.
+    #[test]
+    fn a_thin_scrim_frame_reads_as_a_frame() {
+        let with_frame = |frame: f32| LightParams { softness: 0.2, scrim: Some(ScrimParams { source_size: 1.0, frame }), ..scrim_light() };
+        // How much of the glow shows at unit-box x (y = 0): the cloth, emit over glow.
+        let cloth = |light: &LightParams, x: f32| {
+            let s = ShapedLight::new(light).unwrap().sample(unit_to_dir(light, [x, 0.0]));
+            s.emit / (-0.5 * x * x).exp()
+        };
+        for frame in [0.05f32, 0.1] {
+            let light = with_frame(frame);
+            // The square's half size is its shorter one: the frame is `frame` unit-box units wide.
+            let (middle, inside) = (cloth(&light, 1.0 - 0.5 * frame), cloth(&light, 1.0 - 1.5 * frame));
+            assert!(middle < 0.05, "frame {frame}: its middle shows {middle} of the glow");
+            assert!(inside > 0.9, "frame {frame}: the cloth inside it shows {inside} of the glow");
+            // The frame hides what is behind it across its inner half.
+            let s = ShapedLight::new(&light).unwrap().sample(unit_to_dir(&light, [1.0 - 0.75 * frame, 0.0]));
+            assert!(s.mask > 0.5, "frame {frame}: {}", s.mask);
+        }
+        // No frame and the narrowest one draw almost the same.
+        let (none, hair) = (with_frame(0.0), with_frame(0.002));
+        for i in 0..=100 {
+            let x = 0.7 + 0.5 * i as f32 / 100.0;
+            assert!((cloth(&none, x) - cloth(&hair, x)).abs() < 0.08, "at {x}: {} against {}", cloth(&none, x), cloth(&hair, x));
+        }
     }
 
     #[test]

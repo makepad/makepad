@@ -1,5 +1,6 @@
 //! Gobos (cookies): a pattern hung in front of a light, evaluated in that
-//! light's own rectangle. B6 has windows (a frame and muntin bars), plain
+//! light's own rectangle (a stroke's is the square round the stroke itself,
+//! `light_fx::face_axes`). B6 has windows (a frame and muntin bars), plain
 //! grids of bars and venetian blinds; B7 adds leaves and fern fronds; B8 image
 //! masks and the shadow a gobo throws onto the studio backdrop.
 //!
@@ -14,8 +15,10 @@
 //! its light at any `distance`. A window's pattern is separable (glass is
 //! "inside a pane across" and "inside a pane down"), and so is a box filter,
 //! so the blurred window is exactly the product of two one-axis filters.
-//! Leaves and fern (`foliage.rs`) soften each blade's and stem's edge
-//! instead, so a canopy passes somewhat less of its light as it moves away.
+//! Leaves and fern (`foliage.rs`) box-filter each blade and stem as a strip
+//! across it, which keeps the area of its shade too (D9), so a canopy passes
+//! the same share of its light as it moves away, to within a few per cent
+//! where blurred shades overlap.
 //! An image mask (B8) is box-filtered too, exactly, through a summed-area
 //! table of what its texels pass.
 
@@ -86,6 +89,9 @@ pub struct Gobo {
     /// sin and cos of the slats' tilt from edge-on.
     tilt_sin: f32,
     tilt_cos: f32,
+    /// How far in front of the light the gobo hangs, 0..=1: the slits between
+    /// tilted slats spread their light that far (`blinds`).
+    distance: f32,
     vertical: bool,
     /// Leaves or fern fronds, scattered once from the seed (B7).
     foliage: Option<Foliage>,
@@ -144,6 +150,8 @@ impl Gobo {
             slat_half: 0.5 * p.slat_width.max(0.5).min(1.5),
             tilt_sin,
             tilt_cos,
+            // max/min, not clamp: a NaN distance reads as 0.
+            distance: p.distance.max(0.0).min(1.0),
             vertical: p.vertical,
             foliage,
             image,
@@ -213,9 +221,10 @@ impl Gobo {
     /// from an angle close a little, and overlapping shut blinds stay shut
     /// from every side.
     ///
-    /// The gaps are box-filtered, wider as the blinds close (the gaps become
-    /// slits that spread the light): a gap narrower than the blur dims
-    /// instead of vanishing, and a shut one passes nothing.
+    /// The gaps are box-filtered, wider as the blinds close and the further
+    /// they hang from the light (the gaps become slits that spread the
+    /// light): a gap narrower than the blur dims instead of vanishing, and a
+    /// shut one passes nothing. Against the light they are sharp.
     fn blinds(&self, p: Vec2f, q: Vec2f) -> f32 {
         // The axis across the slats: up the light for horizontal slats.
         let (a, h, view) = if self.vertical { (p.x, self.rect.x, q.x) } else { (p.y, self.rect.y, q.y) };
@@ -226,7 +235,12 @@ impl Gobo {
         if !(gap > 0.0) {
             return 0.0;
         }
-        let w = (self.soft + 0.25 * pitch * self.tilt_sin).min(0.45 * pitch).max(1.0e-5);
+        // D9 (L:137): a slit spreads its light up to a quarter pitch each way,
+        // as far as the blinds hang from the light, as the penumbra does:
+        // against it (distance 0) they are sharp, as the Distance row
+        // promises, where a spread held at a quarter pitch left shut 0.8-pitch
+        // slats showing wide bands of sky at a third of it.
+        let w = (self.soft + 0.25 * pitch * self.tilt_sin * self.distance).min(0.45 * pitch).max(1.0e-5);
         // The gaps are centred on the lines half way between two pivots, which
         // are the multiples of the pitch measured from the light's lower edge.
         // Shifted by the gap's half-width they start on those multiples, and
@@ -583,8 +597,85 @@ mod tests {
             assert!(sharp > 0.3 && sharp < 0.99, "{kind}: {sharp}");
             assert!((sharp - soft).abs() < 0.01 * sharp, "{kind}: sharp {sharp}, soft {soft}");
         }
+        // D9 (L:146): leaves and fern keep their light as they move off too,
+        // on the 60 x 45 degree light the finding measured (leaves 0.381 at
+        // distance 0 and 0.263 at 1, fern 0.720 and 0.513), sparse and dense,
+        // to within 2.5 % of the light. Each blade and stem keeps the area of
+        // its shade (foliage.rs); what is left is where their blurred shades
+        // meet, which the product of what passes them counts only roughly: a
+        // little lighter where a fern's pinnules lie close side by side.
+        let light = vec2f(30f32.to_radians().tan(), 22.5f32.to_radians().tan());
+        for kind in ["leaves", "fern"] {
+            for density in [0.5f32, 0.9] {
+                let mean = |distance: f32| mean_over(&gobo(GoboParams { kind: kind.to_string(), density, distance, ..GoboParams::default() }, light), light, 300);
+                let sharp = mean(0.0);
+                assert!(sharp > 0.05 && sharp < 0.95, "{kind} at density {density}: {sharp}");
+                for distance in [0.4f32, 1.0] {
+                    let soft = mean(distance);
+                    assert!((sharp - soft).abs() < 0.025, "{kind} at density {density}, distance {distance}: sharp {sharp}, soft {soft}");
+                }
+            }
+        }
         assert!(penumbra(1.0) > 20.0 * penumbra(0.0));
         assert_eq!(penumbra(f32::NAN), penumbra(0.0));
+    }
+
+    /// D9 (L:137): against the light (distance 0) blinds are as sharp as a
+    /// window, as the Distance row says: shut slats 0.8 pitches wide leave
+    /// thin bright lines of sky, not wide bands at a third of it. Only further
+    /// off do the slits between them spread their light.
+    #[test]
+    fn blinds_are_sharp_at_distance_zero() {
+        let h = 10f32.to_radians().tan();
+        let profile = |tilt_deg: f32, slat_width: f32, distance: f32| {
+            let g = gobo(GoboParams { kind: "blinds".to_string(), slats: 10, tilt_deg, slat_width, distance, ..GoboParams::default() }, vec2f(h, h));
+            (0..2000).map(|i| g.transmission(vec2f(0.0, h * (-1.0 + (i as f32 + 0.5) / 1000.0)))).collect::<Vec<f32>>()
+        };
+        for (tilt_deg, slat_width) in [(90.0f32, 0.8f32), (60.0, 0.8), (30.0, 1.08)] {
+            let sharp = profile(tilt_deg, slat_width, 0.0);
+            let brightest = sharp.iter().cloned().fold(0.0f32, f32::max);
+            let grey = sharp.iter().filter(|t| **t > 0.05 && **t < 0.95).count() as f32 / sharp.len() as f32;
+            assert!(brightest > 0.99, "tilt {tilt_deg}, slats {slat_width}: the gaps pass all of the light, not {brightest}");
+            assert!(grey < 0.05, "tilt {tilt_deg}, slats {slat_width}: {:.1} % of the light is a blurred edge", 100.0 * grey);
+            // Far off the slits spread: the same share, but no longer sharp.
+            let soft = profile(tilt_deg, slat_width, 1.0);
+            let mean = |ts: &[f32]| ts.iter().sum::<f32>() / ts.len() as f32;
+            assert!((mean(&soft) - mean(&sharp)).abs() < 0.01, "tilt {tilt_deg}: {} against {}", mean(&soft), mean(&sharp));
+            let soft_grey = soft.iter().filter(|t| **t > 0.05 && **t < 0.95).count() as f32 / soft.len() as f32;
+            assert!(soft_grey > 4.0 * grey.max(0.01), "tilt {tilt_deg}: the slits spread far off ({soft_grey} against {grey})");
+        }
+    }
+
+    /// D3 (L:166): a stroke placed by its points casts from where it is
+    /// drawn, its middle, not from the light's own (unused) direction.
+    #[test]
+    fn a_stroke_casts_from_where_it_is_drawn() {
+        let stroke = |azimuth_deg: f32, elevation_deg: f32| LightParams {
+            shape: "stroke".to_string(),
+            azimuth_deg,
+            elevation_deg,
+            stroke: Some(StrokeParams { points: vec![[200.0, 30.0], [220.0, 45.0], [240.0, 30.0]], width_deg: 6.0, ..StrokeParams::default() }),
+            ..projecting_key()
+        };
+        let images = ImageSet::default();
+        let here = BackdropGobo::new(&[stroke(220.0, 40.0)], &images).expect("casts");
+        let elsewhere = BackdropGobo::new(&[stroke(60.0, 15.0)], &images).expect("casts");
+        let (mut shaded, mut centre) = (0, Vec3f::default());
+        for j in 0..30 {
+            for i in 0..90 {
+                let d = dir_from_az_el(4.0 * i as f32, -88.0 + 3.0 * j as f32);
+                assert_eq!(here.shade(d), elsewhere.shade(d), "the light's own direction places nothing: {d:?}");
+                if here.shade(d) < 1.0 {
+                    shaded += 1;
+                    let hit = d * (FLOOR_HEIGHT / -d.y);
+                    centre += vec3f(hit.x, 0.0, hit.z);
+                }
+            }
+        }
+        assert!(shaded > 20, "the stroke's gobo falls on the floor: {shaded}");
+        // The patch lies on the floor under the stroke's middle, about azimuth 220.
+        let (az, _) = az_el_from_dir(centre.normalize());
+        assert!((az - 220.0).abs() < 15.0, "the patch is centred at azimuth {az}");
     }
 
     fn studio(lights: Vec<LightParams>) -> HdriParams {

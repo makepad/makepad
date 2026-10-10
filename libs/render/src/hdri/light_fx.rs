@@ -16,15 +16,16 @@
 //! has to know about it.
 //!
 //! Everything here is laid out in face coordinates: x to the right and y up
-//! as the viewer at the centre sees the light, in tangent units.
+//! as the viewer at the centre sees the light, in tangent units, over the
+//! light's own box, or for a stroke the box round the stroke (`face_axes`).
 
 use super::*;
 use super::aim::Aim;
 use super::gobo::Gobo;
 use super::imperfections::Imperfections;
 use super::noise::hash01;
-use super::shaped::{half_extents, unit_to_dir};
-use super::studio::{light_frame, project, LightFrame};
+use super::shaped::{box_x_sign, half_extents, stroke_box};
+use super::studio::{light_frame, project_held, LightFrame};
 
 /// Strata per axis for the key light's share (`LightFx::key_share`).
 /// Jittered, because a regular grid beats against panes, slats and grid cells.
@@ -44,20 +45,24 @@ const KEY_JITTER_SEED: u32 = 0x6b65_7921;
 /// before the strata are laid over that part (`LightFx::key_share`).
 const KEY_SCAN: i32 = 48;
 
-/// A light's frame with the two facts every extra needs about it: `sx`, the
-/// sign that turns the frame's `right` into the viewer's right, and the
-/// tangent half extents tan(width/2), tan(height/2).
+/// The box every extra is laid in, with the two facts each needs about it:
+/// its frame, `sx`, the sign that turns the frame's `right` into the viewer's
+/// right, and its tangent half extents.
+/// - A light in its own box (a rect, disc, ring, polygon, scrim): its frame
+///   and tan(width/2), tan(height/2).
+/// - A stroke, which its points place (D3, I1): the square round its covering
+///   cone in the tangent plane of its own middle (`shaped::stroke_box`), so
+///   its gobo, aim, doors and wear follow where it is drawn and hold all of
+///   it, never the light's unused azimuth, elevation, width and height.
 pub fn face_axes(light: &LightParams) -> (LightFrame, f32, Vec2f) {
-    let frame = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
-    let (hx, hy) = half_extents(light);
+    let (frame, half) = stroke_box(light).unwrap_or_else(|| {
+        let (hx, hy) = half_extents(light);
+        (light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg), vec2f(hx, hy))
+    });
     // A3's frame follows ibl::softbox, whose `right` points to the viewer's
-    // left. B2's unit box runs to the viewer's right whichever way that is,
-    // so one probe through it settles the sign.
-    let sx = match project(&frame, unit_to_dir(light, [0.01, 0.0])) {
-        Some(t) if t.x < 0.0 => -1.0,
-        _ => 1.0,
-    };
-    (frame, sx, vec2f(hx, hy))
+    // left. B2's unit box runs to the viewer's right whichever way that is
+    // (its sign), and so does every frame `light_frame` builds.
+    (frame, box_x_sign(), half)
 }
 
 /// Everything in front of one light.
@@ -117,9 +122,13 @@ impl LightFx {
     }
 
     /// Face coordinates of `dir`: x to the viewer's right, y up, tangent
-    /// units. None behind the light (where `project` gives up).
+    /// units. Past the tangent plane's limit (about 87 degrees from the
+    /// face's centre, where only a stroke draws) held on the limit's circle
+    /// along the direction's bearing (`project_held`, L:180), so the gobo, the
+    /// aim and the wear go on there instead of stepping to the bare light.
+    /// None only straight behind the centre.
     pub fn face(&self, dir: Vec3f) -> Option<Vec2f> {
-        project(&self.frame, dir).map(|t| vec2f(self.sx * t.x, t.y))
+        project_held(&self.frame, dir).map(|t| vec2f(self.sx * t.x, t.y))
     }
 
     /// The share 0..=1 of an emitting face that shows at `dir` past
@@ -285,7 +294,8 @@ impl LightFx {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::studio::Studio;
+    use super::super::shaped::unit_to_dir;
+    use super::super::studio::{project, Studio};
     use crate::sky::luminance;
 
     fn studio(lights: Vec<LightParams>) -> HdriParams {
@@ -672,6 +682,117 @@ mod tests {
             }
         }
         assert!(off.is_empty(), "{}", off.join("\n"));
+    }
+
+    /// Studio mode over a black backdrop, so a direction shows the lights alone.
+    fn dark_studio(lights: Vec<LightParams>) -> HdriParams {
+        let mut p = studio(lights);
+        p.studio.top = [0.0; 3];
+        p.studio.horizon = [0.0; 3];
+        p.studio.floor = [0.0; 3];
+        p
+    }
+
+    /// The final review's stroke (I1, capture 28-pair): placed by its points,
+    /// far from the light's own azimuth, elevation, width and height, which
+    /// no longer place anything.
+    fn zigzag(azimuth_deg: f32, elevation_deg: f32, width_deg: f32, height_deg: f32) -> LightParams {
+        LightParams {
+            shape: "stroke".to_string(),
+            azimuth_deg,
+            elevation_deg,
+            width_deg,
+            height_deg,
+            intensity_ev: 0.0,
+            stroke: Some(StrokeParams { points: vec![[80.0, 10.0], [100.0, 40.0], [120.0, 15.0], [140.0, 40.0], [160.0, 10.0]], width_deg: 4.0, ..StrokeParams::default() }),
+            ..LightParams::default()
+        }
+    }
+
+    /// D3 (I1; L:119, :147, :166, :180, :198): a stroke placed by its points
+    /// gets its gobo, aim, barn doors and wear in the box round the stroke
+    /// itself, never in the light's unused nominal box. That box once blacked
+    /// the stroke out behind a framed window's frame where the stroke left it,
+    /// and past 87 degrees from it left the stroke bare.
+    #[test]
+    fn a_stroke_is_never_cut_by_the_nominal_box() {
+        let window = GoboParams { panes_x: 4, panes_y: 3, ..GoboParams::default() };
+        let extras = |light: LightParams| LightParams {
+            gobo: Some(window.clone()),
+            aim: Some(AimParams { grid: 0.2, barn_doors: [30.0, 0.0, 0.0, 0.0], ..AimParams::default() }),
+            imperfections: Some(ImperfectionParams { wrinkle: 0.5, dust: 0.3, weave: 0.2, seed: 3 }),
+            ..light
+        };
+        // Directions round the stroke, a degree apart.
+        let dirs: Vec<(f32, Vec3f)> = (0..=110)
+            .flat_map(|i| (0..=60).map(move |j| (70.0 + i as f32, dir_from_az_el(70.0 + i as f32, -5.0 + j as f32))))
+            .collect();
+        let draw = |light: LightParams| {
+            let env = Env::new(&dark_studio(vec![light]));
+            dirs.iter().map(|(_, d)| luminance(env.radiance(*d))).collect::<Vec<f32>>()
+        };
+        // 1. The light's own place and size change nothing the stroke shows.
+        let reference = draw(extras(zigzag(0.0, 30.0, 30.0, 20.0)));
+        for (azimuth_deg, elevation_deg, width_deg, height_deg) in [(120.0, 25.0, 30.0, 20.0), (250.0, -20.0, 100.0, 60.0)] {
+            let moved = draw(extras(zigzag(azimuth_deg, elevation_deg, width_deg, height_deg)));
+            let differ = reference.iter().zip(&moved).filter(|(a, b)| a != b).count();
+            assert_eq!(differ, 0, "the nominal box at ({azimuth_deg}, {elevation_deg}), {width_deg} x {height_deg}, changes {differ} directions");
+        }
+        // 2. The box holds all of the stroke, soft edge included.
+        let light = zigzag(0.0, 30.0, 30.0, 20.0);
+        let (frame, _, half) = face_axes(&light);
+        let shaped = super::super::shaped::ShapedLight::new(&light).expect("the stroke builds");
+        let mut drawn = 0;
+        for i in 0..=440 {
+            for j in 0..=240 {
+                let d = dir_from_az_el(70.0 + 0.25 * i as f32, -5.0 + 0.25 * j as f32);
+                if shaped.sample(d).mask > 0.0 {
+                    drawn += 1;
+                    let q = project(&frame, d).map(|t| vec2f(t.x.abs(), t.y.abs()));
+                    assert!(q.is_some_and(|q| q.x <= half.x && q.y <= half.y), "the stroke draws at {:?}, outside its box {half:?}: {q:?}", az_el_from_dir(d));
+                }
+            }
+        }
+        assert!(drawn > 1000, "the test must see the stroke ({drawn})");
+        // 3. Through the window every stretch of the stroke shows, and the
+        // bars cross it: nothing is cut off by a straight edge.
+        let bare = draw(light.clone());
+        let barred = draw(LightParams { gobo: Some(window), ..light });
+        let peak = bare.iter().cloned().fold(0.0f32, f32::max);
+        assert!(peak > 0.5, "the stroke is lit: {peak}");
+        for stretch in 0..19 {
+            let (lo, hi) = (82.0 + 4.0 * stretch as f32, 86.0 + 4.0 * stretch as f32);
+            let in_stretch = |values: &[f32]| dirs.iter().zip(values).filter(|((az, _), _)| *az >= lo && *az < hi).map(|(_, v)| *v).fold(0.0f32, f32::max);
+            let (open, through) = (in_stretch(&bare), in_stretch(&barred));
+            assert!(through >= 0.5 * open, "azimuth {lo}..{hi}: the window passes {through} of {open}");
+        }
+        let crossed = bare.iter().zip(&barred).filter(|(b, w)| **b > 0.5 * peak && **w < 0.05 * **b).count();
+        assert!(crossed > 0, "the window's bars cross the stroke");
+    }
+
+    /// D3 (L:180): a stroke that reaches more than 87 degrees from its own
+    /// middle, where the tangent plane ends, keeps what hangs in front of it
+    /// there: the face is held at the plane's limit, so a grid that blocks the
+    /// stroke near the limit does not step to full brightness past it.
+    #[test]
+    fn a_stroke_past_the_tangent_plane_keeps_its_extras() {
+        // Half way round the horizon: its middle is due east, its ends 90 degrees off it.
+        let half_ring = LightParams {
+            shape: "stroke".to_string(),
+            azimuth_deg: 90.0,
+            elevation_deg: 0.0,
+            intensity_ev: 0.0,
+            stroke: Some(StrokeParams { points: vec![[0.0, 0.0], [45.0, 0.0], [90.0, 0.0], [135.0, 0.0], [180.0, 0.0]], width_deg: 4.0, ..StrokeParams::default() }),
+            ..LightParams::default()
+        };
+        let gridded = LightParams { aim: Some(AimParams { grid: 0.5, ..AimParams::default() }), ..half_ring.clone() };
+        let (bare, grid) = (Env::new(&dark_studio(vec![half_ring])), Env::new(&dark_studio(vec![gridded])));
+        for az in [5.0f32, 4.0, 3.0, 2.0, 1.0, 0.5, 179.5, 178.0, 176.0] {
+            let d = dir_from_az_el(az, 0.0);
+            let (open, through) = (luminance(bare.radiance(d)), luminance(grid.radiance(d)));
+            assert!(open > 0.5, "the stroke is lit at azimuth {az}: {open}");
+            assert!(through < 0.01 * open, "a grid seen almost edge-on passes nothing, past the plane's limit too: azimuth {az}, {through} of {open}");
+        }
     }
 
     #[test]

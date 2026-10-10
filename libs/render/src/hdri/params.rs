@@ -625,7 +625,10 @@ pub struct GoboParams {
     /// Where leaves and fronds fall and how they turn.
     pub seed: u32,
     /// 0..=1: how far in front of the light the gobo hangs. 0 gives sharp
-    /// edges, 1 a penumbra about an eighth of the light's smaller half size.
+    /// edges (blinds too), 1 a penumbra about an eighth of the light's
+    /// smaller half size. The blur moves light about and keeps it: a gobo
+    /// passes the same share of its light at any distance (leaves and fern
+    /// to within a few per cent).
     pub distance: f32,
     /// Image gobo: the name of an image the app has loaded; "" is none.
     pub image: String,
@@ -733,7 +736,8 @@ impl GoboParams {
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
 pub struct AimParams {
     /// -90..=90 degrees: the face turned off the direction to the centre,
-    /// positive toward the viewer's right.
+    /// positive toward the viewer's right. Turned (with the pitch) within
+    /// about five degrees of edge-on, the whole face fades out.
     pub yaw_deg: f32,
     /// -90..=90 degrees: the face tilted, positive upward.
     pub pitch_deg: f32,

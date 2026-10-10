@@ -8,6 +8,12 @@
 //! where an environment map is seen from. So an aimed light only looks
 //! different through its grid, past its doors, or when it is nearly edge-on.
 //!
+//! The face is one plane, and the centre sees all of it from one side: as it
+//! turns toward edge-on it fades out as a whole, by its own turn (D9, L:187).
+//! A ray through a wide face can still leave it more than 90 degrees from its
+//! normal (the outline does not turn with it); that ray grazes the face, so
+//! its doors and its grid block it as they block a ray just short of 90.
+//!
 //! Positions are face coordinates (x to the viewer's right, y up, tangent
 //! units); the aimed face's own axes are `r` (its right), `u` (its up) and
 //! `n` (its normal, the way it shines).
@@ -24,6 +30,9 @@ pub const GRID_DEPTH_MAX: f32 = 3.732;
 /// a cell's edge, both in cell widths.
 const GRID_WALL: f32 = 0.04;
 const GRID_EDGE: f32 = 0.04;
+/// How far the face turns, as the cosine between its normal and the way back
+/// to the centre, over which it fades out: the last 4.6 degrees before 90.
+const EDGE_ON_FADE: f32 = 0.08;
 const SQRT_3: f32 = 1.732_050_8;
 
 #[derive(Clone, Debug)]
@@ -39,6 +48,11 @@ pub struct Aim {
     grid_depth: f32,
     /// Half a cell wall's thickness, in cell widths.
     grid_wall: f32,
+    /// The softening of a cell's edge, in cell widths.
+    grid_edge: f32,
+    /// What of the face the centre sees as it turns toward edge-on, 0..=1,
+    /// the same all over it.
+    fade: f32,
     /// Each door's flap angle from lying flat outward, radians: top, right, bottom, left.
     flaps: [f32; 4],
     /// The soft edge of a door's shadow on each axis, tangent units.
@@ -76,8 +90,16 @@ impl Aim {
             half,
             cell: 2.0 * half.x.min(half.y) / GRID_CELLS,
             grid_depth: grid * GRID_DEPTH_MAX,
-            // The walls thin out with the grid, so grid 0.01 is not a jump from none.
+            // The walls thin out with the grid, and so does the softening of
+            // the edges they bound (D9, L:188): with the edge held at full
+            // width every cell edge darkened to half at grid 0.001 (the face
+            // 3 % darker), a full-contrast honeycomb at the slider's first step.
             grid_wall: GRID_WALL * (4.0 * grid).min(1.0),
+            grid_edge: (GRID_EDGE * (4.0 * grid).min(1.0)).max(1.0e-6),
+            // The face's own turn, n against the way back to the centre
+            // (cos yaw x cos pitch), fades the whole face: per ray, a line swept
+            // across a wide face from yaw 70 on and left its near half lit at 90.
+            fade: smoothstep(0.0, EDGE_ON_FADE, n.dot(n0)),
             flaps: doors.map(|d| (2.0 * d).to_radians()),
             soft: vec2f(edge * half.x, edge * half.y),
         })
@@ -95,14 +117,17 @@ impl Aim {
         // The ray from the face to the centre, in the face's own axes.
         let v = -dir;
         let vz = v.dot(self.n);
-        if !(vz > 0.0) {
+        if vz.is_nan() {
             return 0.0;
         }
-        // Its slopes toward the face's right and up, per unit along its normal.
+        // Its slopes toward the face's right and up, per unit along its
+        // normal. A ray past 90 degrees from the normal grazes the face: its
+        // slopes go on at the clamp, as they reach it just short of 90.
+        let vz = vz.max(1.0e-6);
         let tx = (v.dot(self.r) / vz).max(-50.0).min(50.0);
         let ty = (v.dot(self.u) / vz).max(-50.0).min(50.0);
-        // A face seen nearly edge-on fades out rather than cutting off.
-        let mut t = smoothstep(0.0, 0.08, vz);
+        // A face turned nearly edge-on fades out as a whole.
+        let mut t = self.fade;
         t *= door(q.y, self.half.y, self.flaps[0], ty, self.soft.y);
         t *= door(q.x, self.half.x, self.flaps[1], tx, self.soft.x);
         t *= door(-q.y, self.half.y, self.flaps[2], -ty, self.soft.y);
@@ -125,7 +150,7 @@ impl Aim {
         let out = vec2f(at.x + tx * self.grid_depth, at.y + ty * self.grid_depth);
         let worst = hex_dist(at).max(hex_dist(out));
         let open = 0.5 - self.grid_wall;
-        1.0 - smoothstep(open - GRID_EDGE, open + GRID_EDGE, worst)
+        1.0 - smoothstep(open - self.grid_edge, open + self.grid_edge, worst)
     }
 }
 
@@ -276,6 +301,64 @@ mod tests {
         let turned = Face::new(AimParams { yaw_deg: 10.0, grid: 0.6, ..AimParams::default() }, 30.0);
         let side = |x: f32| (0..31).map(|k| turned.at(x, (k as f32 - 15.0) / 20.0)).sum::<f32>() / 31.0;
         assert!(side(-0.7) > 0.4 && side(0.7) < 0.05, "left {}, right {}", side(-0.7), side(0.7));
+    }
+
+    /// D9 (L:187): a face turned toward edge-on fades out as a whole over the
+    /// last five degrees of its turn, whatever its width: no fade line sweeps
+    /// across a wide face from yaw 70 on, and at 89-90 no half of it stays at
+    /// full brightness behind a hard edge.
+    #[test]
+    fn a_face_turned_edge_on_fades_out_as_a_whole() {
+        for size in [20.0f32, 60.0, 120.0] {
+            for (yaw_deg, pitch_deg) in [(70.0f32, 0.0f32), (80.0, 0.0), (86.0, 0.0), (88.0, 0.0), (89.5, 0.0), (90.0, 0.0), (0.0, 88.0), (-60.0, 81.5)] {
+                let face = Face::new(AimParams { yaw_deg, pitch_deg, ..AimParams::default() }, size);
+                let ts: Vec<f32> = (0..41 * 41).map(|k| face.at(-0.95 + 0.0475 * (k % 41) as f32, -0.95 + 0.0475 * (k / 41) as f32)).collect();
+                let (lo, hi) = (ts.iter().cloned().fold(1.0f32, f32::min), ts.iter().cloned().fold(0.0f32, f32::max));
+                assert!(hi - lo < 1.0e-6, "{size} degree face turned ({yaw_deg}, {pitch_deg}): {lo}..{hi} across it");
+                // The face's own turn: the angle between where it points and the centre.
+                let turn = (yaw_deg.to_radians().cos() * pitch_deg.to_radians().cos()).acos().to_degrees();
+                if turn <= 85.0 {
+                    assert_eq!(hi, 1.0, "{size} degrees, turned {turn}: still whole");
+                } else if turn >= 89.99 {
+                    assert!(hi < 1.0e-6, "{size} degrees, turned {turn}: gone");
+                } else if turn >= 85.5 {
+                    assert!(hi > 0.0 && hi < 1.0, "{size} degrees, turned {turn}: fading, {hi}");
+                }
+            }
+        }
+    }
+
+    /// D9 (L:188): the first steps of the Grid slider ease in from no grid.
+    /// The cells' edges soften with the walls they bound, so a grid of 0.01
+    /// does not draw a full-contrast honeycomb (every cell edge at 0.5, the
+    /// face 3 % darker) over the light.
+    #[test]
+    fn the_first_grid_steps_ease_in_from_none() {
+        // The mean over a face, and the share of it darker than 0.9.
+        let measure = |grid: f32, size: f32| {
+            let face = Face::new(AimParams { grid, ..AimParams::default() }, size);
+            let n = 120;
+            let ts: Vec<f32> = (0..n * n).map(|k| face.at((k % n) as f32 / n as f32 * 1.9 - 0.95, (k / n) as f32 / n as f32 * 1.9 - 0.95)).collect();
+            let mean = ts.iter().sum::<f32>() / ts.len() as f32;
+            (mean, ts.iter().filter(|t| **t < 0.9).count() as f32 / ts.len() as f32)
+        };
+        // Along its axis (a 2 degree face, every ray within a degree of it) a
+        // grid of 0.001 is all but none, and 0.01 dims the face by under a per
+        // cent (its walls, at 4 % of their full thickness, and their edges):
+        // both drew every cell edge at half, the face 3 % darker and a tenth
+        // of it under 0.9.
+        for (grid, least, most_lined) in [(0.001f32, 0.995f32, 0.01f32), (0.01, 0.99, 0.02)] {
+            let (mean, lined) = measure(grid, 2.0);
+            assert!(mean > least && lined < most_lined, "grid {grid}: mean {mean}, {:.1} % of the face on a cell edge", 100.0 * lined);
+        }
+        // From there the walls close in steadily. Off the axis a shallow
+        // grid's walls also cast thin shadows, as long as the grid is deep.
+        let means: Vec<f32> = [0.001f32, 0.01, 0.05, 0.1, 0.25, 0.5].iter().map(|&grid| measure(grid, 20.0).0).collect();
+        assert!(means[0] > 0.995 && means[1] > 0.98, "{means:?}");
+        for w in means.windows(2) {
+            assert!(w[0] >= w[1], "{means:?}");
+        }
+        assert!(means[5] < 0.97, "a grid of 0.5 has walls: {means:?}");
     }
 
     #[test]
