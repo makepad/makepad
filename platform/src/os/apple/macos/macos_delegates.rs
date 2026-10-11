@@ -11,7 +11,7 @@ use {
             apple::apple_sys::*,
             apple_classes::get_apple_class_global,
             apple_util::{
-                get_event_key_modifier, get_event_mouse_button, nsstring_to_string, superclass,
+                get_event_key_modifier, get_event_mouse_button, nsstring_to_string, str_to_nsstring, superclass,
             },
             cx_native::EventFlow,
             macos::{
@@ -57,6 +57,27 @@ pub fn define_titlebar_container_class() -> *const Class {
         );
     }
     decl.register()
+}
+
+/// Does what the user chose in System Settings for a double-click on a window's title bar.
+unsafe fn perform_title_bar_double_click_action(window: ObjcId) {
+    let defaults: ObjcId = msg_send![class!(NSUserDefaults), standardUserDefaults];
+    let action: ObjcId = msg_send![defaults, stringForKey: str_to_nsstring("AppleActionOnDoubleClick")];
+    let action = if action == nil { String::new() } else { nsstring_to_string(action) };
+    // "Fill" has no public API, so we use the Window menu's own Fill action, if it's there.
+    let can_fill: bool = msg_send![window, respondsToSelector: sel!(_zoomFill:)];
+    match action.as_str() {
+        "None" => {}
+        "Minimize" => {
+            let () = msg_send![window, performMiniaturize: nil];
+        }
+        "Fill" if can_fill => {
+            let () = msg_send![window, _zoomFill: nil];
+        }
+        _ => {
+            let () = msg_send![window, performZoom: nil];
+        }
+    }
 }
 
 pub fn define_macos_timer_delegate() -> *const Class {
@@ -603,12 +624,40 @@ pub fn define_cocoa_view_class() -> *const Class {
         let cw = get_cocoa_window(this);
         unsafe {
             if cw.mouse_down_can_drag_window() {
-                let () = msg_send![cw.window, performWindowDragWithEvent: event];
+                // AppKit doesn't handle our title bar (see `opaque_rect_for_window_move_when_in_titlebar`),
+                // so we do its double-click too.
+                let click_count: isize = msg_send![event, clickCount];
+                if click_count == 2 {
+                    perform_title_bar_double_click_action(cw.window);
+                } else {
+                    let () = msg_send![cw.window, performWindowDragWithEvent: event];
+                }
                 return;
             }
         }
         let modifiers = get_event_key_modifier(event);
         cw.send_mouse_down(MouseButton::PRIMARY, modifiers);
+    }
+
+    // AppKit moves the window from a drag on any part of its title bar that no view claims (like `NSControl` does),
+    // even on a control the app put there. So our view claims all of it, and only the app's `WindowDragQuery` moves it.
+    extern "C" fn opaque_rect_for_window_move_when_in_titlebar(this: &Object, _sel: Sel) -> NSRect {
+        unsafe { msg_send![this, bounds] }
+    }
+
+    // Older macOS versions may only ask this, rather than the above, before moving the window.
+    extern "C" fn mouse_down_can_move_window(_this: &Object, _sel: Sel) -> BOOL {
+        NO
+    }
+
+    // Like AppKit's own title bar, a press on an inactive window's caption bar drags it right away.
+    extern "C" fn accepts_first_mouse(this: &Object, _sel: Sel, event: ObjcId) -> BOOL {
+        if event == nil {
+            return NO;
+        }
+        let cw = get_cocoa_window(this);
+        cw.last_mouse_pos = mouse_pos_from_event(this, event);
+        if cw.mouse_down_can_drag_window() { YES } else { NO }
     }
 
     extern "C" fn mouse_up(this: &Object, _sel: Sel, event: ObjcId) {
@@ -1293,6 +1342,18 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(
             sel!(mouseDown:),
             mouse_down as extern "C" fn(&Object, Sel, ObjcId),
+        );
+        decl.add_method(
+            sel!(_opaqueRectForWindowMoveWhenInTitlebar),
+            opaque_rect_for_window_move_when_in_titlebar as extern "C" fn(&Object, Sel) -> NSRect,
+        );
+        decl.add_method(
+            sel!(mouseDownCanMoveWindow),
+            mouse_down_can_move_window as extern "C" fn(&Object, Sel) -> BOOL,
+        );
+        decl.add_method(
+            sel!(acceptsFirstMouse:),
+            accepts_first_mouse as extern "C" fn(&Object, Sel, ObjcId) -> BOOL,
         );
         decl.add_method(
             sel!(mouseUp:),
