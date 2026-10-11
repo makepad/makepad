@@ -752,8 +752,8 @@ impl Cx {
         let time_now = self
             .os
             .link_flip_time
-            .map(|t| t as f32)
-            .unwrap_or_else(|| with_macos_app(|app| app.time_now() as f32));
+            .unwrap_or_else(|| with_macos_app(|app| app.time_now()));
+        let pass_time = self.pass_time(time_now);
         let scope = self.os.link_scope;
         for draw_pass_id in &passes_todo {
             // Remote capture only spends a present on its requested window.
@@ -956,7 +956,7 @@ impl Cx {
                         };
                         let uniforms_gen = self.next_uniform_gen();
                         if let Some(trace) = &metal_cx.present_trace { trace.mark(PresentStage::Draw); }
-                        self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
+                        self.passes[*draw_pass_id].set_time(pass_time, uniforms_gen);
                         let presented = if metal_window.is_resizing {
                             self.draw_pass(
                                 *draw_pass_id,
@@ -994,12 +994,12 @@ impl Cx {
                 CxDrawPassParent::DrawPass(_) => {
                     //let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                     let uniforms_gen = self.next_uniform_gen();
-                    self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
+                    self.passes[*draw_pass_id].set_time(pass_time, uniforms_gen);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
                 CxDrawPassParent::None => {
                     let uniforms_gen = self.next_uniform_gen();
-                    self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
+                    self.passes[*draw_pass_id].set_time(pass_time, uniforms_gen);
                     self.draw_pass(*draw_pass_id, metal_cx, DrawPassMode::Texture);
                 }
             }

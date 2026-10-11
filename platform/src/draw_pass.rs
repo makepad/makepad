@@ -576,6 +576,11 @@ pub struct CxDrawPass {
     /// it paints once even while orphaned (a thumbnail sheet re-executed for
     /// a texture readback). Cleared when the repaint order is computed.
     pub repaint_requested: bool,
+    /// Set by a backend while painting this pass when something in it needs the
+    /// next frame too: a shader that reads `draw_pass.time`, or a draw call it had to skip.
+    pub repaint_next: bool,
+    /// This pass still has a time-driven frame to paint, so the pass clock can't rebase.
+    pub(crate) time_owed: bool,
     /// The repaint that last painted this pass whole (0 before the first).
     /// A repaint the backend stopped — instances or uniforms not resident,
     /// the submitter saturated — leaves it as it was, so a producer that
@@ -657,6 +662,8 @@ impl Default for CxDrawPass {
             live_with_parent: false,
             attached_by: None,
             repaint_requested: false,
+            repaint_next: false,
+            time_owed: false,
             painted_serial: 0,
             pass_rect: None,
             os: CxOsPass::default(),

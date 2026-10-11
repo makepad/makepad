@@ -821,7 +821,8 @@ impl Cx {
         let time_now = self
             .os
             .link_flip_time
-            .unwrap_or_else(|| with_win32_app(|app| app.time_now())) as f32;
+            .unwrap_or_else(|| with_win32_app(|app| app.time_now()));
+        let pass_time = self.pass_time(time_now);
         let scope = self.os.link_scope;
         // Which windows have a beat of their own coming. Only those are held back
         // during someone else's beat — a popup (no frame-latency waitable), a window
@@ -868,7 +869,7 @@ impl Cx {
                 }
             }
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[*draw_pass_id].set_time(time_now, uniforms_gen);
+            self.passes[*draw_pass_id].set_time(pass_time, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {

@@ -276,9 +276,6 @@ impl Cx {
                     // shader didnt compile somehow
                     continue;
                 }
-                if sh.mapping.uses_time {
-                    self.demo_time_repaint = true;
-                }
                 let shp = &self.draw_shaders.os_shaders[sh.os_shader_id.unwrap()];
 
                 'instance_upload: {
@@ -329,6 +326,7 @@ impl Cx {
                             else {
                                 draw_item.instance_upload_pending = true;
                                 self.demo_time_repaint = true;
+                                self.passes[pass_id].repaint_next = true;
                                 break 'instance_upload;
                             };
                             uploaded
@@ -374,6 +372,10 @@ impl Cx {
 
                 if instances == 0 {
                     continue;
+                }
+                if sh.mapping.uses_time {
+                    self.demo_time_repaint = true;
+                    self.passes[pass_id].repaint_next = true;
                 }
 
                 if sh.mapping.flags.debug_draw {

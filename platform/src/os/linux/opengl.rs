@@ -414,6 +414,7 @@ impl Cx {
             #[cfg(any(linux_direct, target_env = "ohos", all(use_vulkan, not(target_os = "linux"))))]
             {
                 self.demo_time_repaint = true;
+                self.passes[pass].repaint_next = true;
             }
         }
         self.render_view_inner(pass, list, zbias, step);
@@ -592,6 +593,7 @@ impl Cx {
                 else {
                     crate::trace!("gl.repaint", "shader not ready");
                     self.demo_time_repaint = true;
+                    self.passes[draw_pass_id].repaint_next = true;
                     continue;
                 };
                 let trace_draw = crate::makepad_error_log::trace_enabled("gl.draw");
@@ -664,6 +666,7 @@ impl Cx {
                                 crate::trace!("gl.repaint", "retained upload pending");
                                 draw_item.instance_upload_pending = true;
                                 self.demo_time_repaint = true;
+                                self.passes[draw_pass_id].repaint_next = true;
                                 upload_refused = true;
                                 break 'instance_upload;
                             };
@@ -724,6 +727,7 @@ impl Cx {
                 if sh.mapping.uses_time {
                     crate::trace!("gl.repaint", "shader uses time");
                     self.demo_time_repaint = true;
+                    self.passes[draw_pass_id].repaint_next = true;
                 }
 
                 if sh.mapping.flags.debug_draw {
@@ -4639,6 +4643,7 @@ impl Cx {
         }
         if !self.poll_texture_lifetimes_for(true) {
             // We couldn't poll, so a repaint does this work instead.
+            self.repaint_windows();
             self.demo_time_repaint = true;
             return;
         }

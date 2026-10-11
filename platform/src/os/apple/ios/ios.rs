@@ -557,11 +557,12 @@ impl Cx {
         }
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
+        self.queue_popup_parents(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[*draw_pass_id]
-                .set_time(with_ios_app(|app| app.time_now() as f32), uniforms_gen);
+            let time = self.pass_time(with_ios_app(|app| app.time_now()));
+            self.passes[*draw_pass_id].set_time(time, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {

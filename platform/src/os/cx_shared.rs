@@ -53,7 +53,7 @@ impl Cx {
     pub(crate) fn repaint_windows(&mut self) {
         for draw_pass_id in self.passes.id_iter() {
             match self.passes[draw_pass_id].parent {
-                CxDrawPassParent::Window(_) => {
+                CxDrawPassParent::Window(_) if self.passes[draw_pass_id].main_draw_list_id.is_some() => {
                     self.passes[draw_pass_id].paint_dirty = true;
                 }
                 _ => (),
@@ -91,8 +91,8 @@ impl Cx {
         None
     }
 
-    /// Whether the time repaint (`demo_time_repaint`: some shader read
-    /// `draw_pass.time`, so repaint every frame) may re-dirty this pass.
+    /// Whether this pass's `repaint_next` (a shader read `draw_pass.time`, or
+    /// a draw call had to be skipped) may re-dirty it.
     ///
     /// It used to re-dirty EVERY pass with a main draw list — including
     /// passes their owner did not begin again on the latest redraw, which
@@ -110,7 +110,7 @@ impl Cx {
     /// not the global cycle — so a window that did not redraw this cycle
     /// keeps its time-animated child passes alive (multi-window), while a
     /// child left behind by a window that DID redraw is stale. Window passes
-    /// are always live; parentless passes compare against the current cycle.
+    /// are live while their window is open; parentless passes compare against the current cycle.
     /// Explicit `repaint_pass` users are untouched: this gates only the time
     /// repaint, and dirty propagation to parents is unchanged.
     fn pass_live_for_time_repaint(&self, pass_id: DrawPassId) -> bool {
@@ -118,15 +118,21 @@ impl Cx {
         let Some(list_id) = pass.main_draw_list_id else {
             return false;
         };
-        if matches!(pass.parent, CxDrawPassParent::Window(_)) {
-            return true;
+        // A closed window can't paint, so its pass, or a child pass dirtying it, would stay dirty forever.
+        if let CxDrawPassParent::Window(window_id) = pass.parent {
+            return self.windows.is_valid(window_id) && self.windows[window_id].is_created;
         }
         let reference = match self.pass_root_window(pass_id) {
-            Some(window_id) if self.windows.is_valid(window_id) => self.windows[window_id]
-                .main_pass_id
-                .and_then(|main_pass_id| self.passes[main_pass_id].main_draw_list_id)
-                .map(|main_list_id| self.draw_lists[main_list_id].redraw_id)
-                .unwrap_or(self.redraw_id),
+            Some(window_id) if self.windows.is_valid(window_id) => {
+                if !self.windows[window_id].is_created {
+                    return false;
+                }
+                self.windows[window_id]
+                    .main_pass_id
+                    .and_then(|main_pass_id| self.passes[main_pass_id].main_draw_list_id)
+                    .map(|main_list_id| self.draw_lists[main_list_id].redraw_id)
+                    .unwrap_or(self.redraw_id)
+            }
             _ => self.redraw_id,
         };
         self.draw_lists[list_id].redraw_id >= reference
@@ -170,11 +176,29 @@ impl Cx {
         // its flag cleared so an idle app does not keep requesting frames on
         // its behalf. The one exception is an explicit `repaint_pass`, which
         // paints it this once.
+        let mut time_owed = false;
         for draw_pass_id in self.passes.id_iter() {
             let requested = self.passes[draw_pass_id].repaint_requested;
             if !requested && live[draw_pass_id.0] != Some(true) {
                 self.passes[draw_pass_id].paint_dirty = false;
             }
+            let repaint_next = std::mem::take(&mut self.passes[draw_pass_id].repaint_next);
+            let pass = &self.passes[draw_pass_id];
+            if !(repaint_next || pass.time_owed) {
+                continue;
+            }
+            let live_for_time = live[draw_pass_id.0] == Some(true)
+                && self.pass_live_for_time_repaint(draw_pass_id);
+            // A pass that per-window pacing skipped is still dirty, so it keeps owing its frame,
+            // but one that can't paint anymore (closed window, stale child) owes nothing.
+            if !pass.paint_dirty || !live_for_time {
+                self.passes[draw_pass_id].time_owed = false;
+            }
+            if repaint_next && live_for_time {
+                self.passes[draw_pass_id].paint_dirty = true;
+                self.passes[draw_pass_id].time_owed = true;
+            }
+            time_owed |= self.passes[draw_pass_id].time_owed;
         }
 
         // we need this because we don't mark the entire deptree of passes dirty every small paint
@@ -184,11 +208,6 @@ impl Cx {
             for draw_pass_id in self.passes.id_iter() {
                 if live[draw_pass_id.0] != Some(true) {
                     continue;
-                }
-                if self.demo_time_repaint
-                    && self.pass_live_for_time_repaint(draw_pass_id)
-                {
-                    self.passes[draw_pass_id].paint_dirty = true;
                 }
                 if self.passes[draw_pass_id].paint_dirty {
                     let other = match self.passes[draw_pass_id].parent {
@@ -267,7 +286,51 @@ impl Cx {
             }
         };
         passes_todo.sort_by_key(|id| std::cmp::Reverse(depth_of(*id)));
+        self.pass_time_rebase = !time_owed;
         self.demo_time_repaint = false;
+    }
+
+    /// The `draw_pass.time` for a repaint stamped `now`. Its origin only moves while
+    /// nothing time-driven is on screen, so the f32 stays precise however long the app runs.
+    pub(crate) fn pass_time(&mut self, now: f64) -> f32 {
+        if std::mem::take(&mut self.pass_time_rebase) {
+            self.pass_time_origin = now;
+        }
+        (now - self.pass_time_origin).max(0.0) as f32
+    }
+
+    /// Where popups draw as overlays on their parent's surface (Android, iOS), a dirty
+    /// popup has to repaint its parent window too. Window passes sort last, so we append.
+    #[allow(dead_code)]
+    pub(crate) fn queue_popup_parents(&self, passes_todo: &mut Vec<DrawPassId>) {
+        for i in 0..passes_todo.len() {
+            let CxDrawPassParent::Window(window_id) = self.passes[passes_todo[i]].parent else {
+                continue;
+            };
+            if !self.windows.is_valid(window_id) {
+                continue;
+            }
+            let window = &self.windows[window_id];
+            if !window.is_created || !window.is_popup {
+                continue;
+            }
+            let Some(parent_pass_id) = window
+                .popup_parent
+                .filter(|parent_id| {
+                    self.windows.is_valid(*parent_id)
+                        && self.windows[*parent_id].is_created
+                        && !self.windows[*parent_id].is_popup
+                })
+                .and_then(|parent_id| self.windows[parent_id].main_pass_id)
+            else {
+                continue;
+            };
+            if self.passes[parent_pass_id].main_draw_list_id.is_some()
+                && !passes_todo.contains(&parent_pass_id)
+            {
+                passes_todo.push(parent_pass_id);
+            }
+        }
     }
 
     pub(crate) fn need_redrawing(&self) -> bool {
@@ -1601,6 +1664,69 @@ mod tests {
         cx.passes[child_id].paint_dirty = true;
         cx.compute_pass_repaint_order(&mut todo);
         assert!(!todo.contains(&child_id));
+    }
+
+    fn pass_with_current_list(cx: &mut Cx) -> (DrawPass, DrawList) {
+        let pass = DrawPass::new(cx);
+        let list = DrawList::new(cx);
+        let recording_gen = cx.next_uniform_gen();
+        let uniforms_gen = cx.next_uniform_gen();
+        let redraw_id = cx.redraw_id;
+        cx.draw_lists[list.id()].clear_draw_items(redraw_id, recording_gen, uniforms_gen);
+        cx.passes[pass.draw_pass_id()].main_draw_list_id = Some(list.id());
+        (pass, list)
+    }
+
+    #[test]
+    fn time_repaint_only_repaints_the_passes_that_asked() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (animated, _animated_list) = pass_with_current_list(&mut cx);
+        let (idle, _idle_list) = pass_with_current_list(&mut cx);
+        let (animated, idle) = (animated.draw_pass_id(), idle.draw_pass_id());
+        let mut todo = Vec::new();
+
+        cx.passes[animated].repaint_next = true;
+        cx.demo_time_repaint = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(todo, vec![animated]);
+        assert!(!cx.passes[idle].paint_dirty);
+
+        // The flag is used up: without another request nothing repaints.
+        cx.passes[animated].paint_dirty = false;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert!(todo.is_empty());
+    }
+
+    #[test]
+    fn pass_clock_rebases_only_while_nothing_owes_a_time_frame() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (pass, _list) = pass_with_current_list(&mut cx);
+        let pass = pass.draw_pass_id();
+        let mut todo = Vec::new();
+
+        assert_eq!(cx.pass_time(100.0), 0.0);
+        assert_eq!(cx.pass_time(100.5), 0.5);
+
+        // An animating pass holds the origin, even on a beat that skips painting it.
+        cx.passes[pass].repaint_next = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(101.0), 1.0);
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(101.5), 1.5);
+
+        // Once it painted without asking again, the next repaint starts the clock over.
+        cx.passes[pass].paint_dirty = false;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(200.0), 0.0);
+        assert_eq!(cx.pass_time(200.25), 0.25);
+
+        // A pass that still owes a frame but was left behind by a redraw can't paint, so it owes nothing.
+        cx.passes[pass].repaint_next = true;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(201.0), 1.0);
+        cx.redraw_id += 1;
+        cx.compute_pass_repaint_order(&mut todo);
+        assert_eq!(cx.pass_time(300.0), 0.0);
     }
 
     #[test]
