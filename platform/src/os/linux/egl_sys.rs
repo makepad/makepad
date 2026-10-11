@@ -242,7 +242,7 @@ type PFNGLEGLIMAGETARGETTEXTURE2DOESPROC =
     ::std::option::Option<unsafe extern "C" fn(super::gl_sys::GLenum, EGLImageKHR)>;
 
 type PFNEGLPRESENTATIONTIMEANDROID =
-    ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface, time: i64)>;
+    ::std::option::Option<unsafe extern "C" fn(dpy: EGLDisplay, surface: EGLSurface, time: i64) -> EGLBoolean>;
 
 type PFNEGLSURFACEATTRIB = ::std::option::Option<
     unsafe extern "C" fn(

@@ -1687,12 +1687,20 @@ impl Cx {
 
         #[cfg(not(use_vulkan))]
         unsafe {
+            let choreographer_ui = !self.os.in_xr_mode
+                && cfg!(all(not(quest), not(no_android_choreographer)));
             if let Some(display) = &mut self.os.display {
                 if display.is_surface_alive() {
+                    if choreographer_ui {
+                        display.presentation.before_swap(&display.libegl, display.egl_display, display.surface);
+                    }
                     let swapped = (display.libegl.eglSwapBuffers.unwrap())(
                         display.egl_display,
                         display.surface,
                     );
+                    if choreographer_ui {
+                        display.presentation.after_swap(swapped != 0);
+                    }
                     if swapped != 0 {
                         self.hide_android_surface_cover_after_first_present_if_needed();
                         self.request_android_surface_snapshot_refresh_after_present_if_needed();
@@ -2249,6 +2257,8 @@ impl Cx {
                 egl_context,
                 surface,
                 window,
+                #[cfg(not(use_vulkan))]
+                presentation: Default::default(),
             });
 
             #[cfg(use_vulkan)]
@@ -3600,6 +3610,8 @@ pub struct CxAndroidDisplay {
     pub egl_context: egl_sys::EGLContext,
     surface: egl_sys::EGLSurface,
     window: *mut ndk_sys::ANativeWindow,
+    #[cfg(not(use_vulkan))]
+    presentation: super::android_presentation::AndroidPresentation,
     //event_handler: Box<dyn EventHandler>,
 }
 
@@ -3890,6 +3902,7 @@ impl CxAndroidDisplay {
 
     #[cfg(not(use_vulkan))]
     unsafe fn destroy_surface(&mut self) {
+        self.presentation.reset();
         // Releasing the context from the current thread BEFORE destroying the
         // surface is required by the EGL spec — otherwise the driver may
         // dereference torn-down state on the next GL call.
