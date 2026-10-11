@@ -136,7 +136,9 @@ impl Cx {
     }
 
     fn handle_drawing(&mut self) {
-        if self.any_passes_dirty() || self.need_redrawing() || !self.new_next_frames.is_empty() {
+        // Time-animated passes don't turn dirty until compute_pass_repaint_order,
+        // so demo_time_repaint must keep us rendering.
+        if self.any_passes_dirty() || self.demo_time_repaint || self.need_redrawing() || !self.new_next_frames.is_empty() {
             let time_now = self.os.timers.time_now();
             if !self.new_next_frames.is_empty() {
                 self.call_next_frame_event(time_now);
