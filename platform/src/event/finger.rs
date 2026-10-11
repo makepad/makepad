@@ -744,8 +744,10 @@ impl CxFingers {
         Some((seen == time, capture.clone()))
     }
 
+    /// Whether a press is captured by `area`. A press parked on `Area::Empty` (e.g., between sweeps)
+    /// isn't captured by every area that hasn't been drawn yet.
     pub fn is_area_captured(&self, area: Area) -> bool {
-        self.captures.iter().find(|v| v.area == area).is_some()
+        area != Area::Empty && self.captures.iter().any(|v| v.area == area)
     }
 
     /// Whether `digit_id` is held by an area other than `area`, so a
