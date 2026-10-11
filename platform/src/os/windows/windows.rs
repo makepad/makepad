@@ -443,6 +443,7 @@ impl Cx {
                 if self.any_passes_dirty()
                     || self.need_redrawing()
                     || self.new_next_frames.len() != 0
+                    || self.demo_time_repaint
                     || !self.screenshot_requests.is_empty()
                     || self.os.video_players.values().any(|p| p.keep_polling())
                 {
@@ -470,6 +471,8 @@ impl Cx {
         if self.any_passes_dirty()
             || self.need_redrawing()
             || self.new_next_frames.len() != 0
+            // A time-driven shader's pass only turns dirty in the next compute_pass_repaint_order.
+            || self.demo_time_repaint
             // A pending screenshot must never be left asleep in `GetMessageW`:
             // nothing else would wake the loop to render the frame it needs.
             || !self.screenshot_requests.is_empty()
@@ -635,8 +638,10 @@ impl Cx {
                 && d3d11_windows.iter().all(|w| {
                     w.device_lost || w.occluded_since.is_some() || w.win32_window.is_iconic()
                 });
-            if !self.new_next_frames.is_empty() || self.any_passes_dirty() || video_pacing {
-                let ms = if video_pacing || nothing_can_present { 8 } else { 1 };
+            // A time repaint that only painted offscreen passes has no flip to pace it either.
+            let wake_only = self.demo_time_repaint && !self.any_passes_dirty();
+            if !self.new_next_frames.is_empty() || self.any_passes_dirty() || video_pacing || wake_only {
+                let ms = if video_pacing || nothing_can_present || wake_only { 8 } else { 1 };
                 std::thread::sleep(std::time::Duration::from_millis(ms));
             }
         }
