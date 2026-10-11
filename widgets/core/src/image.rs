@@ -27,6 +27,8 @@ script_mod! {
         opacity: 1.0
         image_scale: vec2(1.0, 1.0)
         image_pan: vec2(0.0, 0.0)
+        atlas_scale: vec2(1.0, 1.0)
+        atlas_pan: vec2(0.0, 0.0)
         fit_scale: vec2(1.0, 1.0)
         fit_pan: vec2(0.0, 0.0)
         async_load: 0.0
@@ -51,13 +53,20 @@ script_mod! {
         // there comes back with red and blue swapped. `scale` is the share of
         // the texture the quad spans, so a cropped picture measures its texels
         // at the size they are drawn.
+        sample_image: fn(uv: vec2) -> vec4 {
+            if self.atlas_scale.x == 1.0 && self.atlas_scale.y == 1.0 {
+                return self.image_texture.sample(uv)
+            }
+            return self.image_texture.sample(clamp(uv, vec2(0.0, 0.0), vec2(1.0, 1.0)) * self.atlas_scale + self.atlas_pan)
+        }
+
         sample_at: fn(uv: vec2, scale: vec2) -> vec4 {
             // Nobody asked: the filtered read, and none of the arithmetic
             // below is reached to arrive at it.
             if self.sample_mode == 0.0 {
-                return self.image_texture.sample(uv)
+                return self.sample_image(uv)
             }
-            let size = self.image_texture.size()
+            let size = (self.image_texture.size() * self.atlas_scale)
             let texels_x = max(size.x, 1.0)
             let texels_y = max(size.y, 1.0)
             let device_px_per_texel = self.rect_size.x * self.sample_mode / (texels_x * max(scale.x, 0.0001))
@@ -66,9 +75,9 @@ script_mod! {
                     (floor(uv.x * texels_x) + 0.5) / texels_x,
                     (floor(uv.y * texels_y) + 0.5) / texels_y
                 )
-                return self.image_texture.sample(snapped)
+                return self.sample_image(snapped)
             }
-            return self.image_texture.sample(uv)
+            return self.sample_image(uv)
         }
 
         get_color_scale_pan: fn(scale: vec2, pan: vec2) {
@@ -130,7 +139,7 @@ script_mod! {
         // `at` is measured on the unclipped rect, so a panel a scroll view has half
         // hidden keeps its corners where they belong.
         slice_color: fn() -> vec4 {
-            let texture = max(self.image_texture.size(), vec2(1.0, 1.0))
+            let texture = max((self.image_texture.size() * self.atlas_scale), vec2(1.0, 1.0))
             let window = max(texture * self.image_scale, vec2(1.0, 1.0))
             let size = max(self.rect_size, vec2(0.0001, 0.0001))
             let at = self.pos * self.rect_size
@@ -246,9 +255,13 @@ script_mod! {
     }
 }
 
-#[derive(Script, ScriptHook)]
+#[derive(Script)]
 #[repr(C)]
 pub struct DrawImage {
+    #[rust]
+    atlas_shader: Option<DrawShaderId>,
+    #[rust]
+    atlas_compatible: bool,
     #[deref]
     draw_super: DrawQuad,
     #[live]
@@ -257,6 +270,10 @@ pub struct DrawImage {
     pub image_scale: Vec2f,
     #[live]
     pub image_pan: Vec2f,
+    #[live]
+    atlas_scale: Vec2f,
+    #[live]
+    atlas_pan: Vec2f,
     #[live]
     fit_scale: Vec2f,
     #[live]
@@ -324,6 +341,75 @@ pub struct DrawImage {
     /// 2 tile, 3 tile at the edges' rounded spacing.
     #[live]
     pub slice_mode: Vec2f,
+}
+
+impl ScriptHook for DrawImage {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, value: ScriptValue) {
+        let shader = self.draw_vars.draw_shader_id;
+        if shader == self.atlas_shader { return; }
+        self.atlas_shader = shader;
+        self.atlas_compatible = false;
+        let Some(object) = value.as_object() else { return };
+        let Some(default) = vm.bx.heap.type_default_for_id(Self::script_type_id_static()) else { return };
+        // Only the standard sampling program is eligible. A custom shader
+        // can inspect texture dimensions or sample outside its image, so it
+        // keeps the original binding without needing an application flag.
+        self.atlas_compatible = [id!(vertex), id!(pixel), id!(get_color),
+            id!(get_color_scale_pan), id!(sample_image), id!(sample_at), id!(slice_color), id!(slice_axis)]
+            .into_iter().all(|key| vm.bx.heap.value(object, key.into(), NoTrap)
+                == vm.bx.heap.value(default, key.into(), NoTrap));
+    }
+}
+
+impl DrawImage {
+    fn with_image_atlas<R>(&mut self, cx: &mut Cx2d, draw: impl FnOnce(&mut DrawQuad, &mut Cx2d) -> R) -> R {
+        let scale = self.image_scale;
+        let pan = self.image_pan;
+        let uv0 = self.fit_pan * scale + pan;
+        let uv1 = (self.fit_pan + self.fit_scale) * scale + pan;
+        let eligible = self.atlas_compatible && self.many_instances.is_none()
+            && self.sample_mode == 0.0 && self.image_dim_w == 0.0 && self.slice_mode.x == 0.0
+            && uv0.x >= 0.0 && uv0.y >= 0.0 && uv1.x <= 1.0 && uv1.y <= 1.0
+            && uv1.x > uv0.x && uv1.y > uv0.y;
+        let original = eligible.then(|| self.draw_vars.texture_slots[0].clone()).flatten();
+        let region = original.as_ref().and_then(|texture| makepad_draw::image_atlas::atlas_image(
+            cx, texture, dvec2(self.rect_size.x as f64, self.rect_size.y as f64),
+            dvec2((uv1.x-uv0.x) as f64, (uv1.y-uv0.y) as f64),
+        ));
+        if let Some(region) = region {
+            self.draw_vars.set_texture(0, &region.texture);
+            self.atlas_scale = region.scale;
+            self.atlas_pan = region.pan;
+            let result = draw(&mut self.draw_super, cx);
+            self.draw_vars.mark_texture_remapped(cx);
+            self.atlas_scale = vec2(1.0, 1.0);
+            self.atlas_pan = vec2(0.0, 0.0);
+            self.draw_vars.texture_slots[0] = original;
+            result
+        } else {
+            draw(&mut self.draw_super, cx)
+        }
+    }
+
+    pub fn draw(&mut self, cx: &mut Cx2d) {
+        self.with_image_atlas(cx, |quad, cx| quad.draw(cx));
+    }
+
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect) {
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();
+        self.draw(cx);
+    }
+
+    pub fn draw_rel(&mut self, cx: &mut Cx2d, rect: Rect) {
+        self.draw_abs(cx, rect.translate(cx.turtle().origin()));
+    }
+
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> Rect {
+        let rect = cx.walk_turtle(walk);
+        self.draw_abs(cx, rect);
+        rect
+    }
 }
 
 #[derive(Copy, Clone, Debug, Default, Script, ScriptHook)]
@@ -667,7 +753,7 @@ impl Widget for Image {
                 self.redraw(cx);
             } else if let Some(image_texture) = &self.texture {
                 let (texture_width, texture_height) = image_texture
-                    .get_format(cx)
+                    .format(cx)
                     .vec_width_height()
                     .unwrap_or((self.placeholder_width as usize, self.placeholder_height as usize));
                 if let Some(animation) = image_texture.animation(cx).clone() {
@@ -828,7 +914,7 @@ impl Image {
         }
         self.texture
             .as_ref()
-            .and_then(|t| t.get_format(cx).vec_width_height())
+            .and_then(|t| t.format(cx).vec_width_height())
     }
 
     /// True if a texture has been set on this `Image`.
@@ -955,12 +1041,12 @@ impl Image {
             self.draw_bg.draw_vars.set_texture(0, image_texture);
             texture_texels = texels_of(image_texture, cx);
             let (width, height) = image_texture
-                .get_format(cx)
+                .format(cx)
                 .vec_width_height()
                 // A FIXED-size render target (e.g. a video convert pass)
                 // has real dimensions too — without this it sized as
                 // min_* (usually zero) and the picture silently vanished.
-                .or_else(|| image_texture.get_format(cx).render_fixed_width_height())
+                .or_else(|| image_texture.format(cx).render_fixed_width_height())
                 .unwrap_or((self.placeholder_width as usize, self.placeholder_height as usize));
             if let Some(animation) = image_texture.animation(cx) {
                 let (w, h) = (animation.width as f64, animation.height as f64);
@@ -970,7 +1056,7 @@ impl Image {
                 let scale_y = h as f32 / height as f32;
                 self.draw_bg.image_scale = vec2(scale_x, scale_y);
                 (w, h)
-            } else if image_texture.get_format(cx).is_render() {
+            } else if image_texture.format(cx).is_render() {
                 // Render targets are stored top-left on EVERY backend now
                 // (GL renders offscreen through a Y-inverted projection),
                 // so they sample exactly like any other texture — the old
@@ -1214,7 +1300,7 @@ impl Image {
 /// picture by, without its fallback to the placeholder size, which is not
 /// a texture a slice could be measured in.
 fn texels_of(texture: &Texture, cx: &mut Cx) -> Option<Vec2d> {
-    let format = texture.get_format(cx);
+    let format = texture.format(cx);
     format
         .vec_width_height()
         .or_else(|| format.render_fixed_width_height())

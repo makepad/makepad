@@ -1601,6 +1601,12 @@ impl Texture {
     }
 
     pub fn set_animation(&self, cx: &mut Cx, animation: Option<TextureAnimation>) {
+        // Decoders also call this for static images. An unchanged absence of
+        // animation does not make their immutable pixels a mutable source.
+        if animation.is_none() && cx.textures[self.texture_id()].animation.is_none() {
+            return;
+        }
+        self.before_image_write(cx);
         cx.textures[self.texture_id()].animation = animation;
     }
 
@@ -1628,8 +1634,41 @@ impl Texture {
         &cx.textures[self.texture_id()].animation
     }
 
+    /// Read the format without opting a static image out of shared storage.
+    pub fn format<'a>(&self, cx: &'a Cx) -> &'a TextureFormat {
+        &cx.textures[self.texture_id()].format
+    }
+
+    /// Mutable access retains the legacy API. Images drawn from a shared
+    /// copy return to individual textures before their pixels can change.
+    /// Use [`Self::format`] when only inspecting dimensions or format.
     pub fn get_format<'a>(&self, cx: &'a mut Cx) -> &'a mut TextureFormat {
+        self.before_image_write(cx);
         &mut cx.textures[self.texture_id()].format
+    }
+
+    /// Whether the image renderer may share a copy of this texture's pixels.
+    /// CPU mutation permanently opts this handle out; a newly loaded image
+    /// has a new handle and can be shared again.
+    pub fn can_atlas_image(&self, cx: &Cx) -> bool {
+        let texture = &cx.textures[self.texture_id()];
+        !texture.image_atlas_mutable && texture.animation.is_none()
+    }
+
+    /// Record that draw instances may contain coordinates in a shared copy.
+    /// Called by the image renderer, after checking [`Self::can_atlas_image`].
+    pub fn mark_image_atlased(&self, cx: &mut Cx) {
+        cx.textures[self.texture_id()].image_atlas_used = true;
+    }
+
+    fn before_image_write(&self, cx: &mut Cx) {
+        let texture = &mut cx.textures[self.texture_id()];
+        texture.image_atlas_mutable = true;
+        if std::mem::take(&mut texture.image_atlas_used) {
+            // Includes retained draw lists: they must bind the original
+            // texture again, not keep the old atlas coordinates indefinitely.
+            cx.redraw_all();
+        }
     }
 
     /// The texels the backend allocated for this texture (a render target
@@ -1640,6 +1679,7 @@ impl Texture {
     }
 
     pub fn take_vec_u32(&self, cx: &mut Cx) -> Vec<u32> {
+        self.before_image_write(cx);
         let cx_texture = &mut cx.textures[self.texture_id()];
         let data = match &mut cx_texture.format {
             TextureFormat::VecBGRAu8_32 { data, .. } => data,
@@ -1649,6 +1689,7 @@ impl Texture {
     }
 
     pub fn swap_vec_u32(&self, cx: &mut Cx, vec: &mut Vec<u32>) {
+        self.before_image_write(cx);
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (data, updated) = match &mut cx_texture.format {
             TextureFormat::VecBGRAu8_32 { data, updated, .. } => (data, updated),
@@ -1675,6 +1716,7 @@ impl Texture {
         new_height: usize,
         new_data: Vec<u32>,
     ) {
+        self.before_image_write(cx);
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (width, height, data, updated) = match &mut cx_texture.format {
             TextureFormat::VecBGRAu8_32 {
@@ -1692,6 +1734,7 @@ impl Texture {
     }
 
     pub fn put_back_vec_u32(&self, cx: &mut Cx, new_data: Vec<u32>, dirty_rect: Option<RectUsize>) {
+        self.before_image_write(cx);
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (data, updated) = match &mut cx_texture.format {
             TextureFormat::VecBGRAu8_32 { data, updated, .. } => (data, updated),
@@ -1703,6 +1746,7 @@ impl Texture {
     }
 
     pub fn take_vec_u8(&self, cx: &mut Cx) -> Vec<u8> {
+        self.before_image_write(cx);
         let cx_texture = &mut cx.textures[self.texture_id()];
         let data = match &mut cx_texture.format {
             TextureFormat::VecRu8 { data, .. } => data,
@@ -1713,6 +1757,7 @@ impl Texture {
     }
 
     pub fn put_back_vec_u8(&self, cx: &mut Cx, new_data: Vec<u8>, dirty_rect: Option<RectUsize>) {
+        self.before_image_write(cx);
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (data, updated) = match &mut cx_texture.format {
             TextureFormat::VecRu8 { data, updated, .. } => (data, updated),
@@ -1725,6 +1770,7 @@ impl Texture {
     }
 
     pub fn take_vec_f32(&self, cx: &mut Cx) -> Vec<f32> {
+        self.before_image_write(cx);
         let cx_texture = &mut cx.textures[self.texture_id()];
         let data = match &mut cx_texture.format {
             TextureFormat::VecRf32 { data, .. } => data,
@@ -1736,6 +1782,7 @@ impl Texture {
     }
 
     pub fn put_back_vec_f32(&self, cx: &mut Cx, new_data: Vec<f32>, dirty_rect: Option<RectUsize>) {
+        self.before_image_write(cx);
         let cx_texture = &mut cx.textures[self.texture_id()];
         let (data, updated) = match &mut cx_texture.format {
             TextureFormat::VecRf32 { data, updated, .. } => (data, updated),
@@ -1751,6 +1798,11 @@ impl Texture {
 
 #[derive(Default)]
 pub struct CxTexture {
+    // A mutable CPU view makes sharing its pixels unsafe. The ordinary
+    // texture path remains available; a cached image opts out on its first
+    // write and invalidates recorded instances that refer to its old copy.
+    image_atlas_mutable: bool,
+    image_atlas_used: bool,
     pub(crate) format: TextureFormat,
     pub(crate) alloc: Option<TextureAlloc>,
     pub(crate) allocation_generation: u64,

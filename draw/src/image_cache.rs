@@ -900,7 +900,7 @@ fn evict_image_cache_if_oversized(cx: &mut Cx, inserted: &Path) {
         .into_iter()
         .map(|(path, texture)| {
             let bytes = texture
-                .get_format(cx)
+                .format(cx)
                 .vec_width_height()
                 .map_or(0, |(w, h)| ImageCache::texture_bytes(w, h));
             (path, bytes)

@@ -1709,6 +1709,9 @@ impl CxDrawKind {
 
 #[repr(C)]
 pub struct CxDrawCall {
+    /// Instances contain coordinates in a shared texture, rather than the
+    /// caller's logical binding. Replacing the binding needs a fresh draw.
+    pub(crate) texture_remapped: bool,
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
     pub total_instance_slots: usize,
@@ -1774,6 +1777,7 @@ impl CxDrawCall {
         self.total_instance_slots = mapping.instances.total_slots;
         self.draw_call_uniforms = DrawCallUniforms::default();
         sized_dyn_uniforms(&mut self.dyn_uniforms, &draw_vars.dyn_uniforms, mapping.dyn_uniforms.total_slots);
+        self.texture_remapped = false;
         self.texture_slots.clone_from(&draw_vars.texture_slots);
         self.uniform_buffer_slots
             .clone_from(&draw_vars.uniform_buffer_slots);
@@ -1791,6 +1795,7 @@ impl CxDrawCall {
     ) -> Self {
         debug_assert_ne!(uniforms_gen, 0);
         CxDrawCall {
+            texture_remapped: false,
             geometry_id: draw_vars.geometry_id,
             options: draw_vars.options.clone(),
             append_group_id: draw_vars.append_group_id,
@@ -3223,6 +3228,7 @@ mod uniform_generation_tests {
 
     fn test_draw_call(uniforms_gen: u64) -> CxDrawCall {
         CxDrawCall {
+            texture_remapped: false,
             draw_shader_id: DrawShaderId { index: 0 },
             options: CxDrawShaderOptions::default(),
             append_group_id: 0,

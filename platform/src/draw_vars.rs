@@ -588,6 +588,16 @@ impl DrawVars {
     }
 
 
+    /// Mark the recorded call as using a shared binding. Instance-only
+    /// updates remain valid; replacing all bindings requests reconstruction.
+    pub fn mark_texture_remapped(&self, cx: &mut Cx) {
+        if let Some(inst) = self.area.valid_instance(cx).copied() {
+            if let Some(call) = cx.draw_lists[inst.draw_list_id].draw_items[inst.draw_item_id].kind.draw_call_mut() {
+                call.texture_remapped = true;
+            }
+        }
+    }
+
     /// Pushes every dyn uniform and texture slot this `DrawVars` holds onto
     /// the retained draw call behind `area`, and marks its pass for repaint.
     /// The whole-block twin of `set_uniform_on_area`: a widget that keeps
@@ -595,7 +605,9 @@ impl DrawVars {
     /// (`set_uniform`, `set_texture`) and hands the result over in one
     /// copy, so a camera move touches uniforms only and never the resident
     /// instance buffers. `false` when the area is stale or belongs to
-    /// another shader; nothing is written then.
+    /// another shader; nothing is written then. A call with remapped texture
+    /// coordinates also returns false and requests a redraw, preserving its
+    /// image instances until their logical bindings can be recorded again.
     pub fn update_uniforms_on_area(&self, cx: &mut Cx, area: Area) -> bool {
         let Some(draw_shader_id) = self.draw_shader_id else {
             return false;
@@ -610,6 +622,10 @@ impl DrawVars {
             return false;
         };
         if draw_call.draw_shader_id != draw_shader_id {
+            return false;
+        }
+        if draw_call.texture_remapped {
+            area.redraw(cx);
             return false;
         }
         crate::draw_list::copy_dyn_uniforms(&mut draw_call.dyn_uniforms, &self.dyn_uniforms);
@@ -627,6 +643,8 @@ impl DrawVars {
     /// marks its pass for repaint: the list-wide twin of
     /// `update_uniforms_on_area`, for a batch a widget recorded once and
     /// re-presents under this frame's camera. `false` when no call took it.
+    /// Remapped image bindings request a redraw and return `false`: copying
+    /// logical textures into atlas instances would address the wrong pixels.
     pub fn update_uniforms_on_draw_list(
         &self,
         cx: &mut Cx,
@@ -638,6 +656,11 @@ impl DrawVars {
         let Some(draw_list) = cx.draw_lists.checked_index(list) else {
             return false;
         };
+        if (0..draw_list.draw_items.len()).any(|i| draw_list.draw_items[i].kind.draw_call().is_some_and(|call|
+            call.draw_shader_id == draw_shader_id && call.texture_remapped)) {
+            cx.redraw_list_and_children(list);
+            return false;
+        }
         let pass_id = draw_list.draw_pass_id;
         let uniform_gen = &mut cx.uniform_gen;
         let draw_list = &mut cx.draw_lists[list];

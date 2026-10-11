@@ -9,6 +9,7 @@ pub mod cx_draw;
 pub mod draw_list_2d;
 pub mod geometry;
 pub mod image_cache;
+pub mod image_atlas;
 pub mod match_event;
 pub mod nav;
 pub mod overlay;
