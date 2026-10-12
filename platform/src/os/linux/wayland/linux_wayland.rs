@@ -10,7 +10,7 @@ use crate::cx_native::EventFlow;
 use crate::egl_sys::NativeDisplayType;
 use crate::gl_sys::TEXTURE0;
 use crate::makepad_live_id::*;
-use crate::makepad_math::{dvec2, Rect, Vec2d};
+use crate::makepad_math::{dvec2, Rect};
 use crate::opengl_cx::OpenglCx;
 use crate::os::linux::gstreamer_sys::LibGStreamer;
 use crate::os::linux::linux_video_playback::{
@@ -288,7 +288,7 @@ impl WaylandCx {
                     .iter()
                     .position(|window| window.window_id == re.window_id);
                 // Wayland's native surface state does not know the geometry of
-                // Makepad-drawn buttons. Populate it after DPI conversion below.
+                // Makepad-drawn buttons. The DPI conversion below fills it in.
                 re.new_geom.window_chrome_buttons = Rect::default();
 
                 if let Some(window_index) = window_index {
@@ -317,19 +317,13 @@ impl WaylandCx {
                     {
                         let cx_window = &mut cx.windows[re.window_id];
                         cx_window.uses_client_side_decorations = uses_csd;
+                        // Also in fullscreen: we keep drawing our chrome there, and a click
+                        // lands on a button rather than starting a caption drag only if the
+                        // geom says where the buttons are.
+                        cx_window.draws_chrome_buttons = uses_csd;
                         cx_window.wayland_is_fullscreen = is_fullscreen;
                         cx_window.os_dpi_factor = Some(re.new_geom.dpi_factor);
                         re.new_geom = cx_window.native_window_geom_to_layout(re.new_geom);
-                    }
-                    // Also in fullscreen: we keep drawing our chrome there, and a click
-                    // lands on a button rather than starting a caption drag only if the
-                    // geom says where the buttons are.
-                    if uses_csd {
-                        const BUTTONS_SIZE: Vec2d = Vec2d { x: 138.0, y: 29.0 };
-                        re.new_geom.window_chrome_buttons = Rect {
-                            pos: dvec2(re.new_geom.inner_size.x - BUTTONS_SIZE.x, 0.0),
-                            size: BUTTONS_SIZE,
-                        };
                     }
                     re.old_geom.window_chrome_buttons = old_chrome_buttons;
                     cx.windows[re.window_id].window_geom = re.new_geom.clone();
@@ -884,6 +878,7 @@ impl WaylandCx {
                     state.windows.push(window);
                     let cx_window = &mut cx.windows[window_id];
                     cx_window.uses_client_side_decorations = uses_client_side_decorations;
+                    cx_window.draws_chrome_buttons = uses_client_side_decorations;
                     cx_window.wayland_is_fullscreen = wayland_is_fullscreen;
                     cx_window.os_dpi_factor = Some(native_geom.dpi_factor);
                     let layout_geom = cx_window.native_window_geom_to_layout(native_geom);

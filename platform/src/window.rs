@@ -479,6 +479,7 @@ impl WindowHandle {
         cxwindow.wayland_decorations = WaylandDecorationPreference::default();
         cxwindow.uses_client_side_decorations = false;
         cxwindow.wayland_is_fullscreen = false;
+        cxwindow.draws_chrome_buttons = false;
         cx.platform_ops
             .push_back(CxOsOp::CreateWindow(window.window_id()));
         window
@@ -524,6 +525,7 @@ impl WindowHandle {
             cxwindow.wayland_decorations = WaylandDecorationPreference::default();
             cxwindow.uses_client_side_decorations = false;
             cxwindow.wayland_is_fullscreen = false;
+            cxwindow.draws_chrome_buttons = false;
             cxwindow.popup_grab_keyboard
         };
         cx.platform_ops.push_back(CxOsOp::CreatePopupWindow {
@@ -869,6 +871,9 @@ pub struct CxWindow {
     pub(crate) uses_client_side_decorations: bool,
     /// True compositor fullscreen, kept separate so CSD remains visible when maximized.
     pub(crate) wayland_is_fullscreen: bool,
+    /// Whether makepad draws this window's minimize/maximize/close buttons itself (Windows, Wayland CSD),
+    /// so they keep their size in layout points, unlike the OS's own buttons.
+    pub(crate) draws_chrome_buttons: bool,
 }
 
 impl Default for CxWindow {
@@ -898,6 +903,7 @@ impl Default for CxWindow {
             wayland_decorations: WaylandDecorationPreference::default(),
             uses_client_side_decorations: false,
             wayland_is_fullscreen: false,
+            draws_chrome_buttons: false,
         }
     }
 }
@@ -931,6 +937,29 @@ impl CxWindow {
         rect.pos *= scale;
         rect.size *= scale;
         rect
+    }
+
+    /// The size of the three 46 x 29 chrome buttons that makepad draws itself, in layout points.
+    const DRAWN_CHROME_BUTTONS_SIZE: Vec2d = Vec2d { x: 138.0, y: 29.0 };
+
+    /// Returns `geom` with all of its in-window lengths multiplied by `scale`, at `dpi_factor`.
+    ///
+    /// The OS's own chrome buttons scale too, but the ones we draw zoom along with the rest of our drawing,
+    /// so they keep their size in layout points at the top right.
+    pub(crate) fn scale_window_geom(&self, mut geom: WindowGeom, scale: f64, dpi_factor: f64) -> WindowGeom {
+        geom.inner_size *= scale;
+        geom.outer_size *= scale;
+        geom.safe_area_insets = geom.safe_area_insets.scale(scale);
+        geom.window_chrome_buttons = if self.draws_chrome_buttons {
+            Rect {
+                pos: dvec2(geom.inner_size.x - Self::DRAWN_CHROME_BUTTONS_SIZE.x, 0.0),
+                size: Self::DRAWN_CHROME_BUTTONS_SIZE,
+            }
+        } else {
+            Self::scale_rect(geom.window_chrome_buttons, scale)
+        };
+        geom.dpi_factor = dpi_factor;
+        geom
     }
 
     pub fn window_visuals(&self) -> WindowVisuals {
@@ -1058,18 +1087,12 @@ impl CxWindow {
 
     /// Converts a `WindowGeom` reported in native OS points into Makepad layout
     /// points, applying any active `dpi_override` to every in-window metric.
-    pub fn native_window_geom_to_layout(&self, mut geom: WindowGeom) -> WindowGeom {
+    pub fn native_window_geom_to_layout(&self, geom: WindowGeom) -> WindowGeom {
         let native_dpi =
             Self::valid_dpi_factor(geom.dpi_factor).unwrap_or(self.native_dpi_factor());
         let effective_dpi =
             Self::valid_dpi_factor(self.dpi_override.unwrap_or(native_dpi)).unwrap_or(native_dpi);
-        let scale = native_dpi / effective_dpi;
-        geom.inner_size *= scale;
-        geom.outer_size *= scale;
-        geom.safe_area_insets = geom.safe_area_insets.scale(scale);
-        geom.window_chrome_buttons = Self::scale_rect(geom.window_chrome_buttons, scale);
-        geom.dpi_factor = effective_dpi;
-        geom
+        self.scale_window_geom(geom, native_dpi / effective_dpi, effective_dpi)
     }
 
     pub fn remap_dpi_override(&self, pos: Vec2d) -> Vec2d {
