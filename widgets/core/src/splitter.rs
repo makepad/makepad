@@ -636,6 +636,7 @@ impl Widget for Splitter {
                     },
                 );
                 self.drag_moved = false;
+                cx.claim_finger_drag(fe.digit_id);
             }
             Hit::FingerUp(f) => {
                 self.drag_start_align = None;

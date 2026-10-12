@@ -733,10 +733,18 @@ impl IosApp {
         });
     }
 
-    pub fn send_long_press(abs: NSPoint, uid: u64) {
-        let time_now = with_ios_app(|app| app.time_now());
+    pub fn send_long_press(abs: NSPoint) {
+        let abs = dvec2(abs.x, abs.y);
+        // The recognizer's action doesn't hand us its touch, so we use the active touch nearest to it,
+        // which lets widgets match the long press to the touch they captured.
+        let (time_now, uid) = with_ios_app(|app| {
+            let uid = app.touches.iter()
+                .min_by(|a, b| a.abs.distance(&abs).total_cmp(&b.abs.distance(&abs)))
+                .map_or(0, |touch| touch.uid);
+            (app.time_now(), uid)
+        });
         IosApp::do_callback(IosEvent::LongPress(LongPressEvent {
-            abs: dvec2(abs.x, abs.y),
+            abs,
             time: time_now,
             window_id: CxWindowPool::id_zero(),
             uid,

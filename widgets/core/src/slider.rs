@@ -2332,6 +2332,7 @@ impl Widget for Slider {
                 // rect,
                 device,
                 tap_count,
+                digit_id,
                 ..
             }) if device.is_primary_hit() => {
                 if self.animator_in_state(cx, ids!(disabled.on)) {
@@ -2353,6 +2354,7 @@ impl Widget for Slider {
 
                 self.animator_play(cx, ids!(drag.on));
                 self.dragging = Some(self.relative_value);
+                cx.claim_finger_drag(digit_id);
                 cx.widget_action(uid, SliderAction::StartSlide);
                 cx.set_cursor(MouseCursor::Grabbing);
             }

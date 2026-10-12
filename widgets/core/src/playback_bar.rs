@@ -845,6 +845,7 @@ impl Widget for PlaybackBar {
                 // one's first target back.
                 self.gate.rest();
                 self.animator_play(cx, ids!(drag.on));
+                cx.claim_finger_drag(fe.digit_id);
                 cx.widget_action(uid, PlaybackBarAction::Grabbed);
                 let fraction = self.fraction_at_x(fe.abs.x, fe.rect);
                 self.drive(cx, fraction, fe.time, Stroke::Down);

@@ -1224,6 +1224,7 @@ impl Widget for ColorWheel {
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
                 cx.set_key_focus(self.draw_bg.area());
                 self.dragging = true;
+                cx.claim_finger_drag(fe.digit_id);
                 self.track(cx, uid, fe.abs, false);
             }
             Hit::FingerMove(fe) => {
@@ -1400,6 +1401,7 @@ impl Widget for ColorArea {
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
                 cx.set_key_focus(self.draw_bg.area());
                 self.dragging = true;
+                cx.claim_finger_drag(fe.digit_id);
                 self.track(cx, uid, fe.abs, false);
             }
             Hit::FingerMove(fe) => {
@@ -1585,6 +1587,7 @@ impl Widget for ColorAlpha {
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
                 cx.set_key_focus(self.draw_bg.area());
                 self.dragging = true;
+                cx.claim_finger_drag(fe.digit_id);
                 self.track(cx, uid, fe.abs, false);
             }
             Hit::FingerMove(fe) => {

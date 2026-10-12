@@ -18,7 +18,7 @@ script_mod! {
         StoryNote{text: "A root view with pages pushed over it. A pushed page slides in from the side under a header with a back button, and going back slides it away again."}
 
         StoryHeading{text: "Push, and go back"}
-        StoryNote{text: "Push a page from the root, then push another from inside it. The back button at the top left, the mouse's back button and the platform's back gesture all return to the root rather than to the page before: the widget keeps the page in view and the one leaving, and no history."}
+        StoryNote{text: "Push a page from the root, then push another from inside it. The back button at the top left, the mouse's back button, the platform's back gesture and a swipe to the right all return to the root rather than to the page before: the widget keeps the page in view and the one leaving, and no history."}
         // The navigation draws each page it shows with its own walk and
         // reserves no room of its own, so a pushed page would collapse the
         // space and let the section below ride up under it. The frame holds

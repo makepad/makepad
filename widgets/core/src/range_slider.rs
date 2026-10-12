@@ -722,6 +722,7 @@ impl Widget for RangeSlider {
                 self.put(r);
                 self.active_is_end = matches!(grab, Grab::End);
                 self.grab = Some(grab);
+                cx.claim_finger_drag(fe.digit_id);
                 self.animator_play(cx, ids!(drag.on));
                 cx.widget_action(uid, RangeSliderAction::StartSlide);
                 self.slided(cx);

@@ -387,12 +387,18 @@ impl FrameClock {
 pub fn rubber_band_bounce(x0: f64, v0: f64, t: f64, touch: bool) -> (f64, bool) {
     let (x, lambda) = if touch {
         let lambda = RUBBER_BAND_TOUCH_DECAY;
-        ((x0 + (v0 + lambda * x0) * t) * (-lambda * t).exp(), lambda)
+        (critically_damped_spring(x0, v0, lambda, t), lambda)
     } else {
         let lambda = RUBBER_BAND_STIFFNESS / RUBBER_BAND_PERIOD;
         ((x0 + v0 * RUBBER_BAND_AMPLITUDE * t) * (-lambda * t).exp(), lambda)
     };
     (x, t * lambda > 1.0)
+}
+
+/// Where a critically damped spring with decay rate `lambda` is, `t` seconds after it was let go
+/// at `x0` from its rest point with velocity `v0`: `x(t) = (x0 + (v0 + λ·x0)·t)·e^(−λ·t)`.
+pub fn critically_damped_spring(x0: f64, v0: f64, lambda: f64, t: f64) -> f64 {
+    (x0 + (v0 + lambda * x0) * t) * (-lambda * t).exp()
 }
 
 /// The lifecycle of the OS trackpad momentum stream for one scrollable widget.

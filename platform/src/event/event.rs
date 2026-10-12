@@ -277,6 +277,9 @@ pub enum Event {
     BackPressed {
         handled: Cell<bool>,
     },
+    /// The system back gesture while the user is still making it (Android's predictive back, API 34+).
+    /// If they complete it, an `Event::BackPressed` follows; otherwise it ends with a `Cancel`.
+    BackGesture(BackGestureEvent),
 
     /// Permission check or request result
     PermissionResult(PermissionResult),
@@ -372,6 +375,7 @@ impl Event {
             51 => "MouseLeave",
             52 => "Actions",
             53 => "BackPressed",
+            76 => "BackGesture",
             54 => "PermissionResult",
 
             #[cfg(target_arch = "wasm32")]
@@ -468,6 +472,7 @@ impl Event {
             Self::MouseLeave(_) => 51,
             Self::Actions(_) => 52,
             Self::BackPressed { .. } => 53,
+            Self::BackGesture(_) => 76,
             Self::PermissionResult(_) => 54,
             Self::LocationUpdate(_) => 69,
             Self::LocationError(_) => 70,
@@ -557,6 +562,33 @@ impl QuitRequestedEvent {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct BackGestureEvent {
+    pub state: BackGestureState,
+    /// Where the finger is, or `None` if this gesture doesn't come from a touch (e.g. a held back button).
+    pub abs: Option<crate::makepad_math::Vec2d>,
+    /// How far along the system thinks the gesture is, from 0 to 1.
+    pub progress: f64,
+    /// Which screen edge the gesture started from.
+    pub edge: BackGestureEdge,
+    /// Seconds, on the same clock as this platform's touch times.
+    pub time: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackGestureState {
+    Start,
+    Move,
+    Cancel,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackGestureEdge {
+    Left,
+    Right,
+    None,
+}
+
 #[derive(Debug)]
 pub enum Hit {
     KeyFocus(KeyFocusEvent),
@@ -601,7 +633,8 @@ impl Event {
             | Self::TouchUpdate(_)
             | Self::Scroll(_)
             | Self::Pinch(_)
-            | Self::BackPressed { .. } => true,
+            | Self::BackPressed { .. }
+            | Self::BackGesture(_) => true,
             Self::KeyDown(key) | Self::KeyUp(key) if key.key_code == KeyCode::Escape => true,
             _ => false,
         }

@@ -549,6 +549,7 @@ impl Widget for ChartView {
             Hit::FingerDown(fe) if press_starts_pan(fe.is_primary_hit(), held_outside) => {
                 self.drag_start_abs = Some(fe.abs);
                 self.drag_start_viewport = self.viewport.clone();
+                cx.claim_finger_drag(fe.digit_id);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
             Hit::FingerMove(fe) => {

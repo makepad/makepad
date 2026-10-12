@@ -2166,6 +2166,7 @@ impl Widget for GlassSlider {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.dragging = true;
+                cx.claim_finger_drag(fe.digit_id);
                 self.set_key_focus(cx);
                 if self.set_value_from_x(cx, fe.abs.x) {
                     cx.widget_action_with_data(&self.action_data, uid, GlassSliderAction::Changed);

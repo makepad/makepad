@@ -18,6 +18,7 @@ public class MakepadNative {
     public native static void initChoreographer(float deviceRefreshRate, int sdkVersion);
 
     public native static void onBackPressed();
+    public native static void onBackGesture(int state, float touchX, float touchY, float progress, int edge, long timeMillis);
 
     // belongs to QuadSurface class
     public native static void surfaceOnSurfaceCreated(Surface surface);

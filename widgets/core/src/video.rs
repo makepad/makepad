@@ -1504,6 +1504,7 @@ impl Video {
                 } else if self.controls_interactable() && self.hit_test_progress_bar(cx, fe.abs) {
                     // Start dragging progress bar
                     self.is_dragging_progress = true;
+                    cx.claim_finger_drag(fe.digit_id);
                     self.seek_to_position_from_x(cx, fe.abs.x);
                 } else if self.controls_interactable() && self.hit_test_controls(cx, fe.abs) {
                     // Will be handled on FingerUp
