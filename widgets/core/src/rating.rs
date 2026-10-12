@@ -548,6 +548,7 @@ impl Widget for Rating {
                 let m = self.marks();
                 let landed = m.press(self.value, m.value_at(x), self.clearable);
                 self.press_x = Some(x);
+                cx.claim_finger_drag(fe.digit_id);
                 // The preview goes down with the press. A preview still
                 // showing the mark under the finger, on a row the press
                 // has just cleared, would say the press had not worked.

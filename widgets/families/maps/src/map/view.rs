@@ -8684,6 +8684,7 @@ impl MapView {
                 };
                 self.fly = None;
                 self.gesture_panned = false;
+                cx.claim_finger_drag(fe.digit_id);
                 TouchGesture::Pan {
                     uid: *uid,
                     start_abs: abs,
@@ -8742,6 +8743,7 @@ impl MapView {
                 }
 
                 if let Some(remaining) = first_active_touch(event) {
+                    cx.claim_finger_drag(live_id_num!(touch, remaining.uid).into());
                     self.touch_gesture = TouchGesture::Pan {
                         uid: remaining.uid,
                         start_abs: remaining.abs,

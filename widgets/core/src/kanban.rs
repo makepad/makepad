@@ -1198,6 +1198,7 @@ impl Widget for KanbanBoard {
                 if let Some((column, card)) = self.card_at(e.abs) {
                     self.drag = Some(KanbanDrag::press(column, card, e.abs.x, e.abs.y));
                     self.pointer = Some(e.abs);
+                    cx.claim_finger_drag(e.digit_id);
                 }
             }
             Hit::FingerMove(e) => {

@@ -1272,6 +1272,10 @@ impl Widget for WheelPicker {
                     abs: along,
                     caught,
                 });
+                // An upright drum drags vertically, leaving sideways swipes to its containers.
+                if !vertical {
+                    cx.claim_finger_drag(fe.digit_id);
+                }
                 self.animator_play(cx, ids!(drag.on));
                 self.draw_bg.redraw(cx);
             }
