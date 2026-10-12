@@ -306,6 +306,9 @@ pub enum CxOsOp {
     SetChromelessWhenMaximized(WindowId, bool),
     SetWindowTitle(WindowId, String),
     SetWindowVisuals(WindowId, WindowVisuals),
+    /// macOS only: the dpi a window lays its UI out at instead of the native one,
+    /// which keeps the traffic lights centered in a caption bar that zooms with the UI.
+    SetWindowDpiOverride(WindowId, Option<f64>),
     ShowInDock(bool),
     /// FPS-style pointer lock: `true` hides the cursor and freezes it in
     /// place while mouse deltas keep arriving (as synthesized absolute
@@ -513,6 +516,7 @@ impl std::fmt::Debug for CxOsOp {
             Self::SetChromelessWhenMaximized(..) => write!(f, "SetChromelessWhenMaximized"),
             Self::SetWindowTitle(..) => write!(f, "SetWindowTitle"),
             Self::SetWindowVisuals(..) => write!(f, "SetWindowVisuals"),
+            Self::SetWindowDpiOverride(..) => write!(f, "SetWindowDpiOverride"),
             Self::ShowInDock(..) => write!(f, "ShowInDock"),
             Self::LockMousePointer(..) => write!(f, "LockMousePointer"),
             Self::PinMousePointer(..) => write!(f, "PinMousePointer"),
@@ -1456,6 +1460,11 @@ impl Cx {
     /// this can be called from inside normal event/action handlers.
     pub fn set_window_dpi_override(&mut self, window_id: WindowId, dpi_override: Option<f64>) {
         let dpi_override = dpi_override.and_then(CxWindow::valid_dpi_factor);
+        if matches!(self.os_type(), OsType::Macos) {
+            self.platform_ops
+                .retain(|queued| !matches!(queued, CxOsOp::SetWindowDpiOverride(id, _) if *id == window_id));
+            self.platform_ops.push_back(CxOsOp::SetWindowDpiOverride(window_id, dpi_override));
+        }
         let window = &mut self.windows[window_id];
         let current_dpi = window.effective_dpi_factor();
         let target_dpi = dpi_override.unwrap_or_else(|| window.native_dpi_factor());
