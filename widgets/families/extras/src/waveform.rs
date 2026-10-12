@@ -2132,6 +2132,7 @@ impl Widget for Waveform {
                 // rest of the window, and "nothing" has to mean nothing.
                 cx.set_key_focus(self.area);
                 self.grab = Some(part);
+                cx.claim_finger_drag(fe.digit_id);
                 self.press_x = fe.abs.x;
                 self.animator_play(cx, ids!(drag.on));
                 cx.widget_action(uid, WaveformAction::Grabbed(part));

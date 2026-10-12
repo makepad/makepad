@@ -6,8 +6,8 @@ use crate::{
 };
 use std::collections::HashMap;
 
-/// How far (in layout px) a finger must move before we decide whether it's a swipe back.
-/// That's iOS's pan threshold, and it's past both platforms' long-press tolerance.
+/// How far (in the OS's points, so UI zoom doesn't shrink it) a finger must move before we decide
+/// whether it's a swipe back. That's iOS's pan threshold, and at least both platforms' long-press tolerance.
 const SWIPE_BACK_SLOP: f64 = 10.0;
 
 /// A swipe back must move at least this many times more sideways than vertically.
@@ -714,37 +714,10 @@ impl Widget for StackNavigation {
             }
             (Event::LongPress(_), Some(_)) => {}
             (Event::TouchUpdate(e), None) => 'touch: {
-                // A finger that swipes right far enough takes over the current view.
-                let candidate_touch = self.swipe_back_candidate.take().and_then(|candidate| match e.touches.as_slice() {
-                    [touch] if touch.uid == candidate.uid
-                        && matches!(touch.state, TouchState::Move | TouchState::Stable) => Some((candidate, touch)),
-                    _ => None,
-                });
-                if let Some((candidate, touch)) = candidate_touch {
-                    let delta = touch.abs - candidate.start_abs;
-                    if delta.length() < SWIPE_BACK_SLOP {
-                        self.swipe_back_candidate = Some(candidate);
-                    } else if let (true, Some(current)) = (
-                        delta.x >= SWIPE_BACK_DIRECTION_RATIO * delta.y.abs()
-                            && !cx.fingers.is_touch_drag_claimed(touch.uid)
-                            && self.transition.is_none(),
-                        self.current_view,
-                    ) {
-                        // The view's widgets see this touch get canceled, so none of them act on it.
-                        let cancel_event = cancel_touch(cx, e, touch);
-                        self.stack_view_ref(cx, current).handle_event(cx, &cancel_event, scope);
-                        // The pop can end while this finger is still down, so the rest of it must hit nothing.
-                        cx.release_touch_captures(touch.uid);
-                        // This hides the soft keyboard of a text input in the view.
-                        cx.set_key_focus(Area::Empty);
-                        let driver = InteractivePopDriver::Touch { uid: touch.uid, origin_x: touch.abs.x };
-                        self.begin_interactive_pop(cx, driver, 1.0, touch.time);
-                        break 'touch;
-                    }
-                }
-                // Only a single finger on a view that Back would go to (so nothing covers it) can swipe it away.
+                // Only a single finger on a view that Back would go to can swipe it away, so nothing that
+                // covers it (a modal, or a popover holding the pointer) gets left behind.
                 if let (true, Some(current), [touch @ TouchPoint { state: TouchState::Start, .. }]) = (
-                    self.enable_swipe_back && self.transition.is_none(),
+                    self.enable_swipe_back && self.transition.is_none() && cx.sweep_lock_area().is_none(),
                     self.current_view,
                     e.touches.as_slice(),
                 ) {
@@ -754,10 +727,42 @@ impl Widget for StackNavigation {
                         self.swipe_back_candidate = Some(SwipeBackCandidate { uid: touch.uid, start_abs: touch.abs });
                     }
                 }
+                // The views see each move first, so a widget that gives this finger's drag its own meaning
+                // (a scroller claiming it, or a popover its press opened) keeps it before we'd take it.
                 self.forward_event_to_views(cx, event, scope);
-                // A widget that gives this finger's drag its own meaning keeps it.
-                if self.swipe_back_candidate.is_some_and(|candidate| cx.fingers.is_touch_drag_claimed(candidate.uid)) {
-                    self.swipe_back_candidate = None;
+                let Some(candidate) = self.swipe_back_candidate.take() else { break 'touch };
+                let [touch] = e.touches.as_slice() else { break 'touch };
+                if touch.uid != candidate.uid
+                    || cx.fingers.is_touch_drag_claimed(touch.uid)
+                    || cx.sweep_lock_area().is_some()
+                {
+                    break 'touch;
+                }
+                let delta = touch.abs - candidate.start_abs;
+                match touch.state {
+                    TouchState::Start => self.swipe_back_candidate = Some(candidate),
+                    TouchState::Move | TouchState::Stable
+                        if delta.length() < cx.windows[e.window_id].native_points_to_layout(SWIPE_BACK_SLOP) =>
+                    {
+                        self.swipe_back_candidate = Some(candidate);
+                    }
+                    // A finger that swipes right far enough takes over the current view.
+                    TouchState::Move | TouchState::Stable => {
+                        let (true, Some(current)) = (
+                            delta.x >= SWIPE_BACK_DIRECTION_RATIO * delta.y.abs() && self.transition.is_none(),
+                            self.current_view,
+                        ) else { break 'touch };
+                        // The view's widgets see this touch get canceled, so none of them act on it.
+                        let cancel_event = cancel_touch(cx, e, touch);
+                        self.stack_view_ref(cx, current).handle_event(cx, &cancel_event, scope);
+                        // The pop can end while this finger is still down, so the rest of it must hit nothing.
+                        cx.release_touch_captures(touch.uid);
+                        // This hides the soft keyboard of a text input in the view.
+                        cx.set_key_focus(Area::Empty);
+                        let driver = InteractivePopDriver::Touch { uid: touch.uid, origin_x: touch.abs.x };
+                        self.begin_interactive_pop(cx, driver, 1.0, touch.time);
+                    }
+                    _ => {}
                 }
             }
             (Event::LongPress(_), None) => {
@@ -776,7 +781,8 @@ impl Widget for StackNavigation {
                             | InteractivePopPhase::Releasing { is_commit: false, .. }
                         )
                     );
-                    if !can_take_over || !self.is_back_owned_by_current_view(cx, Cx::owns_cancel) {
+                    // A popover holding the pointer gets the Back instead.
+                    if !can_take_over || !self.is_back_owned_by_current_view(cx, Cx::owns_cancel) || cx.sweep_lock_area().is_some() {
                         self.forward_event_to_views(cx, event, scope);
                     } else if let Some(pop) = &mut self.interactive_pop {
                         pop.phase = InteractivePopPhase::Dragging {
@@ -1489,6 +1495,18 @@ impl StackNavigationRef {
         self.borrow()
             .as_ref()
             .is_some_and(|inner| inner.transition.is_some())
+    }
+
+    /// Whether a swipe or back gesture is moving the current view and hasn't committed its pop yet.
+    /// An app that handles Back itself should leave Back to the stack then, since a back gesture ends with one.
+    pub fn has_pending_interactive_pop(&self) -> bool {
+        self.borrow().as_ref().is_some_and(|inner| matches!(
+            inner.interactive_pop,
+            Some(InteractivePop {
+                phase: InteractivePopPhase::Dragging { .. } | InteractivePopPhase::Releasing { is_commit: false, .. },
+                ..
+            })
+        ))
     }
 
     /// Reveals the given view beneath the one that a swipe or back gesture is dragging away,

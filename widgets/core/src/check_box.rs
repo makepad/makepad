@@ -953,6 +953,7 @@ impl Widget for CheckBox {
                         pos: 0.0,
                         moved: false,
                     });
+                    cx.claim_finger_drag(fe.digit_id);
                 }
             }
             // A focused box flips on Space (and Return) the way a click does,

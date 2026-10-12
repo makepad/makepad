@@ -768,11 +768,12 @@ impl CxFingers {
         }
     }
 
-    /// Whether a widget claimed the drag of the touch with the given uid
-    /// (see [`Cx::claim_finger_drag`]), so a container shouldn't make it its own gesture.
+    /// Whether a widget claimed the drag of the touch with the given uid (see [`Cx::claim_finger_drag`])
+    /// or already owns its gesture (see [`Cx::claim_finger_gesture`]), so a container shouldn't make it its own gesture.
     pub fn is_touch_drag_claimed(&self, uid: u64) -> bool {
         let digit_id: DigitId = live_id_num!(touch, uid).into();
         self.drag_claims.contains(&digit_id)
+            || self.captures.iter().any(|v| v.digit_id == digit_id && v.owner)
     }
 
     pub fn any_areas_captured(&self) -> bool {

@@ -1175,6 +1175,7 @@ impl Widget for Carousel {
                         self.samples.clear();
                         push_sample(&mut self.samples, fe.abs.x, fe.time);
                         self.grab = Some(Grab { offset: self.offset, abs: fe.abs.x, caught });
+                        cx.claim_finger_drag(fe.digit_id);
                         self.animator_play(cx, ids!(drag.on));
                         self.draw_bg.redraw(cx);
                     }

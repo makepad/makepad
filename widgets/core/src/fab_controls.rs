@@ -1701,6 +1701,7 @@ impl Widget for FabValueInput {
                     shift: fe.modifiers.shift,
                     raw_value: self.value,
                 });
+                cx.claim_finger_drag(fe.digit_id);
                 // The next event may already be Escape; ownership is captured
                 // before dispatch, so the scope must exist before this returns.
                 self.cancel_scope = Some(self.begin_cancel_scope(cx));
@@ -1954,6 +1955,7 @@ impl Widget for FabColorWheel {
                 let zone = wheel_zone(fe.abs - rect.pos, size);
                 if zone != WheelZone::None {
                     self.drag = Some(zone);
+                    cx.claim_finger_drag(fe.digit_id);
                     self.apply_pointer(cx, uid, fe.abs, false);
                 }
             }

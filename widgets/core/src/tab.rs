@@ -487,6 +487,7 @@ impl Tab {
                     // For touch: don't select on finger down; selection happens
                     // on finger up if no gesture was recognized (see FingerUp above).
                     if fde.is_primary_hit() {
+                        cx.claim_finger_drag(fde.digit_id);
                         dispatch_action(
                             cx,
                             TabAction::TouchDown {
