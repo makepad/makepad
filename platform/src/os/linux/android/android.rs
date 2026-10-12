@@ -2458,10 +2458,12 @@ impl Cx {
         //opengl_cx.make_current();
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
+        self.queue_popup_parents(&mut passes_todo);
         self.repaint_id += 1;
         for draw_pass_id in &passes_todo {
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[*draw_pass_id].set_time(self.os.timers.time_now() as f32, uniforms_gen);
+            let time = self.pass_time(self.os.timers.time_now());
+            self.passes[*draw_pass_id].set_time(time, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {
                     // cant happen
@@ -2476,18 +2478,25 @@ impl Cx {
                     let metrics = self.collect_gpu_pass_metrics(*draw_pass_id);
                     self.draw_pass_to_window_for_active_backend(*draw_pass_id);
 
-                    // Draw popup window passes as overlays on the same surface
-                    for popup_pass_id in &passes_todo {
-                        if let CxDrawPassParent::Window(pw_id) = self.passes[*popup_pass_id].parent
-                        {
+                    // Draw popup window passes as overlays on the same surface: every open one,
+                    // dirty or not, since the parent just painted over it.
+                    let popup_pass_ids: Vec<DrawPassId> = self
+                        .windows
+                        .id_iter()
+                        .filter_map(|pw_id| {
                             let pw = &self.windows[pw_id];
-                            if pw.is_popup && pw.popup_parent == Some(window_id) {
-                                let saved = self.passes[*popup_pass_id].dont_clear;
-                                self.passes[*popup_pass_id].dont_clear = true;
-                                self.draw_pass_to_fullscreen(*popup_pass_id);
-                                self.passes[*popup_pass_id].dont_clear = saved;
+                            if !pw.is_created || !pw.is_popup || pw.popup_parent != Some(window_id) {
+                                return None;
                             }
-                        }
+                            pw.main_pass_id
+                                .filter(|pass_id| self.passes[*pass_id].main_draw_list_id.is_some())
+                        })
+                        .collect();
+                    for popup_pass_id in popup_pass_ids {
+                        let saved = self.passes[popup_pass_id].dont_clear;
+                        self.passes[popup_pass_id].dont_clear = true;
+                        self.draw_pass_to_fullscreen(popup_pass_id);
+                        self.passes[popup_pass_id].dont_clear = saved;
                     }
 
                     let end = self.seconds_since_app_start();

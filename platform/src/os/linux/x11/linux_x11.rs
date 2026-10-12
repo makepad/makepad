@@ -421,8 +421,8 @@ impl X11Cx {
         {
             // Paint is emitted on every idle poll/timer tick. If no pass is dirty there is
             // nothing to draw, so skip the eglMakeCurrent + full pass-list scan below.
-            // demo_time_repaint forces a redraw of time-animated passes (see
-            // compute_pass_repaint_order), so it must keep us rendering.
+            // Time-animated passes don't turn dirty until compute_pass_repaint_order,
+            // so demo_time_repaint must keep us rendering.
             let mut cx = self.cx.borrow_mut();
             if !cx.any_passes_dirty() && !cx.demo_time_repaint {
                 // This still binds our context while retirement work is pending.
@@ -441,8 +441,8 @@ impl X11Cx {
             let parent = {
                 let mut cx = self.cx.borrow_mut();
                 let uniforms_gen = cx.next_uniform_gen();
-                cx.passes[*draw_pass_id]
-                    .set_time(get_xlib_app_global().time_now() as f32, uniforms_gen);
+                let time = cx.pass_time(get_xlib_app_global().time_now());
+                cx.passes[*draw_pass_id].set_time(time, uniforms_gen);
                 cx.passes[*draw_pass_id].parent.clone()
             };
             match parent {

@@ -1011,9 +1011,10 @@ impl Cx {
 
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        let pass_time = self.pass_time(time);
         for draw_pass_id in &passes_todo {
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[*draw_pass_id].set_time(time as f32, uniforms_gen);
+            self.passes[*draw_pass_id].set_time(pass_time, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {}
                 CxDrawPassParent::Window(window_id) => {

@@ -192,8 +192,8 @@ impl Cx {
             .is_some();
         for draw_pass_id in &passes_todo {
             let uniforms_gen = self.next_uniform_gen();
-            self.passes[*draw_pass_id]
-                .set_time(self.os.timers.time_now() as f32, uniforms_gen);
+            let time = self.pass_time(self.os.timers.time_now());
+            self.passes[*draw_pass_id].set_time(time, uniforms_gen);
             match self.passes[*draw_pass_id].parent.clone() {
                 CxDrawPassParent::Xr => {
                     #[cfg(use_vulkan)]

@@ -84,7 +84,11 @@ pub struct Cx {
     /// Studio instead; this is where that arrives, and it is what
     /// `game_input_states` reads while `in_makepad_studio` is set.
     pub(crate) game_input_remote: Vec<crate::event::game_input::GameInputState>,
+    /// Keeps the frame loop running. Which passes repaint is up to each pass's `repaint_next`.
     pub demo_time_repaint: bool,
+    /// `draw_pass.time` counts from here, which `Cx::pass_time` moves while no pass owes a time frame.
+    pub(crate) pass_time_origin: f64,
+    pub(crate) pass_time_rebase: bool,
     pub(crate) mouse_cursor: crate::cursor::MouseCursor,
     pub(crate) gpu_info: GpuInfo,
     pub(crate) xr_capabilities: XrCapabilities,
@@ -948,6 +952,8 @@ impl Cx {
             font_set: crate::font_policy::FontSet::target_default(),
             font_set_frozen: false,
             demo_time_repaint: false,
+            pass_time_origin: 0.0,
+            pass_time_rebase: true,
             mouse_cursor: Default::default(),
             null_texture,
             null_cube_texture,
