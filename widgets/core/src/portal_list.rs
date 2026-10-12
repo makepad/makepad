@@ -839,10 +839,10 @@ pub struct PortalList {
     /// bounce follow the incoming gesture's momentum (see `scroll_motion`); there is
     /// no fixed cap.
     #[live(true)]
-    bounce_at_start: bool,
+    pub bounce_at_start: bool,
     /// Whether content rubber-bands past the end (bottom) edge.
     #[live(true)]
-    bounce_at_end: bool,
+    pub bounce_at_end: bool,
     /// Whether to emit [`PortalListAction::Scroll`] whenever the viewport moves, at
     /// most once per frame. On by default; lists with no scroll-position consumers
     /// can disable it to skip the per-frame action. The one-shot edge sentinels
