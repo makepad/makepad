@@ -12,7 +12,6 @@ script_mod! {
             color: uniform(theme.color_makepad)
 
             rotation_speed: uniform(1.2)
-            border_size: uniform(20.0)
             max_gap_ratio: uniform(0.92)
             min_gap_ratio: uniform(0.12)
             stroke_width: uniform(3.0)

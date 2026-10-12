@@ -23,7 +23,8 @@
 //! A value below zero means INDETERMINATE: the shader replaces the fill with
 //! a segment that sweeps the track on the pass clock, the same way
 //! `loading_spinner.rs` turns its arc, so nothing has to pump frames from
-//! Rust while a bar waits for a first byte.
+//! Rust while a bar waits for a first byte. Only `draw_sweep` reads that
+//! clock, so a bar or ring that knows its value never repaints by itself.
 //!
 //! The intent colours come straight from the theme's accent roles
 //! (`color_primary`, `color_success`, `color_warning`, `color_error`,
@@ -34,6 +35,7 @@
 //! uses for a page that has not said how long it will take.
 
 use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*};
+use std::ops::DerefMut;
 
 /// A progress widget's actions.
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -198,6 +200,11 @@ script_mod! {
                 return mix(fill, vec4(fill.xyz * self.gradient_shade, fill.w), self.gradient * axis)
             }
 
+            // A shader that reads the pass clock repaints every frame, so only `draw_sweep`
+            // (drawn while indeterminate) swaps `clock` for `sweep_clock`.
+            clock: fn() -> float { return 0.0 }
+            sweep_clock: fn() -> float { return self.draw_pass.time }
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let w = self.rect_size.x
@@ -243,7 +250,7 @@ script_mod! {
                 if self.value < 0.0 {
                     let span = x1 - x0
                     let seg = span * self.sweep_width
-                    let t = fract(self.draw_pass.time * self.sweep_speed)
+                    let t = fract(self.clock() * self.sweep_speed)
                     let te = t * t * (3.0 - 2.0 * t)
                     let x = x0 - seg + (span + seg) * te
                     let a = max(x, x0)
@@ -372,6 +379,9 @@ script_mod! {
                 return self.base_angle + mix(x, 1.0 - x, flip) * self.sweep
             }
 
+            clock: fn() -> float { return 0.0 }
+            sweep_clock: fn() -> float { return self.draw_pass.time }
+
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
                 let th = self.thickness
@@ -421,9 +431,9 @@ script_mod! {
                     let len = span * 0.25
                     let mut a0 = lo
                     if self.sweep > 6.0 {
-                        a0 = lo + fract(self.draw_pass.time * self.sweep_speed) * TAU
+                        a0 = lo + fract(self.clock() * self.sweep_speed) * TAU
                     } else {
-                        let tri = abs(fract(self.draw_pass.time * self.sweep_speed * 0.5) * 2.0 - 1.0)
+                        let tri = abs(fract(self.clock() * self.sweep_speed * 0.5) * 2.0 - 1.0)
                         a0 = lo + tri * tri * (3.0 - 2.0 * tri) * (span - len)
                     }
                     if self.rounded_caps > 0.5 {
@@ -830,9 +840,26 @@ fn draw_text_in(
     draw_text.draw_walk_laidout(cx, Walk::fixed(size.x, size.y).with_abs_pos(pos), &laid);
 }
 
+/// The draw for a piece showing `value`: the clock-reading `draw_sweep` only while the value is
+/// unknown, and then `draw_bg` keeps the rect as its area, so its redraws still reach us.
+fn pick_draw<'a, D: DerefMut<Target = DrawQuad>>(
+    cx: &mut Cx2d,
+    rect: Rect,
+    value: f64,
+    draw_bg: &'a mut D,
+    draw_sweep: &'a mut D,
+) -> &'a mut D {
+    if value < 0.0 {
+        cx.add_rect_area(&mut draw_bg.draw_vars.area, rect);
+        draw_sweep
+    } else {
+        draw_bg
+    }
+}
+
 /// A bar with a track and a fill. `value` is the target; what is drawn is
 /// the eased value on its way there.
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct ProgressBar {
     #[uid]
     uid: WidgetUid,
@@ -845,6 +872,9 @@ pub struct ProgressBar {
     #[redraw]
     #[live]
     draw_bg: DrawProgressBar,
+    /// `draw_bg` with its `sweep_clock`, drawn in its place while indeterminate.
+    #[new]
+    draw_sweep: DrawProgressBar,
     #[live]
     draw_text: DrawText,
     /// A fixed label beside the bar; wins over the percentage.
@@ -883,6 +913,12 @@ pub struct ProgressBar {
     drawn: bool,
     #[rust]
     next_frame: NextFrame,
+}
+
+impl ScriptHook for ProgressBar {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        apply_draw_twin(vm, apply, scope, value, id!(draw_bg), id!(sweep_clock), &mut self.draw_sweep);
+    }
 }
 
 impl ProgressBar {
@@ -991,13 +1027,15 @@ impl Widget for ProgressBar {
         };
         let intent = if self.disabled { DISABLED_INK } else { self.intent.index() };
         self.draw_bg.opacity = if self.disabled { 0.6 } else { 1.0 };
+        self.draw_sweep.opacity = self.draw_bg.opacity;
         if self.segments.is_empty() {
-            self.draw_bg.start = 0.0;
-            self.draw_bg.end = 1.0;
-            self.draw_bg.value = self.shown as f32;
-            self.draw_bg.intent = intent;
-            self.draw_bg.track = 1.0;
-            self.draw_bg.draw_abs(cx, bar);
+            let draw = pick_draw(cx, bar, self.shown, &mut self.draw_bg, &mut self.draw_sweep);
+            draw.start = 0.0;
+            draw.end = 1.0;
+            draw.value = self.shown as f32;
+            draw.intent = intent;
+            draw.track = 1.0;
+            draw.draw_abs(cx, bar);
         } else {
             // The track alone first, then one piece per segment over it.
             self.draw_bg.start = 0.0;
@@ -1120,7 +1158,7 @@ impl ProgressBarRef {
 
 /// A ring, an open arc or nested rings. Shares the bar's value contract:
 /// `value` is the target, the drawn value eases toward it, forward only.
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct ProgressRing {
     #[uid]
     uid: WidgetUid,
@@ -1133,6 +1171,9 @@ pub struct ProgressRing {
     #[redraw]
     #[live]
     draw_bg: DrawProgressRing,
+    /// `draw_bg` with its `sweep_clock`, drawn in its place while indeterminate.
+    #[new]
+    draw_sweep: DrawProgressRing,
     #[live]
     draw_text: DrawText,
     #[live]
@@ -1168,6 +1209,12 @@ pub struct ProgressRing {
     drawn: bool,
     #[rust]
     next_frame: NextFrame,
+}
+
+impl ScriptHook for ProgressRing {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, value: ScriptValue) {
+        apply_draw_twin(vm, apply, scope, value, id!(draw_bg), id!(sweep_clock), &mut self.draw_sweep);
+    }
 }
 
 impl ProgressRing {
@@ -1232,13 +1279,14 @@ impl ProgressRing {
 
     /// One piece of ring: the fraction it covers and where its fill stands.
     fn piece(&mut self, cx: &mut Cx2d, rect: Rect, start: f64, end: f64, value: f64, intent: f32, inset: f64) {
-        self.draw_bg.start = start as f32;
-        self.draw_bg.end = end as f32;
-        self.draw_bg.value = value as f32;
-        self.draw_bg.intent = intent;
-        self.draw_bg.track = 1.0;
-        self.draw_bg.inset = inset as f32;
-        self.draw_bg.draw_abs(cx, rect);
+        let draw = pick_draw(cx, rect, value, &mut self.draw_bg, &mut self.draw_sweep);
+        draw.start = start as f32;
+        draw.end = end as f32;
+        draw.value = value as f32;
+        draw.intent = intent;
+        draw.track = 1.0;
+        draw.inset = inset as f32;
+        draw.draw_abs(cx, rect);
     }
 }
 
@@ -1260,6 +1308,7 @@ impl Widget for ProgressRing {
         let rect = cx.turtle().rect();
         let intent = if self.disabled { DISABLED_INK } else { self.intent.index() };
         self.draw_bg.opacity = if self.disabled { 0.6 } else { 1.0 };
+        self.draw_sweep.opacity = self.draw_bg.opacity;
         match self.shape {
             ProgressShape::Rings => {
                 let step = self.draw_bg.thickness as f64 + self.ring_gap;

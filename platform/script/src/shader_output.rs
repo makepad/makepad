@@ -250,6 +250,8 @@ pub struct ShaderOutput {
     pub errors: Vec<String>,
     /// True if this shader uses screen-space derivatives (dFdx/dFdy).
     pub uses_derivatives: bool,
+    /// True if this shader reads `draw_pass.time`, so its pass repaints every frame.
+    pub uses_time: bool,
     /// Monotonic temporary id source for Rust backend expression hoisting.
     pub rust_tmp_counter: usize,
     /// Monotonic id source for loop-guard locals, so nested guards never

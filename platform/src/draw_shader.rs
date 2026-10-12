@@ -1347,14 +1347,6 @@ impl CxDrawShaderMapping {
             );
         }
 
-        // Check if shader uses draw_pass->time (requires repaint every frame)
-        let uses_time = match &code {
-            CxDrawShaderCode::Combined { code } => code.contains("draw_pass->time"),
-            CxDrawShaderCode::Separate { vertex, fragment } => {
-                vertex.contains("draw_pass->time") || fragment.contains("draw_pass->time")
-            }
-        };
-
         CxDrawShaderMapping {
             source,
             code,
@@ -1373,7 +1365,7 @@ impl CxDrawShaderMapping {
             uniform_buffers,
             samplers: output.samplers.clone(),
             texture_sampler_indices,
-            uses_time,
+            uses_time: output.uses_time,
             rect_pos,
             rect_size,
             draw_clip,

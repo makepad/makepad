@@ -952,7 +952,7 @@ impl Cx {
             }
         }
         let draw_done = std::time::Instant::now();
-        let flipped = self.hosted_repaint(windows, time_now as f32);
+        let flipped = self.hosted_repaint(windows, time_now);
         // Where a hosted frame's time goes, as the Activity build's
         // `frame.cpu`: NextFrame, the widget draw, and the repaint (record,
         // submit and the wait for the GPU before the host is told).
@@ -982,7 +982,7 @@ impl Cx {
         }
         // A host that ticks on demand (paced) needs to hear what this child
         // still has to do: another frame now, or a timer later.
-        if !self.new_next_frames.is_empty() || self.need_redrawing() || SignalToUI::any_pending() {
+        if !self.new_next_frames.is_empty() || self.need_redrawing() || self.demo_time_repaint || SignalToUI::any_pending() {
             crate::trace!("pace", "child raf next_frames={} redraw={}", self.new_next_frames.len(), self.need_redrawing());
             Self::hosted_send(AppToStudio::RequestAnimationFrame);
         } else if let Some(due) = self.hosted_next_timer_in() {
@@ -1020,10 +1020,11 @@ impl Cx {
     }
 
     /// Repaint every dirty pass; true when a window frame went to the host.
-    fn hosted_repaint(&mut self, windows: &mut [HostedWindow], time: f32) -> bool {
+    fn hosted_repaint(&mut self, windows: &mut [HostedWindow], time_now: f64) -> bool {
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
+        let time = self.pass_time(time_now);
         let fenced = FENCED.load(Ordering::Relaxed);
         // The shared image this repaint draws into may still be read by the
         // host's GPU: this submission waits for the host's latest one.

@@ -2151,6 +2151,40 @@ macro_rules! register_widget {
     }};
 }
 
+/// Applies the `field` draw of a widget's `value` to `twin` with its `clock` fn swapped for its
+/// `clock_fn`, so a second shader of that draw keeps every override the field gets.
+pub(crate) fn apply_draw_twin<T: ScriptApply + 'static>(
+    vm: &mut ScriptVm,
+    apply: &Apply,
+    scope: &mut Scope,
+    value: ScriptValue,
+    field: LiveId,
+    clock_fn: LiveId,
+    twin: &mut T,
+) {
+    let draw = match vm.bx.heap.value_for_apply(value, field.into(), apply) {
+        Some(draw) => draw.as_object(),
+        // Like the derive, a field the widget never sets comes from its type's default.
+        None if apply.is_new() || apply.is_reload() => {
+            vm.bx.heap.type_default_for_id(ScriptTypeId::of::<T>())
+        }
+        None => None,
+    };
+    let Some(draw) = draw else {
+        return;
+    };
+    let object = vm.bx.heap.new_with_proto(draw.into());
+    // An eval only fills a draw's own entries, so the twin needs the eval's own values too.
+    if apply.is_eval() {
+        vm.bx.heap.merge_object(object, draw, NoTrap);
+    }
+    let clock = vm.bx.heap.value(draw, clock_fn.into(), NoTrap);
+    if clock.as_object().is_some_and(|f| vm.bx.heap.is_fn(f)) {
+        vm.bx.heap.set_value(object, id!(clock).into(), clock, NoTrap);
+    }
+    twin.script_apply(vm, apply, scope, object.into());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

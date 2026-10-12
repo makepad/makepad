@@ -661,6 +661,14 @@ impl ShaderFnCompiler {
         let (instance_ty, instance_s) = self.pop_resolved(vm, output);
 
         if let ShaderType::Id(field_id) = field_ty {
+            // Backends spell this read differently, so we flag it here instead of searching their output.
+            if let ShaderType::Pod(pod_ty) | ShaderType::PodPtr(pod_ty) = instance_ty {
+                if field_id == id!(time)
+                    && output.io.iter().any(|io| io.name == id!(draw_pass) && io.ty == pod_ty)
+                {
+                    output.uses_time = true;
+                }
+            }
             if let ShaderType::Pod(pod_ty) = instance_ty {
                 if let Some(ret_ty) =
                     vm.bx

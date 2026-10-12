@@ -1376,8 +1376,8 @@ impl WaylandCx {
     pub(crate) fn handle_repaint(&self, state: &mut WaylandState) {
         let mut cx = self.cx.borrow_mut();
         // Skip the eglMakeCurrent + full pass-list scan when there is nothing to draw.
-        // demo_time_repaint forces a redraw of time-animated passes (see
-        // compute_pass_repaint_order), so it must keep us rendering.
+        // Time-animated passes don't turn dirty until compute_pass_repaint_order,
+        // so demo_time_repaint must keep us rendering.
         if !cx.any_passes_dirty() && !cx.demo_time_repaint {
             // This still binds our context while retirement work is pending.
             cx.maintain_instance_retirements();
@@ -1392,7 +1392,8 @@ impl WaylandCx {
         for draw_pass_id in &passes_todo {
             let now = state.time_now();
             let uniforms_gen = cx.next_uniform_gen();
-            cx.passes[*draw_pass_id].set_time(now as f32, uniforms_gen);
+            let time = cx.pass_time(now);
+            cx.passes[*draw_pass_id].set_time(time, uniforms_gen);
             let parent = cx.passes[*draw_pass_id].parent.clone();
             match parent {
                 CxDrawPassParent::Xr => {}
