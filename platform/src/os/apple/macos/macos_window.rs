@@ -52,6 +52,12 @@ pub struct MacosWindow {
     window_delegate: ObjcId,
     live_resize_timer: ObjcId,
     last_window_geom: Option<WindowGeom>,
+    dpi_override: Option<f64>,
+    default_window_buttons: Option<DefaultWindowButtons>,
+    /// How far we've moved the traffic lights down from AppKit's layout.
+    window_buttons_offset: f64,
+    /// Whether AppKit is animating this window out of fullscreen, so we leave its titlebar alone.
+    pub(crate) is_exiting_fullscreen: bool,
     /// Wall-clock time of the most recent OS momentum scroll event. While the momentum
     /// stream is live, macOS suppresses tap-to-click, so taps in that window have to be
     /// synthesized from the raw trackpad touches.
@@ -67,6 +73,16 @@ pub struct MacosWindow {
     /// but no longer forwards those callbacks into `Cx`.
     retired: bool,
     close_event_deferred: bool,
+}
+
+/// AppKit's own layout of a window's traffic lights, from before we first moved them.
+#[derive(Clone, Copy)]
+struct DefaultWindowButtons {
+    titlebar_width: f64,
+    titlebar_height: f64,
+    /// The height of a caption bar that centers the buttons, i.e., `2 * top + height`.
+    caption_height: f64,
+    origins: [NSPoint; 3],
 }
 
 impl MacosWindow {
@@ -94,6 +110,10 @@ impl MacosWindow {
                 window_id: window_id,
                 view: view,
                 last_window_geom: None,
+                dpi_override: None,
+                default_window_buttons: None,
+                window_buttons_offset: 0.0,
+                is_exiting_fullscreen: false,
                 last_momentum_time: 0.0,
                 touch_began_time: 0.0,
                 touch_disqualified: false,
@@ -233,6 +253,7 @@ impl MacosWindow {
             let title = str_to_nsstring(title);
             let () = msg_send![self.window, setTitle: title];
         }
+        self.position_window_buttons();
     }
 
     fn is_topmost(&self) -> bool {
@@ -389,6 +410,9 @@ impl MacosWindow {
 
             let input_context: ObjcId = msg_send![self.view, inputContext];
             let () = msg_send![input_context, invalidateCharacterCoordinates];
+            // We need AppKit's own layout of the traffic lights
+            // from before fullscreen or a zoom can change it.
+            self.capture_default_window_buttons();
             if is_fullscreen {
                 self.maximize();
             }
@@ -635,6 +659,7 @@ impl MacosWindow {
             let () = msg_send![miniaturize, setHidden: hidden];
             let () = msg_send![zoom, setHidden: hidden];
         }
+        self.position_window_buttons();
     }
 
     pub fn set_window_visuals(&mut self, visuals: WindowVisuals) {
@@ -766,6 +791,132 @@ impl MacosWindow {
         }
     }
 
+    /// Returns whether the traffic lights moved, like `position_window_buttons()`.
+    pub fn set_dpi_override(&mut self, dpi_override: Option<f64>) -> bool {
+        self.dpi_override = dpi_override;
+        self.position_window_buttons()
+    }
+
+    /// Keeps the traffic lights centered in a caption bar that zooms with the UI.
+    /// Returns whether that moved them from where we last reported them.
+    pub fn position_window_buttons(&mut self) -> bool {
+        const NS_USER_INTERFACE_LAYOUT_DIRECTION_RIGHT_TO_LEFT: i64 = 1;
+
+        if self.retired || self.is_fullscreen || self.is_exiting_fullscreen {
+            return false;
+        }
+        let zoom = self.get_window_buttons_zoom();
+        if zoom == 1.0 && self.window_buttons_offset == 0.0 {
+            return false;
+        }
+        // AppKit's tab bar lives in the titlebar too,
+        // so we leave the titlebar's layout alone while that's shown.
+        let tab_group: ObjcId = unsafe { msg_send![self.window, tabGroup] };
+        if tab_group != nil && unsafe { msg_send![tab_group, isTabBarVisible] } {
+            return false;
+        }
+        let container = self.get_titlebar_container();
+        let Some(buttons) = self.get_window_buttons() else { return false };
+        let Some(default) = self.capture_default_window_buttons() else { return false };
+        if container == nil {
+            return false;
+        }
+        // We stick to whole pixels so the buttons don't get drawn blurry.
+        let dpi = self.get_dpi_factor();
+        let offset = (default.caption_height * (zoom - 1.0) / 2.0 * dpi).round() / dpi;
+        unsafe {
+            let theme_frame: ObjcId = msg_send![container, superview];
+            let theme_bounds: NSRect = msg_send![theme_frame, bounds];
+            let mut titlebar_frame: NSRect = msg_send![container, frame];
+            titlebar_frame.size.height = default.titlebar_height + 2.0 * offset;
+            titlebar_frame.origin.y = theme_bounds.size.height - titlebar_frame.size.height;
+            let () = msg_send![container, setFrame: titlebar_frame];
+            // Right-to-left titlebars put the buttons on the right, so we move those left,
+            // from the right edge since that moves as the window gets resized.
+            let direction: i64 = msg_send![self.window, windowTitlebarLayoutDirection];
+            let x_offset = if direction == NS_USER_INTERFACE_LAYOUT_DIRECTION_RIGHT_TO_LEFT {
+                titlebar_frame.size.width - default.titlebar_width - offset
+            } else {
+                offset
+            };
+            for (button, origin) in buttons.into_iter().zip(default.origins) {
+                let origin = NSPoint { x: origin.x + x_offset, y: origin.y + offset };
+                let () = msg_send![button, setFrameOrigin: origin];
+            }
+        }
+        self.window_buttons_offset = offset;
+        self.last_window_geom.as_ref().is_some_and(|geom| {
+            geom.window_chrome_buttons != self.traffic_lights_geom().unwrap_or_default()
+        })
+    }
+
+    /// How much bigger the UI is drawn than AppKit's titlebar, or 1 if it's not zoomed in.
+    pub fn get_window_buttons_zoom(&self) -> f64 {
+        self.dpi_override.map_or(1.0, |dpi_override| dpi_override / self.get_dpi_factor()).max(1.0)
+    }
+
+    /// The close, minimize and zoom buttons, if this window has all three.
+    fn get_window_buttons(&self) -> Option<[ObjcId; 3]> {
+        let buttons = [0u64, 1, 2].map(|kind| -> ObjcId {
+            unsafe { msg_send![self.window, standardWindowButton: kind] }
+        });
+        (!buttons.contains(&nil)).then_some(buttons)
+    }
+
+    /// AppKit's own layout of the traffic lights, which we capture once, before we ever move them.
+    fn capture_default_window_buttons(&mut self) -> Option<DefaultWindowButtons> {
+        if self.default_window_buttons.is_none() {
+            let buttons = self.get_window_buttons()?;
+            let lights = self.traffic_lights_geom()?;
+            let container = self.get_titlebar_container();
+            if container == nil {
+                return None;
+            }
+            let titlebar_frame: NSRect = unsafe { msg_send![container, frame] };
+            self.default_window_buttons = Some(DefaultWindowButtons {
+                titlebar_width: titlebar_frame.size.width,
+                titlebar_height: titlebar_frame.size.height,
+                caption_height: lights.pos.y * 2.0 + lights.size.y,
+                origins: buttons.map(|button| {
+                    let frame: NSRect = unsafe { msg_send![button, frame] };
+                    frame.origin
+                }),
+            });
+        }
+        self.default_window_buttons
+    }
+
+    /// AppKit moves the traffic lights back to its own spot when it re-lays out the titlebar,
+    /// so we move them again, and report that if they're not where we last said they were.
+    pub fn handle_titlebar_relayout(&mut self) {
+        if self.position_window_buttons() {
+            self.send_change_event();
+        }
+    }
+
+    /// The titlebar container that holds the traffic lights,
+    /// or `nil` unless it's the one we took over in `defang_titlebar_container()`.
+    fn get_titlebar_container(&self) -> ObjcId {
+        let class = get_macos_class_global().titlebar_container;
+        if class.is_null() {
+            return nil;
+        }
+        unsafe {
+            let close: ObjcId = msg_send![self.window, standardWindowButton: 0u64];
+            let titlebar: ObjcId = msg_send![close, superview];
+            let container: ObjcId = msg_send![titlebar, superview];
+            let is_ours: bool = msg_send![container, isKindOfClass: &*class];
+            if is_ours { container } else { nil }
+        }
+    }
+
+    pub fn set_titlebar_visible(&mut self, visible: bool) {
+        let hidden = if visible { NO } else { YES };
+        unsafe {
+            let () = msg_send![self.get_titlebar_container(), setHidden: hidden];
+        }
+    }
+
     pub fn get_window_geom(&self) -> WindowGeom {
         WindowGeom {
             xr_is_presenting: false,
@@ -892,6 +1043,14 @@ impl MacosWindow {
             return;
         }
         //return;
+        let geom_change = self.take_window_geom_change();
+        self.do_callback(MacosEvent::WindowGeomChange(geom_change));
+        self.do_callback(MacosEvent::Paint);
+        // we should schedule a timer for +16ms another Paint
+    }
+
+    /// Takes the geometry change since the last one we reported, which then counts as reported.
+    pub fn take_window_geom_change(&mut self) -> WindowGeomChangeEvent {
         let new_geom = self.get_window_geom();
         let old_geom = if let Some(old_geom) = &self.last_window_geom {
             old_geom.clone()
@@ -899,13 +1058,11 @@ impl MacosWindow {
             new_geom.clone()
         };
         self.last_window_geom = Some(new_geom.clone());
-        self.do_callback(MacosEvent::WindowGeomChange(WindowGeomChangeEvent {
+        WindowGeomChangeEvent {
             window_id: self.window_id,
             old_geom: old_geom,
             new_geom: new_geom,
-        }));
-        self.do_callback(MacosEvent::Paint);
-        // we should schedule a timer for +16ms another Paint
+        }
     }
 
     pub fn send_got_focus_event(&mut self) {
