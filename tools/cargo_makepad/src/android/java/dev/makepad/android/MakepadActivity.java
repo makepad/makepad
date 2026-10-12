@@ -74,7 +74,11 @@ import android.text.SpannableStringBuilder;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -566,6 +570,12 @@ class MakepadSurface
     @SuppressWarnings("deprecation")
     @Override
     public boolean onKey(View v, int keyCode, KeyEvent event) {
+        // API 36 still passes the back key on to us after the activity's back callback got it as Back.
+        if (keyCode == KeyEvent.KEYCODE_BACK
+            && getContext() instanceof MakepadActivity
+            && ((MakepadActivity) getContext()).mBackGoesThroughCallback) {
+            return true;
+        }
         if (event.getAction() == KeyEvent.ACTION_DOWN && keyCode != 0) {
             int metaState = event.getMetaState();
             boolean isRepeat = event.getRepeatCount() > 0;
@@ -1072,6 +1082,15 @@ public class MakepadActivity
     private SelectionHandleView mSelectionHandleEnd;
     private int mSelectionHandleSizePx;
 
+    // back callback (API 33+), whose gesture states and edge match onBackGesture in android_jni.rs
+    private static final int BACK_GESTURE_START = 0;
+    private static final int BACK_GESTURE_MOVE = 1;
+    private static final int BACK_GESTURE_CANCEL = 2;
+    private static final int BACK_EDGE_NONE = 2;
+    private OnBackInvokedCallback mBackCallback;
+    // Set by the callback's first call, since the system ignores it unless the manifest opts in.
+    boolean mBackGoesThroughCallback;
+
     static {
         System.loadLibrary("makepad");
     }
@@ -1333,6 +1352,79 @@ public class MakepadActivity
         MakepadNative.activityOnCreate(this);
         registerPhysicalKeyboardListener();
 
+        // If the manifest opts in, API 33+ sends Back here instead of to onBackPressed(). On 34+ we also
+        // hear the gesture's progress, through reflection since we compile against SDK 33.
+        if (Build.VERSION.SDK_INT >= 33) {
+            mBackCallback = MakepadNative::onBackPressed;
+            if (Build.VERSION.SDK_INT >= 34) {
+                try {
+                    Class<?> callbackClass = Class.forName("android.window.OnBackAnimationCallback");
+                    Class<?> backEventClass = Class.forName("android.window.BackEvent");
+                    Method getTouchX = backEventClass.getMethod("getTouchX");
+                    Method getTouchY = backEventClass.getMethod("getTouchY");
+                    Method getProgress = backEventClass.getMethod("getProgress");
+                    Method getSwipeEdge = backEventClass.getMethod("getSwipeEdge");
+                    int[] surfaceOrigin = new int[2];
+                    int[] swipeEdge = new int[1];
+                    mBackCallback = (OnBackInvokedCallback) Proxy.newProxyInstance(
+                        MakepadActivity.class.getClassLoader(),
+                        new Class<?>[] { callbackClass },
+                        (proxy, method, args) -> {
+                            String name = method.getName();
+                            switch (name) {
+                                case "onBackStarted":
+                                case "onBackProgressed":
+                                    mBackGoesThroughCallback = true;
+                                    float touchX = (float) getTouchX.invoke(args[0]);
+                                    float touchY = (float) getTouchY.invoke(args[0]);
+                                    swipeEdge[0] = (int) getSwipeEdge.invoke(args[0]);
+                                    // A back button press comes as a touch at (0, 0), not the NaN BackEvent's docs promise.
+                                    if (touchX == 0 && touchY == 0) {
+                                        touchX = Float.NaN;
+                                        touchY = Float.NaN;
+                                        swipeEdge[0] = BACK_EDGE_NONE;
+                                    }
+                                    // BackEvent's touch point is on the screen, but touches are relative to the surface.
+                                    view.getLocationOnScreen(surfaceOrigin);
+                                    MakepadNative.onBackGesture(
+                                        name.equals("onBackStarted") ? BACK_GESTURE_START : BACK_GESTURE_MOVE,
+                                        touchX - surfaceOrigin[0],
+                                        touchY - surfaceOrigin[1],
+                                        (float) getProgress.invoke(args[0]),
+                                        swipeEdge[0],
+                                        SystemClock.uptimeMillis());
+                                    return null;
+                                case "onBackCancelled":
+                                    MakepadNative.onBackGesture(
+                                        BACK_GESTURE_CANCEL,
+                                        Float.NaN,
+                                        Float.NaN,
+                                        0,
+                                        swipeEdge[0],
+                                        SystemClock.uptimeMillis());
+                                    return null;
+                                case "onBackInvoked":
+                                    MakepadNative.onBackPressed();
+                                    return null;
+                                // The dispatcher keeps callbacks in a map, so the proxy answers these itself.
+                                case "hashCode":
+                                    return System.identityHashCode(proxy);
+                                case "equals":
+                                    return proxy == args[0];
+                                case "toString":
+                                    return "MakepadBackAnimationCallback";
+                                default:
+                                    return null;
+                            }
+                        });
+                } catch (ReflectiveOperationException e) {
+                    Log.w(LOG_TAG, "Predictive back is unavailable, so Back won't animate", e);
+                }
+            }
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT, mBackCallback);
+        }
+
         mVideoPlaybackThread = new HandlerThread("VideoPlayerThread");
         mVideoPlaybackThread.start(); // TODO: only start this if its needed.
         mVideoPlaybackHandler = new Handler(mVideoPlaybackThread.getLooper());
@@ -1396,6 +1488,10 @@ public class MakepadActivity
     @Override
     protected void onDestroy() {
         unregisterPhysicalKeyboardListener();
+        if (mBackCallback != null) {
+            getOnBackInvokedDispatcher().unregisterOnBackInvokedCallback(mBackCallback);
+            mBackCallback = null;
+        }
         if (mCameraPreviewOverlay != null) {
             for (Long videoId : mCameraPreviewViews.keySet()) {
                 MakepadNative.onCameraPreviewSurfaceDestroyed(videoId);

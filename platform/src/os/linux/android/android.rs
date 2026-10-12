@@ -34,6 +34,7 @@ use {
             drag_drop::{DragEvent, DragItem, DragResponse, DropEvent},
             keyboard::{CharOffset, FullTextState, ImeAction, ImeActionEvent},
             video_playback::CameraPreviewMode,
+            BackGestureEvent,
             Event,
             KeyCode,
             KeyEvent,
@@ -560,6 +561,23 @@ impl Cx {
                 self.call_event_handler(&Event::BackPressed {
                     handled: Cell::new(false),
                 });
+            }
+            FromJavaMessage::BackGesture {
+                state,
+                abs,
+                progress,
+                edge,
+                time,
+            } => {
+                let window = &self.windows[CxWindowPool::id_zero()];
+                let e = Event::BackGesture(BackGestureEvent {
+                    state,
+                    abs: abs.map(|abs| window.physical_vec2d_to_layout(abs)),
+                    progress,
+                    edge,
+                    time,
+                });
+                self.call_event_handler(&e);
             }
             FromJavaMessage::SurfaceCreated { window } => {
                 #[cfg(use_vulkan)]

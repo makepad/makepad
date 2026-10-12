@@ -883,6 +883,12 @@ impl Cx {
         self.cancel_scopes.has_press_owner()
     }
 
+    /// Whether a back swipe by a touch that starts in the event being delivered would belong
+    /// to `scope`, since Back would go to it right now. Only meaningful during that event.
+    pub fn owns_back_swipe(&self, scope: &CancelScope) -> bool {
+        self.cancel_scopes.owns_back_swipe(scope)
+    }
+
     pub fn new(event_handler: Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
         crate::thread::ui_hang::initialize();
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

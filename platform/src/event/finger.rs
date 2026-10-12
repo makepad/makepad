@@ -419,6 +419,7 @@ pub struct CxFingers {
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
     xr_poke_locks: Vec<DigitId>,
+    drag_claims: Vec<DigitId>,
     /// Owners of the sweep lock, outermost first; only the LAST entry is
     /// the live lock. A single slot cannot serve NESTING OVERLAYS — a menu
     /// over a dialog over a modal — where each level takes the pointer in
@@ -761,6 +762,19 @@ impl CxFingers {
         self.captures.iter().find(|v| v.digit_id == digit_id).map(|v| v.area)
     }
 
+    pub(crate) fn claim_drag(&mut self, digit_id: DigitId) {
+        if !self.drag_claims.contains(&digit_id) {
+            self.drag_claims.push(digit_id);
+        }
+    }
+
+    /// Whether a widget claimed the drag of the touch with the given uid
+    /// (see [`Cx::claim_finger_drag`]), so a container shouldn't make it its own gesture.
+    pub fn is_touch_drag_claimed(&self, uid: u64) -> bool {
+        let digit_id: DigitId = live_id_num!(touch, uid).into();
+        self.drag_claims.contains(&digit_id)
+    }
+
     pub fn any_areas_captured(&self) -> bool {
         self.captures.len() > 0
     }
@@ -829,6 +843,7 @@ impl CxFingers {
         {
             self.captures.remove(index);
         }
+        self.drag_claims.retain(|id| *id != digit_id);
     }
 
     pub(crate) fn remove_hover(&mut self, digit_id: DigitId) {
@@ -2145,5 +2160,21 @@ impl Event {
             _ => (),
         };
         Hit::Nothing
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_drag_claim_ends_when_its_digit_is_released() {
+        let mut fingers = CxFingers::default();
+        fingers.claim_drag(live_id_num!(touch, 3).into());
+        assert!(fingers.is_touch_drag_claimed(3));
+        assert!(!fingers.is_touch_drag_claimed(4));
+        // Touch uids get reused, so a claim that outlived its touch would block the next one.
+        fingers.release_digit(live_id_num!(touch, 3).into());
+        assert!(!fingers.is_touch_drag_claimed(3));
     }
 }

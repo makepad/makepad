@@ -3085,8 +3085,10 @@ impl Widget for TextInput {
                 abs,
                 tap_count,
                 device,
+                digit_id,
                 ..
             }) if device.is_primary_hit() && !scrollbar_captured => {
+                cx.claim_finger_drag(digit_id);
                 self.reset_blink_timer(cx);
                 self.set_key_focus(cx);
                 let rel = abs - self.text_area.rect(cx).pos;

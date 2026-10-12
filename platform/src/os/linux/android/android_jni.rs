@@ -6,7 +6,10 @@ use {
     crate::{
         area::Area,
         cx::AndroidParams,
-        event::{SelectionHandleKind, SelectionHandlePhase, TouchPoint, TouchState, VideoSource},
+        event::{
+            BackGestureEdge, BackGestureState, SelectionHandleKind, SelectionHandlePhase,
+            TouchPoint, TouchState, VideoSource,
+        },
         ime::{AutoCapitalize, AutoCorrect, InputMode, ReturnKeyType, TextInputConfig},
         makepad_live_id::*,
         makepad_math::*,
@@ -92,6 +95,14 @@ pub enum FromJavaMessage {
     Init(AndroidParams),
     SwitchedActivity(jni_sys::jobject, u64),
     BackPressed,
+    BackGesture {
+        state: BackGestureState,
+        // Physical px, like touches.
+        abs: Option<Vec2d>,
+        progress: f64,
+        edge: BackGestureEdge,
+        time: f64,
+    },
     SurfaceChanged {
         window: *mut ndk_sys::ANativeWindow,
         width: i32,
@@ -734,6 +745,37 @@ unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onBackPressed(
 ) {
     // crate::log!("Java_dev_makepad_android_MakepadNative_onBackPressed");
     send_from_java_message(FromJavaMessage::BackPressed);
+}
+
+#[no_mangle]
+unsafe extern "C" fn Java_dev_makepad_android_MakepadNative_onBackGesture(
+    _: *mut jni_sys::JNIEnv,
+    _: jni_sys::jclass,
+    state: jni_sys::jint,
+    touch_x: jni_sys::jfloat,
+    touch_y: jni_sys::jfloat,
+    progress: jni_sys::jfloat,
+    edge: jni_sys::jint,
+    time_millis: jni_sys::jlong,
+) {
+    let state = match state {
+        0 => BackGestureState::Start,
+        1 => BackGestureState::Move,
+        2 => BackGestureState::Cancel,
+        _ => return,
+    };
+    send_from_java_message(FromJavaMessage::BackGesture {
+        state,
+        // NaN means the gesture has no touch point, e.g. a button press.
+        abs: (!touch_x.is_nan() && !touch_y.is_nan()).then(|| dvec2(touch_x as f64, touch_y as f64)),
+        progress: progress as f64,
+        edge: match edge {
+            0 => BackGestureEdge::Left,
+            1 => BackGestureEdge::Right,
+            _ => BackGestureEdge::None,
+        },
+        time: time_millis as f64 / 1000.0,
+    });
 }
 
 #[no_mangle]
