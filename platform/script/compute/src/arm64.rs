@@ -25,6 +25,9 @@ use crate::ir::{Bin, Block, Cmp, Op, Program, Region, Stmt, Ty, Un, Val};
 // =========================================================================
 
 mod sys {
+    // Only macOS and Linux map executable memory; elsewhere Code::new returns None and only
+    // the (never reached) unmapping refers to this module.
+    #![cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
     use std::ffi::c_void;
     pub const PROT_READ: i32 = 1;
     pub const PROT_WRITE: i32 = 2;
@@ -45,8 +48,6 @@ mod sys {
         pub fn pthread_jit_write_protect_np(enabled: i32);
         #[cfg(target_os = "macos")]
         pub fn sys_icache_invalidate(start: *mut c_void, len: usize);
-        #[cfg(not(target_os = "macos"))]
-        pub fn __clear_cache(start: *mut c_void, end: *mut c_void);
     }
 }
 
@@ -71,6 +72,10 @@ impl Code {
         #[cfg(not(any(target_os = "macos", target_os = "linux")))]
         {
             let _ = words;
+            return None;
+        }
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        if !makepad_codegen::exec::codegen_allowed() {
             return None;
         }
         #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -105,7 +110,7 @@ impl Code {
                     sys::munmap(ptr, map_len);
                     return None;
                 }
-                sys::__clear_cache(ptr, (ptr as *mut u8).add(len) as *mut _);
+                makepad_codegen::exec::clear_cache(ptr as usize, ptr as usize + len);
             }
             Some(Code { ptr: ptr as *mut u8, map_len, len })
         }

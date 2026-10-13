@@ -1,7 +1,7 @@
 use makepad_script_std::makepad_network::{
     EventSink, HttpRequest, HttpResponse, NetworkBackend, NetworkResponse, NetworkRuntime, WsSend,
 };
-use makepad_script_std::makepad_script::{makepad_live_id::LiveId, script, ScriptArrayStorage, *};
+use makepad_script_std::makepad_script::{makepad_live_id::LiveId, script, *};
 use makepad_script_std::{pump_network_runtime, script_mod, with_vm, ScriptStd};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -60,7 +60,7 @@ fn headless_http_request_resolves_promise_through_script_std() {
     let mut host = ScriptVmHost::new((), ScriptStd::with_network_runtime(runtime));
     host.script_vm = Some(Box::new(ScriptVmBase::new()));
 
-    let promise = with_vm(&mut host, |vm| {
+    let promise = with_vm(&mut host.host_context(), |vm| {
         script_mod(vm);
         vm.eval(script! {
             use mod.std
@@ -83,7 +83,7 @@ fn headless_http_request_resolves_promise_through_script_std() {
         .expect("script should return a promise handle");
     assert_eq!(host.std.data.http_requests.len(), 1);
 
-    let responses = pump_network_runtime(&mut host);
+    let responses = pump_network_runtime(&mut host.host_context());
     assert_eq!(responses.len(), 1);
     assert!(host.std.data.http_requests.is_empty());
 
@@ -97,11 +97,11 @@ fn headless_http_request_resolves_promise_through_script_std() {
         .as_ref()
         .unwrap()
         .heap
-        .array_storage(task.queue.as_array())
+        .array_values(task.queue.as_array())
     {
-        ScriptArrayStorage::ScriptValue(values) => {
-            assert_eq!(values.len(), 1);
-            assert_eq!(values[0].as_f64(), Some(200.0));
+        Some((front, back)) => {
+            assert_eq!(front.len() + back.len(), 1);
+            assert_eq!(front.iter().chain(back).next().unwrap().as_f64(), Some(200.0));
         }
         _ => panic!("unexpected promise queue storage kind"),
     }

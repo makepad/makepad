@@ -9,7 +9,10 @@ use makepad_script::*;
 
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    ScriptVm { host, bx: Box::new(ScriptVmBase::new()) }
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
 }
 
 /// Compile `fragment_body` (plus `extra` members) as a draw shader for
@@ -28,15 +31,7 @@ fn compile(backend: &str, extra: &str, fragment_body: &str) -> String {
          }}\nshader.test_compile_draw_source(sh, \"{backend}\", false)"
     );
     let value = vm.with_instruction_limit(5_000_000, |vm| {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: "shader_hostile".into(),
-            line: 0,
-            column: 0,
-            code,
-            values: vec![],
-        })
+        vm.eval(ScriptMod::new("", "", "shader_hostile", 0, 0, &code, &[]))
     });
     vm.bx.heap.string_with(value, |_, s| s.to_string()).unwrap_or_else(|| format!("ERRORS: not a string: {value:?}"))
 }
@@ -44,7 +39,47 @@ fn compile(backend: &str, extra: &str, fragment_body: &str) -> String {
 fn ok(backend: &str, extra: &str, body: &str) -> String {
     let src = compile(backend, extra, body);
     assert!(!src.starts_with("ERRORS") && !src.starts_with("unknown") && !src.starts_with("no shader"), "{backend}: {src}");
-    src
+    wgsl_plain(&src)
+}
+
+/// The IR printers' locals (`l3_f`) and WGSL's typed literals (`2.0f`, `0i`)
+/// as the other emitters spell them (`l_f`, `2.0`, `0`), so one needle checks
+/// every backend.
+fn wgsl_plain(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        let prev_ident = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+        // `l<digits>_` at the start of an identifier.
+        if c == b'l' && !prev_ident {
+            let mut j = i + 1;
+            while j < b.len() && b[j].is_ascii_digit() {
+                j += 1;
+            }
+            if j > i + 1 && j < b.len() && b[j] == b'_' {
+                out.push_str("l_");
+                i = j + 1;
+                continue;
+            }
+        }
+        // A number's `f` / `i` suffix.
+        if (c == b'f' || c == b'i') && i > 0 && b[i - 1].is_ascii_digit() && !(i + 1 < b.len() && (b[i + 1].is_ascii_alphanumeric() || b[i + 1] == b'_')) {
+            let mut j = i;
+            while j > 0 && (b[j - 1].is_ascii_digit() || b[j - 1] == b'.' || b[j - 1] == b'e' || b[j - 1] == b'-') {
+                j -= 1;
+            }
+            let starts_number = j == 0 || !(b[j - 1].is_ascii_alphanumeric() || b[j - 1] == b'_');
+            if starts_number {
+                i += 1;
+                continue;
+            }
+        }
+        out.push(c as char);
+        i += 1;
+    }
+    out
 }
 
 fn fails(backend: &str, extra: &str, body: &str, needle: &str) {
@@ -65,9 +100,8 @@ fn dynamic_array_indices_are_clamped_for_read_assign_and_compound_assign() {
                 self.pixel = vec4(a, arr[0], 0.0, 1.0)";
     for backend in BACKENDS {
         let src = ok(backend, "", body);
-        let clamp = if backend == "wgsl" { "clamp(i32(" } else { "clamp(int(" };
-        // (GLSL's source lists the functions twice.)
-        let n = src.matches(&format!("{clamp}l_i), 0, 3)]")).count();
+        let clamped = "clamp(l_i, 0, 3)]";
+        let n = src.matches(clamped).count();
         assert!(n >= 4 && n % 4 == 0, "{backend}: every dynamic index is clamped:\n{src}");
         assert!(!src.contains("[l_i]") && !src.contains("[i]"), "{backend}: an unclamped index:\n{src}");
         // The local array is declared with the backend's array syntax.
@@ -89,7 +123,7 @@ fn unsigned_vector_and_matrix_indices_are_clamped() {
                 self.pixel = vec4(v[k], col.x, 0.0, 1.0)";
     for backend in BACKENDS {
         let src = ok(backend, "", body);
-        let (vec_clamp, mat_clamp) = if backend == "wgsl" { ("min(u32(", "3u)]") } else { ("min(uint(", "3u)]") };
+        let (vec_clamp, mat_clamp) = ("min(l_k, ", "3u)]");
         let n = src.matches(vec_clamp).count();
         assert!(n >= 4 && n % 4 == 0, "{backend}:\n{src}");
         assert!(!src.contains("[l_k]") && !src.contains("[k]"), "{backend}: an unclamped index:\n{src}");
@@ -118,21 +152,21 @@ fn runtime_bounded_loops_charge_the_shared_invocation_budget() {
     // Every runtime loop keeps its per-loop cap and charges one body pass to
     // the invocation's counter, which every function shares.
     let src = ok("metal", "", "var s = 0f\nfor i in 0..uint(self.u_n) { s += 1f }\nself.pixel = vec4(s)");
-    assert!(src.contains("> 65536u || _io._mp_iter > 4194304u){break;}"), "{src}");
-    assert!(src.contains("_io._mp_iter += 1u;"), "{src}");
+    assert!(src.contains("> 65536u) || (_mp._mp_iter > 4194304u))) { break; }"), "{src}");
+    assert!(src.contains("_mp._mp_iter = (_mp._mp_iter + 1u);"), "{src}");
     // A runtime loop around a literal one charges the literal's whole cost
     // per pass (1 + 1000 x 1).
     let src = ok("metal", "", "var s = 0f\nfor i in 0..uint(self.u_n) { for j in 0..1000 { s += 1f } }\nself.pixel = vec4(s)");
-    assert!(src.contains("_io._mp_iter += 1001u;"), "{src}");
+    assert!(src.contains("_mp._mp_iter = (_mp._mp_iter + 1001u);"), "{src}");
     // Nested runtime loops each charge; `loop` too.
     let src = ok("metal", "", "var s = 0f\nfor i in 0..uint(self.u_n) { loop { s += 1f\n if s > 1e30 { break } } }\nself.pixel = vec4(s)");
-    assert_eq!(src.matches("_io._mp_iter > 4194304u").count(), 2, "{src}");
+    assert_eq!(src.matches("_mp._mp_iter > 4194304u").count(), 2, "{src}");
     // The runtime bound is evaluated once, before the loop.
-    assert!(src.contains("_end = uint("), "{src}");
+    assert!(src.contains("_mp_end_") && src.contains(" = uint(_mp.u->uni_u_n);"), "{src}");
     // No placeholder survives into the output.
     assert!(!src.contains('\u{1}'), "{src}");
     // Every GPU backend declares and charges its counter.
-    for (backend, needle) in [("hlsl", "_mp_iter += 1u;"), ("glsl", "_mp_iter += 1u;"), ("wgsl", "_mp_iter = _mp_iter + 1u;")] {
+    for (backend, needle) in [("hlsl", "_mp_iter = (_mp_iter + 1u);"), ("glsl", "_mp_iter = (_mp_iter + 1u);"), ("wgsl", "_mp_iter = (_mp_iter + 1u);")] {
         let src = ok(backend, "", "var s = 0f\nfor i in 0..uint(self.u_n) { s += 1f }\nself.pixel = vec4(s)");
         assert!(src.contains(needle) && src.contains("_mp_iter > 4194304u"), "{backend}:\n{src}");
     }
@@ -143,11 +177,11 @@ fn loops_in_called_functions_charge_their_callers() {
     let extra = "inner: fn() { var s = 0f\n for j in 0..64 { s += 1f }\n return s }";
     let src = ok("metal", extra, "var s = 0f\nfor i in 0..uint(self.u_n) { s += self.inner() }\nself.pixel = vec4(s)");
     // One pass of the caller's loop: 1 + the callee's 1 + 64.
-    assert!(src.contains("_io._mp_iter += 66u;"), "{src}");
+    assert!(src.contains("_mp._mp_iter = (_mp._mp_iter + 66u);"), "{src}");
     // The callee's own runtime loop charges the same shared counter.
     let extra = "inner: fn() { var s = 0f\n for j in 0..uint(self.u_n) { s += 1f }\n return s }";
     let src = ok("metal", extra, "var s = 0f\nfor i in 0..uint(self.u_n) { s += self.inner() }\nself.pixel = vec4(s)");
-    assert_eq!(src.matches("_io._mp_iter > 4194304u").count(), 2, "{src}");
+    assert_eq!(src.matches("_mp._mp_iter > 4194304u").count(), 2, "{src}");
 }
 
 #[test]
@@ -160,7 +194,7 @@ fn literal_nesting_over_the_budget_is_refused() {
     fails("metal", extra, "var s = 0f\nfor i in 0..60000 { s += self.inner() }\nself.pixel = vec4(s)", "loops too costly");
     // A modest literal nest is fine and gets no guard.
     let src = ok("metal", "", "var s = 0f\nfor i in 0..64 { for j in 0..64 { s += 1f } }\nself.pixel = vec4(s)");
-    assert!(!src.contains("{break;}"), "{src}");
+    assert!(!src.contains("break;"), "{src}");
 }
 
 #[test]

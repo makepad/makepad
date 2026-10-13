@@ -51,7 +51,7 @@ fn main() {
     }
 }
 
-fn time(shader: &std::sync::Arc<makepad_script_audio_aot::AudioShader>, secs: f32) -> f64 {
+fn time(shader: &makepad_script_audio_aot::AudioShaderRef, secs: f32) -> f64 {
     let mut inst = Instance::new(shader.clone(), RATE);
     inst.note_on(48.0, 0.8, 3);
     let frames = (secs * RATE) as usize;

@@ -9,17 +9,23 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [features]
+host-shims = []
 # `module::register_shared_std`: the shared stdlib registered in a Splash VM
 # (effect and Motion documents, runtime-compiled shaders). Off by default,
 # so the compiler itself stays dependency-free.
-vm = ["dep:makepad-script", "dep:makepad-tween"]
+vm = ["dep:makepad-script"]
+# AArch64 native code through the shared back end (makepad-codegen) instead of compute's own
+# arm64/NEON emitters (x86-64 always uses it). Step 3 of loader-core.md step 6 makes it the only path.
+shared-backend = []
 
 [dependencies]
+makepad-relax-api = { path = "../../../libs/relax_api", version = "1.0.0" }
+# The shared middle and back end (RIR, optimiser, x64/arm64 emitters): native kernels.
+makepad-codegen = { path = "../../codegen" }
 makepad-script = { path = "..", optional = true }
-# `ease(@name, u)` in the registered stdlib reads Motion's ease table.
-makepad-tween = { path = "../../../libs/tween", optional = true }
 
 [dev-dependencies]
+makepad-script-compute-sched = { path = "../compute_sched" }
 makepad-csg-math = { path = "../../../libs/csg/csg_math" }
 # tests/wasm.rs runs the generated scalar wasm natively (a wasm interpreter).
 makepad-stitch = { path = "../../../libs/stitch" }

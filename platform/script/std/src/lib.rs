@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 pub use makepad_network;
 pub use makepad_script;
 
@@ -5,6 +6,8 @@ pub mod data;
 pub mod fs;
 pub mod net;
 pub mod net_types;
+pub mod net_values;
+pub mod net_adapter;
 pub mod run;
 pub mod task;
 pub mod vm;
@@ -17,6 +20,7 @@ pub use vm::*;
 
 use makepad_script::*;
 
+#[relax_api]
 pub fn script_mod(vm: &mut ScriptVm) {
     crate::fs::script_mod(vm);
     crate::run::script_mod(vm);
@@ -24,20 +28,22 @@ pub fn script_mod(vm: &mut ScriptVm) {
     crate::net::script_mod(vm);
 }
 
-pub fn pump(host: &mut dyn ScriptHost) {
+#[relax_api]
+pub fn pump(host: &mut ScriptHostContext) {
     crate::run::handle_script_child_processes(host);
     crate::net::handle_script_socket_streams(host);
     crate::net::handle_script_http_servers(host);
     crate::task::handle_script_tasks(host);
 }
 
-pub fn pump_network_runtime(host: &mut dyn ScriptHost) -> Vec<makepad_network::NetworkResponse> {
-    let responses = crate::net::drain_network_runtime(
-        host.script_std().downcast_mut::<ScriptStd>().unwrap(),
-    );
+pub fn pump_network_runtime(host: &mut ScriptHostContext) -> Vec<makepad_network::NetworkResponse> {
+    let responses = crate::net::drain_network_runtime(host.std_mut::<ScriptStd>().unwrap());
     if !responses.is_empty() {
-        crate::net::handle_script_network_events(host, &responses);
+        for response in &responses {
+            crate::net_adapter::dispatch_network_response(host, response);
+        }
         crate::task::handle_script_tasks(host);
     }
     responses
 }
+

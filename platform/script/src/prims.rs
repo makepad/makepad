@@ -15,16 +15,22 @@ macro_rules!script_primitive {
     ( $ ty: ty, $new:item, $ type_check: item, $ apply: item, $ to_value: item) => {
         impl ScriptHook for $ty{}
         impl ScriptNew for $ty{
+            fn script_type_id_static()->ScriptTypeId{
+                const ID: ScriptTypeId = ScriptTypeId::of_path(concat!("makepad_script::prim::", stringify!($ty)));
+                ID
+            }
             $ new
             $ type_check
-            fn script_type_name()->Option<LiveId>{ LiveId::from_str_with_lut(stringify!($ty)).ok() }
+            fn script_proto(vm:&mut ScriptVm)->ScriptValue{
+                script_proto_inner(vm, Self::script_type_id_static(), script_proto_build_c::<Self>, script_type_check_c::<Self>, Some(stringify!($ty)), false)
+            }
             fn script_default(vm:&mut ScriptVm)->ScriptValue{Self::script_new(vm).script_to_value(vm)}
             fn script_proto_build(vm:&mut ScriptVm, _props:&mut ScriptTypeProps)->ScriptValue{
                  Self::script_default(vm)
             }
         }
         impl ScriptApply for $ty{
-            fn script_type_id(&self)->ScriptTypeId{ScriptTypeId::of::<Self>()}
+            fn script_type_id(&self)->ScriptTypeId{<Self as ScriptNew>::script_type_id_static()}
             $apply
             $to_value
         }
@@ -47,18 +53,30 @@ macro_rules! script_compact_primitive {
         impl ScriptHook for $ty {}
 
         impl ScriptNew for $ty {
+            fn script_type_id_static() -> ScriptTypeId {
+                const ID: ScriptTypeId = ScriptTypeId::of_path(concat!("makepad_script::prim::", stringify!($ty)));
+                ID
+            }
+
             fn script_new(_vm: &mut ScriptVm) -> Self {
                 Self::default()
             }
 
-            fn script_type_name() -> Option<LiveId> {
-                LiveId::from_str_with_lut(stringify!($ty)).ok()
+            fn script_proto(vm: &mut ScriptVm) -> ScriptValue {
+                script_proto_inner(
+                    vm,
+                    Self::script_type_id_static(),
+                    script_proto_build_c::<Self>,
+                    script_type_check_c::<Self>,
+                    Some(stringify!($ty)),
+                    false,
+                )
             }
 
             fn script_type_check(heap: &ScriptHeap, value: ScriptValue) -> bool {
                 if let Some(pod) = value.as_pod() {
-                    let ty = &heap.pod_types[heap.pods[pod].ty.index as usize].ty;
-                    if *ty == ScriptPodTy::Packed(<Self as CompactScriptPrimitive>::packed_type()) {
+                    let (pod_type, _) = heap.pod_data(pod);
+                    if pod_type.ty().packed() == Some(<Self as CompactScriptPrimitive>::packed_type()) {
                         return true;
                     }
                 }
@@ -78,7 +96,7 @@ macro_rules! script_compact_primitive {
 
         impl ScriptApply for $ty {
             fn script_type_id(&self) -> ScriptTypeId {
-                ScriptTypeId::of::<Self>()
+                <Self as ScriptNew>::script_type_id_static()
             }
 
             fn script_apply(
@@ -89,9 +107,10 @@ macro_rules! script_compact_primitive {
                 value: ScriptValue,
             ) {
                 if let Some(pod) = value.as_pod() {
-                    let pod_data = &vm.bx.heap.pods[pod];
-                    if pod_data.ty == <Self as CompactScriptPrimitive>::pod_type(vm) {
-                        *self = <Self as CompactScriptPrimitive>::from_words(&pod_data.data);
+                    let view = vm.heap().pod_view(crate::pod_heap::POD_VIEW_DATA, pod, ScriptPodType::default());
+                    if view.id == <Self as CompactScriptPrimitive>::pod_type(vm) {
+                        // SAFETY: the words are the pod's data, borrowed from the heap
+                        *self = <Self as CompactScriptPrimitive>::from_words(unsafe { std::slice::from_raw_parts(view.ptr, view.len) });
                         return;
                     }
                 }
@@ -101,12 +120,9 @@ macro_rules! script_compact_primitive {
             }
 
             fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
-                let pod = vm
-                    .bx
-                    .heap
-                    .new_pod(<Self as CompactScriptPrimitive>::pod_type(vm));
-                vm.bx.heap.pods[pod].data =
-                    <Self as CompactScriptPrimitive>::to_words(*self);
+                let pod_type = <Self as CompactScriptPrimitive>::pod_type(vm);
+                let pod = vm.heap_mut().new_pod(pod_type);
+                vm.heap_mut().pod_data_mut(pod).copy_from_slice(&<Self as CompactScriptPrimitive>::to_words(*self));
                 pod.into()
             }
         }
@@ -117,7 +133,7 @@ macro_rules! script_compact_primitive {
 impl CompactScriptPrimitive for makepad_math::F16x2 {
     type Logical = makepad_math::Vec2f;
     fn packed_type() -> ScriptPodPacked { ScriptPodPacked::F16x2 }
-    fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.bx.code.builtins.pod.pod_f16x2 }
+    fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.pod_builtins().pod_f16x2 }
     fn from_words(v: &[u32]) -> Self {
         let v = v.first().copied().unwrap_or(0);
         Self { x: v as u16, y: (v >> 16) as u16 }
@@ -133,7 +149,7 @@ impl CompactScriptPrimitive for makepad_math::F16x2 {
 impl CompactScriptPrimitive for makepad_math::F16x4 {
     type Logical = makepad_math::Vec4f;
     fn packed_type() -> ScriptPodPacked { ScriptPodPacked::F16x4 }
-    fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.bx.code.builtins.pod.pod_f16x4 }
+    fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.pod_builtins().pod_f16x4 }
     fn from_words(v: &[u32]) -> Self {
         let a = v.first().copied().unwrap_or(0);
         let b = v.get(1).copied().unwrap_or(0);
@@ -154,7 +170,7 @@ macro_rules! impl_compact_u16x2 {
         impl CompactScriptPrimitive for $ty {
             type Logical = makepad_math::Vec2f;
             fn packed_type() -> ScriptPodPacked { $packed }
-            fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.bx.code.builtins.pod.$builtin }
+            fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.pod_builtins().$builtin }
             fn from_words(v: &[u32]) -> Self {
                 let word = v.first().copied().unwrap_or(0);
                 ($from)(word)
@@ -187,7 +203,7 @@ impl_compact_u16x2!(
 impl CompactScriptPrimitive for makepad_math::U16x2 {
     type Logical = makepad_math::Vec2f;
     fn packed_type() -> ScriptPodPacked { ScriptPodPacked::U16x2 }
-    fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.bx.code.builtins.pod.pod_u16x2 }
+    fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.pod_builtins().pod_u16x2 }
     fn from_words(v: &[u32]) -> Self {
         let v = v.first().copied().unwrap_or(0);
         Self { x: v as u16, y: (v >> 16) as u16 }
@@ -200,7 +216,7 @@ impl CompactScriptPrimitive for makepad_math::U16x2 {
 impl CompactScriptPrimitive for makepad_math::I16x2 {
     type Logical = makepad_math::Vec2f;
     fn packed_type() -> ScriptPodPacked { ScriptPodPacked::I16x2 }
-    fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.bx.code.builtins.pod.pod_i16x2 }
+    fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.pod_builtins().pod_i16x2 }
     fn from_words(v: &[u32]) -> Self {
         let v = v.first().copied().unwrap_or(0);
         Self { x: v as u16 as i16, y: (v >> 16) as u16 as i16 }
@@ -215,7 +231,7 @@ macro_rules! impl_compact_i8x4 {
         impl CompactScriptPrimitive for $ty {
             type Logical = makepad_math::Vec4f;
             fn packed_type() -> ScriptPodPacked { $packed }
-            fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.bx.code.builtins.pod.$builtin }
+            fn pod_type(vm: &ScriptVm) -> ScriptPodType { vm.pod_builtins().$builtin }
             fn from_words(v: &[u32]) -> Self {
                 let bytes = v.first().copied().unwrap_or(0).to_le_bytes();
                 Self(bytes.map(|v| v as _))
@@ -375,7 +391,7 @@ script_primitive!(
 script_primitive!(
     ScriptObjectRef,
     fn script_new(vm: &mut ScriptVm) -> Self {
-        vm.bx.heap.new_object_ref(ScriptObject::ZERO)
+        vm.heap_mut().new_object_ref(ScriptObject::ZERO)
     },
     fn script_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
         value.is_object()
@@ -388,7 +404,7 @@ script_primitive!(
         value: ScriptValue,
     ) {
         if let Some(obj) = value.as_object() {
-            *self = vm.bx.heap.new_object_ref(obj)
+            *self = vm.heap_mut().new_object_ref(obj)
         }
     },
     fn script_to_value(&self, _vm: &mut ScriptVm) -> ScriptValue {
@@ -399,7 +415,7 @@ script_primitive!(
 script_primitive!(
     ScriptFnRef,
     fn script_new(vm: &mut ScriptVm) -> Self {
-        vm.bx.heap.new_fn_ref(ScriptObject::ZERO)
+        vm.heap_mut().new_fn_ref(ScriptObject::ZERO)
     },
     fn script_type_check(heap: &ScriptHeap, value: ScriptValue) -> bool {
         if let Some(obj) = value.as_object() {
@@ -416,8 +432,8 @@ script_primitive!(
         value: ScriptValue,
     ) {
         if let Some(obj) = value.as_object() {
-            if vm.bx.heap.is_fn(obj) {
-                *self = vm.bx.heap.new_fn_ref(obj)
+            if vm.heap_mut().is_fn(obj) {
+                *self = vm.heap_mut().new_fn_ref(obj)
             }
         }
     },
@@ -429,7 +445,7 @@ script_primitive!(
 script_primitive!(
     ScriptHandleRef,
     fn script_new(vm: &mut ScriptVm) -> Self {
-        vm.bx.heap.new_handle_ref(ScriptHandle::ZERO)
+        vm.heap_mut().new_handle_ref(ScriptHandle::ZERO)
     },
     fn script_type_check(_heap: &ScriptHeap, value: ScriptValue) -> bool {
         value.as_handle().is_some()
@@ -442,7 +458,7 @@ script_primitive!(
         value: ScriptValue,
     ) {
         if let Some(handle) = value.as_handle() {
-            *self = vm.bx.heap.new_handle_ref(handle)
+            *self = vm.heap_mut().new_handle_ref(handle)
         }
     },
     fn script_to_value(&self, _vm: &mut ScriptVm) -> ScriptValue {
@@ -529,7 +545,7 @@ script_primitive!(
         _scope: &mut Scope,
         value: ScriptValue,
     ) {
-        *self = vm.bx.heap.cast_to_bool(value);
+        *self = vm.heap_mut().cast_to_bool(value);
     },
     fn script_to_value(&self, _vm: &mut ScriptVm) -> ScriptValue {
         ScriptValue::from_bool(*self)
@@ -564,13 +580,13 @@ script_primitive!(
             return;
         }
         self.clear();
-        vm.bx.heap.cast_to_string(value, self);
+        vm.heap().cast_to_string(value, self);
     },
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
         if let Some(val) = ScriptValue::from_inline_string(&self) {
             return val;
         } else {
-            vm.bx.heap.new_string_from_str(self).into()
+            vm.new_string(self).into()
         }
     }
 );
@@ -596,7 +612,7 @@ script_primitive!(
         if let Some(val) = ScriptValue::from_inline_string(&self) {
             return val;
         } else {
-            vm.bx.heap.new_string_from_str(self).into()
+            vm.new_string(self).into()
         }
     }
 );
@@ -707,16 +723,15 @@ where
     V: ScriptApply + ScriptNew + 'static,
 {
     fn script_type_id_static() -> ScriptTypeId {
-        ScriptTypeId::of::<Self>()
+        ScriptTypeId::of_path("makepad_live_id::LiveIdMap").with_args(&[K::script_type_id_static(), V::script_type_id_static()])
     }
     fn script_type_check(heap: &ScriptHeap, value: ScriptValue) -> bool {
         if let Some(obj) = value.as_object() {
-            let map = heap.map_ref(obj);
-            for (key, value) in map.iter() {
-                if !K::script_type_check(heap, *key) {
+            for e in heap.map_entries(obj) {
+                if !K::script_type_check(heap, e.key) {
                     return false;
                 }
-                if !V::script_type_check(heap, value.value) {
+                if !V::script_type_check(heap, e.value) {
                     return false;
                 }
             }
@@ -748,7 +763,7 @@ where
     V: ScriptApply + ScriptNew + 'static,
 {
     fn script_type_id(&self) -> ScriptTypeId {
-        ScriptTypeId::of::<Self>()
+        <Self as ScriptNew>::script_type_id_static()
     }
     fn script_apply(
         &mut self,
@@ -763,41 +778,31 @@ where
         }
         if let Some(obj) = value.as_object() {
             self.clear();
-            vm.map_mut_with(obj, |vm, obj_map| {
-                for (key, value) in obj_map.iter_mut() {
-                    let key = K::script_from_value(vm, *key);
-                    let value = V::script_from_value(vm, value.value);
-                    self.insert(key, value);
-                }
-            })
+            for e in vm.heap().map_entries(obj) {
+                let key = K::script_from_value(vm, e.key);
+                let value = V::script_from_value(vm, e.value);
+                self.insert(key, value);
+            }
         } else if value.is_nil() {
             self.clear()
         } else {
-            script_err_type_mismatch!(vm.bx.threads.cur_ref().trap, "wrong type in apply");
+            script_err_type_mismatch!(vm.trap(), "wrong type in apply");
         }
     }
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
-        let obj = vm.bx.heap.new_object();
-        vm.map_mut_with(obj, |vm, obj_map| {
-            for (key, value) in self.iter() {
-                let key = key.script_to_value(vm);
-                let value = value.script_to_value(vm);
-                if !vm.bx.heap.charge_object_map_entry(
-                    obj,
-                    key,
-                    "converting a Rust map to a script object",
-                ) {
-                    continue;
-                }
-                obj_map.insert(
-                    key,
-                    ScriptMapValue {
-                        tag: Default::default(),
-                        value,
-                    },
-                );
+        let obj = vm.heap_mut().new_object();
+        for (key, value) in self.iter() {
+            let key = key.script_to_value(vm);
+            let value = value.script_to_value(vm);
+            if !vm.heap_mut().charge_object_map_entry(
+                obj,
+                key,
+                "converting a Rust map to a script object",
+            ) {
+                continue;
             }
-        });
+            vm.heap_mut().map_insert_own(obj, key, value);
+        }
         obj.into()
     }
 }
@@ -812,9 +817,8 @@ script_primitive!(
             return true;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &heap.pods[pod];
-            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Vec(v) = &pod_type.ty {
+            let (pod_type, _) = heap.pod_data(pod);
+            if let Some(v) = pod_type.ty().as_vec() {
                 return v.dims() == 2;
             }
         }
@@ -833,31 +837,30 @@ script_primitive!(
             return;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &vm.bx.heap.pods[pod];
-            let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Vec(v) = &pod_type.ty {
+            let (pod_type, pod_words) = vm.heap_mut().pod_data(pod);
+            if let Some(v) = pod_type.ty().as_vec() {
                 if v.dims() == 2 {
                     match v {
                         ScriptPodVec::Vec2f => {
-                            self.x = f32::from_bits(pod_data.data[0]) as f64;
-                            self.y = f32::from_bits(pod_data.data[1]) as f64;
+                            self.x = f32::from_bits(pod_words[0]) as f64;
+                            self.y = f32::from_bits(pod_words[1]) as f64;
                         }
                         ScriptPodVec::Vec2i => {
-                            self.x = pod_data.data[0] as i32 as f64;
-                            self.y = pod_data.data[1] as i32 as f64;
+                            self.x = pod_words[0] as i32 as f64;
+                            self.y = pod_words[1] as i32 as f64;
                         }
                         ScriptPodVec::Vec2u => {
-                            self.x = pod_data.data[0] as f64;
-                            self.y = pod_data.data[1] as f64;
+                            self.x = pod_words[0] as f64;
+                            self.y = pod_words[1] as f64;
                         }
                         ScriptPodVec::Vec2b => {
-                            self.x = if pod_data.data[0] != 0 { 1.0 } else { 0.0 };
-                            self.y = if pod_data.data[1] != 0 { 1.0 } else { 0.0 };
+                            self.x = if pod_words[0] != 0 { 1.0 } else { 0.0 };
+                            self.y = if pod_words[1] != 0 { 1.0 } else { 0.0 };
                         }
                         ScriptPodVec::Vec2h => {
-                            self.x = crate::pod_heap::f16_to_f32(pod_data.data[0] as u16) as f64;
+                            self.x = crate::pod_heap::f16_to_f32(pod_words[0] as u16) as f64;
                             self.y =
-                                crate::pod_heap::f16_to_f32((pod_data.data[0] >> 16) as u16) as f64;
+                                crate::pod_heap::f16_to_f32((pod_words[0] >> 16) as u16) as f64;
                         }
                         _ => (),
                     }
@@ -871,11 +874,11 @@ script_primitive!(
         }
     },
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
-        let pod_type = vm.bx.code.builtins.pod.pod_vec2f;
-        let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod];
-        pod_data.data[0] = (self.x as f32).to_bits();
-        pod_data.data[1] = (self.y as f32).to_bits();
+        let pod_type = vm.pod_builtins().pod_vec2f;
+        let pod = vm.heap_mut().new_pod(pod_type);
+        let pod_words = vm.heap_mut().pod_data_mut(pod);
+        pod_words[0] = (self.x as f32).to_bits();
+        pod_words[1] = (self.y as f32).to_bits();
         pod.into()
     }
 );
@@ -890,9 +893,8 @@ script_primitive!(
             return true;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &heap.pods[pod];
-            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Vec(v) = &pod_type.ty {
+            let (pod_type, _) = heap.pod_data(pod);
+            if let Some(v) = pod_type.ty().as_vec() {
                 return v.dims() == 2;
             }
         }
@@ -911,30 +913,29 @@ script_primitive!(
             return;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &vm.bx.heap.pods[pod];
-            let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Vec(v) = &pod_type.ty {
+            let (pod_type, pod_words) = vm.heap_mut().pod_data(pod);
+            if let Some(v) = pod_type.ty().as_vec() {
                 if v.dims() == 2 {
                     match v {
                         ScriptPodVec::Vec2f => {
-                            self.x = f32::from_bits(pod_data.data[0]);
-                            self.y = f32::from_bits(pod_data.data[1]);
+                            self.x = f32::from_bits(pod_words[0]);
+                            self.y = f32::from_bits(pod_words[1]);
                         }
                         ScriptPodVec::Vec2i => {
-                            self.x = pod_data.data[0] as i32 as f32;
-                            self.y = pod_data.data[1] as i32 as f32;
+                            self.x = pod_words[0] as i32 as f32;
+                            self.y = pod_words[1] as i32 as f32;
                         }
                         ScriptPodVec::Vec2u => {
-                            self.x = pod_data.data[0] as f32;
-                            self.y = pod_data.data[1] as f32;
+                            self.x = pod_words[0] as f32;
+                            self.y = pod_words[1] as f32;
                         }
                         ScriptPodVec::Vec2b => {
-                            self.x = if pod_data.data[0] != 0 { 1.0 } else { 0.0 };
-                            self.y = if pod_data.data[1] != 0 { 1.0 } else { 0.0 };
+                            self.x = if pod_words[0] != 0 { 1.0 } else { 0.0 };
+                            self.y = if pod_words[1] != 0 { 1.0 } else { 0.0 };
                         }
                         ScriptPodVec::Vec2h => {
-                            self.x = crate::pod_heap::f16_to_f32(pod_data.data[0] as u16);
-                            self.y = crate::pod_heap::f16_to_f32((pod_data.data[0] >> 16) as u16);
+                            self.x = crate::pod_heap::f16_to_f32(pod_words[0] as u16);
+                            self.y = crate::pod_heap::f16_to_f32((pod_words[0] >> 16) as u16);
                         }
                         _ => (),
                     }
@@ -948,11 +949,11 @@ script_primitive!(
         }
     },
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
-        let pod_type = vm.bx.code.builtins.pod.pod_vec2f;
-        let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod];
-        pod_data.data[0] = (self.x).to_bits();
-        pod_data.data[1] = (self.y).to_bits();
+        let pod_type = vm.pod_builtins().pod_vec2f;
+        let pod = vm.heap_mut().new_pod(pod_type);
+        let pod_words = vm.heap_mut().pod_data_mut(pod);
+        pod_words[0] = (self.x).to_bits();
+        pod_words[1] = (self.y).to_bits();
         pod.into()
     }
 );
@@ -970,9 +971,8 @@ script_primitive!(
             return true;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &heap.pods[pod];
-            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Vec(v) = &pod_type.ty {
+            let (pod_type, _) = heap.pod_data(pod);
+            if let Some(v) = pod_type.ty().as_vec() {
                 return v.dims() == 3;
             }
         }
@@ -999,35 +999,34 @@ script_primitive!(
             return;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &vm.bx.heap.pods[pod];
-            let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Vec(v) = &pod_type.ty {
+            let (pod_type, pod_words) = vm.heap_mut().pod_data(pod);
+            if let Some(v) = pod_type.ty().as_vec() {
                 if v.dims() == 3 {
                     match v {
                         ScriptPodVec::Vec3f => {
-                            self.x = f32::from_bits(pod_data.data[0]);
-                            self.y = f32::from_bits(pod_data.data[1]);
-                            self.z = f32::from_bits(pod_data.data[2]);
+                            self.x = f32::from_bits(pod_words[0]);
+                            self.y = f32::from_bits(pod_words[1]);
+                            self.z = f32::from_bits(pod_words[2]);
                         }
                         ScriptPodVec::Vec3i => {
-                            self.x = pod_data.data[0] as i32 as f32;
-                            self.y = pod_data.data[1] as i32 as f32;
-                            self.z = pod_data.data[2] as i32 as f32;
+                            self.x = pod_words[0] as i32 as f32;
+                            self.y = pod_words[1] as i32 as f32;
+                            self.z = pod_words[2] as i32 as f32;
                         }
                         ScriptPodVec::Vec3u => {
-                            self.x = pod_data.data[0] as f32;
-                            self.y = pod_data.data[1] as f32;
-                            self.z = pod_data.data[2] as f32;
+                            self.x = pod_words[0] as f32;
+                            self.y = pod_words[1] as f32;
+                            self.z = pod_words[2] as f32;
                         }
                         ScriptPodVec::Vec3b => {
-                            self.x = if pod_data.data[0] != 0 { 1.0 } else { 0.0 };
-                            self.y = if pod_data.data[1] != 0 { 1.0 } else { 0.0 };
-                            self.z = if pod_data.data[2] != 0 { 1.0 } else { 0.0 };
+                            self.x = if pod_words[0] != 0 { 1.0 } else { 0.0 };
+                            self.y = if pod_words[1] != 0 { 1.0 } else { 0.0 };
+                            self.z = if pod_words[2] != 0 { 1.0 } else { 0.0 };
                         }
                         ScriptPodVec::Vec3h => {
-                            self.x = crate::pod_heap::f16_to_f32(pod_data.data[0] as u16);
-                            self.y = crate::pod_heap::f16_to_f32((pod_data.data[0] >> 16) as u16);
-                            self.z = crate::pod_heap::f16_to_f32(pod_data.data[1] as u16);
+                            self.x = crate::pod_heap::f16_to_f32(pod_words[0] as u16);
+                            self.y = crate::pod_heap::f16_to_f32((pod_words[0] >> 16) as u16);
+                            self.z = crate::pod_heap::f16_to_f32(pod_words[1] as u16);
                         }
                         _ => (),
                     }
@@ -1041,12 +1040,12 @@ script_primitive!(
         }
     },
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
-        let pod_type = vm.bx.code.builtins.pod.pod_vec3f;
-        let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod];
-        pod_data.data[0] = (self.x).to_bits();
-        pod_data.data[1] = (self.y).to_bits();
-        pod_data.data[2] = (self.z).to_bits();
+        let pod_type = vm.pod_builtins().pod_vec3f;
+        let pod = vm.heap_mut().new_pod(pod_type);
+        let pod_words = vm.heap_mut().pod_data_mut(pod);
+        pod_words[0] = (self.x).to_bits();
+        pod_words[1] = (self.y).to_bits();
+        pod_words[2] = (self.z).to_bits();
         pod.into()
     }
 );
@@ -1064,9 +1063,8 @@ script_primitive!(
             return true;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &heap.pods[pod];
-            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Vec(v) = &pod_type.ty {
+            let (pod_type, _) = heap.pod_data(pod);
+            if let Some(v) = pod_type.ty().as_vec() {
                 return v.dims() == 4;
             }
         }
@@ -1092,40 +1090,39 @@ script_primitive!(
             return;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &vm.bx.heap.pods[pod];
-            let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Vec(v) = &pod_type.ty {
+            let (pod_type, pod_words) = vm.heap_mut().pod_data(pod);
+            if let Some(v) = pod_type.ty().as_vec() {
                 if v.dims() == 4 {
                     match v {
                         ScriptPodVec::Vec4f => {
-                            self.x = f32::from_bits(pod_data.data[0]);
-                            self.y = f32::from_bits(pod_data.data[1]);
-                            self.z = f32::from_bits(pod_data.data[2]);
-                            self.w = f32::from_bits(pod_data.data[3]);
+                            self.x = f32::from_bits(pod_words[0]);
+                            self.y = f32::from_bits(pod_words[1]);
+                            self.z = f32::from_bits(pod_words[2]);
+                            self.w = f32::from_bits(pod_words[3]);
                         }
                         ScriptPodVec::Vec4i => {
-                            self.x = pod_data.data[0] as i32 as f32;
-                            self.y = pod_data.data[1] as i32 as f32;
-                            self.z = pod_data.data[2] as i32 as f32;
-                            self.w = pod_data.data[3] as i32 as f32;
+                            self.x = pod_words[0] as i32 as f32;
+                            self.y = pod_words[1] as i32 as f32;
+                            self.z = pod_words[2] as i32 as f32;
+                            self.w = pod_words[3] as i32 as f32;
                         }
                         ScriptPodVec::Vec4u => {
-                            self.x = pod_data.data[0] as f32;
-                            self.y = pod_data.data[1] as f32;
-                            self.z = pod_data.data[2] as f32;
-                            self.w = pod_data.data[3] as f32;
+                            self.x = pod_words[0] as f32;
+                            self.y = pod_words[1] as f32;
+                            self.z = pod_words[2] as f32;
+                            self.w = pod_words[3] as f32;
                         }
                         ScriptPodVec::Vec4b => {
-                            self.x = if pod_data.data[0] != 0 { 1.0 } else { 0.0 };
-                            self.y = if pod_data.data[1] != 0 { 1.0 } else { 0.0 };
-                            self.z = if pod_data.data[2] != 0 { 1.0 } else { 0.0 };
-                            self.w = if pod_data.data[3] != 0 { 1.0 } else { 0.0 };
+                            self.x = if pod_words[0] != 0 { 1.0 } else { 0.0 };
+                            self.y = if pod_words[1] != 0 { 1.0 } else { 0.0 };
+                            self.z = if pod_words[2] != 0 { 1.0 } else { 0.0 };
+                            self.w = if pod_words[3] != 0 { 1.0 } else { 0.0 };
                         }
                         ScriptPodVec::Vec4h => {
-                            self.x = crate::pod_heap::f16_to_f32(pod_data.data[0] as u16);
-                            self.y = crate::pod_heap::f16_to_f32((pod_data.data[0] >> 16) as u16);
-                            self.z = crate::pod_heap::f16_to_f32(pod_data.data[1] as u16);
-                            self.w = crate::pod_heap::f16_to_f32((pod_data.data[1] >> 16) as u16);
+                            self.x = crate::pod_heap::f16_to_f32(pod_words[0] as u16);
+                            self.y = crate::pod_heap::f16_to_f32((pod_words[0] >> 16) as u16);
+                            self.z = crate::pod_heap::f16_to_f32(pod_words[1] as u16);
+                            self.w = crate::pod_heap::f16_to_f32((pod_words[1] >> 16) as u16);
                         }
                         _ => (),
                     }
@@ -1139,13 +1136,13 @@ script_primitive!(
         }
     },
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
-        let pod_type = vm.bx.code.builtins.pod.pod_vec4f;
-        let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod];
-        pod_data.data[0] = (self.x).to_bits();
-        pod_data.data[1] = (self.y).to_bits();
-        pod_data.data[2] = (self.z).to_bits();
-        pod_data.data[3] = (self.w).to_bits();
+        let pod_type = vm.pod_builtins().pod_vec4f;
+        let pod = vm.heap_mut().new_pod(pod_type);
+        let pod_words = vm.heap_mut().pod_data_mut(pod);
+        pod_words[0] = (self.x).to_bits();
+        pod_words[1] = (self.y).to_bits();
+        pod_words[2] = (self.z).to_bits();
+        pod_words[3] = (self.w).to_bits();
         pod.into()
     }
 );
@@ -1160,9 +1157,8 @@ script_primitive!(
             return true;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &heap.pods[pod];
-            let pod_type = &heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Mat(m) = &pod_type.ty {
+            let (pod_type, _) = heap.pod_data(pod);
+            if let Some(m) = pod_type.ty().as_mat() {
                 return m.dims() == (4, 4);
             }
         }
@@ -1182,14 +1178,13 @@ script_primitive!(
             return;
         }
         if let Some(pod) = value.as_pod() {
-            let pod_data = &vm.bx.heap.pods[pod];
-            let pod_type = &vm.bx.heap.pod_types[pod_data.ty.index as usize];
-            if let ScriptPodTy::Mat(m) = &pod_type.ty {
+            let (pod_type, pod_words) = vm.heap_mut().pod_data(pod);
+            if let Some(m) = pod_type.ty().as_mat() {
                 if m.dims() == (4, 4) {
                     match m {
                         ScriptPodMat::Mat4x4f => {
                             for i in 0..16 {
-                                self.v[i] = f32::from_bits(pod_data.data[i]);
+                                self.v[i] = f32::from_bits(pod_words[i]);
                             }
                         }
                         _ => (),
@@ -1204,11 +1199,11 @@ script_primitive!(
         }
     },
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
-        let pod_type = vm.bx.code.builtins.pod.pod_mat4x4f;
-        let pod = vm.bx.heap.new_pod(pod_type);
-        let pod_data = &mut vm.bx.heap.pods[pod];
+        let pod_type = vm.pod_builtins().pod_mat4x4f;
+        let pod = vm.heap_mut().new_pod(pod_type);
+        let pod_words = vm.heap_mut().pod_data_mut(pod);
         for i in 0..16 {
-            pod_data.data[i] = self.v[i].to_bits();
+            pod_words[i] = self.v[i].to_bits();
         }
         pod.into()
     }
@@ -1222,7 +1217,7 @@ where
     T: ScriptApply + ScriptNew + 'static,
 {
     fn script_type_id_static() -> ScriptTypeId {
-        ScriptTypeId::of::<Self>()
+        ScriptTypeId::of_path("core::option::Option").with_args(&[T::script_type_id_static()])
     }
     fn script_type_check(heap: &ScriptHeap, value: ScriptValue) -> bool {
         value.is_nil() || T::script_type_check(heap, value)
@@ -1242,7 +1237,7 @@ where
     T: ScriptApply + ScriptNew + 'static,
 {
     fn script_type_id(&self) -> ScriptTypeId {
-        ScriptTypeId::of::<Self>()
+        <Self as ScriptNew>::script_type_id_static()
     }
     fn script_apply(
         &mut self,
@@ -1284,9 +1279,6 @@ impl<T> ScriptNew for Box<T>
 where
     T: ScriptApply + ScriptNew + 'static,
 {
-    fn script_type_name() -> Option<LiveId> {
-        T::script_type_name()
-    }
     fn script_type_id_static() -> ScriptTypeId {
         T::script_type_id_static()
     }
@@ -1352,7 +1344,7 @@ mod compact_primitive_tests {
     fn compact_primitives_round_trip_through_pod_values() {
         let mut host = ScriptVmHost::new((), ());
         let mut vm = ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         round_trip(&mut vm, makepad_math::F16x2::from_f32(0.5, -2.0));

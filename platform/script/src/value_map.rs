@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::makepad_live_id::LiveId;
 
 use std::{
@@ -6,6 +7,7 @@ use std::{
 };
 
 // Idea taken from the `nohash_hasher` crate.
+#[relax_api(plain)]
 #[derive(Default)]
 pub struct ValueHasher(u64);
 
@@ -60,6 +62,7 @@ impl std::hash::Hasher for ValueHasher {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Copy, Clone, Default)]
 pub struct ValueHasherBuilder {}
 

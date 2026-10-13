@@ -12,8 +12,8 @@
 //! cargo run --release -p makepad-script-compute --example bench_kernels
 //! (BENCH_INTERP=1 also times the interpreter, which takes seconds.)
 
-use makepad_script_compute::kernel::{compile_with, Kernel};
-use makepad_script_compute::sched::{Executor, InlineExecutor, Job, ThreadExecutor};
+use makepad_script_compute::kernel::{compile_with, KernelRef};
+use makepad_script_compute_sched::sched::{Executor, InlineExecutor, Job, ThreadExecutor};
 use makepad_script_compute::Backend;
 use std::sync::Arc;
 use std::time::Instant;
@@ -210,7 +210,7 @@ fn main() {
     // -- instances -------------------------------------------------------------------
     let m = 100_000;
     let src: Arc<[f32]> = (0..m * 8).map(|i| ((i * 7919) % 1000) as f32 * 0.001 + 0.1).collect::<Vec<_>>().into();
-    let k: Arc<Kernel> = native(INSTANCES);
+    let k: KernelRef = native(INSTANCES);
     println!("instances, 100k (NEON code: {})", k.simd());
     let mut job = Job::new(k, m);
     job.set_param("t", 1.5);

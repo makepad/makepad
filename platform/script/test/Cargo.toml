@@ -9,6 +9,16 @@ metadata.makepad-auto-version = "BkQvnL-yt07_4n3oopSxq7yCP_w="
 
 [dependencies]
 makepad-script = { path = "../", version = "1.0.0"}
-makepad-script-math-aot = { path = "../math_aot", version = "1.0.0" }
 
-#[workspace]
+makepad-core-util = { path = "../../../libs/core_util" }
+makepad-widgets = { path = "../../../widgets", optional = true, features = ["maps", "pdf", "voice", "browser", "ai"] }
+
+makepad-widgets-tweaker = { path = "../../../widgets/families/tweaker", optional = true }
+
+[features]
+inventory = ["dep:makepad-widgets", "dep:makepad-widgets-tweaker"]
+
+[[bin]]
+name = "shader-inventory"
+path = "src/bin/shader_inventory.rs"
+required-features = ["inventory"]

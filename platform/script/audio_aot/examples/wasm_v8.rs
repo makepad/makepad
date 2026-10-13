@@ -15,8 +15,7 @@
 //! words the host changed since the previous call (note on/off, params,
 //! the frame counter), then the expected hash.
 
-use makepad_script_audio_aot::{compile_with, AudioShader, Backend, Kind, CTX_FRAME, MAX_FRAMES};
-use std::sync::Arc;
+use makepad_script_audio_aot::{compile_with, AudioShaderRef, Backend, Kind, CTX_FRAME, MAX_FRAMES};
 
 const RATE: f32 = 48000.0;
 const TOTAL: usize = 30000;
@@ -81,20 +80,22 @@ impl Out {
 
 /// Renders the performance on the interpreter, writing the batch entry;
 /// returns (hash, interpreter ns per frame).
-fn record(out: &mut Out, name: &str, shader: &Arc<AudioShader>, slices: &[usize]) -> (u64, f64) {
+fn record(out: &mut Out, name: &str, shader: &AudioShaderRef, slices: &[usize]) -> (u64, f64) {
     let module = makepad_script_audio_aot::wasm::module(&[shader], Default::default()).expect("compiles to wasm");
     out.bytes(name.as_bytes());
     out.bytes(&module);
     out.u32(makepad_script_audio_aot::wasm::frame_words(shader) as u32);
     out.words(shader.shared_table().iter().copied());
-    let mut ctx = shader.new_ctx(RATE);
-    let mut state = shader.new_state();
+    let mut ctx = vec![0u32; shader.ctx_words()];
+    shader.init_ctx(&mut ctx, RATE);
+    let mut state = vec![0u32; shader.state_words()];
+    shader.reset_state(&mut state);
     out.words(ctx.iter().copied());
     out.words(state.iter().copied());
     let (in_l, in_r) = if shader.kind == Kind::Effect { test_input(TOTAL) } else { (vec![0.0; TOTAL], vec![0.0; TOTAL]) };
     out.words(in_l.iter().map(|x| x.to_bits()));
     out.words(in_r.iter().map(|x| x.to_bits()));
-    let mut scratch = shader.new_scratch();
+    let mut scratch = vec![0u32; shader.scratch_words()];
     let (mut out_l, mut out_r) = (vec![0.0f32; TOTAL], vec![0.0f32; TOTAL]);
     let events = [0usize, 12345, 24000, 30000, 52000];
     let (mut prev_ctx, mut prev_state) = (ctx.clone(), state.clone());
@@ -142,7 +143,7 @@ fn record(out: &mut Out, name: &str, shader: &Arc<AudioShader>, slices: &[usize]
         }
         ncalls += 1;
         let t0 = std::time::Instant::now();
-        shader.run_interp(&mut ctx, &mut state, &mut scratch, [&in_l[frame..frame + n], &in_r[frame..frame + n]], [&mut out_l[frame..frame + n], &mut out_r[frame..frame + n]], n);
+        shader.run_interp(&mut ctx, &mut state, &mut scratch, &in_l[frame..frame + n], &in_r[frame..frame + n], &mut out_l[frame..frame + n], &mut out_r[frame..frame + n], n);
         secs += t0.elapsed().as_secs_f64();
         prev_ctx.copy_from_slice(&ctx);
         prev_state.copy_from_slice(&state);

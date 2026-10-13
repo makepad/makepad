@@ -108,6 +108,8 @@ impl<'a> ScriptVm<'a> {
             Opcode::SCOPE_INHERIT_WRITE => self.handle_scope_inherit_write(),
             Opcode::FIELD_INHERIT_READ => self.handle_field_inherit_read(),
             Opcode::FIELD_INHERIT_WRITE => self.handle_field_inherit_write(),
+            Opcode::FIELD_SLOT_READ => self.handle_field_slot_read(),
+            Opcode::ASSIGN_FIELD_VEC => self.handle_assign_field_vec(),
             Opcode::INDEX_INHERIT_READ => self.handle_index_inherit_read(),
             Opcode::INDEX_INHERIT_WRITE => self.handle_index_inherit_write(),
             Opcode::END_PROTO => self.handle_end_proto(),

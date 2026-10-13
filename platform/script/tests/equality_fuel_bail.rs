@@ -8,19 +8,15 @@ use std::time::Duration;
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new((), ())));
     ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     }
 }
 
 fn script(name: &str, code: &str) -> ScriptMod {
-    ScriptMod {
-        file: format!("equality_fuel_bail_{name}"),
-        // The streaming parser closes a statement on the next token, so the
-        // tail expression needs the same terminator production eval appends.
-        code: format!("{code}\n;"),
-        ..Default::default()
-    }
+    // The streaming parser closes a statement on the next token, so the
+    // tail expression needs the same terminator production eval appends.
+    ScriptMod::new("", "", &format!("equality_fuel_bail_{name}"), 0, 0, &format!("{code}\n;"), &[])
 }
 
 fn eval_bool(name: &str, code: &str) -> Option<bool> {

@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 pub fn main() {
     let mut host = ScriptVmHost::new(0, ());
     let vm = &mut ScriptVm {
-        host: &mut host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     };
 
@@ -151,8 +151,7 @@ pub fn main() {
 
     fn rust_uniform_buffer_test_pod(vm: &mut ScriptVm) -> ScriptValue {
         let pod = RustUniformBufferTest::script_pod(vm).expect("Cant make a pod type");
-        vm.bx
-            .heap
+        vm.heap_mut()
             .pod_type_name_set(pod, id_lut!(RustUniformBufferTest));
         pod.into()
     }
@@ -199,7 +198,7 @@ pub fn main() {
                     impl ScriptHandleGc for DummyHandle {
                         fn gc(&mut self) {}
                     }
-                    vm.bx.heap.new_handle(ht, Box::new(DummyHandle)).into()
+                    vm.heap_mut().new_handle(ht, Box::new(DummyHandle)).into()
                 },
             );
 
@@ -322,9 +321,6 @@ pub fn main() {
         for v in iv { ov.push(v) } assert(iv == ov)
         assert(ov.pop() == 4) assert(iv != ov)
         assert(ov[2] == 3);
-
-
-
 
         // functions
         let f = |x| x+1
@@ -2119,8 +2115,8 @@ pub fn main() {
             }
         }
         shader.test_compile_draw(shader_all_features)
-        assert(shader.test_compile_draw_contains(shader_all_features, "<< uint(3)"))
-        assert(shader.test_compile_draw_contains(shader_all_features, ">> uint(31)"))
+        assert(shader.test_compile_draw_contains(shader_all_features, "<< 3u)"))
+        assert(shader.test_compile_draw_contains(shader_all_features, ">> 31u)"))
 
     };
 
@@ -3906,9 +3902,9 @@ pub fn main() {
             }
         }
         shader.test_compile_draw(gpu_stage_4l)
-        assert(shader.test_compile_draw_rust_contains(gpu_stage_4l, "c.x, c.y, c.z"))
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4l, "x: _p0.x, y: _p0.y, z: _p0.z, w: _p1"))
 
-        println("GPU stage 4m: transcendental vec builtins suffix on the Rust backend")
+        println("GPU stage 4m: transcendental vec builtins go per lane on the Rust backend")
         let gpu_stage_4m = #(GpuShaderStageTest::script_shader(vm)){
             vertex_pos: shader.vertex_position(vec4f)
             pixel: shader.fragment_output(0, vec4f)
@@ -3916,12 +3912,13 @@ pub fn main() {
             tint: shader.uniform(vec3f)
 
             probe: fn() {
-                // The analytic-sky recipe: exp of a vec3, pow of a vec3 by a
-                // scalar. Unsuffixed these hit the scalar preamble fns and
-                // the whole shader fails the gpusim JIT (found live: a
-                // gpusim sweep died at the first game.sky).
+                // The analytic-sky recipe: exp, pow and log of a vec3. On
+                // the Rust shader backend each is a vec3 helper that
+                // applies the f32 builtin per lane (a scalar call there fails
+                // the whole shader's JIT; found live: a shader validation sweep died at
+                // the first game.sky).
                 let absorbed = exp(self.tint * -0.5)
-                let shaped = pow(absorbed, 0.75)
+                let shaped = pow(absorbed, vec3(0.75))
                 let leveled = log(absorbed + vec3(1.0, 1.0, 1.0))
                 return vec4(shaped + leveled, 1.0)
             }
@@ -3936,9 +3933,9 @@ pub fn main() {
             }
         }
         shader.test_compile_draw(gpu_stage_4m)
-        assert(shader.test_compile_draw_rust_contains(gpu_stage_4m, "exp_3f("))
-        assert(shader.test_compile_draw_rust_contains(gpu_stage_4m, "pow_3f("))
-        assert(shader.test_compile_draw_rust_contains(gpu_stage_4m, "log_3f("))
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4m, "-> Vec3f { Vec3f { x: (a0.x).exp()"))
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4m, "x: (a0.x).powf(a1.x)"))
+        assert(shader.test_compile_draw_rust_contains(gpu_stage_4m, "x: (a0.x).ln()"))
 
         println("GPU stage 4n: an `if` body's last statement keeps its value")
         let gpu_stage_4n = #(GpuShaderStageTest::script_shader(vm)){
@@ -3966,7 +3963,7 @@ pub fn main() {
             }
         }
         shader.test_compile_draw(gpu_stage_4n)
-        assert(shader.test_compile_draw_contains(gpu_stage_4n, "side_effect(_io, _iof, 7.0)"))
+        assert(shader.test_compile_draw_contains(gpu_stage_4n, "side_effect(_mp, 7.0)"))
 
         println("Runtime vector methods + lerp + TAU (value-level, not shader)")
         assert(vec3(3.0, 4.0, 0.0).length() == 5.0)
@@ -4664,7 +4661,7 @@ pub fn main() {
     {
         let mut host = ScriptVmHost::new(0, ());
         let vm = &mut ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
 
@@ -4857,7 +4854,7 @@ pub fn main() {
     {
         let mut host = ScriptVmHost::new(0, ());
         let vm = &mut ScriptVm {
-            host: &mut host,
+            host: host.host_context(),
             bx: Box::new(ScriptVmBase::new()),
         };
         let exports = vm.heap_mut().new_object();
@@ -5056,23 +5053,14 @@ pub fn main() {
 
         fn eval_generated(vm: &mut ScriptVm, code: String) -> ScriptValue {
             let shader_obj = ShaderSkyCapacity::script_shader(vm);
-            let script_mod = ScriptMod {
-                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
-                module_path: "shader_capacity_test".to_string(),
-                file: "shader_capacity_gen.rs".to_string(),
-                line: 1,
-                column: 1,
-                code,
-                values: vec![shader_obj],
-            };
+            let script_mod = ScriptMod::new(env!("CARGO_MANIFEST_DIR"), "shader_capacity_test", "shader_capacity_gen.rs", 1, 1, &code, &[shader_obj]);
             vm.eval(script_mod)
         }
 
         fn eval_to_string(vm: &mut ScriptVm, code: String) -> String {
             let v = eval_generated(vm, code);
             assert!(!v.is_err(), "generated shader test script errored: {:?}", v);
-            vm.bx
-                .heap
+            vm.heap()
                 .string_with(v, |_heap, s| s.to_string())
                 .unwrap_or_default()
         }
@@ -5082,13 +5070,13 @@ pub fn main() {
         // emitted Metal source and the compile must report no errors.
         for pads in [0usize, 2, 16, 64, 256] {
             let last = if pads == 0 {
-                "l_hclip".to_string()
+                "_hclip = ".to_string()
             } else {
-                format!("l_pad{}", pads - 1)
+                format!("_pad{} = ", pads - 1)
             };
             let tail = format!(
                 r#"
-        assert(shader.test_compile_draw_contains(sky, "l_sfade"))
+        assert(shader.test_compile_draw_contains(sky, "_sfade = "))
         assert(shader.test_compile_draw_contains(sky, "{last}"))
         shader.test_compile_draw_errors(sky)
     "#
@@ -5133,20 +5121,10 @@ pub fn main() {
     "#
             .to_string();
             let shader_obj = ShaderSkyCapacity::script_shader(vm);
-            let script_mod = ScriptMod {
-                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
-                module_path: "shader_capacity_test".to_string(),
-                file: "shader_loud_failure_gen.rs".to_string(),
-                line: 1,
-                column: 1,
-                code: bad,
-                values: vec![shader_obj],
-            };
+            let script_mod = ScriptMod::new(env!("CARGO_MANIFEST_DIR"), "shader_capacity_test", "shader_loud_failure_gen.rs", 1, 1, &bad, &[shader_obj]);
             let v = vm.eval(script_mod);
             assert!(!v.is_err(), "loud-failure test script errored: {:?}", v);
-            let errors = vm
-                .bx
-                .heap
+            let errors = vm.heap()
                 .string_with(v, |_heap, s| s.to_string())
                 .unwrap_or_default();
             assert!(
@@ -5434,15 +5412,7 @@ View{
         {
             for end in 1..=full_code.len() {
                 let code_so_far = &full_code[..end];
-                let script_mod = ScriptMod {
-                    cargo_manifest_path: String::new(),
-                    module_path: String::new(),
-                    file: "streaming_test".to_string(),
-                    line: 0,
-                    column: 0,
-                    code: String::new(),
-                    values: vec![],
-                };
+                let script_mod = ScriptMod::new("", "", "streaming_test", 0, 0, "", &[]);
                 // Execute incrementally — errors are expected for incomplete code,
                 // but panics/crashes would indicate bad opcode generation.
                 let _value = vm.eval_with_append_source(script_mod, code_so_far, NIL.into());
@@ -5461,15 +5431,7 @@ View{
                     end += 1;
                 }
                 let code_so_far = &full_code[..end];
-                let script_mod = ScriptMod {
-                    cargo_manifest_path: String::new(),
-                    module_path: String::new(),
-                    file: "streaming_20char".to_string(),
-                    line: 0,
-                    column: 0,
-                    code: String::new(),
-                    values: vec![],
-                };
+                let script_mod = ScriptMod::new("", "", "streaming_20char", 0, 0, "", &[]);
                 let _value = vm.eval_with_append_source(script_mod, code_so_far, NIL.into());
                 pos = end;
                 steps += 1;

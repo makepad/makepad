@@ -2,9 +2,10 @@
 //! pre-emption, cancellation, counted work limits, keep-last-result streams, and
 //! locked-time (synchronous) runs.
 
-use makepad_script_compute::admission::{DeviceLimits, JobBudget, Ledger, Origin};
-use makepad_script_compute::kernel::{compile, compile_with, Kernel, KernelError};
-use makepad_script_compute::sched::{Executor, FnExecutor, InlineExecutor, Job, JobError, Priority, Scheduler, SchedulerConfig, Stream, ThreadExecutor};
+use makepad_script_compute_sched::admission::{DeviceLimits, JobBudget, Ledger, Origin};
+use makepad_script_compute::kernel::{compile, compile_with, KernelRef};
+use makepad_script_compute_sched::kernel::{KernelError};
+use makepad_script_compute_sched::sched::{Executor, FnExecutor, InlineExecutor, Job, JobError, Priority, Scheduler, SchedulerConfig, Stream, ThreadExecutor};
 use makepad_script_compute::Backend;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,7 +25,7 @@ fn sched(exec: Arc<dyn Executor>, max_running: usize) -> Scheduler {
     Scheduler::new(exec, SchedulerConfig { max_running, threads: 8, ledger: Some(ledger), queue_capacity: 64 })
 }
 
-fn field_job(k: &Arc<Kernel>, n: usize) -> Job {
+fn field_job(k: &KernelRef, n: usize) -> Job {
     let mut j = Job::new(k.clone(), n);
     j.output("pos", vec![0.0; n * 3]).unwrap();
     j
@@ -90,8 +91,9 @@ fn near_jobs_preempt_far_ones_which_resume_and_finish_identically() {
     let fast = compile(FIELD).unwrap();
     let exec: Arc<dyn Executor> = Arc::new(ThreadExecutor::new(3));
     let s = sched(exec, 1);
-    // ~20 k elements x 20 µs = 0.4 s of work: long enough to be caught running.
-    let n = 20_000;
+    // Long enough to still be running when the near job finishes, on the fastest machine
+    // that runs this (the mini's compiled kernel finished 20 k elements before the near job did).
+    let n = 200_000;
     let mut far = Job::new(slow.clone(), n);
     far.output("o", vec![0.0; n]).unwrap();
     let far = s.submit(far, Priority::Far, Origin::Host, ANY).map_err(|(_, e)| e).unwrap();

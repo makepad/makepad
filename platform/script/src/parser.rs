@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::makepad_error_log::*;
 use crate::makepad_live_id::live_id::*;
 use crate::makepad_live_id::makepad_live_id_macros::*;
@@ -656,6 +657,16 @@ impl State {
         }
     }
 
+    /// The read half of a field-inherit write: `obj.f += {..}` reads the field's value, a path
+    /// `a.b +: {..}` builds on the instance copy of the named child or property.
+    fn field_inherit_read(op: LiveId) -> Opcode {
+        if op == id!(+:) {
+            Opcode::FIELD_SLOT_READ
+        } else {
+            Opcode::FIELD_INHERIT_READ
+        }
+    }
+
     fn operator_to_field_assign(op: LiveId) -> ScriptValue {
         match op {
             id!(=) | id!(:) => Opcode::ASSIGN_FIELD,
@@ -670,6 +681,7 @@ impl State {
             id!(<<=) => Opcode::ASSIGN_FIELD_SHL,
             id!(>>=) => Opcode::ASSIGN_FIELD_SHR,
             id!(?=) => Opcode::ASSIGN_FIELD_IFNIL,
+            id!(:=) => Opcode::ASSIGN_FIELD_VEC,
             _ => Opcode::NOP,
         }
         .into()
@@ -827,6 +839,7 @@ pub(crate) struct SlotCtx {
     loop_marks: Vec<usize>,
 }
 
+#[relax_api(handle)]
 pub struct ScriptParser {
     /// Keep every number literal a pushed value of its own (no folding into
     /// an operator's argument): a host can then set one in place while the
@@ -896,7 +909,9 @@ pub struct ScriptParser {
     pub(crate) slot_frames: Vec<(u32, Vec<LiveId>)>,
 }
 
+#[relax_api]
 impl Default for ScriptParser {
+    #[relax_api]
     fn default() -> Self {
         Self {
             keep_numbers: false,
@@ -947,6 +962,7 @@ pub struct ParserCheckpoint {
     slot_frames_len: usize,
 }
 
+#[relax_api]
 impl ScriptParser {
     /// A parser that keeps number literals as values of their own, or not
     /// ([`Self::keep_numbers`]).
@@ -4238,15 +4254,17 @@ impl ScriptParser {
                         });
                         return 1;
                     }
-                    // Check if there's a pending field += for field-inherit
+                    // Check if there's a pending field += or path +: for field-inherit
                     if let Some(State::EmitFieldAssign {
-                        what_op: id!(+=), ..
+                        what_op: field_op @ (id!(+=) | id!(+:)),
+                        ..
                     }) = self.state.last()
                     {
+                        let read = State::field_inherit_read(*field_op);
                         self.state.pop();
-                        // Field-inherit operator: obj.field += { ... }
-                        // Emit FIELD_INHERIT_READ to read field and push proto value
-                        self.push_code(Opcode::FIELD_INHERIT_READ.into(), self.index);
+                        // Field-inherit operator: obj.field += { ... } / a.b.c +: { ... }
+                        // Emit the read of the field and push proto value
+                        self.push_code(read.into(), self.index);
                         self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
                         self.state.push(State::EndFieldInherit);
                         self.state.push(State::BeginStmt {
@@ -4749,8 +4767,10 @@ impl ScriptParser {
                         {
                             if State::is_assign_operator(op) {
                                 // For : operator with field chain like field.sub: value
-                                // transform to me.field.sub = value
-                                if op == id!(:) {
+                                // transform to me.field.sub = value. `+:` and `:=` take the
+                                // same path (`a.b.c +: {..}` is `a +: { b +: { c +: {..} } }`,
+                                // `a.b.c := v` is `a +: { b +: { c := v } }`).
+                                if op == id!(:) || op == id!(+:) || op == id!(:=) {
                                     // Find the start of the field chain by walking backwards
                                     // The chain structure is: [id, id, (FIELD, id)*]
                                     // e.g. field.sub -> [id(field), id(sub)]
@@ -4949,12 +4969,13 @@ impl ScriptParser {
                             });
                             return 1;
                         } else if let State::EmitFieldAssign {
-                            what_op: id!(+=), ..
+                            what_op: field_op @ (id!(+=) | id!(+:)),
+                            ..
                         } = last
                         {
-                            // Field-inherit operator: obj.field += Proto { ... }
-                            // Emit FIELD_INHERIT_READ to read field and push proto value
-                            self.push_code(Opcode::FIELD_INHERIT_READ.into(), self.index);
+                            // Field-inherit operator: obj.field += Proto { ... } / a.b +: Proto { ... }
+                            // Emit the read of the field and push proto value
+                            self.push_code(State::field_inherit_read(field_op).into(), self.index);
                             self.push_code(Opcode::BEGIN_PROTO.into(), self.index);
                             self.state.push(State::EndFieldInherit);
                             self.state.push(State::BeginStmt {
@@ -5140,6 +5161,7 @@ impl ScriptParser {
         0
     }
 
+    #[relax_api]
     pub fn parse(
         &mut self,
         tokenizer: &ScriptTokenizer,
@@ -5823,4 +5845,26 @@ mod tests {
         assert!(State::operator_order(id!(==)) < State::operator_order(id!(&&)));
         assert!(State::operator_order(id!(&&)) < State::operator_order(id!(||)));
     }
+}
+
+/// What ScriptParser::errors answers.
+#[relax_api(plain)]
+#[repr(C)]
+pub struct ParserErrors<'a> {
+    pub had_error: bool,
+    pub first: &'a str,
+    pub has_first: bool,
+}
+
+#[relax_api(marked)]
+impl ScriptParser {
+    #[relax_api]
+    pub fn errors(&self) -> ParserErrors<'_> {
+        let first = self.parse_errors.first().map(String::as_str);
+        ParserErrors { had_error: self.had_error, first: first.unwrap_or(""), has_first: first.is_some() }
+    }
+    #[inline]
+    pub fn had_error(&self) -> bool { self.errors().had_error }
+    #[inline]
+    pub fn first_error(&self) -> Option<&str> { let e = self.errors(); e.has_first.then_some(e.first) }
 }

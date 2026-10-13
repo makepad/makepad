@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::array::*;
 use crate::function::*;
 use crate::heap::*;
@@ -10,118 +11,48 @@ use crate::vm::*;
 use crate::*;
 
 #[macro_export]
-macro_rules! script_value_f64 {
-    ($ctx:ident, $args:ident.$id: ident) => {
-        $ctx.heap.cast_to_f64(
-            $ctx.heap.value($args, id!($id).into(), &$ctx.thread.trap),
-            $ctx.thread.trap.ip,
-        )
-    };
-    ($ctx:ident, $obj:ident[$index: expr]) => {
-        $ctx.heap.cast_to_f64(
-            $ctx.heap.vec_value($obj, ($index) as usize),
-            $ctx.thread.ip(),
-        )
-    };
-}
-
-#[macro_export]
-macro_rules! script_value_bool {
-    ($ctx:ident, $args:ident.$id: ident) => {
-        $ctx.heap.cast_to_bool(
-            $ctx.heap.value($args, id!($id).into(), NIL),
-            $ctx.thread.ip(),
-        )
-    };
-    ($ctx:ident, $obj:ident[$index: expr]) => {
-        $ctx.heap.cast_to_bool(
-            $ctx.heap.vec_value($obj, ($index) as usize),
-            $ctx.thread.ip(),
-        )
-    };
-}
-
-#[macro_export]
 macro_rules! script_value {
     ($vm:ident, $obj:ident.$id: ident) => {
-        $vm.bx.heap.value(
-            ($obj).into(),
-            id!($id).into(),
-            $vm.bx.threads.cur_ref().trap.pass(),
-        )
+        $vm.value_trap(($obj).into(), id!($id))
     };
-    ($vm:ident, $obj:ident.$id:ident.$id2:ident) => {
-        $vm.bx.heap.value(
-            $vm.bx
-                .heap
-                .value(
-                    ($obj).into(),
-                    id!($id).into(),
-                    $vm.bx.threads.cur_ref().trap.pass(),
-                )
-                .into(),
-            id!($id2).into(),
-            $vm.bx.threads.cur_ref().trap.pass(),
-        )
-    };
+    ($vm:ident, $obj:ident.$id:ident.$id2:ident) => {{
+        let __script_value_inner = $vm.value_trap(($obj).into(), id!($id));
+        $vm.value_trap(__script_value_inner.into(), id!($id2))
+    }};
     ($vm:ident, $obj:ident[$index: expr]) => {
-        $vm.bx.heap.vec_value(
-            ($obj).into(),
-            ($index) as usize,
-            $vm.bx.threads.cur_ref().trap.pass(),
-        )
+        $vm.vec_value_trap(($obj).into(), ($index) as usize)
     };
     ($vm:ident, $obj:ident as array[$index: expr]) => {
-        $vm.bx.heap.array_index(
-            ($obj).into(),
-            ($index) as usize,
-            $vm.bx.threads.cur_ref().trap.pass(),
-        )
+        $vm.heap().array_index(($obj).into(), ($index) as usize, $vm.trap())
     };
 }
 
 #[macro_export]
 macro_rules! script_has_proto {
     ($vm:ident, $what:ident, $obj:ident.$id: ident) => {{
-        let proto = $vm.bx.heap.value(
-            ($obj).into(),
-            id!($id).into(),
-            $vm.bx.threads.cur_ref().trap.pass(),
-        );
-        $vm.bx.heap.has_proto(($what).into(), proto)
+        let proto = $vm.value_trap(($obj).into(), id!($id));
+        $vm.heap_mut().has_proto(($what).into(), proto)
     }};
 }
 
 #[macro_export]
 macro_rules! script_is_fn {
     ($vm:ident, $what:ident, $obj:expr) => {{
-        $vm.bx.heap.is_fn(($obj).into())
+        $vm.heap().is_fn(($obj).into())
     }};
 }
 
 #[macro_export]
 macro_rules! script_array_index {
     ($vm:ident, $obj:ident[$index: expr]) => {{
-        let trap = $vm.bx.threads.cur().trap.pass();
-        $vm.bx
-            .heap
-            .array_index(($obj).into(), ($index) as usize, trap)
+        $vm.heap().array_index(($obj).into(), ($index) as usize, $vm.trap())
     }};
 }
 
 #[macro_export]
 macro_rules! set_script_value {
     ($vm:ident, $obj:ident.$id: ident=$value:expr) => {{
-        let trap = $vm.bx.threads.cur().trap.pass();
-        $vm.bx
-            .heap
-            .set_value($obj, id!($id).into(), ($value).into(), trap)
-    }};
-    ($vm:ident, $obj:ident[$index: expr]=$value:expr) => {{
-        let trap = $vm.bx.threads.cur().trap.pass();
-        $vm.bx
-            .heap
-            .set_vec_value($obj, ($index) as usize, ($value).into(), trap)
+        $vm.set_value_trap($obj, id!($id), $value)
     }};
 }
 
@@ -129,17 +60,11 @@ macro_rules! set_script_value {
 macro_rules! set_script_value_to_api {
     ($vm:ident, $obj:ident.$id: ident=$val:expr) => {{
         let v = $val::script_api($vm);
-        let trap = $vm.bx.threads.cur().trap.pass();
-        $vm.bx
-            .heap
-            .set_value(($obj).into(), id_lut!($id).into(), v, trap);
+        $vm.set_value_trap(($obj).into(), id_lut!($id), v);
     }};
     ($vm:ident, $obj:ident.$id: ident) => {{
         let v = $id::script_api($vm);
-        let trap = $vm.bx.threads.cur().trap.pass();
-        $vm.bx
-            .heap
-            .set_value(($obj).into(), id_lut!($id).into(), v, trap);
+        $vm.set_value_trap(($obj).into(), id_lut!($id), v);
     }};
 }
 
@@ -147,23 +72,13 @@ macro_rules! set_script_value_to_api {
 macro_rules! set_script_value_to_pod {
     ($vm:ident, $obj:ident.$id: ident=$val:expr) => {{
         let v = $val::script_pod($vm).expect("Cant make a pod type");
-        $vm.bx.heap.pod_type_name_set(v, id_lut!($id));
-        $vm.bx.heap.set_value(
-            ($obj).into(),
-            id_lut!($id).into(),
-            v.into(),
-            $vm.bx.threads.cur_ref().trap.pass(),
-        );
+        $vm.heap_mut().pod_type_name_set(v, id_lut!($id));
+        $vm.set_value_trap(($obj).into(), id_lut!($id), v);
     }};
     ($vm:ident, $obj:ident.$id: ident) => {{
         let v = $id::script_pod($vm).expect("Cant make a pod type");
-        $vm.bx.heap.pod_type_name_set(v, id_lut!($id));
-        $vm.bx.heap.set_value(
-            ($obj).into(),
-            id_lut!($id).into(),
-            v.into(),
-            $vm.bx.threads.cur_ref().trap.pass(),
-        );
+        $vm.heap_mut().pod_type_name_set(v, id_lut!($id));
+        $vm.set_value_trap(($obj).into(), id_lut!($id), v);
     }};
 }
 
@@ -181,14 +96,112 @@ macro_rules! script_args_def{
     }
 }
 
-pub type NativeGetterFn = Box<dyn Fn(&mut ScriptVm, ScriptValue, LiveId) -> ScriptValue + 'static>;
-pub type NativeSetterFn =
-    Box<dyn Fn(&mut ScriptVm, ScriptValue, LiveId, ScriptValue) -> ScriptValue + 'static>;
-/// Generic method dispatch: called with (vm, args_object, method).
-/// The args object has `self` set and all call arguments collected.
-/// Used when a type has no specific method registered but has a catch-all call handler.
-pub type NativeCallFn = Box<dyn Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue + 'static>;
-pub type NativeFn = Box<dyn Fn(&mut ScriptVm, ScriptObject) -> ScriptValue + 'static>;
+// Natives are C-ABI callables: `{data, call, drop}` where `call` is an `extern "C-unwind"` fn
+// made per closure type by a generic trampoline. The VM calls them without knowing which
+// compiler built the closure: in the makepad loader the VM is rustc-built and app natives are
+// Rapid-built (local/plans/loader-core.md section 8). Under one compiler this is the same
+// indirect call a `Box<dyn Fn>` makes. "C-unwind": a panicking native unwinds through the VM
+// as before.
+macro_rules! native_callable {
+    ($(#[$m:meta])* $name:ident, $view:ident, ($($arg:ident: $ty:ty),*)) => {
+        $(#[$m])*
+        #[relax_api(plain)]
+        #[repr(C)]
+        pub struct $name {
+            data: *mut u8,
+            call: unsafe extern "C-unwind" fn(*const u8, &mut ScriptVm $(, $ty)*) -> ScriptValue,
+            drop: unsafe extern "C-unwind" fn(*mut u8),
+        }
+
+        /// A copy of a native's entry that outlives the borrow of the native table (the
+        /// closure lives as long as its table entry).
+        #[relax_api(plain)]
+        #[derive(Clone, Copy)]
+        #[repr(C)]
+        pub struct $view {
+            data: *const u8,
+            call: unsafe extern "C-unwind" fn(*const u8, &mut ScriptVm $(, $ty)*) -> ScriptValue,
+        }
+
+        impl $name {
+            #[inline(always)]
+            pub fn new<F>(f: F) -> Self
+            where
+                F: Fn(&mut ScriptVm $(, $ty)*) -> ScriptValue + 'static,
+            {
+                unsafe extern "C-unwind" fn call<F>(data: *const u8, vm: &mut ScriptVm $(, $arg: $ty)*) -> ScriptValue
+                where
+                    F: Fn(&mut ScriptVm $(, $ty)*) -> ScriptValue + 'static,
+                {
+                    (*(data as *const F))(vm $(, $arg)*)
+                }
+                unsafe extern "C-unwind" fn drop_box<F>(data: *mut u8) {
+                    drop(Box::from_raw(data as *mut F));
+                }
+                Self {
+                    data: Box::into_raw(Box::new(f)) as *mut u8,
+                    call: call::<F>,
+                    drop: drop_box::<F>,
+                }
+            }
+
+            #[inline(always)]
+            pub fn view(&self) -> $view {
+                $view { data: self.data, call: self.call }
+            }
+
+            /// The native as `{data, call, drop}`, its ownership passing to the raw record
+            /// (what `ScriptVmBase::vm_register` takes).
+            #[inline(always)]
+            pub fn into_raw(self) -> crate::vm_ctl::ScriptNativeRaw {
+                let me = std::mem::ManuallyDrop::new(self);
+                crate::vm_ctl::ScriptNativeRaw { data: me.data, call: me.call as *const (), drop: me.drop }
+            }
+
+            /// # Safety
+            /// `raw` must come from `into_raw` of this very type and not be used again.
+            #[inline(always)]
+            pub unsafe fn from_raw(raw: crate::vm_ctl::ScriptNativeRaw) -> Self {
+                Self { data: raw.data, call: std::mem::transmute(raw.call), drop: raw.drop }
+            }
+        }
+
+        impl $view {
+            /// # Safety
+            /// The native's table entry must still exist (natives are never removed while
+            /// the VM runs).
+            #[inline(always)]
+            pub unsafe fn call(self, vm: &mut ScriptVm $(, $arg: $ty)*) -> ScriptValue {
+                (self.call)(self.data, vm $(, $arg)*)
+            }
+        }
+
+        impl Drop for $name {
+            fn drop(&mut self) {
+                unsafe { (self.drop)(self.data) }
+            }
+        }
+    };
+}
+
+native_callable!(
+    /// A field read on a value type: (vm, value, field).
+    NativeGetterFn, NativeGetterView, (value: ScriptValue, field: LiveId)
+);
+native_callable!(
+    /// A field write on a value type: (vm, value, field, new value).
+    NativeSetterFn, NativeSetterView, (value: ScriptValue, field: LiveId, to: ScriptValue)
+);
+native_callable!(
+    /// Generic method dispatch: called with (vm, args_object, method).
+    /// The args object has `self` set and all call arguments collected.
+    /// Used when a type has no specific method registered but has a catch-all call handler.
+    NativeCallFn, NativeCallView, (args: ScriptObject, method: LiveId)
+);
+native_callable!(
+    /// A native function: (vm, args_object).
+    NativeFn, NativeFnView, (args: ScriptObject)
+);
 
 #[derive(Default)]
 pub struct ScriptNative {
@@ -221,7 +234,7 @@ impl ScriptNative {
     where
         F: Fn(&mut ScriptVm, ScriptObject) -> ScriptValue + 'static,
     {
-        let boxed: NativeFn = Box::new(f);
+        let boxed = NativeFn::new(f);
         self.add_fn_boxed(heap, args, boxed)
     }
 
@@ -254,17 +267,24 @@ impl ScriptNative {
 
     /// Registers a native function to be used as an apply_transform and returns its NativeId.
     /// This is used for creating objects that transform to a computed value when applied.
+    #[inline(always)]
     pub fn add_apply_transform_fn<F>(&mut self, f: F) -> NativeId
     where
         F: Fn(&mut ScriptVm, ScriptObject) -> ScriptValue + 'static,
     {
+        self.add_apply_transform_native(NativeFn::new(f))
+    }
+
+    pub fn add_apply_transform_native(&mut self, f: NativeFn) -> NativeId {
         let fn_index = self.functions.len();
-        self.functions.push(Box::new(f));
+        self.functions.push(f);
         NativeId {
             index: fn_index as u32,
         }
     }
 
+    /// Generic entry point - only boxes the closure, delegates to non-generic helper
+    #[inline(always)]
     pub fn add_method<F>(
         &mut self,
         heap: &mut ScriptHeap,
@@ -275,8 +295,19 @@ impl ScriptNative {
     ) where
         F: Fn(&mut ScriptVm, ScriptObject) -> ScriptValue + 'static,
     {
-        // lets get the
-        let fn_obj = self.add_fn(heap, args, f);
+        self.add_method_boxed(heap, module, method, args, NativeFn::new(f))
+    }
+
+    #[inline(never)]
+    pub fn add_method_boxed(
+        &mut self,
+        heap: &mut ScriptHeap,
+        module: ScriptObject,
+        method: LiveId,
+        args: &[(LiveId, ScriptValue)],
+        f: NativeFn,
+    ) {
+        let fn_obj = self.add_fn_boxed(heap, args, f);
         heap.set_value_def(module, method.into(), fn_obj.into());
     }
 
@@ -294,26 +325,41 @@ impl ScriptNative {
         ty
     }
 
+    #[inline(always)]
     pub fn set_type_getter<F>(&mut self, ty_redux: ScriptTypeRedux, f: F)
     where
         F: Fn(&mut ScriptVm, ScriptValue, LiveId) -> ScriptValue + 'static,
     {
-        self.getters[ty_redux.to_index()] = Box::new(f)
+        self.set_type_getter_native(ty_redux, NativeGetterFn::new(f))
     }
 
+    pub fn set_type_getter_native(&mut self, ty_redux: ScriptTypeRedux, f: NativeGetterFn) {
+        self.getters[ty_redux.to_index()] = f
+    }
+
+    #[inline(always)]
     pub fn set_type_setter<F>(&mut self, ty_redux: ScriptTypeRedux, f: F)
     where
         F: Fn(&mut ScriptVm, ScriptValue, LiveId, ScriptValue) -> ScriptValue + 'static,
     {
-        self.setters[ty_redux.to_index()] = Box::new(f)
+        self.set_type_setter_native(ty_redux, NativeSetterFn::new(f))
     }
 
+    pub fn set_type_setter_native(&mut self, ty_redux: ScriptTypeRedux, f: NativeSetterFn) {
+        self.setters[ty_redux.to_index()] = f
+    }
+
+    #[inline(always)]
     pub fn set_type_call<F>(&mut self, ty_redux: ScriptTypeRedux, f: F)
     where
         F: Fn(&mut ScriptVm, ScriptObject, LiveId) -> ScriptValue + 'static,
     {
+        self.set_type_call_native(ty_redux, NativeCallFn::new(f))
+    }
+
+    pub fn set_type_call_native(&mut self, ty_redux: ScriptTypeRedux, f: NativeCallFn) {
         self.ensure_type_table_capacity(ty_redux);
-        self.calls[ty_redux.to_index()] = Some(Box::new(f));
+        self.calls[ty_redux.to_index()] = Some(f);
     }
 
     /// The methods registered on a value type (`set_type_method`), by name.
@@ -328,7 +374,7 @@ impl ScriptNative {
             self.type_table
                 .resize_with(ty_redux.to_index() + 1, || Default::default());
             self.getters.resize_with(ty_redux.to_index() + 1, || {
-                Box::new(|vm, value, field| {
+                NativeGetterFn::new(|vm: &mut ScriptVm, value: ScriptValue, field: LiveId| {
                     script_err_not_found!(
                         vm.bx.threads.cur_ref().trap,
                         "no getter for field {:?} on type {:?}",
@@ -338,7 +384,7 @@ impl ScriptNative {
                 })
             });
             self.setters.resize_with(ty_redux.to_index() + 1, || {
-                Box::new(|vm, value, field, _| {
+                NativeSetterFn::new(|vm: &mut ScriptVm, value: ScriptValue, field: LiveId, _: ScriptValue| {
                     script_err_not_found!(
                         vm.bx.threads.cur_ref().trap,
                         "no setter for field {:?} on type {:?}",
@@ -351,6 +397,8 @@ impl ScriptNative {
         }
     }
 
+    /// Generic entry point - only boxes the closure, delegates to non-generic helper
+    #[inline(always)]
     pub fn add_type_method<F>(
         &mut self,
         heap: &mut ScriptHeap,
@@ -361,7 +409,19 @@ impl ScriptNative {
     ) where
         F: Fn(&mut ScriptVm, ScriptObject) -> ScriptValue + 'static,
     {
-        let fn_obj = self.add_fn(heap, args, f);
+        self.add_type_method_native(heap, ty_redux, method, args, NativeFn::new(f))
+    }
+
+    #[inline(never)]
+    pub fn add_type_method_native(
+        &mut self,
+        heap: &mut ScriptHeap,
+        ty_redux: ScriptTypeRedux,
+        method: LiveId,
+        args: &[(LiveId, ScriptValue)],
+        f: NativeFn,
+    ) {
+        let fn_obj = self.add_fn_boxed(heap, args, f);
         self.ensure_type_table_capacity(ty_redux);
         self.type_table[ty_redux.to_index()].insert(method, fn_obj);
     }

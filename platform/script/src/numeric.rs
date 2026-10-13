@@ -2,6 +2,7 @@
 //!
 //! This module provides the `NumericValue` enum which can hold f64, Vec2f, Vec3f, Vec4f,
 //! Color, or Mat4x4f values and supports component-wise operations with proper type promotion.
+use makepad_relax_api::relax_api;
 
 use crate::heap::*;
 use crate::pod::*;
@@ -11,7 +12,10 @@ use makepad_math::{Vec2f, Vec3f, Vec4f};
 
 /// Represents a numeric value that can be f64, Vec2f, Vec3f, Vec4f, Color, or Mat4x4f
 /// Used for type-preserving arithmetic operations
+/// `repr(C, u8)`: a fixed layout, so JIT code reads it without the VM (relax_api.txt).
+#[relax_api(plain)]
 #[derive(Clone, Copy)]
+#[repr(C, u8)]
 pub enum NumericValue {
     F64(f64),
     Vec2(Vec2f),
@@ -21,8 +25,34 @@ pub enum NumericValue {
     Mat4([f32; 16]), // 4x4 matrix in column-major order
 }
 
+/// Layout-independent discriminant for a numeric value.
+#[relax_api(plain)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NumericValueTag { F64, Vec2, Vec3, Vec4, Color, Mat4 }
+
+#[relax_api]
 impl NumericValue {
+    pub fn mat4(value: [f32; 16]) -> Self { Self::Mat4(value) }
+    pub fn as_mat4(&self) -> Option<[f32; 16]> { match self { Self::Mat4(v) => Some(*v), _ => None } }
+    #[relax_api]
+    pub fn to_script_value(self, vm: &mut crate::vm::ScriptVm) -> ScriptValue {
+        self.to_script_value_heap(&mut vm.bx.heap, &vm.bx.code)
+    }
+    pub fn vec2(value: Vec2f) -> Self { Self::Vec2(value) }
+    pub fn vec3(value: Vec3f) -> Self { Self::Vec3(value) }
+    pub fn vec4(value: Vec4f) -> Self { Self::Vec4(value) }
+
+    pub fn kind(&self) -> NumericValueTag {
+        match self { Self::F64(..) => NumericValueTag::F64, Self::Vec2(..) => NumericValueTag::Vec2, Self::Vec3(..) => NumericValueTag::Vec3, Self::Vec4(..) => NumericValueTag::Vec4, Self::Color(..) => NumericValueTag::Color, Self::Mat4(..) => NumericValueTag::Mat4 }
+    }
+    pub fn as_f64(&self) -> Option<f64> { match self { Self::F64(v) => Some(*v), _ => None } }
+    pub fn as_vec2(&self) -> Option<Vec2f> { match self { Self::Vec2(v) => Some(*v), _ => None } }
+    pub fn as_vec3(&self) -> Option<Vec3f> { match self { Self::Vec3(v) => Some(*v), _ => None } }
+    pub fn as_vec4(&self) -> Option<Vec4f> { match self { Self::Vec4(v) => Some(*v), _ => None } }
+    pub fn as_color(&self) -> Option<Vec4f> { match self { Self::Color(v) => Some(*v), _ => None } }
+
     /// Extract a numeric value from ScriptValue (heap-only version, no vm needed)
+    #[relax_api]
     pub fn from_script_value_heap(heap: &ScriptHeap, value: ScriptValue, ip: ScriptIp) -> Self {
         // Check for Color first (u32 encoded)
         if let Some(c) = value.as_color() {
@@ -116,6 +146,7 @@ impl NumericValue {
     }
 
     /// Convert back to ScriptValue (heap + code version)
+    #[relax_api]
     pub fn to_script_value_heap(self, heap: &mut ScriptHeap, code: &ScriptCode) -> ScriptValue {
         match self {
             NumericValue::F64(f) => ScriptValue::from_f64(f),

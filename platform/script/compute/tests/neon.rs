@@ -6,6 +6,7 @@
 //! must agree, and nothing outside a buffer may change.
 #![cfg(target_arch = "aarch64")]
 
+use makepad_script_compute_sched::kernel::KernelExt;
 use makepad_script_compute::ir::{self, Block, Program, Region, Regions, Stmt};
 use makepad_script_compute::kernel::{compile, compile_with, K_BASE};
 use makepad_script_compute::{arm64, neon, Backend};

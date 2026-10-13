@@ -5,22 +5,17 @@ use makepad_script::*;
 
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    ScriptVm { host, bx: Box::new(ScriptVmBase::new()) }
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
 }
 
 fn run(name: &str, code: &str) -> (ScriptValue, Vec<String>, ScriptVm<'static>) {
     let mut vm = test_vm();
     vm.bx.captured_errors = Some(Vec::new());
     let value = vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: String::new(),
-            file: format!("fp1_{name}"),
-            line: 0,
-            column: 0,
-            code: code.to_string(),
-            values: vec![],
-        })
+        vm.eval(ScriptMod::new("", "", &format!("fp1_{name}"), 0, 0, &code, &[]))
     });
     let mut errs: Vec<String> = vm.bx.captured_errors.take().unwrap().into_iter().map(|e| format!("{e:?}")).collect();
     errs.extend(vm.take_errors().into_iter().map(|e| format!("{e:?}")));
@@ -194,18 +189,13 @@ mod shader_ln {
     #[test]
     fn ln_compiles_to_log_on_every_backend() {
         let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-        let mut vm = ScriptVm { host, bx: Box::new(ScriptVmBase::new()) };
+        let mut vm = ScriptVm {
+            host: host.host_context(),
+            bx: Box::new(ScriptVmBase::new()),
+        };
         for backend in ["metal", "hlsl", "glsl", "wgsl"] {
             let shader_obj = ShaderLnTest::script_shader(&mut vm);
-            let value = vm.eval(ScriptMod {
-                cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
-                module_path: "shader_ln".to_string(),
-                file: "shader_ln.rs".to_string(),
-                line: 1,
-                column: 1,
-                code: format!("{SHADER}\n        shader.test_compile_draw_source(sh, \"{backend}\", false)"),
-                values: vec![shader_obj],
-            });
+            let value = vm.eval(ScriptMod::new(env!("CARGO_MANIFEST_DIR"), "shader_ln", "shader_ln.rs", 1, 1, &format!("{SHADER}\n        shader.test_compile_draw_source(sh, \"{backend}\", false)"), &[shader_obj]));
             assert!(!value.is_err(), "{backend}: script errored: {value:?}");
             let source = vm.bx.heap.string_with(value, |_heap, s| s.to_string()).unwrap_or_default();
             assert!(!source.is_empty() && !source.starts_with("ERRORS"), "{backend}: {source}");

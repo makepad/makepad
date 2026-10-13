@@ -2,6 +2,7 @@
 //! `makepad_csg_math::portable` (the Rust generators' math), natively and
 //! interpreted, on special values, edge cases and random bit patterns.
 
+use makepad_script_compute_sched::kernel::KernelExt;
 use makepad_csg_math::portable as p;
 use makepad_script_compute::kernel::{compile_with, CANONICAL_NAN};
 use makepad_script_compute::Backend;

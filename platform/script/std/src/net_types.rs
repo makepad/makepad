@@ -4,12 +4,14 @@
 //! with the script crate); the `net` script module converts between these
 //! mirrors and the network types at the boundary. The mirrors keep the type
 //! and field names scripts see (`net.HttpRequest{...}`, `res.status_code`).
+use makepad_relax_api::relax_api;
 
 use crate::makepad_network as network;
 use makepad_script::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+#[relax_api(plain)]
 #[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum WebSocketTransport {
     #[pick]
@@ -29,6 +31,7 @@ impl From<WebSocketTransport> for network::WebSocketTransport {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Script, ScriptHook, Clone, Copy, Debug, PartialEq, Eq, Default)]
 #[allow(clippy::upper_case_acronyms)]
 pub enum HttpMethod {
@@ -128,32 +131,12 @@ pub struct HttpResponse {
     pub body: Option<Arc<[u8]>>,
 }
 
-impl From<&network::HttpResponse> for HttpResponse {
-    fn from(v: &network::HttpResponse) -> Self {
-        Self {
-            metadata_id: v.metadata_id,
-            status_code: v.status_code,
-            headers: v.headers.clone(),
-            body: v.body.clone(),
-        }
-    }
-}
-
 #[derive(Script, ScriptHook, Clone, Debug, PartialEq, Eq)]
 pub struct HttpError {
     #[live]
     pub message: String,
     #[live]
     pub metadata_id: LiveId,
-}
-
-impl From<&network::HttpError> for HttpError {
-    fn from(v: &network::HttpError) -> Self {
-        Self {
-            message: v.message.clone(),
-            metadata_id: v.metadata_id,
-        }
-    }
 }
 
 #[derive(Script, ScriptHook, Clone, Debug)]
@@ -178,32 +161,10 @@ pub struct HttpServerHeaders {
     pub sec_websocket_key: Option<String>,
 }
 
-impl From<&network::utils::HttpServerHeaders> for HttpServerHeaders {
-    fn from(v: &network::utils::HttpServerHeaders) -> Self {
-        Self {
-            addr_text: v.addr_text.clone(),
-            lines: v.lines.clone(),
-            verb: v.verb.clone(),
-            path: v.path.clone(),
-            path_no_slash: v.path_no_slash.clone(),
-            search: v.search.clone(),
-            content_length: v.content_length,
-            accept_encoding: v.accept_encoding.clone(),
-            sec_websocket_key: v.sec_websocket_key.clone(),
-        }
-    }
-}
-
 #[derive(Script, ScriptHook, Clone)]
 pub struct HttpServerResponse {
     #[live]
     pub header: String,
     #[live]
     pub body: Vec<u8>,
-}
-
-impl From<HttpServerResponse> for network::http_server::HttpServerResponse {
-    fn from(v: HttpServerResponse) -> Self {
-        Self::new(v.header, v.body)
-    }
 }

@@ -1,3 +1,4 @@
+use makepad_relax_api::relax_api;
 use crate::heap::*;
 use crate::makepad_live_id::*;
 use crate::native::*;
@@ -6,10 +7,18 @@ use crate::*;
 use ::std::borrow::Borrow;
 use ::std::sync::Arc;
 
+#[relax_api(handle, clone)]
 #[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct ScriptRcString(pub Arc<String>);
 
+#[relax_api]
 impl ScriptRcString {
+    #[relax_api]
+    pub fn as_str(&self) -> &str { self.0.as_str() }
+
+    #[relax_api]
+    pub fn from_str(value: &str) -> Self { Self(Arc::new(value.to_owned())) }
+
     pub fn new(str: String) -> Self {
         Self(Arc::new(str))
     }
@@ -27,6 +36,7 @@ impl Borrow<String> for ScriptRcString {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Default)]
 pub struct StringTag(u64);
 
@@ -55,6 +65,7 @@ impl StringTag {
     }
 }
 
+#[relax_api(handle)]
 #[derive(Default)]
 pub struct ScriptStringData {
     pub tag: StringTag,

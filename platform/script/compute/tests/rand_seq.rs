@@ -1,5 +1,6 @@
 //! The kernel prelude's `rand_seq` is the documents' draw (src/rand.rs) to 24 bits.
 
+use makepad_script_compute_sched::kernel::KernelExt;
 use makepad_script_compute::kernel::compile;
 use makepad_script_compute::rand::rand_seq;
 

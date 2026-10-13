@@ -6,11 +6,14 @@ use makepad_script::*;
 
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
-    ScriptVm { host, bx: Box::new(ScriptVmBase::new()) }
+    ScriptVm {
+        host: host.host_context(),
+        bx: Box::new(ScriptVmBase::new()),
+    }
 }
 
 fn module(file: &str, code: &str) -> ScriptMod {
-    ScriptMod { file: file.to_string(), code: code.to_string(), ..Default::default() }
+    ScriptMod::new("", "", &file, 0, 0, &code, &[])
 }
 
 fn body_count(vm: &ScriptVm) -> usize {

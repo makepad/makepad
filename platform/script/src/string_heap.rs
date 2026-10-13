@@ -1,7 +1,9 @@
+use makepad_relax_api::relax_api;
 use crate::array::*;
 use crate::heap::*;
 use crate::string::*;
 use crate::value::*;
+use crate::vm_api::ScriptTextOut;
 use std::fmt::{self, Write};
 
 /// A sink used while the VM converts values into strings.
@@ -23,6 +25,19 @@ pub trait ScriptStringSink: Write {
 }
 
 impl ScriptStringSink for String {
+    fn is_full(&self) -> bool {
+        false
+    }
+}
+
+impl Write for crate::vm_api::ScriptTextOut<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        self.push(s);
+        Ok(())
+    }
+}
+
+impl ScriptStringSink for crate::vm_api::ScriptTextOut<'_> {
     fn is_full(&self) -> bool {
         false
     }
@@ -120,6 +135,24 @@ impl ScriptStringSink for ScriptStringBuffer {
     }
 }
 
+/// str_read's mode.
+pub const STR_VIEW: u32 = 0;
+pub const STR_INTERN: u32 = 1;
+pub const STR_CAST: u32 = 2;
+pub const STR_LEN: u32 = 3;
+
+/// What str_read answers (by its mode).
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct StrRead {
+    pub value: ScriptValue,
+    pub ptr: *const u8,
+    pub len: usize,
+    pub found: bool,
+}
+
+#[relax_api]
 impl ScriptHeap {
     // Strings
 
@@ -247,25 +280,88 @@ impl ScriptHeap {
         None
     }
 
+    #[inline(always)]
     pub fn string_with<R, F: FnOnce(&Self, &str) -> R>(
         &self,
         value: ScriptValue,
         cb: F,
     ) -> Option<R> {
-        if let Some(s) = value.as_string() {
-            if let Some(s) = &self.strings[s] {
-                let r = cb(self, &s.string.0);
-                return Some(r);
-            } else {
-                return None;
-            }
+        if value.as_string().is_some() {
+            return self.string_view(value).map(|s| cb(self, s));
         }
-        if let Some(r) = value.as_inline_string(|s| cb(self, s)) {
-            return Some(r);
-        }
-        None
+        value.as_inline_string(|s| cb(self, s))
     }
 
+    /// The text of heap string `value` (None: no heap string; inline strings live in the value
+    /// itself, ScriptValue::as_inline_string).
+    #[inline]
+    pub fn string_view(&self, value: ScriptValue) -> Option<&str> {
+        let r = self.str_read(STR_VIEW, value, "", &mut ScriptTextOut::discard());
+        // SAFETY: the view is the heap string's text, borrowed from `self`
+        r.found.then(|| unsafe { std::str::from_utf8_unchecked(std::slice::from_raw_parts(r.ptr, r.len)) })
+    }
+
+    /// Writes `value` as text into `out` (what cast_to_string writes into a String).
+    #[inline]
+    pub fn cast_to_text(&self, value: ScriptValue, out: &mut ScriptTextOut) {
+        self.str_read(STR_CAST, value, "", out);
+    }
+
+    /// Reads strings by `mode`: STR_VIEW the text of heap string `value` (`ptr`/`len`, `found`
+    /// false when it is no heap string); STR_INTERN the value an existing string `text` has
+    /// (`value`, `found` false when none); STR_CAST writes `value` as text into `out`; STR_LEN the
+    /// length of `value` as text (`len`).
+    #[relax_api]
+    pub fn str_read(&self, mode: u32, value: ScriptValue, text: &str, out: &mut ScriptTextOut) -> StrRead {
+        let mut r = StrRead { value: NIL, ptr: std::ptr::null(), len: 0, found: false };
+        match mode {
+            STR_VIEW => {
+                if let Some(s) = value.as_string() {
+                    if let Some(d) = self.strings[s].as_ref() {
+                        let t = d.string.0.as_str();
+                        r.ptr = t.as_ptr();
+                        r.len = t.len();
+                        r.found = true;
+                    }
+                }
+            }
+            STR_INTERN => {
+                if !self.exceeds_string_limit(text.len()) {
+                    if let Some(v) = ScriptValue::from_inline_string(text) {
+                        r.value = v;
+                        r.found = true;
+                    } else if let Some(idx) = self.string_intern.get(text) {
+                        r.value = (*idx).into();
+                        r.found = true;
+                    }
+                }
+            }
+            STR_CAST => self.cast_to_string(value, out),
+            _ => {
+                r.len = if let Some(len) = value.as_inline_string(|value| value.len()) {
+                    len
+                } else if let Some(value) = value.as_string() {
+                    self.string(value).len()
+                } else {
+                    // Non-string casts are all small, fixed-shape values. Formatting one
+                    // here cannot scale with script-controlled container contents.
+                    let mut out = String::new();
+                    self.cast_to_string(value, &mut out);
+                    out.len()
+                };
+            }
+        }
+        r
+    }
+
+    /// Charges the heap's allocation budget for an owned copy of `value`'s text (false: over
+    /// budget, nothing to copy).
+    pub fn charge_owned_string(&mut self, value: ScriptValue, operation: &'static str) -> bool {
+        let len = self.cast_to_string_len(value);
+        self.charge_allocation(len, operation)
+    }
+
+    #[relax_api]
     pub fn new_string_from_str(&mut self, value: &str) -> ScriptValue {
         if self.exceeds_string_limit(value.len()) {
             self.note_string_limit_exceeded(value.len(), "creating a string");
@@ -482,30 +578,19 @@ impl ScriptHeap {
             str
         } else {
             let out = ScriptRcString::new(out);
-            let index = self.strings.len();
-            self.strings.push(Some(ScriptStringData {
+            let (index, generation) = self.strings.push(Some(ScriptStringData {
                 tag: Default::default(),
                 string: out.clone(),
             }));
-            // New slot starts at generation 0
-            let ret = ScriptString::new(index as _, crate::value::GENERATION_ZERO);
+            let ret = ScriptString::new(index, generation);
             self.string_intern.insert(out, ret);
             ret
         }
     }
 
+    #[inline]
     pub(crate) fn cast_to_string_len(&self, value: ScriptValue) -> usize {
-        if let Some(len) = value.as_inline_string(|value| value.len()) {
-            return len;
-        }
-        if let Some(value) = value.as_string() {
-            return self.string(value).len();
-        }
-        // Non-string casts are all small, fixed-shape values. Formatting one
-        // here cannot scale with script-controlled container contents.
-        let mut out = String::new();
-        self.cast_to_string(value, &mut out);
-        out.len()
+        self.str_read(STR_LEN, value, "", &mut ScriptTextOut::discard()).len
     }
 
     /// Copy a script value into an owned Rust string for a native binding,
@@ -526,25 +611,15 @@ impl ScriptHeap {
         Some(out)
     }
 
+    #[inline]
     pub fn check_intern_string(&self, value: &str) -> Option<ScriptValue> {
-        if self.exceeds_string_limit(value.len()) {
-            return None;
-        }
-        if let Some(v) = ScriptValue::from_inline_string(&value) {
-            Some(v)
-        } else if let Some(idx) = self.string_intern.get(value) {
-            Some((*idx).into())
-        } else {
-            None
-        }
+        let r = self.str_read(STR_INTERN, NIL, value, &mut ScriptTextOut::discard());
+        r.found.then_some(r.value)
     }
 
+    #[inline]
     pub fn string(&self, ptr: ScriptString) -> &str {
-        if let Some(s) = &self.strings[ptr] {
-            &s.string.0
-        } else {
-            ""
-        }
+        self.string_view(ptr.into()).unwrap_or("")
     }
 
     pub fn string_to_bytes_array(&mut self, v: ScriptValue) -> ScriptArray {

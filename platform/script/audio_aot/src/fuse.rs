@@ -8,13 +8,16 @@
 //! A graph is either an effect graph (every node an effect; `Port::Input`
 //! is the graph's stereo input) or an instrument chain (node 0 a voice,
 //! the rest effects run per voice, with per-voice state).
+use makepad_relax_api::relax_api;
 
 use crate::parse::*;
 use crate::{Backend, ShaderError};
 use std::collections::{HashMap, HashSet};
 
 /// Where a node input (or the graph output) reads from.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 pub enum Port {
     /// The graph's stereo input (effect graphs).
     Input,
@@ -34,10 +37,17 @@ pub struct FuseNode<'a> {
 
 /// A fusion error: the node it belongs to (None: the graph itself) and the
 /// error with a span relative to that node's code.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct FuseError {
     pub node: Option<usize>,
     pub error: ShaderError,
+}
+
+impl Clone for FuseError {
+    #[inline(always)]
+    fn clone(&self) -> Self {
+        Self { node: self.node, error: self.error.clone() }
+    }
 }
 
 fn gerr(msg: String) -> FuseError {
@@ -45,7 +55,20 @@ fn gerr(msg: String) -> FuseError {
 }
 
 /// Fuses and compiles a graph.
-pub fn fuse(nodes: &[FuseNode], outputs: &[Port], backend: Backend) -> Result<std::sync::Arc<crate::AudioShader>, FuseError> {
+#[inline(always)]
+pub fn fuse(nodes: &[FuseNode], outputs: &[Port], backend: Backend) -> Result<crate::AudioShaderRef, FuseError> {
+    let views: Vec<crate::boundary::FuseNodeView<'_>> = nodes.iter().map(|node| {
+        crate::boundary::FuseNodeView { name: node.name, code: node.code, inputs: &node.inputs }
+    }).collect();
+    let mut compiled = crate::boundary::compile_fused(&views, outputs, backend);
+    if let Some(shader) = compiled.take_shader() {
+        return Ok(shader);
+    }
+    let error = compiled.error(0);
+    Err(FuseError { node: compiled.node(), error: ShaderError::new(error.start, error.end, error.message.to_string()) })
+}
+
+pub(crate) fn fuse_impl(nodes: &[FuseNode], outputs: &[Port], backend: Backend) -> Result<std::sync::Arc<crate::AudioShaderBody>, FuseError> {
     let (items, bases) = fuse_items(nodes, outputs)?;
     crate::compile_items(&items, bases.last().map_or(0, |b| b.1 + 64), backend, false).map_err(|e| {
         let e = e.into_iter().next().unwrap();

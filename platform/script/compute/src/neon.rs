@@ -2135,6 +2135,13 @@ fn compile_words(p: &Program, lanes: u32) -> Option<(Vec<u32>, u32)> {
         em.stmt(s);
     }
     em.stmt(sh.element);
+    // The run's counted work: the lanes' counts, summed, into its ctx word.
+    if let Some((var, word)) = sh.post {
+        let r = em.src(Ent::Var(var.0), VS0);
+        em.e(0x4EB1_B800 | (r as u32) << 5 | VS0 as u32); // addv s31, vR.4s
+        em.e(v::umov_w(9, VS0, 0));
+        em.e(0xB900_0000 | word << 10 | 9); // str w9, [x0, #4 * word]
+    }
     sub_sp(&mut em, true);
     for (a, b) in [(14u32, 15u32), (12, 13), (10, 11), (8, 9)] {
         // ldp qa, qb, [sp], #32

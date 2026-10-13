@@ -3,8 +3,10 @@
 //! and init-time budgets, the IR validator as a panic-free barrier, and
 //! cancellation reaching running native code.
 
+use makepad_script_compute_sched::kernel::KernelExt;
 use makepad_script_compute::ir::{self, Bin, Block, Cmp, Op, Program, Region, Regions, Stmt, Ty, Un, Val, Var};
-use makepad_script_compute::kernel::{compile, compile_with, KernelError};
+use makepad_script_compute::kernel::{compile, compile_with};
+use makepad_script_compute_sched::kernel::{KernelError};
 use makepad_script_compute::Backend;
 use std::time::{Duration, Instant};
 
@@ -144,7 +146,7 @@ fn a_call_stops_past_its_counted_work() {
     let mut c = k.call();
     c.output("o", &mut out).unwrap();
     // The worst case bounds what a call counts.
-    let worst = makepad_script_compute::admission::element_ops(&k) * 1000;
+    let worst = makepad_script_compute::cost::element_ops(&k) * 1000;
     let used = c.run(1000).unwrap().work;
     assert!(used > 0 && used <= worst, "{used} of {worst}");
     c.set_work_limit(used / 100);
@@ -293,6 +295,24 @@ fn validator_fuzz_never_panics_and_valid_programs_run() {
                 assert!(g0[..2].iter().chain(&g0[4..]).chain(&g1[..2]).chain(&g1[5..]).all(|w| *w == 0xDEAD), "native wrote outside a buffer");
                 assert_eq!(nshared, shared, "native wrote shared tables");
             }
+            #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+            if let Some(code) = makepad_script_compute::native::compile(&p) {
+                let mut nctx = vec![0u32; 8];
+                let mut nstate = vec![0u32; 4];
+                let nshared = vec![0u32; 4];
+                let mut g0 = [0xDEADu32; 6];
+                let mut g1 = [0xDEADu32; 7];
+                g0[2..4].fill(0);
+                g1[2..5].fill(0);
+                let table = [g0[2..].as_mut_ptr() as u64, 2, g1[2..].as_mut_ptr() as u64, 3];
+                unsafe { code.run_kernel(nctx.as_mut_ptr(), nstate.as_mut_ptr(), nshared.as_ptr() as *mut u32, table.as_ptr(), 1) };
+                assert_eq!(&g0[2..4], &[0, 0], "native wrote a read-only buffer");
+                assert_eq!(&g1[2..5], &b1, "native and interpreter disagree on the buffer");
+                assert_eq!(nctx, ctx, "native and interpreter disagree on ctx");
+                assert_eq!(nstate, state, "native and interpreter disagree on state");
+                assert!(g0[..2].iter().chain(&g0[4..]).chain(&g1[..2]).chain(&g1[5..]).all(|w| *w == 0xDEAD), "native wrote outside a buffer");
+                assert_eq!(nshared, shared, "native wrote shared tables");
+            }
         }
     }
     assert!(valid > 100, "the fuzzer produced only {} valid programs", valid);
@@ -332,12 +352,10 @@ fn cancel_stops_a_running_kernel_within_milliseconds() {
 
 #[test]
 fn emit_takes_layout_records() {
-    use makepad_script_compute::kernel::{compact, FieldTy, Layout, LayoutField};
-    let seg = Layout {
-        name: "Seg".into(),
-        stride: 6,
-        fields: vec![LayoutField { name: "a".into(), ty: FieldTy::Vec3, offset: 0 }, LayoutField { name: "w".into(), ty: FieldTy::F32, offset: 4 }],
-    };
+    use makepad_script_compute::boundary::{LayoutFieldView, LayoutView};
+    use makepad_script_compute::kernel::FieldTy;
+use makepad_script_compute_sched::kernel::{compact};
+    let seg = LayoutView { name: "Seg", stride: 6, fields: &[LayoutFieldView { name: "a", ty: FieldTy::Vec3, offset: 0 }, LayoutFieldView { name: "w", ty: FieldTy::F32, offset: 4 }] };
     let src = "let s = emit_buffer(Seg, 2)\nfn primitive(i) { let r = Seg{}\n r.a = vec3(float(i), 1.0, 2.0)\n r.w = 0.5\n emit(s, r) }";
     let k = compile_with(src, &[seg], Backend::Native).unwrap_or_else(|e| panic!("{:?}", e));
     let mut data = vec![0.0f32; 3 * 2 * 6];

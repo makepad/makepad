@@ -19,6 +19,7 @@
 //! work ran beside it, and a runaway loop still stops at its instruction count.
 //! A write into a frozen object is an ordinary script error (`Immutable`),
 //! reported with its source location.
+use makepad_relax_api::relax_api;
 
 use crate::array::ScriptArrayStorage;
 use crate::heap::{ScriptAllocationReport, ScriptHeap};
@@ -26,6 +27,7 @@ use crate::value::ScriptValue;
 use crate::vm::ScriptVm;
 
 /// The limits of one evaluation.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvalLimits {
     pub instructions: usize,
@@ -58,12 +60,19 @@ impl EvalLimits {
 }
 
 /// What a bounded evaluation used, and the limit it hit, if any.
+#[relax_api(handle)]
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EvalReport {
     pub instructions: usize,
     pub heap: ScriptAllocationReport,
     /// The limit that stopped the evaluation (its script error message).
     pub limit: Option<String>,
+}
+
+#[relax_api]
+impl EvalReport {
+    #[relax_api]
+    pub fn limit(&self) -> Option<&str> { self.limit.as_deref() }
 }
 
 /// Script errors that come from a limit (uncatchable resource failures).
@@ -81,6 +90,7 @@ fn limit_message(error: &str) -> bool {
     .any(|k| error.contains(k))
 }
 
+#[relax_api]
 impl ScriptVm<'_> {
     /// Runs `f` (one evaluation of document code) under `limits`. Nested
     /// bounds only narrow. Errors are captured, not printed: the report's
@@ -88,15 +98,32 @@ impl ScriptVm<'_> {
     /// script errors are left in the capture sink for the host
     /// (`take_errors`).
     pub fn eval_bounded<R>(&mut self, limits: &EvalLimits, f: impl FnOnce(&mut ScriptVm) -> R) -> (R, EvalReport) {
+        unsafe extern "C-unwind" fn run<R, F: FnOnce(&mut ScriptVm) -> R>(ctx: *mut u8, vm: *mut ScriptVm) {
+            let (f, result) = &mut *(ctx as *mut (Option<F>, Option<R>));
+            *result = Some(f.take().unwrap()(&mut *vm));
+        }
+        fn call<R, F: FnOnce(&mut ScriptVm) -> R>(vm: &mut ScriptVm, limits: &EvalLimits, f: F) -> (R, EvalReport) {
+            let mut state = (Some(f), None::<R>);
+            let report = unsafe { vm.eval_bounded_with(limits, &mut state as *mut _ as *mut u8, run::<R, F>) };
+            (state.1.unwrap(), report)
+        }
+        call(self, limits, f)
+    }
+
+    /// Runs the callback synchronously under the same limits as `eval_bounded`.
+    /// # Safety
+    /// `ctx` must be valid for `run`, which is called exactly once and must not retain the VM pointer.
+    #[relax_api]
+    pub unsafe fn eval_bounded_with(&mut self, limits: &EvalLimits, ctx: *mut u8, run: unsafe extern "C-unwind" fn(*mut u8, *mut ScriptVm)) -> EvalReport {
         if self.bx.captured_errors.is_none() {
             self.bx.captured_errors = Some(Vec::new());
         }
         let before = self.bx.captured_errors.as_ref().map_or(0, |e| e.len());
         let strings_after = std::mem::replace(&mut self.bx.heap.charge_native_strings_after, true);
-        let ((r, heap), instructions) = {
+        let (((), heap), instructions) = {
             let r = self.with_instruction_limit(limits.instructions, |vm| {
                 vm.with_stack_value_limit(limits.stack_values, |vm| {
-                    vm.with_call_frame_limit(limits.call_frames, |vm| vm.with_heap_allocation_limit(limits.heap_bytes, f))
+                    vm.with_call_frame_limit(limits.call_frames, |vm| vm.with_heap_allocation_limit(limits.heap_bytes, |vm| unsafe { run(ctx, vm) }))
                 })
             });
             (r, self.last_limit_consumed())
@@ -112,7 +139,7 @@ impl ScriptVm<'_> {
         if limit.is_none() && instructions >= limits.instructions {
             limit = Some(format!("script instruction limit of {} exceeded", limits.instructions));
         }
-        (r, EvalReport { instructions, heap, limit })
+        EvalReport { instructions, heap, limit }
     }
 
     /// Freezes the document reachable from `roots` (its value, its
@@ -121,6 +148,7 @@ impl ScriptVm<'_> {
     /// entered: static and already-frozen objects (modules, components,
     /// types, APIs), the module table and the host's injected globals.
     /// Returns how many objects and arrays were frozen.
+    #[relax_api]
     pub fn freeze_document(&mut self, roots: &[ScriptValue]) -> (usize, usize) {
         let mut stop: Vec<ScriptValue> = self.bx.injected_globals.values().copied().collect();
         stop.push(self.bx.heap.modules.into());

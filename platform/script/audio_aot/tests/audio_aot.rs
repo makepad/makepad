@@ -2,10 +2,32 @@
 //! bits on every backend and under any host slicing, never allocates on
 //! the audio path, and the math and error paths behave.
 
-use makepad_script_audio_aot::{compile_with, AudioShader, Backend, Instance, Kind, ShaderError, CTX_FRAME};
+use makepad_script_audio_aot::{compile_with, AudioShader, AudioShaderRef, Backend, Instance, Kind, ShaderError, CTX_FRAME};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+
+/// The host's buffers for a shader, allocated as a host does (caller-owned).
+trait Buffers {
+    fn new_ctx(&self, rate: f32) -> Box<[u32]>;
+    fn new_state(&self) -> Box<[u32]>;
+    fn new_scratch(&self) -> Box<[u32]>;
+}
+
+impl Buffers for AudioShader {
+    fn new_ctx(&self, rate: f32) -> Box<[u32]> {
+        let mut ctx = vec![0u32; self.ctx_words()].into_boxed_slice();
+        self.init_ctx(&mut ctx, rate);
+        ctx
+    }
+    fn new_state(&self) -> Box<[u32]> {
+        let mut state = vec![0u32; self.state_words()].into_boxed_slice();
+        self.reset_state(&mut state);
+        state
+    }
+    fn new_scratch(&self) -> Box<[u32]> {
+        vec![0u32; self.scratch_words()].into_boxed_slice()
+    }
+}
 
 // -- a counting allocator (only counts on the thread that armed it) ----------
 
@@ -55,7 +77,7 @@ fn shader_src(name: &str) -> String {
     std::fs::read_to_string(format!("{}/shaders/{}.splash", env!("CARGO_MANIFEST_DIR"), name)).unwrap()
 }
 
-fn build(src: &str, backend: Backend) -> Arc<AudioShader> {
+fn build(src: &str, backend: Backend) -> AudioShaderRef {
     match compile_with(src, backend) {
         Ok(s) => s,
         Err(errs) => {
@@ -70,13 +92,33 @@ const INSTRUMENTS: &[&str] = &["saw_svf", "fm4", "pluck", "wavetable_pad", "fm2_
 const EFFECTS: &[&str] = &["allpass_reverb", "waveshaper4x"];
 
 /// A deterministic test input for effects: a decaying chirp plus clicks.
+/// A sine of `turns` from IEEE +, -, * and floor only (no libm), so the test input -- and
+/// the golden hashes of effects -- are the same bits on every host.
+fn poly_sin(turns: f32) -> f32 {
+    // x in [-0.5, 0.5) turns, then sin(2 pi x) by an odd polynomial on [-0.25, 0.25]
+    let x = turns - (turns + 0.5).floor();
+    let x = if x > 0.25 { 0.5 - x } else if x < -0.25 { -0.5 - x } else { x };
+    let x2 = x * x;
+    x * (6.283_185 + x2 * (-41.341_7 + x2 * (81.605_25 + x2 * (-76.705_86 + x2 * 42.058_69))))
+}
+
+/// exp(-x) for x in [0, 3] from IEEE +, * only (a truncated series of exp(-x/8), cubed
+/// three times).
+fn poly_exp_neg(x: f32) -> f32 {
+    let y = x * 0.125;
+    let e = 1.0 - y + y * y * 0.5 - y * y * y * (1.0 / 6.0) + y * y * y * y * (1.0 / 24.0);
+    let e2 = e * e;
+    let e4 = e2 * e2;
+    e4 * e4
+}
+
 fn test_input(n: usize) -> (Vec<f32>, Vec<f32>) {
     let mut l = vec![0.0; n];
     let mut r = vec![0.0; n];
     for i in 0..n {
         let t = i as f32 / RATE;
-        let env = (-(t % 0.5) * 6.0).exp();
-        l[i] = (t * 220.0 * (1.0 + t) * std::f32::consts::TAU).sin() * env * 0.7;
+        let env = poly_exp_neg((t % 0.5) * 6.0);
+        l[i] = poly_sin(t * 220.0 * (1.0 + t)) * env * 0.7;
         r[i] = if i % 9000 == 0 { 0.9 } else { l[i] * 0.5 };
     }
     (l, r)
@@ -84,13 +126,15 @@ fn test_input(n: usize) -> (Vec<f32>, Vec<f32>) {
 
 /// Renders a scripted performance: two notes, a param change, releases.
 /// `slices` gives the host's call sizes (cycled).
-fn perform(shader: &Arc<AudioShader>, interp: bool, slices: &[usize], total: usize) -> (Vec<f32>, Vec<f32>) {
+fn perform(shader: &AudioShaderRef, interp: bool, slices: &[usize], total: usize) -> (Vec<f32>, Vec<f32>) {
     let mut scratch = shader.new_scratch();
     perform_with(shader, slices, total, &mut |ctx, state, ins, outs, n| {
         if interp {
-            shader.run_interp(ctx, state, &mut scratch, ins, outs, n);
+            let [o0, o1] = outs;
+            shader.run_interp(ctx, state, &mut scratch, ins[0], ins[1], o0, o1, n);
         } else {
-            shader.run(ctx, state, &mut scratch, ins, outs, n);
+            let [o0, o1] = outs;
+            shader.run(ctx, state, &mut scratch, ins[0], ins[1], o0, o1, n);
         }
     })
 }
@@ -99,7 +143,7 @@ fn perform(shader: &Arc<AudioShader>, interp: bool, slices: &[usize], total: usi
 type Run<'a> = dyn FnMut(&mut [u32], &mut [u32], [&[f32]; 2], [&mut [f32]; 2], usize) + 'a;
 
 /// [`perform`] through any runner of the shader's calls.
-fn perform_with(shader: &Arc<AudioShader>, slices: &[usize], total: usize, run: &mut Run) -> (Vec<f32>, Vec<f32>) {
+fn perform_with(shader: &AudioShaderRef, slices: &[usize], total: usize, run: &mut Run) -> (Vec<f32>, Vec<f32>) {
     let mut ctx = shader.new_ctx(RATE);
     let mut state = shader.new_state();
     let mut out_l = vec![0.0f32; total];
@@ -247,11 +291,11 @@ fn native_code_runs_on_another_thread() {
 }
 
 /// An effect that outputs f(l) on the left, for checking math intrinsics.
-fn math_probe(expr: &str) -> Arc<AudioShader> {
+fn math_probe(expr: &str) -> AudioShaderRef {
     build(&format!("fn effect(l, r) {{ let x = l\n vec2({}, 0.0) }}", expr), Backend::Native)
 }
 
-fn probe(s: &Arc<AudioShader>, xs: &[f32], interp: bool) -> Vec<f32> {
+fn probe(s: &AudioShaderRef, xs: &[f32], interp: bool) -> Vec<f32> {
     let mut ctx = s.new_ctx(RATE);
     let mut state = s.new_state();
     let mut scratch = s.new_scratch();
@@ -262,9 +306,9 @@ fn probe(s: &Arc<AudioShader>, xs: &[f32], interp: bool) -> Vec<f32> {
         let at = k * 4096;
         let n = chunk.len();
         if interp {
-            s.run_interp(&mut ctx, &mut state, &mut scratch, [chunk, &zeros[..n]], [&mut out[at..at + n], &mut other[at..at + n]], n);
+            s.run_interp(&mut ctx, &mut state, &mut scratch, chunk, &zeros[..n], &mut out[at..at + n], &mut other[at..at + n], n);
         } else {
-            s.run(&mut ctx, &mut state, &mut scratch, [chunk, &zeros[..n]], [&mut out[at..at + n], &mut other[at..at + n]], n);
+            s.run(&mut ctx, &mut state, &mut scratch, chunk, &zeros[..n], &mut out[at..at + n], &mut other[at..at + n], n);
         }
     }
     out
@@ -333,8 +377,8 @@ fn integer_and_edge_ops_match() {
     let r: Vec<f32> = (0..n).map(|i| ((i * 104729) % 1001) as f32 / 1000.0).collect();
     let (mut a0, mut a1) = (vec![0.0; n], vec![0.0; n]);
     let (mut b0, mut b1) = (vec![0.0; n], vec![0.0; n]);
-    s.run(&mut ctx, &mut st_a, &mut scratch, [&l, &r], [&mut a0, &mut a1], n);
-    s.run_interp(&mut ctx, &mut st_b, &mut scratch, [&l, &r], [&mut b0, &mut b1], n);
+    s.run(&mut ctx, &mut st_a, &mut scratch, &l, &r, &mut a0, &mut a1, n);
+    s.run_interp(&mut ctx, &mut st_b, &mut scratch, &l, &r, &mut b0, &mut b1, n);
     assert_eq!(bits(&a0), bits(&b0));
     assert_eq!(bits(&a1), bits(&b1));
     assert_eq!(st_a, st_b);
@@ -359,8 +403,8 @@ fn register_pressure_spills_exactly() {
     let mut scratch = s.new_scratch();
     let (mut a0, mut a1) = (vec![0.0; 3000], vec![0.0; 3000]);
     let (mut b0, mut b1) = (vec![0.0; 3000], vec![0.0; 3000]);
-    s.run(&mut ctx, &mut sa, &mut scratch, [&l, &r], [&mut a0, &mut a1], 3000);
-    s.run_interp(&mut ctx, &mut sb, &mut scratch, [&l, &r], [&mut b0, &mut b1], 3000);
+    s.run(&mut ctx, &mut sa, &mut scratch, &l, &r, &mut a0, &mut a1, 3000);
+    s.run_interp(&mut ctx, &mut sb, &mut scratch, &l, &r, &mut b0, &mut b1, 3000);
     assert_eq!(bits(&a0), bits(&b0));
     assert_eq!(bits(&a1), bits(&b1));
 }
@@ -405,8 +449,8 @@ fn control_flow_matches() {
     let mut scratch = s.new_scratch();
     let (mut a0, mut a1) = (vec![0.0; 6000], vec![0.0; 6000]);
     let (mut b0, mut b1) = (vec![0.0; 6000], vec![0.0; 6000]);
-    s.run(&mut ctx, &mut sa, &mut scratch, [&l, &r], [&mut a0, &mut a1], 4096);
-    s.run_interp(&mut ctx, &mut sb, &mut scratch, [&l, &r], [&mut b0, &mut b1], 4096);
+    s.run(&mut ctx, &mut sa, &mut scratch, &l, &r, &mut a0, &mut a1, 4096);
+    s.run_interp(&mut ctx, &mut sb, &mut scratch, &l, &r, &mut b0, &mut b1, 4096);
     assert_eq!(bits(&a0[..4096]), bits(&b0[..4096]));
     assert_eq!(bits(&a1[..4096]), bits(&b1[..4096]));
     assert!(a1[4095] > 100.0, "side effects of && / || ran: {}", a1[4095]);
@@ -504,7 +548,7 @@ fn fused_instrument_chain_equals_the_nodes_run_one_by_one() {
         Backend::Native,
     )
     .unwrap_or_else(|e| panic!("{:?}", e));
-    assert!(fused.param_index("lead_cutoff").is_some() && fused.param_index("drive_drive").is_some());
+    assert!(["lead_cutoff", "drive_drive"].iter().all(|name| fused.params().iter().any(|p| p.name == *name)));
     let n = 20000;
     // Fused: one program per voice.
     let mut f = Instance::new(fused.clone(), RATE);
@@ -717,28 +761,28 @@ const GOLDEN: &[(&str, u64)] = &[
     ("wavetable_pad/interp", 0x978a07348239c3bf),
     ("fm2_svf", 0x0d7fe18dcc2fd471),
     ("fm2_svf/interp", 0x0d7fe18dcc2fd471),
-    ("allpass_reverb", 0xebe5fd62eeab7d0a),
-    ("allpass_reverb/interp", 0xebe5fd62eeab7d0a),
-    ("waveshaper4x", 0xbaf761b5859d7176),
-    ("waveshaper4x/interp", 0xbaf761b5859d7176),
+    ("allpass_reverb", 0xe9c4307947d62634),
+    ("allpass_reverb/interp", 0xe9c4307947d62634),
+    ("waveshaper4x", 0x7aefcc9015b0e175),
+    ("waveshaper4x/interp", 0x7aefcc9015b0e175),
     ("lib/acid", 0xc785649af8f0a525),
     ("lib/acid/interp", 0xc785649af8f0a525),
     ("lib/analog_poly", 0xa14f9b3d160ebab5),
     ("lib/analog_poly/interp", 0xa14f9b3d160ebab5),
-    ("lib/drive", 0x279d54cd64bcb051),
-    ("lib/drive/interp", 0x279d54cd64bcb051),
-    ("lib/echo", 0xabd15e701858205a),
-    ("lib/echo/interp", 0xabd15e701858205a),
+    ("lib/drive", 0x248a1620a927ba0c),
+    ("lib/drive/interp", 0x248a1620a927ba0c),
+    ("lib/echo", 0x22a372ef7bc88a7c),
+    ("lib/echo/interp", 0x22a372ef7bc88a7c),
     ("lib/epiano", 0x580aad531bfdd513),
     ("lib/epiano/interp", 0x580aad531bfdd513),
-    ("lib/flanger", 0xa207408b506acf19),
-    ("lib/flanger/interp", 0xa207408b506acf19),
-    ("lib/gated_verb", 0x19c4947f0605f7ef),
-    ("lib/gated_verb/interp", 0x19c4947f0605f7ef),
+    ("lib/flanger", 0x5c5bb8a10d767dad),
+    ("lib/flanger/interp", 0x5c5bb8a10d767dad),
+    ("lib/gated_verb", 0xd496809a931be2ec),
+    ("lib/gated_verb/interp", 0xd496809a931be2ec),
     ("lib/modal_bell", 0x628b207e9249e181),
     ("lib/modal_bell/interp", 0x628b207e9249e181),
-    ("lib/phaser", 0x3d92343036a714f3),
-    ("lib/phaser/interp", 0x3d92343036a714f3),
+    ("lib/phaser", 0x003e4717b331e31d),
+    ("lib/phaser/interp", 0x003e4717b331e31d),
     ("lib/pluck", 0x44ccdb790d68505d),
     ("lib/pluck/interp", 0x44ccdb790d68505d),
     ("lib/supersaw", 0xc259b05b8867b5f2),
@@ -882,7 +926,7 @@ impl WasmRunner {
     }
 }
 
-fn perform_wasm(shader: &Arc<AudioShader>, slices: &[usize], total: usize) -> (Vec<f32>, Vec<f32>) {
+fn perform_wasm(shader: &AudioShaderRef, slices: &[usize], total: usize) -> (Vec<f32>, Vec<f32>) {
     let mut w = WasmRunner::new(shader);
     perform_with(shader, slices, total, &mut |ctx, state, ins, outs, n| w.run(ctx, state, ins, outs, n))
 }
@@ -923,7 +967,7 @@ fn a_counting_build_plays_the_same_bits_and_counts_the_same_ops() {
     for name in INSTRUMENTS {
         let src = shader_src(name);
         let plain = build(&src, Backend::Native);
-        let play = |s: &Arc<AudioShader>| {
+        let play = |s: &AudioShaderRef| {
             let mut i = Instance::new(s.clone(), 48000.0);
             let (mut l, mut r) = (vec![0.0f32; 9000], vec![0.0f32; 9000]);
             i.note_on(50.0, 0.9, 3);

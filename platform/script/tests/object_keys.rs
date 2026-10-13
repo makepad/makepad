@@ -9,7 +9,7 @@ use makepad_script::*;
 fn test_vm() -> ScriptVm<'static> {
     let host = Box::leak(Box::new(ScriptVmHost::new((), ())));
     let mut vm = ScriptVm {
-        host,
+        host: host.host_context(),
         bx: Box::new(ScriptVmBase::new()),
     };
     vm.bx.captured_errors = Some(Vec::new());
@@ -18,11 +18,7 @@ fn test_vm() -> ScriptVm<'static> {
 
 fn eval(vm: &mut ScriptVm, name: &str, code: &str) -> ScriptValue {
     vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            file: format!("object_keys_{name}.octoscript"),
-            code: format!("{code}\n;"),
-            ..Default::default()
-        })
+        vm.eval(ScriptMod::new("", "", &format!("object_keys_{name}.octoscript"), 0, 0, &format!("{code}\n;"), &[]))
     })
 }
 
@@ -118,11 +114,7 @@ fn iteration_keys_equal_id_literals() {
 /// so the source ends directly on its last statement.
 fn eval_raw(vm: &mut ScriptVm, name: &str, code: &str) -> (ScriptValue, Vec<String>) {
     let value = vm.with_instruction_limit(500_000, |vm| {
-        vm.eval(ScriptMod {
-            file: format!("object_keys_{name}.octoscript"),
-            code: code.to_string(),
-            ..Default::default()
-        })
+        vm.eval(ScriptMod::new("", "", &format!("object_keys_{name}.octoscript"), 0, 0, &code, &[]))
     });
     (value, vm.take_errors())
 }

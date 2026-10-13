@@ -21,8 +21,11 @@
 //! - Every op is total and has one exact meaning (IEEE f32 without
 //!   fusion except the explicit [`Op::Fma`], wrapping i32, division by zero gives 0, min/max are selects),
 //!   so backends are held BIT-IDENTICAL to [`run`], the reference.
+use makepad_relax_api::relax_api;
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(u8)]
 pub enum Ty {
     F32,
     I32,
@@ -30,13 +33,19 @@ pub enum Ty {
     F64,
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(transparent)]
 pub struct Val(pub u32);
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(transparent)]
 pub struct Var(pub u32);
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(u8)]
 pub enum Region {
     /// Per-instance host words: sample rate, frame, parameter targets.
     Ctx,
@@ -51,7 +60,9 @@ pub enum Region {
     Buf(u8),
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(u8)]
 pub enum Un {
     NegF,
     AbsF,
@@ -93,7 +104,9 @@ pub enum Un {
     LoD,
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(u8)]
 pub enum Bin {
     AddF,
     SubF,
@@ -132,7 +145,9 @@ pub enum Bin {
 }
 
 /// A fused multiply-add's form: one rounding of the exact result.
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(u8)]
 pub enum Fma {
     /// `a * b + c`
     Add,
@@ -144,7 +159,9 @@ pub enum Fma {
     MulAddI,
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[repr(u8)]
 pub enum Cmp {
     Lt,
     Le,
@@ -218,7 +235,9 @@ pub enum Stmt {
 
 /// A host call's buffer slice: host buffer `buf`, `len` words from word
 /// `off` (both clamped to the buffer at run time).
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
 pub struct SliceArg {
     pub buf: u8,
     pub off: Val,
@@ -658,6 +677,7 @@ pub fn bounds(p: &Program) -> Vec<Option<u32>> {
 
 /// The memory and I/O a call runs against. Every I/O slice holds at least
 /// `n` frames.
+#[relax_api(plain)]
 pub struct Io<'a> {
     pub ins: [&'a [f32]; 2],
     pub outs: [&'a mut [f32]; 2],
@@ -667,7 +687,9 @@ pub struct Io<'a> {
 /// once (each writing only its own elements), so the interpreter never makes
 /// a Rust reference over this memory: it reads and writes single words
 /// through relaxed atomics.
+#[relax_api(plain)]
 #[derive(Clone, Copy, Debug)]
+#[repr(C)]
 pub struct RawBuf {
     pub ptr: *mut u32,
     /// Length in words.
