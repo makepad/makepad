@@ -1,8 +1,8 @@
+#[cfg(not(target_os = "android"))]
+use std::{fs::File, io::Read};
 use {
     crate::cx::Cx,
     std::{
-        fs::File,
-        io::prelude::*,
         path::{Path, PathBuf},
         rc::Rc,
         sync::OnceLock,
@@ -83,6 +83,7 @@ pub(crate) fn load_package_paths() -> std::collections::HashMap<String, PathBuf>
 }
 
 /// `crate_name/rest` resolved through the package map, when the crate is in it.
+#[cfg(not(target_os = "android"))]
 fn source_resource_path(
     packages: &std::collections::HashMap<String, PathBuf>,
     path: &Path,
@@ -104,12 +105,19 @@ pub fn read_file_cwd_or_exe_relative(
     packages: &std::collections::HashMap<String, PathBuf>,
     path: impl AsRef<Path>,
 ) -> Option<Vec<u8>> {
+    #[cfg(not(target_os = "android"))]
     fn read(path: &Path) -> Option<Vec<u8>> {
         let mut buffer = Vec::<u8>::new();
         File::open(path).ok()?.read_to_end(&mut buffer).ok()?;
         Some(buffer)
     }
     let path = path.as_ref();
+    #[cfg(target_os = "android")]
+    {
+        let _ = packages;
+        return crate::os::hal::read_asset(path.to_str()?);
+    }
+    #[cfg(not(target_os = "android"))]
     source_resource_path(packages, path).and_then(|p| read(&p))
         .or_else(|| read(path)).or_else(|| read(&exe_relative_path(path)?))
 }

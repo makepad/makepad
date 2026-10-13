@@ -223,11 +223,14 @@ impl SocketStream {
         })
     }
 
-    pub fn connect_capture(_host: &str, _port: &str) -> io::Result<(Self, [u8; 32])> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "self-signed TLS is not available on this target",
-        ))
+    /// TLS without CA validation (self-signed servers); returns the server
+    /// certificate's SHA-256 for a known-hosts check ([`crate::tls::KnownHosts`]).
+    pub fn connect_capture(host: &str, port: &str) -> io::Result<(Self, [u8; 32])> {
+        let inner = crate::backend::connect_platform_socket_stream(host, port, true, true)?;
+        let fingerprint = inner.peer_fingerprint().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Other, "the TLS server presented no certificate")
+        })?;
+        Ok((Self { inner }, fingerprint))
     }
 
     pub fn into_tls(self, _host: &str, _ignore_ssl_cert: bool) -> io::Result<Self> {

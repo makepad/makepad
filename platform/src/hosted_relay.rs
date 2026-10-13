@@ -391,14 +391,9 @@ impl HostRelayServer {
     }
 
     /// Picker answers (they arrive as actions).
-    pub fn on_actions(&mut self, cx: &Cx, actions: &Actions) -> Vec<(u64, HostRelay)> {
+    pub fn on_actions(&mut self, actions: &Actions) -> Vec<(u64, HostRelay)> {
         let mut out = Vec::new();
         for action in actions {
-            // A picked set the worker finished copying (see `materialize`).
-            if let Some(done) = action.downcast_ref::<MaterializedPick>() {
-                out.push((done.client, HostRelay::FileDialog(done.result.clone())));
-                continue;
-            }
             if self.dialogs.is_empty() && self.folder_dialogs.is_empty() {
                 continue;
             }
@@ -443,12 +438,6 @@ impl HostRelayServer {
                 out.push((pending.client, HostRelay::FileDialog(result)));
                 continue;
             }
-            if !pending.save && !pending.folder && paths.iter().any(|p| p.to_string_lossy().starts_with("content://")) {
-                // Copying documents out of a provider can take seconds:
-                // a worker does it and answers through an action.
-                materialize(cx, pending.client, result, paths);
-                continue;
-            }
             result.paths = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
             out.push((pending.client, HostRelay::FileDialog(result)));
         }
@@ -469,92 +458,6 @@ impl HostRelayServer {
     }
 }
 
-/// A picked set a worker finished copying, posted back to the UI thread.
-#[derive(Clone, Debug)]
-struct MaterializedPick {
-    client: u64,
-    result: RelayFileDialogResult,
-}
-
-/// Picked documents a child can open: on Android the picker answers with
-/// `content://` URIs only a JVM can read, so a worker copies each one into
-/// the app's cache (the child runs as the same app and reads it there) and
-/// the answer is posted when all are copied. Each pick gets its own
-/// directory; picks older than a day are removed first.
-#[allow(unused_variables)]
-fn materialize(cx: &Cx, client: u64, mut result: RelayFileDialogResult, paths: Vec<PathBuf>) {
-    #[cfg(target_os = "android")]
-    {
-        use crate::os::linux::android::android_jni;
-        let root = match cx.os_type() {
-            crate::cx::OsType::Android(params) if !params.cache_path.is_empty() => {
-                PathBuf::from(&params.cache_path).join("picked")
-            }
-            _ => {
-                Cx::post_action(MaterializedPick { client, result });
-                return;
-            }
-        };
-        std::thread::spawn(move || {
-            remove_old_picks(&root, std::time::Duration::from_secs(24 * 3600));
-            let stamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let dir = root.join(format!("{stamp}-{}", LiveId::unique().0));
-            let _ = std::fs::create_dir_all(&dir);
-            for p in paths {
-                let uri = p.to_string_lossy().into_owned();
-                if !uri.starts_with("content://") {
-                    result.paths.push(uri);
-                    continue;
-                }
-                let name = pick_file_name(&uri, result.paths.len());
-                let dest = dir.join(name);
-                if unsafe { android_jni::to_java_copy_content_uri(&uri, &dest.to_string_lossy()) } {
-                    result.paths.push(dest.to_string_lossy().into_owned());
-                }
-            }
-            Cx::post_action(MaterializedPick { client, result });
-        });
-        return;
-    }
-    #[allow(unreachable_code)]
-    {
-        result.paths = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
-        Cx::post_action(MaterializedPick { client, result });
-    }
-}
-
-/// A file name for a copied document: the URI's last segment (decoded
-/// spaces), made safe, prefixed with its index so two picks never collide.
-#[cfg(any(target_os = "android", test))]
-fn pick_file_name(uri: &str, index: usize) -> String {
-    let last = uri.rsplit(['/', ':']).next().filter(|n| !n.is_empty()).unwrap_or("document");
-    let clean: String = last
-        .replace("%20", " ")
-        .chars()
-        .map(|c| if c == '/' || c == '\\' || c.is_control() { '_' } else { c })
-        .collect();
-    format!("{index}-{clean}")
-}
-
-#[cfg(target_os = "android")]
-fn remove_old_picks(root: &std::path::Path, max_age: std::time::Duration) {
-    let Ok(entries) = std::fs::read_dir(root) else { return };
-    for entry in entries.flatten() {
-        let old = entry
-            .metadata()
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| t.elapsed().ok())
-            .is_some_and(|age| age > max_age);
-        if old {
-            let _ = std::fs::remove_dir_all(entry.path());
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Child side
 // ---------------------------------------------------------------------------
@@ -564,9 +467,6 @@ impl Cx {
     pub(crate) fn handle_host_relay(&mut self, relay: HostRelay) {
         match relay {
             HostRelay::Http(event) => {
-                #[cfg(target_os = "android")]
-                crate::os::linux::android::android_network::hosted_http_event(&event);
-                #[cfg(not(target_os = "android"))]
                 let _ = event;
             }
             HostRelay::PermissionResult { request_id, permission, status } => {
@@ -644,13 +544,6 @@ mod tests {
         for bad in ["file:///data/x", "content://x", "intent://x#Intent;end", "javascript:1", "noscheme"] {
             assert!(!url_scheme_allowed(bad), "{bad}");
         }
-    }
-
-    #[test]
-    fn copied_picks_get_safe_distinct_names() {
-        assert_eq!(pick_file_name("content://com.android.providers/document/primary%3AA%20b.csv", 0), "0-primary%3AA b.csv");
-        assert_eq!(pick_file_name("content://x/document/", 3), "3-document");
-        assert_ne!(pick_file_name("content://x/a", 0), pick_file_name("content://x/a", 1));
     }
 
     #[test]

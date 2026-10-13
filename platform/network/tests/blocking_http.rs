@@ -83,7 +83,8 @@ fn tight_limits() -> Limits {
         max_trailer_bytes: 64,
         max_body_bytes: 64,
         max_chunk_line_bytes: 16,
-        total_timeout: Duration::from_secs(3),
+        connect_timeout: Duration::from_secs(3),
+        idle_timeout: Duration::from_secs(3),
     }
 }
 
@@ -399,7 +400,7 @@ fn cancel_returns_without_waiting_for_body() {
     let url = url(port, "/slow");
     let worker = thread::spawn(move || {
         request_no_redirect(Request::get(url).cancel_token(token2).limits(Limits {
-            total_timeout: Duration::from_secs(5),
+            idle_timeout: Duration::from_secs(5),
             ..Limits::default()
         }))
     });
@@ -599,7 +600,7 @@ fn header_then_stall_cancel_returns_promptly() {
     let u = url(port, "/stall");
     let worker = thread::spawn(move || {
         request_no_redirect(Request::get(u).cancel_token(token2).limits(Limits {
-            total_timeout: Duration::from_secs(5),
+            idle_timeout: Duration::from_secs(5),
             ..Limits::default()
         }))
     });
@@ -649,7 +650,7 @@ fn trailer_count_cap_is_enforced() {
 #[test]
 fn timed_out_connect_does_not_wedge_later_loopback() {
     let mut limits = Limits::default();
-    limits.total_timeout = Duration::from_millis(150);
+    limits.connect_timeout = Duration::from_millis(150);
     let first = request_no_redirect(Request::get("https://172.16.0.4:1/").limits(limits));
     assert!(
         matches!(first, Err(Error::Timeout) | Err(Error::Connect) | Err(Error::Cancelled)),
@@ -663,4 +664,49 @@ fn timed_out_connect_does_not_wedge_later_loopback() {
     let resp = request_no_redirect(Request::get(url(port, "/"))).expect("loopback after timeout");
     assert_eq!(resp.status, 200);
     assert_eq!(resp.body, b"ok");
+}
+
+#[test]
+fn arriving_bytes_renew_idle_wait_across_headers_and_body_framing() {
+    for response in [
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\nok\r\n0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok",
+    ] {
+        let (listener, port) = listen();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            read_request(&mut stream);
+            for byte in response.bytes() {
+                stream.write_all(&[byte]).unwrap();
+                stream.flush().unwrap();
+                thread::sleep(Duration::from_millis(20));
+            }
+        });
+        let started = std::time::Instant::now();
+        let response = request_no_redirect(Request::get(url(port, "/")).limits(Limits {
+            idle_timeout: Duration::from_millis(250),
+            ..Limits::default()
+        })).expect("progressing response outlives the idle threshold");
+        assert_eq!(response.body, b"ok");
+        assert!(started.elapsed() > Duration::from_millis(250));
+        server.join().unwrap();
+    }
+}
+
+#[test]
+fn silence_after_partial_body_times_out() {
+    let (listener, port) = listen();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        read_request(&mut stream);
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\no").unwrap();
+        stream.flush().unwrap();
+        thread::sleep(Duration::from_millis(600));
+    });
+    expect_err(request_no_redirect(Request::get(url(port, "/")).limits(Limits {
+        idle_timeout: Duration::from_millis(150),
+        ..Limits::default()
+    })), Error::Timeout);
+    server.join().unwrap();
 }

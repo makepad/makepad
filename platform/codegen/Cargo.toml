@@ -1,0 +1,9 @@
+[package]
+name = "makepad-codegen"
+version = "0.1.0"
+edition = "2021"
+description = "Makepad's shared middle and back end: RIR, the tier-0 optimiser, register allocation, x86-64 and AArch64 machine code, the C ABI planner and executable memory. Front ends: Rapid (the Rust dialect) and Splash kernels"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]

@@ -1,7 +1,4 @@
-#[cfg(not(gpusim))]
-use crate::os::apple::apple_sys::ui_hang_sys as sys;
-#[cfg(gpusim)]
-#[path = "../../os/apple/apple_sys/ui_hang_sys.rs"]
+#[path = "macos_sys.rs"]
 mod sys;
 use std::ffi::{c_void, CStr};
 

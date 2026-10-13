@@ -1,6 +1,5 @@
 use crate::*;
 use makepad_script::*;
-use std::any::Any;
 
 pub trait ScriptVmCx {
     fn cx_mut(&mut self) -> &mut Cx;
@@ -9,20 +8,27 @@ pub trait ScriptVmCx {
     fn with_cx_mut<R, F: FnOnce(&mut Cx) -> R>(&mut self, f: F) -> R;
 }
 
-impl ScriptHost for Cx {
-    fn as_any(&self) -> &dyn Any {
-        self
+unsafe impl ScriptHostCapability for Cx {
+    const ID: LiveId = LiveId::from_str("makepad.platform.cx.v1");
+}
+unsafe impl ScriptHostOwner for Cx {
+    unsafe fn query(owner: *mut Self, id: LiveId, standard: bool) -> *mut u8 {
+        if !standard && id == <Cx as ScriptHostCapability>::ID {
+            owner.cast()
+        } else if standard && id == <makepad_script_std::ScriptStd as ScriptHostCapability>::ID {
+            std::ptr::addr_of_mut!((*owner).script_data.std).cast()
+        } else if !standard && id == SCRIPT_HOST_VM_BASE {
+            (*owner)
+                .script_vm
+                .as_deref()
+                .map_or(std::ptr::null_mut(), |base| {
+                    base as *const ScriptVmBase as *mut u8
+                })
+        } else {
+            std::ptr::null_mut()
+        }
     }
-
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-
-    fn script_std(&mut self) -> &mut dyn Any {
-        &mut self.script_data.std
-    }
-
-    fn script_vm_slot(&mut self) -> &mut Option<Box<ScriptVmBase>> {
+    fn vm_slot(&mut self) -> &mut Option<Box<ScriptVmBase>> {
         &mut self.script_vm
     }
 }
@@ -48,10 +54,10 @@ fn assert_vm_slot_free(cx: &Cx) {
 
 impl<'a> ScriptVmCx for ScriptVm<'a> {
     fn cx_mut(&mut self) -> &mut Cx {
-        self.host.as_any_mut().downcast_mut().unwrap()
+        self.host.get_mut().unwrap()
     }
     fn cx(&mut self) -> &Cx {
-        self.host.as_any().downcast_ref().unwrap()
+        self.host.get().unwrap()
     }
     fn with_cx<R, F: FnOnce(&Cx) -> R>(&mut self, f: F) -> R {
         let mut f = Some(f);
@@ -67,6 +73,14 @@ impl<'a> ScriptVmCx for ScriptVm<'a> {
     }
 }
 
+thread_local! {
+    // The placeholder `with_vm_parked` leaves in the caller's `ScriptVm` while the real VM is
+    // back on `Cx`: one per thread, reused, because it is never read (it only fills the slot).
+    // Making a fresh one per park built a whole empty heap (root table, heap tag, module root)
+    // on every script->Cx callback: thousands per second in Stage.
+    static PARKED_PLACEHOLDER: std::cell::Cell<Option<Box<ScriptVmBase>>> = const { std::cell::Cell::new(None) };
+}
+
 /// Park the executing base back onto `Cx` for the duration of `f`, so
 /// native code reached through `f` can `cx.with_vm` again, and take it
 /// back out afterwards — whether `f` returned or unwound. A panic caught
@@ -79,17 +93,20 @@ impl<'a> ScriptVmCx for ScriptVm<'a> {
 /// `Option` slots).
 #[inline(never)]
 fn with_vm_parked(vm: &mut ScriptVm, f: &mut dyn FnMut(&mut Cx)) {
-    let saved_thread_id = vm.bx.threads.current();
-    assert_vm_slot_free(vm.host.as_any().downcast_ref().unwrap());
-    let bx = std::mem::replace(&mut vm.bx, Box::new(ScriptVmBase::empty()));
-    *vm.host.script_vm_slot() = Some(bx);
+    let saved_thread_id = vm.current_thread();
+    assert_vm_slot_free(vm.host.get().unwrap());
+    // a nested park finds the spare taken and makes its own
+    let placeholder = PARKED_PLACEHOLDER.with(|p| p.take()).unwrap_or_else(|| Box::new(ScriptVmBase::empty()));
+    let bx = std::mem::replace(&mut vm.bx, placeholder);
+    vm.host.restore_vm(bx);
     let out = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        f(vm.host.as_any_mut().downcast_mut().unwrap())
+        f(vm.host.get_mut().unwrap())
     }));
-    match (vm.host.script_vm_slot().take(), out) {
+    match (vm.host.take_vm(), out) {
         (Some(bx), Ok(())) => {
-            vm.bx = bx;
-            vm.bx.threads.set_current(saved_thread_id);
+            let placeholder = std::mem::replace(&mut vm.bx, bx);
+            PARKED_PLACEHOLDER.with(|p| p.set(Some(placeholder)));
+            vm.set_current_thread(saved_thread_id);
         }
         (None, Ok(())) => {
             panic!("the closure took the script VM off Cx and never parked it back")
@@ -99,43 +116,58 @@ fn with_vm_parked(vm: &mut ScriptVm, f: &mut dyn FnMut(&mut Cx)) {
             // lost it leaves the placeholder, and the entry above says so.
             if let Some(bx) = bx {
                 vm.bx = bx;
-                vm.bx.threads.set_current(saved_thread_id);
+                vm.set_current_thread(saved_thread_id);
             }
             std::panic::resume_unwind(payload)
         }
     }
 }
 
-impl ScriptVmCx for &mut dyn ScriptHost {
+impl ScriptVmCx for ScriptHostContext<'_> {
     fn cx_mut(&mut self) -> &mut Cx {
-        self.as_any_mut().downcast_mut().unwrap()
+        self.get_mut().unwrap()
     }
     fn cx(&mut self) -> &Cx {
-        self.as_any().downcast_ref().unwrap()
+        self.get().unwrap()
     }
     fn with_cx<R, F: FnOnce(&Cx) -> R>(&mut self, f: F) -> R {
-        let cx: &Cx = self.as_any().downcast_ref().unwrap();
+        let cx: &Cx = self.get().unwrap();
         f(cx)
     }
     fn with_cx_mut<R, F: FnOnce(&mut Cx) -> R>(&mut self, f: F) -> R {
-        let cx: &mut Cx = self.as_any_mut().downcast_mut().unwrap();
+        let cx: &mut Cx = self.get_mut().unwrap();
         f(cx)
     }
 }
 
-impl ScriptVmCx for &mut dyn Any {
-    fn cx_mut(&mut self) -> &mut Cx {
-        self.downcast_mut().unwrap()
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    /// A panic that a platform's event catcher contains must leave the VM on
+    /// `Cx`: otherwise every later script entry is refused as re-entrant.
+    #[test]
+    fn a_panic_in_with_vm_leaves_the_vm_usable() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let out = catch_unwind(AssertUnwindSafe(|| {
+            cx.with_vm(|_vm| panic!("contained panic in a script entry"))
+        }));
+        assert!(out.is_err());
+        assert!(cx.script_vm.is_some(), "the VM came back on unwind");
+        assert_eq!(cx.with_vm(|_vm| 7), 7, "a later entry is not re-entrant");
     }
-    fn cx(&mut self) -> &Cx {
-        self.downcast_ref().unwrap()
-    }
-    fn with_cx<R, F: FnOnce(&Cx) -> R>(&mut self, f: F) -> R {
-        let cx: &Cx = self.downcast_ref().unwrap();
-        f(cx)
-    }
-    fn with_cx_mut<R, F: FnOnce(&mut Cx) -> R>(&mut self, f: F) -> R {
-        let cx: &mut Cx = self.downcast_mut().unwrap();
-        f(cx)
+
+    /// The same through `with_cx_mut`, which parks the VM on `Cx` while its
+    /// closure runs.
+    #[test]
+    fn a_panic_in_with_cx_mut_leaves_the_vm_usable() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let out = catch_unwind(AssertUnwindSafe(|| {
+            cx.with_vm(|vm| vm.with_cx_mut(|_cx| panic!("contained panic in a cx borrow")))
+        }));
+        assert!(out.is_err());
+        assert!(cx.script_vm.is_some());
+        assert_eq!(cx.with_vm(|_vm| 7), 7);
     }
 }

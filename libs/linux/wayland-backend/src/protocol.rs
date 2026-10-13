@@ -218,7 +218,7 @@ pub struct ProtocolError {
 ///
 /// This is a ad-hoc number trying to reach a good balance between avoiding too many allocations
 /// and keeping the stack size of `Message` small.
-// Note: Keep in sync with `wayland_scanner::common::gen_write_body`.
+// Note: Keep in sync with `INLINE_ARGS` in tools/wayland_codegen/src/messages.rs.
 pub const INLINE_ARGS: usize = 4;
 
 /// Represents a message that has been sent from some object.

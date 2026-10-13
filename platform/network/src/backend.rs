@@ -12,12 +12,11 @@ mod android;
 pub(crate) use self::android::connect_platform_socket_stream;
 #[cfg(target_os = "android")]
 pub use self::android::{
-    clear_platform_backend, clear_platform_socket_factory, register_platform_backend,
-    register_platform_socket_factory, PlatformSocketFactory, PlatformSocketStream,
+    clear_platform_socket_factory, register_platform_socket_factory, PlatformSocketFactory, PlatformSocketStream,
 };
 #[cfg(any(target_os = "ios", target_os = "macos", target_os = "tvos"))]
 pub mod apple;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 // Linux socket workers are native-only and never compiled into a web app.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod linux;
@@ -169,14 +168,8 @@ pub fn default_backend() -> Arc<dyn NetworkBackend> {
     web::create_backend()
 }
 
-#[cfg(all(not(target_arch = "wasm32"), target_os = "android"))]
-pub fn default_backend() -> Arc<dyn NetworkBackend> {
-    android::create_backend()
-}
-
 #[cfg(all(
     not(target_arch = "wasm32"),
-    not(target_os = "android"),
     target_os = "windows"
 ))]
 pub fn default_backend() -> Arc<dyn NetworkBackend> {
@@ -185,7 +178,6 @@ pub fn default_backend() -> Arc<dyn NetworkBackend> {
 
 #[cfg(all(
     not(target_arch = "wasm32"),
-    not(target_os = "android"),
     not(target_os = "windows"),
     any(target_os = "ios", target_os = "macos", target_os = "tvos")
 ))]
@@ -195,10 +187,9 @@ pub fn default_backend() -> Arc<dyn NetworkBackend> {
 
 #[cfg(all(
     not(target_arch = "wasm32"),
-    not(target_os = "android"),
     not(target_os = "windows"),
     not(any(target_os = "ios", target_os = "macos", target_os = "tvos")),
-    target_os = "linux"
+    any(target_os = "linux", target_os = "android")
 ))]
 pub fn default_backend() -> Arc<dyn NetworkBackend> {
     linux::create_backend()

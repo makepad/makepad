@@ -1,14 +1,6 @@
 use crate::event::game_input::GameInputState;
 
-#[cfg(any(
-    gpusim,
-    not(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "tvos"
-    ))
-))]
+#[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
 use crate::cx::Cx;
 
 pub trait CxGameInputApi {
@@ -47,20 +39,11 @@ pub trait CxGameInputApi {
     }
 }
 
-#[cfg(any(
-    gpusim,
-    not(any(
-        target_os = "windows",
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "tvos"
-    ))
-))]
+#[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
 /// These platforms have no native game-input backend, but an app hosted by
 /// Studio still gets controllers: Studio reads them and forwards the state, so
 /// a Linux app run from Studio on a machine whose Studio can see a pad works
-/// even though the same app run standalone would see nothing. The gpusim
-/// backend also has no native game input and uses the same remote fallback.
+/// even though the same app run standalone would see nothing.
 impl CxGameInputApi for Cx {
     fn game_input_state(&mut self, index: usize) -> Option<&GameInputState> {
         self.game_input_remote.get(index)

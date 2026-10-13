@@ -5,14 +5,22 @@
 
 use crate::cx::Cx;
 use crate::cx_api::CxOsApi;
-use crate::event::{Event, KeyCode, MouseButton, PinchPhase, TouchState};
+use crate::event::{DigitDevice, Event, KeyCode, MouseButton, PinchPhase, TouchState};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const QUIET_PERIOD: Duration = Duration::from_secs(2);
+
+/// Advances on every native input. A number of its own (not inside the `Cx`), so the endpoint's
+/// command threads can stamp every answer with it without asking the UI thread.
+static USER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// The user sequence as the command threads see it.
+pub(crate) fn user_seq_now() -> u64 {
+    USER_SEQ.load(Ordering::Acquire)
+}
 
 /// What the person has done to this instance natively, and what remote input
 /// is in flight. Owned by the `Cx`, so an instance's bookkeeping lives and
@@ -30,9 +38,6 @@ pub(crate) struct RemoteActivity {
     pinching: bool,
     remote_buttons: Vec<MouseButton>,
     remote_keys: Vec<KeyCode>,
-    /// Advances on every native input; the remote service shares this
-    /// handle with its request threads for headers and conflict checks.
-    seq: Arc<AtomicU64>,
     /// True while an injected event is being dispatched (see
     /// `remote::remote_input_scope`); shared so the scope guard needs no
     /// borrow of the `Cx` across the dispatch.
@@ -41,12 +46,7 @@ pub(crate) struct RemoteActivity {
 
 impl RemoteActivity {
     pub(crate) fn user_seq(&self) -> u64 {
-        self.seq.load(Ordering::Acquire)
-    }
-
-    /// The counter the HTTP threads read.
-    pub(crate) fn seq_handle(&self) -> Arc<AtomicU64> {
-        self.seq.clone()
+        user_seq_now()
     }
 
     /// Pointer, touch, drag and pinch input has a release the window server
@@ -119,6 +119,7 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
         return;
     }
     let remote = cx.remote_activity.remote_input.get();
+    let cancel_taken_away = matches!(event, Event::FingerCancel(e) if cx.fingers.press_taken_away(e.digit_id));
     let activity = &mut cx.remote_activity;
     if remote {
         match event {
@@ -130,6 +131,11 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
             Event::MouseUp(event) => activity
                 .remote_buttons
                 .retain(|button| *button != event.button),
+            Event::FingerCancel(event) if cancel_taken_away => {
+                if let DigitDevice::Mouse { button } = event.device {
+                    activity.remote_buttons.retain(|held| *held != button);
+                }
+            }
             Event::KeyDown(event) => {
                 if !activity.remote_keys.contains(&event.key_code) {
                     activity.remote_keys.push(event.key_code);
@@ -171,6 +177,14 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
         Event::KeyUp(event) => {
             activity.keys.retain(|key| *key != event.key_code);
             ("key_up", None)
+        }
+        Event::FingerCancel(event) if cancel_taken_away => {
+            match event.device {
+                DigitDevice::Touch { uid } => activity.touches.retain(|touch| *touch != (event.window_id.id(), uid)),
+                DigitDevice::Mouse { button } => activity.buttons.retain(|held| *held != (event.window_id.id(), button.bits())),
+                _ => {}
+            }
+            ("pointer_cancel", Some(event.window_id.id()))
         }
         Event::TouchUpdate(event) => {
             let mut changed = false;
@@ -225,7 +239,7 @@ pub(crate) fn note_user_event(cx: &mut Cx, event: &Event) {
     activity.kind = kind;
     activity.window = window;
     activity.last_input = Some(Instant::now());
-    activity.seq.fetch_add(1, Ordering::Release);
+    USER_SEQ.fetch_add(1, Ordering::Release);
     if activity.remote_buttons.is_empty() && activity.remote_keys.is_empty() {
         return;
     }

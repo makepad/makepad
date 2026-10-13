@@ -13,6 +13,7 @@ pub mod mpsc;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod plain_web_socket;
 pub mod runtime;
+pub mod runtime_handle;
 pub mod socket_stream;
 // TLS server and pinned identities on each OS's own TLS stack (native only).
 #[cfg(not(target_arch = "wasm32"))]
@@ -37,6 +38,7 @@ pub use crate::http_server::{
     HttpServerResponseSender,
 };
 pub use crate::runtime::{NetworkConfig, NetworkRuntime};
+pub use crate::runtime_handle::NetworkRuntimeHandle;
 pub use crate::socket_stream::SocketStream;
 pub use crate::types::{
     HttpError, HttpMethod, HttpProgress, HttpRequest, HttpResponse, NetworkError, NetworkResponse,
@@ -58,9 +60,7 @@ pub use makepad_error_log;
 
 #[cfg(target_os = "android")]
 pub use crate::backend::{
-    clear_platform_backend as clear_android_backend_shim,
     clear_platform_socket_factory as clear_android_socket_stream_factory_shim,
-    register_platform_backend as register_android_backend_shim,
     register_platform_socket_factory as register_android_socket_stream_factory_shim,
     PlatformSocketFactory as AndroidSocketStreamFactory,
     PlatformSocketStream as AndroidSocketStream,

@@ -184,6 +184,8 @@ mod apple_decoder;
 mod apple_encoder;
 #[cfg(target_vendor = "apple")]
 mod apple_intra_frame;
+#[cfg(target_vendor = "apple")]
+mod apple_texture_intake;
 // Pure Rust and portable, but only the macOS still-writer uses it so far.
 #[cfg(target_vendor = "apple")]
 mod mp4_single_frame;
@@ -214,6 +216,135 @@ use linux_encoder::LinuxVideoFileEncoder as OsVideoFileEncoder;
 
 #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
 const UNSUPPORTED: &str = "video file codec is not implemented on this platform yet";
+
+// ---------------------------------------------------------------------------
+// Pictures from shared GPU textures
+// ---------------------------------------------------------------------------
+
+#[cfg(target_vendor = "apple")]
+pub use apple_texture_intake::GpuPicture;
+
+/// A picture ready for the encoder, in GPU memory (see [`GpuPictureMaker`]).
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+pub struct GpuPicture {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Linux: a picture is the region read back from the shared texture once, as
+/// NV12 (the Linux encoder, x264, takes CPU memory anyway).
+#[cfg(target_os = "linux")]
+pub struct GpuPicture {
+    pub width: u32,
+    pub height: u32,
+    nv12: Vec<u8>,
+}
+
+/// Windows: a picture is the region copied on the GPU into a texture of its own (BGRA, on the
+/// HAL's shared-texture device); pushing it converts and scales it to the track's NV12 on the
+/// GPU (one D3D11 video-processor blit) for the encoder. No pixel crosses the CPU.
+#[cfg(target_os = "windows")]
+pub struct GpuPicture {
+    pub width: u32,
+    pub height: u32,
+    texture: windows::Win32::Graphics::Direct3D11::ID3D11Texture2D,
+}
+
+// SAFETY: a texture of a multithread-protected device; a recorder makes it on one worker and
+// encodes it on another, never both at once
+#[cfg(target_os = "windows")]
+unsafe impl Send for GpuPicture {}
+
+/// Makes encoder pictures from shared GPU textures: a region of the texture
+/// (the platform's shared-texture handle: an IOSurface id on macOS) copied
+/// and converted to the encoder's format on the GPU, no CPU copy. The
+/// texture may be written again as soon as `picture` returns; the picture
+/// is pushed with [`VideoFileEncoder::push_gpu_picture`] whenever the
+/// caller is ready (a recorder holding pictures for their sound).
+pub struct GpuPictureMaker {
+    #[cfg(target_vendor = "apple")]
+    intake: apple_texture_intake::TextureIntake,
+}
+
+impl GpuPictureMaker {
+    pub fn new() -> Result<GpuPictureMaker, VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return Ok(GpuPictureMaker { intake: apple_texture_intake::TextureIntake::new()? });
+        #[cfg(target_os = "windows")]
+        makepad_hal::shared_texture::prepare();
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        return Ok(GpuPictureMaker {});
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+        return Err(VideoFileError::new("GPU pictures are not implemented on this platform yet"));
+    }
+
+    /// `region` is `x, y, width, height` of the texture; its sides even.
+    pub fn picture(&mut self, handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
+        if region[2] % 2 != 0 || region[3] % 2 != 0 {
+            return Err(VideoFileError::new(format!("a {}x{} picture cannot be NV12 (its sides must be even)", region[2], region[3])));
+        }
+        #[cfg(target_vendor = "apple")]
+        return unsafe { self.intake.picture(handle, region) };
+        #[cfg(target_os = "linux")]
+        return read_picture(handle, region);
+        #[cfg(target_os = "windows")]
+        return makepad_hal::shared_texture::picture(handle, region)
+            .map(|texture| GpuPicture { width: region[2], height: region[3], texture })
+            .map_err(|e| VideoFileError::new(format!("picture of shared texture {handle:#x}: {e}")));
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+        {
+            let _ = handle;
+            return Err(VideoFileError::new("GPU pictures are not implemented on this platform yet"));
+        }
+    }
+}
+
+/// The region's BGRA pixels of a shared texture. Linux: `handle` is a DMA-BUF
+/// registered with `makepad_hal::dmabuf::copy` (a frame ring's slot).
+#[cfg(target_os = "linux")]
+fn read_shared_bgra(handle: u64, region: [u32; 4], out: &mut [u8]) -> bool {
+    makepad_hal::dmabuf::hal_dmabuf_read(handle, &region, out) == out.len() as i64
+}
+
+/// A picture of a shared texture's region, read back once and made NV12.
+#[cfg(target_os = "linux")]
+fn read_picture(handle: u64, region: [u32; 4]) -> Result<GpuPicture, VideoFileError> {
+    let (width, height) = (region[2], region[3]);
+    let mut bgra = vec![0u8; width as usize * height as usize * 4];
+    if !read_shared_bgra(handle, region, &mut bgra) {
+        return Err(VideoFileError::new(format!("cannot read shared texture {handle} {region:?}")));
+    }
+    for px in bgra.chunks_exact_mut(4) {
+        px.swap(0, 2);
+    }
+    let mut nv12 = Vec::new();
+    nv12::rgbx_to_nv12(&bgra, width, height, 4, &mut nv12);
+    Ok(GpuPicture { width, height, nv12 })
+}
+
+/// Nearest-sample an NV12 picture to `width` x `height` (both even).
+#[cfg(target_os = "linux")]
+fn nv12_resample(src: &[u8], sw: u32, sh: u32, width: u32, height: u32) -> Vec<u8> {
+    let (sw, sh, w, h) = (sw as usize, sh as usize, width as usize, height as usize);
+    let mut out = vec![0u8; nv12::nv12_frame_size(width, height)];
+    let (y_out, uv_out) = out.split_at_mut(w * h);
+    let (y_in, uv_in) = src.split_at(sw * sh);
+    for y in 0..h {
+        let sy = y * sh / h;
+        for x in 0..w {
+            y_out[y * w + x] = y_in[sy * sw + x * sw / w];
+        }
+    }
+    for y in 0..h / 2 {
+        let sy = y * (sh / 2) / (h / 2);
+        for x in 0..w / 2 {
+            let sx = x * (sw / 2) / (w / 2);
+            uv_out[y * w + x * 2] = uv_in[sy * sw + sx * 2];
+            uv_out[y * w + x * 2 + 1] = uv_in[sy * sw + sx * 2 + 1];
+        }
+    }
+    out
+}
 
 // ---------------------------------------------------------------------------
 // Encoder facade
@@ -256,6 +387,9 @@ impl VideoFileEncoder {
         options: VideoFileEncoderOptions,
         fragment_interval_secs: Option<f64>,
     ) -> Result<Self, VideoFileError> {
+        // Windows: the device frames of shared textures are read on is made before the first one
+        #[cfg(target_os = "windows")]
+        makepad_hal::shared_texture::prepare();
         if options.width == 0
             || options.height == 0
             || options.width % 2 != 0
@@ -367,6 +501,58 @@ impl VideoFileEncoder {
         {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
+        }
+    }
+
+    /// Push a picture made by a [`GpuPictureMaker`] (any time after it was
+    /// made; it stays the caller's).
+    pub fn push_gpu_picture(&mut self, picture: &GpuPicture, pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return self.os.push_gpu_picture(picture, pts_100ns);
+        #[cfg(target_os = "windows")]
+        {
+            let device = makepad_hal::shared_texture::device().map_err(VideoFileError::new)?;
+            self.os.use_nv12_textures(&device)?;
+            let nv12 = makepad_hal::shared_texture::to_nv12(&picture.texture, self.options.width, self.options.height)
+                .map_err(|e| VideoFileError::new(format!("picture to NV12: {e}")))?;
+            return self.os.push_d3d11_texture(&nv12, pts_100ns);
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let (w, h) = (self.options.width, self.options.height);
+            if picture.width == w && picture.height == h {
+                return self.os.push_frame_nv12(&picture.nv12, pts_100ns);
+            }
+            let scaled = nv12_resample(&picture.nv12, picture.width, picture.height, w, h);
+            return self.os.push_frame_nv12(&scaled, pts_100ns);
+        }
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+        {
+            let _ = (picture, pts_100ns);
+            return Err(VideoFileError::new("GPU pictures are not implemented on this platform yet"));
+        }
+    }
+
+    /// Push one frame straight from a shared GPU texture: `handle` is the
+    /// platform's shared-texture handle (an IOSurface id on macOS, what
+    /// `Cx::shared_texture_handle` and the hosted frame rings carry) and
+    /// `region` (`x, y, width, height`) the part of it that is the picture.
+    /// The region is copied and converted on the GPU (see
+    /// [`GpuPictureMaker`]) and scaled to the track's size by the encoder;
+    /// no pixel crosses the CPU. The texture may be written again as soon
+    /// as this returns.
+    pub fn push_frame_shared_texture(&mut self, handle: u64, region: [u32; 4], pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        #[cfg(target_vendor = "apple")]
+        return self.os.push_shared_texture(handle, region, pts_100ns);
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        {
+            let picture = GpuPictureMaker::new()?.picture(handle, region)?;
+            return self.push_gpu_picture(&picture, pts_100ns);
+        }
+        #[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
+        {
+            let _ = (handle, region, pts_100ns);
+            return Err(VideoFileError::new("encoding from a shared texture is not implemented on this platform yet"));
         }
     }
 

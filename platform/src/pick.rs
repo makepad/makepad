@@ -20,7 +20,12 @@
 //! batch exactly as without the feature.
 
 use crate::cx::Cx;
-use crate::texture::{Texture, TextureId};
+use crate::texture::Texture;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::texture::TextureId;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::{draw_list::DrawListId, draw_pass::DrawPassId};
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 
 /// A pick asked for ([`Cx::request_pick`]).
@@ -56,7 +61,9 @@ impl PickImage {
             return 0;
         }
         let at = (y * self.width + x) * 4;
-        let Some(p) = self.bytes.get(at..at + 4) else { return 0 };
+        let Some(p) = self.bytes.get(at..at + 4) else {
+            return 0;
+        };
         p[2] as u32 | (p[1] as u32) << 8 | (p[0] as u32) << 16
     }
 
@@ -87,6 +94,7 @@ impl PickImage {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct PickRequest {
     pub ticket: PickTicket,
     pub texture: Texture,
@@ -101,40 +109,49 @@ pub(crate) struct CxPick {
     /// The id draw calls made now carry.
     pub id: u32,
     pub next_ticket: u64,
+    #[cfg(not(target_arch = "wasm32"))]
     pub requests: Vec<PickRequest>,
     /// Each render target's pick twin (and a depth twin for a pass with
     /// depth), by the target's texture.
+    #[cfg(not(target_arch = "wasm32"))]
     pub twins: HashMap<TextureId, Texture>,
     pub results: Vec<(PickTicket, Result<PickImage, PickError>)>,
     /// While a pick repaint draws.
+    #[cfg(not(target_arch = "wasm32"))]
     pub paint: Option<PickPaint>,
 }
 
 /// A pick repaint in progress.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) struct PickPaint {
-    pub ticket: PickTicket,
-    /// The pass that draws the picked texture (drawn last).
-    pub target: crate::draw_pass::DrawPassId,
-    pub texture: TextureId,
     /// The targets whose twins hold this paint's ids.
     pub painted: std::collections::HashSet<TextureId>,
-    /// Draws whose pick pipeline is still compiling: the image would miss
-    /// them, so it is drawn again on a later repaint.
-    pub not_ready: usize,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl CxPick {
     /// The twin of render target `of` (created on first use): an 8-bit
     /// target of the same size, or a depth target for a depth texture.
-    pub fn twin(&mut self, textures: &mut crate::texture::CxTexturePool, of: TextureId, depth: bool) -> Texture {
+    pub fn twin(
+        &mut self,
+        textures: &mut crate::texture::CxTexturePool,
+        of: TextureId,
+        depth: bool,
+    ) -> Texture {
         if let Some(t) = self.twins.get(&of) {
             return t.clone();
         }
         use crate::texture::{TextureFormat, TextureSize};
         let format = if depth {
-            TextureFormat::DepthD32 { size: TextureSize::Auto, initial: true }
+            TextureFormat::DepthD32 {
+                size: TextureSize::Auto,
+                initial: true,
+            }
         } else {
-            TextureFormat::RenderBGRAu8 { size: TextureSize::Auto, initial: true }
+            TextureFormat::RenderBGRAu8 {
+                size: TextureSize::Auto,
+                initial: true,
+            }
         };
         let t = textures.alloc(format);
         self.twins.insert(of, t.clone());
@@ -199,33 +216,113 @@ impl Cx {
     pub fn request_pick(&mut self, texture: &Texture) -> PickTicket {
         self.pick.next_ticket += 1;
         let ticket = PickTicket(self.pick.next_ticket);
-        if !cfg!(target_os = "macos") {
-            self.pick.results.push((ticket, Err(PickError::Unsupported)));
-            return ticket;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if !self.pick.variants {
+                self.pick.results.push((ticket, Err(PickError::NoVariants)));
+                return ticket;
+            }
+            let id = texture.texture_id();
+            let producer = self.passes.id_iter().find(|pass| {
+                !self.passes.0.is_free(pass.0)
+                    && self.passes[*pass]
+                        .color_textures
+                        .iter()
+                        .any(|c| c.texture.texture_id() == id)
+            });
+            let Some(producer) = producer else {
+                self.pick
+                    .results
+                    .push((ticket, Err(PickError::NotRendered)));
+                return ticket;
+            };
+            self.pick.requests.push(PickRequest {
+                ticket,
+                texture: texture.clone(),
+            });
+            self.repaint_pass(producer);
         }
-        if !self.pick.variants {
-            self.pick.results.push((ticket, Err(PickError::NoVariants)));
-            return ticket;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = texture;
+            self.pick
+                .results
+                .push((ticket, Err(PickError::Unsupported)));
         }
-        let id = texture.texture_id();
-        let producer = self.passes.id_iter().find(|pass| {
-            !self.passes.0.is_free(pass.0) && self.passes[*pass].color_textures.iter().any(|c| c.texture.texture_id() == id)
-        });
-        let Some(producer) = producer else {
-            self.pick.results.push((ticket, Err(PickError::NotRendered)));
-            return ticket;
-        };
-        self.pick.requests.push(PickRequest { ticket, texture: texture.clone() });
-        // (A repaint to draw it in.)
-        self.repaint_pass(producer);
         ticket
     }
 
     /// The pick's image once it is back.
     pub fn take_pick(&mut self, ticket: PickTicket) -> Option<Result<PickImage, PickError>> {
-        #[cfg(target_os = "macos")]
-        self.poll_pick_results();
         let at = self.pick.results.iter().position(|(t, _)| *t == ticket)?;
         Some(self.pick.results.remove(at).1)
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Cx {
+    /// The draw lists a pass draws, its sub-lists too.
+    pub(crate) fn pick_lists(&self, list: DrawListId, out: &mut Vec<DrawListId>) {
+        if out.contains(&list) || self.draw_lists.is_id_freed(list) {
+            return;
+        }
+        out.push(list);
+        let len = self.draw_lists[list].draw_item_order_len();
+        for order in 0..len {
+            let Some(item) = self.draw_lists[list].draw_item_id_at_order_index(order) else {
+                continue;
+            };
+            if let Some(sub) = self.draw_lists[list].draw_items[item].kind.sub_list() {
+                self.pick_lists(sub, out);
+            }
+        }
+    }
+
+    /// `pass` after the passes it samples (depth first): what feeds it.
+    pub(crate) fn pick_feeders(
+        &self,
+        pass: DrawPassId,
+        out: &mut Vec<DrawPassId>,
+        visiting: &mut Vec<DrawPassId>,
+    ) {
+        if out.contains(&pass) || visiting.contains(&pass) || self.passes.0.is_free(pass.0) {
+            return;
+        }
+        let Some(list) = self.passes[pass].main_draw_list_id else {
+            return;
+        };
+        visiting.push(pass);
+        let mut lists = Vec::new();
+        self.pick_lists(list, &mut lists);
+        let mut sampled: Vec<crate::texture::TextureId> = Vec::new();
+        for list in &lists {
+            let items = &self.draw_lists[*list].draw_items;
+            for i in 0..items.len() {
+                let Some(call) = items[i].kind.draw_call() else {
+                    continue;
+                };
+                for t in call.texture_slots.iter().flatten() {
+                    if !sampled.contains(&t.texture_id()) {
+                        sampled.push(t.texture_id());
+                    }
+                }
+            }
+        }
+        for texture in sampled {
+            let producer = self.passes.id_iter().find(|p| {
+                !self.passes.0.is_free(p.0)
+                    && self.passes[*p]
+                        .color_textures
+                        .iter()
+                        .any(|c| c.texture.texture_id() == texture)
+            });
+            if let Some(producer) = producer {
+                self.pick_feeders(producer, out, visiting);
+            }
+        }
+        visiting.pop();
+        if !self.passes[pass].color_textures.is_empty() {
+            out.push(pass);
+        }
     }
 }

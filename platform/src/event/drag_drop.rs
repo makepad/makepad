@@ -108,6 +108,13 @@ pub(crate) enum InternalDragEvent {
 }
 
 impl CxDragDrop {
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn cancel_internal_drag(&mut self) -> bool {
+        let active = self.internal_drag_items.take().is_some();
+        let suspended = self.suspended_drag_items.take().is_some();
+        active || suspended
+    }
+
     pub(crate) fn start_internal_drag(&mut self, items: Vec<DragItem>) {
         assert!(self.internal_drag_items.is_none(), "start drag twice");
         self.internal_drag_items = Some(Arc::new(items));

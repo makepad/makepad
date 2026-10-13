@@ -61,7 +61,8 @@ impl Cx {
         }
 
         self.draw_lists
-            .retire_free_items(&self.task_pool(), self.repaint_id, |os| {
+            .retire_free_items(&self.task_pool(), self.repaint_id, |item| {
+                let os = &mut item.os;
                 if let Some(id) = os.inst_vb_id {
                     array_buffer_ids.push(id);
                     os.inst_vb_generation = os.inst_vb_generation.wrapping_add(1);
@@ -100,6 +101,8 @@ impl Cx {
             pass.paint_dirty = false;
             pass.live_with_parent = false;
             pass.repaint_requested = false;
+            pass.repaint_next = false;
+            pass.time_owed = false;
         }
 
         // Draw-list and pass cleanup above can release their final Texture Rc.
@@ -185,7 +188,7 @@ impl Cx {
         }
         self.draw_shaders.os_shaders.clear();
         for shader in &mut self.draw_shaders.shaders {
-            shader.os_shader_id = None;
+            shader.pipeline_id = None;
         }
         self.os.webgl_shaders_pending = 0;
         self.os.webgl_shaders_waiting = 0;
@@ -274,7 +277,7 @@ impl Cx {
                 };
 
                 let sh = &self.draw_shaders[draw_call.draw_shader_id.index];
-                if sh.os_shader_id.is_none() {
+                if sh.pipeline_id.is_none() {
                     // shader didnt compile somehow
                     continue;
                 }
@@ -289,10 +292,6 @@ impl Cx {
                         .is_some_and(|publication| publication.id() == draw_item.os.retained_failed)
                 {
                     continue;
-                }
-
-                if sh.mapping.uses_time {
-                    self.demo_time_repaint = true;
                 }
 
                 if (draw_call.instance_dirty
@@ -656,12 +655,12 @@ impl Cx {
                 if vao.inst_vb_id != draw_item.os.inst_vb_id
                     || vao.geom_vb_id != geometry.os.vb_id
                     || vao.geom_ib_id != geometry.os.ib_id
-                    || vao.shader_id != sh.os_shader_id
+                    || vao.shader_id != sh.pipeline_id
                     || vao.inst_vb_generation != draw_item.os.inst_vb_generation
                     || vao.geom_vb_generation != geometry.os.vb_generation
                     || vao.geom_ib_generation != geometry.os.ib_generation
                 {
-                    vao.shader_id = sh.os_shader_id.clone();
+                    vao.shader_id = sh.pipeline_id.clone();
                     vao.inst_vb_id = draw_item.os.inst_vb_id;
                     vao.geom_vb_id = geometry.os.vb_id;
                     vao.geom_ib_id = geometry.os.ib_id;
@@ -769,7 +768,7 @@ impl Cx {
                             }
                         })
                         .collect(),
-                    shader_id: sh.os_shader_id.unwrap(),
+                    shader_id: sh.pipeline_id.unwrap(),
                     vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     index_width: geometry.index_width as u32,
                     depth_write: draw_call.options.depth_write,
@@ -824,6 +823,10 @@ impl Cx {
                     .kind
                     .draw_call()
                     .map_or(0, |call| call.uniforms_gen);
+                if sh.mapping.uses_time {
+                    self.demo_time_repaint = true;
+                    self.passes[draw_pass_id].repaint_next = true;
+                }
             }
         }
         /*
@@ -1054,7 +1057,7 @@ impl Cx {
 
         for draw_shader_id in draw_shader_ids {
             if self.draw_shaders.shaders[draw_shader_id]
-                .os_shader_id
+                .pipeline_id
                 .is_some()
             {
                 self.draw_shaders.compile_set.remove(&draw_shader_id);
@@ -1114,17 +1117,17 @@ impl Cx {
                 crate::log!("{}\n{}", vertex, pixel);
             }
 
-            let mut os_shader_id = self.draw_shaders.shaders[draw_shader_id].os_shader_id;
-            if os_shader_id.is_none() {
+            let mut pipeline_id = self.draw_shaders.shaders[draw_shader_id].pipeline_id;
+            if pipeline_id.is_none() {
                 for (index, ds) in self.draw_shaders.os_shaders.iter().enumerate() {
                     if ds.in_vertex == vertex && ds.in_pixel == pixel {
-                        os_shader_id = Some(index);
+                        pipeline_id = Some(index);
                         break;
                     }
                 }
             }
 
-            if os_shader_id.is_none() {
+            if pipeline_id.is_none() {
                 let shp = CxOsDrawShader::new(vertex, pixel);
                 let shader_id = self.draw_shaders.os_shaders.len();
                 self.os.from_wasm(FromWasmCompileWebGLShader {
@@ -1139,10 +1142,10 @@ impl Cx {
                 });
                 self.draw_shaders.os_shaders.push(shp);
                 self.os.webgl_shaders_pending += 1;
-                os_shader_id = Some(shader_id);
+                pipeline_id = Some(shader_id);
             }
 
-            self.draw_shaders.shaders[draw_shader_id].os_shader_id = os_shader_id;
+            self.draw_shaders.shaders[draw_shader_id].pipeline_id = pipeline_id;
             self.draw_shaders.compile_set.remove(&draw_shader_id);
         }
     }
@@ -1250,14 +1253,6 @@ pub struct CxOsDrawCall {
     pub uniforms_recording_gen: Option<u64>,
     pub draw_call_uniforms_gen: Option<u64>,
     pub user_uniforms_gen: Option<u64>,
-}
-
-impl CxOsDrawCall {
-    /// This backend keeps no per-publication backing lease on a draw item
-    /// (contract §10): nothing to release when the item's lease clears.
-    pub(crate) fn take_backing(&mut self) -> Option<u64> {
-        None
-    }
 }
 
 #[derive(Clone)]

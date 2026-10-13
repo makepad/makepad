@@ -31,10 +31,6 @@ fn frame(k: usize) -> Vec<u8> {
     out
 }
 
-fn encode(codec: VideoFileCodec, tag: &str) -> Vec<u8> {
-    encode_with(codec, tag, false)
-}
-
 /// With `audio`, a second of sound leads the pictures, as an edit export
 /// interleaves them.
 fn encode_with(codec: VideoFileCodec, tag: &str, audio: bool) -> Vec<u8> {

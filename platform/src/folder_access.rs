@@ -57,7 +57,7 @@ pub fn resolve_folder_bookmark(bookmark: &[u8]) -> Option<ResolvedFolder> {
 
 #[cfg(target_os = "macos")]
 mod macos {
-    use crate::os::apple::apple_sys::*;
+    use makepad_apple_sys::*;
     use std::ffi::c_void;
 
     const CREATION_WITH_SECURITY_SCOPE: u64 = 1 << 11;

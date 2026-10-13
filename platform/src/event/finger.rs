@@ -15,12 +15,13 @@ use {
     std::{
         cell::{Cell, RefCell},
         ops::Deref,
+        rc::{Rc, Weak},
     },
 };
 
 // Mouse events
 
-pub use makepad_studio_protocol::{KeyModifiers, MouseButton, PinchPhase};
+pub use makepad_studio_protocol::{KeyModifiers, MouseButton, PinchPhase, ScrollPhase};
 
 #[derive(Clone, Debug)]
 pub struct MouseDownEvent {
@@ -73,45 +74,6 @@ pub struct MouseLeaveEvent {
     pub modifiers: KeyModifiers,
     pub time: f64,
     pub handled: Cell<Area>,
-}
-
-/// The gesture phase of a scroll event, when the OS provides one.
-///
-/// Trackpad scrolling on some platforms (macOS in particular) is a gesture: the OS reports
-/// when fingers touch the pad (`Began`), each movement while they are down (`Changed`), when
-/// they lift off (`Ended`), and then a stream of decaying momentum deltas
-/// (`Momentum`/`MomentumEnded`).
-///
-/// The scrollable widgets apply the user-driven deltas directly and, on `Ended`, start a fling
-/// that follows the OS momentum stream so the deceleration matches the OS (see
-/// `widgets::scroll_motion`). Widgets that don't track phases can apply every delta directly,
-/// which gives plain OS momentum scrolling.
-///
-/// On platforms and devices with no phase information (classic mouse wheels, X11, Windows),
-/// this is `None`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ScrollPhase {
-    /// No phase information available (classic mouse wheel, or the platform doesn't report phases).
-    #[default]
-    None,
-    /// Fingers touched the trackpad; a scroll gesture may begin (the delta is usually zero).
-    Began,
-    /// A raw finger contact on the trackpad, sent for every touch with a zero delta
-    /// (macOS only). Unlike `Began`, this fires even for single-finger contacts that never
-    /// become a scroll gesture, so widgets use it to instantly stop kinetic scrolling the
-    /// way a touch natively catches a coast. It must not disturb anything else: any
-    /// tap-to-click press or drag from the same contact arrives separately as mouse events.
-    Touched,
-    /// Fingers moved while on the trackpad: a user-driven scroll delta.
-    Changed,
-    /// Fingers lifted off the trackpad: the last event of the user-driven gesture (the delta
-    /// may be zero). Widgets start their fling here.
-    Ended,
-    /// A momentum delta arriving from the OS after the fingers lifted. Widgets follow these to
-    /// match the OS deceleration rate.
-    Momentum,
-    /// The OS momentum stream finished (the delta is zero).
-    MomentumEnded,
 }
 
 #[derive(Clone, Debug)]
@@ -366,6 +328,36 @@ pub struct CxDigitHover {
     area: Area,
 }
 
+/// Keeps a scoped sweep lock alive until its widget closes or is dropped.
+#[must_use]
+pub struct SweepLock {
+    owner: Rc<Cell<bool>>,
+}
+
+impl SweepLock {
+    pub fn is_active(&self) -> bool {
+        self.owner.get()
+    }
+}
+
+#[derive(Clone)]
+struct CxSweepLock {
+    area: Area,
+    owner: Weak<Cell<bool>>,
+}
+
+impl CxSweepLock {
+    fn is_active(&self) -> bool {
+        self.owner.upgrade().is_some_and(|owner| owner.get())
+    }
+
+    fn release(&self) {
+        if let Some(owner) = self.owner.upgrade() {
+            owner.set(false);
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct CxFingers {
     pub first_mouse_button: Option<(MouseButton, WindowId)>,
@@ -388,12 +380,16 @@ pub struct CxFingers {
     tap: CxDigitTap,
     hovers: Vec<CxDigitHover>,
     xr_poke_locks: Vec<DigitId>,
+    drag_claims: Vec<DigitId>,
     /// Owners of the sweep lock, outermost first; only the LAST entry is
     /// the live lock. A single slot cannot serve NESTING OVERLAYS — a menu
     /// over a dialog over a modal — where each level takes the pointer in
     /// turn and has to hand it back to the one beneath it when it closes.
     /// With one owner this behaves exactly as a single slot does.
     sweep_locks: Vec<Area>,
+    // Kept apart from stack order: modals temporarily lift and restore legacy locks.
+    scoped_sweep_locks: Vec<CxSweepLock>,
+    sweep_lock_validation_event: Option<u64>,
     /// Owners of the scroll block, outermost first; only the LAST entry is
     /// live. It nests for the reason the sweep lock does: a modal over a
     /// modal blocks scrolling in turn, and the one that closes has to leave
@@ -450,6 +446,12 @@ impl CxFingers {
         for lock in &mut self.sweep_locks {
             if *lock == old_area {
                 *lock = new_area;
+            }
+        }
+        for lock in &mut self.scoped_sweep_locks {
+            if lock.area == old_area {
+                lock.area = new_area;
+                self.sweep_lock_validation_event = None;
             }
         }
         for block in &mut self.scroll_blocks {
@@ -704,8 +706,10 @@ impl CxFingers {
         Some((seen == time, capture.clone()))
     }
 
+    /// Whether a press is captured by `area`. A press parked on `Area::Empty` (e.g., between sweeps)
+    /// isn't captured by every area that hasn't been drawn yet.
     pub fn is_area_captured(&self, area: Area) -> bool {
-        self.captures.iter().find(|v| v.area == area).is_some()
+        area != Area::Empty && self.captures.iter().any(|v| v.area == area)
     }
 
     /// Whether `digit_id` is held by an area other than `area`, so a
@@ -719,6 +723,20 @@ impl CxFingers {
     pub fn touch_capture_area(&self, uid: u64) -> Option<Area> {
         let digit_id: DigitId = live_id_num!(touch, uid).into();
         self.captures.iter().find(|v| v.digit_id == digit_id).map(|v| v.area)
+    }
+
+    pub(crate) fn claim_drag(&mut self, digit_id: DigitId) {
+        if !self.drag_claims.contains(&digit_id) {
+            self.drag_claims.push(digit_id);
+        }
+    }
+
+    /// Whether a widget claimed the drag of the touch with the given uid (see [`Cx::claim_finger_drag`])
+    /// or already owns its gesture (see [`Cx::claim_finger_gesture`]), so a container shouldn't make it its own gesture.
+    pub fn is_touch_drag_claimed(&self, uid: u64) -> bool {
+        let digit_id: DigitId = live_id_num!(touch, uid).into();
+        self.drag_claims.contains(&digit_id)
+            || self.captures.iter().any(|v| v.digit_id == digit_id && v.owner)
     }
 
     pub fn any_areas_captured(&self) -> bool {
@@ -789,6 +807,7 @@ impl CxFingers {
         {
             self.captures.remove(index);
         }
+        self.drag_claims.retain(|id| *id != digit_id);
     }
 
     pub(crate) fn remove_hover(&mut self, digit_id: DigitId) {
@@ -924,8 +943,9 @@ impl CxFingers {
     }
 
     pub(crate) fn test_sweep_lock(&mut self, sweep_area: Area) -> bool {
-        match self.sweep_locks.last() {
-            Some(lock) => !same_owner(*lock, sweep_area),
+        self.clear_expired_sweep_locks();
+        match self.sweep_lock_area() {
+            Some(lock) => !same_owner(lock, sweep_area),
             None => false,
         }
     }
@@ -936,10 +956,32 @@ impl CxFingers {
     /// not a second owner); a new owner goes on top and holds the lock
     /// until it unlocks.
     pub fn sweep_lock(&mut self, area: Area) {
+        self.clear_expired_sweep_locks();
         match self.sweep_locks.iter_mut().find(|lock| same_owner(**lock, area)) {
             Some(lock) => *lock = area,
             None => self.sweep_locks.push(area),
         }
+    }
+
+    /// Take a scoped lock above existing owners, unless this area already owns one.
+    pub fn acquire_sweep_lock(&mut self, area: Area) -> Option<SweepLock> {
+        self.clear_expired_sweep_locks();
+        if self.sweep_locks.iter().any(|lock| same_owner(*lock, area))
+            || self.scoped_sweep_locks.iter().any(|lock| same_owner(lock.area, area))
+        {
+            return None;
+        }
+        let owner = Rc::new(Cell::new(true));
+        self.sweep_locks.push(area);
+        self.scoped_sweep_locks.push(CxSweepLock { area, owner: Rc::downgrade(&owner) });
+        self.sweep_lock_validation_event = None;
+        Some(SweepLock { owner })
+    }
+
+    fn clear_expired_sweep_locks(&mut self) {
+        self.sweep_locks.retain(|area| !self.scoped_sweep_locks.iter()
+            .any(|lock| same_owner(lock.area, *area) && !lock.is_active()));
+        self.scoped_sweep_locks.retain(CxSweepLock::is_active);
     }
 
     /// The area holding the sweep lock right now — the innermost of the
@@ -949,7 +991,8 @@ impl CxFingers {
     /// this to tell "I hold it" from "somebody above me holds it", so it
     /// releases only its own grab.
     pub fn sweep_lock_area(&self) -> Option<Area> {
-        self.sweep_locks.last().copied()
+        self.sweep_locks.iter().rev().find(|area| !self.scoped_sweep_locks.iter()
+            .any(|lock| same_owner(lock.area, **area) && !lock.is_active())).copied()
     }
 
     /// Release `area`'s sweep lock wherever it sits in the stack. Letting go
@@ -1305,6 +1348,36 @@ impl HitOptions {
     }
 }
 
+impl Cx {
+    pub(crate) fn validate_scoped_sweep_locks_after_draw(&mut self) {
+        self.fingers.sweep_lock_validation_event = None;
+        self.validate_scoped_sweep_locks();
+    }
+
+    fn validate_scoped_sweep_locks(&mut self) {
+        self.fingers.clear_expired_sweep_locks();
+        let event_id = self.event_id();
+        if self.fingers.scoped_sweep_locks.is_empty()
+            || self.fingers.sweep_lock_validation_event == Some(event_id)
+        {
+            return;
+        }
+        self.fingers.sweep_lock_validation_event = Some(event_id);
+        for lock in &self.fingers.scoped_sweep_locks {
+            let area = lock.area;
+            let attached = area.is_valid(self)
+                && area.draw_list_id()
+                    .and_then(|list| self.draw_lists[list].draw_pass_id)
+                    .is_some_and(|pass| !self.pass_attachment_is_stale(pass)
+                        && area.is_attached(self, &self.attached_draw_lists(pass)));
+            if !attached {
+                lock.release();
+            }
+        }
+        self.fingers.clear_expired_sweep_locks();
+    }
+}
+
 impl Event {
     /// `area`'s answer for a pointer event that meets one of its CANCELLED
     /// captures: the terminal `FingerUp { cancelled: true }` for the one
@@ -1455,6 +1528,10 @@ impl Event {
         options: HitOptions,
         hit_test: &dyn Fn(Vec2d, &Rect, &Option<Inset>) -> bool,
     ) -> Hit {
+        // Draw lists attach when they end, so validate only between draws.
+        if !matches!(self, Event::Draw(_)) {
+            cx.validate_scoped_sweep_locks();
+        }
         // A cancelled press ends before anything else — even for an area
         // that is no longer drawn: its terminal FingerUp is owed to it
         // whatever became of its drawable.
@@ -2085,6 +2162,21 @@ mod lock_nest_tests {
     }
 
     #[test]
+    fn a_lift_belongs_to_the_area_that_took_the_press() {
+        // A press switches the view; the lift of that same press must find no
+        // capture on the newly shown view's area (it never saw the down), so
+        // `hits` gives it no FingerUp and nothing there reacts to it.
+        let (old_view, new_view, _) = areas();
+        let digit: DigitId = live_id_num!(touch, 0).into();
+        let mut fingers = CxFingers::default();
+        fingers.capture_digit(digit, old_view, Area::Empty, 1.0, dvec2(10.0, 10.0));
+        assert!(fingers.find_digit_area_capture(digit, new_view).is_none());
+        assert!(fingers.find_digit_area_capture(digit, old_view).is_some());
+        fingers.release_digit(digit);
+        assert!(fingers.find_digit_area_capture(digit, old_view).is_none());
+    }
+
+    #[test]
     fn a_single_owner_locks_and_unlocks() {
         let (a, b, _) = areas();
         let mut fingers = CxFingers::default();
@@ -2248,5 +2340,15 @@ mod lock_nest_tests {
         // Popping an empty stack is harmless.
         fingers.block_scrolling_within_area(None);
         assert_eq!(fingers.blocked_scrolling_exception_area(), None);
+    }
+    #[test]
+    fn a_drag_claim_ends_when_its_digit_is_released() {
+        let mut fingers = CxFingers::default();
+        fingers.claim_drag(live_id_num!(touch, 3).into());
+        assert!(fingers.is_touch_drag_claimed(3));
+        assert!(!fingers.is_touch_drag_claimed(4));
+        // Touch uids get reused, so a claim that outlived its touch would block the next one.
+        fingers.release_digit(live_id_num!(touch, 3).into());
+        assert!(!fingers.is_touch_drag_claimed(3));
     }
 }

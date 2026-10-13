@@ -1,9 +1,10 @@
-//#![cfg_attr(all(unix), feature(unix_socket_ancillary_data))]
+#[cfg(not(target_os = "android"))]
 pub mod gl_render_bridge;
 pub mod home;
+/// Allocator swaps (before/after loading something that replaces the process allocator).
+pub use makepad_alloc_epoch as alloc_epoch;
 pub mod archive_cache;
 pub mod folder_access;
-pub mod clipboard_image;
 pub mod os;
 
 #[cfg(any(
@@ -40,8 +41,10 @@ pub mod thread;
 pub mod storage;
 pub mod video;
 pub mod gpu_texture;
-pub mod gpu_admission;
+#[cfg(target_os = "linux")]
+pub mod foreign_dmabuf;
 pub mod gpu_inventory;
+pub mod gpu_ledger;
 pub mod resource_resolver;
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -59,31 +62,22 @@ mod draw_pass;
 mod draw_shader;
 pub mod draw_shader_layout;
 mod draw_vars;
+#[cfg(not(target_arch = "wasm32"))]
+mod frame_build;
 pub mod shader_pack;
 pub mod collect;
 pub mod splash_blank;
 
-// Native Linux display inventory (direct DRM/KMS outputs). Lives at the crate
-// root so headless logic builds of the WM see the same types and API; only the
-// direct Vulkan backend fills it in.
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-#[path = "os/linux/display.rs"]
+// Native Linux services are owned by the HAL.
+#[cfg(target_os = "linux")]
 pub mod linux_display;
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-#[path = "os/linux/input.rs"]
+#[cfg(target_os = "linux")]
+#[path = "os/hal/input.rs"]
 pub mod linux_input;
+#[cfg(target_os = "linux")]
+pub use makepad_hal::wide_desktop as linux_wide_desktop;
 
-// Wide-desktop geometry for the direct backend: pure, unit tested anywhere.
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-#[path = "os/linux/wide_desktop.rs"]
-pub mod linux_wide_desktop;
-
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
-#[path = "os/linux/gpu.rs"]
-pub mod linux_gpu;
-
-#[cfg(all(not(gpusim), not(linux_direct), any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod app_icon;
 pub mod app_meta;
 pub mod app_open;
@@ -104,6 +98,7 @@ mod performance_stats;
 pub mod memory_watchdog;
 pub mod perf_monitor;
 pub mod gpu_frame_timer;
+pub mod gpu_admission;
 pub mod sploded;
 pub mod pick;
 pub mod permission;
@@ -119,8 +114,6 @@ pub mod audio_stream;
 
 pub mod file_dialogs;
 pub mod hosted_relay;
-#[cfg(any(linux_direct, test))]
-mod direct_clipboard;
 
 mod media_api;
 mod media_host;
@@ -135,8 +128,8 @@ pub mod font_policy;
 
 #[macro_use]
 mod app_main;
-pub mod mcp_relay;
 pub mod remote;
+pub mod remote_schema;
 pub mod devtools;
 pub mod pixel_probe;
 pub mod screen_capture;
@@ -151,11 +144,11 @@ pub mod log_ring;
 /// (`Instant::now()` panics, "time not implemented on this platform"), so
 /// code that runs in a web build measures time with this instead.
 pub fn monotonic_seconds() -> f64 {
-    #[cfg(all(not(gpusim), target_arch = "wasm32"))]
+    #[cfg(target_arch = "wasm32")]
     {
         crate::Cx::monotonic_now()
     }
-    #[cfg(not(all(not(gpusim), target_arch = "wasm32")))]
+    #[cfg(not(target_arch = "wasm32"))]
     {
         use std::sync::OnceLock;
         use std::time::Instant;
@@ -164,12 +157,27 @@ pub fn monotonic_seconds() -> f64 {
     }
 }
 pub mod audio_output_fence;
+pub mod audio_deadline;
 pub mod shader_error;
+pub use makepad_script::shader_reflection::DrawShaderDesc;
+/// Whether the host system is in dark mode, when the host can say: the HAL's
+/// latest window-system answer, readable from any thread. Web returns `None`.
+pub fn host_dark() -> Option<bool> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        makepad_hal::host_dark()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+}
 pub use crate::app_main::{
-    attach_parent_console, new_cx_with_font_set, resolve_studio_http, should_run_stdin_loop_from_env,
+    attach_parent_console, new_cx_with_font_set, resolve_studio_http, run_app, should_run_stdin_loop_from_env,
 };
 // Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).
 pub use crate::cx::{
+    first_present_seen, launched_hidden_until_first_present,startup_trace_first_present,
     startup_acc, startup_since_exec_ms, startup_trace, startup_trace_enabled, startup_trace_flush,
 };
 pub use crate::cx_api::{can_play_type, CxSystemBrowser, SystemBrowserId};
@@ -186,15 +194,17 @@ pub use makepad_objc_sys;
 #[cfg(target_os = "windows")]
 pub use ::windows;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub use makepad_hal;
+
 pub use makepad_futures;
 pub use makepad_script_std::makepad_network;
 pub use makepad_script_std::makepad_script;
+pub use makepad_script_census;
 pub use makepad_studio_protocol as studio;
 
 // Re-export trap module for Script derive macro error macros that use crate::trap::ScriptTrap
 pub use makepad_script_std::makepad_script::trap;
-
-pub use crate::gl_render_bridge::{GlApi, GlRenderBridge};
 
 pub use {
     crate::{
@@ -224,7 +234,7 @@ pub use {
         draw_matrix::DrawMatrix,
         draw_pass::{
             CxDrawPassParent, CxDrawPassRect, DrawPass, DrawPassClearColor, DrawPassClearDepth,
-            DrawPassId, ScriptDrawPass,
+            DrawPassId, ScriptDrawPass, union_rects,
         },
         draw_vars::{DrawVars, DRAW_CALL_MAX_UNIFORM_FLOATS},
         sploded::{SplodedParams, SplodedView},
@@ -232,6 +242,9 @@ pub use {
             AppOpenEvent,
             AppOpenItem,
             AppOpenSource,
+            BackGestureEdge,
+            BackGestureEvent,
+            BackGestureState,
             CancelScope,
             CancelScopeKind,
             CharOffset,
@@ -245,7 +258,17 @@ pub use {
             DrawEvent,
             DropEvent,
             DropHitEvent,
+            ChildWindowAction,
+            ChildWindowActionEvent,
+            ChildWindowClosedEvent,
+            ChildWindowEvent,
+            DomainEntry,
+            DomainListEvent,
+            DomainStateEvent,
+            DomainStatus,
             Event,
+            GpuPressureEvent,
+            LentId,
             FingerDownEvent,
             FingerHoverEvent,
             FingerMoveEvent,
@@ -311,7 +334,7 @@ pub use {
         game_input::*,
         geometry::{CxGeometry, Geometry, GeometryId, IndexData, VertexData},
         draw_shader::{
-            CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat, DrawShaderDesc,
+            CxDrawShaderCode, CxDrawShaderMapping, DrawShaderAttrFormat,
             DrawShaderInputPacking, DrawShaderInputs,
         },
         gpu_info::GpuPerformance,
@@ -387,7 +410,7 @@ pub use {
         apply::*, handle::*, heap::*, makepad_error_log, makepad_live_id, makepad_live_id::*,
         makepad_math, makepad_script_derive, makepad_script_derive::*, native::*, object::*,
         script_args, script_args_def, script_array_index, script_has_proto, script_is_fn,
-        script_value, script_value_bool, script_value_f64, set_script_value,
+        script_value, set_script_value,
         set_script_value_to_api, set_script_value_to_pod, string::*, traits::*, trap::*, value::*,
         vm::*,
     },
@@ -403,3 +426,5 @@ pub use crate::pick::{PickError, PickImage, PickTicket};
 /// `set_literal_source`, `patch_literal`).
 pub use makepad_script_std::makepad_script::literal::{LiteralOrigin, LiteralReach, LiteralSite, LiteralValue};
 pub use crate::collect::{ScanEvent, Scanner};
+
+pub mod restart;

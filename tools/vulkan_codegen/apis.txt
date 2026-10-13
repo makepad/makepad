@@ -1,0 +1,644 @@
+# Vulkan API roots used by platform/src/os/linux, including Android/XR.
+# Regenerate with tools/vulkan_codegen; dependencies are selected from vk.xml.
+const VK_ANDROID_EXTERNAL_MEMORY_ANDROID_HARDWARE_BUFFER_EXTENSION_NAME
+const VK_API_VERSION_1_1
+type VkAccessFlags
+type VkAndroidHardwareBufferFormatPropertiesANDROID
+type VkAndroidHardwareBufferPropertiesANDROID
+type VkAndroidSurfaceCreateInfoKHR
+type VkApplicationInfo
+type VkAttachmentDescription
+type VkAttachmentLoadOp
+type VkAttachmentReference
+type VkAttachmentStoreOp
+type VkBlendFactor
+type VkBlendOp
+type VkBool32
+type VkBorderColor
+type VkBuffer
+type VkBufferCopy
+type VkBufferCreateInfo
+type VkBufferImageCopy
+type VkBufferMemoryBarrier
+type VkBufferUsageFlags
+type VkClearColorValue
+type VkClearDepthStencilValue
+type VkClearValue
+type VkColorComponentFlags
+type VkColorSpaceKHR
+type VkCommandBuffer
+type VkCommandBufferAllocateInfo
+type VkCommandBufferBeginInfo
+type VkCommandBufferLevel
+type VkCommandBufferResetFlags
+type VkCommandBufferUsageFlags
+type VkCommandPool
+type VkCommandPoolCreateFlags
+type VkCommandPoolCreateInfo
+type VkCompareOp
+type VkComponentMapping
+type VkCompositeAlphaFlagsKHR
+type VkCullModeFlags
+type VkDebugUtilsMessageSeverityFlagsEXT
+type VkDebugUtilsMessageTypeFlagsEXT
+type VkDebugUtilsMessengerCallbackDataEXT
+type VkDebugUtilsMessengerCreateInfoEXT
+type VkDebugUtilsMessengerEXT
+type VkDependencyFlags
+type VkDescriptorBufferInfo
+type VkDescriptorImageInfo
+type VkDescriptorPool
+type VkDescriptorPoolCreateInfo
+type VkDescriptorPoolResetFlags
+type VkDescriptorPoolSize
+type VkDescriptorSet
+type VkDescriptorSetAllocateInfo
+type VkDescriptorSetLayout
+type VkDescriptorSetLayoutBinding
+type VkDescriptorSetLayoutCreateInfo
+type VkDescriptorType
+type VkDevice
+type VkDeviceCreateInfo
+type VkDeviceMemory
+type VkDeviceQueueCreateInfo
+type VkDeviceSize
+type VkDisplayKHR
+type VkDisplayModeKHR
+type VkDisplayPlaneAlphaFlagsKHR
+type VkDisplaySurfaceCreateInfoKHR
+type VkDriverId
+type VkDrmFormatModifierPropertiesEXT
+type VkDrmFormatModifierPropertiesListEXT
+type VkDynamicState
+const VK_EXT_ACQUIRE_DRM_DISPLAY_EXTENSION_NAME
+const VK_EXT_DEBUG_UTILS_EXTENSION_NAME
+const VK_EXT_DIRECT_MODE_DISPLAY_EXTENSION_NAME
+const VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME
+const VK_EXT_FRAGMENT_DENSITY_MAP_EXTENSION_NAME
+const VK_EXT_MEMORY_BUDGET_EXTENSION_NAME
+const VK_EXT_IMAGE_DRM_FORMAT_MODIFIER_EXTENSION_NAME
+const VK_EXT_PCI_BUS_INFO_EXTENSION_NAME
+const VK_EXT_QUEUE_FAMILY_FOREIGN_EXTENSION_NAME
+type VkExportMemoryAllocateInfo
+type VkExportSemaphoreCreateInfo
+type VkExtent2D
+type VkExtent3D
+type VkExternalFormatANDROID
+type VkExternalImageFormatProperties
+type VkExternalMemoryFeatureFlags
+type VkExternalMemoryHandleTypeFlags
+type VkExternalMemoryImageCreateInfo
+type VkExternalMemoryProperties
+type VkExternalSemaphoreFeatureFlags
+type VkExternalSemaphoreHandleTypeFlags
+type VkExternalSemaphoreProperties
+const VK_FALSE
+type VkFence
+type VkFenceCreateFlags
+type VkFenceCreateInfo
+type VkFilter
+type VkFormat
+type VkFormatFeatureFlags
+type VkFormatProperties2
+type VkFramebuffer
+type VkFramebufferCreateInfo
+type VkFrontFace
+type VkGraphicsPipelineCreateInfo
+type VkImage
+type VkImageAspectFlags
+type VkImageBlit
+type VkImageCopy
+type VkImageCreateFlags
+type VkImageCreateInfo
+type VkImageDrmFormatModifierExplicitCreateInfoEXT
+type VkImageDrmFormatModifierListCreateInfoEXT
+type VkImageDrmFormatModifierPropertiesEXT
+type VkImageFormatProperties
+type VkImageFormatProperties2
+type VkImageLayout
+type VkImageMemoryBarrier
+type VkImageSubresource
+type VkImageSubresourceLayers
+type VkImageSubresourceRange
+type VkImageTiling
+type VkImageType
+type VkImageUsageFlags
+type VkImageView
+type VkImageViewCreateInfo
+type VkImageViewType
+type VkImportAndroidHardwareBufferInfoANDROID
+type VkImportMemoryFdInfoKHR
+type VkImportSemaphoreFdInfoKHR
+type VkIndexType
+type VkInstance
+type VkInstanceCreateInfo
+const VK_KHR_ANDROID_SURFACE_EXTENSION_NAME
+const VK_KHR_DISPLAY_EXTENSION_NAME
+const VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME
+const VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME
+const VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME
+const VK_KHR_IMAGE_FORMAT_LIST_EXTENSION_NAME
+const VK_KHR_PRESENT_ID_EXTENSION_NAME
+const VK_KHR_PRESENT_WAIT_EXTENSION_NAME
+const VK_KHR_SURFACE_EXTENSION_NAME
+const VK_KHR_SWAPCHAIN_EXTENSION_NAME
+const VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME
+const VK_KHR_XLIB_SURFACE_EXTENSION_NAME
+const VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME
+const VK_LOD_CLAMP_NONE
+type VkMemoryAllocateInfo
+type VkMemoryBarrier
+type VkMemoryDedicatedAllocateInfo
+type VkMemoryFdPropertiesKHR
+type VkMemoryGetFdInfoKHR
+type VkMemoryMapFlags
+type VkMemoryPropertyFlags
+type VkMemoryType
+type VkOffset2D
+type VkOffset3D
+type VkPhysicalDevice
+type VkPhysicalDeviceDriverProperties
+type VkPhysicalDeviceExternalImageFormatInfo
+type VkPhysicalDeviceExternalSemaphoreInfo
+type VkPhysicalDeviceFeatures
+type VkPhysicalDeviceFeatures2
+type VkPhysicalDeviceMemoryBudgetPropertiesEXT
+type VkPhysicalDeviceMemoryProperties2
+type VkPhysicalDeviceFragmentDensityMapFeaturesEXT
+type VkPhysicalDeviceIDProperties
+type VkPhysicalDeviceImageDrmFormatModifierInfoEXT
+type VkPhysicalDeviceImageFormatInfo2
+type VkPhysicalDeviceMultiviewFeatures
+type VkPhysicalDeviceMultiviewProperties
+type VkPhysicalDevicePCIBusInfoPropertiesEXT
+type VkPhysicalDevicePresentIdFeaturesKHR
+type VkPhysicalDevicePresentWaitFeaturesKHR
+type VkPhysicalDeviceProperties2
+type VkPhysicalDeviceSamplerYcbcrConversionFeatures
+type VkPhysicalDeviceTimelineSemaphoreFeatures
+type VkPhysicalDeviceType
+type VkPipeline
+type VkPipelineBindPoint
+type VkPipelineCache
+type VkPipelineCacheCreateInfo
+type VkPipelineColorBlendAttachmentState
+type VkPipelineColorBlendStateCreateInfo
+type VkPipelineDepthStencilStateCreateInfo
+type VkPipelineDynamicStateCreateInfo
+type VkPipelineInputAssemblyStateCreateInfo
+type VkPipelineLayout
+type VkPipelineLayoutCreateInfo
+type VkPipelineMultisampleStateCreateInfo
+type VkPipelineRasterizationStateCreateInfo
+type VkPipelineShaderStageCreateInfo
+type VkPipelineStageFlags
+type VkPipelineVertexInputStateCreateInfo
+type VkPipelineViewportStateCreateInfo
+type VkPolygonMode
+type VkPresentIdKHR
+type VkPresentInfoKHR
+type VkPresentModeKHR
+type VkPrimitiveTopology
+const VK_QUEUE_FAMILY_EXTERNAL
+const VK_QUEUE_FAMILY_FOREIGN_EXT
+const VK_QUEUE_FAMILY_IGNORED
+type VkQueryPool
+type VkQueryPoolCreateInfo
+type VkQueryResultFlags
+type VkQueryType
+type VkQueue
+type VkQueueFlags
+type VkRect2D
+type VkRenderPass
+type VkRenderPassBeginInfo
+type VkRenderPassCreateInfo
+type VkRenderPassFragmentDensityMapCreateInfoEXT
+type VkRenderPassMultiviewCreateInfo
+type VkResult
+const VK_SUBPASS_EXTERNAL
+type VkSampleCountFlags
+type VkSampler
+type VkSamplerAddressMode
+type VkSamplerCreateInfo
+type VkSamplerMipmapMode
+type VkSamplerYcbcrConversion
+type VkSamplerYcbcrConversionCreateInfo
+type VkSamplerYcbcrConversionInfo
+type VkSemaphore
+type VkSemaphoreCreateInfo
+type VkSemaphoreGetFdInfoKHR
+type VkSemaphoreImportFlags
+type VkSemaphoreType
+type VkSemaphoreTypeCreateInfo
+type VkShaderModule
+type VkShaderModuleCreateInfo
+type VkShaderStageFlags
+type VkSharingMode
+type VkSubmitInfo
+type VkSubpassContents
+type VkSubpassDependency
+type VkSubpassDescription
+type VkSubresourceLayout
+type VkSurfaceFormatKHR
+type VkSurfaceKHR
+type VkSurfaceTransformFlagsKHR
+type VkSwapchainCreateInfoKHR
+type VkSwapchainKHR
+const VK_TRUE
+type VkTimelineSemaphoreSubmitInfo
+type VkVertexInputAttributeDescription
+type VkVertexInputBindingDescription
+type VkVertexInputRate
+type VkViewport
+const VK_WHOLE_SIZE
+type VkXlibSurfaceCreateInfoKHR
+type VkWaylandSurfaceCreateInfoKHR
+type VkWriteDescriptorSet
+value VkAccessFlags COLOR_ATTACHMENT_READ
+value VkAccessFlags COLOR_ATTACHMENT_WRITE
+value VkAccessFlags DEPTH_STENCIL_ATTACHMENT_READ
+value VkAccessFlags DEPTH_STENCIL_ATTACHMENT_WRITE
+value VkAccessFlags FRAGMENT_DENSITY_MAP_READ_EXT
+value VkAccessFlags HOST_READ
+value VkAccessFlags HOST_WRITE
+value VkAccessFlags MEMORY_READ
+value VkAccessFlags MEMORY_WRITE
+value VkAccessFlags SHADER_READ
+value VkAccessFlags TRANSFER_READ
+value VkAccessFlags TRANSFER_WRITE
+value VkAccessFlags VERTEX_ATTRIBUTE_READ
+value VkAttachmentLoadOp CLEAR
+value VkAttachmentLoadOp DONT_CARE
+value VkAttachmentLoadOp LOAD
+value VkAttachmentStoreOp DONT_CARE
+value VkAttachmentStoreOp STORE
+value VkBlendFactor ONE
+value VkBlendFactor ONE_MINUS_SRC_ALPHA
+value VkBlendOp ADD
+value VkBlendOp MAX
+value VkBorderColor FLOAT_TRANSPARENT_BLACK
+value VkBufferUsageFlags INDEX_BUFFER
+value VkBufferUsageFlags STORAGE_BUFFER
+value VkBufferUsageFlags TRANSFER_DST
+value VkBufferUsageFlags TRANSFER_SRC
+value VkBufferUsageFlags UNIFORM_BUFFER
+value VkBufferUsageFlags VERTEX_BUFFER
+value VkColorSpaceKHR SRGB_NONLINEAR
+value VkCommandBufferLevel PRIMARY
+value VkCommandBufferUsageFlags ONE_TIME_SUBMIT
+value VkCommandPoolCreateFlags RESET_COMMAND_BUFFER
+value VkCompareOp LESS_OR_EQUAL
+value VkCompositeAlphaFlagsKHR INHERIT
+value VkCompositeAlphaFlagsKHR OPAQUE
+value VkCompositeAlphaFlagsKHR POST_MULTIPLIED
+value VkCompositeAlphaFlagsKHR PRE_MULTIPLIED
+value VkCullModeFlags BACK
+value VkCullModeFlags NONE
+value VkDebugUtilsMessageSeverityFlagsEXT ERROR
+value VkDebugUtilsMessageSeverityFlagsEXT INFO
+value VkDebugUtilsMessageSeverityFlagsEXT VERBOSE
+value VkDebugUtilsMessageSeverityFlagsEXT WARNING
+value VkDebugUtilsMessageTypeFlagsEXT GENERAL
+value VkDebugUtilsMessageTypeFlagsEXT PERFORMANCE
+value VkDebugUtilsMessageTypeFlagsEXT VALIDATION
+value VkDescriptorType COMBINED_IMAGE_SAMPLER
+value VkDescriptorType SAMPLED_IMAGE
+value VkDescriptorType SAMPLER
+value VkDescriptorType STORAGE_BUFFER
+value VkDescriptorType UNIFORM_BUFFER
+value VkDisplayPlaneAlphaFlagsKHR GLOBAL
+value VkDisplayPlaneAlphaFlagsKHR OPAQUE
+value VkDisplayPlaneAlphaFlagsKHR PER_PIXEL
+value VkDisplayPlaneAlphaFlagsKHR PER_PIXEL_PREMULTIPLIED
+value VkDriverId NVIDIA_PROPRIETARY
+value VkDynamicState SCISSOR
+value VkDynamicState VIEWPORT
+value VkExternalMemoryFeatureFlags EXPORTABLE
+value VkExternalMemoryFeatureFlags IMPORTABLE
+value VkExternalMemoryHandleTypeFlags ANDROID_HARDWARE_BUFFER_ANDROID
+value VkExternalMemoryHandleTypeFlags DMA_BUF_EXT
+value VkExternalMemoryHandleTypeFlags OPAQUE_FD
+value VkExternalSemaphoreFeatureFlags EXPORTABLE
+value VkExternalSemaphoreFeatureFlags IMPORTABLE
+value VkExternalSemaphoreHandleTypeFlags OPAQUE_FD
+value VkExternalSemaphoreHandleTypeFlags SYNC_FD
+value VkFenceCreateFlags SIGNALED
+value VkFilter LINEAR
+value VkFilter NEAREST
+value VkFormat A2B10G10R10_UNORM_PACK32
+value VkFormat A8B8G8R8_UNORM_PACK32
+value VkFormat ASTC_4X4_UNORM_BLOCK
+value VkFormat B8G8R8A8_SRGB
+value VkFormat B8G8R8A8_UNORM
+value VkFormat BC5_UNORM_BLOCK
+value VkFormat BC7_UNORM_BLOCK
+value VkFormat D16_UNORM
+value VkFormat D24_UNORM_S8_UINT
+value VkFormat D32_SFLOAT
+value VkFormat D32_SFLOAT_S8_UINT
+value VkFormat G8_B8R8_2PLANE_420_UNORM
+value VkFormat G8_B8_R8_3PLANE_420_UNORM
+value VkFormat R16G16B16A16_SFLOAT
+value VkFormat R16G16_SFLOAT
+value VkFormat R16G16_SINT
+value VkFormat R16G16_SNORM
+value VkFormat R16G16_UINT
+value VkFormat R16G16_UNORM
+value VkFormat R32G32B32A32_SFLOAT
+value VkFormat R32G32B32A32_SINT
+value VkFormat R32G32B32A32_UINT
+value VkFormat R32G32B32_SFLOAT
+value VkFormat R32G32B32_SINT
+value VkFormat R32G32B32_UINT
+value VkFormat R32G32_SFLOAT
+value VkFormat R32G32_SINT
+value VkFormat R32G32_UINT
+value VkFormat R32_SFLOAT
+value VkFormat R32_SINT
+value VkFormat R32_UINT
+value VkFormat R8G8B8A8_SNORM
+value VkFormat R8G8B8A8_SRGB
+value VkFormat R8G8B8A8_UNORM
+value VkFormat R8G8_UNORM
+value VkFormat R8_UNORM
+value VkFormat UNDEFINED
+value VkFormatFeatureFlags BLIT_DST
+value VkFormatFeatureFlags BLIT_SRC
+value VkFormatFeatureFlags COLOR_ATTACHMENT
+value VkFormatFeatureFlags COLOR_ATTACHMENT_BLEND
+value VkFormatFeatureFlags DEPTH_STENCIL_ATTACHMENT
+value VkFormatFeatureFlags FRAGMENT_DENSITY_MAP_EXT
+value VkFormatFeatureFlags SAMPLED_IMAGE
+value VkFormatFeatureFlags SAMPLED_IMAGE_FILTER_LINEAR
+value VkFormatFeatureFlags TRANSFER_SRC
+value VkFrontFace COUNTER_CLOCKWISE
+value VkImageAspectFlags COLOR
+value VkImageAspectFlags DEPTH
+value VkImageAspectFlags MEMORY_PLANE_0_EXT
+value VkImageAspectFlags PLANE_0
+value VkImageAspectFlags PLANE_1
+value VkImageAspectFlags PLANE_2
+value VkImageAspectFlags STENCIL
+value VkImageCreateFlags CUBE_COMPATIBLE
+value VkImageCreateFlags MUTABLE_FORMAT
+value VkImageLayout COLOR_ATTACHMENT_OPTIMAL
+value VkImageLayout DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+value VkImageLayout DEPTH_STENCIL_READ_ONLY_OPTIMAL
+value VkImageLayout FRAGMENT_DENSITY_MAP_OPTIMAL_EXT
+value VkImageLayout GENERAL
+value VkImageLayout PRESENT_SRC_KHR
+value VkImageLayout SHADER_READ_ONLY_OPTIMAL
+value VkImageLayout TRANSFER_DST_OPTIMAL
+value VkImageLayout TRANSFER_SRC_OPTIMAL
+value VkImageLayout UNDEFINED
+value VkImageTiling DRM_FORMAT_MODIFIER_EXT
+value VkImageTiling OPTIMAL
+value VkImageType TYPE_2D
+value VkImageUsageFlags COLOR_ATTACHMENT
+value VkImageUsageFlags DEPTH_STENCIL_ATTACHMENT
+value VkImageUsageFlags SAMPLED
+value VkImageUsageFlags TRANSFER_DST
+value VkImageUsageFlags TRANSFER_SRC
+value VkImageViewType CUBE
+value VkImageViewType TYPE_2D
+value VkImageViewType TYPE_2D_ARRAY
+value VkIndexType UINT16
+value VkIndexType UINT32
+value VkMemoryPropertyFlags DEVICE_LOCAL
+value VkMemoryPropertyFlags HOST_COHERENT
+value VkMemoryPropertyFlags HOST_VISIBLE
+value VkMemoryPropertyFlags PROTECTED
+value VkPhysicalDeviceType CPU
+value VkPhysicalDeviceType DISCRETE_GPU
+value VkPhysicalDeviceType INTEGRATED_GPU
+value VkPipelineBindPoint GRAPHICS
+value VkPipelineStageFlags ALL_COMMANDS
+value VkPipelineStageFlags BOTTOM_OF_PIPE
+value VkPipelineStageFlags COLOR_ATTACHMENT_OUTPUT
+value VkPipelineStageFlags EARLY_FRAGMENT_TESTS
+value VkPipelineStageFlags FRAGMENT_DENSITY_PROCESS_EXT
+value VkPipelineStageFlags FRAGMENT_SHADER
+value VkPipelineStageFlags HOST
+value VkPipelineStageFlags LATE_FRAGMENT_TESTS
+value VkPipelineStageFlags TOP_OF_PIPE
+value VkPipelineStageFlags TRANSFER
+value VkPipelineStageFlags VERTEX_INPUT
+value VkPipelineStageFlags VERTEX_SHADER
+value VkPolygonMode FILL
+value VkPresentModeKHR FIFO
+value VkPrimitiveTopology TRIANGLE_LIST
+value VkQueryResultFlags TYPE_64
+value VkQueryType TIMESTAMP
+value VkQueueFlags GRAPHICS
+value VkResult ERROR_FORMAT_NOT_SUPPORTED
+value VkResult ERROR_FRAGMENTED_POOL
+value VkResult ERROR_OUT_OF_DATE_KHR
+value VkResult ERROR_OUT_OF_POOL_MEMORY
+value VkResult ERROR_SURFACE_LOST_KHR
+value VkResult NOT_READY
+value VkResult SUCCESS
+value VkResult TIMEOUT
+value VkSampleCountFlags TYPE_1
+value VkSamplerAddressMode CLAMP_TO_BORDER
+value VkSamplerAddressMode CLAMP_TO_EDGE
+value VkSamplerAddressMode MIRRORED_REPEAT
+value VkSamplerAddressMode REPEAT
+value VkSamplerMipmapMode LINEAR
+value VkSamplerMipmapMode NEAREST
+value VkSemaphoreImportFlags TEMPORARY
+value VkSemaphoreType TIMELINE
+value VkShaderStageFlags ALL_GRAPHICS
+value VkShaderStageFlags FRAGMENT
+value VkShaderStageFlags VERTEX
+value VkSharingMode EXCLUSIVE
+value VkSubpassContents INLINE
+value VkSurfaceTransformFlagsKHR IDENTITY
+value VkVertexInputRate VERTEX
+device vkAcquireNextImageKHR
+device vkAllocateCommandBuffers
+device vkAllocateDescriptorSets
+device vkAllocateMemory
+device vkBeginCommandBuffer
+device vkBindBufferMemory
+device vkBindImageMemory
+device vkCmdBeginRenderPass
+device vkCmdBindDescriptorSets
+device vkCmdBindIndexBuffer
+device vkCmdBindPipeline
+device vkCmdBindVertexBuffers
+device vkCmdBlitImage
+device vkCmdClearColorImage
+device vkCmdClearDepthStencilImage
+device vkCmdCopyBuffer
+device vkCmdCopyBufferToImage
+device vkCmdCopyImage
+device vkCmdCopyImageToBuffer
+device vkCmdDraw
+device vkCmdDrawIndexed
+device vkCmdEndRenderPass
+device vkCmdFillBuffer
+device vkCmdPipelineBarrier
+device vkCmdResetQueryPool
+device vkCmdSetScissor
+device vkCmdSetViewport
+device vkCmdWriteTimestamp
+device vkCreateBuffer
+device vkCreateCommandPool
+device vkCreateDescriptorPool
+device vkCreateDescriptorSetLayout
+device vkCreateFence
+device vkCreateFramebuffer
+device vkCreateGraphicsPipelines
+device vkCreateImage
+device vkCreateImageView
+device vkCreatePipelineLayout
+device vkCreatePipelineCache
+device vkCreateQueryPool
+device vkCreateRenderPass
+device vkCreateSampler
+device vkCreateSamplerYcbcrConversion
+device vkCreateSemaphore
+device vkCreateShaderModule
+device vkCreateSwapchainKHR
+device vkDestroyBuffer
+device vkDestroyCommandPool
+device vkDestroyDescriptorPool
+device vkDestroyDescriptorSetLayout
+device vkDestroyDevice
+device vkDestroyFence
+device vkDestroyFramebuffer
+device vkDestroyImage
+device vkDestroyImageView
+device vkDestroyPipeline
+device vkDestroyPipelineCache
+device vkDestroyPipelineLayout
+device vkDestroyQueryPool
+device vkDestroyRenderPass
+device vkDestroySampler
+device vkDestroySamplerYcbcrConversion
+device vkDestroySemaphore
+device vkDestroyShaderModule
+device vkDestroySwapchainKHR
+device vkDeviceWaitIdle
+device vkEndCommandBuffer
+device vkFreeCommandBuffers
+device vkFreeMemory
+device vkGetAndroidHardwareBufferPropertiesANDROID
+device vkGetBufferMemoryRequirements
+instance vkGetDeviceProcAddr
+device vkGetDeviceQueue
+device vkGetFenceStatus
+device vkGetImageDrmFormatModifierPropertiesEXT
+device vkGetImageMemoryRequirements
+device vkGetImageSubresourceLayout
+device vkGetMemoryFdKHR
+device vkGetMemoryFdPropertiesKHR
+device vkGetQueryPoolResults
+device vkGetSemaphoreCounterValue
+device vkGetSemaphoreFdKHR
+device vkGetSwapchainImagesKHR
+device vkImportSemaphoreFdKHR
+device vkMapMemory
+device vkQueuePresentKHR
+device vkQueueSubmit
+device vkQueueWaitIdle
+device vkResetCommandBuffer
+device vkResetDescriptorPool
+device vkResetFences
+device vkUnmapMemory
+device vkUpdateDescriptorSets
+device vkWaitForFences
+device vkWaitForPresentKHR
+device vkWaitSemaphores
+entry vkCreateInstance
+entry vkEnumerateInstanceExtensionProperties
+entry vkEnumerateInstanceLayerProperties
+entry vkGetInstanceProcAddr
+instance vkAcquireDrmDisplayEXT
+instance vkCreateAndroidSurfaceKHR
+instance vkCreateDebugUtilsMessengerEXT
+instance vkCreateDevice
+instance vkCreateDisplayPlaneSurfaceKHR
+instance vkCreateXlibSurfaceKHR
+instance vkCreateWaylandSurfaceKHR
+instance vkDestroyDebugUtilsMessengerEXT
+instance vkDestroyInstance
+instance vkDestroySurfaceKHR
+instance vkEnumerateDeviceExtensionProperties
+instance vkEnumeratePhysicalDevices
+instance vkGetDisplayModePropertiesKHR
+instance vkGetDisplayPlaneCapabilitiesKHR
+instance vkGetDisplayPlaneSupportedDisplaysKHR
+instance vkGetDrmDisplayEXT
+instance vkGetPhysicalDeviceDisplayPlanePropertiesKHR
+instance vkGetPhysicalDeviceDisplayPropertiesKHR
+instance vkGetPhysicalDeviceExternalSemaphoreProperties
+instance vkGetPhysicalDeviceFeatures
+instance vkGetPhysicalDeviceFeatures2
+instance vkGetPhysicalDeviceFormatProperties
+instance vkGetPhysicalDeviceFormatProperties2
+instance vkGetPhysicalDeviceImageFormatProperties2
+instance vkGetPhysicalDeviceMemoryProperties
+instance vkGetPhysicalDeviceMemoryProperties2
+instance vkGetPhysicalDeviceProperties
+instance vkGetPhysicalDeviceProperties2
+instance vkGetPhysicalDeviceQueueFamilyProperties
+instance vkGetPhysicalDeviceSurfaceCapabilitiesKHR
+instance vkGetPhysicalDeviceSurfaceFormatsKHR
+instance vkGetPhysicalDeviceSurfacePresentModesKHR
+instance vkGetPhysicalDeviceSurfaceSupportKHR
+instance vkReleaseDisplayEXT
+value VkColorComponentFlags R
+value VkColorComponentFlags G
+value VkColorComponentFlags B
+value VkColorComponentFlags A
+instance vkGetPhysicalDeviceWaylandPresentationSupportKHR
+# Compute (libs/ai/vulkan): device-address buffers, push constants, subgroup control.
+device vkCreateComputePipelines
+device vkCmdDispatch
+device vkCmdPushConstants
+device vkGetBufferDeviceAddress
+device vkFlushMappedMemoryRanges
+device vkInvalidateMappedMemoryRanges
+device vkResetQueryPool
+instance vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR
+type VkComputePipelineCreateInfo
+type VkBufferDeviceAddressInfo
+type VkMemoryAllocateFlagsInfo
+type VkMappedMemoryRange
+type VkPhysicalDeviceVulkan11Features
+type VkPhysicalDeviceVulkan12Features
+type VkPhysicalDeviceVulkan13Features
+type VkPhysicalDeviceVulkan11Properties
+type VkPhysicalDeviceVulkan12Properties
+type VkPhysicalDeviceVulkan13Properties
+type VkPipelineShaderStageRequiredSubgroupSizeCreateInfo
+type VkPhysicalDeviceCooperativeMatrixFeaturesKHR
+type VkCooperativeMatrixPropertiesKHR
+value VkBufferUsageFlags SHADER_DEVICE_ADDRESS
+value VkMemoryAllocateFlags DEVICE_ADDRESS
+value VkPipelineBindPoint COMPUTE
+value VkShaderStageFlags COMPUTE
+value VkPipelineStageFlags COMPUTE_SHADER
+value VkAccessFlags SHADER_READ
+value VkAccessFlags SHADER_WRITE
+value VkAccessFlags HOST_READ
+value VkAccessFlags HOST_WRITE
+value VkAccessFlags TRANSFER_READ
+value VkAccessFlags TRANSFER_WRITE
+value VkPipelineShaderStageCreateFlags REQUIRE_FULL_SUBGROUPS
+value VkQueryType TIMESTAMP
+const VK_API_VERSION_1_2
+const VK_API_VERSION_1_3
+value VkQueueFlags COMPUTE
+value VkMemoryPropertyFlags HOST_CACHED
+value VkQueryResultFlags WAIT
+# Cooperative matrix shape selection and compute-stage support.
+type VkPhysicalDeviceCooperativeMatrixPropertiesKHR
+value VkComponentTypeKHR FLOAT16
+value VkComponentTypeKHR FLOAT32
+value VkComponentTypeKHR SINT8
+value VkComponentTypeKHR UINT8
+value VkComponentTypeKHR SINT32
+value VkComponentTypeKHR UINT32
+value VkScopeKHR SUBGROUP

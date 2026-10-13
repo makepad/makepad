@@ -13,33 +13,26 @@ use {
     windows::{
         core::{GUID, PCWSTR},
         Win32::Media::MediaFoundation::{
-            IMFSample, IMFSourceReader, MFAudioFormat_PCM,
-            MFCreateAttributes, MFCreateMFByteStreamOnStream, MFCreateMediaType,
-            MFCreateSourceReaderFromByteStream, MFCreateSourceReaderFromURL,
-            MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_HEVC,
-            MFVideoFormat_NV12, MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
-            MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_DEFAULT_STRIDE,
-            MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-            MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE,
+            IMFSample, IMFSourceReader, MFAudioFormat_PCM, MFCreateAttributes,
+            MFCreateMFByteStreamOnStream, MFCreateMediaType, MFCreateSourceReaderFromByteStream,
+            MFCreateSourceReaderFromURL, MFMediaType_Audio, MFMediaType_Video, MFVideoFormat_H264,
+            MFVideoFormat_HEVC, MFVideoFormat_NV12, MF_BYTESTREAM_CONTENT_TYPE,
+            MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
+            MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE,
+            MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_MINIMUM_DISPLAY_APERTURE, MF_MT_SUBTYPE,
             MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
             MF_SOURCE_READERF_CURRENTMEDIATYPECHANGED, MF_SOURCE_READERF_ENDOFSTREAM,
-            MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-            MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_FIRST_AUDIO_STREAM,
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-            MF_SOURCE_READER_MEDIASOURCE, MF_BYTESTREAM_CONTENT_TYPE,
+            MF_SOURCE_READER_ALL_STREAMS, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
+            MF_SOURCE_READER_FIRST_AUDIO_STREAM, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            MF_SOURCE_READER_MEDIASOURCE,
         },
-        Win32::UI::Shell::SHCreateMemStream,
         Win32::System::Com::StructuredStorage::{
             PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
         },
-        Win32::System::Variant::{VARENUM, VT_UI8},
+        Win32::System::Variant::{VT_I8, VT_UI8},
+        Win32::UI::Shell::SHCreateMemStream,
     },
 };
-
-/// `VT_I8` — the trimmed vendored windows crate generates only the `VARENUM`
-/// values it already uses. `IMFSourceReader::SetCurrentPosition` with a NULL
-/// time format wants the position as a signed 100ns `LONGLONG`, i.e. VT_I8.
-const VT_I8: VARENUM = VARENUM(20);
 
 pub struct WindowsVideoFileDecoder {
     reader: IMFSourceReader,
@@ -125,7 +118,7 @@ impl WindowsVideoFileDecoder {
                     })?;
             }
             let wide_path = to_wide(path);
-            MFCreateSourceReaderFromURL(PCWSTR(wide_path.as_ptr()), &attributes)
+            MFCreateSourceReaderFromURL(PCWSTR(wide_path.as_ptr()), Some(&attributes))
                 .map_err(|e| hr_err("MFCreateSourceReaderFromURL", e))
         }
     }
@@ -137,19 +130,25 @@ impl WindowsVideoFileDecoder {
         ensure_media_foundation()?;
         unsafe {
             let attributes = Self::reader_attributes()?;
-            let istream = SHCreateMemStream(Some(bytes))
-                .ok_or_else(|| VideoFileError::new("SHCreateMemStream returned null"))?;
+            let istream = windows::Win32::System::Com::IStream::from_raw(SHCreateMemStream(
+                Some(bytes.as_ptr()),
+                bytes
+                    .len()
+                    .try_into()
+                    .map_err(|_| VideoFileError::new("memory stream exceeds Win32 length"))?,
+            ))
+            .map_err(|e| hr_err("SHCreateMemStream", e))?;
             let byte_stream = MFCreateMFByteStreamOnStream(&istream)
                 .map_err(|e| hr_err("MFCreateMFByteStreamOnStream", e))?;
-            use windows::core::Interface;
+
             if let Ok(stream_attributes) =
-                byte_stream.cast::<windows::Win32::Media::MediaFoundation::IMFAttributes>()
+                windows::Win32::Media::MediaFoundation::IMFAttributes::query(byte_stream.as_raw())
             {
                 let content_type = to_wide("video/mp4");
                 let _ = stream_attributes
                     .SetString(&MF_BYTESTREAM_CONTENT_TYPE, PCWSTR(content_type.as_ptr()));
             }
-            let reader = MFCreateSourceReaderFromByteStream(&byte_stream, &attributes)
+            let reader = MFCreateSourceReaderFromByteStream(&byte_stream, Some(&attributes))
                 .map_err(|e| hr_err("MFCreateSourceReaderFromByteStream", e))?;
             Self::from_reader(reader)
         }
@@ -185,11 +184,13 @@ impl WindowsVideoFileDecoder {
                 .map_err(|e| hr_err("get native video subtype", e))?;
             #[allow(non_upper_case_globals)]
             let video_codec = match native_subtype {
-                MFVideoFormat_HEVC => Some(VideoFileCodec::H265),
-                MFVideoFormat_H264 => Some(VideoFileCodec::H264),
+                value if value == MFVideoFormat_HEVC => Some(VideoFileCodec::H265),
+                value if value == MFVideoFormat_H264 => Some(VideoFileCodec::H264),
                 _ => None,
             };
-            let frame_rate = native.GetUINT64(&MF_MT_FRAME_RATE).unwrap_or((30 << 32) | 1);
+            let frame_rate = native
+                .GetUINT64(&MF_MT_FRAME_RATE)
+                .unwrap_or((30 << 32) | 1);
             let mut fps_num = (frame_rate >> 32) as u32;
             let mut fps_den = ((frame_rate & 0xffff_ffff) as u32).max(1);
             let g = gcd(fps_num, fps_den);
@@ -206,9 +207,11 @@ impl WindowsVideoFileDecoder {
             // Request NV12 output; the reader inserts decoder + converter.
             let out_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType", e))?;
             out_type
+                .as_IMFAttributes()
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(|e| hr_err("set decode major type", e))?;
             out_type
+                .as_IMFAttributes()
                 .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_NV12)
                 .map_err(|e| hr_err("set decode subtype NV12", e))?;
             reader
@@ -219,6 +222,7 @@ impl WindowsVideoFileDecoder {
                 .GetCurrentMediaType(video_stream)
                 .map_err(|e| hr_err("GetCurrentMediaType(video)", e))?;
             let frame_size = current
+                .as_IMFAttributes()
                 .GetUINT64(&MF_MT_FRAME_SIZE)
                 .map_err(|e| hr_err("get decoded frame size", e))?;
             let coded_width = (frame_size >> 32) as u32;
@@ -229,9 +233,18 @@ impl WindowsVideoFileDecoder {
                 display_width = aw;
                 display_height = ah;
             }
-            let width = if display_width != 0 { display_width.min(coded_width) } else { coded_width };
-            let height = if display_height != 0 { display_height.min(coded_height) } else { coded_height };
+            let width = if display_width != 0 {
+                display_width.min(coded_width)
+            } else {
+                coded_width
+            };
+            let height = if display_height != 0 {
+                display_height.min(coded_height)
+            } else {
+                coded_height
+            };
             let video_stride = current
+                .as_IMFAttributes()
                 .GetUINT32(&MF_MT_DEFAULT_STRIDE)
                 .map(|v| (v as i32).unsigned_abs() as usize)
                 .unwrap_or(coded_width as usize)
@@ -252,21 +265,27 @@ impl WindowsVideoFileDecoder {
                     .clamp(1, 2);
                 let pcm_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType", e))?;
                 pcm_type
+                    .as_IMFAttributes()
                     .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
                     .map_err(|e| hr_err("set decode audio major type", e))?;
                 pcm_type
+                    .as_IMFAttributes()
                     .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
                     .map_err(|e| hr_err("set decode audio subtype PCM", e))?;
                 pcm_type
+                    .as_IMFAttributes()
                     .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
                     .map_err(|e| hr_err("set decode audio bits", e))?;
                 pcm_type
+                    .as_IMFAttributes()
                     .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, rate)
                     .map_err(|e| hr_err("set decode audio rate", e))?;
                 pcm_type
+                    .as_IMFAttributes()
                     .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels)
                     .map_err(|e| hr_err("set decode audio channels", e))?;
                 pcm_type
+                    .as_IMFAttributes()
                     .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, channels * 2)
                     .map_err(|e| hr_err("set decode audio block align", e))?;
                 reader
@@ -351,21 +370,27 @@ impl WindowsVideoFileDecoder {
                 .clamp(1, 2);
             let pcm_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType", e))?;
             pcm_type
+                .as_IMFAttributes()
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
                 .map_err(|e| hr_err("set decode audio major type", e))?;
             pcm_type
+                .as_IMFAttributes()
                 .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
                 .map_err(|e| hr_err("set decode audio subtype PCM", e))?;
             pcm_type
+                .as_IMFAttributes()
                 .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
                 .map_err(|e| hr_err("set decode audio bits", e))?;
             pcm_type
+                .as_IMFAttributes()
                 .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, rate)
                 .map_err(|e| hr_err("set decode audio rate", e))?;
             pcm_type
+                .as_IMFAttributes()
                 .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels)
                 .map_err(|e| hr_err("set decode audio channels", e))?;
             pcm_type
+                .as_IMFAttributes()
                 .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, channels * 2)
                 .map_err(|e| hr_err("set decode audio block align", e))?;
             reader
@@ -433,13 +458,14 @@ impl WindowsVideoFileDecoder {
         }
         let video_stream = MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32;
         if let Ok(current) = self.reader.GetCurrentMediaType(video_stream) {
-            if let Ok(frame_size) = current.GetUINT64(&MF_MT_FRAME_SIZE) {
+            if let Ok(frame_size) = current.as_IMFAttributes().GetUINT64(&MF_MT_FRAME_SIZE) {
                 self.coded_width = (frame_size >> 32) as u32;
                 self.coded_height = (frame_size & 0xffff_ffff) as u32;
                 self.info.width = self.info.width.min(self.coded_width).max(1);
                 self.info.height = self.info.height.min(self.coded_height).max(1);
             }
             self.video_stride = current
+                .as_IMFAttributes()
                 .GetUINT32(&MF_MT_DEFAULT_STRIDE)
                 .map(|v| (v as i32).unsigned_abs() as usize)
                 .unwrap_or(self.coded_width as usize)
@@ -602,7 +628,7 @@ impl WindowsVideoFileDecoder {
             // conversion so nothing can reinterpret the tag.
             let position = PROPVARIANT {
                 Anonymous: PROPVARIANT_0 {
-                    Anonymous: std::mem::ManuallyDrop::new(PROPVARIANT_0_0 {
+                    Anonymous: PROPVARIANT_0_0 {
                         vt: VT_I8,
                         wReserved1: 0,
                         wReserved2: 0,
@@ -610,7 +636,7 @@ impl WindowsVideoFileDecoder {
                         Anonymous: PROPVARIANT_0_0_0 {
                             hVal: position_100ns,
                         },
-                    }),
+                    },
                 },
             };
             self.reader

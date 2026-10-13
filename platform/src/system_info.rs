@@ -15,7 +15,7 @@ static GPU_ADAPTER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Called once by the GPU backend with the adapter it rendered with; the
 /// first name sticks (a device lost and recreated is the same adapter).
-#[allow(dead_code)] // not every backend names its adapter (gpusim, web)
+#[allow(dead_code)] // not every backend names its adapter (headless, web)
 pub(crate) fn note_gpu_adapter(name: &str) {
     let name = name.trim();
     if !name.is_empty() {
@@ -37,7 +37,7 @@ pub fn physical_memory_bytes() -> Option<u64> {
     {
         crate::cx::apple_physical_memory_bytes()
     }
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     {
         crate::cx::linux_physical_memory_bytes()
     }
@@ -45,12 +45,7 @@ pub fn physical_memory_bytes() -> Option<u64> {
     {
         crate::cx::windows_physical_memory_bytes()
     }
-    #[cfg(not(any(
-        target_os = "macos",
-        target_os = "ios",
-        all(target_os = "linux", not(target_env = "ohos")),
-        target_os = "windows"
-    )))]
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "linux", target_os = "windows")))]
     {
         None
     }
@@ -104,7 +99,7 @@ fn os_version() -> Option<String> {
     })
 }
 
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 fn os_version() -> Option<String> {
     let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
         .ok()
@@ -142,7 +137,7 @@ fn os_version() -> Option<String> {
     }
     // RtlGetVersion reports the real version; GetVersionEx is capped at
     // what the executable's manifest declares.
-    windows_core::link!("ntdll.dll" "system" fn RtlGetVersion(info: *mut OsVersionInfoW) -> i32);
+    #[link(name = "ntdll", kind = "raw-dylib")] extern "system" { fn RtlGetVersion(info: *mut OsVersionInfoW) -> i32; }
     let mut info = OsVersionInfoW {
         dwOSVersionInfoSize: std::mem::size_of::<OsVersionInfoW>() as u32,
         dwMajorVersion: 0,
@@ -166,18 +161,13 @@ fn os_version() -> Option<String> {
     ))
 }
 
-#[cfg(not(any(
-    target_vendor = "apple",
-    all(target_os = "linux", not(target_env = "ohos")),
-    target_os = "windows"
-)))]
+#[cfg(not(any(target_vendor = "apple", target_os = "linux", target_os = "windows")))]
 fn os_version() -> Option<String> {
     None
 }
 
-// Desktop Linux reports what its media layer actually connected to
-// (os/linux/linux_media.rs); every other platform has one audio stack.
-#[cfg(not(all(target_os = "linux", not(target_env = "ohos"), not(gpusim))))]
+// Audio stack descriptions for backends that expose them.
+#[cfg(not(target_os = "linux"))]
 impl crate::cx::Cx {
     /// The audio stack this process plays through, e.g. "CoreAudio",
     /// "WASAPI", "PipeWire 1.0.5 (PulseAudio API)" or "ALSA".
@@ -188,8 +178,6 @@ impl crate::cx::Cx {
             "WASAPI"
         } else if cfg!(target_os = "android") {
             "AAudio"
-        } else if cfg!(target_env = "ohos") {
-            "OHAudio"
         } else if cfg!(target_arch = "wasm32") {
             "Web Audio"
         } else {

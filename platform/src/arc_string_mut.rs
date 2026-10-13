@@ -25,14 +25,14 @@ impl ArcStringMut {
     pub fn as_rc(&self) -> ScriptRcString {
         match self {
             Self::Rc(rc) => rc.clone(),
-            Self::String(s) => ScriptRcString::new(s.clone()),
+            Self::String(s) => ScriptRcString::from_str(s),
         }
     }
 
     pub fn as_mut(&mut self) -> &mut String {
         match self {
             Self::Rc(rc) => {
-                *self = Self::String(rc.0.to_string());
+                *self = Self::String(rc.as_str().to_string());
                 self.as_mut()
             }
             Self::String(s) => s,
@@ -66,7 +66,7 @@ impl ArcStringMut {
 
     pub fn as_ref(&self) -> &str {
         match self {
-            Self::Rc(rc) => &rc.0,
+            Self::Rc(rc) => rc.as_str(),
             Self::String(s) => s,
         }
     }
@@ -100,9 +100,7 @@ impl ScriptApply for ArcStringMut {
             return;
         }
         // Convert to owned String using the heap's cast method
-        let mut s = String::new();
-        vm.bx.heap.cast_to_string(value, &mut s);
-        *self = ArcStringMut::String(s);
+        *self = ArcStringMut::String(vm.cast_to_string(value));
     }
 
     fn script_to_value(&self, vm: &mut ScriptVm) -> ScriptValue {
@@ -110,6 +108,6 @@ impl ScriptApply for ArcStringMut {
         if let Some(val) = ScriptValue::from_inline_string(s) {
             return val;
         }
-        vm.bx.heap.new_string_from_str(s).into()
+        vm.new_string(s).into()
     }
 }

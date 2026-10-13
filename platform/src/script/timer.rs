@@ -188,15 +188,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let (year, month, day) = civil_from_days(days);
             // 1970-01-01 was a Thursday (weekday 4 with Sunday = 0).
             let weekday = (days + 4).rem_euclid(7);
-            let obj = vm.bx.heap.new_object();
-            let trap = vm.bx.threads.cur().trap.pass();
-            vm.bx.heap.set_value(obj, id!(year).into(), (year as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(month).into(), (month as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(day).into(), (day as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(hour).into(), ((secs_of_day / 3600) as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(minute).into(), ((secs_of_day / 60 % 60) as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(second).into(), ((secs_of_day % 60) as f64).into(), trap);
-            vm.bx.heap.set_value(obj, id!(weekday).into(), (weekday as f64).into(), trap);
+            let obj = vm.new_object();
+            vm.set_value_trap(obj, id!(year), year as f64);
+            vm.set_value_trap(obj, id!(month), month as f64);
+            vm.set_value_trap(obj, id!(day), day as f64);
+            vm.set_value_trap(obj, id!(hour), (secs_of_day / 3600) as f64);
+            vm.set_value_trap(obj, id!(minute), (secs_of_day / 60 % 60) as f64);
+            vm.set_value_trap(obj, id!(second), (secs_of_day % 60) as f64);
+            vm.set_value_trap(obj, id!(weekday), weekday as f64);
             obj.into()
         },
     );
@@ -208,7 +207,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         |vm, args| {
             let delay = script_value!(vm, args.delay);
             let callback = script_value!(vm, args.callback);
-            if !delay.is_number() || !vm.bx.heap.is_fn(callback.into()) {
+            if !delay.is_number() || !vm.is_fn(callback.into()) {
                 return script_err_type_mismatch!(vm.trap(), "invalid timer arg type");
             }
             let callback = ScriptFnRef::script_from_value(vm, callback);
@@ -235,7 +234,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
             let delay = script_value!(vm, args.delay);
             let callback = script_value!(vm, args.callback);
 
-            if !delay.is_number() || !ScriptFnRef::script_type_check(&vm.bx.heap, callback) {
+            if !delay.is_number() || !ScriptFnRef::script_type_check(vm.heap(), callback) {
                 return script_err_type_mismatch!(vm.trap(), "invalid timer arg type");
             }
             let callback = ScriptFnRef::script_from_value(vm, callback);

@@ -179,6 +179,8 @@ pub struct ForceTarget {
 #[derive(Clone)]
 pub struct GameInputForce {
     shared: Arc<ForceShared>,
+    /// A platform whose effects run in another layer (the HAL) gets each target as it is set.
+    sink: Option<Arc<dyn Fn(ForceTarget) + Send + Sync>>,
 }
 
 struct ForceShared {
@@ -215,7 +217,14 @@ impl GameInputForce {
                 damper: AtomicU32::new(0),
                 stamp_ms: AtomicU64::new(0),
             }),
+            sink: None,
         }
+    }
+
+    /// A channel whose targets go to `sink` as they are set (from the app's thread): a platform
+    /// whose force effects run behind the HAL boundary holds and ages them there.
+    pub fn forwarding(sink: Arc<dyn Fn(ForceTarget) + Send + Sync>) -> Self {
+        Self { sink: Some(sink), ..Self::new() }
     }
 
     /// The app's side: the target from now on. Call it at least every
@@ -227,6 +236,9 @@ impl GameInputForce {
         s.spring.store(unit(target.spring, 0.0).to_bits(), Ordering::Relaxed);
         s.damper.store(unit(target.damper, 0.0).to_bits(), Ordering::Relaxed);
         s.stamp_ms.store(s.epoch.elapsed().as_millis() as u64 + 1, Ordering::Release);
+        if let Some(sink) = &self.sink {
+            sink(ForceTarget { constant: unit(target.constant, -1.0), spring: unit(target.spring, 0.0), damper: unit(target.damper, 0.0) });
+        }
     }
 
     /// The platform's side: the latest target and its age (`None` = never

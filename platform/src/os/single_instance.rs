@@ -263,10 +263,10 @@ pub(crate) mod windows_pipe {
     const ERROR_ACCESS_DENIED: i32 = 5;
     const ERROR_PIPE_CONNECTED: i32 = 535;
 
-    windows_core::link!("kernel32.dll" "system" fn CreateNamedPipeW(lpname: PCWSTR, dwopenmode: u32, dwpipemode: u32, nmaxinstances: u32, noutbuffersize: u32, ninbuffersize: u32, ndefaulttimeout: u32, lpsecurityattributes: *const core::ffi::c_void) -> HANDLE);
-    windows_core::link!("kernel32.dll" "system" fn ConnectNamedPipe(hnamedpipe: HANDLE, lpoverlapped: *mut core::ffi::c_void) -> BOOL);
-    windows_core::link!("kernel32.dll" "system" fn GetNamedPipeServerProcessId(pipe: HANDLE, serverprocessid: *mut u32) -> BOOL);
-    windows_core::link!("user32.dll" "system" fn AllowSetForegroundWindow(dwprocessid: u32) -> BOOL);
+    #[link(name = "kernel32", kind = "raw-dylib")] extern "system" { fn CreateNamedPipeW(lpname: PCWSTR, dwopenmode: u32, dwpipemode: u32, nmaxinstances: u32, noutbuffersize: u32, ninbuffersize: u32, ndefaulttimeout: u32, lpsecurityattributes: *const core::ffi::c_void) -> HANDLE; }
+    #[link(name = "kernel32", kind = "raw-dylib")] extern "system" { fn ConnectNamedPipe(hnamedpipe: HANDLE, lpoverlapped: *mut core::ffi::c_void) -> BOOL; }
+    #[link(name = "kernel32", kind = "raw-dylib")] extern "system" { fn GetNamedPipeServerProcessId(pipe: HANDLE, serverprocessid: *mut u32) -> BOOL; }
+    #[link(name = "user32", kind = "raw-dylib")] extern "system" { fn AllowSetForegroundWindow(dwprocessid: u32) -> BOOL; }
 
     pub(crate) struct Server {
         name: Vec<u16>,

@@ -73,14 +73,7 @@ pub enum SingleInstance {
     Standalone,
 }
 
-#[cfg(all(
-    not(gpusim),
-    any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", not(target_env = "ohos"))
-    )
-))]
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 mod native {
     use super::*;
     use crate::os::single_instance::{self as si, Claim, HANDOFF_TIMEOUT};
@@ -140,19 +133,12 @@ mod native {
     }
 }
 
-#[cfg(not(all(
-    not(gpusim),
-    any(
-        target_os = "macos",
-        target_os = "windows",
-        all(target_os = "linux", not(target_env = "ohos"))
-    )
-)))]
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 mod native {
     use super::*;
 
     /// No single instance here: the OS keeps one (mobile) or there is no
-    /// process to share (web, the simulated GPU).
+    /// process to share (web).
     #[doc(hidden)]
     pub struct SingleInstanceServer(());
 

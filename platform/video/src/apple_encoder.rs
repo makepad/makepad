@@ -127,6 +127,8 @@ pub struct MacosVideoFileEncoder {
     audio_frames_pushed: u64,
     finalized: bool,
     nv12_scratch: Vec<u8>,
+    /// Made on the first frame pushed as a shared texture.
+    intake: Option<crate::apple_texture_intake::TextureIntake>,
 }
 
 // Driven from one thread at a time; the wrapped AVFoundation objects are not
@@ -401,6 +403,7 @@ impl MacosVideoFileEncoder {
                 audio_frames_pushed: 0,
                 finalized: false,
                 nv12_scratch: Vec::new(),
+                intake: None,
             })
         }
     }
@@ -451,6 +454,25 @@ impl MacosVideoFileEncoder {
         }
         self.frame_index += 1;
         Ok(())
+    }
+
+    /// Append a region of a shared GPU texture (an IOSurface id), copied on
+    /// the GPU (see `VideoFileEncoder::push_frame_shared_texture`).
+    pub fn push_shared_texture(&mut self, handle: u64, region: [u32; 4], pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        if self.finalized {
+            return Err(VideoFileError::new("encoder already finalized"));
+        }
+        if self.intake.is_none() {
+            self.intake = Some(crate::apple_texture_intake::TextureIntake::new()?);
+        }
+        let _pool = AutoreleasePool::new();
+        let picture = unsafe { self.intake.as_mut().unwrap().picture(handle, region)? };
+        self.push_gpu_picture(&picture, pts_100ns)
+    }
+
+    /// Append a picture made earlier (see `VideoFileEncoder::push_gpu_picture`).
+    pub fn push_gpu_picture(&mut self, picture: &crate::apple_texture_intake::GpuPicture, pts_100ns: Option<i64>) -> Result<(), VideoFileError> {
+        unsafe { self.push_pixel_buffer(picture.buffer, pts_100ns) }
     }
 
     pub fn push_frame_nv12(

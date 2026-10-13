@@ -10,6 +10,7 @@ use crate::types::{
 };
 
 pub mod http;
+#[cfg(target_os = "linux")]
 pub(crate) mod socket_stream;
 pub mod web_socket;
 

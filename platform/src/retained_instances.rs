@@ -93,10 +93,6 @@ pub struct RetainedUploadBudget {
     /// This frame's retirement allowance (the drain of buffers the GPU is
     /// done with): bounded by bytes derived from the copy probe.
     pub retirement: RetainedMaintenance,
-    /// Publication ids whose backing lease a draw item released outside a
-    /// collection (`detach_shared`, a consumer's eviction); the backend drops
-    /// each lease at its next upload phase (O(released), no walk).
-    pub backing_releases: Vec<u64>,
 }
 
 /// One process allowance, shared by Scope's prepared cache and the platform.
@@ -425,9 +421,9 @@ impl RetainedAllocationBudget {
     /// Extra bounded sweeps while released records are queued. Every upload of
     /// a draw item's instances leaves one released record behind and a pan
     /// re-uploads hundreds of items per frame, so one 64-record sweep per
-    /// frame lets the backlog (and the retirement repaints it asks for) outlast
-    /// the interaction by tens of seconds. Each call stays within `collect`'s
-    /// bound; `max_calls` caps the frame's total.
+    /// frame lets the backlog, and the retirement work it keeps waking up for,
+    /// outlast the interaction by tens of seconds. Each call stays within
+    /// `collect`'s bound; `max_calls` caps the frame's total.
     pub fn collect_backlog(&mut self, frame: u64, completed: u64, max_calls: usize) {
         if self.collected_backlog_frame == Some(frame) {
             return;
@@ -476,7 +472,6 @@ impl RetainedUploadBudget {
             retirement_queued: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             retirement_frame: None,
             retirement: RetainedMaintenance::default(),
-            backing_releases: Vec::new(),
         }
     }
 

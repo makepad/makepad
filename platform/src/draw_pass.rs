@@ -1,3 +1,5 @@
+#[cfg(target_arch = "wasm32")]
+use crate::os::web::CxOsPass;
 use crate::{
     area::Area,
     cx::Cx,
@@ -6,7 +8,6 @@ use crate::{
     makepad_math::*,
     //makepad_live_id::*,
     makepad_script::*,
-    os::CxOsPass,
     script::vm::*,
     texture::Texture,
     window::WindowId,
@@ -143,6 +144,10 @@ impl std::ops::IndexMut<DrawPassId> for CxDrawPassPool {
 
 impl ScriptHook for DrawPass {}
 impl ScriptNew for DrawPass {
+    fn script_type_id_static() -> ScriptTypeId {
+        const ID: ScriptTypeId = ScriptTypeId::of_path(concat!(module_path!(), "::DrawPass"));
+        ID
+    }
     fn script_new(vm: &mut ScriptVm) -> Self {
         Self::new(vm.cx_mut())
     }
@@ -561,7 +566,7 @@ pub struct CxDrawPassColorTexture {
     pub cube_face: Option<u32>,
 }
 
-#[derive(Default, Clone, Script, ScriptHook)]
+#[derive(Default, Clone, Script, ScriptHook, Copy)]
 #[repr(C)]
 pub struct DrawPassUniforms {
     #[live]
@@ -610,9 +615,30 @@ pub struct DrawPassUniforms {
     pub pad2: f32,
 }
 
+crate::makepad_math::impl_gpu_pod!(DrawPassUniforms,
+    camera_projection: Mat4f,
+    camera_projection_r: Mat4f,
+    camera_view: Mat4f,
+    camera_view_r: Mat4f,
+    depth_projection: Mat4f,
+    depth_projection_r: Mat4f,
+    depth_view: Mat4f,
+    depth_view_r: Mat4f,
+    camera_inv: Mat4f,
+    camera_inv_r: Mat4f,
+    dpi_factor: f32,
+    dpi_dilate: f32,
+    display_dpi_factor: f32,
+    time: f32,
+    shiny_time: f32,
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
+);
+
 impl DrawPassUniforms {
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawPassUniforms>() >> 2] {
-        unsafe { std::mem::transmute(self) }
+        crate::makepad_math::bytemuck::cast_ref(self)
     }
 }
 
@@ -663,6 +689,11 @@ pub struct CxDrawPass {
     /// it paints once even while orphaned (a thumbnail sheet re-executed for
     /// a texture readback). Cleared when the repaint order is computed.
     pub repaint_requested: bool,
+    /// Set by a backend while painting this pass when something in it needs the
+    /// next frame too: a shader that reads `draw_pass.time`, or a draw call it had to skip.
+    pub repaint_next: bool,
+    /// This pass still has a time-driven frame to paint, so the pass clock can't rebase.
+    pub(crate) time_owed: bool,
     /// The repaint that last painted this pass whole (0 before the first).
     /// A repaint the backend stopped — instances or uniforms not resident,
     /// the submitter saturated — leaves it as it was, so a producer that
@@ -680,6 +711,7 @@ pub struct CxDrawPass {
     /// Set while the exploded z-layer view is up on this pass; `None` is
     /// ordinary flat 2D and leaves `camera_view` the identity it always was.
     pub sploded: Option<crate::sploded::SplodedParams>,
+    #[cfg(target_arch = "wasm32")]
     pub os: CxOsPass,
     pub(crate) gpu_time_query: Option<GpuTimeQuery>,
 }
@@ -745,12 +777,24 @@ impl Default for CxDrawPass {
             live_with_parent: false,
             attached_by: None,
             repaint_requested: false,
+            repaint_next: false,
+            time_owed: false,
             painted_serial: 0,
             pass_rect: None,
+            #[cfg(target_arch = "wasm32")]
             os: CxOsPass::default(),
             gpu_time_query: None,
         }
     }
+}
+
+/// The smallest rect holding both.
+pub fn union_rects(a: Rect, b: Rect) -> Rect {
+    let x0 = a.pos.x.min(b.pos.x);
+    let y0 = a.pos.y.min(b.pos.y);
+    let x1 = (a.pos.x + a.size.x).max(b.pos.x + b.size.x);
+    let y1 = (a.pos.y + a.size.y).max(b.pos.y + b.size.y);
+    Rect { pos: dvec2(x0, y0), size: dvec2(x1 - x0, y1 - y0) }
 }
 
 #[derive(Clone, Debug)]
@@ -825,26 +869,6 @@ impl CxDrawPass {
     }
 }
 
-/// The size of a pass's depth attachment, in device pixels.
-///
-/// A pass rendering into a texture the caller chose takes that texture's
-/// allocation: the WM hands its clients power-of-two shared textures larger
-/// than the pass. A pass drawing into its own targets, or a window, sizes the
-/// depth buffer like its colour buffers, from the pass rect.
-// Only the D3D11 backend binds strict-size depth views; the other backends
-// clip to the smallest attachment and size depth from the pass.
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub(crate) fn depth_attachment_size(
-    target_alloc: Option<(usize, usize)>,
-    pass_size: DVec2,
-    dpi_factor: f64,
-) -> (usize, usize) {
-    target_alloc.unwrap_or_else(|| {
-        let size = pass_size * dpi_factor;
-        (size.x as usize, size.y as usize)
-    })
-}
-
 #[cfg(test)]
 mod allocation_tests {
     use super::*;
@@ -870,40 +894,6 @@ mod allocation_tests {
         assert!(pass.pass_rect.is_none());
         assert!(!pass.keep_camera_matrix && !pass.dont_clear);
         assert_ne!(pass.pass_uniforms_gen, generation);
-    }
-}
-
-#[cfg(test)]
-mod depth_attachment_size_tests {
-    use super::*;
-
-    #[test]
-    fn a_window_pass_sizes_depth_from_the_pass_rect() {
-        assert_eq!(
-            depth_attachment_size(None, dvec2(1126.0, 680.0), 2.0),
-            (2252, 1360)
-        );
-        assert_eq!(
-            depth_attachment_size(None, dvec2(800.0, 600.0), 1.0),
-            (800, 600)
-        );
-    }
-
-    #[test]
-    fn a_hosted_pass_sizes_depth_from_the_shared_texture_allocation() {
-        // The WM's Windows allocation for a 1126x680 tile at dpi 2.
-        assert_eq!(
-            depth_attachment_size(Some((4096, 2048)), dvec2(1126.0, 680.0), 2.0),
-            (4096, 2048)
-        );
-    }
-
-    #[test]
-    fn the_target_allocation_wins_even_when_smaller_than_the_pass() {
-        assert_eq!(
-            depth_attachment_size(Some((1024, 512)), dvec2(1126.0, 680.0), 2.0),
-            (1024, 512)
-        );
     }
 }
 

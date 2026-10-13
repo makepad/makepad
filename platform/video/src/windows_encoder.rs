@@ -12,77 +12,58 @@ use {
         nv12, PcmAudioTrackOptions, VideoFileCodec, VideoFileEncoderOptions, VideoFileError,
         VideoTransformInfo,
     },
+    std::sync::atomic::{AtomicI32, Ordering},
+    std::sync::Once,
     windows::{
-        core::{Interface, GUID, PCWSTR, PWSTR},
-        Win32::Media::MediaFoundation::{
-            eAVEncH264VProfile_Main, eAVEncH265VProfile_Main_420_8, IMFAttributes,
-            IMFByteStream, IMFMediaBuffer, IMFSample, IMFSinkWriter, IMFSinkWriterEx,
-            IMFTransform, CODECAPI_AVEncMPVGOPSize,
-            MFAudioFormat_AAC, MFAudioFormat_PCM, MFCreateAttributes,
-            MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-            MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFStartup,
-            MFTranscodeContainerType_MPEG4, MFVideoFormat_H264, MFVideoFormat_HEVC,
-            MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFT_CATEGORY_VIDEO_ENCODER,
-            MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute,
-            MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
-            MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT,
-            MF_MT_AUDIO_NUM_CHANNELS, MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE,
-            MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-            MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_MT_VIDEO_PROFILE,
-            MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_DISABLE_THROTTLING,
-            MF_TRANSCODE_CONTAINERTYPE, MF_VERSION,
-        },
-        Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED},
+        core::{GUID, PCWSTR, PWSTR},
         Win32::Graphics::Direct3D11::{
             ID3D11Device, ID3D11Multithread, ID3D11Texture2D, D3D11_BIND_RENDER_TARGET,
             D3D11_BIND_SHADER_RESOURCE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
             D3D11_USAGE_DEFAULT,
         },
         Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC},
-        Win32::Media::MediaFoundation::{MFCreateDXGIDeviceManager, IMFDXGIDeviceManager},
+        Win32::Media::MediaFoundation::{
+            eAVEncH264VProfile_Main, eAVEncH265VProfile_Main_420_8, CODECAPI_AVEncMPVGOPSize,
+            IMFAttributes, IMFByteStream, IMFMediaBuffer, IMFSample, IMFSinkWriter,
+            IMFSinkWriterEx, IMFTransform, MFAudioFormat_AAC, MFAudioFormat_PCM,
+            MFCreateAttributes, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+            MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFStartup,
+            MFT_ENUM_HARDWARE_URL_Attribute, MFT_FRIENDLY_NAME_Attribute,
+            MFTranscodeContainerType_MPEG4, MFVideoFormat_H264, MFVideoFormat_HEVC,
+            MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFT_CATEGORY_VIDEO_ENCODER,
+            MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+            MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
+            MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE,
+            MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE,
+            MF_MT_SUBTYPE, MF_MT_VIDEO_PROFILE, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
+            MF_SINK_WRITER_DISABLE_THROTTLING, MF_TRANSCODE_CONTAINERTYPE, MF_VERSION,
+        },
+        Win32::Media::MediaFoundation::{IMFDXGIDeviceManager, MFCreateDXGIDeviceManager},
+        Win32::System::Com::{CoInitializeEx, CoTaskMemFree, COINIT_MULTITHREADED},
     },
-    std::sync::atomic::{AtomicI32, Ordering},
-    std::sync::Once,
 };
 
 const HNS_PER_SECOND: u128 = 10_000_000;
 
-/// `MF_MT_MAX_KEYFRAME_SPACING` (missing from the pinned windows crate
-/// version): max frames between key frames; 1 = all-intra.
-const MF_MT_MAX_KEYFRAME_SPACING: windows::core::GUID =
-    windows::core::GUID::from_u128(0xc16eb52b_73a1_476f_8d62_839d6a020652);
-
-/// `MF_SINK_WRITER_D3D_MANAGER` (missing from the pinned windows crate
-/// version; mfreadwrite.h gives it the source reader's value).
-const MF_SINK_WRITER_D3D_MANAGER: GUID = GUID::from_u128(0xec822da2_e1e9_4b29_a0d8_563c719f5269);
-
-/// `MFVideoFormat_RGB32` (D3DFMT_X8R8G8B8, BGRA bytes, alpha ignored),
-/// missing from the pinned windows crate version.
-const MF_VIDEO_FORMAT_RGB32: GUID = GUID::from_u128(0x00000016_0000_0010_8000_00aa00389b71);
-
-#[link(name = "mfplat")]
-extern "system" {
-    /// Wraps a DXGI surface as a media buffer; not in the pinned bindings.
-    fn MFCreateDXGISurfaceBuffer(
-        riid: *const GUID,
-        surface: *mut std::ffi::c_void,
-        subresource_index: u32,
-        bottom_up_when_linear: i32,
-        buffer: *mut *mut std::ffi::c_void,
-    ) -> windows::core::HRESULT;
-}
+use windows::Win32::Media::MediaFoundation::{
+    MFCreateDXGISurfaceBuffer, MFVideoFormat_RGB32, MF_MT_MAX_KEYFRAME_SPACING,
+    MF_SINK_WRITER_D3D_MANAGER,
+};
 
 /// The app's device, the textures the encoder reads (see `new_d3d11`).
 struct D3d11Input {
     device: ID3D11Device,
     width: u32,
     height: u32,
+    /// NV12 textures at the track's size (the encoder's own input: no video processor in the
+    /// sink writer) instead of BGRA at the source's size
+    nv12: bool,
     _manager: IMFDXGIDeviceManager,
     bgra_scratch: Vec<u8>,
 }
 
-pub(crate) fn hr_err(context: &str, err: windows::core::Error) -> VideoFileError {
-    VideoFileError::with_code(format!("{}: {}", context, err.message()), err.code().0)
+pub(crate) fn hr_err(context: &str, err: windows::core::HRESULT) -> VideoFileError {
+    VideoFileError::with_code(format!("{}: {}", context, err), err.code().0)
 }
 
 /// Initialize COM (MTA) on this thread and Media Foundation once per process.
@@ -158,7 +139,12 @@ unsafe fn read_string_attribute(attributes: &IMFAttributes, key: &GUID) -> Optio
 }
 
 pub struct WindowsVideoFileEncoder {
-    sink: IMFSinkWriter,
+    /// None once a reopen for GPU pictures dropped it and failed (see `use_d3d11`)
+    sink: Option<IMFSinkWriter>,
+    /// made by `new`: nothing opened yet (see `open`)
+    lazy: bool,
+    path: String,
+    options: VideoFileEncoderOptions,
     video_stream: u32,
     audio_stream: Option<u32>,
     width: u32,
@@ -176,8 +162,44 @@ pub struct WindowsVideoFileEncoder {
 }
 
 impl WindowsVideoFileEncoder {
+    /// The file is opened at the first frame, sound or `finish`: then the input is known (CPU
+    /// frames, or a recorder's GPU pictures as NV12 textures) and the sink writer is made once
+    /// for it (opening one costs ~430 ms with a hardware MFT; reopening doubled that per segment).
     pub fn new(path: &str, options: &VideoFileEncoderOptions) -> Result<Self, VideoFileError> {
-        Self::new_with(path, options, None)
+        ensure_media_foundation()?;
+        let (audio_sample_rate, audio_channels) = options.audio.map_or((0, 0), |a| (a.sample_rate, a.channels));
+        Ok(Self {
+            sink: None,
+            lazy: true,
+            path: path.to_string(),
+            options: *options,
+            video_stream: 0,
+            audio_stream: None,
+            width: options.width,
+            height: options.height,
+            fps_num: options.fps_num,
+            fps_den: options.fps_den,
+            audio_sample_rate,
+            audio_channels,
+            frame_index: 0,
+            audio_frames_pushed: 0,
+            nv12_scratch: Vec::new(),
+            transform_info: None,
+            finalized: false,
+            d3d11: None,
+        })
+    }
+
+    /// A lazily made encoder opens its sink writer: for NV12 textures on `nv12_device`, else
+    /// for CPU frames.
+    fn open(&mut self, nv12_device: Option<&ID3D11Device>) -> Result<(), VideoFileError> {
+        if !self.lazy {
+            return Ok(());
+        }
+        self.lazy = false;
+        let (path, options) = (std::mem::take(&mut self.path), self.options);
+        *self = Self::new_with(&path, &options, nv12_device.map(|d| (d, options.width, options.height, true)))?;
+        Ok(())
     }
 
     /// An encoder fed BGRA8 textures of `source_width` x `source_height` on
@@ -192,13 +214,13 @@ impl WindowsVideoFileEncoder {
         source_width: u32,
         source_height: u32,
     ) -> Result<Self, VideoFileError> {
-        Self::new_with(path, options, Some((device, source_width, source_height)))
+        Self::new_with(path, options, Some((device, source_width, source_height, false)))
     }
 
     fn new_with(
         path: &str,
         options: &VideoFileEncoderOptions,
-        d3d11: Option<(&ID3D11Device, u32, u32)>,
+        d3d11: Option<(&ID3D11Device, u32, u32, bool)>,
     ) -> Result<Self, VideoFileError> {
         ensure_media_foundation()?;
         unsafe {
@@ -215,26 +237,28 @@ impl WindowsVideoFileEncoder {
                 .SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4)
                 .map_err(|e| hr_err("set MF_TRANSCODE_CONTAINERTYPE", e))?;
             let d3d11 = match d3d11 {
-                Some((device, width, height)) => {
-                    if let Ok(multithread) = device.cast::<ID3D11Multithread>() {
+                Some((device, width, height, nv12)) => {
+                    if let Ok(multithread) = ID3D11Multithread::query(device.as_raw()) {
                         let _ = multithread.SetMultithreadProtected(true);
                     }
                     let mut reset_token = 0u32;
                     let mut manager: Option<IMFDXGIDeviceManager> = None;
                     MFCreateDXGIDeviceManager(&mut reset_token, &mut manager)
                         .map_err(|e| hr_err("MFCreateDXGIDeviceManager", e))?;
-                    let manager = manager
-                        .ok_or_else(|| VideoFileError::new("MFCreateDXGIDeviceManager returned nothing"))?;
+                    let manager = manager.ok_or_else(|| {
+                        VideoFileError::new("MFCreateDXGIDeviceManager returned nothing")
+                    })?;
                     manager
-                        .ResetDevice(device, reset_token)
+                        .ResetDevice(device.as_IUnknown(), reset_token)
                         .map_err(|e| hr_err("IMFDXGIDeviceManager::ResetDevice", e))?;
                     attributes
-                        .SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, &manager)
+                        .SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, manager.as_IUnknown())
                         .map_err(|e| hr_err("set MF_SINK_WRITER_D3D_MANAGER", e))?;
                     Some(D3d11Input {
                         device: device.clone(),
                         width,
                         height,
+                        nv12,
                         _manager: manager,
                         bgra_scratch: Vec::new(),
                     })
@@ -243,21 +267,33 @@ impl WindowsVideoFileEncoder {
             };
             // Input frames: NV12 bytes, or BGRA textures at the source's size.
             let (in_subtype, in_width, in_height, in_stride) = match &d3d11 {
-                Some(input) => (&MF_VIDEO_FORMAT_RGB32, input.width, input.height, input.width * 4),
-                None => (&MFVideoFormat_NV12, options.width, options.height, options.width),
+                Some(input) if input.nv12 => (&MFVideoFormat_NV12, input.width, input.height, input.width),
+                Some(input) => (
+                    &MFVideoFormat_RGB32,
+                    input.width,
+                    input.height,
+                    input.width * 4,
+                ),
+                None => (
+                    &MFVideoFormat_NV12,
+                    options.width,
+                    options.height,
+                    options.width,
+                ),
             };
 
             let wide_path = to_wide(path);
             let sink = MFCreateSinkWriterFromURL(
-                PCWSTR(wide_path.as_ptr()),
+                Some(PCWSTR(wide_path.as_ptr())),
                 None::<&IMFByteStream>,
-                &attributes,
+                Some(&attributes),
             )
             .map_err(|e| hr_err("MFCreateSinkWriterFromURL", e))?;
 
             // Output (encoded) video type.
             let out_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType", e))?;
             out_type
+                .as_IMFAttributes()
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(|e| hr_err("set video major type", e))?;
             let (subtype, profile) = match options.codec {
@@ -265,33 +301,40 @@ impl WindowsVideoFileEncoder {
                 VideoFileCodec::H264 => (&MFVideoFormat_H264, eAVEncH264VProfile_Main.0),
             };
             out_type
+                .as_IMFAttributes()
                 .SetGUID(&MF_MT_SUBTYPE, subtype)
                 .map_err(|e| hr_err("set video subtype", e))?;
             out_type
+                .as_IMFAttributes()
                 .SetUINT32(&MF_MT_AVG_BITRATE, options.video_bitrate_bps)
                 .map_err(|e| hr_err("set video bitrate", e))?;
             out_type
+                .as_IMFAttributes()
                 .SetUINT64(
                     &MF_MT_FRAME_SIZE,
                     ((options.width as u64) << 32) | options.height as u64,
                 )
                 .map_err(|e| hr_err("set video frame size", e))?;
             out_type
+                .as_IMFAttributes()
                 .SetUINT64(
                     &MF_MT_FRAME_RATE,
                     ((options.fps_num as u64) << 32) | options.fps_den as u64,
                 )
                 .map_err(|e| hr_err("set video frame rate", e))?;
             out_type
+                .as_IMFAttributes()
                 .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                 .map_err(|e| hr_err("set video interlace mode", e))?;
             out_type
+                .as_IMFAttributes()
                 .SetUINT32(&MF_MT_VIDEO_PROFILE, profile as u32)
                 .map_err(|e| hr_err("set video profile", e))?;
             if options.keyframe_only {
                 // GOP size 1: every output frame is an IDR frame, so the
                 // file decodes at any frame in any order (bounce loops).
                 out_type
+                    .as_IMFAttributes()
                     .SetUINT32(&MF_MT_MAX_KEYFRAME_SPACING, 1)
                     .map_err(|e| hr_err("set keyframe spacing", e))?;
             }
@@ -302,24 +345,33 @@ impl WindowsVideoFileEncoder {
             // Input (raw) video type.
             let in_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType", e))?;
             in_type
+                .as_IMFAttributes()
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(|e| hr_err("set input major type", e))?;
             in_type
+                .as_IMFAttributes()
                 .SetGUID(&MF_MT_SUBTYPE, in_subtype)
                 .map_err(|e| hr_err("set input subtype", e))?;
             in_type
-                .SetUINT64(&MF_MT_FRAME_SIZE, ((in_width as u64) << 32) | in_height as u64)
+                .as_IMFAttributes()
+                .SetUINT64(
+                    &MF_MT_FRAME_SIZE,
+                    ((in_width as u64) << 32) | in_height as u64,
+                )
                 .map_err(|e| hr_err("set input frame size", e))?;
             in_type
+                .as_IMFAttributes()
                 .SetUINT64(
                     &MF_MT_FRAME_RATE,
                     ((options.fps_num as u64) << 32) | options.fps_den as u64,
                 )
                 .map_err(|e| hr_err("set input frame rate", e))?;
             in_type
+                .as_IMFAttributes()
                 .SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)
                 .map_err(|e| hr_err("set input interlace mode", e))?;
             in_type
+                .as_IMFAttributes()
                 .SetUINT32(&MF_MT_DEFAULT_STRIDE, in_stride)
                 .map_err(|e| hr_err("set input stride", e))?;
             if options.keyframe_only {
@@ -341,7 +393,7 @@ impl WindowsVideoFileEncoder {
                 enc_params
                     .SetUINT32(&CODECAPI_AVEncMPVGOPSize, 1)
                     .map_err(|e| hr_err("set CODECAPI_AVEncMPVGOPSize", e))?;
-                sink.SetInputMediaType(video_stream, &in_type, &enc_params)
+                sink.SetInputMediaType(video_stream, &in_type, Some(&enc_params))
                     .map_err(|e| {
                         hr_err("IMFSinkWriter::SetInputMediaType(video NV12, GOP 1)", e)
                     })?;
@@ -378,7 +430,10 @@ impl WindowsVideoFileEncoder {
             }
 
             Ok(Self {
-                sink,
+                sink: Some(sink),
+                lazy: false,
+                path: path.to_string(),
+                options: *options,
                 video_stream,
                 audio_stream,
                 width: options.width,
@@ -411,21 +466,27 @@ impl WindowsVideoFileEncoder {
 
         let out_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType", e))?;
         out_type
+            .as_IMFAttributes()
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
             .map_err(|e| hr_err("set audio major type", e))?;
         out_type
+            .as_IMFAttributes()
             .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)
             .map_err(|e| hr_err("set audio subtype AAC", e))?;
         out_type
+            .as_IMFAttributes()
             .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, audio.sample_rate)
             .map_err(|e| hr_err("set audio sample rate", e))?;
         out_type
+            .as_IMFAttributes()
             .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, audio.channels as u32)
             .map_err(|e| hr_err("set audio channels", e))?;
         out_type
+            .as_IMFAttributes()
             .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
             .map_err(|e| hr_err("set audio bits per sample", e))?;
         out_type
+            .as_IMFAttributes()
             .SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, aac_bytes_per_second)
             .map_err(|e| hr_err("set audio bitrate", e))?;
         let audio_stream = sink
@@ -435,30 +496,38 @@ impl WindowsVideoFileEncoder {
         let in_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType", e))?;
         let block_align = audio.channels as u32 * 2;
         in_type
+            .as_IMFAttributes()
             .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
             .map_err(|e| hr_err("set audio input major type", e))?;
         in_type
+            .as_IMFAttributes()
             .SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)
             .map_err(|e| hr_err("set audio input subtype PCM", e))?;
         in_type
+            .as_IMFAttributes()
             .SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, audio.sample_rate)
             .map_err(|e| hr_err("set audio input sample rate", e))?;
         in_type
+            .as_IMFAttributes()
             .SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, audio.channels as u32)
             .map_err(|e| hr_err("set audio input channels", e))?;
         in_type
+            .as_IMFAttributes()
             .SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
             .map_err(|e| hr_err("set audio input bits per sample", e))?;
         in_type
+            .as_IMFAttributes()
             .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block_align)
             .map_err(|e| hr_err("set audio input block alignment", e))?;
         in_type
+            .as_IMFAttributes()
             .SetUINT32(
                 &MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
                 audio.sample_rate * block_align,
             )
             .map_err(|e| hr_err("set audio input avg bytes per second", e))?;
         in_type
+            .as_IMFAttributes()
             .SetUINT32(&MF_MT_ALL_SAMPLES_INDEPENDENT, 1)
             .map_err(|e| hr_err("set audio input samples independent", e))?;
         sink.SetInputMediaType(audio_stream, &in_type, None::<&IMFAttributes>)
@@ -469,9 +538,12 @@ impl WindowsVideoFileEncoder {
     /// Walk the sink writer's transform chain for the video stream and report
     /// the encoder MFT: its friendly name (when exposed) and whether it is a
     /// hardware transform (MFT_ENUM_HARDWARE_URL_Attribute present).
-    fn resolve_video_transform(sink: &IMFSinkWriter, video_stream: u32) -> Option<VideoTransformInfo> {
+    fn resolve_video_transform(
+        sink: &IMFSinkWriter,
+        video_stream: u32,
+    ) -> Option<VideoTransformInfo> {
         unsafe {
-            let sink_ex: IMFSinkWriterEx = sink.cast().ok()?;
+            let sink_ex = IMFSinkWriterEx::query(sink.as_raw()).ok()?;
             for transform_index in 0.. {
                 let mut category = GUID::zeroed();
                 let mut transform: Option<IMFTransform> = None;
@@ -534,12 +606,13 @@ impl WindowsVideoFileEncoder {
         nv12_bytes: &[u8],
         pts_100ns: Option<i64>,
     ) -> Result<(), VideoFileError> {
+        self.open(None)?;
         let auto_pts = self.frame_pts(self.frame_index);
         let duration = self.frame_pts(self.frame_index + 1) - auto_pts;
         let pts = pts_100ns.unwrap_or(auto_pts);
         let sample = make_sample(nv12_bytes, pts, duration)?;
         unsafe {
-            self.sink
+            self.sink()?
                 .WriteSample(self.video_stream, &sample)
                 .map_err(|e| hr_err("IMFSinkWriter::WriteSample(video)", e))?;
         }
@@ -557,28 +630,32 @@ impl WindowsVideoFileEncoder {
         pts_100ns: Option<i64>,
     ) -> Result<(), VideoFileError> {
         let Some(input) = &self.d3d11 else {
-            return Err(VideoFileError::new("encoder was not opened for D3D11 textures"));
+            return Err(VideoFileError::new(
+                "encoder was not opened for D3D11 textures",
+            ));
         };
-        let length = input.width * input.height * 4;
+        let length = if input.nv12 { input.width * input.height * 3 / 2 } else { input.width * input.height * 4 };
         let auto_pts = self.frame_pts(self.frame_index);
         let duration = self.frame_pts(self.frame_index + 1) - auto_pts;
         let pts = pts_100ns.unwrap_or(auto_pts);
         unsafe {
-            let mut raw = std::ptr::null_mut();
-            MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture.as_raw(), 0, 0, &mut raw)
-                .ok()
-                .map_err(|e| hr_err("MFCreateDXGISurfaceBuffer", e))?;
-            let buffer = IMFMediaBuffer::from_raw(raw);
+            let buffer =
+                MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture.as_IUnknown(), 0, false)
+                    .map_err(|e| hr_err("MFCreateDXGISurfaceBuffer", e))?;
             buffer
                 .SetCurrentLength(length)
                 .map_err(|e| hr_err("IMFMediaBuffer::SetCurrentLength", e))?;
             let sample: IMFSample = MFCreateSample().map_err(|e| hr_err("MFCreateSample", e))?;
-            sample.AddBuffer(&buffer).map_err(|e| hr_err("IMFSample::AddBuffer", e))?;
-            sample.SetSampleTime(pts).map_err(|e| hr_err("IMFSample::SetSampleTime", e))?;
+            sample
+                .AddBuffer(&buffer)
+                .map_err(|e| hr_err("IMFSample::AddBuffer", e))?;
+            sample
+                .SetSampleTime(pts)
+                .map_err(|e| hr_err("IMFSample::SetSampleTime", e))?;
             sample
                 .SetSampleDuration(duration)
                 .map_err(|e| hr_err("IMFSample::SetSampleDuration", e))?;
-            self.sink
+            self.sink()?
                 .WriteSample(self.video_stream, &sample)
                 .map_err(|e| hr_err("IMFSinkWriter::WriteSample(video texture)", e))?;
         }
@@ -634,6 +711,7 @@ impl WindowsVideoFileEncoder {
     }
 
     pub fn push_audio_i16(&mut self, samples: &[i16]) -> Result<(), VideoFileError> {
+        self.open(None)?;
         let Some(audio_stream) = self.audio_stream else {
             return Err(VideoFileError::new("encoder has no audio stream"));
         };
@@ -651,7 +729,7 @@ impl WindowsVideoFileEncoder {
         };
         let sample = make_sample(bytes, pts, duration)?;
         unsafe {
-            self.sink
+            self.sink()?
                 .WriteSample(audio_stream, &sample)
                 .map_err(|e| hr_err("IMFSinkWriter::WriteSample(audio)", e))?;
         }
@@ -663,12 +741,42 @@ impl WindowsVideoFileEncoder {
         if self.finalized {
             return Ok(());
         }
+        self.open(None)?;
         self.finalized = true;
         unsafe {
-            self.sink
+            self.sink()?
                 .Finalize()
                 .map_err(|e| hr_err("IMFSinkWriter::Finalize", e))
         }
+    }
+
+    fn sink(&self) -> Result<&IMFSinkWriter, VideoFileError> {
+        self.sink.as_ref().ok_or_else(|| VideoFileError::new("the encoder could not be reopened for GPU pictures"))
+    }
+
+    /// The input GPU pictures need: NV12 textures of the track's size on `device` (converted
+    /// and scaled by the caller, `shared_texture::to_nv12`). An encoder opened for CPU frames
+    /// that has written nothing yet is reopened on the same path for them (a recorder's first
+    /// picture decides); one already writing CPU frames keeps its input.
+    pub fn use_nv12_textures(&mut self, device: &ID3D11Device) -> Result<(), VideoFileError> {
+        if self.lazy {
+            return self.open(Some(device));
+        }
+        if let Some(input) = &self.d3d11 {
+            if input.nv12 {
+                return Ok(());
+            }
+            return Err(VideoFileError::new("the encoder was opened for BGRA textures"));
+        }
+        if self.frame_index > 0 || self.audio_frames_pushed > 0 {
+            return Err(VideoFileError::new("an encoder that has written CPU frames cannot take GPU pictures"));
+        }
+        // the old writer goes first: it holds the file the new one creates
+        self.finalized = true;
+        self.sink = None;
+        let (path, options) = (std::mem::take(&mut self.path), self.options);
+        *self = Self::new_with(&path, &options, Some((device, options.width, options.height, true)))?;
+        Ok(())
     }
 }
 
@@ -676,8 +784,10 @@ impl Drop for WindowsVideoFileEncoder {
     fn drop(&mut self) {
         if !self.finalized {
             self.finalized = true;
-            unsafe {
-                let _ = self.sink.Finalize();
+            if let Some(sink) = &self.sink {
+                unsafe {
+                    let _ = sink.Finalize();
+                }
             }
         }
     }

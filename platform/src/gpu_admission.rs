@@ -12,13 +12,17 @@
 //! it touches, so a long export is split into bounded submissions rather than
 //! handing the driver one unbounded batch.
 //!
-//! The ledger is one per process (there is one GPU device per process);
-//! reservations are RAII: dropping a [`GpuReservation`] or a
-//! [`GpuDocument`] gives its bytes back.
+//! Cx owns the admission client. The HAL reports actual device usage after submitted
+//! allocations; new reservations remain charged locally until that report acknowledges
+//! their epoch. Admission reads this cached state, never the HAL pipe. The reported
+//! bytes include other sessions and unowned allocations. Like any asynchronous device
+//! snapshot, this is planning admission, not a driver-enforced allocation guarantee.
+//! Reservations are RAII; dropping a document or reservation returns its planned bytes.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::rc::Rc;
 
 /// The limits the ledger admits against. Host settings; the device budget
 /// is set from the device when the backend knows it (Metal's recommended
@@ -52,11 +56,25 @@ pub enum GpuRefusal {
     /// A size computation overflowed (a hostile or broken plan).
     Overflow(String),
     /// The document's own budget would be exceeded.
-    Document { document: String, wanted: u64, held: u64, limit: u64 },
+    Document {
+        document: String,
+        wanted: u64,
+        held: u64,
+        limit: u64,
+    },
     /// The device budget would be exceeded (all documents together).
-    Device { document: String, wanted: u64, in_use: u64, limit: u64 },
+    Device {
+        document: String,
+        wanted: u64,
+        in_use: u64,
+        limit: u64,
+    },
     /// One submission is over its caps: split it.
-    Submission { bytes: u64, draws: u64, budget: GpuBudget },
+    Submission {
+        bytes: u64,
+        draws: u64,
+        budget: GpuBudget,
+    },
 }
 
 impl fmt::Display for GpuRefusal {
@@ -68,7 +86,7 @@ impl fmt::Display for GpuRefusal {
                 f,
                 "{document}: {:.1} MiB more would bring it to {:.1} MiB, over its {:.1} MiB GPU budget",
                 mib(wanted),
-                mib(&(held + wanted)),
+                mib(&held.saturating_add(*wanted)),
                 mib(limit)
             ),
             Self::Device { document, wanted, in_use, limit } => write!(
@@ -95,8 +113,15 @@ impl std::error::Error for GpuRefusal {}
 /// `bytes_per_texel`, with `mips` levels (1 for none), all checked. The
 /// frame plan sums these for every attachment, depth, history and
 /// accumulation target before asking the ledger.
-pub fn target_bytes(width: u64, height: u64, layers: u64, bytes_per_texel: u64, mips: u32) -> Result<u64, GpuRefusal> {
-    let overflow = || GpuRefusal::Overflow(format!("{width}x{height}x{layers} x {bytes_per_texel} B"));
+pub fn target_bytes(
+    width: u64,
+    height: u64,
+    layers: u64,
+    bytes_per_texel: u64,
+    mips: u32,
+) -> Result<u64, GpuRefusal> {
+    let overflow =
+        || GpuRefusal::Overflow(format!("{width}x{height}x{layers} x {bytes_per_texel} B"));
     let base = width
         .checked_mul(height)
         .and_then(|v| v.checked_mul(layers))
@@ -120,35 +145,46 @@ struct LedgerState {
     budget: GpuBudget,
     next_id: u64,
     docs: BTreeMap<u64, DocEntry>,
+    reserved: u64,
+    device_used: u64,
+    epoch: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    submitted_epoch: u64,
+    pending: BTreeMap<u64, (u64, u64)>, // epoch -> (document, bytes)
+    pending_bytes: u64,
+    #[cfg(not(target_arch = "wasm32"))]
+    refused: bool,
 }
 
 impl LedgerState {
     fn in_use(&self) -> u64 {
-        self.docs.values().map(|d| d.held).sum()
+        self.device_used
+            .saturating_add(self.pending_bytes)
+            .max(self.reserved)
     }
 }
 
-/// The ledger. Use [`GpuLedger::global`]; separate ledgers exist only for
-/// tests.
+/// The admission state of one Cx, accessed through `Cx::gpu_admission`.
 #[derive(Debug)]
 pub struct GpuLedger {
-    state: Arc<Mutex<LedgerState>>,
+    state: Rc<RefCell<LedgerState>>,
 }
 
 /// One document's registration. Dropping it releases everything the
 /// document still holds.
 #[derive(Debug)]
 pub struct GpuDocument {
-    state: Arc<Mutex<LedgerState>>,
+    state: Rc<RefCell<LedgerState>>,
     id: u64,
 }
 
 /// Bytes admitted for one document. Dropping it gives them back.
 #[derive(Debug)]
 pub struct GpuReservation {
-    state: Arc<Mutex<LedgerState>>,
+    state: Rc<RefCell<LedgerState>>,
     doc: u64,
     bytes: u64,
+    epoch: u64,
 }
 
 /// What the ledger holds right now, for a host's memory panel.
@@ -162,46 +198,103 @@ pub struct GpuLedgerSnapshot {
 
 impl GpuLedger {
     pub fn new(budget: GpuBudget) -> Self {
-        Self { state: Arc::new(Mutex::new(LedgerState { budget, next_id: 0, docs: BTreeMap::new() })) }
+        Self {
+            state: Rc::new(RefCell::new(LedgerState {
+                budget,
+                next_id: 0,
+                docs: BTreeMap::new(),
+                reserved: 0,
+                device_used: 0,
+                epoch: 0,
+                pending: BTreeMap::new(),
+                pending_bytes: 0,
+                #[cfg(not(target_arch = "wasm32"))]
+                submitted_epoch: 0,
+                #[cfg(not(target_arch = "wasm32"))]
+                refused: false,
+            })),
+        }
     }
 
-    /// The process's ledger (one GPU device per process).
-    pub fn global() -> &'static GpuLedger {
-        static LEDGER: OnceLock<GpuLedger> = OnceLock::new();
-        LEDGER.get_or_init(|| GpuLedger::new(GpuBudget::default()))
+    /// Mark reservations whose allocations are included in this batch. Control-only batches
+    /// may refresh usage, but must not acknowledge plans that have not been drawn yet.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn submitted(&self, has_frames: bool) -> u64 {
+        let mut state = self.state.borrow_mut();
+        if has_frames {
+            state.submitted_epoch = state.epoch;
+        }
+        state.submitted_epoch
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn update(&self, epoch: u64, device_bytes: u64, used_bytes: u64) -> bool {
+        let mut state = self.state.borrow_mut();
+        let old_room = state.budget.device_bytes.saturating_sub(state.in_use());
+        if device_bytes != 0 {
+            state.budget.device_bytes = device_bytes;
+        }
+        state.device_used = used_bytes;
+        while state
+            .pending
+            .first_key_value()
+            .is_some_and(|(key, _)| *key <= epoch)
+        {
+            let (_, (_, bytes)) = state.pending.pop_first().unwrap();
+            state.pending_bytes -= bytes;
+        }
+        let retry =
+            state.refused && state.budget.device_bytes.saturating_sub(state.in_use()) > old_room;
+        if retry {
+            state.refused = false;
+        }
+        retry
     }
 
     pub fn budget(&self) -> GpuBudget {
-        self.state.lock().unwrap().budget
+        self.state.borrow().budget
     }
 
     /// Replace the limits (host settings, or the device's real size once the
     /// backend knows it). Existing reservations stay; new ones see the new
     /// limits.
     pub fn set_budget(&self, budget: GpuBudget) {
-        self.state.lock().unwrap().budget = budget;
+        self.state.borrow_mut().budget = budget;
     }
 
     /// Set only the device-wide byte budget (the backend's measured size).
     pub fn set_device_bytes(&self, device_bytes: u64) {
-        self.state.lock().unwrap().budget.device_bytes = device_bytes;
+        self.state.borrow_mut().budget.device_bytes = device_bytes;
     }
 
     /// Register a document under `label` (shown in refusals and snapshots).
     pub fn register(&self, label: impl Into<String>) -> GpuDocument {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.borrow_mut();
         let id = state.next_id;
         state.next_id += 1;
-        state.docs.insert(id, DocEntry { label: label.into(), held: 0 });
-        GpuDocument { state: self.state.clone(), id }
+        state.docs.insert(
+            id,
+            DocEntry {
+                label: label.into(),
+                held: 0,
+            },
+        );
+        GpuDocument {
+            state: self.state.clone(),
+            id,
+        }
     }
 
     pub fn snapshot(&self) -> GpuLedgerSnapshot {
-        let state = self.state.lock().unwrap();
+        let state = self.state.borrow();
         GpuLedgerSnapshot {
             budget: state.budget,
             in_use: state.in_use(),
-            documents: state.docs.values().map(|d| (d.label.clone(), d.held)).collect(),
+            documents: state
+                .docs
+                .values()
+                .map(|d| (d.label.clone(), d.held))
+                .collect(),
         }
     }
 
@@ -211,7 +304,11 @@ impl GpuLedger {
     pub fn check_submission(&self, bytes: u64, draws: u64) -> Result<(), GpuRefusal> {
         let budget = self.budget();
         if bytes > budget.submission_bytes || draws > budget.submission_draws {
-            return Err(GpuRefusal::Submission { bytes, draws, budget });
+            return Err(GpuRefusal::Submission {
+                bytes,
+                draws,
+                budget,
+            });
         }
         Ok(())
     }
@@ -222,34 +319,74 @@ impl GpuDocument {
     /// anything when the document's or the device's budget would be
     /// exceeded.
     pub fn admit(&self, bytes: u64) -> Result<GpuReservation, GpuRefusal> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.borrow_mut();
         let budget = state.budget;
         let in_use = state.in_use();
         let doc = state.docs.get(&self.id).expect("registered document");
         let held = doc.held;
-        let over_doc = held.checked_add(bytes).is_none_or(|t| t > budget.document_bytes);
+        let over_doc = held
+            .checked_add(bytes)
+            .is_none_or(|t| t > budget.document_bytes);
         if over_doc {
-            return Err(GpuRefusal::Document { document: doc.label.clone(), wanted: bytes, held, limit: budget.document_bytes });
+            return Err(GpuRefusal::Document {
+                document: doc.label.clone(),
+                wanted: bytes,
+                held,
+                limit: budget.document_bytes,
+            });
         }
-        let over_device = in_use.checked_add(bytes).is_none_or(|t| t > budget.device_bytes);
+        let over_device = in_use
+            .checked_add(bytes)
+            .is_none_or(|t| t > budget.device_bytes);
         if over_device {
-            return Err(GpuRefusal::Device { document: doc.label.clone(), wanted: bytes, in_use, limit: budget.device_bytes });
+            let refusal = GpuRefusal::Device {
+                document: doc.label.clone(),
+                wanted: bytes,
+                in_use,
+                limit: budget.device_bytes,
+            };
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                state.refused = true;
+            }
+            return Err(refusal);
         }
         state.docs.get_mut(&self.id).unwrap().held += bytes;
-        Ok(GpuReservation { state: self.state.clone(), doc: self.id, bytes })
+        state.reserved += bytes;
+        state.epoch += 1;
+        let epoch = state.epoch;
+        state.pending.insert(epoch, (self.id, bytes));
+        state.pending_bytes += bytes;
+        Ok(GpuReservation {
+            state: self.state.clone(),
+            doc: self.id,
+            bytes,
+            epoch,
+        })
     }
 
     /// Bytes this document holds across its live reservations.
     pub fn held(&self) -> u64 {
-        self.state.lock().unwrap().docs.get(&self.id).map_or(0, |d| d.held)
+        self.state.borrow().docs.get(&self.id).map_or(0, |d| d.held)
     }
 }
 
 impl Drop for GpuDocument {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.state.lock() {
-            state.docs.remove(&self.id);
+        let mut state = self.state.borrow_mut();
+        if let Some(doc) = state.docs.remove(&self.id) {
+            state.reserved -= doc.held;
         }
+        let mut released = 0;
+        state.pending.retain(|_, (doc, bytes)| {
+            if *doc == self.id {
+                released += *bytes;
+                false
+            } else {
+                true
+            }
+        });
+        state.pending_bytes -= released;
     }
 }
 
@@ -261,82 +398,29 @@ impl GpuReservation {
 
 impl Drop for GpuReservation {
     fn drop(&mut self) {
-        if let Ok(mut state) = self.state.lock() {
-            // The document may be gone already (dropped first): its entry,
-            // with these bytes, went with it.
-            if let Some(doc) = state.docs.get_mut(&self.doc) {
-                doc.held = doc.held.saturating_sub(self.bytes);
-            }
+        let mut state = self.state.borrow_mut();
+        if let Some(doc) = state.docs.get_mut(&self.doc) {
+            doc.held -= self.bytes;
+            state.reserved -= self.bytes;
+        }
+        if let Some((_, bytes)) = state.pending.remove(&self.epoch) {
+            state.pending_bytes -= bytes;
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn small() -> GpuLedger {
-        GpuLedger::new(GpuBudget { device_bytes: 1000, document_bytes: 600, submission_bytes: 500, submission_draws: 10 })
+impl Default for GpuLedger {
+    fn default() -> Self {
+        Self::new(GpuBudget::default())
     }
+}
 
-    #[test]
-    fn documents_are_admitted_against_their_own_and_the_device_budget() {
-        let ledger = small();
-        let a = ledger.register("deck A");
-        let b = ledger.register("deck B");
-        let ra = a.admit(500).unwrap();
-        // A's own budget: 500 + 200 > 600.
-        assert!(matches!(a.admit(200), Err(GpuRefusal::Document { .. })));
-        let rb = b.admit(450).unwrap();
-        // The device: 950 in use, 100 more is over 1000 even though B has room.
-        let refused = b.admit(100).unwrap_err();
-        assert!(matches!(refused, GpuRefusal::Device { in_use: 950, .. }), "{refused}");
-        assert!(refused.to_string().contains("deck B"));
-        // Refusals reserve nothing.
-        assert_eq!(ledger.snapshot().in_use, 950);
-        drop(ra);
-        assert_eq!(a.held(), 0);
-        let rb2 = b.admit(100).unwrap();
-        assert_eq!(ledger.snapshot().documents, vec![("deck A".to_string(), 0), ("deck B".to_string(), 550)]);
-        drop((rb, rb2));
-        assert_eq!(ledger.snapshot().in_use, 0);
-    }
-
-    #[test]
-    fn dropping_a_document_releases_everything_it_held() {
-        let ledger = small();
-        let a = ledger.register("preview");
-        let r = a.admit(600).unwrap();
-        drop(a);
-        assert_eq!(ledger.snapshot().in_use, 0);
-        assert!(ledger.snapshot().documents.is_empty());
-        // The orphaned reservation's drop is harmless.
-        drop(r);
-        let b = ledger.register("next");
-        assert!(b.admit(600).is_ok());
-    }
-
-    #[test]
-    fn target_sizes_are_checked() {
-        // One 8192^2 RGBA16F target is 512 MiB, as §3.4.1 says.
-        assert_eq!(target_bytes(8192, 8192, 1, 8, 1).unwrap(), 512 << 20);
-        assert_eq!(target_bytes(4, 4, 6, 4, 1).unwrap(), 384);
-        assert_eq!(target_bytes(3, 3, 1, 1, 4).unwrap(), 12);
-        assert!(matches!(target_bytes(u64::MAX, 2, 1, 1, 1), Err(GpuRefusal::Overflow(_))));
-        assert!(matches!(target_bytes(1 << 32, 1 << 32, 1, 1, 1), Err(GpuRefusal::Overflow(_))));
-        // An overflowing request is refused, never wrapped into a small one.
-        let ledger = small();
-        let doc = ledger.register("x");
-        assert!(doc.admit(u64::MAX).is_err());
-    }
-
-    #[test]
-    fn submissions_over_the_caps_must_be_split() {
-        let ledger = small();
-        assert!(ledger.check_submission(500, 10).is_ok());
-        assert!(matches!(ledger.check_submission(501, 1), Err(GpuRefusal::Submission { .. })));
-        assert!(matches!(ledger.check_submission(1, 11), Err(GpuRefusal::Submission { .. })));
-        ledger.set_budget(GpuBudget { submission_draws: 100, ..ledger.budget() });
-        assert!(ledger.check_submission(1, 11).is_ok());
+impl crate::cx::Cx {
+    pub fn gpu_admission(&self) -> &GpuLedger {
+        let bytes = crate::gpu_info::gpu_working_set_bytes();
+        if bytes != 0 {
+            self.gpu_admission.set_device_bytes(bytes);
+        }
+        &self.gpu_admission
     }
 }

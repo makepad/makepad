@@ -29,26 +29,19 @@ use crate::stream_debug::{self as dbg, hex_hr};
 use crate::stream_decoder::DecodedFrame;
 use crate::stream_encoder::StreamVideoCodec;
 use crate::windows_encoder::{ensure_media_foundation, hr_err};
-use crate::windows_mft::{
-    self, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
-    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, CODECAPI_AV_LOW_LATENCY_MODE, MF_E_BUFFERTOOSMALL, MF_E_NOTACCEPTING,
-    MF_E_TRANSFORM_NEED_MORE_INPUT, MF_E_TRANSFORM_STREAM_CHANGE, MF_E_TRANSFORM_TYPE_NOT_SET, MF_LOW_LATENCY,
-};
+use crate::windows_mft;
 use crate::VideoFileError;
 use std::collections::VecDeque;
+use windows::Win32::Media::MediaFoundation::*;
 use windows::{
-    core::GUID,
+    core::HRESULT,
     Win32::Media::MediaFoundation::{
-        IMFMediaType, IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
-        MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_NV12, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
-        MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+        IMFMediaType, IMFSample, IMFTransform, MFCreateMediaType, MFCreateMemoryBuffer,
+        MFCreateSample, MFMediaType_Video, MFVideoFormat_H264, MFVideoFormat_NV12,
+        MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
     },
     Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
 };
-
-/// Well-known Microsoft H.264 decoder MFT CLSID (msmpeg2vdec.dll) — stable
-/// and documented since Windows 7; not in the vendored bindings.
-const CLSID_CMS_H264_DECODER_MFT: GUID = GUID::from_u128(0x62ce7e72_4c71_4d20_b15d_452831a87d9d);
 
 /// The `level_idc` every SPS is rewritten to (level 1.0, MaxDpbMbs 396):
 /// one decoded picture of DPB for anything 352x288 or larger, which is
@@ -69,30 +62,50 @@ const MAX_RENEGOTIATIONS: u32 = 4;
 
 fn create_transform() -> Result<IMFTransform, VideoFileError> {
     ensure_media_foundation()?;
-    unsafe { CoCreateInstance(&CLSID_CMS_H264_DECODER_MFT, None, CLSCTX_INPROC_SERVER) }
-        .map_err(|e| hr_err("CoCreateInstance(CLSID_CMSH264DecoderMFT)", e))
+    unsafe {
+        CoCreateInstance(
+            &CMSH264DecoderMFT,
+            None,
+            CLSCTX_INPROC_SERVER,
+            &IMFTransform::IID,
+        )
+        .and_then(|raw| IMFTransform::from_raw(raw))
+    }
+    .map_err(|e| hr_err("CoCreateInstance(CLSID_CMSH264DecoderMFT)", e))
 }
 
 fn make_input_sample(annex_b: &[u8], pts_100ns: i64) -> Result<IMFSample, VideoFileError> {
     unsafe {
-        let buffer = MFCreateMemoryBuffer(annex_b.len().max(1) as u32).map_err(|e| hr_err("MFCreateMemoryBuffer", e))?;
+        let buffer = MFCreateMemoryBuffer(annex_b.len().max(1) as u32)
+            .map_err(|e| hr_err("MFCreateMemoryBuffer", e))?;
         let mut ptr = std::ptr::null_mut();
-        buffer.Lock(&mut ptr, None, None).map_err(|e| hr_err("Lock", e))?;
+        buffer
+            .Lock(&mut ptr, None, None)
+            .map_err(|e| hr_err("Lock", e))?;
         std::ptr::copy_nonoverlapping(annex_b.as_ptr(), ptr, annex_b.len());
         buffer.Unlock().map_err(|e| hr_err("Unlock", e))?;
-        buffer.SetCurrentLength(annex_b.len() as u32).map_err(|e| hr_err("SetCurrentLength", e))?;
+        buffer
+            .SetCurrentLength(annex_b.len() as u32)
+            .map_err(|e| hr_err("SetCurrentLength", e))?;
         let sample = MFCreateSample().map_err(|e| hr_err("MFCreateSample", e))?;
-        sample.AddBuffer(&buffer).map_err(|e| hr_err("AddBuffer", e))?;
-        sample.SetSampleTime(pts_100ns).map_err(|e| hr_err("SetSampleTime", e))?;
+        sample
+            .AddBuffer(&buffer)
+            .map_err(|e| hr_err("AddBuffer", e))?;
+        sample
+            .SetSampleTime(pts_100ns)
+            .map_err(|e| hr_err("SetSampleTime", e))?;
         Ok(sample)
     }
 }
 
 fn make_output_sample(size: u32) -> Result<IMFSample, VideoFileError> {
     unsafe {
-        let buffer = MFCreateMemoryBuffer(size.max(1)).map_err(|e| hr_err("MFCreateMemoryBuffer(out)", e))?;
+        let buffer = MFCreateMemoryBuffer(size.max(1))
+            .map_err(|e| hr_err("MFCreateMemoryBuffer(out)", e))?;
         let sample = MFCreateSample().map_err(|e| hr_err("MFCreateSample(out)", e))?;
-        sample.AddBuffer(&buffer).map_err(|e| hr_err("AddBuffer(out)", e))?;
+        sample
+            .AddBuffer(&buffer)
+            .map_err(|e| hr_err("AddBuffer(out)", e))?;
         Ok(sample)
     }
 }
@@ -100,7 +113,10 @@ fn make_output_sample(size: u32) -> Result<IMFSample, VideoFileError> {
 /// `(width, height)` from a media type's `MF_MT_FRAME_SIZE`, `None` while
 /// the decoder still carries a placeholder (absent or zero) size.
 unsafe fn frame_size_of(media_type: &IMFMediaType) -> Option<(u32, u32)> {
-    let packed = media_type.GetUINT64(&MF_MT_FRAME_SIZE).ok()?;
+    let packed = media_type
+        .as_IMFAttributes()
+        .GetUINT64(&MF_MT_FRAME_SIZE)
+        .ok()?;
     let size = ((packed >> 32) as u32, (packed & 0xFFFF_FFFF) as u32);
     (size.0 > 0 && size.1 > 0).then_some(size)
 }
@@ -121,23 +137,36 @@ pub struct WindowsStreamDecoder {
 impl WindowsStreamDecoder {
     pub fn new(codec: StreamVideoCodec) -> Result<Self, VideoFileError> {
         if !matches!(codec, StreamVideoCodec::H264) {
-            return Err(VideoFileError::new("windows stream decoder: only H264 is implemented"));
+            return Err(VideoFileError::new(
+                "windows stream decoder: only H264 is implemented",
+            ));
         }
         let transform = create_transform()?;
         unsafe {
-            match windows_mft::get_attributes(&transform) {
+            match transform.GetAttributes() {
                 Ok(attributes) => {
                     let set = attributes.SetUINT32(&MF_LOW_LATENCY, 1);
                     dbg::log(|| format!("h264dec: MF_LOW_LATENCY set -> {set:?}"));
                 }
-                Err(e) => dbg::log(|| format!("h264dec: GetAttributes failed {e:?} (no low-latency attribute)")),
+                Err(e) => dbg::log(|| {
+                    format!("h264dec: GetAttributes failed {e:?} (no low-latency attribute)")
+                }),
             }
-            let codec_api = windows_mft::set_codec_api_u32(&transform, &CODECAPI_AV_LOW_LATENCY_MODE, 1);
+            let codec_api =
+                windows_mft::set_codec_api_u32(&transform, &CODECAPI_AVLowLatencyMode, 1);
             dbg::log(|| format!("h264dec: CODECAPI_AVLowLatencyMode set -> {codec_api:?}"));
             let in_type = MFCreateMediaType().map_err(|e| hr_err("MFCreateMediaType(in)", e))?;
-            in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video).map_err(|e| hr_err("set in major type", e))?;
-            in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264).map_err(|e| hr_err("set in subtype", e))?;
-            windows_mft::set_input_type(&transform, &in_type).map_err(|e| hr_err("IMFTransform::SetInputType", e))?;
+            in_type
+                .as_IMFAttributes()
+                .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
+                .map_err(|e| hr_err("set in major type", e))?;
+            in_type
+                .as_IMFAttributes()
+                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
+                .map_err(|e| hr_err("set in subtype", e))?;
+            transform
+                .SetInputType(0, &in_type, 0)
+                .map_err(|e| hr_err("IMFTransform::SetInputType", e))?;
         }
         let mut decoder = Self {
             transform,
@@ -159,9 +188,13 @@ impl WindowsStreamDecoder {
             dbg::log(|| format!("h264dec: eager output negotiation failed: {e}"));
         }
         unsafe {
-            windows_mft::process_message(&decoder.transform, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
+            decoder
+                .transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0)
                 .map_err(|e| hr_err("ProcessMessage(BEGIN_STREAMING)", e))?;
-            windows_mft::process_message(&decoder.transform, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
+            decoder
+                .transform
+                .ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)
                 .map_err(|e| hr_err("ProcessMessage(START_OF_STREAM)", e))?;
         }
         dbg::log(|| "h264dec: ready (input H264, streaming notified)".to_string());
@@ -177,52 +210,80 @@ impl WindowsStreamDecoder {
             let mut chosen = None;
             let mut offered = Vec::new();
             for index in 0.. {
-                let Ok(candidate) = windows_mft::get_output_available_type(&self.transform, index) else {
+                let Ok(candidate) = self.transform.GetOutputAvailableType(0, index) else {
                     break;
                 };
-                let subtype = candidate.GetGUID(&MF_MT_SUBTYPE).ok();
-                offered.push(subtype.map(|g| format!("{g:?}")).unwrap_or_else(|| "?".into()));
+                let subtype = candidate.as_IMFAttributes().GetGUID(&MF_MT_SUBTYPE).ok();
+                offered.push(
+                    subtype
+                        .map(|g| format!("{g:?}"))
+                        .unwrap_or_else(|| "?".into()),
+                );
                 if subtype == Some(MFVideoFormat_NV12) && chosen.is_none() {
                     chosen = Some(candidate);
                 }
             }
-            dbg::log(|| format!("h264dec: output types offered: {} (nv12 {})", offered.join(", "), chosen.is_some()));
+            dbg::log(|| {
+                format!(
+                    "h264dec: output types offered: {} (nv12 {})",
+                    offered.join(", "),
+                    chosen.is_some()
+                )
+            });
             let Some(chosen_type) = chosen else {
                 return Err(VideoFileError::new(
                     "windows stream decoder: no NV12 output type offered by CMSH264DecoderMFT",
                 ));
             };
-            windows_mft::set_output_type(&self.transform, &chosen_type).map_err(|e| hr_err("SetOutputType(NV12)", e))?;
+            self.transform
+                .SetOutputType(0, &chosen_type, 0)
+                .map_err(|e| hr_err("SetOutputType(NV12)", e))?;
             self.refresh_output_geometry(&chosen_type)?;
         }
         Ok(())
     }
 
-    unsafe fn refresh_output_geometry(&mut self, committed: &IMFMediaType) -> Result<(), VideoFileError> {
+    unsafe fn refresh_output_geometry(
+        &mut self,
+        committed: &IMFMediaType,
+    ) -> Result<(), VideoFileError> {
         if let Some((width, height)) = frame_size_of(committed) {
             self.width = width;
             self.height = height;
             self.output_stride = committed
+                .as_IMFAttributes()
                 .GetUINT32(&MF_MT_DEFAULT_STRIDE)
                 .map(|stride| (stride as i32).unsigned_abs() as usize)
                 .unwrap_or(width as usize)
                 .max(width as usize);
         }
-        let stream_info =
-            windows_mft::get_output_stream_info(&self.transform).map_err(|e| hr_err("GetOutputStreamInfo", e))?;
-        self.provides_samples = stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES != 0;
+        let stream_info = self
+            .transform
+            .GetOutputStreamInfo(0)
+            .map_err(|e| hr_err("GetOutputStreamInfo", e))?;
+        self.provides_samples =
+            stream_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32 != 0;
         let needed = (self.output_stride as u32).saturating_mul(self.height.div_ceil(2) * 3);
         self.output_buffer_size = stream_info.cbSize.max(needed).max(OUTPUT_BUFFER_FLOOR);
         dbg::log(|| {
             format!(
                 "h264dec: output committed {}x{} stride {} flags 0x{:x} cbSize {} -> alloc {}",
-                self.width, self.height, self.output_stride, stream_info.dwFlags, stream_info.cbSize, self.output_buffer_size
+                self.width,
+                self.height,
+                self.output_stride,
+                stream_info.dwFlags,
+                stream_info.cbSize,
+                self.output_buffer_size
             )
         });
         Ok(())
     }
 
-    pub fn push_packet(&mut self, annex_b_data: &[u8], pts_100ns: i64) -> Result<Vec<DecodedFrame>, VideoFileError> {
+    pub fn push_packet(
+        &mut self,
+        annex_b_data: &[u8],
+        pts_100ns: i64,
+    ) -> Result<Vec<DecodedFrame>, VideoFileError> {
         // See `WindowsStreamEncoder::push_frame_nv12`'s identical comment —
         // this type is `Send` and may be called from a different thread
         // than the one that constructed it; re-assert MTA membership here.
@@ -232,11 +293,21 @@ impl WindowsStreamDecoder {
         let low_delay = annex_b::with_sps_level_idc(annex_b_data, LOW_DELAY_LEVEL_IDC);
         let annex_b_data = low_delay.as_deref().unwrap_or(annex_b_data);
         let sample = make_input_sample(annex_b_data, pts_100ns)?;
-        let mut hr = unsafe { windows_mft::process_input(&self.transform, &sample) };
+        let mut hr = unsafe {
+            self.transform
+                .ProcessInput(0, &sample, 0)
+                .err()
+                .unwrap_or(HRESULT(0))
+        };
         let mut frames = Vec::new();
-        if hr.0 == MF_E_NOTACCEPTING {
+        if hr.0 == MF_E_NOTACCEPTING.0 {
             frames = self.drain_available()?;
-            hr = unsafe { windows_mft::process_input(&self.transform, &sample) };
+            hr = unsafe {
+                self.transform
+                    .ProcessInput(0, &sample, 0)
+                    .err()
+                    .unwrap_or(HRESULT(0))
+            };
         }
         dbg::log(|| {
             format!(
@@ -264,42 +335,66 @@ impl WindowsStreamDecoder {
         let mut frames = Vec::new();
         let mut renegotiations = 0;
         loop {
-            let provided = if self.provides_samples { None } else { Some(make_output_sample(self.output_buffer_size)?) };
-            let (hr, status, sample) = unsafe { windows_mft::process_output(&self.transform, provided) };
+            let provided = if self.provides_samples {
+                None
+            } else {
+                Some(make_output_sample(self.output_buffer_size)?)
+            };
+            let (hr, status, sample) =
+                unsafe { windows_mft::process_output(&self.transform, provided) };
             self.pumps += 1;
-            if self.pumps <= 40 || hr.0 != MF_E_TRANSFORM_NEED_MORE_INPUT {
-                dbg::log(|| format!("h264dec: ProcessOutput #{} {} status 0x{status:x}", self.pumps, hex_hr(hr.0)));
+            if self.pumps <= 40 || hr.0 != MF_E_TRANSFORM_NEED_MORE_INPUT.0 {
+                dbg::log(|| {
+                    format!(
+                        "h264dec: ProcessOutput #{} {} status 0x{status:x}",
+                        self.pumps,
+                        hex_hr(hr.0)
+                    )
+                });
             }
-            if hr.0 == MF_E_TRANSFORM_NEED_MORE_INPUT {
+            if hr.0 == MF_E_TRANSFORM_NEED_MORE_INPUT.0 {
                 break;
             }
-            if hr.0 == MF_E_TRANSFORM_STREAM_CHANGE || hr.0 == MF_E_TRANSFORM_TYPE_NOT_SET || hr.0 == MF_E_BUFFERTOOSMALL {
+            if hr.0 == MF_E_TRANSFORM_STREAM_CHANGE.0
+                || hr.0 == MF_E_TRANSFORM_TYPE_NOT_SET.0
+                || hr.0 == MF_E_BUFFERTOOSMALL.0
+            {
                 renegotiations += 1;
                 if renegotiations > MAX_RENEGOTIATIONS {
-                    return Err(VideoFileError::with_code("IMFTransform::ProcessOutput (type never settles)", hr.0));
+                    return Err(VideoFileError::with_code(
+                        "IMFTransform::ProcessOutput (type never settles)",
+                        hr.0,
+                    ));
                 }
                 self.negotiate_output_type()?;
                 continue;
             }
             if hr.is_err() {
-                return Err(VideoFileError::with_code("IMFTransform::ProcessOutput", hr.0));
+                return Err(VideoFileError::with_code(
+                    "IMFTransform::ProcessOutput",
+                    hr.0,
+                ));
             }
             let Some(sample) = sample else { break };
             if self.width == 0 || self.height == 0 {
                 // A decoder that emitted a picture without ever reporting a
                 // stream change still carries the size on its current type.
-                if let Ok(current) = unsafe { windows_mft::get_output_current_type(&self.transform) } {
+                if let Ok(current) = unsafe { self.transform.GetOutputCurrentType(0) } {
                     unsafe { self.refresh_output_geometry(&current)? };
                 }
                 if self.width == 0 || self.height == 0 {
-                    dbg::log(|| "h264dec: decoded sample but no frame size known, dropping".to_string());
+                    dbg::log(|| {
+                        "h264dec: decoded sample but no frame size known, dropping".to_string()
+                    });
                     self.pending_pts.pop_front();
                     continue;
                 }
             }
-            let buffer = unsafe { sample.ConvertToContiguousBuffer() }.map_err(|e| hr_err("ConvertToContiguousBuffer", e))?;
+            let buffer = unsafe { sample.ConvertToContiguousBuffer() }
+                .map_err(|e| hr_err("ConvertToContiguousBuffer", e))?;
             let (mut ptr, mut len) = (std::ptr::null_mut(), 0u32);
-            unsafe { buffer.Lock(&mut ptr, None, Some(&mut len)) }.map_err(|e| hr_err("Lock(out)", e))?;
+            unsafe { buffer.Lock(&mut ptr, None, Some(&mut len)) }
+                .map_err(|e| hr_err("Lock(out)", e))?;
             let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
             let width = self.width as usize;
             let height = self.height as usize;
@@ -338,7 +433,7 @@ impl WindowsStreamDecoder {
     /// reference pictures survive, so streaming can continue afterwards.
     pub fn flush(&mut self) -> Result<Vec<DecodedFrame>, VideoFileError> {
         ensure_media_foundation()?;
-        unsafe { windows_mft::process_message(&self.transform, MFT_MESSAGE_COMMAND_DRAIN, 0) }
+        unsafe { self.transform.ProcessMessage(MFT_MESSAGE_COMMAND_DRAIN, 0) }
             .map_err(|e| hr_err("ProcessMessage(COMMAND_DRAIN)", e))?;
         self.drain_available()
     }
