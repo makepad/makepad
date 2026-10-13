@@ -1,7 +1,7 @@
 //! The browser chrome: a custom-drawn Chrome-style tab strip (favicon +
 //! title tabs with a close x, a + for a new tab) and the toolbar
 //! (back / forward / reload, the omnibox with search icon and bookmark star,
-//! the menu button). Hard-square Omarchy look, colours from `mod.browser_theme`.
+//! the menu button). Hard-square Omarchy look, colours from the active system theme.
 
 use crate::tabs::{TabId, TabSummary};
 use makepad_widgets::image::DrawImage;
@@ -18,62 +18,62 @@ script_mod! {
         height: 36
 
         draw_bg +: {
-            color: uniform(mod.browser_theme.darker_background)
+            color: uniform(mod.theme.color_bg_container)
             pixel: fn() {
                 return self.color
             }
         }
         draw_tab +: {
-            color: uniform(mod.browser_theme.darker_background)
+            color: uniform(mod.theme.color_bg_container)
             pixel: fn() {
                 return self.color
             }
         }
         draw_tab_hover +: {
-            color: uniform(mod.browser_theme.dark_background)
+            color: uniform(mod.theme.color_bg_container)
             pixel: fn() {
                 return self.color
             }
         }
         draw_tab_active +: {
-            color: uniform(mod.browser_theme.background)
+            color: uniform(mod.theme.color_bg_app)
             pixel: fn() {
                 return self.color
             }
         }
         draw_sep +: {
-            color: uniform(mod.browser_theme.muted)
+            color: uniform(mod.theme.color_bevel_outset_2)
             pixel: fn() {
                 return self.color
             }
         }
         draw_text +: {
-            color: mod.browser_theme.foreground
+            color: mod.theme.color_text
             text_style: theme.font_regular{
                 font_size: 9.5
             }
         }
         draw_text_dim +: {
-            color: mod.browser_theme.dark_foreground
+            color: mod.theme.color_text_disabled
             text_style: theme.font_regular{
                 font_size: 9.5
             }
         }
         draw_close +: {
             svg: crate_resource("self:resources/icons/close.svg")
-            color: mod.browser_theme.dark_foreground
+            color: mod.theme.color_text_disabled
         }
         draw_close_active +: {
             svg: crate_resource("self:resources/icons/close.svg")
-            color: mod.browser_theme.foreground
+            color: mod.theme.color_text
         }
         draw_plus +: {
             svg: crate_resource("self:resources/icons/plus.svg")
-            color: mod.browser_theme.foreground
+            color: mod.theme.color_text
         }
         draw_globe +: {
             svg: crate_resource("self:resources/icons/globe.svg")
-            color: mod.browser_theme.dark_foreground
+            color: mod.theme.color_text_disabled
         }
     }
 
@@ -87,14 +87,14 @@ script_mod! {
         align: Align{x: 0.5 y: 0.5}
         icon_walk: Walk{width: 16 height: 16}
         draw_icon +: {
-            color: mod.browser_theme.foreground
+            color: mod.theme.color_text
         }
         draw_bg +: {
             border_radius: 0.0
             border_size: 0.0
             color: #00000000
-            color_hover: mod.browser_theme.lighter_background
-            color_down: mod.browser_theme.muted
+            color_hover: mod.theme.color_fg_app
+            color_down: mod.theme.color_bevel_outset_2
             color_focus: #00000000
         }
     }
@@ -109,8 +109,8 @@ script_mod! {
         padding: Inset{left: 14 right: 14 top: 0 bottom: 0}
         margin: Inset{left: 0 right: 0 top: 0 bottom: 0}
         draw_text +: {
-            color: mod.browser_theme.foreground
-            color_hover: mod.browser_theme.bright_foreground
+            color: mod.theme.color_text
+            color_hover: mod.theme.color_text_hover
             text_style: theme.font_regular{
                 font_size: 10
             }
@@ -119,8 +119,8 @@ script_mod! {
             border_radius: 0.0
             border_size: 0.0
             color: #00000000
-            color_hover: mod.browser_theme.lighter_background
-            color_down: mod.browser_theme.muted
+            color_hover: mod.theme.color_fg_app
+            color_down: mod.theme.color_bevel_outset_2
         }
     }
 
@@ -137,7 +137,7 @@ script_mod! {
         padding: Inset{left: 6 right: 6 top: 4 bottom: 4}
         spacing: 2
         draw_bg +: {
-            color: mod.browser_theme.background
+            color: mod.theme.color_bg_app
         }
 
         back_btn := MpToolButton{
@@ -162,14 +162,14 @@ script_mod! {
             padding: Inset{left: 10 right: 2 top: 0 bottom: 0}
             spacing: 6
             draw_bg +: {
-                color: mod.browser_theme.darker_background
+                color: mod.theme.color_bg_container
             }
             Icon{
                 margin: Inset{top: 9 bottom: 0 left: 0 right: 0}
                 icon_walk: Walk{width: 14 height: 14}
                 draw_icon +: {
                     svg: crate_resource("self:resources/icons/search.svg")
-                    color: mod.browser_theme.dark_foreground
+                    color: mod.theme.color_text_disabled
                 }
             }
             omnibox := TextInputFlat{
@@ -197,14 +197,14 @@ script_mod! {
                     border_color_empty: #00000000
                 }
                 draw_cursor +: {
-                    color: mod.browser_theme.bright_foreground
+                    color: mod.theme.color_text_hover
                 }
                 draw_text +: {
-                    color: mod.browser_theme.foreground
-                    color_hover: mod.browser_theme.foreground
-                    color_focus: mod.browser_theme.bright_foreground
-                    color_empty: mod.browser_theme.dark_foreground
-                    color_empty_hover: mod.browser_theme.dark_foreground
+                    color: mod.theme.color_text
+                    color_hover: mod.theme.color_text
+                    color_focus: mod.theme.color_text_hover
+                    color_empty: mod.theme.color_text_disabled
+                    color_empty_hover: mod.theme.color_text_disabled
                     text_style: theme.font_regular{
                         font_size: 10.5
                     }
@@ -217,7 +217,7 @@ script_mod! {
                 icon_walk: Walk{width: 15 height: 15}
                 draw_icon +: {
                     svg: crate_resource("self:resources/icons/star.svg")
-                    color: mod.browser_theme.dark_foreground
+                    color: mod.theme.color_text_disabled
                 }
             }
         }

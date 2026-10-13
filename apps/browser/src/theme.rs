@@ -1,112 +1,58 @@
-//! The browser-chrome palette. Theming lives in splash: the chrome reads
-//! `mod.browser_theme.*` (tab strip, toolbar, omnibox, icon roles), which this
-//! module evaluates into the VM before the UI modules.
-//!
-//! Under makepad-app-wm the roles come from the WM's theme.splash
-//! (`MAKEPAD_WM_THEME_SPLASH`, line-scanned by `makepad_wm_theme`, the family bridge);
-//! standalone runs get Chrome's own dark palette.
+//! Browser chrome and CEF page colours follow the active system theme.
 
 use makepad_widgets::*;
 
-/// Chrome-dark roles, keyed like the wm theme so one mapping serves both.
+/// System theme colours used by the browser chrome and generated pages.
 #[derive(Clone, Debug)]
 pub struct Palette {
     /// Tab strip background (the "frame").
     pub darker_background: String,
     /// Active tab + toolbar.
     pub background: String,
-    /// Hovered inactive tab.
-    pub dark_background: String,
-    /// Button hover squares, omnibox focus fill.
-    pub lighter_background: String,
     pub foreground: String,
     pub dark_foreground: String,
     pub bright_foreground: String,
     pub muted: String,
-    pub selection: String,
-    pub accent: String,
 }
 
 impl Palette {
-    pub fn chrome_dark() -> Self {
-        Self {
-            darker_background: "#202124".into(),
-            background: "#35363a".into(),
-            dark_background: "#2b2c2f".into(),
-            lighter_background: "#3c4043".into(),
-            foreground: "#e8eaed".into(),
-            dark_foreground: "#9aa0a6".into(),
-            bright_foreground: "#ffffff".into(),
-            muted: "#5f6368".into(),
-            selection: "#264f78".into(),
-            accent: "#8ab4f8".into(),
-        }
-    }
-
-    /// The WM palette when wm exported one, else Chrome dark.
-    pub fn current() -> Self { Self::from_palette(makepad_wm_theme::current()) }
-    pub fn for_vm(vm: &mut ScriptVm) -> Self { Self::from_palette(makepad_wm_theme::current_for_vm(vm)) }
-    fn from_palette(palette: Option<makepad_wm_theme::Palette>) -> Self {
-        let fallback = Self::chrome_dark();
-        let Some(p) = palette else {
-            return fallback;
+    /// Read the owning VM after the system stylesheet is installed.
+    pub fn for_vm(vm: &mut ScriptVm) -> Self {
+        let mut hex = |role| {
+            let color = theme_tokens::color(vm, role)
+                .unwrap_or_else(|| panic!("missing system theme colour: {role}"));
+            format!("#{:08x}", color.to_u32())
         };
         Self {
-            darker_background: p.hex("darker_background", &fallback.darker_background),
-            background: p.hex("background", &fallback.background),
-            dark_background: p.hex("dark_background", &fallback.dark_background),
-            lighter_background: p.hex("lighter_background", &fallback.lighter_background),
-            foreground: p.hex("foreground", &fallback.foreground),
-            dark_foreground: p.hex("dark_foreground", &fallback.dark_foreground),
-            bright_foreground: p.hex("bright_foreground", &fallback.bright_foreground),
-            muted: p.hex("muted", &fallback.muted),
-            selection: p.hex("selection", &fallback.selection),
-            accent: p.hex("accent", &fallback.accent),
+            darker_background: hex("color_bg_container"),
+            background: hex("color_bg_app"),
+            foreground: hex("color_text"),
+            dark_foreground: hex("color_text_disabled"),
+            bright_foreground: hex("color_text_hover"),
+            muted: hex("color_bevel_outset_2"),
         }
     }
 
-    /// The `mod.browser_theme = {...}` splash source. Runtime-evaluated, so plain
-    /// `#hex` (the `#x` escape is a proc-macro-only hazard).
+    /// Bind the browser's Splash roles directly to the installed theme.
     pub fn splash_source(&self) -> String {
-        format!(
-            "mod.browser_theme = {{\n\
-             \x20   darker_background: {}\n\
-             \x20   background: {}\n\
-             \x20   dark_background: {}\n\
-             \x20   lighter_background: {}\n\
-             \x20   foreground: {}\n\
-             \x20   dark_foreground: {}\n\
-             \x20   bright_foreground: {}\n\
-             \x20   muted: {}\n\
-             \x20   selection: {}\n\
-             \x20   accent: {}\n\
-             }}\n\
-             true\n",
-            self.darker_background,
-            self.background,
-            self.dark_background,
-            self.lighter_background,
-            self.foreground,
-            self.dark_foreground,
-            self.bright_foreground,
-            self.muted,
-            self.selection,
-            self.accent,
-        )
+        String::from("mod.browser_theme = {\n\
+            darker_background: mod.theme.color_bg_container\n\
+            background: mod.theme.color_bg_app\n\
+            dark_background: mod.theme.color_bg_container\n\
+            lighter_background: mod.theme.color_fg_app\n\
+            foreground: mod.theme.color_text\n\
+            dark_foreground: mod.theme.color_text_disabled\n\
+            bright_foreground: mod.theme.color_text_hover\n\
+            muted: mod.theme.color_bevel_outset_2\n\
+            selection: mod.theme.color_bg_highlight\n\
+            accent: mod.theme.color_focus\n\
+            }\ntrue\n")
     }
 
     /// Evaluate `mod.browser_theme` into the VM. Call after
     /// `makepad_widgets::script_mod(vm)` and before the chrome modules.
     pub fn apply(&self, vm: &mut ScriptVm) {
-        let script_mod_id = ScriptMod {
-            cargo_manifest_path: env!("CARGO_MANIFEST_DIR").to_string(),
-            module_path: "browser_theme".to_string(),
-            file: "browser_theme.splash".to_string(),
-            line: 0,
-            column: 0,
-            code: self.splash_source(),
-            values: vec![],
-        };
+        let script_mod_id = ScriptMod::new(env!("CARGO_MANIFEST_DIR"), "browser_theme", "browser_theme.splash", 0, 0, &self.splash_source(), &[]);
         vm.eval(script_mod_id);
         for e in vm.take_errors() {
             log!("browser theme: {}", e);
@@ -118,11 +64,11 @@ impl Palette {
     /// ground the page quad sits on, so neither a cold tab nor a mid-resize
     /// page shows a black hole.
     pub fn page_background_argb(&self) -> u32 {
-        parse_argb(&self.darker_background).unwrap_or(0xff20_2124)
+        parse_argb(&self.darker_background).expect("a system theme colour")
     }
 
     pub fn is_dark(&self) -> bool {
-        let c = parse_hex(&self.background).unwrap_or(vec4(0.0, 0.0, 0.0, 1.0));
+        let c = parse_hex(&self.background).expect("a system theme colour");
         0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z < 0.5
     }
 
@@ -149,29 +95,17 @@ impl Palette {
 
 pub fn parse_hex(s: &str) -> Option<Vec4f> {
     let s = s.trim().trim_start_matches('#');
-    if s.len() != 6 {
-        return None;
-    }
-    let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-    let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-    let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-    Some(vec4(
-        r as f32 / 255.0,
-        g as f32 / 255.0,
-        b as f32 / 255.0,
-        1.0,
-    ))
+    let rgba = match s.len() {
+        6 => (u32::from_str_radix(s, 16).ok()? << 8) | 0xff,
+        8 => u32::from_str_radix(s, 16).ok()?,
+        _ => return None,
+    };
+    Some(Vec4f::from_u32(rgba))
 }
 
-/// A `#rrggbb` role as opaque ARGB (`0xFFRRGGBB`) — the form CEF wants for
-/// `cef_browser_settings_t::background_color`.
+/// A theme role as opaque ARGB (`0xFFRRGGBB`) for CEF's page background.
 pub fn parse_argb(s: &str) -> Option<u32> {
-    let s = s.trim().trim_start_matches('#');
-    if s.len() != 6 {
-        return None;
-    }
-    let rgb = u32::from_str_radix(s, 16).ok()?;
-    Some(0xff00_0000 | rgb)
+    Some(0xff00_0000 | (parse_hex(s)?.to_u32() >> 8))
 }
 
 /// Minimal percent-encoding for a `data:` URL payload.
@@ -200,7 +134,9 @@ mod tests {
 
     #[test]
     fn new_tab_url_is_recognised() {
-        let p = Palette::chrome_dark();
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        let p = cx.with_vm(Palette::for_vm);
         assert!(is_new_tab_url(&p.new_tab_url()));
         assert!(!is_new_tab_url("https://makepad.nl"));
     }
@@ -219,10 +155,13 @@ mod tests {
         assert_eq!(parse_argb("#202124"), Some(0xff20_2124));
         assert_eq!(parse_argb("202124"), Some(0xff20_2124));
         assert_eq!(parse_argb("#nope"), None);
-        assert_eq!(
-            Palette::chrome_dark().page_background_argb(),
-            0xff20_2124,
-            "the CEF fill must match the themed ground the page sits on"
-        );
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(makepad_widgets::script_mod);
+        cx.with_vm(|vm| {
+            let p = Palette::for_vm(vm);
+            let ground = theme_tokens::color(vm, "color_bg_container").unwrap();
+            assert_eq!(p.page_background_argb(), 0xff00_0000 | (ground.to_u32() >> 8),
+                "the CEF fill must match the themed ground the page sits on");
+        });
     }
 }

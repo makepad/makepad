@@ -150,14 +150,43 @@ pub struct cef_accelerated_paint_info_t {
 }
 
 /// `cef_accelerated_paint_info_t` for Windows (include/internal/cef_types_win.h):
-/// a D3D11 shared-texture `HANDLE`. Unused — Windows browsers paint in
-/// software.
+/// a D3D11 shared-texture `HANDLE` (an NT handle).
 #[cfg(windows)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct cef_accelerated_paint_info_t {
     pub size: usize,
     pub shared_texture_handle: *mut c_void,
+    pub format: cef_color_type_t,
+    pub extra: cef_accelerated_paint_info_common_t,
+}
+
+/// One plane of a Linux accelerated paint (include/internal/cef_types_linux.h,
+/// `cef_accelerated_paint_native_pixmap_plane_t`): usually a dmabuf.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct cef_accelerated_paint_native_pixmap_plane_t {
+    pub stride: u32,
+    pub offset: u64,
+    pub size: u64,
+    pub fd: c_int,
+}
+
+#[cfg(target_os = "linux")]
+pub const ACCELERATED_PAINT_MAX_PLANES: usize = 4;
+
+/// `cef_accelerated_paint_info_t` for Linux (include/internal/cef_types_linux.h):
+/// the planes of a native pixmap (dmabuf fds) out of CEF's pool, valid only
+/// for the duration of `on_accelerated_paint`.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct cef_accelerated_paint_info_t {
+    pub size: usize,
+    pub planes: [cef_accelerated_paint_native_pixmap_plane_t; ACCELERATED_PAINT_MAX_PLANES],
+    pub plane_count: c_int,
+    pub modifier: u64,
     pub format: cef_color_type_t,
     pub extra: cef_accelerated_paint_info_common_t,
 }

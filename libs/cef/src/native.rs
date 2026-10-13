@@ -30,15 +30,13 @@ use std::os::raw::c_int;
 use std::os::unix::ffi::OsStringExt;
 #[cfg(target_os = "macos")]
 use std::os::unix::fs::symlink;
-#[cfg(target_os = "macos")]
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::ptr;
 use std::slice;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(target_os = "macos")]
@@ -57,10 +55,19 @@ extern "C" {
 #[cfg(target_os = "macos")]
 #[link(name = "IOSurface", kind = "framework")]
 extern "C" {
+    fn IOSurfaceLookup(id: u32) -> *mut c_void;
     fn IOSurfaceGetWidth(surface: *mut c_void) -> usize;
     fn IOSurfaceGetHeight(surface: *mut c_void) -> usize;
     fn IOSurfaceGetPixelFormat(surface: *mut c_void) -> u32;
+    fn IOSurfaceLock(surface: *mut c_void, options: u32, seed: *mut u32) -> i32;
+    fn IOSurfaceUnlock(surface: *mut c_void, options: u32, seed: *mut u32) -> i32;
+    fn IOSurfaceGetBaseAddress(surface: *mut c_void) -> *mut c_void;
+    fn IOSurfaceGetBytesPerRow(surface: *mut c_void) -> usize;
 }
+
+/// `kIOSurfaceLockReadOnly`.
+#[cfg(target_os = "macos")]
+const IOSURFACE_LOCK_READ_ONLY: u32 = 1;
 
 #[cfg(target_os = "macos")]
 #[link(name = "CoreFoundation", kind = "framework")]
@@ -193,7 +200,7 @@ unsafe fn metal_texture_for_iosurface(
 }
 
 /// The client-owned copy destination for accelerated paints: an IOSurface
-/// created by the embedder (Makepad's `create_iosurface_render_texture`) that
+/// created by the HAL and exported through `TextureShare` that
 /// we keep retained, plus a Metal view of it on our blit device.
 #[cfg(target_os = "macos")]
 struct AccelTarget {
@@ -247,7 +254,7 @@ struct AccelStats {
 /// (144, 151, …) keeps serving this layout when asked for it, so one set of
 /// structs works across dists; asking for a dist's own newest version would
 /// misalign `cef_browser_settings_t` (144 inserts `databases`).
-const CEF_API_VERSION: c_int = 13800;
+use crate::subprocess::CEF_API_VERSION;
 #[cfg(target_os = "macos")]
 const HELPER_APP_SUFFIXES: [(&str, &str); 4] = [
     ("", ""),
@@ -345,6 +352,8 @@ struct Runtime {
     /// Browsers created and not yet gone: counted up when one is made and
     /// down when CEF says it has closed, which is what `shutdown` waits for.
     live_browsers: AtomicUsize,
+    #[cfg(target_os = "macos")]
+    browsers: Mutex<Vec<std::sync::Weak<AtomicUsize>>>,
 }
 
 #[derive(Default)]
@@ -352,14 +361,16 @@ struct RuntimeState {
     initialized: bool,
     shutting_down: bool,
     app: usize,
+    #[cfg(target_os = "macos")]
+    main_loop: Option<makepad_hal::MainLoopGuard>,
+    #[cfg(target_os = "macos")]
+    shutdown_flush: Option<Arc<AtomicBool>>,
 }
 
 #[cfg(target_os = "macos")]
 struct SyntheticAppBundle {
-    _bundle_dir: PathBuf,
-    bundle_executable: PathBuf,
-    _framework_dir: PathBuf,
-    _resources_dir: PathBuf,
+    bundle_dir: PathBuf,
+    framework_dir: PathBuf,
     helper_executable: PathBuf,
     log_file: PathBuf,
 }
@@ -398,11 +409,15 @@ struct SharedBrowserState {
     frame: Mutex<Option<CapturedFrame>>,
     capture_clock: CaptureClock,
     navigation_epoch: AtomicU64,
-    closing: AtomicBool,
     editable_focus: AtomicBool,
     /// Accelerated paint: the copy destination and the frame statistics.
     #[cfg(target_os = "macos")]
-    accel_target: Mutex<Option<AccelTarget>>,
+    accel_target: Mutex<Option<Arc<AccelTarget>>>,
+    /// An external sink of accelerated frames; it replaces `accel_target`.
+    frame_sink: Mutex<Option<Arc<dyn crate::FrameSink>>>,
+    /// The sink's slot textures wrapped for the blit, by handle.
+    #[cfg(target_os = "macos")]
+    sink_targets: Mutex<Vec<(u64, Arc<AccelTarget>)>>,
     accel: Mutex<AccelStats>,
     accel_frames: AtomicU64,
     software_frames: AtomicU64,
@@ -739,7 +754,6 @@ struct AppHandler {
 
 #[cfg(target_os = "macos")]
 struct ExternalPump {
-    owner_thread: usize,
     handler: usize,
     timer: Mutex<usize>,
     is_active: AtomicBool,
@@ -758,7 +772,9 @@ pub struct BrowserOptions {
 }
 
 pub struct Browser {
-    browser: *mut ffi::cef_browser_t,
+    /// CEF owns this reference on its UI thread; the app only queues work naming it.
+    browser: Arc<AtomicUsize>,
+    error: Arc<Mutex<Option<String>>>,
     state: Arc<SharedBrowserState>,
     width: usize,
     height: usize,
@@ -824,35 +840,37 @@ fn framework_dir_for_bundle_executable(executable: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "macos")]
-fn distribution_runtime_paths() -> RuntimePaths {
+fn distribution_runtime_paths() -> Result<RuntimePaths> {
+    let framework_dir = match env::var_os("MAKEPAD_CEF_FRAMEWORK_DIR") {
+        Some(dir) => PathBuf::from(dir),
+        None => crate::distribution::find().map_err(Error::new)?
+            .join("Release/Chromium Embedded Framework.framework"),
+    };
     let framework_bin = env::var_os("MAKEPAD_CEF_FRAMEWORK_BIN")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("MAKEPAD_CEF_FRAMEWORK_BIN")));
-    let framework_dir = env::var_os("MAKEPAD_CEF_FRAMEWORK_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("MAKEPAD_CEF_FRAMEWORK_DIR")));
+        .unwrap_or_else(|| framework_dir.join("Chromium Embedded Framework"));
     let resources_dir = env::var_os("MAKEPAD_CEF_RESOURCES_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("MAKEPAD_CEF_RESOURCES_DIR")));
-    RuntimePaths {
+        .unwrap_or_else(|| framework_dir.join("Resources"));
+    Ok(RuntimePaths {
         framework_bin,
         framework_dir,
         _resources_dir: resources_dir,
-    }
+    })
 }
 
 #[cfg(target_os = "macos")]
-fn runtime_paths() -> RuntimePaths {
+fn runtime_paths() -> Result<RuntimePaths> {
     if let Ok(current_executable) = env::current_exe() {
         if let Some(framework_dir) = framework_dir_for_bundle_executable(&current_executable) {
             let framework_bin = framework_dir.join("Chromium Embedded Framework");
             let resources_dir = framework_dir.join("Resources");
             if framework_bin.exists() && resources_dir.exists() {
-                return RuntimePaths {
+                return Ok(RuntimePaths {
                     framework_bin,
                     framework_dir,
                     _resources_dir: resources_dir,
-                };
+                });
             }
         }
     }
@@ -860,24 +878,15 @@ fn runtime_paths() -> RuntimePaths {
     distribution_runtime_paths()
 }
 
-#[cfg(target_os = "macos")]
-fn helper_binary_source() -> PathBuf {
-    env::var_os("MAKEPAD_CEF_HELPER_BIN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("MAKEPAD_CEF_HELPER_BIN")))
-}
-
 #[cfg(any(windows, target_os = "linux"))]
-fn runtime_paths() -> RuntimePaths {
-    let dist_dir = env::var_os("MAKEPAD_CEF_DIST_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("MAKEPAD_CEF_DIST_DIR")));
+fn runtime_paths() -> Result<RuntimePaths> {
+    let dist_dir = crate::distribution::find().map_err(Error::new)?;
     let module_dir = dist_dir.join("Release");
-    RuntimePaths {
+    Ok(RuntimePaths {
         libcef: module_dir.join(if cfg!(windows) { "libcef.dll" } else { "libcef.so" }),
         resources_dir: dist_dir.join("Resources"),
         module_dir,
-    }
+    })
 }
 
 /// The Windows distribution keeps `Resources/` (icudtl.dat, the pak files,
@@ -925,12 +934,22 @@ fn link_tree(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
+static RUNTIME: OnceLock<Result<Runtime>> = OnceLock::new();
+
 fn runtime() -> Result<&'static Runtime> {
-    static RUNTIME: OnceLock<Result<Runtime>> = OnceLock::new();
     let runtime_result = RUNTIME.get_or_init(|| {
-        let paths = runtime_paths();
+        let paths = runtime_paths()?;
         #[cfg(any(windows, target_os = "linux"))]
         ensure_flat_layout(&paths)?;
+        // the library CEF's subprocesses load: a program running on the makepad loader (Relax)
+        // is the loader's process, and the loader runs `cef_execute_process` from this library
+        // when CEF starts it with `--type=..` (Linux, Windows; macOS starts its helper bundle)
+        #[cfg(any(windows, target_os = "linux"))]
+        env::set_var("MAKEPAD_CEF_LIBRARY", &paths.libcef);
+        // loading the framework installs Chromium's malloc shim (a library constructor): threads
+        // that allocate on their own are parked across it (makepad-alloc-epoch)
+        #[cfg(target_os = "macos")]
+        makepad_alloc_epoch::before_allocator_swap();
         #[cfg(target_os = "macos")]
         let library = unsafe {
             libloading::os::unix::Library::open(
@@ -938,7 +957,11 @@ fn runtime() -> Result<&'static Runtime> {
                 libloading::os::unix::RTLD_LAZY | libloading::os::unix::RTLD_LOCAL | RTLD_FIRST,
             )
             .map(Library::from)
-        }
+        };
+        #[cfg(target_os = "macos")]
+        makepad_alloc_epoch::after_allocator_swap();
+        #[cfg(target_os = "macos")]
+        let library = library
         .map_err(|err| {
             Error::new(format!(
                 "failed to load {}: {err}",
@@ -964,6 +987,9 @@ fn runtime() -> Result<&'static Runtime> {
                 Some(&paths.libcef), libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_LOCAL,
             ).map(Library::from)
         }.map_err(|err| Error::new(format!("failed to load {}: {err}", paths.libcef.display())))?;
+        // libcef's memory dump CHECKs glibc's int-field mallinfo: see malloc_compat.rs
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        crate::malloc_compat::install();
         let api = unsafe {
             CefApi {
                 cef_api_hash: load_symbol(&library, b"cef_api_hash\0")?,
@@ -994,6 +1020,8 @@ fn runtime() -> Result<&'static Runtime> {
 
         Ok(Runtime {
             live_browsers: AtomicUsize::new(0),
+            #[cfg(target_os = "macos")]
+            browsers: Mutex::new(Vec::new()),
             _library: library,
             api,
             _paths: paths,
@@ -1028,7 +1056,8 @@ extern "C" fn cef_set_handling_send_event(_this: &Object, _cmd: Sel, handling: B
 extern "C" fn cef_application_send_event(this: &Object, _cmd: Sel, event: ObjcId) {
     let previous = CEF_HANDLING_SEND_EVENT.swap(true, Ordering::AcqRel);
     unsafe {
-        let () = msg_send![super(this, class!(NSApplication)), sendEvent: event];
+        let superclass = Class::get("MakepadCefApplication").and_then(|class| class.superclass()).unwrap_or(class!(NSApplication));
+        let () = msg_send![super(this, superclass), sendEvent: event];
     };
     CEF_HANDLING_SEND_EVENT.store(previous, Ordering::Release);
 }
@@ -1042,7 +1071,9 @@ fn ensure_cef_application_class() -> Result<&'static Class> {
                 return Ok(existing);
             }
 
-            let mut decl = ClassDecl::new("MakepadCefApplication", class!(NSApplication))
+            let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            let superclass = &*(runtime::object_getClass(app) as *const Class);
+            let mut decl = ClassDecl::new("MakepadCefApplication", superclass)
                 .ok_or_else(|| Error::new("failed to allocate MakepadCefApplication"))?;
             if let Some(protocol) = Protocol::get("CefAppProtocol") {
                 decl.add_protocol(protocol);
@@ -1086,13 +1117,9 @@ fn ensure_cef_application_patch() -> Result<()> {
 
             let actual_class = &*actual_class;
             if actual_class.name() != app_class.name() {
-                return Err(Error::new(format!(
-                    "CEF requires NSApp to be {}, found {}",
-                    app_class.name(),
-                    actual_class.name()
-                )));
+                extern "C" { fn object_setClass(object: ObjcId, class: *const Class) -> *const Class; }
+                object_setClass(ns_app, app_class);
             }
-
             Ok(())
         })
         .as_ref()
@@ -1102,18 +1129,6 @@ fn ensure_cef_application_patch() -> Result<()> {
 
 #[cfg(target_os = "macos")]
 static CEF_HANDLING_SEND_EVENT: AtomicBool = AtomicBool::new(false);
-
-#[cfg(target_os = "macos")]
-extern "C" fn external_pump_schedule_work(_this: &Object, _cmd: Sel, delay_ms: ObjcId) {
-    let delay_ms = if delay_ms.is_null() {
-        0
-    } else {
-        unsafe { msg_send![delay_ms, longLongValue] }
-    };
-    if let Ok(pump) = external_pump() {
-        pump.handle_schedule_work(delay_ms);
-    }
-}
 
 #[cfg(target_os = "macos")]
 extern "C" fn external_pump_timer_fired(_this: &Object, _cmd: Sel, _timer: ObjcId) {
@@ -1134,10 +1149,6 @@ fn ensure_external_pump_class() -> Result<&'static Class> {
             let mut decl = ClassDecl::new("MakepadCefMessagePumpTarget", class!(NSObject))
                 .ok_or_else(|| Error::new("failed to allocate MakepadCefMessagePumpTarget"))?;
             decl.add_method(
-                sel!(scheduleWork:),
-                external_pump_schedule_work as extern "C" fn(&Object, Sel, ObjcId),
-            );
-            decl.add_method(
                 sel!(timerFired:),
                 external_pump_timer_fired as extern "C" fn(&Object, Sel, ObjcId),
             );
@@ -1157,12 +1168,7 @@ fn external_pump() -> Result<&'static ExternalPump> {
         if handler.is_null() {
             return Err(Error::new("MakepadCefMessagePumpTarget new returned null"));
         }
-        let owner_thread: ObjcId = msg_send![class!(NSThread), mainThread];
-        if owner_thread.is_null() {
-            return Err(Error::new("NSThread mainThread returned null"));
-        }
         Ok(ExternalPump {
-            owner_thread: owner_thread as usize,
             handler: handler as usize,
             timer: Mutex::new(0),
             is_active: AtomicBool::new(false),
@@ -1174,27 +1180,13 @@ fn external_pump() -> Result<&'static ExternalPump> {
 
 #[cfg(target_os = "macos")]
 impl ExternalPump {
-    fn owner_thread(&self) -> ObjcId {
-        self.owner_thread as ObjcId
-    }
-
     fn handler(&self) -> ObjcId {
         self.handler as ObjcId
     }
 
     fn schedule(&self, delay_ms: i64) {
-        unsafe {
-            let delay_number: ObjcId = msg_send![class!(NSNumber), numberWithLongLong: delay_ms];
-            let _: () = msg_send![
-                self.handler(),
-                performSelector: sel!(scheduleWork:)
-                onThread: self.owner_thread()
-                withObject: delay_number
-                waitUntilDone: NO
-            ];
-        }
+        schedule_pump_work(delay_ms);
     }
-
     fn is_timer_pending(&self) -> bool {
         *self.timer.lock().unwrap() != 0
     }
@@ -1255,6 +1247,7 @@ impl ExternalPump {
 
     fn do_work(&self) {
         let was_reentrant = self.perform_message_loop_work();
+        if !is_initialized() { self.kill_timer(); return; }
         if was_reentrant {
             self.schedule(0);
         } else if !self.is_timer_pending() {
@@ -1377,8 +1370,23 @@ fn chromium_switches() -> Vec<String> {
     if let Some(backend) = use_angle_backend() {
         switches.push(format!("--use-angle={backend}"));
     }
+    // Linux: GPU paint (dmabufs) needs Chromium on a display (the headless
+    // platform hands out no native pixmaps); software paint runs headless.
     #[cfg(target_os = "linux")]
-    switches.push("--ozone-platform=headless".to_string());
+    {
+        let ozone = if linux_gpu_paint() { linux_ozone() } else { "headless".to_string() };
+        switches.push(format!("--ozone-platform={ozone}"));
+        // Headless has no scanout images: a playing <video> asked for one
+        // (GpuMemoryBuffer video frames) and took the GPU process down
+        // ("Could not find SharedImageBackingFactory ... Scanout", node 165).
+        if ozone == "headless" {
+            switches.push("--disable-accelerated-video-decode".to_string());
+            switches.push("--disable-gpu-memory-buffer-video-frames".to_string());
+        }
+        if ozone != "headless" && use_angle_backend().as_deref() == Some("vulkan") {
+            switches.push("--enable-features=Vulkan,VulkanFromANGLE,DefaultANGLEVulkan".to_string());
+        }
+    }
     for switch in [
         "--disable-background-networking",
         "--disable-sync",
@@ -1416,13 +1424,12 @@ fn platform_prepare() -> Result<()> {
 /// browser creation).
 #[cfg(target_os = "macos")]
 fn schedule_pump_work(delay_ms: i64) {
-    if let Ok(pump) = external_pump() {
-        pump.schedule(delay_ms);
-    }
+    let _ = on_cef_thread(move || {
+        if is_initialized() {
+            if let Ok(pump) = external_pump() { pump.handle_schedule_work(delay_ms); }
+        }
+    });
 }
-
-/// No timer of its own on Windows: the embedder pumps at a fixed rate, at
-/// least as often as CEF asks for.
 #[cfg(any(windows, target_os = "linux"))]
 fn schedule_pump_work(_delay_ms: i64) {}
 
@@ -1434,9 +1441,41 @@ fn accelerated_paint_available() -> bool {
     accelerated_paint_requested() && metal_blit().is_some()
 }
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(target_os = "linux")]
 fn accelerated_paint_available() -> bool {
-    false
+    linux_gpu_paint()
+}
+
+/// Linux browsers paint on the GPU (dmabufs copied into the sink's slots)
+/// only when `MAKEPAD_CEF_LINUX_GPU=1` and Chromium has a display to run on;
+/// otherwise in software (one upload per frame into the slot). Measured on
+/// CEF 144 / NVIDIA 580 (node 165): every Ozone/ANGLE combination either
+/// fails to make the shared images (headless; ANGLE over GL on Wayland or
+/// X11) or hands out dmabufs that stay empty (ANGLE over Vulkan on Wayland or
+/// X11), so GPU paint is not the default.
+#[cfg(target_os = "linux")]
+fn linux_gpu_paint() -> bool {
+    accelerated_paint_requested() && env_flag("MAKEPAD_CEF_LINUX_GPU").unwrap_or(false) && linux_ozone() != "headless"
+}
+
+/// The Ozone platform Chromium runs on: `MAKEPAD_CEF_OZONE`, else the
+/// session's (Wayland, X11), else headless.
+#[cfg(target_os = "linux")]
+fn linux_ozone() -> String {
+    let set = |name: &str| env::var_os(name).is_some_and(|v| !v.is_empty());
+    match env::var("MAKEPAD_CEF_OZONE") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        _ if set("WAYLAND_DISPLAY") => "wayland".into(),
+        _ if set("DISPLAY") => "x11".into(),
+        _ => "headless".into(),
+    }
+}
+
+/// Windows browsers paint on the GPU (D3D11 shared textures copied into the sink's slots) when
+/// asked to; without a sink nothing in this process shows accelerated frames.
+#[cfg(windows)]
+fn accelerated_paint_available() -> bool {
+    accelerated_paint_requested()
 }
 
 /// The user's home: `HOME`, or `USERPROFILE` on Windows.
@@ -1489,7 +1528,7 @@ pub fn set_background_color(argb: u32) {
 /// Must be called on the application's UI thread after platform preparation.
 pub fn set_application_dark_mode(dark: bool) {
     #[cfg(target_os = "macos")]
-    unsafe {
+    let _ = on_cef_thread(move || unsafe {
         static APPEARANCE: AtomicU32 = AtomicU32::new(0);
         let value = if dark { 2 } else { 1 };
         if APPEARANCE.swap(value, Ordering::Relaxed) == value {
@@ -1499,7 +1538,7 @@ pub fn set_application_dark_mode(dark: bool) {
         let appearance: ObjcId = msg_send![class!(NSAppearance), appearanceNamed:name];
         let app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
         let () = msg_send![app,setAppearance:appearance];
-    }
+    });
     #[cfg(not(target_os = "macos"))]
     let _ = dark;
 }
@@ -1580,16 +1619,59 @@ impl Drop for CefString {
     }
 }
 
+/// CEF's UI thread is the HAL main thread on macOS. Calls enqueue owned work and never wait
+/// for AppKit from the app's Cx thread. On other hosts the caller owns CEF's UI loop.
+fn on_cef_thread(f: impl FnOnce() + Send + 'static) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let guard = makepad_hal::keep_main_loop_alive()
+            .ok_or_else(|| Error::new("CEF requires run_app and a live HAL main loop"))?;
+        if makepad_hal::dispatch_main(move || {
+            let _guard = guard;
+            f();
+        }) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                "CEF requires a running HAL main loop (start through run_app)",
+            ))
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        f();
+        Ok(())
+    }
+}
+
+static INITIALIZATION_ERROR: Mutex<Option<String>> = Mutex::new(None);
+
+/// An asynchronous initialization failure, if any. Readable on the app thread.
+pub fn initialization_error() -> Option<String> {
+    INITIALIZATION_ERROR.lock().unwrap().clone()
+}
+
 fn ensure_initialized() -> Result<()> {
     let runtime = runtime()?;
-    let mut state = runtime.state.lock().unwrap();
-    if state.initialized {
-        return Ok(());
-    }
+    let state = runtime.state.lock().unwrap();
     if state.shutting_down {
         return Err(Error::new("CEF is shutting down"));
     }
+    if state.initialized {
+        return Ok(());
+    }
 
+    drop(state);
+    // Windows: Chromium paces windowless frames with timers; at the default 15.6 ms timer
+    // resolution a 60 fps page misses about one frame in twenty (Stage's recorder measured
+    // 95% of the source's frames). 1 ms resolution for the life of the process.
+    #[cfg(windows)]
+    unsafe {
+        makepad_windows_sys::Win32::Media::timeBeginPeriod(1);
+    }
+    #[cfg(target_os = "macos")]
+    let main_loop = makepad_hal::keep_main_loop_alive()
+        .ok_or_else(|| Error::new("CEF requires a live HAL main loop"))?;
     platform_prepare()?;
 
     let args = MainArgsStorage::current_process()?;
@@ -1606,15 +1688,35 @@ fn ensure_initialized() -> Result<()> {
     // macOS: Chromium's subprocesses are the helper app inside the synthetic
     // bundle. Windows: this executable is its own subprocess — `bootstrap()`
     // runs `cef_execute_process` before anything else.
+    // The process itself stays where it is (no exec into the bundle): an executable outside an
+    // app bundle (a dev build, the Relax loader) names the synthetic bundle as Chromium's main
+    // bundle and framework directory instead.
     #[cfg(target_os = "macos")]
-    let (helper_executable, log_file) = {
+    let (helper_executable, log_file, main_bundle, framework_dir) = {
         let synthetic_bundle =
-            ensure_synthetic_app_bundle(&distribution_runtime_paths(), &current_exe)?;
+            ensure_synthetic_app_bundle(&runtime_paths()?, &current_exe)?;
+        if let Some(root) = synthetic_bundle.bundle_dir.parent() {
+            remove_unused_synthetic_bundles(root);
+        }
+        let outside = !is_running_inside_app_bundle(&current_exe);
         (
             synthetic_bundle.helper_executable.to_string_lossy().to_string(),
             synthetic_bundle.log_file.to_string_lossy().to_string(),
+            outside.then(|| synthetic_bundle.bundle_dir.to_string_lossy().to_string()),
+            outside.then(|| synthetic_bundle.framework_dir.to_string_lossy().to_string()),
         )
     };
+    #[cfg(target_os = "macos")]
+    let main_bundle = main_bundle.map(|path| CefString::new(&runtime.api, path)).transpose()?;
+    #[cfg(target_os = "macos")]
+    let framework_dir = framework_dir.map(|path| CefString::new(&runtime.api, path)).transpose()?;
+    #[cfg(target_os = "macos")]
+    let (main_bundle_path, framework_dir_path) = (
+        main_bundle.as_ref().map_or_else(ffi::cef_string_t::default, |s| s.raw()),
+        framework_dir.as_ref().map_or_else(ffi::cef_string_t::default, |s| s.raw()),
+    );
+    #[cfg(any(windows, target_os = "linux"))]
+    let (main_bundle_path, framework_dir_path) = (ffi::cef_string_t::default(), ffi::cef_string_t::default());
     #[cfg(any(windows, target_os = "linux"))]
     let (helper_executable, log_file) = (
         current_exe.to_string_lossy().to_string(),
@@ -1622,7 +1724,7 @@ fn ensure_initialized() -> Result<()> {
     );
     // The resources sit beside libcef.dll (`ensure_flat_layout`); say so.
     #[cfg(any(windows, target_os = "linux"))]
-    let paths = runtime_paths();
+    let paths = runtime_paths()?;
     #[cfg(any(windows, target_os = "linux"))]
     let resources_dir = CefString::new(&runtime.api, paths.module_dir.to_string_lossy())?;
     #[cfg(any(windows, target_os = "linux"))]
@@ -1643,8 +1745,8 @@ fn ensure_initialized() -> Result<()> {
         size: std::mem::size_of::<ffi::cef_settings_t>(),
         no_sandbox: 1,
         browser_subprocess_path: browser_subprocess_path.raw(),
-        framework_dir_path: ffi::cef_string_t::default(),
-        main_bundle_path: ffi::cef_string_t::default(),
+        framework_dir_path,
+        main_bundle_path,
         multi_threaded_message_loop: 0,
         external_message_pump: 1,
         windowless_rendering_enabled: 1,
@@ -1668,6 +1770,22 @@ fn ensure_initialized() -> Result<()> {
 
     let app = AppHandler::allocate();
 
+    // CefInitialize reconfigures Chromium's allocator (PartitionAlloc's partitions after the
+    // feature list), which also must not race other threads' allocations (makepad-alloc-epoch)
+    makepad_alloc_epoch::before_allocator_swap();
+    // The browser-process half of CEF bootstrap belongs to the same main thread as init.
+    #[cfg(target_os = "macos")]
+    {
+        // libcef's CToCpp wrapper owns the reference it is handed and releases it when the call
+        // ends: pass one of its own, or the first call frees the app that `cef_initialize` takes.
+        unsafe { add_ref_and_return(app); }
+        let code = unsafe { (runtime.api.cef_execute_process)(&args.main_args, &mut (*app).cef_app, ptr::null_mut()) };
+        if code >= 0 {
+            makepad_alloc_epoch::after_allocator_swap();
+            unsafe { release_ref_counted(&mut (*app).cef_app.base as *mut _); }
+            return Err(Error::new(format!("CEF browser process unexpectedly exited with {code}")));
+        }
+    }
     let initialized = unsafe {
         (runtime.api.cef_initialize)(
             &args.main_args,
@@ -1676,6 +1794,7 @@ fn ensure_initialized() -> Result<()> {
             ptr::null_mut(),
         )
     };
+    makepad_alloc_epoch::after_allocator_swap();
     if initialized == 0 {
         let exit_code = unsafe { (runtime.api.cef_get_exit_code)() };
         unsafe {
@@ -1686,8 +1805,13 @@ fn ensure_initialized() -> Result<()> {
         )));
     }
 
-    state.app = app as usize;
-    state.initialized = true;
+    {
+        let mut state = runtime.state.lock().unwrap();
+        state.app = app as usize;
+        state.initialized = true;
+        #[cfg(target_os = "macos")]
+        { state.main_loop = Some(main_loop); }
+    }
     schedule_pump_work(0);
     Ok(())
 }
@@ -1888,7 +2012,7 @@ fn write_if_changed(path: &PathBuf, content: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "macos")]
-fn copy_executable(source: &PathBuf, destination: &PathBuf) -> Result<()> {
+fn copy_executable(source: &PathBuf, destination: &PathBuf, hard_link: bool) -> Result<()> {
     if source == destination {
         return Ok(());
     }
@@ -1937,9 +2061,13 @@ fn copy_executable(source: &PathBuf, destination: &PathBuf) -> Result<()> {
         }
     }
 
-    // A real copy, not a hard link: exec'ing a hard link to a freshly built
-    // binary got the process killed by taskgated ("Code Signature Invalid")
-    // on its first launch.
+    if hard_link && std::fs::hard_link(source, destination).is_ok() {
+        return Ok(());
+    }
+
+    // The main bundle keeps a real copy: exec'ing a hard link to a freshly
+    // built binary got the process killed by taskgated ("Code Signature
+    // Invalid") on its first launch. Helpers fall back to copying across volumes.
     std::fs::copy(source, destination).map_err(|err| {
         Error::new(format!(
             "failed to copy {} to {}: {err}",
@@ -2071,6 +2199,13 @@ fn ensure_framework_bundle_layout(
     source_framework_dir: &PathBuf,
     framework_dir: &PathBuf,
 ) -> Result<()> {
+    // Already inside a complete app bundle: do not make Versions/A link back
+    // to its own framework when reusing the bundle's runtime paths.
+    if source_framework_dir.canonicalize().ok().is_some_and(|source| {
+        framework_dir.canonicalize().ok().as_ref() == Some(&source)
+    }) {
+        return Ok(());
+    }
     match std::fs::symlink_metadata(framework_dir) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             std::fs::remove_file(framework_dir).map_err(|err| {
@@ -2174,9 +2309,8 @@ fn ensure_synthetic_app_bundle(
     let main_info_plist = contents_dir.join("Info.plist");
     let main_pkginfo = contents_dir.join("PkgInfo");
     let log_file = root_dir.join("cef.log");
-    let helper_source = helper_binary_source();
 
-    copy_executable(main_executable, &main_bundle_executable)?;
+    copy_executable(main_executable, &main_bundle_executable, false)?;
     ensure_framework_bundle_layout(&runtime_paths.framework_dir, &framework_dir)?;
 
     write_if_changed(
@@ -2210,7 +2344,9 @@ fn ensure_synthetic_app_bundle(
             ))
         })?;
 
-        copy_executable(&helper_source, &helper_binary)?;
+        // current_exe is the standalone app, or the Relax loader hosting it.
+        // Both dispatch --type= before any application/loader initialization.
+        copy_executable(main_executable, &helper_binary, true)?;
         write_if_changed(
             &helper_info_plist,
             &helper_bundle_info_plist(&helper_name, &helper_name, &helper_bundle_id),
@@ -2225,10 +2361,8 @@ fn ensure_synthetic_app_bundle(
         helper_executable.ok_or_else(|| Error::new("failed to create CEF helper bundle"))?;
 
     Ok(SyntheticAppBundle {
-        _bundle_dir: bundle_dir,
-        bundle_executable: main_bundle_executable,
-        _framework_dir: framework_dir.clone(),
-        _resources_dir: framework_dir.join("Resources"),
+        bundle_dir,
+        framework_dir,
         helper_executable,
         log_file,
     })
@@ -2299,8 +2433,7 @@ fn build_key(path: &str, len: u64, modified_ns: u128) -> u64 {
 #[cfg(target_os = "macos")]
 static HELD_BUNDLES: Mutex<Vec<(PathBuf, std::fs::File)>> = Mutex::new(Vec::new());
 
-/// Mark the bundle at `root` in use for the rest of this process (and, via
-/// `keep_bundle_hold_across_exec`, the process it execs into). A cleanup
+/// Mark the bundle at `root` in use for the rest of this process. A cleanup
 /// that removed the bundle between opening its lock and taking it leaves
 /// the lock file unlinked: then the bundle is made again.
 #[cfg(target_os = "macos")]
@@ -2330,28 +2463,6 @@ fn hold_synthetic_bundle(root: &Path) -> Result<()> {
         if same {
             held.push((root.to_path_buf(), file));
             return Ok(());
-        }
-    }
-}
-
-/// The held bundle locks survive `exec`: the re-exec'd process keeps the
-/// bundle in use from its first instruction, before it takes its own hold.
-#[cfg(target_os = "macos")]
-fn keep_bundle_hold_across_exec() {
-    use std::os::fd::AsRawFd;
-    extern "C" {
-        fn fcntl(fd: c_int, cmd: c_int, ...) -> c_int;
-    }
-    const F_GETFD: c_int = 1;
-    const F_SETFD: c_int = 2;
-    const FD_CLOEXEC: c_int = 1;
-    for (_, file) in HELD_BUNDLES.lock().unwrap().iter() {
-        let fd = file.as_raw_fd();
-        unsafe {
-            let flags = fcntl(fd, F_GETFD);
-            if flags >= 0 {
-                fcntl(fd, F_SETFD, flags & !FD_CLOEXEC);
-            }
         }
     }
 }
@@ -2411,93 +2522,47 @@ fn is_running_inside_app_bundle(executable: &PathBuf) -> bool {
         && bundle_dir.extension().and_then(|value| value.to_str()) == Some("app")
 }
 
-/// Startup phases measured across the bundle re-exec: `(bundle_ms,
-/// exec_gap_ms)` — time spent materialising the app bundle in the first
-/// process, and wall time between its `exec` and this process reaching
-/// `main` (the OS's first-launch verification of a new executable lands
-/// here). `None` when not re-exec'd.
-pub fn startup_phases() -> Option<(u128, u128)> {
-    if !makepad_error_log::trace_enabled("startup") {
-        return None;
-    }
-    let bundle_ms = env::var("MAKEPAD_CEF_BUNDLE_MS").ok()?.parse::<u128>().ok()?;
-    let exec_at = env::var("MAKEPAD_CEF_EXEC_AT_MS").ok()?.parse::<u128>().ok()?;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(exec_at);
-    Some((bundle_ms, now.saturating_sub(exec_at)))
-}
-
-#[cfg(target_os = "macos")]
-pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
-    let current_executable = env::current_exe()
-        .map_err(|err| Error::new(format!("failed to resolve current executable: {err}")))?;
-    if is_running_inside_app_bundle(&current_executable) {
-        return Ok(());
-    }
-    if env::var_os("MAKEPAD_CEF_APP_BUNDLE_EXEC").is_some() {
-        return Err(Error::new(format!(
-            "refusing to re-exec {} into an app bundle twice",
-            current_executable.display()
-        )));
-    }
-
-    let startup_trace = makepad_error_log::trace_enabled("startup");
-    let started = startup_trace.then(std::time::Instant::now);
-    let synthetic_bundle =
-        ensure_synthetic_app_bundle(&distribution_runtime_paths(), &current_executable)?;
-    let mut command = std::process::Command::new(&synthetic_bundle.bundle_executable);
-    command.args(env::args_os().skip(1));
-    command.env("MAKEPAD_CEF_APP_BUNDLE_EXEC", "1");
-    if let Some(started) = started {
-        // Internal self-signals let the re-exec'd process report time spent
-        // materialising and launching the synthetic bundle.
-        let bundle_ms = started.elapsed().as_millis();
-        let launch_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        command.env("MAKEPAD_CEF_BUNDLE_MS", bundle_ms.to_string());
-        command.env("MAKEPAD_CEF_EXEC_AT_MS", launch_ms.to_string());
-    }
-    command.env("MallocNanoZone", "0");
-    if let Some(root) = synthetic_bundle.bundle_executable.ancestors().nth(4) {
-        remove_unused_synthetic_bundles(root);
-    }
-    keep_bundle_hold_across_exec();
-    let err = command.exec();
-    Err(Error::new(format!(
-        "failed to exec {}: {err}",
-        synthetic_bundle.bundle_executable.display()
-    )))
-}
-
-/// Nothing to re-exec into on Windows: Chromium's subprocesses are this
-/// executable.
-#[cfg(any(windows, target_os = "linux"))]
-pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
-    Ok(())
-}
 
 pub fn initialize() -> Result<()> {
-    ensure_initialized()
+    #[cfg(not(target_os = "macos"))]
+    return ensure_initialized();
+    #[cfg(target_os = "macos")]
+    on_cef_thread(|| {
+        if let Err(error) = ensure_initialized() {
+            *INITIALIZATION_ERROR.lock().unwrap() = Some(error.to_string());
+            say!("[makepad-cef] initialize: {error}");
+        }
+    })
 }
 
-/// The cheap part of CEF setup that must happen BEFORE the embedder creates
-/// its NSApplication / windows: NSApp becomes the CEF-aware subclass and the
-/// external message pump exists. The heavy `cef_initialize` (subprocess
+/// Queues platform preparation on the HAL main thread on macOS: the existing NSApp becomes
+/// the CEF-aware subclass without replacing its delegate, and the external pump is installed. The heavy `cef_initialize` (subprocess
 /// spawn, GPU bring-up) is left to `initialize()` / the first `Browser::new`,
 /// so a window can be on screen first.
 pub fn prepare() -> Result<()> {
-    platform_prepare()
+    #[cfg(not(target_os = "macos"))]
+    return platform_prepare();
+    #[cfg(target_os = "macos")]
+    {
+        // Loading the framework swaps the process allocator (a library constructor, see
+        // makepad-alloc-epoch): a free on another thread inside that window crashes the process.
+        // Under the HAL the app thread runs next to the HAL's main thread, so the load happens
+        // here, at the start of the app thread before any other thread allocates, never later
+        // on the main thread beside a running app.
+        runtime()?;
+        on_cef_thread(|| {
+            if let Err(error) = platform_prepare() {
+                *INITIALIZATION_ERROR.lock().unwrap() = Some(error.to_string());
+                say!("[makepad-cef] prepare: {error}");
+            }
+        })
+    }
 }
 
 /// True once `cef_initialize` has run.
 pub fn is_initialized() -> bool {
-    runtime()
-        .map(|runtime| runtime.state.lock().unwrap().initialized)
-        .unwrap_or(false)
+    RUNTIME.get().and_then(|runtime| runtime.as_ref().ok())
+        .is_some_and(|runtime| runtime.state.lock().unwrap().initialized)
 }
 
 impl SharedBrowserState {
@@ -2510,7 +2575,6 @@ impl SharedBrowserState {
                 scale_factor,
             }),
             frame: Mutex::new(None),
-            closing: AtomicBool::new(false),
             editable_focus: AtomicBool::new(false),
             ..Default::default()
         }
@@ -3052,6 +3116,68 @@ unsafe extern "system" fn audio_on_stream_started(
     let _ = tap.events.try_send(AudioEvent::Started(tap.format()));
 }
 
+/// Chromium stamps audio packets on its `TimeTicks` clock (time since boot,
+/// in milliseconds), not on the Unix clock its callers and our frame stamps
+/// use: measured 681593465 for a packet captured at Unix 1791865212859 ms.
+/// Moved onto the Unix clock here, against this callback's own Unix time and
+/// the ticks clock read now (Chromium's mac `TimeTicks` is
+/// `mach_absolute_time`). A value already near the Unix time is kept.
+fn unix_pts_ms(pts: i64, unix_now_ms: i64) -> i64 {
+    const YEAR_MS: i64 = 365 * 24 * 3600 * 1000;
+    if (unix_now_ms - pts).abs() < YEAR_MS {
+        return pts;
+    }
+    match ticks_now_ms() {
+        Some(ticks) => pts + (unix_now_ms - ticks),
+        None => pts,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn ticks_now_ms() -> Option<i64> {
+    #[repr(C)]
+    struct Timebase {
+        numer: u32,
+        denom: u32,
+    }
+    extern "C" {
+        fn mach_absolute_time() -> u64;
+        fn mach_timebase_info(info: *mut Timebase) -> i32;
+    }
+    let mut base = Timebase { numer: 0, denom: 0 };
+    if unsafe { mach_timebase_info(&mut base) } != 0 || base.denom == 0 {
+        return None;
+    }
+    let ns = unsafe { mach_absolute_time() } as u128 * base.numer as u128 / base.denom as u128;
+    Some((ns / 1_000_000) as i64)
+}
+
+/// Linux: Chromium's `TimeTicks` is `CLOCK_MONOTONIC`.
+#[cfg(target_os = "linux")]
+fn ticks_now_ms() -> Option<i64> {
+    #[repr(C)]
+    struct Timespec {
+        sec: i64,
+        nsec: i64,
+    }
+    extern "C" {
+        fn clock_gettime(clock: c_int, out: *mut Timespec) -> c_int;
+    }
+    const CLOCK_MONOTONIC: c_int = 1;
+    let mut now = Timespec { sec: 0, nsec: 0 };
+    if unsafe { clock_gettime(CLOCK_MONOTONIC, &mut now) } != 0 {
+        return None;
+    }
+    Some(now.sec * 1000 + now.nsec / 1_000_000)
+}
+
+/// Windows: Chromium's `TimeTicks` is the performance counter (QPC), which the HAL clock reads
+/// as absolute nanoseconds.
+#[cfg(windows)]
+fn ticks_now_ms() -> Option<i64> {
+    Some((makepad_hal::clock::raw_ns() / 1_000_000) as i64)
+}
+
 /// Capture thread, once per packet: `data` is one plane of `frames` f32 per
 /// channel. Interleaved into a recycled buffer and handed over without ever
 /// waiting; a packet the embedder has no room for is dropped and counted.
@@ -3110,7 +3236,7 @@ unsafe extern "system" fn audio_on_stream_packet(
         epoch: tap.epoch.load(Ordering::Acquire),
         channels: channels as u32,
         frames,
-        pts_ms: pts,
+        pts_ms: unix_pts_ms(pts, capture.callback_unix_ms),
         capture,
         samples,
     };
@@ -3280,6 +3406,12 @@ unsafe extern "system" fn render_on_paint(
     let render = self_ as *mut RenderHandler;
     let state: &SharedBrowserState = &(*render).state;
     let timestamp = state.capture_timestamp(state.navigation_epoch.load(Ordering::Acquire));
+    #[cfg(any(target_os = "linux", windows))]
+    if let Some(sink) = state.frame_sink.lock().unwrap().clone() {
+        let bytes = slice::from_raw_parts(buffer as *const u8, width as usize * height as usize * 4);
+        sink_upload(state, &*sink, bytes, width as usize, height as usize, timestamp);
+        return;
+    }
     let pixels =
         slice::from_raw_parts(buffer as *const u32, width as usize * height as usize).to_vec();
     let n = state.software_frames.fetch_add(1, Ordering::AcqRel) + 1;
@@ -3338,11 +3470,17 @@ unsafe extern "system" fn render_on_accelerated_paint(
         return;
     }
 
+    let sink = state.frame_sink.lock().unwrap().clone();
+    if let Some(sink) = sink {
+        sink_paint(state, &*sink, iosurface, width, height);
+        return;
+    }
+
     let started = std::time::Instant::now();
     let mut blitted = false;
     let mut copied = (0usize, 0usize);
+    let target = state.accel_target.lock().unwrap().clone();
     if let Some(metal) = metal_blit() {
-        let target = state.accel_target.lock().unwrap();
         if let Some(target) = target.as_ref() {
             // Blits need identical pixel formats on both sides, so the pool
             // surface is viewed with the destination's BGRA8 format. CEF on
@@ -3389,7 +3527,11 @@ unsafe extern "system" fn render_on_accelerated_paint(
     }
     let micros = started.elapsed().as_micros() as u64;
 
-    {
+    let stats = {
+        let current = state.accel_target.lock().unwrap();
+        // Resizing may have replaced the target while this copy ran; old pixels must never
+        // promote a newly allocated surface in the app.
+        let current_target = current.as_ref().zip(target.as_ref()).is_some_and(|(a, b)| Arc::ptr_eq(a, b));
         let mut stats = state.accel.lock().unwrap();
         stats.frames += 1;
         stats.last_width = width;
@@ -3398,12 +3540,16 @@ unsafe extern "system" fn render_on_accelerated_paint(
         if blitted {
             stats.last_blit_micros = micros;
             stats.total_blit_micros += micros;
-            stats.target_frames += 1;
-            stats.last_copy_width = copied.0;
-            stats.last_copy_height = copied.1;
+            if current_target {
+                stats.target_frames += 1;
+                stats.last_copy_width = copied.0;
+                stats.last_copy_height = copied.1;
+            }
         } else {
             stats.dropped_no_target += 1;
         }
+        *stats
+    };
         // Measured evidence of the GPU path: frames 1, 2, 10, 100, 1000... are
         // logged unconditionally (every frame with the `cef` topic).
         let milestone = matches!(stats.frames, 1 | 2 | 10 | 100 | 1000 | 10000 | 100000);
@@ -3435,10 +3581,331 @@ unsafe extern "system" fn render_on_accelerated_paint(
                 say!("[makepad-cef] {message}");
             }
         }
-    }
+
     if blitted {
         state.accel_frames.fetch_add(1, Ordering::AcqRel);
     }
+}
+
+/// Linux GPU path: CEF hands us a dmabuf out of its pool (valid until we
+/// return); a sink's slot takes it with one GPU copy (waited on), stamped
+/// with this callback's time and the probes read from CEF's own buffer.
+/// Without a sink nothing in this process shows accelerated frames.
+#[cfg(target_os = "linux")]
+unsafe extern "system" fn render_on_accelerated_paint(
+    self_: *mut ffi::cef_render_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    type_: ffi::cef_paint_element_type_t,
+    _dirty_rects_count: usize,
+    _dirty_rects: *const ffi::cef_rect_t,
+    info: *const c_void,
+) {
+    use makepad_hal::dmabuf::copy;
+    release_param(browser);
+    if type_ != ffi::PET_VIEW || info.is_null() {
+        return;
+    }
+    let info = &*(info as *const ffi::cef_accelerated_paint_info_t);
+    let render = self_ as *mut RenderHandler;
+    let state = &(*render).state;
+    let (width, height) = (info.extra.coded_size.width.max(0) as usize, info.extra.coded_size.height.max(0) as usize);
+    if info.plane_count != 1 || info.planes[0].fd < 0 || width == 0 || height == 0 {
+        let mut stats = state.accel.lock().unwrap();
+        stats.dropped_no_target += 1;
+        if stats.dropped_no_target == 1 {
+            say!("[makepad-cef] accelerated paint with {} planes, {width}x{height}: not taken", info.plane_count);
+        }
+        return;
+    }
+    let Some(sink) = state.frame_sink.lock().unwrap().clone() else {
+        state.accel.lock().unwrap().dropped_no_target += 1;
+        return;
+    };
+    let timestamp = state.capture_timestamp(state.navigation_epoch.load(Ordering::Acquire));
+    let plane = info.planes[0];
+    let layout = copy::Layout {
+        width: width as u32,
+        height: height as u32,
+        fourcc: if info.format == ffi::CEF_COLOR_TYPE_BGRA_8888 { copy::AR24 } else { copy::AB24 },
+        modifier: info.modifier,
+        offset: plane.offset,
+        stride: plane.stride as u64,
+    };
+    let Some(target) = sink.acquire(width, height) else {
+        state.accel.lock().unwrap().dropped_no_target += 1;
+        return;
+    };
+    let started = std::time::Instant::now();
+    let fd = std::os::fd::BorrowedFd::borrow_raw(plane.fd);
+    let probes = match copy::copy(fd, layout, target.handle, &sink.probes()) {
+        Ok(probes) => probes,
+        Err(error) => {
+            sink.abandon(target.slot);
+            let mut stats = state.accel.lock().unwrap();
+            stats.dropped_no_target += 1;
+            if stats.dropped_no_target < 4 {
+                say!("[makepad-cef] accelerated paint into sink slot {}: {error}", target.slot);
+            }
+            return;
+        }
+    };
+    let micros = started.elapsed().as_micros() as u64;
+    let copied = (width.min(target.width), height.min(target.height));
+    sink.publish(target.slot, copied, timestamp, &probes.iter().map(|p| luminance(p[0], p[1], p[2])).collect::<Vec<_>>());
+    sink_stats(state, width, height, copied, micros, target.slot);
+}
+
+/// Software paint into a sink (Linux): the CPU frame goes up into the slot.
+#[cfg(target_os = "linux")]
+fn sink_upload(state: &SharedBrowserState, sink: &dyn crate::FrameSink, pixels: &[u8], width: usize, height: usize, timestamp: CaptureTimestamp) {
+    use makepad_hal::dmabuf::copy;
+    let Some(target) = sink.acquire(width, height) else {
+        state.accel.lock().unwrap().dropped_no_target += 1;
+        return;
+    };
+    let started = std::time::Instant::now();
+    if let Err(error) = copy::upload(target.handle, pixels, width as u32, height as u32, width * 4) {
+        sink.abandon(target.slot);
+        let mut stats = state.accel.lock().unwrap();
+        stats.dropped_no_target += 1;
+        if stats.dropped_no_target < 4 {
+            say!("[makepad-cef] software paint into sink slot {}: {error}", target.slot);
+        }
+        return;
+    }
+    let micros = started.elapsed().as_micros() as u64;
+    let probes: Vec<u8> = sink.probes().iter().map(|[x, y]| {
+        let (x, y) = (*x as usize, *y as usize);
+        if x >= width || y >= height {
+            return 0;
+        }
+        let at = (y * width + x) * 4;
+        luminance(pixels[at], pixels[at + 1], pixels[at + 2])
+    }).collect();
+    let copied = (width.min(target.width), height.min(target.height));
+    sink.publish(target.slot, copied, timestamp, &probes);
+    sink_stats(state, width, height, copied, micros, target.slot);
+}
+
+/// Windows GPU path: CEF hands us a D3D11 shared texture (an NT handle valid until we return);
+/// a sink's slot takes it with one GPU copy under the slot's keyed mutex, stamped with this
+/// callback's time and the probes read from CEF's own texture. Without a sink nothing in this
+/// process shows accelerated frames.
+#[cfg(windows)]
+unsafe extern "system" fn render_on_accelerated_paint(
+    self_: *mut ffi::cef_render_handler_t,
+    browser: *mut ffi::cef_browser_t,
+    type_: ffi::cef_paint_element_type_t,
+    _dirty_rects_count: usize,
+    _dirty_rects: *const ffi::cef_rect_t,
+    info: *const c_void,
+) {
+    use makepad_hal::shared_texture;
+    release_param(browser);
+    if type_ != ffi::PET_VIEW || info.is_null() {
+        return;
+    }
+    let info = &*(info as *const ffi::cef_accelerated_paint_info_t);
+    let render = self_ as *mut RenderHandler;
+    let state = &(*render).state;
+    let (width, height) = (info.extra.coded_size.width.max(0) as usize, info.extra.coded_size.height.max(0) as usize);
+    if info.shared_texture_handle.is_null() || width == 0 || height == 0 {
+        state.accel.lock().unwrap().dropped_no_target += 1;
+        return;
+    }
+    let Some(sink) = state.frame_sink.lock().unwrap().clone() else {
+        state.accel.lock().unwrap().dropped_no_target += 1;
+        return;
+    };
+    let timestamp = state.capture_timestamp(state.navigation_epoch.load(Ordering::Acquire));
+    let Some(target) = sink.acquire(width, height) else {
+        state.accel.lock().unwrap().dropped_no_target += 1;
+        return;
+    };
+    let started = std::time::Instant::now();
+    let probes = match shared_texture::copy(info.shared_texture_handle as isize, target.handle, &sink.probes()) {
+        Ok(probes) => probes,
+        Err(error) => {
+            sink.abandon(target.slot);
+            let mut stats = state.accel.lock().unwrap();
+            stats.dropped_no_target += 1;
+            if stats.dropped_no_target < 4 {
+                say!("[makepad-cef] accelerated paint into sink slot {}: {error}", target.slot);
+            }
+            return;
+        }
+    };
+    let micros = started.elapsed().as_micros() as u64;
+    let copied = (width.min(target.width), height.min(target.height));
+    sink.publish(target.slot, copied, timestamp, &probes.iter().map(|p| luminance(p[0], p[1], p[2])).collect::<Vec<_>>());
+    sink_stats(state, width, height, copied, micros, target.slot);
+}
+
+/// Software paint into a sink (Windows): the CPU frame goes up into the slot.
+#[cfg(windows)]
+fn sink_upload(state: &SharedBrowserState, sink: &dyn crate::FrameSink, pixels: &[u8], width: usize, height: usize, timestamp: CaptureTimestamp) {
+    use makepad_hal::shared_texture;
+    let Some(target) = sink.acquire(width, height) else {
+        state.accel.lock().unwrap().dropped_no_target += 1;
+        return;
+    };
+    let started = std::time::Instant::now();
+    if let Err(error) = shared_texture::upload(target.handle, pixels, width as u32, height as u32, width * 4) {
+        sink.abandon(target.slot);
+        let mut stats = state.accel.lock().unwrap();
+        stats.dropped_no_target += 1;
+        if stats.dropped_no_target < 4 {
+            say!("[makepad-cef] software paint into sink slot {}: {error}", target.slot);
+        }
+        return;
+    }
+    let micros = started.elapsed().as_micros() as u64;
+    let probes: Vec<u8> = sink.probes().iter().map(|[x, y]| {
+        let (x, y) = (*x as usize, *y as usize);
+        if x >= width || y >= height {
+            return 0;
+        }
+        let at = (y * width + x) * 4;
+        luminance(pixels[at], pixels[at + 1], pixels[at + 2])
+    }).collect();
+    let copied = (width.min(target.width), height.min(target.height));
+    sink.publish(target.slot, copied, timestamp, &probes);
+    sink_stats(state, width, height, copied, micros, target.slot);
+}
+
+/// A BGRA pixel's luminance byte (the probes' measure).
+#[cfg(any(target_os = "linux", windows))]
+fn luminance(b: u8, g: u8, r: u8) -> u8 {
+    ((r as u32 * 77 + g as u32 * 150 + b as u32 * 29) >> 8) as u8
+}
+
+#[cfg(any(target_os = "linux", windows))]
+fn sink_stats(state: &SharedBrowserState, width: usize, height: usize, copied: (usize, usize), micros: u64, slot: usize) {
+    let frames = {
+        let mut stats = state.accel.lock().unwrap();
+        stats.frames += 1;
+        stats.last_width = width;
+        stats.last_height = height;
+        stats.last_blit_micros = micros;
+        stats.total_blit_micros += micros;
+        stats.last_copy_width = copied.0;
+        stats.last_copy_height = copied.1;
+        stats.frames
+    };
+    if matches!(frames, 1 | 2 | 10 | 100 | 1000 | 10000 | 100000) {
+        say!("[makepad-cef] paint #{frames} into sink slot {slot}: {width}x{height}, copy {micros}us");
+    }
+}
+
+/// The sink path of an accelerated paint: a slot of the sink's ring takes
+/// the frame (GPU copy, waited on), stamped with this callback's time and
+/// the probes read from CEF's own surface while it is still ours.
+#[cfg(target_os = "macos")]
+unsafe fn sink_paint(state: &SharedBrowserState, sink: &dyn crate::FrameSink, iosurface: *mut c_void, width: usize, height: usize) {
+    let timestamp = state.capture_timestamp(state.navigation_epoch.load(Ordering::Acquire));
+    let Some(metal) = metal_blit() else { return };
+    let Some(target) = sink.acquire(width, height) else {
+        state.accel.lock().unwrap().dropped_no_target += 1;
+        return;
+    };
+    let Some(dest) = sink_target(state, metal, target) else {
+        sink.abandon(target.slot);
+        return;
+    };
+    let source = metal_texture_for_iosurface(metal.device(), iosurface, width, height, MTL_PIXEL_FORMAT_BGRA8_UNORM);
+    if source.is_null() {
+        sink.abandon(target.slot);
+        return;
+    }
+    let copy = (width.min(dest.width), height.min(dest.height));
+    let started = std::time::Instant::now();
+    let command_buffer: ObjcId = msg_send![metal.queue(), commandBuffer];
+    let encoder: ObjcId = msg_send![command_buffer, blitCommandEncoder];
+    let origin = MTLOrigin { x: 0, y: 0, z: 0 };
+    let size = MTLSize { width: copy.0 as u64, height: copy.1 as u64, depth: 1 };
+    let () = msg_send![
+        encoder,
+        copyFromTexture: source
+        sourceSlice: 0u64
+        sourceLevel: 0u64
+        sourceOrigin: origin
+        sourceSize: size
+        toTexture: dest.texture as ObjcId
+        destinationSlice: 0u64
+        destinationLevel: 0u64
+        destinationOrigin: origin
+    ];
+    let () = msg_send![encoder, endEncoding];
+    let () = msg_send![command_buffer, commit];
+    let () = msg_send![command_buffer, waitUntilCompleted];
+    let () = msg_send![source, release];
+    let micros = started.elapsed().as_micros() as u64;
+    let probes = read_probes(iosurface, width, height, &sink.probes());
+    sink.publish(target.slot, copy, timestamp, &probes);
+    let frames = {
+        let mut stats = state.accel.lock().unwrap();
+        stats.frames += 1;
+        stats.last_width = width;
+        stats.last_height = height;
+        stats.last_blit_micros = micros;
+        stats.total_blit_micros += micros;
+        stats.last_copy_width = copy.0;
+        stats.last_copy_height = copy.1;
+        stats.frames
+    };
+    if matches!(frames, 1 | 2 | 10 | 100 | 1000 | 10000 | 100000) {
+        say!("[makepad-cef] accelerated paint #{frames} into sink slot {}: {width}x{height}, blit {micros}us", target.slot);
+    }
+}
+
+/// The sink slot's texture on our blit device (wrapped once per handle).
+#[cfg(target_os = "macos")]
+unsafe fn sink_target(state: &SharedBrowserState, metal: &MetalBlit, target: crate::SinkTarget) -> Option<Arc<AccelTarget>> {
+    let mut targets = state.sink_targets.lock().unwrap();
+    if let Some((_, found)) = targets.iter().find(|(handle, t)| *handle == target.handle && t.width == target.width && t.height == target.height) {
+        return Some(found.clone());
+    }
+    let iosurface = IOSurfaceLookup(u32::try_from(target.handle).ok()?);
+    if iosurface.is_null() {
+        return None;
+    }
+    let texture = metal_texture_for_iosurface(metal.device(), iosurface, target.width, target.height, MTL_PIXEL_FORMAT_BGRA8_UNORM);
+    if texture.is_null() {
+        CFRelease(iosurface as *const c_void);
+        return None;
+    }
+    // IOSurfaceLookup returned it retained: the target keeps that reference.
+    let wrapped = Arc::new(AccelTarget { iosurface: iosurface as usize, texture: texture as usize, width: target.width, height: target.height });
+    targets.retain(|(handle, _)| *handle != target.handle);
+    targets.push((target.handle, wrapped.clone()));
+    Some(wrapped)
+}
+
+/// One luminance byte per probe point of a BGRA surface (0 outside it).
+#[cfg(target_os = "macos")]
+unsafe fn read_probes(iosurface: *mut c_void, width: usize, height: usize, probes: &[[u32; 2]]) -> Vec<u8> {
+    if probes.is_empty() {
+        return Vec::new();
+    }
+    if IOSurfaceLock(iosurface, IOSURFACE_LOCK_READ_ONLY, std::ptr::null_mut()) != 0 {
+        return vec![0; probes.len()];
+    }
+    let base = IOSurfaceGetBaseAddress(iosurface) as *const u8;
+    let row = IOSurfaceGetBytesPerRow(iosurface);
+    let out = probes
+        .iter()
+        .map(|[x, y]| {
+            let (x, y) = (*x as usize, *y as usize);
+            if base.is_null() || x >= width || y >= height {
+                return 0;
+            }
+            let px = base.add(y * row + x * 4);
+            let (b, g, r) = (*px as u32, *px.add(1) as u32, *px.add(2) as u32);
+            ((r * 77 + g * 150 + b * 29) >> 8) as u8
+        })
+        .collect();
+    IOSurfaceUnlock(iosurface, IOSURFACE_LOCK_READ_ONLY, std::ptr::null_mut());
+    out
 }
 
 unsafe extern "system" fn display_on_address_change(
@@ -3854,6 +4321,7 @@ unsafe extern "system" fn completion_on_complete(self_: *mut ffi::cef_completion
 /// made in the last half minute of a session would be gone at the next
 /// launch. Waits for the store's answer on the loop, bounded; harmless to
 /// call more than once or with pages still open.
+#[cfg(not(target_os = "macos"))]
 pub fn flush_profile() {
     let Ok(runtime) = runtime() else {
         return;
@@ -3870,6 +4338,7 @@ pub fn flush_profile() {
 
 /// The cookie flush itself: asked of the global store, waited for on the
 /// loop, bounded so a store that never answers does not hold the process.
+#[cfg(not(target_os = "macos"))]
 fn flush_cookies(runtime: &Runtime) -> String {
     let done = Arc::new(AtomicBool::new(false));
     unsafe {
@@ -3890,10 +4359,10 @@ fn flush_cookies(runtime: &Runtime) -> String {
         }
     }
     let started = Instant::now();
-    let deadline = started + Duration::from_secs(2);
+    let deadline = started + std::time::Duration::from_secs(2);
     while !done.load(Ordering::Acquire) && Instant::now() < deadline {
         do_message_loop_work_impl();
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
     if done.load(Ordering::Acquire) {
         format!("flushed in {} ms", started.elapsed().as_millis())
@@ -3963,10 +4432,7 @@ impl RenderHandler {
                 on_popup_show: Some(render_on_popup_show),
                 on_popup_size: Some(render_on_popup_size),
                 on_paint: Some(render_on_paint),
-                #[cfg(target_os = "macos")]
                 on_accelerated_paint: Some(render_on_accelerated_paint),
-                #[cfg(not(target_os = "macos"))]
-                on_accelerated_paint: None,
                 get_touch_handle_size: None,
                 on_touch_handle_state_changed: None,
                 start_dragging: None,
@@ -4106,7 +4572,7 @@ impl Browser {
     /// no native Chrome window to propagate the profile theme to Blink.
     /// Call on the same UI thread that pumps CEF.
     pub fn set_dark_mode(&mut self, dark: bool) -> Result<()> {
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             let get = (*host).get_request_context
                 .ok_or_else(|| Error::new("CEF request context unavailable"))?;
             let context = get(host);
@@ -4138,53 +4604,62 @@ impl Browser {
         })
     }
 
-    fn with_host<T>(&self, f: impl FnOnce(*mut ffi::cef_browser_host_t) -> Result<T>) -> Result<T> {
-        unsafe {
-            let host = (*self.browser)
-                .get_host
-                .ok_or_else(|| Error::new("cef_browser_t::get_host missing"))?(
-                self.browser
-            );
-            if host.is_null() {
-                return Err(Error::new("cef_browser_t::get_host returned null"));
-            }
+    /// The latest error from queued native work (including browser creation).
+    pub fn take_error(&mut self) -> Option<String> {
+        self.error.lock().unwrap().take()
+    }
+
+    fn with_browser(&self, f: impl FnOnce(*mut ffi::cef_browser_t) -> Result<()> + Send + 'static) -> Result<()> {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let browser = self.browser.load(Ordering::Acquire) as *mut ffi::cef_browser_t;
+            if browser.is_null() { return Err(Error::new("browser is closed")); }
+            f(browser)
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let browser = self.browser.clone();
+            let error = self.error.clone();
+            on_cef_thread(move || {
+                let browser = browser.load(Ordering::Acquire) as *mut ffi::cef_browser_t;
+                if !browser.is_null() {
+                    if let Err(err) = f(browser) { *error.lock().unwrap() = Some(err.to_string()); }
+                }
+            })
+        }
+    }
+
+    fn with_host(&self, f: impl FnOnce(*mut ffi::cef_browser_host_t) -> Result<()> + Send + 'static) -> Result<()> {
+        self.with_browser(move |browser| unsafe {
+            let host = (*browser).get_host.ok_or_else(|| Error::new("cef_browser_t::get_host missing"))?(browser);
+            if host.is_null() { return Err(Error::new("cef_browser_t::get_host returned null")); }
             let result = f(host);
             release_ref_counted(&mut (*host).base as *mut _);
             result
-        }
+        })
     }
 
-    /// The frame holding the keyboard focus (an iframe the user clicked
-    /// into), else the main frame.
-    fn with_focused_frame<T>(&self, f: impl FnOnce(*mut ffi::cef_frame_t) -> Result<T>) -> Result<T> {
-        unsafe {
-            let frame = match (*self.browser).get_focused_frame {
-                Some(get_focused_frame) => get_focused_frame(self.browser),
-                None => ptr::null_mut(),
-            };
+    fn with_focused_frame(&self, f: impl FnOnce(*mut ffi::cef_frame_t) -> Result<()> + Send + 'static) -> Result<()> {
+        self.with_frame(true, f)
+    }
+
+    fn with_main_frame(&self, f: impl FnOnce(*mut ffi::cef_frame_t) -> Result<()> + Send + 'static) -> Result<()> {
+        self.with_frame(false, f)
+    }
+
+    fn with_frame(&self, focused: bool, f: impl FnOnce(*mut ffi::cef_frame_t) -> Result<()> + Send + 'static) -> Result<()> {
+        self.with_browser(move |browser| unsafe {
+            let mut frame = if focused {
+                (*browser).get_focused_frame.map_or(ptr::null_mut(), |get| get(browser))
+            } else { ptr::null_mut() };
             if frame.is_null() {
-                return self.with_main_frame(f);
+                frame = (*browser).get_main_frame.ok_or_else(|| Error::new("cef_browser_t::get_main_frame missing"))?(browser);
             }
+            if frame.is_null() { return Err(Error::new("CEF returned a null frame")); }
             let result = f(frame);
             release_ref_counted(&mut (*frame).base as *mut _);
             result
-        }
-    }
-
-    fn with_main_frame<T>(&self, f: impl FnOnce(*mut ffi::cef_frame_t) -> Result<T>) -> Result<T> {
-        unsafe {
-            let frame = (*self.browser)
-                .get_main_frame
-                .ok_or_else(|| Error::new("cef_browser_t::get_main_frame missing"))?(
-                self.browser
-            );
-            if frame.is_null() {
-                return Err(Error::new("cef_browser_t::get_main_frame returned null"));
-            }
-            let result = f(frame);
-            release_ref_counted(&mut (*frame).base as *mut _);
-            result
-        }
+        })
     }
 
     /// `width`/`height` are the PIXEL size of the surface the page is drawn
@@ -4204,104 +4679,134 @@ impl Browser {
         scale_factor: f32,
         options: BrowserOptions,
     ) -> Result<Self> {
-        ensure_initialized()?;
-        let runtime = runtime()?;
-
         let state = Arc::new(SharedBrowserState::new(width, height, scale_factor));
-        let logical = state.view();
-        let render_handler = RenderHandler::allocate(state.clone());
-        let display_handler = DisplayHandler::allocate(state.clone());
-        let load_handler = LoadHandler::allocate(state.clone());
-        let life_span_handler = LifeSpanHandler::allocate(state.clone());
-        let audio_handler = AudioHandler::allocate(state.clone());
-        let client = ClientHandler::allocate(
-            render_handler,
-            display_handler,
-            load_handler,
-            life_span_handler,
-            audio_handler,
-        );
+        let browser = Arc::new(AtomicUsize::new(0));
+        let error = Arc::new(Mutex::new(None));
         let accelerated = accelerated_paint_available() && !options.software_frames;
+        let url = url.to_string();
+        let native_state = state.clone();
+        let native_browser = browser.clone();
+        let native_error = error.clone();
+        on_cef_thread(move || {
+            let state = native_state;
+            let result: Result<usize> = (|| {
+                ensure_initialized()?;
+                let runtime = runtime()?;
 
-        let url = CefString::new(
-            &runtime.api,
-            if url.is_empty() { "about:blank" } else { url },
-        )?;
-        let bounds = ffi::cef_rect_t {
-            x: 0,
-            y: 0,
-            width: logical.width as c_int,
-            height: logical.height as c_int,
-        };
-        #[cfg(target_os = "macos")]
-        let mut window_info = ffi::cef_window_info_t {
-            size: std::mem::size_of::<ffi::cef_window_info_t>(),
-            window_name: ffi::cef_string_t::default(),
-            bounds,
-            hidden: 0,
-            parent_view: ptr::null_mut(),
-            windowless_rendering_enabled: 1,
-            shared_texture_enabled: accelerated as c_int,
-            external_begin_frame_enabled: 0,
-            view: ptr::null_mut(),
-            runtime_style: 0,
-        };
-        #[cfg(windows)]
-        let mut window_info = ffi::cef_window_info_t {
-            size: std::mem::size_of::<ffi::cef_window_info_t>(),
-            ex_style: 0,
-            window_name: ffi::cef_string_t::default(),
-            style: 0,
-            bounds,
-            parent_window: ptr::null_mut(),
-            menu: ptr::null_mut(),
-            windowless_rendering_enabled: 1,
-            shared_texture_enabled: accelerated as c_int,
-            external_begin_frame_enabled: 0,
-            window: ptr::null_mut(),
-            runtime_style: 0,
-        };
-        #[cfg(target_os = "linux")]
-        let mut window_info = ffi::cef_window_info_t {
-            size: std::mem::size_of::<ffi::cef_window_info_t>(),
-            bounds,
-            windowless_rendering_enabled: 1,
-            shared_texture_enabled: accelerated as c_int,
-            ..Default::default()
-        };
-        let mut browser_settings = ffi::cef_browser_settings_t {
-            size: std::mem::size_of::<ffi::cef_browser_settings_t>(),
-            windowless_frame_rate: 60,
-            // Themed, not black: what the page area shows before the site
-            // has composited anything, and behind area a reflow has not
-            // reached yet.
-            background_color: background_color(),
-            ..Default::default()
-        };
+                let logical = state.view();
+                let render_handler = RenderHandler::allocate(state.clone());
+                let display_handler = DisplayHandler::allocate(state.clone());
+                let load_handler = LoadHandler::allocate(state.clone());
+                let life_span_handler = LifeSpanHandler::allocate(state.clone());
+                let audio_handler = AudioHandler::allocate(state.clone());
+                let client = ClientHandler::allocate(
+                    render_handler,
+                    display_handler,
+                    load_handler,
+                    life_span_handler,
+                    audio_handler,
+                );
 
-        let browser = unsafe {
-            (runtime.api.cef_browser_host_create_browser_sync)(
-                &mut window_info,
-                &mut (*client).cef_client,
-                &url.value,
-                &mut browser_settings,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            )
-        };
+                let url = CefString::new(
+                    &runtime.api,
+                    if url.is_empty() { "about:blank" } else { &url },
+                )?;
+                let bounds = ffi::cef_rect_t {
+                    x: 0,
+                    y: 0,
+                    width: logical.width as c_int,
+                    height: logical.height as c_int,
+                };
+                #[cfg(target_os = "macos")]
+                let mut window_info = ffi::cef_window_info_t {
+                    size: std::mem::size_of::<ffi::cef_window_info_t>(),
+                    window_name: ffi::cef_string_t::default(),
+                    bounds,
+                    hidden: 0,
+                    parent_view: ptr::null_mut(),
+                    windowless_rendering_enabled: 1,
+                    shared_texture_enabled: accelerated as c_int,
+                    external_begin_frame_enabled: 0,
+                    view: ptr::null_mut(),
+                    runtime_style: 0,
+                };
+                #[cfg(windows)]
+                let mut window_info = ffi::cef_window_info_t {
+                    size: std::mem::size_of::<ffi::cef_window_info_t>(),
+                    ex_style: 0,
+                    window_name: ffi::cef_string_t::default(),
+                    style: 0,
+                    bounds,
+                    parent_window: ptr::null_mut(),
+                    menu: ptr::null_mut(),
+                    windowless_rendering_enabled: 1,
+                    shared_texture_enabled: accelerated as c_int,
+                    external_begin_frame_enabled: 0,
+                    window: ptr::null_mut(),
+                    runtime_style: 0,
+                };
+                #[cfg(target_os = "linux")]
+                let mut window_info = ffi::cef_window_info_t {
+                    size: std::mem::size_of::<ffi::cef_window_info_t>(),
+                    bounds,
+                    windowless_rendering_enabled: 1,
+                    shared_texture_enabled: accelerated as c_int,
+                    ..Default::default()
+                };
+                let mut browser_settings = ffi::cef_browser_settings_t {
+                    size: std::mem::size_of::<ffi::cef_browser_settings_t>(),
+                    windowless_frame_rate: 60,
+                    // Themed, not black: what the page area shows before the site
+                    // has composited anything, and behind area a reflow has not
+                    // reached yet.
+                    background_color: background_color(),
+                    ..Default::default()
+                };
 
-        if browser.is_null() {
-            unsafe {
-                release_ref_counted(&mut (*client).cef_client.base as *mut _);
+                let browser = unsafe {
+                    (runtime.api.cef_browser_host_create_browser_sync)(
+                        &mut window_info,
+                        &mut (*client).cef_client,
+                        &url.value,
+                        &mut browser_settings,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                    )
+                };
+
+                if browser.is_null() {
+                    unsafe {
+                        release_ref_counted(&mut (*client).cef_client.base as *mut _);
+                    }
+                    return Err(Error::new(
+                        "cef_browser_host_create_browser_sync returned null",
+                    ));
+                }
+                runtime.live_browsers.fetch_add(1, Ordering::AcqRel);
+
+                Ok(browser as usize)
+            })();
+            match result {
+                Ok(ptr) => {
+                    native_browser.store(ptr, Ordering::Release);
+                    #[cfg(target_os = "macos")]
+                    if let Ok(runtime) = runtime() {
+                        let mut browsers = runtime.browsers.lock().unwrap();
+                        browsers.retain(|browser| browser.strong_count() != 0);
+                        browsers.push(Arc::downgrade(&native_browser));
+                    }
+                }
+                Err(err) => *native_error.lock().unwrap() = Some(err.to_string()),
             }
-            return Err(Error::new(
-                "cef_browser_host_create_browser_sync returned null",
-            ));
-        }
-        runtime.live_browsers.fetch_add(1, Ordering::AcqRel);
+        })?;
 
+        #[cfg(not(target_os = "macos"))]
+        if let Some(err) = error.lock().unwrap().take() {
+            return Err(Error::new(err));
+        }
         let mut this = Self {
             browser,
+            error,
             state,
             width: 0,
             height: 0,
@@ -4351,8 +4856,9 @@ impl Browser {
     }
 
     /// Register the client-owned IOSurface that accelerated paints are copied
-    /// into. `iosurface` is an `IOSurfaceRef` the embedder keeps alive (it is
-    /// retained here as well); its pixel format must be BGRA8.
+    /// into. `handle` is the IOSurface ID from HAL `TextureShared`; the
+    /// embedder keeps the HAL texture alive and CEF retains its surface view.
+    /// The surface pixel format must be BGRA8.
     ///
     /// The surface may be LARGER than the browser view — the blit fills its
     /// top-left `min(paint, target)` corner and `AcceleratedStats::
@@ -4364,70 +4870,101 @@ impl Browser {
     #[cfg(target_os = "macos")]
     pub fn set_accelerated_target(
         &mut self,
-        iosurface: *mut c_void,
+        handle: u64,
         width: usize,
         height: usize,
     ) -> Result<()> {
-        if iosurface.is_null() || width == 0 || height == 0 {
-            *self.state.accel_target.lock().unwrap() = None;
-            return Ok(());
+        let id = u32::try_from(handle).map_err(|_| Error::new("invalid IOSurface ID"))?;
+        let iosurface = unsafe { IOSurfaceLookup(id) };
+        if iosurface.is_null() {
+            return Err(Error::new(
+                "the HAL's shared surface is no longer available",
+            ));
         }
-        let metal = metal_blit().ok_or_else(|| Error::new("no Metal device for CEF blits"))?;
-        {
-            let current = self.state.accel_target.lock().unwrap();
-            if let Some(current) = current.as_ref() {
-                if current.iosurface == iosurface as usize
-                    && current.width == width
-                    && current.height == height
-                {
-                    return Ok(());
+        let result = (|| {
+            if width == 0 || height == 0 {
+                let old = self.state.accel_target.lock().unwrap().take();
+                drop(old);
+                return Ok(());
+            }
+            let metal = metal_blit().ok_or_else(|| Error::new("no Metal device for CEF blits"))?;
+            {
+                let current = self.state.accel_target.lock().unwrap();
+                if let Some(current) = current.as_ref() {
+                    if current.iosurface == iosurface as usize
+                        && current.width == width
+                        && current.height == height
+                    {
+                        return Ok(());
+                    }
                 }
             }
-        }
-        let texture = unsafe {
-            metal_texture_for_iosurface(
-                metal.device(),
-                iosurface,
+            let texture = unsafe {
+                metal_texture_for_iosurface(
+                    metal.device(),
+                    iosurface,
+                    width,
+                    height,
+                    MTL_PIXEL_FORMAT_BGRA8_UNORM,
+                )
+            };
+            if texture.is_null() {
+                return Err(Error::new(format!(
+                    "failed to wrap the {width}x{height} target IOSurface in a Metal texture"
+                )));
+            }
+            unsafe {
+                CFRetain(iosurface as *const c_void);
+            }
+            let replacement = Arc::new(AccelTarget {
+                iosurface: iosurface as usize,
+                texture: texture as usize,
                 width,
                 height,
-                MTL_PIXEL_FORMAT_BGRA8_UNORM,
-            )
-        };
-        if texture.is_null() {
-            return Err(Error::new(format!(
-                "failed to wrap the {width}x{height} target IOSurface in a Metal texture"
-            )));
-        }
+            });
+            let old = {
+                let mut current = self.state.accel_target.lock().unwrap();
+                let old = current.replace(replacement);
+                let mut stats = self.state.accel.lock().unwrap();
+                stats.target_frames = 0;
+                stats.last_copy_width = 0;
+                stats.last_copy_height = 0;
+                old
+            };
+            drop(old);
+            // The page may be idle: ask for a repaint so the new surface fills.
+            let _ = self.with_host(move |host| unsafe {
+                if let Some(invalidate) = (*host).invalidate {
+                    invalidate(host, ffi::PET_VIEW);
+                }
+                Ok(())
+            });
+            Ok(())
+        })();
         unsafe {
-            CFRetain(iosurface as *const c_void);
+            CFRelease(iosurface as *const c_void);
         }
-        // A brand-new surface holds nothing yet; the fill counter starts over
-        // so the embedder can tell "blank" from "painted".
-        {
-            let mut stats = self.state.accel.lock().unwrap();
-            stats.target_frames = 0;
-            stats.last_copy_width = 0;
-            stats.last_copy_height = 0;
-        }
-        *self.state.accel_target.lock().unwrap() = Some(AccelTarget {
-            iosurface: iosurface as usize,
-            texture: texture as usize,
-            width,
-            height,
-        });
-        // The page may be idle: ask for a repaint so the new surface fills.
-        let _ = self.with_host(|host| unsafe {
+        result
+    }
+    /// Send accelerated frames to `sink` (None: back to the target set with
+    /// `set_accelerated_target`). See [`crate::FrameSink`].
+    pub fn set_frame_sink(&mut self, sink: Option<Arc<dyn crate::FrameSink>>) {
+        *self.state.frame_sink.lock().unwrap() = sink;
+        #[cfg(target_os = "macos")]
+        self.state.sink_targets.lock().unwrap().clear();
+        // The page may be idle: ask for a frame for the new sink.
+        let _ = self.with_host(move |host| unsafe {
             if let Some(invalidate) = (*host).invalidate {
                 invalidate(host, ffi::PET_VIEW);
             }
             Ok(())
         });
-        Ok(())
     }
 
     #[cfg(target_os = "macos")]
     pub fn clear_accelerated_target(&mut self) {
-        *self.state.accel_target.lock().unwrap() = None;
+        let old = self.state.accel_target.lock().unwrap().take();
+        drop(old);
     }
 
     /// Monotonic count of accelerated frames copied into the target; the
@@ -4463,48 +5000,35 @@ impl Browser {
     }
 
     pub fn go_back(&mut self) -> Result<()> {
-        unsafe {
-            if let Some(go_back) = (*self.browser).go_back {
-                go_back(self.browser);
-            }
-        }
-        Ok(())
+        self.with_browser(|browser| unsafe {
+            if let Some(f) = (*browser).go_back { f(browser); }
+            Ok(())
+        })
     }
-
     pub fn go_forward(&mut self) -> Result<()> {
-        unsafe {
-            if let Some(go_forward) = (*self.browser).go_forward {
-                go_forward(self.browser);
-            }
-        }
-        Ok(())
+        self.with_browser(|browser| unsafe {
+            if let Some(f) = (*browser).go_forward { f(browser); }
+            Ok(())
+        })
     }
-
     pub fn reload(&mut self) -> Result<()> {
-        unsafe {
-            if let Some(reload) = (*self.browser).reload {
-                reload(self.browser);
-            }
-        }
-        Ok(())
+        self.with_browser(|browser| unsafe {
+            if let Some(f) = (*browser).reload { f(browser); }
+            Ok(())
+        })
     }
-
     pub fn stop_load(&mut self) -> Result<()> {
-        unsafe {
-            if let Some(stop_load) = (*self.browser).stop_load {
-                stop_load(self.browser);
-            }
-        }
-        Ok(())
+        self.with_browser(|browser| unsafe {
+            if let Some(f) = (*browser).stop_load { f(browser); }
+            Ok(())
+        })
     }
-
-    /// Hidden browsers (background tabs) stop painting until shown again.
     pub fn set_hidden(&mut self, hidden: bool) -> Result<()> {
         if self.hidden == hidden {
             return Ok(());
         }
         self.hidden = hidden;
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             if let Some(was_hidden) = (*host).was_hidden {
                 was_hidden(host, hidden as c_int);
             }
@@ -4555,7 +5079,7 @@ impl Browser {
     /// without a display server, one private to this process — the
     /// embedder puts [`Self::selected_text`] on the real clipboard).
     pub fn copy_selection(&mut self) -> Result<()> {
-        self.with_focused_frame(|frame| unsafe {
+        self.with_focused_frame(move |frame| unsafe {
             (*frame).copy.ok_or_else(|| Error::new("cef_frame_t::copy missing"))?(frame);
             Ok(())
         })
@@ -4564,7 +5088,7 @@ impl Browser {
     /// The page's own Cut command on the focused frame: as
     /// [`Self::copy_selection`], and an editable selection is removed.
     pub fn cut_selection(&mut self) -> Result<()> {
-        self.with_focused_frame(|frame| unsafe {
+        self.with_focused_frame(move |frame| unsafe {
             (*frame).cut.ok_or_else(|| Error::new("cef_frame_t::cut missing"))?(frame);
             Ok(())
         })
@@ -4638,7 +5162,7 @@ impl Browser {
         self.scale_factor = scale_factor;
         self.state.update_view(width, height, scale_factor);
 
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             if let Some(notify_screen_info_changed) = (*host).notify_screen_info_changed {
                 notify_screen_info_changed(host);
             }
@@ -4656,7 +5180,7 @@ impl Browser {
     /// a still page delivers a fresh paint with its own callback timestamp.
     /// UI thread only; changes nothing about the page.
     pub fn request_repaint(&mut self) -> Result<()> {
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             if let Some(invalidate) = (*host).invalidate {
                 invalidate(host, ffi::PET_VIEW);
             }
@@ -4665,43 +5189,29 @@ impl Browser {
     }
 
     pub fn set_url(&mut self, url: &str) -> Result<()> {
-        let runtime = runtime()?;
-        let url = CefString::new(
-            &runtime.api,
-            if url.is_empty() { "about:blank" } else { url },
-        )?;
-        self.with_main_frame(|frame| unsafe {
-            (*frame)
-                .load_url
-                .ok_or_else(|| Error::new("cef_frame_t::load_url missing"))?(
-                frame, &url.value
-            );
+        let url = if url.is_empty() { "about:blank" } else { url }.to_string();
+        self.with_main_frame(move |frame| unsafe {
+            let url = CefString::new(&runtime()?.api, &url)?;
+            (*frame).load_url.ok_or_else(|| Error::new("cef_frame_t::load_url missing"))?(frame, &url.value);
             Ok(())
         })
     }
 
-    /// Run `code` in the page's main frame, as a script of the page's own
-    /// would. Fire and forget: nothing comes back, and a frame that has no
-    /// document yet runs nothing. Call on the thread that pumps CEF.
+    /// Queues JavaScript on the browser's main frame.
     pub fn execute_javascript(&mut self, code: &str) -> Result<()> {
-        let runtime = runtime()?;
-        let code = CefString::new(&runtime.api, code)?;
-        let script_url = CefString::new(&runtime.api, "")?;
-        self.with_main_frame(|frame| unsafe {
-            (*frame)
-                .execute_java_script
-                .ok_or_else(|| Error::new("cef_frame_t::execute_java_script missing"))?(
-                frame,
-                &code.value,
-                &script_url.value,
-                0,
-            );
+        let code = code.to_string();
+        self.with_main_frame(move |frame| unsafe {
+            let api = &runtime()?.api;
+            let code = CefString::new(api, &code)?;
+            let script_url = CefString::new(api, "")?;
+            (*frame).execute_java_script.ok_or_else(|| Error::new("cef_frame_t::execute_java_script missing"))?(
+                frame, &code.value, &script_url.value, 0);
             Ok(())
         })
     }
 
     pub fn set_focus(&mut self, focus: bool) -> Result<()> {
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             (*host)
                 .set_focus
                 .ok_or_else(|| Error::new("cef_browser_host_t::set_focus missing"))?(
@@ -4720,7 +5230,7 @@ impl Browser {
         mouse_leave: bool,
     ) -> Result<()> {
         let event = ffi::cef_mouse_event_t { x, y, modifiers };
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             (*host)
                 .send_mouse_move_event
                 .ok_or_else(|| Error::new("cef_browser_host_t::send_mouse_move_event missing"))?(
@@ -4737,7 +5247,7 @@ impl Browser {
     /// (so nothing is clicked). For an embedder that stops routing input to
     /// this browser mid-gesture.
     pub fn send_capture_lost_event(&mut self) -> Result<()> {
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             (*host)
                 .send_capture_lost_event
                 .ok_or_else(|| Error::new("cef_browser_host_t::send_capture_lost_event missing"))?(host);
@@ -4755,7 +5265,7 @@ impl Browser {
         click_count: i32,
     ) -> Result<()> {
         let event = ffi::cef_mouse_event_t { x, y, modifiers };
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             (*host)
                 .send_mouse_click_event
                 .ok_or_else(|| Error::new("cef_browser_host_t::send_mouse_click_event missing"))?(
@@ -4778,7 +5288,7 @@ impl Browser {
         delta_y: i32,
     ) -> Result<()> {
         let event = ffi::cef_mouse_event_t { x, y, modifiers };
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             (*host)
                 .send_mouse_wheel_event
                 .ok_or_else(|| Error::new("cef_browser_host_t::send_mouse_wheel_event missing"))?(
@@ -4813,7 +5323,7 @@ impl Browser {
             // CEF's virtual-keyboard callback is also honoured when it fires.
             focus_on_editable_field: 1,
         };
-        self.with_host(|host| unsafe {
+        self.with_host(move |host| unsafe {
             (*host)
                 .send_key_event
                 .ok_or_else(|| Error::new("cef_browser_host_t::send_key_event missing"))?(
@@ -4824,33 +5334,15 @@ impl Browser {
     }
 
     pub fn ime_commit_text(&mut self, text: &str) -> Result<()> {
-        let runtime = runtime()?;
-        let text = CefString::new(&runtime.api, text)?;
-        // "No replacement" is CefRange::InvalidRange(), never a null range:
-        // CEF drops a call whose by-reference range is null, text and all.
-        let no_replacement = ffi::cef_range_t { from: u32::MAX, to: u32::MAX };
-        self.with_host(|host| unsafe {
-            (*host)
-                .ime_commit_text
-                .ok_or_else(|| Error::new("cef_browser_host_t::ime_commit_text missing"))?(
-                host,
-                &text.value,
-                &no_replacement,
-                0,
-            );
+        let text = text.to_string();
+        self.with_host(move |host| unsafe {
+            let text = CefString::new(&runtime()?.api, &text)?;
+            let no_replacement = ffi::cef_range_t { from: u32::MAX, to: u32::MAX };
+            (*host).ime_commit_text.ok_or_else(|| Error::new("cef_browser_host_t::ime_commit_text missing"))?(
+                host, &text.value, &no_replacement, 0);
             Ok(())
         })
     }
-
-    /// Capture what the page plays instead of letting it reach the system
-    /// device. Off until called, and a browser that never calls it behaves
-    /// as if this API did not exist.
-    ///
-    /// CEF asks for the capture when the page next becomes audible, so call
-    /// this before the page plays. While a capture runs Chromium mutes the
-    /// page's own output: the embedder's mix is the only place it is heard.
-    /// Call on the thread that pumps CEF, and drain with [`Self::poll_audio`]
-    /// from the same thread.
     pub fn enable_audio_capture(&mut self, config: AudioCaptureConfig) {
         if self.audio.is_none() {
             let (events, drain_events) = sync_channel(AUDIO_QUEUE_PACKETS);
@@ -4996,35 +5488,149 @@ impl Browser {
 
 impl Drop for Browser {
     fn drop(&mut self) {
-        self.state.closing.store(true, Ordering::Release);
-        if let Some(tap) = self.state.audio.get() {
-            tap.enabled.store(false, Ordering::Release);
-        }
-        if let Ok(runtime) = runtime() {
-            let state = runtime.state.lock().unwrap();
-            if state.initialized && !state.shutting_down && !self.browser.is_null() {
-                unsafe {
-                    if let Some(get_host) = (*self.browser).get_host {
-                        let host = get_host(self.browser);
-                        if !host.is_null() {
-                            if let Some(close_browser) = (*host).close_browser {
-                                close_browser(host, 1);
-                            }
-                            release_ref_counted(&mut (*host).base as *mut _);
-                        }
-                    }
-                }
-            }
-        }
-        if !self.browser.is_null() {
-            unsafe {
-                release_ref_counted(&mut (*self.browser).base as *mut _);
-            }
+        self.disable_audio_capture();
+        let browser = self.browser.clone();
+        if let Err(err) = on_cef_thread(move || close_browser(&browser)) {
+            say!("[makepad-cef] closing browser: {err}");
         }
     }
 }
+/// Close the native reference exactly once, even if shutdown precedes the proxy's Drop.
+fn close_browser(slot: &AtomicUsize) {
+    unsafe {
+        let browser = slot.swap(0, Ordering::AcqRel) as *mut ffi::cef_browser_t;
+        if browser.is_null() {
+            return;
+        }
+        if let Some(get) = (*browser).get_host {
+            let host = get(browser);
+            if !host.is_null() {
+                if let Some(close) = (*host).close_browser {
+                    close(host, 1);
+                }
+                release_ref_counted(&mut (*host).base as *mut _);
+            }
+        }
+        release_ref_counted(&mut (*browser).base as *mut _);
+    }
+}
+
+/// Ask CEF to persist its cookie store. Its own completion callback signals the result;
+/// neither UI thread waits or sleeps. Called only on the CEF UI thread.
+#[cfg(target_os = "macos")]
+fn request_cookie_flush(runtime: &Runtime) -> Arc<AtomicBool> {
+    let done = Arc::new(AtomicBool::new(false));
+    unsafe {
+        let manager = (runtime.api.cef_cookie_manager_get_global_manager)(ptr::null_mut());
+        let asked = if manager.is_null() {
+            false
+        } else {
+            let asked = if let Some(flush) = (*manager).flush_store {
+                let callback = CompletionCallback::allocate(done.clone());
+                // the callback's one reference passes to CEF with the call (it releases it after
+                // `on_complete`); releasing it here as well freed it under CEF -> a call through
+                // freed memory in the next pump, the exit segfault with CEF alive
+                flush(manager, &mut (*callback).cef_callback) != 0
+            } else {
+                false
+            };
+            release_ref_counted(&mut (*manager).base as *mut _);
+            asked
+        };
+        if !asked {
+            say!("[makepad-cef] cookie store flush unavailable");
+            done.store(true, Ordering::Release);
+        }
+    }
+    done
+}
+
+/// Queue a profile flush; CEF commits it while its main-thread pump continues running.
+#[cfg(target_os = "macos")]
+pub fn flush_profile() {
+    let _ = on_cef_thread(|| {
+        if let Ok(runtime) = runtime() {
+            let state = runtime.state.lock().unwrap();
+            let ready = state.initialized && !state.shutting_down;
+            drop(state);
+            if ready {
+                request_cookie_flush(runtime);
+            }
+        }
+    });
+}
+
+/// Begin main-thread shutdown. The HAL guard is held until all browsers close and the cookie
+/// flush completes, so returning from the app thread cannot strand CEF's callbacks.
+#[cfg(target_os = "macos")]
+pub fn shutdown() {
+    if let Err(err) = on_cef_thread(|| {
+        let Ok(runtime) = runtime() else {
+            return;
+        };
+        {
+            let mut state = runtime.state.lock().unwrap();
+            if !state.initialized || state.shutting_down {
+                return;
+            }
+            state.shutting_down = true;
+        }
+        let browsers = std::mem::take(&mut *runtime.browsers.lock().unwrap());
+        for browser in browsers.into_iter().filter_map(|browser| browser.upgrade()) {
+            close_browser(&browser);
+        }
+        schedule_pump_work(0);
+    }) {
+        say!("[makepad-cef] shutdown: {err}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn advance_shutdown(runtime: &Runtime) {
+    let state = runtime.state.lock().unwrap();
+    if !state.initialized
+        || !state.shutting_down
+        || runtime.live_browsers.load(Ordering::Acquire) != 0
+    {
+        return;
+    }
+    let flush = state.shutdown_flush.clone();
+    drop(state);
+    let Some(flush) = flush else {
+        let flush = request_cookie_flush(runtime);
+        runtime.state.lock().unwrap().shutdown_flush = Some(flush);
+        return;
+    };
+    if !flush.load(Ordering::Acquire) {
+        return;
+    }
+    let app = {
+        let mut state = runtime.state.lock().unwrap();
+        state.initialized = false;
+        std::mem::take(&mut state.app) as *mut AppHandler
+    };
+    if let Ok(pump) = external_pump() {
+        pump.kill_timer();
+    }
+    unsafe {
+        (runtime.api.cef_shutdown)();
+        if !app.is_null() {
+            release_ref_counted(&mut (*app).cef_app.base as *mut _);
+        }
+    }
+    // Dropping outside the state lock may wake the HAL loop for its final exit.
+    let guard = runtime.state.lock().unwrap().main_loop.take();
+    drop(guard);
+}
 
 pub fn bootstrap() -> Result<BootstrapResult> {
+    if let Some(code) = crate::run_helper_if_subprocess() {
+        return Ok(BootstrapResult::Exit(code));
+    }
+    #[cfg(target_os = "macos")]
+    return Ok(BootstrapResult::Continue);
+    #[cfg(not(target_os = "macos"))]
+    {
     let runtime = runtime()?;
     let args = MainArgsStorage::current_process()?;
     let app = AppHandler::allocate();
@@ -5039,26 +5645,41 @@ pub fn bootstrap() -> Result<BootstrapResult> {
     } else {
         Ok(BootstrapResult::Continue)
     }
+    }
 }
 
 fn do_message_loop_work_impl() {
     if let Ok(runtime) = runtime() {
         let should_pump = {
             let state = runtime.state.lock().unwrap();
-            state.initialized && !state.shutting_down
+            state.initialized && (cfg!(target_os = "macos") || !state.shutting_down)
         };
         if should_pump {
             unsafe {
                 (runtime.api.cef_do_message_loop_work)();
             }
         }
+        #[cfg(target_os = "macos")]
+        advance_shutdown(runtime);
     }
 }
 
 pub fn do_message_loop_work() {
+    #[cfg(target_os = "macos")]
+    {
+        static PENDING: AtomicBool = AtomicBool::new(false);
+        if !PENDING.swap(true, Ordering::AcqRel) {
+            if on_cef_thread(|| {
+                PENDING.store(false, Ordering::Release);
+                if let Ok(pump) = external_pump() { pump.perform_message_loop_work(); }
+            }).is_err() { PENDING.store(false, Ordering::Release); }
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     do_message_loop_work_impl();
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn shutdown() {
     let Ok(runtime) = runtime() else {
         return;
@@ -5076,10 +5697,10 @@ pub fn shutdown() {
     // Bounded, so a page that will not close does not hold the process.
     let open = runtime.live_browsers.load(Ordering::Acquire);
     let started = Instant::now();
-    let deadline = started + Duration::from_secs(2);
+    let deadline = started + std::time::Duration::from_secs(2);
     while runtime.live_browsers.load(Ordering::Acquire) > 0 && Instant::now() < deadline {
         do_message_loop_work_impl();
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
     let left = runtime.live_browsers.load(Ordering::Acquire);
     let closed_ms = started.elapsed().as_millis();

@@ -23,12 +23,27 @@ impl std::error::Error for Error {}
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// The CEF distribution this crate was built against (from the prebuilt's
-/// `cef_version.h`), e.g. `138.0.59+g21d63d5+chromium-138.0.7204.306`.
-pub const CEF_VERSION: &str = match option_env!("MAKEPAD_CEF_VERSION") {
-    Some(version) => version,
-    None => "unknown",
-};
+mod distribution;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod malloc_compat;
+
+/// Version from the installed distribution's header, or `unknown` when headers
+/// are unavailable (for example, a packaged app containing only the framework).
+pub fn cef_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    VERSION.get_or_init(distribution::version).as_deref().unwrap_or("unknown")
+}
+
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+mod subprocess;
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
+pub use subprocess::run_helper_if_subprocess;
+
+/// Call first in main, before application or allocator initialization.
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+pub fn run_helper_if_subprocess() -> Option<i32> {
+    None
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BootstrapResult {
@@ -68,6 +83,32 @@ pub struct CapturedFrame {
     pub frame: Frame,
     pub sequence: u64,
     pub timestamp: CaptureTimestamp,
+}
+
+/// A slot of an external frame sink to copy an accelerated frame into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SinkTarget {
+    pub slot: usize,
+    /// The platform's shared-texture handle (an IOSurface id on macOS).
+    pub handle: u64,
+    pub width: usize,
+    pub height: usize,
+}
+
+/// Where a browser's accelerated frames go instead of its one target: a
+/// ring of shared textures (another process's, `makepad_app_host::
+/// frame_ring`). Called on the thread CEF paints on, inside its paint
+/// callback: `acquire` may wait (a lossless consumer's back-pressure, which
+/// slows the page down), and the frame is published once the GPU copy is
+/// done. The callback's timestamp and the `probes`' luminance (read from
+/// the frame, one byte per point) travel with it.
+pub trait FrameSink: Send + Sync {
+    fn acquire(&self, width: usize, height: usize) -> Option<SinkTarget>;
+    /// Pixels of the frame (`[x, y]`) to read back with it.
+    fn probes(&self) -> Vec<[u32; 2]>;
+    fn publish(&self, slot: usize, copied: (usize, usize), timestamp: CaptureTimestamp, probes: &[u8]);
+    /// The slot was not filled after all.
+    fn abandon(&self, slot: usize);
 }
 
 /// What a page's audio is captured as. Chromium mixes and resamples the
@@ -190,20 +231,20 @@ pub const MOUSE_BUTTON_RIGHT: i32 = 2;
 
 pub const TEXT_INPUT_MODE_NONE: i32 = 1;
 
-#[cfg(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos"))))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 mod ffi;
-#[cfg(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos"))))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 mod native;
 
-#[cfg(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos"))))]
+#[cfg(any(target_os = "macos", windows, target_os = "linux"))]
 pub use native::{
     accelerated_paint_requested, background_color, bootstrap, do_message_loop_work, initialize,
-    is_initialized, prepare, reexec_into_app_bundle_if_needed, set_application_dark_mode,
-    set_background_color, shutdown, flush_profile, startup_phases, AcceleratedStats, Browser,
+    is_initialized, initialization_error, prepare, set_application_dark_mode,
+    set_background_color, shutdown, flush_profile, AcceleratedStats, Browser,
     BrowserOptions, RenderMode,
 };
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RenderMode {
     None,
@@ -211,7 +252,7 @@ pub enum RenderMode {
     Accelerated,
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AcceleratedStats {
     pub frames: u64,
@@ -226,32 +267,32 @@ pub struct AcceleratedStats {
     pub last_copy_height: usize,
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn accelerated_paint_requested() -> bool {
     false
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn set_background_color(_argb: u32) {}
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn set_application_dark_mode(_dark: bool) {}
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn background_color() -> u32 {
     0
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct BrowserOptions {
     pub software_frames: bool,
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub struct Browser;
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 impl Browser {
     pub fn set_dark_mode(&mut self, _dark: bool) -> Result<()> {
         Ok(())
@@ -371,6 +412,8 @@ impl Browser {
         0
     }
 
+    pub fn take_error(&mut self) -> Option<String> { None }
+
     pub fn is_accelerated(&self) -> bool {
         false
     }
@@ -385,7 +428,7 @@ impl Browser {
 
     pub fn set_accelerated_target(
         &mut self,
-        _iosurface: *mut std::ffi::c_void,
+        _handle: u64,
         _width: usize,
         _height: usize,
     ) -> Result<()> {
@@ -393,6 +436,8 @@ impl Browser {
     }
 
     pub fn clear_accelerated_target(&mut self) {}
+
+    pub fn set_frame_sink(&mut self, _sink: Option<std::sync::Arc<dyn FrameSink>>) {}
 
     pub fn accelerated_frame_counter(&self) -> u64 {
         0
@@ -485,41 +530,34 @@ impl Browser {
     }
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn bootstrap() -> Result<BootstrapResult> {
     Ok(BootstrapResult::Continue)
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn do_message_loop_work() {}
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn initialize() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn prepare() -> Result<()> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn is_initialized() -> bool {
     false
 }
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
-pub fn startup_phases() -> Option<(u128, u128)> {
-    None
-}
-
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn shutdown() {}
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
 pub fn flush_profile() {}
 
-#[cfg(not(any(target_os = "macos", windows, all(target_os = "linux", not(target_env = "ohos")))))]
-pub fn reexec_into_app_bundle_if_needed() -> Result<()> {
-    Ok(())
-}
+#[cfg(not(any(target_os = "macos", windows, target_os = "linux")))]
+pub fn initialization_error() -> Option<String> { None }
