@@ -26,12 +26,9 @@ use std::time::Duration;
 
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
 pub const MAX_RESPONSES_BODY: usize = 256 * 1024;
-/// OpenAI non-reasoning default.
-pub const DEFAULT_OPENAI_TIMEOUT: Duration = Duration::from_secs(60);
-/// Grok reasoning can take minutes; still hard-capped.
-pub const DEFAULT_GROK_TIMEOUT: Duration = Duration::from_secs(180);
-pub const MAX_GROK_TIMEOUT: Duration = Duration::from_secs(600);
-pub const GROK_TIMEOUT_ENV: &str = "MAKEPAD_CONTENT_CHAT_GROK_TIMEOUT_SECS";
+/// Two minutes without any bytes allows model thinking; active responses
+/// continue indefinitely. This is an idle timeout for both OpenAI and Grok.
+pub const RESPONSES_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_RESPONSE_ID: usize = 128;
 const MAX_CALL_ID: usize = MAX_TOOL_CALL_ID;
 const MAX_FN_NAME: usize = 64;
@@ -65,7 +62,7 @@ pub struct ResponsesConfig {
     model: String,
     endpoint: String,
     max_output_tokens: u32,
-    request_timeout: Duration,
+    idle_timeout: Duration,
     missing_key_reason: String,
 }
 
@@ -78,7 +75,7 @@ impl ResponsesConfig {
             model: bound_model(model.into(), crate::providers::openai::DEFAULT_OPENAI_MODEL),
             endpoint: crate::providers::openai::OPENAI_RESPONSES_URL.to_string(),
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-            request_timeout: DEFAULT_OPENAI_TIMEOUT,
+            idle_timeout: RESPONSES_IDLE_TIMEOUT,
             missing_key_reason: format!(
                 "{} is not set",
                 crate::providers::openai::OPENAI_API_KEY_ENV
@@ -94,7 +91,7 @@ impl ResponsesConfig {
             model: bound_model(model.into(), crate::providers::grok::DEFAULT_GROK_MODEL),
             endpoint: crate::providers::grok::GROK_RESPONSES_URL.to_string(),
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-            request_timeout: grok_timeout_from_env(),
+            idle_timeout: RESPONSES_IDLE_TIMEOUT,
             missing_key_reason: format!("{} is not set", crate::providers::grok::GROK_API_KEY_ENV),
         }
     }
@@ -113,7 +110,7 @@ impl ResponsesConfig {
             model: bound_model(model, crate::providers::openai::DEFAULT_OPENAI_MODEL),
             endpoint: crate::providers::openai::OPENAI_RESPONSES_URL.to_string(),
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-            request_timeout: DEFAULT_OPENAI_TIMEOUT,
+            idle_timeout: RESPONSES_IDLE_TIMEOUT,
             missing_key_reason: format!(
                 "{} is not set",
                 crate::providers::openai::OPENAI_API_KEY_ENV
@@ -135,7 +132,7 @@ impl ResponsesConfig {
             model: bound_model(model, crate::providers::grok::DEFAULT_GROK_MODEL),
             endpoint: crate::providers::grok::GROK_RESPONSES_URL.to_string(),
             max_output_tokens: DEFAULT_MAX_OUTPUT_TOKENS,
-            request_timeout: grok_timeout_from_env(),
+            idle_timeout: RESPONSES_IDLE_TIMEOUT,
             missing_key_reason: format!("{} is not set", crate::providers::grok::GROK_API_KEY_ENV),
         }
     }
@@ -152,32 +149,11 @@ impl ResponsesConfig {
         &self.endpoint
     }
 
-    pub fn request_timeout(&self) -> Duration {
-        self.request_timeout
-    }
-
     pub fn with_max_output_tokens(mut self, tokens: u32) -> Self {
         self.max_output_tokens = tokens.max(1).min(32_768);
         self
     }
 
-    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
-        let max = if self.kind == ProviderKind::Grok {
-            MAX_GROK_TIMEOUT
-        } else {
-            Duration::from_secs(120)
-        };
-        self.request_timeout = timeout.max(Duration::from_secs(5)).min(max);
-        self
-    }
-}
-
-fn grok_timeout_from_env() -> Duration {
-    let secs = std::env::var(GROK_TIMEOUT_ENV)
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_GROK_TIMEOUT.as_secs());
-    Duration::from_secs(secs.clamp(30, MAX_GROK_TIMEOUT.as_secs()))
 }
 
 fn bound_model(model: String, fallback: &str) -> String {
@@ -273,7 +249,7 @@ pub trait ResponsesTransport: Send + Sync + 'static {
         api_key: &str,
         body: &[u8],
         cancel: &CancelToken,
-        timeout: Duration,
+        idle_timeout: Duration,
     ) -> Result<RawHttp, String>;
 }
 
@@ -292,7 +268,7 @@ impl ResponsesTransport for BlockingTransport {
         api_key: &str,
         body: &[u8],
         cancel: &CancelToken,
-        timeout: Duration,
+        idle_timeout: Duration,
     ) -> Result<RawHttp, String> {
         let req = Request::post(url)
             .bearer(api_key)
@@ -302,7 +278,7 @@ impl ResponsesTransport for BlockingTransport {
             .cancel_token(cancel.clone())
             .limits(Limits {
                 max_body_bytes: MAX_RESPONSES_BODY,
-                total_timeout: timeout,
+                idle_timeout,
                 ..Limits::default()
             });
         match post_json(req) {
@@ -521,11 +497,11 @@ impl<T: ResponsesTransport> ResponsesChatProvider<T> {
         let (tx, rx) = mpsc::channel();
         let transport = self.transport.clone();
         let cancel = self.cancel.clone();
-        let timeout = self.config.request_timeout;
+        let idle_timeout = self.config.idle_timeout;
         std::thread::Builder::new()
             .name("content-chat-responses".into())
             .spawn(move || {
-                let result = transport.post_json(&url, &key, &bytes, &cancel, timeout);
+                let result = transport.post_json(&url, &key, &bytes, &cancel, idle_timeout);
                 if cancel.is_cancelled() {
                     return;
                 }

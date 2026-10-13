@@ -478,6 +478,51 @@ fn shared_cache_ranges(
     Ok(ranges)
 }
 
+/// A session's device bytes by purpose (`LlamaSession::memory`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionMemory {
+    /// The whole arena: weights + main region.
+    pub total: usize,
+    /// The read-only weights region (0 for a single-arena context).
+    pub weights: usize,
+    /// Attention K/V caches for every slot at the session's context.
+    pub attention_kv: usize,
+    /// What one more token of context costs in `attention_kv`, per slot.
+    pub attention_kv_per_token: usize,
+    /// Recurrent r/s state rows, the draft head's checkpoints and carry.
+    pub state: usize,
+    /// Planned activations and scratch (the rest of the main region).
+    pub activations: usize,
+}
+
+/// A rewind point of a [`LlamaSession`]; see [`LlamaSession::save_state`].
+#[derive(Clone)]
+pub struct LlamaSessionState {
+    token_ids: Vec<i32>,
+    rope_pos_next: i64,
+    last_run: Option<HybridDecodeRun>,
+    state_row: i32,
+    mtp_filled: usize,
+    has_mtp: bool,
+    /// `(context offset, bytes)` of every saved device state range.
+    ranges: Vec<(usize, Vec<u8>)>,
+}
+
+impl LlamaSessionState {
+    pub fn token_ids(&self) -> &[i32] {
+        &self.token_ids
+    }
+
+    pub fn token_count(&self) -> usize {
+        self.token_ids.len()
+    }
+
+    /// Device state bytes the snapshot holds (what a restore uploads).
+    pub fn state_bytes(&self) -> usize {
+        self.ranges.iter().map(|(_, bytes)| bytes.len()).sum()
+    }
+}
+
 pub struct LlamaSession {
     model: LlamaModel,
     vocab: LlamaVocab,
@@ -655,6 +700,28 @@ impl LlamaSession {
     /// The number to multiply when answering "what would 128k cost?".
     pub fn attention_cache_bytes_per_token(&self) -> Result<usize> {
         Ok(self.attention_cache_bytes()? / self.attention_arena_rows.max(1))
+    }
+
+    /// Where this session's device bytes go, from its own arena accounting:
+    /// the weights region, the attention K/V caches, the recurrent state
+    /// (plus the draft head's checkpoint rows and hidden carry), and the
+    /// activations the graph planner placed in the rest of the arena. What the
+    /// hub reports and sizes the context from; nothing here is estimated.
+    pub fn memory(&self) -> Result<SessionMemory> {
+        let total = self.weights.ctx.mem_size();
+        let weights = self.weights.ctx.ro_split();
+        let attention_kv = self.attention_cache_bytes()?;
+        let caches = self.context_extra_bytes.saturating_sub(self.config.extra_activation_bytes);
+        let state = caches.saturating_sub(attention_kv);
+        let activations = total.saturating_sub(weights + attention_kv + state);
+        Ok(SessionMemory {
+            total,
+            weights,
+            attention_kv,
+            attention_kv_per_token: attention_kv / self.attention_arena_rows.max(1),
+            state,
+            activations,
+        })
     }
 
     /// A slot table matching this session's cache geometry exactly.
@@ -1097,6 +1164,110 @@ impl LlamaSession {
         if let Some(mtp) = self.mtp.as_mut() {
             mtp.state_row = 0;
             mtp.mtp_filled = 0;
+        }
+        Ok(())
+    }
+
+    /// Snapshot the single-stream state after the tokens appended so far, so
+    /// [`restore_state`](Self::restore_state) can rewind to exactly this point
+    /// later. The use is a long fixed prompt prefix (a system message) shared
+    /// by many fresh requests: append the prefix once, save, then per request
+    /// restore and append only the request's own tokens.
+    ///
+    /// The snapshot holds everything the next step reads: the attention KV
+    /// rows `0..n` of every attention cache (the draft head's included), the
+    /// live recurrent row of every recurrent cache (conv and delta state), the
+    /// draft head's hidden-carry block when speculating, and the host-side
+    /// bookkeeping (tokens, rope position, last logits, live checkpoint row,
+    /// draft-head fill). Saving the KV rows rather than trusting them to stay
+    /// in place makes the snapshot self-contained: it survives a `reset()` or
+    /// a different conversation in between, and several snapshots can be
+    /// restored in any order.
+    ///
+    /// Single-stream only: the slot/lane APIs keep their own state and are
+    /// not covered. A snapshot belongs to the session that took it.
+    pub fn save_state(&self) -> Result<LlamaSessionState> {
+        let n = self.token_ids.len();
+        let state_row = self.live_state_row();
+        let row = usize::try_from(state_row)
+            .map_err(|_| LlamaError::format("negative live recurrent row"))?;
+        let ctx = &self.weights.ctx;
+        let mut ranges = Vec::new();
+        if n > 0 {
+            for ids in self.graphs.shared_cache.attention.values() {
+                for tensor in [ids.k_cache, ids.v_cache] {
+                    ranges.push(state_row_range(ctx, tensor, 0, n)?);
+                }
+            }
+        }
+        for ids in self.graphs.shared_cache.recurrent.values() {
+            for tensor in [ids.r_cache, ids.s_cache] {
+                ranges.push(state_row_range(ctx, tensor, row, 1)?);
+            }
+        }
+        if let (Some(carry), Some(mtp)) = (self.graphs.hidden_carry, self.mtp) {
+            // Lane 0's whole block: the catch-up after a restore reads ring
+            // rows of positions the draft head has not consumed yet.
+            ranges.push(state_row_range(ctx, carry, 0, mtp.carry_ring + 2)?);
+        }
+        ranges.sort_unstable();
+        ranges.dedup();
+        let mut saved = Vec::with_capacity(ranges.len());
+        for (offset, len) in ranges {
+            if len == 0 {
+                continue;
+            }
+            let bytes = self.graphs.shared_runtime.read_state_range(
+                &self.graphs.shared_buffers,
+                offset,
+                len,
+            )?;
+            saved.push((offset, bytes));
+        }
+        Ok(LlamaSessionState {
+            token_ids: self.token_ids.clone(),
+            rope_pos_next: self.rope_pos_next,
+            last_run: self.last_run.clone(),
+            state_row,
+            mtp_filled: self.mtp.map(|mtp| mtp.mtp_filled).unwrap_or(0),
+            has_mtp: self.mtp.is_some(),
+            ranges: saved,
+        })
+    }
+
+    /// Rewind the session to a snapshot taken by [`save_state`](Self::save_state).
+    ///
+    /// Afterwards the session is exactly where it was when the snapshot was
+    /// taken: the next append or generation step computes what it would
+    /// have computed then.
+    pub fn restore_state(&mut self, state: &LlamaSessionState) -> Result<()> {
+        if state.token_ids.len() > self.max_context {
+            return Err(LlamaError::format(format!(
+                "snapshot holds {} tokens, session max_context is {}",
+                state.token_ids.len(),
+                self.max_context
+            )));
+        }
+        if state.has_mtp != self.mtp.is_some() {
+            return Err(LlamaError::format(
+                "snapshot was taken by a session with a different speculative setup",
+            ));
+        }
+        for (offset, bytes) in &state.ranges {
+            self.graphs.shared_runtime.write_state_range(
+                &mut self.weights.ctx,
+                &self.graphs.shared_buffers,
+                *offset,
+                bytes,
+            )?;
+        }
+        self.token_ids.clear();
+        self.token_ids.extend_from_slice(&state.token_ids);
+        self.rope_pos_next = state.rope_pos_next;
+        self.last_run = state.last_run.clone();
+        if let Some(mtp) = self.mtp.as_mut() {
+            mtp.state_row = state.state_row;
+            mtp.mtp_filled = state.mtp_filled;
         }
         Ok(())
     }
@@ -1824,8 +1995,16 @@ impl LlamaSession {
 
             let planes = Self::image_rope_planes(pos0, offset, batch_size, tokens_w)?;
 
-            let graph_params = SessionGraphParams::greedy_embeddings(batch_size, cache_tokens);
+            // Bucketed like text prefill, so a picture reuses the compiled
+            // graphs instead of compiling one per cache length.
+            let graph_params =
+                SessionGraphParams::greedy_embeddings(batch_size, self.graph_key_count(cache_tokens));
             self.ensure_compiled_graph(graph_params)?;
+            // The same recurrent row and MTP hidden-carry rows text prefill
+            // writes: with a draft head the graph writes the main model's
+            // hidden for every position, which the head reads next.
+            let state_row = self.live_state_row();
+            let hidden_write_rows = self.carry_rows_for_positions(start, batch_size);
             let run = {
                 let compiled = self
                     .graphs
@@ -1839,6 +2018,8 @@ impl LlamaSession {
                     &output_ids,
                 )?;
                 layout.rope_positions = Some(planes);
+                layout.recurrent_state_rows = vec![state_row];
+                layout.hidden_write_rows = hidden_write_rows;
                 if compiled.decode().input_recurrent_state_rows.is_none() {
                     layout.recurrent_state_rows.clear();
                 }
@@ -1853,6 +2034,7 @@ impl LlamaSession {
             self.token_ids
                 .extend(std::iter::repeat(pad_token).take(batch_size));
             self.last_run = Some(collapse_last_token_run(run)?);
+            self.flush_mtp_prefill(false)?;
             offset += batch_size;
         }
         self.rope_pos_next = pos0 + tokens_w.max(tokens_h) as i64;
@@ -2402,6 +2584,8 @@ impl LlamaSession {
         match self.graphs.shared_runtime.features() {
             crate::exec::ExecFeatures::Cuda(features) => features.device_name,
             crate::exec::ExecFeatures::Metal(_) => "metal".to_string(),
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            crate::exec::ExecFeatures::Vulkan(features) => features.name,
         }
     }
 

@@ -6,11 +6,13 @@ use crate::fleet_auth::Role;
 pub struct Caller {
     pub client_id: String,
     pub role: Role,
+    /// The calling app's name (`X-Hub-App` header), for the control panel.
+    pub app: Option<String>,
 }
 
 impl Caller {
     pub fn local() -> Self {
-        Caller { client_id: "local".into(), role: Role::Lan }
+        Caller { client_id: "local".into(), role: Role::Lan, app: None }
     }
 }
 

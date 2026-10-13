@@ -1,6 +1,7 @@
 use crate::whisper::decoder::{self, KvCache};
 use crate::whisper::encoder;
 use crate::whisper::mel;
+use crate::whisper::tensor::Tensor;
 use crate::whisper::model::WhisperModel;
 
 /// A transcribed text segment with timestamps.
@@ -33,6 +34,10 @@ pub struct AlignedSegment {
 #[derive(Debug, Clone)]
 pub struct WhisperParams {
     pub language: String,
+    /// Text the model reads as what was said just before (whisper's initial
+    /// prompt): it steers spelling and script, e.g. a Simplified Chinese
+    /// sentence keeps `zh` output Simplified. Empty for none.
+    pub prompt: String,
     pub translate: bool,
     pub no_timestamps: bool,
     pub single_segment: bool,
@@ -46,6 +51,7 @@ impl Default for WhisperParams {
     fn default() -> Self {
         WhisperParams {
             language: "en".into(),
+            prompt: String::new(),
             translate: false,
             no_timestamps: false,
             single_segment: false,
@@ -60,6 +66,9 @@ impl Default for WhisperParams {
 /// Mutable state for the transcription process.
 pub struct WhisperState {
     kv_cache: KvCache,
+    /// The language the last `language == "auto"` transcription settled on,
+    /// with its probability among the model's languages.
+    detected: Option<(String, f32)>,
 }
 
 impl WhisperState {
@@ -67,7 +76,34 @@ impl WhisperState {
         let n_layers = model.hparams.n_text_layer as usize;
         WhisperState {
             kv_cache: KvCache::new(n_layers),
+            detected: None,
         }
+    }
+
+    /// The language chosen by the last transcription run with
+    /// `WhisperParams::language == "auto"` and its probability; `None` when
+    /// the language was given or nothing has been transcribed.
+    pub fn detected_language(&self) -> Option<(&str, f32)> {
+        self.detected.as_ref().map(|(code, p)| (code.as_str(), *p))
+    }
+
+    /// Which language the first chunk is spoken in: one decoder step on
+    /// `[SOT]`, the argmax over the language tokens (Whisper's own rule).
+    /// Leaves the KV cache empty.
+    fn detect_language(
+        &mut self,
+        model: &WhisperModel,
+        cross_kv: &[(Tensor, Tensor)],
+    ) -> (String, f32) {
+        let vocab = &model.vocab;
+        self.kv_cache.clear();
+        let logits = decoder::decode(model, &[vocab.token_sot], &[0], &mut self.kv_cache, cross_kv, None);
+        self.kv_cache.clear();
+        let n_vocab = model.hparams.n_vocab as usize;
+        let n_lang = (vocab.num_languages() as usize).min(LANGUAGES.len());
+        let first = (vocab.token_sot + 1) as usize;
+        let row = &logits.data[..n_vocab];
+        pick_language(&row[first..first + n_lang])
     }
 
     /// Transcribe PCM audio (f32, 16kHz, mono) and return text segments.
@@ -121,6 +157,7 @@ impl WhisperState {
         );
 
         let mut segments: Vec<AlignedSegment> = Vec::new();
+        self.detected = None;
         let mut seek = 0usize; // in mel frames
         let heads = align.then(|| crate::whisper::align::AlignmentHeads::for_model(&model.hparams));
 
@@ -161,6 +198,16 @@ impl WhisperState {
             // 5. Decode tokens
             self.kv_cache.clear();
 
+            // "auto": the first chunk names the language for the whole call.
+            let language: String = if params.language == "auto" {
+                if self.detected.is_none() && model.vocab.is_multilingual() {
+                    self.detected = Some(self.detect_language(model, &cross_kv));
+                }
+                self.detected.as_ref().map_or_else(|| "en".to_string(), |(code, _)| code.clone())
+            } else {
+                params.language.clone()
+            };
+
             // One capture per chunk: rows are appended in decode order, so
             // row (n_prompt + i) is the input position of generated token i,
             // and generated token i is timed by row (n_prompt - 1 + i), the
@@ -176,13 +223,21 @@ impl WhisperState {
 
             let vocab = &model.vocab;
 
-            // Build initial prompt: [SOT, lang_id, task, (notimestamps?)]
+            // Build initial prompt: [prev, <prompt text>, SOT, lang_id, task, (notimestamps?)]
             let mut prompt_tokens: Vec<i32> = Vec::new();
+            if !params.prompt.trim().is_empty() && !align {
+                // At most a quarter of the context, from the end of the text.
+                let mut text = model.tokenizer().encode(&format!(" {}", params.prompt.trim()));
+                let keep = (model.hparams.n_text_ctx as usize / 4).min(text.len());
+                text.drain(..text.len() - keep);
+                prompt_tokens.push(vocab.token_prev);
+                prompt_tokens.extend(text);
+            }
             prompt_tokens.push(vocab.token_sot);
 
             // Language token (SOT + 1 + lang_id)
             if vocab.is_multilingual() {
-                let lang_id = language_id(&params.language);
+                let lang_id = language_id(&language);
                 prompt_tokens.push(vocab.token_sot + 1 + lang_id);
                 if params.translate {
                     prompt_tokens.push(vocab.token_translate);
@@ -354,7 +409,9 @@ impl WhisperState {
                         seg_ids.push(token.id);
                     }
                 }
-                let text: String = seg_tokens.iter().map(|(_, text)| *text).collect();
+                // Decode the ids together: one character can span several byte tokens
+                // (every Chinese character may), and each token alone is not valid UTF-8.
+                let text = model.tokenizer().decode(&seg_ids);
                 if !text.is_empty() {
                     let end_ms = chunk_start_ms + (seek_delta as f64 * 10.0) as i64;
                     segments.push(AlignedSegment {
@@ -368,7 +425,6 @@ impl WhisperState {
             } else {
                 // Split on timestamp tokens
                 let mut seg_start = chunk_start_ms;
-                let mut seg_text = String::new();
                 let mut seg_tokens: Vec<(usize, &str)> = Vec::new();
                 let mut seg_ids: Vec<i32> = Vec::new();
 
@@ -376,33 +432,31 @@ impl WhisperState {
                     if token.id >= vocab.token_beg {
                         let ts_ms = chunk_start_ms + (2 * (token.id - vocab.token_beg) as i64) * 10;
 
-                        if !seg_text.is_empty() {
+                        if !seg_ids.is_empty() {
                             segments.push(AlignedSegment {
                                 start_ms: seg_start,
                                 end_ms: ts_ms,
-                                text: seg_text.clone(),
+                                text: model.tokenizer().decode(&seg_ids),
                                 words: words_for(&seg_tokens),
                                 tokens: seg_ids.clone(),
                             });
                         }
                         seg_start = ts_ms;
-                        seg_text.clear();
                         seg_tokens.clear();
                         seg_ids.clear();
                     } else if token.id < vocab.token_eot {
-                        seg_text.push_str(vocab.token_to_str(token.id));
                         seg_tokens.push((idx, vocab.token_to_str(token.id)));
                         seg_ids.push(token.id);
                     }
                 }
 
                 // Remaining text after last timestamp
-                if !seg_text.is_empty() {
+                if !seg_ids.is_empty() {
                     let end_ms = chunk_start_ms + (seek_delta as f64 * 10.0) as i64;
                     segments.push(AlignedSegment {
                         start_ms: seg_start,
                         end_ms,
-                        text: seg_text,
+                        text: model.tokenizer().decode(&seg_ids),
                         words: words_for(&seg_tokens),
                         tokens: seg_ids,
                     });
@@ -417,6 +471,12 @@ impl WhisperState {
             seek += seek_step;
         }
 
+        // A short encoder context leaves the last chunk's end at the window, not the
+        // clip: nothing a clip says can end after the clip does.
+        let clip_ms = (samples.len() as i64) * 1000 / 16_000;
+        for segment in segments.iter_mut() {
+            segment.end_ms = segment.end_ms.min(clip_ms.max(segment.start_ms));
+        }
         segments
     }
 
@@ -621,108 +681,153 @@ fn softmax_single(logits: &[f32], idx: usize) -> f32 {
     (logits[idx] - max_val).exp() / sum
 }
 
+/// Whisper's languages in token order: the language token is
+/// `token_sot + 1 + index`. The first 99 are in every multilingual model,
+/// `yue` (Cantonese) only in large-v3 and newer.
+pub const LANGUAGES: [&str; 100] = [
+    "en",
+    "zh",
+    "de",
+    "es",
+    "ru",
+    "ko",
+    "fr",
+    "ja",
+    "pt",
+    "tr",
+    "pl",
+    "ca",
+    "nl",
+    "ar",
+    "sv",
+    "it",
+    "id",
+    "hi",
+    "fi",
+    "vi",
+    "he",
+    "uk",
+    "el",
+    "ms",
+    "cs",
+    "ro",
+    "da",
+    "hu",
+    "ta",
+    "no",
+    "th",
+    "ur",
+    "hr",
+    "bg",
+    "lt",
+    "la",
+    "mi",
+    "ml",
+    "cy",
+    "sk",
+    "te",
+    "fa",
+    "lv",
+    "bn",
+    "sr",
+    "az",
+    "sl",
+    "kn",
+    "et",
+    "mk",
+    "br",
+    "eu",
+    "is",
+    "hy",
+    "ne",
+    "mn",
+    "bs",
+    "kk",
+    "sq",
+    "sw",
+    "gl",
+    "mr",
+    "pa",
+    "si",
+    "km",
+    "sn",
+    "yo",
+    "so",
+    "af",
+    "oc",
+    "ka",
+    "be",
+    "tg",
+    "sd",
+    "gu",
+    "am",
+    "yi",
+    "lo",
+    "uz",
+    "fo",
+    "ht",
+    "ps",
+    "tk",
+    "nn",
+    "mt",
+    "sa",
+    "lb",
+    "my",
+    "bo",
+    "tl",
+    "mg",
+    "as",
+    "tt",
+    "haw",
+    "ln",
+    "ha",
+    "ba",
+    "jw",
+    "su",
+    "yue",
+];
+
+/// The most likely language among `logits` (one per entry of [`LANGUAGES`],
+/// in order) and its softmax probability.
+fn pick_language(logits: &[f32]) -> (String, f32) {
+    let (best, _) = logits
+        .iter()
+        .enumerate()
+        .fold((0, f32::NEG_INFINITY), |acc, (i, &v)| if v > acc.1 { (i, v) } else { acc });
+    (LANGUAGES[best].to_string(), softmax_single(logits, best))
+}
+
 fn language_id(lang: &str) -> i32 {
-    // Common language codes. For a full implementation this would be a complete table.
-    match lang {
-        "en" => 0,
-        "zh" => 1,
-        "de" => 2,
-        "es" => 3,
-        "ru" => 4,
-        "ko" => 5,
-        "fr" => 6,
-        "ja" => 7,
-        "pt" => 8,
-        "tr" => 9,
-        "pl" => 10,
-        "ca" => 11,
-        "nl" => 12,
-        "ar" => 13,
-        "sv" => 14,
-        "it" => 15,
-        "id" => 16,
-        "hi" => 17,
-        "fi" => 18,
-        "vi" => 19,
-        "he" => 20,
-        "uk" => 21,
-        "el" => 22,
-        "ms" => 23,
-        "cs" => 24,
-        "ro" => 25,
-        "da" => 26,
-        "hu" => 27,
-        "ta" => 28,
-        "no" => 29,
-        "th" => 30,
-        "ur" => 31,
-        "hr" => 32,
-        "bg" => 33,
-        "lt" => 34,
-        "la" => 35,
-        "mi" => 36,
-        "ml" => 37,
-        "cy" => 38,
-        "sk" => 39,
-        "te" => 40,
-        "fa" => 41,
-        "lv" => 42,
-        "bn" => 43,
-        "sr" => 44,
-        "az" => 45,
-        "sl" => 46,
-        "kn" => 47,
-        "et" => 48,
-        "mk" => 49,
-        "br" => 50,
-        "eu" => 51,
-        "is" => 52,
-        "hy" => 53,
-        "ne" => 54,
-        "mn" => 55,
-        "bs" => 56,
-        "kk" => 57,
-        "sq" => 58,
-        "sw" => 59,
-        "gl" => 60,
-        "mr" => 61,
-        "pa" => 62,
-        "si" => 63,
-        "km" => 64,
-        "sn" => 65,
-        "yo" => 66,
-        "so" => 67,
-        "af" => 68,
-        "oc" => 69,
-        "ka" => 70,
-        "be" => 71,
-        "tg" => 72,
-        "sd" => 73,
-        "gu" => 74,
-        "am" => 75,
-        "yi" => 76,
-        "lo" => 77,
-        "uz" => 78,
-        "fo" => 79,
-        "ht" => 80,
-        "ps" => 81,
-        "tk" => 82,
-        "nn" => 83,
-        "mt" => 84,
-        "sa" => 85,
-        "lb" => 86,
-        "my" => 87,
-        "bo" => 88,
-        "tl" => 89,
-        "mg" => 90,
-        "as" => 91,
-        "tt" => 92,
-        "haw" => 93,
-        "ln" => 94,
-        "ha" => 95,
-        "ba" => 96,
-        "jw" => 97,
-        "su" => 98,
-        _ => 0, // default to english
+    // An unknown code decodes as English, as it always did.
+    LANGUAGES.iter().position(|l| *l == lang).unwrap_or(0) as i32
+}
+
+
+#[cfg(test)]
+mod language_tests {
+    use super::*;
+
+    #[test]
+    fn the_table_matches_whispers_token_order() {
+        assert_eq!(LANGUAGES.len(), 100);
+        assert_eq!((LANGUAGES[0], LANGUAGES[1], LANGUAGES[2]), ("en", "zh", "de"));
+        assert_eq!(LANGUAGES[98], "su");
+        assert_eq!(LANGUAGES[99], "yue");
+        for (i, code) in LANGUAGES.iter().enumerate() {
+            assert_eq!(language_id(code), i as i32, "{code}");
+        }
+    }
+
+    #[test]
+    fn the_most_likely_language_wins_with_its_probability() {
+        let mut logits = vec![0.0f32; 99];
+        logits[LANGUAGES.iter().position(|l| *l == "zh").unwrap()] = 10.0;
+        let (code, p) = pick_language(&logits);
+        assert_eq!(code, "zh");
+        assert!(p > 0.99, "{p}");
+        // A 99-language model never offers `yue`.
+        logits[1] = 0.0;
+        logits[6] = 5.0;
+        assert_eq!(pick_language(&logits).0, "fr");
     }
 }

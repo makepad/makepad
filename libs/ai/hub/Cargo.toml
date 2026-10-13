@@ -149,6 +149,14 @@ makepad-video = { package = "makepad-platform-video", path = "../../../platform/
 # library, and it keeps working when the wire grows fields it has never
 # heard of.
 [[bin]]
+name = "hub-verify-files"
+path = "src/bin/hub_verify_files.rs"
+
+[[bin]]
+name = "hub-control"
+path = "src/bin/hub_control.rs"
+
+[[bin]]
 name = "chat-bench"
 path = "src/bin/chat_bench.rs"
 
@@ -176,6 +184,21 @@ name = "speech-roundtrip"
 path = "src/bin/speech_roundtrip.rs"
 
 [[bin]]
+name = "speech-ext-check"
+path = "src/bin/speech_ext_check.rs"
+required-features = ["stt", "tts"]
+
+[[bin]]
+name = "hub-elect-check"
+path = "src/bin/hub_elect_check.rs"
+required-features = ["llm", "stt", "tts"]
+
+[[bin]]
+name = "tts-stream-check"
+path = "src/bin/tts_stream_check.rs"
+required-features = ["tts"]
+
+[[bin]]
 name = "hub-install"
 path = "src/bin/hub_install.rs"
 required-features = ["local"]
@@ -183,3 +206,6 @@ required-features = ["local"]
 [[bin]]
 name = "ai-fleet"
 path = "src/bin/ai_fleet.rs"
+
+[target.'cfg(windows)'.dependencies]
+makepad-windows-sys = {path = "../../windows/sys", version = "0.1.0"}

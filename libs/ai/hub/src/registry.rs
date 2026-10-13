@@ -1404,8 +1404,13 @@ mod tests {
         assert_eq!(qwen38.domain, Domain::Text);
         assert_eq!(qwen38.backend, "llm");
         assert!(qwen38.available && !qwen38.gated);
-        assert_eq!(qwen38.vram_gb, Some(19.0));
-        assert_eq!(qwen38.files.len(), 1);
+        assert_eq!(qwen38.vram_gb, Some(18.4));
+        // The language GGUF and the model's own vision tower (chat pictures).
+        assert_eq!(qwen38.files.len(), 2);
+        assert_eq!(
+            qwen38.file_by_role("mmproj").unwrap().cache_as,
+            "llm/Qwen3.8-27B-mmproj-F16.gguf"
+        );
         let qwen38_gguf = qwen38.file_by_role("llm-gguf").unwrap();
         assert_eq!(qwen38_gguf.repo, "unsloth/Qwen3.8-27B-GGUF");
         assert_eq!(qwen38_gguf.path, "Qwen3.8-27B-Q4_K_M.gguf");

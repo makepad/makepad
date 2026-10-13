@@ -190,8 +190,9 @@ mod tests {
 /// fixtures out of it. The rule is the asset client's own
 /// (`MAKEPAD_ASSET_LIBRARY`, else `MAKEPAD_ROOT` or this checkout, then
 /// `local/asset-library`); it is restated here, test-only, so the hub does
-/// not link the asset client to find a directory.
-#[cfg(test)]
+/// not link the asset client to find a directory. Its readers are the
+/// motion-native retarget tests and the mesh quality tests.
+#[cfg(all(test, any(feature = "motion-native", feature = "mesh")))]
 pub(crate) fn test_asset_library_root() -> PathBuf {
     let from_env = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty()).map(PathBuf::from);
     from_env("MAKEPAD_ASSET_LIBRARY").unwrap_or_else(|| {

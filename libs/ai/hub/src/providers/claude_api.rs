@@ -12,12 +12,12 @@ use crate::chat_wire::{
 };
 use crate::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
 use makepad_network::blocking_http::{
-    post_json, CancelToken, Error as HttpError, Limits, Request,
+    request_to_writer_no_redirect, CancelToken, Error as HttpError, Limits, Request,
 };
 use makepad_strict_json::{self as json, Value};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 pub const CLAUDE_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -28,7 +28,8 @@ pub const CLAUDE_CODE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 pub const CLAUDE_MODEL_ENV: &str = "MAKEPAD_CONTENT_CHAT_CLAUDE_MODEL";
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5";
 pub const DEFAULT_MAX_TOKENS: u32 = 4096;
-pub const DEFAULT_CLAUDE_TIMEOUT: Duration = Duration::from_secs(120);
+/// Allow silent model thinking for two minutes; each arriving byte renews the wait.
+pub const CLAUDE_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 pub const MAX_CLAUDE_BODY: usize = 256 * 1024;
 
 const MAX_MODEL_BYTES: usize = 128;
@@ -86,7 +87,7 @@ pub struct ClaudeApiConfig {
     model: String,
     endpoint: String,
     max_tokens: u32,
-    request_timeout: Duration,
+    idle_timeout: Duration,
     unavailable_reason: String,
 }
 
@@ -99,7 +100,7 @@ impl ClaudeApiConfig {
             model: bound_model(model.into()),
             endpoint: CLAUDE_MESSAGES_URL.to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
-            request_timeout: DEFAULT_CLAUDE_TIMEOUT,
+            idle_timeout: CLAUDE_IDLE_TIMEOUT,
             unavailable_reason: missing_credential_reason(),
         }
     }
@@ -113,7 +114,7 @@ impl ClaudeApiConfig {
             model: bound_model(model.into()),
             endpoint: CLAUDE_MESSAGES_URL.to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
-            request_timeout: DEFAULT_CLAUDE_TIMEOUT,
+            idle_timeout: CLAUDE_IDLE_TIMEOUT,
             unavailable_reason: missing_credential_reason(),
         }
     }
@@ -153,7 +154,7 @@ impl ClaudeApiConfig {
             model: bound_model(model),
             endpoint: CLAUDE_MESSAGES_URL.to_string(),
             max_tokens: DEFAULT_MAX_TOKENS,
-            request_timeout: DEFAULT_CLAUDE_TIMEOUT,
+            idle_timeout: CLAUDE_IDLE_TIMEOUT,
             unavailable_reason,
         }
     }
@@ -171,12 +172,7 @@ impl ClaudeApiConfig {
         self
     }
 
-    pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
-        self.request_timeout = timeout
-            .max(Duration::from_secs(5))
-            .min(Duration::from_secs(600));
-        self
-    }
+
 }
 
 fn missing_credential_reason() -> String {
@@ -203,7 +199,8 @@ pub trait ClaudeApiTransport: Send + Sync + 'static {
         auth: &ClaudeAuth,
         body: &[u8],
         cancel: &CancelToken,
-        timeout: Duration,
+        idle_timeout: Duration,
+        on_chunk: &mut dyn FnMut(&[u8]),
     ) -> Result<ClaudeRawHttp, String>;
 }
 
@@ -221,7 +218,8 @@ impl ClaudeApiTransport for BlockingClaudeTransport {
         auth: &ClaudeAuth,
         body: &[u8],
         cancel: &CancelToken,
-        timeout: Duration,
+        idle_timeout: Duration,
+        on_chunk: &mut dyn FnMut(&[u8]),
     ) -> Result<ClaudeRawHttp, String> {
         let request = Request::post(url)
             .header("anthropic-version", ANTHROPIC_VERSION)
@@ -243,17 +241,35 @@ impl ClaudeApiTransport for BlockingClaudeTransport {
             .cancel_token(cancel.clone())
             .limits(Limits {
                 max_body_bytes: MAX_CLAUDE_BODY,
-                total_timeout: timeout,
+                idle_timeout,
                 ..Limits::default()
             });
-        match post_json(request) {
+        let mut writer = ClaudeBody { body: Vec::new(), on_chunk };
+        match request_to_writer_no_redirect(request, &mut writer) {
             Ok(response) => Ok(ClaudeRawHttp {
                 status: response.status,
-                body: response.body,
+                body: writer.body,
             }),
             Err(error) => Err(safe_http_err(error)),
         }
     }
+}
+
+/// Decode SSE as each HTTP body chunk arrives, including chunked transfer
+/// encoding. Keep the bounded body for the existing HTTP error categories.
+struct ClaudeBody<'a> {
+    body: Vec<u8>,
+    on_chunk: &'a mut dyn FnMut(&[u8]),
+}
+
+impl std::io::Write for ClaudeBody<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.body.extend_from_slice(bytes);
+        (self.on_chunk)(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
 }
 
 fn safe_http_err(error: HttpError) -> String {
@@ -380,6 +396,7 @@ enum BlockState {
         name: String,
         partial_json: String,
         initial_input: String,
+        last_partial: Option<Instant>,
     },
     Ignored,
 }
@@ -392,10 +409,15 @@ struct ClaudeStreamParser {
     function_call: Option<ParsedClaudeToolUse>,
     stop_reason: Option<String>,
     saw_message_stop: bool,
+    partial_events: Vec<ProviderEvent>,
 }
 
 impl ClaudeStreamParser {
     fn event(&mut self, event: SseEvent) -> Result<(), String> {
+        self.event_at(event, Instant::now())
+    }
+
+    fn event_at(&mut self, event: SseEvent, now: Instant) -> Result<(), String> {
         match event.event_type.as_str() {
             "ping" => return Ok(()),
             // Forward-compatible Anthropic events are deliberately ignored,
@@ -409,7 +431,7 @@ impl ClaudeStreamParser {
         match event.event_type.as_str() {
             "message_start" => Ok(()),
             "content_block_start" => self.start_block(&value),
-            "content_block_delta" => self.delta_block(&value),
+            "content_block_delta" => self.delta_block(&value, now),
             "content_block_stop" => self.stop_block(),
             "message_delta" => self.message_delta(&value),
             "message_stop" => {
@@ -456,6 +478,7 @@ impl ClaudeStreamParser {
                     name: name.to_string(),
                     partial_json: String::new(),
                     initial_input,
+                    last_partial: None,
                 }
             }
             Some(_) => BlockState::Ignored,
@@ -464,7 +487,7 @@ impl ClaudeStreamParser {
         Ok(())
     }
 
-    fn delta_block(&mut self, value: &Value) -> Result<(), String> {
+    fn delta_block(&mut self, value: &Value, now: Instant) -> Result<(), String> {
         let delta = value
             .get("delta")
             .ok_or_else(|| "content block delta missing".to_string())?;
@@ -478,7 +501,7 @@ impl ClaudeStreamParser {
                     .to_string();
                 self.append_text(&text)
             }
-            Some(BlockState::Tool { partial_json, .. })
+            Some(BlockState::Tool { call_id, name, partial_json, last_partial, .. })
                 if delta_type == Some("input_json_delta") =>
             {
                 let fragment = delta
@@ -489,6 +512,12 @@ impl ClaudeStreamParser {
                     return Err("tool arguments too large".to_string());
                 }
                 partial_json.push_str(fragment);
+                if last_partial.is_none_or(|last| now.duration_since(last) >= Duration::from_millis(50)) {
+                    self.partial_events.push(ProviderEvent::FunctionCallPartial {
+                        call_id: call_id.clone(), name: name.clone(), partial_json: partial_json.clone(),
+                    });
+                    *last_partial = Some(now);
+                }
                 Ok(())
             }
             Some(_) => Ok(()),
@@ -508,6 +537,7 @@ impl ClaudeStreamParser {
                 name,
                 partial_json,
                 initial_input,
+                ..
             } => {
                 if self.function_call.is_some() {
                     return Err("multiple tool uses are not allowed".to_string());
@@ -517,6 +547,10 @@ impl ClaudeStreamParser {
                 } else {
                     partial_json
                 };
+                // Always flush the final prefix, even inside the throttle window.
+                self.partial_events.push(ProviderEvent::FunctionCallPartial {
+                    call_id: call_id.clone(), name: name.clone(), partial_json: arguments.clone(),
+                });
                 validate_tool_arguments(&arguments)?;
                 self.function_call = Some(ParsedClaudeToolUse {
                     call_id,
@@ -768,6 +802,7 @@ struct PendingTool {
 }
 
 enum WorkerOut {
+    Partial(ProviderEvent),
     Ok(ParsedClaudeStream),
     Err(String),
 }
@@ -829,15 +864,29 @@ impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
             return Err("request body too large".to_string());
         }
         let endpoint = self.config.endpoint.clone();
-        let timeout = self.config.request_timeout;
+        let idle_timeout = self.config.idle_timeout;
         let cancel = self.cancel.clone();
         let transport = self.transport.clone();
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new()
             .name("content-chat-claude-api".into())
             .spawn(move || {
-                let response =
-                    transport.post_messages(&endpoint, &auth, &bytes, &cancel, timeout);
+                let mut decoder = SseDecoder::default();
+                let mut parser = ClaudeStreamParser::default();
+                let mut parse_error = None;
+                let response = transport.post_messages(&endpoint, &auth, &bytes, &cancel, idle_timeout, &mut |chunk| {
+                    if parse_error.is_some() || cancel.is_cancelled() { return; }
+                    let result = decoder.push(chunk).and_then(|events| {
+                        for event in events {
+                            parser.event(event)?;
+                            for partial in parser.partial_events.drain(..) {
+                                let _ = tx.send(WorkerOut::Partial(partial));
+                            }
+                        }
+                        Ok(())
+                    });
+                    parse_error = result.err();
+                });
                 if cancel.is_cancelled() {
                     return;
                 }
@@ -856,7 +905,16 @@ impl<T: ClaudeApiTransport> ClaudeApiChatProvider<T> {
                     Ok(raw) if !(200..300).contains(&raw.status) => {
                         WorkerOut::Err(http_status_error(raw.status, &raw.body))
                     }
-                    Ok(raw) => match parse_claude_stream(&raw.body) {
+                    Ok(_) => match (|| {
+                        if let Some(error) = parse_error { return Err(error); }
+                        for event in decoder.finish()? {
+                            parser.event(event)?;
+                            for partial in parser.partial_events.drain(..) {
+                                let _ = tx.send(WorkerOut::Partial(partial));
+                            }
+                        }
+                        parser.finish()
+                    })() {
                         Ok(parsed) => WorkerOut::Ok(parsed),
                         Err(error) => WorkerOut::Err(sanitize_public_error(&error)),
                     },
@@ -974,6 +1032,7 @@ impl<T: ClaudeApiTransport> ChatProvider for ClaudeApiChatProvider<T> {
             None => return Vec::new(),
         };
         match received {
+            Ok(WorkerOut::Partial(event)) => vec![event],
             Ok(WorkerOut::Ok(parsed)) => {
                 let Some(active) = self.active.take() else {
                     return vec![ProviderEvent::Error("provider state error".to_string())];
@@ -1156,6 +1215,7 @@ data: {"type":"message_stop"}
             _body: &[u8],
             _cancel: &CancelToken,
             _timeout: Duration,
+            _on_chunk: &mut dyn FnMut(&[u8]),
         ) -> Result<ClaudeRawHttp, String> {
             panic!("transport must not be called without credentials")
         }
@@ -1203,6 +1263,7 @@ data: {"type":"message_stop"}
             body: &[u8],
             _cancel: &CancelToken,
             _timeout: Duration,
+            on_chunk: &mut dyn FnMut(&[u8]),
         ) -> Result<ClaudeRawHttp, String> {
             *self.seen.lock().unwrap() = Some(SeenRequest {
                 url: url.to_string(),
@@ -1210,7 +1271,9 @@ data: {"type":"message_stop"}
                 secret_len: auth.secret().len(),
                 body: body.to_vec(),
             });
-            Ok(self.response.lock().unwrap().take().expect("one response"))
+            let response = self.response.lock().unwrap().take().expect("one response");
+            for chunk in response.body.chunks(17) { on_chunk(chunk); }
+            Ok(response)
         }
     }
 

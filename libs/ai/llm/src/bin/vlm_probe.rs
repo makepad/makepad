@@ -36,34 +36,6 @@ fn read_png(path: &str) -> (Vec<u8>, usize, usize) {
     (rgb, width, height)
 }
 
-fn read_ppm(path: &str) -> (Vec<u8>, usize, usize) {
-    let data = std::fs::read(path).expect("cannot read image");
-    let mut fields = Vec::new();
-    let mut pos = 0usize;
-    while fields.len() < 4 {
-        while pos < data.len() && (data[pos] as char).is_ascii_whitespace() {
-            pos += 1;
-        }
-        if data[pos] == b'#' {
-            while pos < data.len() && data[pos] != b'\n' {
-                pos += 1;
-            }
-            continue;
-        }
-        let start = pos;
-        while pos < data.len() && !(data[pos] as char).is_ascii_whitespace() {
-            pos += 1;
-        }
-        fields.push(String::from_utf8_lossy(&data[start..pos]).into_owned());
-    }
-    pos += 1;
-    assert_eq!(fields[0], "P6");
-    let w: usize = fields[1].parse().unwrap();
-    let h: usize = fields[2].parse().unwrap();
-    assert_eq!(fields[3], "255");
-    (data[pos..pos + w * h * 3].to_vec(), w, h)
-}
-
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 5 {
@@ -102,7 +74,7 @@ fn main() {
     {
         read_png(image_path)
     } else {
-        read_ppm(image_path)
+        makepad_ai_llm::read_ppm(image_path).expect("read ppm")
     };
     let gguf = makepad_ai_llm::GgufFile::open(mmproj_path).expect("open mmproj");
     let vision_config = VisionConfig::from_gguf(&gguf).expect("vision config");

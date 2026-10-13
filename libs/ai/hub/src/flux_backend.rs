@@ -393,11 +393,6 @@ mod flux_worker {
     static SHARED_WORKER: std::sync::Mutex<(u64, Option<FluxWorker>)> =
         std::sync::Mutex::new((0, None));
 
-    /// Upper bound on a release acknowledgement. Generous because the release
-    /// queues behind whatever the thread is doing; a real free of a resident
-    /// FP8 stack is well under a second.
-    const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
     /// Frees EVERY device allocation this pipeline thread owns — on this
     /// thread, the only place they can be freed from.
     ///
@@ -501,17 +496,11 @@ mod flux_worker {
             self.tx.send(WorkerCmd::Release(ack_tx)).map_err(|_| {
                 FluxWorkerError::WorkerGone("flux worker thread is gone".to_string())
             })?;
-            ack_rx
-                .recv_timeout(RELEASE_TIMEOUT)
-                .map_err(|error| match error {
-                    mpsc::RecvTimeoutError::Disconnected => FluxWorkerError::WorkerGone(
-                        "flux worker dropped the release reply".to_string(),
-                    ),
-                    mpsc::RecvTimeoutError::Timeout => FluxWorkerError::Other(format!(
-                        "flux worker did not acknowledge the device release within {}s",
-                        RELEASE_TIMEOUT.as_secs()
-                    )),
-                })
+            // The release queues behind whatever the thread is doing, so it is
+            // waited for while the worker lives; only its death is a failure.
+            crate::progress_watch::release_reply(&ack_rx, "flux").map_err(|_| {
+                FluxWorkerError::WorkerGone("flux worker dropped the release reply".to_string())
+            })
         }
 
         /// Blocks until the generation finishes, forwarding progress events

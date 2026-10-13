@@ -82,25 +82,21 @@ fn volume_info(path: &Path) -> io::Result<(String, u64)> {
 fn volume_info(path: &Path) -> io::Result<(String, u64)> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
-    unsafe extern "system" {
-        fn GetVolumePathNameW(
-            file_name: *const u16,
-            volume_path_name: *mut u16,
-            volume_path_name_size: u32,
-        ) -> i32;
-        fn GetDiskFreeSpaceExW(
-            directory_name: *const u16,
-            available: *mut u64,
-            total: *mut u64,
-            free: *mut u64,
-        ) -> i32;
-    }
+    use makepad_windows_sys::{
+        core::{PCWSTR, PWSTR},
+        Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumePathNameW},
+    };
 
     let input: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
     let mut volume = vec![0u16; 32_768];
     if unsafe {
-        GetVolumePathNameW(input.as_ptr(), volume.as_mut_ptr(), volume.len() as u32)
-    } == 0
+        GetVolumePathNameW(
+            PCWSTR(input.as_ptr()),
+            PWSTR(volume.as_mut_ptr()),
+            volume.len() as u32,
+        )
+    }
+    .is_err()
     {
         return Err(io::Error::last_os_error());
     }
@@ -123,12 +119,13 @@ fn volume_info(path: &Path) -> io::Result<(String, u64)> {
     let mut free = 0;
     if unsafe {
         GetDiskFreeSpaceExW(
-            volume_units.as_ptr(),
-            &mut available,
-            &mut total,
-            &mut free,
+            Some(PCWSTR(volume_units.as_ptr())),
+            Some(&mut available),
+            Some(&mut total),
+            Some(&mut free),
         )
-    } == 0
+    }
+    .is_err()
     {
         return Err(io::Error::last_os_error());
     }
@@ -143,7 +140,8 @@ fn volume_info(_path: &Path) -> io::Result<(String, u64)> {
     ))
 }
 
-#[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+// 64-bit glibc and bionic share this statvfs layout.
+#[cfg(all(any(target_os = "linux", target_os = "android"), target_pointer_width = "64"))]
 fn available_bytes(path: &Path) -> io::Result<u64> {
     use std::{ffi::CString, os::unix::ffi::OsStrExt, os::raw::{c_int, c_ulong}};
 
@@ -175,7 +173,7 @@ fn available_bytes(path: &Path) -> io::Result<u64> {
     Ok((stat.fragment_size.max(stat.block_size) as u64).saturating_mul(stat.blocks_available as u64))
 }
 
-#[cfg(all(target_os = "linux", not(target_pointer_width = "64")))]
+#[cfg(all(any(target_os = "linux", target_os = "android"), not(target_pointer_width = "64")))]
 fn available_bytes(_path: &Path) -> io::Result<u64> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -220,7 +218,7 @@ fn available_bytes(path: &Path) -> io::Result<u64> {
     Ok((stat.block_size as u64).saturating_mul(stat.blocks_available))
 }
 
-#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos", target_os = "ios", target_os = "tvos"))))]
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "tvos"))))]
 fn available_bytes(_path: &Path) -> io::Result<u64> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,

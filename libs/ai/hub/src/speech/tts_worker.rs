@@ -3,6 +3,7 @@
 
 use super::remote::RemotePipe;
 use super::weights;
+use makepad_system_speech::Voice;
 use super::{SpeechAudio, SpeechReach, TtsConfig, TtsEngine, TtsEngineInfo, TtsEvent, TtsMsg, WordTiming};
 use crate::pipe::PipeId;
 use crate::registry::Domain;
@@ -32,7 +33,7 @@ pub(crate) fn run(
     };
     send(TtsEvent::Ready(engine.info()));
 
-    while let Ok(TtsMsg::Say { utterance, generation: mine, text }) = msg_rx.recv() {
+    while let Ok(TtsMsg::Say { utterance, generation: mine, text, options }) = msg_rx.recv() {
         if mine != generation.load(Ordering::Relaxed) {
             continue;
         }
@@ -41,7 +42,15 @@ pub(crate) fn run(
             continue;
         }
         let started = Instant::now();
-        match engine.synthesize(text, &config) {
+        let say_config = options.applied_to(&config);
+        let mut chunk_index = 0u32;
+        let mut emit = |audio: SpeechAudio| {
+            if mine == generation.load(Ordering::Relaxed) {
+                send(TtsEvent::AudioChunk { utterance, index: chunk_index, audio });
+            }
+            chunk_index += 1;
+        };
+        match engine.synthesize(text, &say_config, &mut emit) {
             Ok((audio, timings)) if !audio.is_empty() => {
                 // Synthesis is slow enough that a cancel can land while it
                 // runs; a stale utterance must never be heard.
@@ -61,7 +70,9 @@ type Spoken = (SpeechAudio, Option<Vec<WordTiming>>);
 
 trait Engine {
     fn info(&self) -> TtsEngineInfo;
-    fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<Spoken, String>;
+    /// `on_chunk` gets each clause as it is ready when `config.stream` is on and the
+    /// engine can; the return value is always the whole take.
+    fn synthesize(&mut self, text: &str, config: &TtsConfig, on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String>;
 }
 
 // ----------------------------------------------------------------- choosing
@@ -91,7 +102,7 @@ fn choose(config: &TtsConfig, send: &dyn Fn(TtsEvent)) -> Result<Box<dyn Engine>
         if config.reach >= SpeechReach::Machine {
             send(TtsEvent::Loading { phase: "looking for a kokoro node".into(), fraction: 0.0 });
             match RemotePipe::find(config.reach, Domain::Speech, &["kokoro"]) {
-                Some(pipe) => return Ok(Box::new(RemoteTts { pipe })),
+                Some(pipe) => return Ok(Box::new(RemoteTts::new(pipe))),
                 None => reasons.push(format!("no node in reach ({:?}) serves tts.kokoro", config.reach)),
             }
         }
@@ -134,7 +145,7 @@ impl Engine for SystemTts {
         }
     }
 
-    fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<Spoken, String> {
+    fn synthesize(&mut self, text: &str, config: &TtsConfig, _on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String> {
         let options = sys::TtsOptions {
             voice: config.voice.clone(),
             language: config.language.clone(),
@@ -150,6 +161,15 @@ impl Engine for SystemTts {
 
 struct RemoteTts {
     pipe: RemotePipe,
+    /// The node's own list of installed voices (older nodes: the English catalogue).
+    voices: Vec<Voice>,
+}
+
+impl RemoteTts {
+    fn new(pipe: RemotePipe) -> Self {
+        let voices = pipe.voices();
+        RemoteTts { pipe, voices }
+    }
 }
 
 impl Engine for RemoteTts {
@@ -159,11 +179,14 @@ impl Engine for RemoteTts {
             engine: format!("kokoro ({})", self.pipe.model),
             remote: Some(self.pipe.base_url.clone()),
             sample_rate: 24_000,
-            voices: weights::kokoro_voice_catalogue(),
+            voices: self.voices.clone(),
         }
     }
 
-    fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<Spoken, String> {
+    fn synthesize(&mut self, text: &str, config: &TtsConfig, on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String> {
+        if config.stream {
+            return self.pipe.synthesize_streaming(text, &kokoro_voice_name(config), config.rate, on_chunk);
+        }
         self.pipe.synthesize(text, &kokoro_voice_name(config), config.rate)
     }
 }
@@ -175,17 +198,15 @@ mod kokoro {
     use super::super::Voice;
     use super::*;
     use crate::machine::{self, Claim, ResidencyState};
-    use makepad_ai_speech::kokoro::KokoroSpeaker;
-    use std::path::{Path, PathBuf};
+    use super::super::kokoro_bank::KokoroBank;
+    use std::path::Path;
     use std::time::Duration;
 
     const HOLDER_PATIENCE: Duration = Duration::from_secs(30);
     const POLL: Duration = Duration::from_millis(150);
 
     pub(super) struct KokoroLocal {
-        model_path: PathBuf,
-        speaker: KokoroSpeaker,
-        voice: String,
+        bank: KokoroBank,
         voices: Vec<Voice>,
         _residency: Option<machine::ResidencyGuard>,
     }
@@ -201,25 +222,15 @@ mod kokoro {
             }
         }
 
-        fn synthesize(&mut self, text: &str, config: &TtsConfig) -> Result<Spoken, String> {
-            let wanted = kokoro_voice_name(config);
-            if wanted != self.voice {
-                // A voice is a 510x256 style table; the speaker reloads with
-                // it. Rare (the config picks one voice), so the reload cost
-                // is acceptable.
-                let voice_path = weights::kokoro_voice_path(&wanted)
-                    .ok_or_else(|| format!("kokoro voice pack {wanted}.mkvoice not found"))?;
-                self.speaker = KokoroSpeaker::load_with_voice(
-                    &self.model_path.to_string_lossy(),
-                    &voice_path.to_string_lossy(),
-                )
-                .map_err(|e| format!("kokoro load voice {wanted}: {e:?}"))?;
-                self.voice = wanted;
-            }
-            let audio = self
-                .speaker
-                .synthesize_with_speed(text, config.rate)
-                .map_err(|e| format!("kokoro: {e:?}"))?;
+        fn synthesize(&mut self, text: &str, config: &TtsConfig, on_chunk: &mut dyn FnMut(SpeechAudio)) -> Result<Spoken, String> {
+            let voice = kokoro_voice_name(config);
+            let audio = if config.stream {
+                self.bank.synthesize_streaming(&voice, &weights::kokoro_voice_path, text, config.rate, &mut |_, _| true, &mut |samples: &[f32]| {
+                    on_chunk(SpeechAudio { samples: samples.to_vec(), sample_rate: makepad_ai_speech::kokoro::SAMPLE_RATE });
+                })?
+            } else {
+                self.bank.synthesize(&voice, &weights::kokoro_voice_path, text, config.rate, &mut |_, _| true)?
+            };
             let timings = audio.timings.map(|words| {
                 words
                     .into_iter()
@@ -243,7 +254,7 @@ mod kokoro {
                     ResidencyState::Ready { port } if port > 0 && config.reach >= SpeechReach::Machine => {
                         let url = format!("http://127.0.0.1:{port}");
                         if let Some((_, pipe)) = RemotePipe::at(&url, Domain::Speech, &["kokoro"]) {
-                            return Ok(Box::new(RemoteTts { pipe }));
+                            return Ok(Box::new(RemoteTts::new(pipe)));
                         }
                         break;
                     }
@@ -273,31 +284,19 @@ mod kokoro {
         };
 
         let voice = kokoro_voice_name(config);
-        let voice_path = match weights::kokoro_voice_path(&voice) {
-            Some(path) => path,
-            None => {
-                let reason = format!("kokoro voice pack {voice}.mkvoice not found");
-                if let Some(guard) = guard.as_mut() {
-                    let _ = guard.publish(ResidencyState::Failed { reason: reason.clone(), retry_after_ms: unix_ms() + 30_000 });
-                }
-                return Err(reason);
-            }
-        };
         send(TtsEvent::Loading { phase: format!("loading {}", weights::KOKORO_MODEL_FILE), fraction: 0.0 });
         let started = Instant::now();
-        let mut speaker = match KokoroSpeaker::load_with_voice(&path.to_string_lossy(), &voice_path.to_string_lossy()) {
-            Ok(speaker) => speaker,
-            Err(error) => {
-                let reason = format!("could not load {}: {error:?}", path.display());
-                if let Some(guard) = guard.as_mut() {
-                    let _ = guard.publish(ResidencyState::Failed { reason: reason.clone(), retry_after_ms: unix_ms() + 30_000 });
-                }
-                return Err(reason);
+        let mut bank = KokoroBank::new(path.to_path_buf(), weights::kokoro_zh_model_path());
+        // Warm-up, discarded: loads the model the default voice needs (and the
+        // first synthesis initializes the Metal context on this thread: better
+        // now than on the first sentence).
+        if let Err(reason) = bank.synthesize(&voice, &weights::kokoro_voice_path, "Hi.", 1.0, &mut |_, _| true) {
+            let reason = format!("could not load {}: {reason}", path.display());
+            if let Some(guard) = guard.as_mut() {
+                let _ = guard.publish(ResidencyState::Failed { reason: reason.clone(), retry_after_ms: unix_ms() + 30_000 });
             }
-        };
-        // Discarded warm-up: the first synthesis initializes the Metal
-        // context on this thread — better now than on the first sentence.
-        let _ = speaker.synthesize("Hi.");
+            return Err(reason);
+        }
         if let Some(guard) = guard.as_mut() {
             let _ = guard.publish(ResidencyState::Ready { port: 0 });
         }
@@ -305,13 +304,7 @@ mod kokoro {
             phase: format!("loaded kokoro in {:.1}s", started.elapsed().as_secs_f64()),
             fraction: 1.0,
         });
-        Ok(Box::new(KokoroLocal {
-            model_path: path.to_path_buf(),
-            speaker,
-            voice,
-            voices: weights::kokoro_voices(),
-            _residency: guard,
-        }))
+        Ok(Box::new(KokoroLocal { bank, voices: weights::kokoro_voices(), _residency: guard }))
     }
 
     fn unix_ms() -> u64 {

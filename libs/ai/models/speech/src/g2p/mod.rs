@@ -7,9 +7,12 @@
 //! set) and hand-write letter-to-sound rules for the rest.
 
 pub mod lexicon;
+pub mod packed;
 pub mod lts;
+pub mod zh;
 pub mod morph;
 pub mod vocab;
+pub mod vocab_v11;
 
 /// Pronounce one word: the lexicon, then regular morphology, then guesswork.
 pub fn pronounce(word: &str) -> String {
@@ -215,6 +218,38 @@ pub fn phonemize_with_sources(text: &str) -> Vec<(char, Option<usize>)> {
     out
 }
 
+/// Which text front end and symbol table a Kokoro model wants. v1.0 and
+/// v1.1-zh were trained on different symbol sets (ids differ; v1.1-zh writes
+/// Mandarin in bopomofo, v1.0 in IPA with tone arrows).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Frontend {
+    /// English, v1.0 symbol table (the default model).
+    English,
+    /// English, v1.1-zh symbol table.
+    EnglishV11,
+    /// Mandarin (and the English words in it), v1.0.
+    MandarinV10,
+    /// Mandarin (and the English words in it), v1.1-zh.
+    MandarinV11,
+}
+
+impl Frontend {
+    fn token(self, symbol: char) -> Option<u16> {
+        match self {
+            Frontend::English | Frontend::MandarinV10 => vocab::token(symbol),
+            Frontend::EnglishV11 | Frontend::MandarinV11 => vocab_v11::token(symbol),
+        }
+    }
+
+    fn phonemes(self, text: &str) -> Vec<(char, Option<usize>)> {
+        match self {
+            Frontend::English | Frontend::EnglishV11 => phonemize_with_sources(text),
+            Frontend::MandarinV10 => zh::phonemize_with_sources(text, zh::Variant::V10),
+            Frontend::MandarinV11 => zh::phonemize_with_sources(text, zh::Variant::V11),
+        }
+    }
+}
+
 /// Phoneme token ids, zero-padded at both ends the way Kokoro expects.
 pub fn tokens(text: &str) -> Vec<u16> {
     tokens_with_sources(text).0
@@ -223,7 +258,12 @@ pub fn tokens(text: &str) -> Vec<u16> {
 /// [`tokens`] plus, per token id, the byte offset in `text` of the word it
 /// sounds (`None` for the pads, spaces and punctuation).
 pub fn tokens_with_sources(text: &str) -> (Vec<u16>, Vec<Option<usize>>) {
-    let phonemes = phonemize_with_sources(text);
+    tokens_with_sources_for(text, Frontend::English)
+}
+
+/// [`tokens_with_sources`] for another front end / symbol table.
+pub fn tokens_with_sources_for(text: &str, frontend: Frontend) -> (Vec<u16>, Vec<Option<usize>>) {
+    let phonemes = frontend.phonemes(text);
     let mut ids = Vec::with_capacity(phonemes.len() + 2);
     let mut sources = Vec::with_capacity(phonemes.len() + 2);
     ids.push(0);
@@ -232,7 +272,7 @@ pub fn tokens_with_sources(text: &str) -> (Vec<u16>, Vec<Option<usize>>) {
         if ids.len() > MAX_TOKENS {
             break;
         }
-        if let Some(id) = vocab::token(symbol) {
+        if let Some(id) = frontend.token(symbol) {
             ids.push(id);
             sources.push(source);
         }

@@ -19,7 +19,10 @@ const WHISPER_SAMPLE_RATE: u32 = 16_000;
 /// One utterance handed to the engine: 16 kHz mono PCM plus the language.
 pub struct TranscribeJob<'a> {
     pub samples_16k: &'a [f32],
+    /// ISO 639-1, or `"auto"` to detect it from the audio.
     pub language: String,
+    /// Text the model reads as the words just before (steers script and spelling); empty for none.
+    pub prompt: String,
 }
 
 /// Pluggable recognition: the real path calls the makepad-ai-speech whisper engine; tests plug in
@@ -116,7 +119,7 @@ impl ContentBackend for WhisperBackend {
             // Whisper wants the bare code; a BCP-47 tag loses its region.
             params.language.split(['-', '_']).next().unwrap_or("en").to_ascii_lowercase()
         };
-        let job = TranscribeJob { samples_16k: &samples, language };
+        let job = TranscribeJob { samples_16k: &samples, language, prompt: params.prompt.clone() };
         progress("transcribe", 0.1);
         let segments = match &mut self.recognizer {
             Recognizer::Stub(recognize) => recognize(&job)?,
@@ -130,7 +133,12 @@ impl ContentBackend for WhisperBackend {
             .filter(|t| !t.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        let json = TranscriptJson { text, segments }.serialize_json();
+        let language = match &self.recognizer {
+            Recognizer::Stub(_) => None,
+            #[cfg(feature = "stt")]
+            Recognizer::Whisper(engine) => engine.detected_language(),
+        };
+        let json = TranscriptJson { text, segments, language }.serialize_json();
         progress("done", 1.0);
         Ok(vec![ArtifactData { content_type: "application/json", ext: "json", bytes: json.into_bytes() }])
     }
@@ -187,8 +195,17 @@ mod whisper_engine {
             self.loaded.is_some()
         }
 
+        /// The language the last `"auto"` transcription settled on.
+        pub fn detected_language(&self) -> Option<String> {
+            let (_, state) = self.loaded.as_ref()?;
+            state.detected_language().map(|(code, _)| code.to_string())
+        }
+
         pub fn unload(&mut self) {
             self.loaded = None;
+            // The CUDA backend keeps Whisper's f32 weights on the device per
+            // thread; without this an unloaded Whisper still holds ~4 GB.
+            makepad_ai_speech::whisper::release_device_state();
         }
 
         pub fn transcribe(&mut self, job: &TranscribeJob) -> Result<Vec<TranscriptSegmentJson>, AssetAiError> {
@@ -198,6 +215,7 @@ mod whisper_engine {
                 .ok_or_else(|| AssetAiError::Backend("whisper used before ensure_loaded".into()))?;
             let mut params = WhisperParams::default();
             params.language = job.language.clone();
+            params.prompt = job.prompt.clone();
             params.no_timestamps = false;
             params.single_segment = false;
             params.temperature = 0.0;

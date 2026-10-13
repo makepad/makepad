@@ -27,15 +27,10 @@ use crate::subproc_img::{
 };
 use makepad_micro_serde::JsonValue;
 use std::path::PathBuf;
-use std::time::Duration;
 
 pub const RIG_CMD_ENV: &str = "MAKEPAD_RIG_CMD";
 const RIG_CMD_DEFAULT: &str =
     r"C:\ai\venv_st\Scripts\python.exe C:\ai\rig_skintokens.py {in} {out}";
-
-/// Per-job budget: warm rigging is ~34s; cold covers ckpt loads (1.6GB) and
-/// the bpy export server spin-up on a slow disk.
-const RIG_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 fn rig_cmd() -> String {
     std::env::var(RIG_CMD_ENV).unwrap_or_else(|_| RIG_CMD_DEFAULT.to_string())
@@ -166,7 +161,6 @@ impl ContentBackend for RigBackend {
                         ext: "glb",
                         input: &params.input_bytes,
                         input_sidecar_json: Some(&format!("{{\"seed\":{}}}", params.seed)),
-                        timeout: RIG_TIMEOUT,
                     },
                     cancel,
                     &mut sub_progress,

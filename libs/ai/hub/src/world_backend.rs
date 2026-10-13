@@ -28,9 +28,10 @@ use crate::backend::{
     ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
 };
 use crate::child_process;
+use crate::progress_watch::{ProcessOutput, ProgressWatch, POLL, STALL_AFTER};
 use crate::error::AssetAiError;
 use makepad_micro_serde::*;
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
@@ -42,11 +43,6 @@ const WORKER_PY: &str = include_str!("../python/fw_worker.py");
 /// walk (24 cameras, ~5.4 units of travel, conditioning image at index 10),
 /// proven on the coastal-world validation run.
 const CAMERAS_FORWARD_JSON: &str = include_str!("../python/fw_cameras_forward.json");
-
-/// Cold-load budget: model construction + 21GB ckpt load + fp8 quantize.
-const READY_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-/// Per-job budget (warm generation is ~6s; leave room for a slow disk).
-const JOB_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(DeJson)]
 struct WorkerEvent {
@@ -63,7 +59,7 @@ struct WorkerEvent {
 struct Worker {
     child: Child,
     stdin: std::process::ChildStdin,
-    lines: mpsc::Receiver<String>,
+    output: ProcessOutput,
 }
 
 impl Worker {
@@ -157,7 +153,7 @@ impl WorldBackend {
             .env("GRADIO_ANALYTICS_ENABLED", "False")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // stderr inherits the service's stream -> tracebacks in svc.log.
+            .stderr(Stdio::piped())
         )
             .map_err(|e| {
                 AssetAiError::Backend(format!(
@@ -168,25 +164,13 @@ impl WorldBackend {
 
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let reader = std::io::BufReader::new(stdout);
-            for line in reader.lines() {
-                match line {
-                    Ok(line) => {
-                        if tx.send(line).is_err() {
-                            return;
-                        }
-                    }
-                    Err(_) => return,
-                }
-            }
-        });
+        let stderr = child.stderr.take().expect("piped stderr");
+        let output = ProcessOutput::new(stdout, stderr);
 
         self.worker = Some(Worker {
             child,
             stdin,
-            lines: rx,
+            output,
         });
         Ok(())
     }
@@ -198,34 +182,43 @@ impl WorldBackend {
     }
 
     /// Pumps worker stdout until `until(ev)` returns Some, forwarding stage
-    /// events to `progress`; kills the worker and errors out on cancel,
-    /// worker exit, or deadline.
+    /// events to `progress`; kills the worker and errors out on cancel or
+    /// worker exit. Elapsed time never fails a job: silence on stdout and
+    /// stderr for `STALL_AFTER` is reported as "not responding" and the
+    /// worker keeps running until it exits or the client cancels.
     fn pump_events<T>(
         &mut self,
         cold: bool,
-        deadline: Duration,
         progress: &mut dyn FnMut(&str, f64),
         cancel: &CancelToken,
         mut until: impl FnMut(&WorkerEvent) -> Option<Result<T, AssetAiError>>,
     ) -> Result<T, AssetAiError> {
-        let started = Instant::now();
+        let mut watch = ProgressWatch::new(Instant::now());
+        let mut seen_bytes = 0;
+        let mut last_stage = ("working".to_string(), 0.0);
         loop {
             if cancel.is_cancelled() {
                 self.kill_worker();
                 return Err(AssetAiError::Cancelled);
             }
-            if started.elapsed() > deadline {
-                self.kill_worker();
-                return Err(AssetAiError::Backend(format!(
-                    "flashworld worker timed out after {:?}",
-                    deadline
-                )));
-            }
             let worker = match self.worker.as_ref() {
                 Some(worker) => worker,
                 None => return Err(AssetAiError::Backend("flashworld worker gone".into())),
             };
-            let line = match worker.lines.recv_timeout(Duration::from_millis(200)) {
+            let now = Instant::now();
+            let bytes = worker.output.bytes();
+            if bytes != seen_bytes {
+                seen_bytes = bytes;
+                if watch.progress(now) {
+                    progress(&last_stage.0, last_stage.1);
+                }
+            } else if watch.stalled(now, STALL_AFTER) {
+                progress(
+                    &format!("not responding: no output for {} min; Stop to cancel", STALL_AFTER.as_secs() / 60),
+                    last_stage.1,
+                );
+            }
+            let line = match worker.output.lines.recv_timeout(POLL) {
                 Ok(line) => line,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -245,7 +238,9 @@ impl WorldBackend {
             };
             if event.ev == "stage" {
                 let stage = event.stage.as_deref().unwrap_or("working");
-                progress(stage, stage_fraction(stage, event.k, event.n, cold));
+                let fraction = stage_fraction(stage, event.k, event.n, cold);
+                last_stage = (stage.to_string(), fraction);
+                progress(stage, fraction);
             }
             if let Some(result) = until(&event) {
                 return result;
@@ -356,7 +351,7 @@ impl ContentBackend for WorldBackend {
         if cold {
             progress("spawn worker", 0.005);
             self.spawn_worker()?;
-            self.pump_events(true, READY_TIMEOUT, progress, cancel, |event| {
+            self.pump_events(true, progress, cancel, |event| {
                 match event.ev.as_str() {
                     "ready" => Some(Ok(())),
                     "error" => Some(Err(AssetAiError::Backend(format!(
@@ -415,7 +410,7 @@ impl ContentBackend for WorldBackend {
         }
 
         // Pump generation events until done.
-        let ply_path = self.pump_events(cold, JOB_TIMEOUT, progress, cancel, |event| {
+        let ply_path = self.pump_events(cold, progress, cancel, |event| {
             match event.ev.as_str() {
                 "done" => Some(match event.ply.clone() {
                     Some(ply) => Ok(ply),

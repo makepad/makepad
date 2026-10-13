@@ -16,15 +16,33 @@
 
 use crate::engine::cli_model::{CliKind, CliModel};
 use crate::engine::{Model, ModelEvent, ToolDefinition};
+use crate::provider::CLAUDE_DESKTOP;
 use crate::state::{ProviderChoice, ProviderRow};
 use makepad_ai_hub::chat_wire::{ChatMessage, ChatRole, ProviderKind};
 use makepad_ai_hub::providers::claude_api::{BlockingClaudeTransport, ClaudeApiChatProvider, ClaudeApiConfig, ClaudeAuth};
 use makepad_ai_hub::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
-use makepad_platform::mcp_relay::CLAUDE_DESKTOP;
 use makepad_strict_json as json;
 
-#[cfg(feature = "localai")]
-pub use super::local_model::{local_model_path, local_model_path_in, LocalModel, DEFAULT_LOCAL_MODEL, LOCAL_MODEL_ENV};
+pub use super::local_model::{hub_generation, local_model_path, local_model_path_in, LocalModel, DEFAULT_LOCAL_MODEL, LOCAL_MODEL_ENV};
+
+/// The weights this build can run in-process: the machine's own model with
+/// the `localai` runtime, none without (the hub chat then only routes to a
+/// node on this machine or the LAN).
+fn local_weights() -> Option<std::path::PathBuf> {
+    #[cfg(feature = "localai")]
+    {
+        local_model_path()
+    }
+    #[cfg(not(feature = "localai"))]
+    {
+        None
+    }
+}
+
+/// The hub row alone, for a panel refreshing its menu when discovery lands.
+pub fn hub_row() -> ProviderRow {
+    super::local_model::local_row(local_weights().as_deref(), cfg!(feature = "localai"))
+}
 
 /// The Anthropic model the cloud adapter asks for.
 pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5";
@@ -32,34 +50,42 @@ pub const DEFAULT_CLAUDE_MODEL: &str = "claude-sonnet-5";
 /// The rows the provider chip offers, with honest availability.
 pub fn provider_rows(local_only: bool) -> Vec<ProviderRow> {
     let mut rows = Vec::new();
-    // With local AI built in, Local is always a choice: the hub's election
-    // finds the model where it is resident — a node on this machine, the
-    // fleet's chat box, or the weights here — and says honestly when none
-    // of those answers. Without it (the default app build) there is no
-    // Local row at all.
-    #[cfg(feature = "localai")]
-    rows.push(super::local_model::local_row());
+    // The AI hub is always listed: the hub's election finds the model where
+    // it is resident — a node on this machine, the fleet's chat box, or
+    // (with local AI built in) the weights here — and the row says honestly
+    // when none of those answers.
+    rows.push(hub_row());
     let claude_unavailable = if local_only {
-        Some("Local AI only is on".into())
+        Some("local AI only".into())
     } else if claude_key().is_none() {
-        Some("no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN".into())
+        Some("no API key".into())
     } else {
         None
     };
-    rows.push(ProviderRow { choice: ProviderChoice::Cloud("claude-api".into()), label: "Claude (API)".into(), unavailable: claude_unavailable });
+    rows.push(ProviderRow {
+        choice: ProviderChoice::Cloud("claude-api".into()),
+        label: format!("Claude API · {DEFAULT_CLAUDE_MODEL}"),
+        unavailable: claude_unavailable,
+    });
     // The person's own logged-in CLIs on this machine.
     for kind in [CliKind::ClaudeCode, CliKind::Codex] {
-        let unavailable = if local_only { Some("Local AI only is on".into()) } else { kind.unavailable() };
+        let unavailable = if local_only { Some("local AI only".into()) } else { kind.unavailable() };
         rows.push(ProviderRow { choice: ProviderChoice::Cloud(kind.slug().into()), label: kind.label().into(), unavailable });
     }
-    // Claude Desktop drives this app's tools through its MCP endpoint; the
-    // conversation is typed there.
+    // The desktop assistant drives this app's tools through makepad-remote;
+    // the conversation is typed there.
     rows.push(ProviderRow {
         choice: ProviderChoice::Cloud(CLAUDE_DESKTOP.into()),
-        label: "Claude Desktop".into(),
-        unavailable: if local_only { Some("Local AI only is on".into()) } else { None },
+        label: "Claude Desktop (MCP)".into(),
+        unavailable: if local_only {
+            Some("local AI only".into())
+        } else if !crate::mcp::mcpb::claude_desktop_installed() {
+            Some("not installed".into())
+        } else {
+            None
+        },
     });
-    rows.push(ProviderRow { choice: ProviderChoice::Cloud("none".into()), label: "No model (tools only)".into(), unavailable: None });
+    rows.push(ProviderRow { choice: ProviderChoice::Cloud("none".into()), label: "Tools only".into(), unavailable: None });
     rows
 }
 
@@ -68,12 +94,13 @@ fn claude_key() -> Option<String> {
         .or_else(|| std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok().filter(|k| !k.trim().is_empty()))
 }
 
-/// What answers instead when the person's saved (or default) choice is not
-/// built into this app: Local, in a build without `localai`, becomes the
-/// first provider that can answer here — Claude Code, then Codex, when
-/// installed; else Claude Desktop; else the Claude API when a key is set;
-/// else no model. `None` when the choice is built in. The caller leaves the
-/// saved choice as it is, so a `localai` build still starts on Local.
+/// What a panel starts on instead of the default Local: in a build without
+/// `localai` the hub is only a LAN node that discovery may not have found
+/// yet, so the start is the first provider that can answer here — Claude
+/// Code, then Codex, when installed; else Claude Desktop; else the Claude
+/// API when a key is set; else no model. The AI hub stays a menu pick.
+/// `None` when the choice stands. The caller leaves the saved choice as it
+/// is, so a `localai` build still starts on Local.
 pub fn fallback_choice(choice: &ProviderChoice) -> Option<ProviderChoice> {
     #[cfg(feature = "localai")]
     {
@@ -96,22 +123,21 @@ pub fn fallback_choice(choice: &ProviderChoice) -> Option<ProviderChoice> {
     }
 }
 
-/// Why Local cannot answer in a build without the local model runtime.
-#[cfg(not(feature = "localai"))]
-pub const NO_LOCAL_AI: &str = "this app is built without local AI (its `localai` cargo feature)";
-
 /// Build the model for a choice, honestly: `Err` names why it cannot be.
 pub fn build_model(choice: &ProviderChoice, local_only: bool) -> Result<Box<dyn Model>, String> {
     match choice {
         // With or without weights on this machine: the election decides
         // where the model runs, and the first line says so if nowhere.
-        #[cfg(feature = "localai")]
-        ProviderChoice::Local => Ok(Box::new(LocalModel::new(local_model_path()))),
-        #[cfg(not(feature = "localai"))]
-        ProviderChoice::Local => Err(NO_LOCAL_AI.into()),
+        ProviderChoice::Local => Ok(Box::new(LocalModel::new(local_weights()))),
         ProviderChoice::Cloud(slug) if slug == "none" => Ok(Box::new(NoModel)),
-        ProviderChoice::Cloud(_) if local_only => Err("Local AI only is on".into()),
-        ProviderChoice::Cloud(slug) if slug == CLAUDE_DESKTOP => Ok(Box::new(ClaudeDesktopModel::new())),
+        ProviderChoice::Cloud(_) if local_only => Err("local AI only".into()),
+        ProviderChoice::Cloud(slug) if slug == CLAUDE_DESKTOP => {
+            if crate::mcp::mcpb::claude_desktop_installed() {
+                Ok(Box::new(ClaudeDesktopModel::new()))
+            } else {
+                Err("not installed".into())
+            }
+        }
         ProviderChoice::Cloud(slug) if CliKind::from_slug(slug).is_some() => {
             let kind = CliKind::from_slug(slug).unwrap();
             match kind.unavailable() {
@@ -120,7 +146,7 @@ pub fn build_model(choice: &ProviderChoice, local_only: bool) -> Result<Box<dyn 
             }
         }
         ProviderChoice::Cloud(slug) if slug == "claude-api" => {
-            let key = claude_key().ok_or_else(|| "no ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN".to_string())?;
+            let key = claude_key().ok_or_else(|| "no API key".to_string())?;
             Ok(Box::new(ClaudeModel::new(DEFAULT_CLAUDE_MODEL, key)))
         }
         ProviderChoice::Cloud(slug) => Err(format!("provider '{slug}' is not wired yet")),
@@ -184,7 +210,7 @@ impl ClaudeModel {
 
 impl Model for ClaudeModel {
     fn label(&self) -> String {
-        "Claude".into()
+        format!("Claude API · {}", self.model)
     }
 
     fn configure(&mut self, system: &str, tools: &[ToolDefinition]) -> Result<(), String> {
@@ -201,7 +227,7 @@ impl Model for ClaudeModel {
         let mut input = TurnInput::new(self.system.clone(), self.history.clone());
         input.dynamic_context = dynamic_context.to_string();
         let Some(provider) = &mut self.provider else {
-            self.queued.push(ModelEvent::Error("Claude is not configured".into()));
+            self.queued.push(ModelEvent::Error("the cloud API is not configured".into()));
             return;
         };
         match provider.begin_turn(&input) {
@@ -248,6 +274,9 @@ impl Model for ClaudeModel {
                     out.push(ModelEvent::Delta(text));
                 }
                 ProviderEvent::Status { .. } | ProviderEvent::Serving(_) => {}
+                ProviderEvent::FunctionCallPartial { call_id, name, partial_json } => {
+                    out.push(ModelEvent::ToolCallPartial { call_id, name: name.replace("__", "."), partial_json });
+                }
                 ProviderEvent::FunctionCall { call_id, name, arguments } => {
                     out.push(ModelEvent::ToolCall { call_id, name: name.replace("__", "."), args: arguments });
                 }

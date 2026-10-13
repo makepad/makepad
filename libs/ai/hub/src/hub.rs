@@ -13,14 +13,15 @@
 //!   the hub side holds only engine state (KV warmth). Killing the hub costs
 //!   a re-prefill, never a conversation (aicore.md §7).
 
-#[cfg(feature = "llm")]
 use crate::hub_chat::{HubChatConfig, HubChatSession};
-#[cfg(feature = "llm")]
 use crate::local_llm::{LocalLlmConfig, ToolSpec, WakeHook};
 use crate::pipe::PipeId;
 
+/// Environment setting that makes the app chat strict: the exact fleet model id
+/// to use (for example `qwen3.8-27b`). When set, no other model answers.
+pub const REQUIRED_MODEL_ENV: &str = "MAKEPAD_AI_MODEL";
+
 /// Configuration for a local-model chat session.
-#[cfg(feature = "llm")]
 pub struct ChatConfig {
     /// Engine limits + the GGUF to load.
     pub llm: LocalLlmConfig,
@@ -58,11 +59,12 @@ impl AiHub {
     /// holder, wait on a loading one, else claim and load in-process.
     /// Loading reports through the returned session's `poll()`; nothing
     /// blocks.
-    #[cfg(feature = "llm")]
     pub fn start_local_chat(&self, config: ChatConfig) -> HubChatSession {
         HubChatSession::start(HubChatConfig {
             llm: config.llm,
-            preferred_model: None,
+            // `MAKEPAD_AI_MODEL` names the one model every app chat on this
+            // machine must use: exactly it or an error, never another model.
+            preferred_model: std::env::var(REQUIRED_MODEL_ENV).ok().map(|m| m.trim().to_string()).filter(|m| !m.is_empty()),
             // Existing app chat callers keep the previous unbounded fleet
             // request and provider-default thinking behaviour. Callers that
             // need per-turn controls use HubChatConfig directly.

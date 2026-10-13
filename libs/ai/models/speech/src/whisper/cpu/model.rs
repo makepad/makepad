@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 const GGML_FILE_MAGIC: u32 = 0x67676d6c;
 
 fn should_preserve_raw_weight_type() -> bool {
-    crate::whisper::settings::PRESERVE_RAW_WEIGHT_TYPE
+    crate::whisper::settings::PRESERVE_RAW_WEIGHT_TYPE || crate::whisper::accel::vulkan_selected()
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +117,9 @@ pub struct DecoderLayer {
 }
 
 pub struct WhisperModel {
+    /// Stable lifetime identity for worker-local Vulkan weight residency.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(crate) vulkan_id: std::sync::Arc<()>,
     pub hparams: WhisperHparams,
     pub filters: MelFilters,
     pub vocab: Vocab,
@@ -138,6 +141,8 @@ pub struct WhisperModel {
     pub d_ln_w: Tensor, // ln.weight [n_text_state]
     pub d_ln_b: Tensor, // ln.bias [n_text_state]
     pub decoder_layers: Vec<DecoderLayer>,
+    /// The file mapping the raw weights point into (when loaded from a file).
+    mapped: Option<std::sync::Arc<makepad_ai_loader::MappedRegion>>,
 
     /// The text encoder over `vocab.token_bytes`, built on first use.
     tokenizer: OnceLock<WhisperTokenizer>,
@@ -186,12 +191,20 @@ fn ggml_type_for_ftype(ftype: i32) -> u32 {
         6 => GGML_TYPE_Q5_0,
         7 => GGML_TYPE_Q5_1,
         8 => GGML_TYPE_Q8_0,
+        12 => GGML_TYPE_Q4_K,
+        13 => GGML_TYPE_Q5_K,
         _ => GGML_TYPE_F16, // fallback
     }
 }
 
 impl WhisperModel {
     pub fn load<R: Read + Seek>(r: &mut R) -> io::Result<Self> {
+        Self::load_from(r, None)
+    }
+
+    /// `map`: the file's mapping when `r` reads it: weight tensors then
+    /// point into the mapping instead of being copied.
+    fn load_from<R: Read + Seek>(r: &mut R, map: Option<&std::sync::Arc<makepad_ai_loader::MappedRegion>>) -> io::Result<Self> {
         // 1. Magic
         let magic = read_u32(r)?;
         if magic != GGML_FILE_MAGIC {
@@ -321,8 +334,21 @@ impl WhisperModel {
             let bs = block_size(ttype);
             let nbytes = (nelements / be) * bs;
 
-            let mut data = vec![0u8; nbytes];
-            r.read_exact(&mut data)?;
+            let data = match map {
+                Some(map) => {
+                    let offset = r.stream_position()? as usize;
+                    if offset + nbytes > map.len() {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("tensor {name} runs past the file end")));
+                    }
+                    r.seek(io::SeekFrom::Current(nbytes as i64))?;
+                    crate::whisper::tensor::WeightBytes::Mapped { map: map.clone(), offset, len: nbytes }
+                }
+                None => {
+                    let mut data = vec![0u8; nbytes];
+                    r.read_exact(&mut data)?;
+                    data.into()
+                }
+            };
 
             // Keep GGML shape order (dim 0 = innermost/contiguous dimension).
             // For 2D: shape[0] = columns (contiguous), shape[1] = rows
@@ -481,6 +507,8 @@ impl WhisperModel {
         }
 
         Ok(WhisperModel {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            vulkan_id: std::sync::Arc::new(()),
             hparams,
             filters,
             vocab,
@@ -499,6 +527,7 @@ impl WhisperModel {
             d_ln_b,
             decoder_layers,
             tokenizer: OnceLock::new(),
+            mapped: None,
         })
     }
 
@@ -510,8 +539,23 @@ impl WhisperModel {
             .get_or_init(|| WhisperTokenizer::new(&self.vocab.token_bytes, self.vocab.token_eot.max(0) as usize))
     }
 
+    /// Loads from a read-only mapping of the file: weight tensors stay in
+    /// the page cache (see [`WhisperModel::release_mapped_weights`]).
     pub fn load_file(path: &str) -> io::Result<Self> {
-        let mut f = std::fs::File::open(path)?;
-        Self::load(&mut f)
+        let map = std::sync::Arc::new(
+            makepad_ai_loader::MappedRegion::map(path).map_err(|e| io::Error::new(io::ErrorKind::Other, e))?,
+        );
+        let mut cursor = io::Cursor::new(map.as_slice());
+        let mut model = Self::load_from(&mut cursor, Some(&map))?;
+        model.mapped = Some(map.clone());
+        Ok(model)
+    }
+
+    /// Drops the mapped weight pages from this process (a GPU backend holds
+    /// its own copy now); the CPU path faults them back in if it runs.
+    pub fn release_mapped_weights(&self) {
+        if let Some(map) = &self.mapped {
+            map.release(0, map.len());
+        }
     }
 }

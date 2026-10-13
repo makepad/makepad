@@ -16,3 +16,6 @@ path = "src/bin/cudnn_v8_bench.rs"
 [[bin]]
 name = "swap-bench"
 path = "src/bin/swap_bench.rs"
+
+[target.'cfg(windows)'.dependencies]
+makepad-windows-sys = {path = "../../windows/sys", version = "0.1.0"}

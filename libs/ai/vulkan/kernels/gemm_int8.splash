@@ -1,0 +1,323 @@
+// Symmetric int8, one scale per weight row and activation column. Packed
+// operands are row/column major with K padded to 64. Metadata is (scale,
+// sum of signed codes) per 32768-value span, keeping raw dot sums in i32.
+let Quantize = {
+    workgroup_size: 128
+    vector_x: 1
+    transpose_io: 0
+    x: shader.buffer(f32)
+    x4: shader.buffer(vec4f)
+    xq: shader.buffer_rw(u32)
+    xs: shader.buffer_rw(vec2f)
+    k: shader.uniform(u32)
+    kp: shader.uniform(u32)
+    m: shader.uniform(u32)
+    partial: shader.workgroup(vec4f, 128)
+    read: fn(d, c) {
+        var v = vec4f(0)
+        if d < self.k {
+            if self.transpose_io == 1 {
+                for t in 0..4 {
+                    if c + t < self.m { v[t] = self.x[(c + t) * self.k + d] }
+                }
+            } else if self.vector_x == 1 { v = self.x4[(d * self.m + c) / 4] }
+            else {
+                for t in 0..4 {
+                    if c + t < self.m { v[t] = self.x[d * self.m + c + t] }
+                }
+            }
+        }
+        return v
+    }
+    quant: fn(v, inv) {
+        let z = v * inv
+        return clamp(sign(z) * floor(abs(z) + 0.5), vec4f(-127), vec4f(127))
+    }
+    main: fn() {
+        let lane = local_id().x
+        let col = group_id().x * 4
+        var amax = vec4f(0)
+        let blocks = self.k / self.workgroup_size + min(self.k % self.workgroup_size, u32(1))
+        for block in 0..blocks {
+            let d = block * self.workgroup_size + lane
+            amax = max(amax, abs(self.read(d, col)))
+        }
+        self.partial[lane] = amax
+        barrier()
+        var stride = u32(self.workgroup_size / 2)
+        while stride > 0 {
+            if lane < stride {
+                self.partial[lane] = max(self.partial[lane], self.partial[lane + stride])
+            }
+            barrier()
+            stride /= 2
+        }
+        let scale = self.partial[0] / 127.0
+        var inv = vec4f(0)
+        for t in 0..4 { if scale[t] > 0.0 { inv[t] = 1.0 / scale[t] } }
+        barrier()
+        var start = u32(0)
+        // One empty span still writes zero scales and sums for K=0.
+        while start < max(self.kp, u32(1)) {
+            let end = start + min(u32(32768), self.kp - start)
+            var sum = vec4f(0)
+            let width = u32(self.workgroup_size * 4)
+            let chunks = (end - start) / width + min((end - start) % width, u32(1))
+            for block in 0..chunks {
+                let d = start + block * width + lane * 4
+                if d < end {
+                    let a = self.quant(self.read(d, col), inv)
+                    let b = self.quant(self.read(d + 1, col), inv)
+                    let c = self.quant(self.read(d + 2, col), inv)
+                    let e = self.quant(self.read(d + 3, col), inv)
+                    sum += a + b + c + e
+                    for t in 0..4 {
+                        if col + t < self.m {
+                            let word = (u32(i32(a[t])) & 255) | ((u32(i32(b[t])) & 255) << 8)
+                                | ((u32(i32(c[t])) & 255) << 16) | ((u32(i32(e[t])) & 255) << 24)
+                            self.xq[(col + t) * (self.kp / 4) + d / 4] = word
+                        }
+                    }
+                }
+            }
+            self.partial[lane] = sum
+            barrier()
+            stride = u32(self.workgroup_size / 2)
+            while stride > 0 {
+                if lane < stride { self.partial[lane] += self.partial[lane + stride] }
+                barrier()
+                stride /= 2
+            }
+            if lane == 0 {
+                let total = self.partial[0]
+                for t in 0..4 {
+                    if col + t < self.m {
+                        self.xs[(start / 32768) * self.m + col + t] = vec2f(scale[t], total[t])
+                    }
+                }
+            }
+            barrier()
+            if end == self.kp { break }
+            start = end
+        }
+    }
+}
+
+let Packed = {
+    transpose_io: 0
+    w4: shader.buffer(vec4u)
+    x4: shader.buffer(vec4u)
+    ws: shader.buffer(vec2f)
+    xs: shader.buffer(vec2f)
+    dst: shader.buffer_rw(f32)
+    bias: shader.buffer(f32)
+    has_bias: shader.uniform(u32)
+    n: shader.uniform(u32)
+    kp: shader.uniform(u32)
+    m: shader.uniform(u32)
+    start: shader.uniform(u32)
+    end: shader.uniform(u32)
+    output: fn(r, c, v) {
+        let wm = self.ws[(self.start / 32768) * self.n + r]
+        let xm = self.xs[(self.start / 32768) * self.m + c]
+        var value = f32(v) * wm.x * xm.x
+        var at = r * self.m + c
+        if self.transpose_io == 1 { at = c * self.n + r }
+        if self.start > 0 { value += self.dst[at] }
+        if self.transpose_io == 1 && self.has_bias != 0 && self.end == self.kp { value += self.bias[r] }
+        self.dst[at] = value
+    }
+}
+
+// 64x64, K=64; every global and shared operand load is 16 bytes.
+// Offset correction happens once per output, outside the dot-product loop.
+let Dot = Packed{
+    workgroup_size: 256
+    rows: 4
+    wt: shader.workgroup(vec4u, 256)
+    xt: shader.workgroup(vec4u, 256)
+    dot16: fn(a, b) {
+        return i32(dot4_u8(a.x, b.x) + dot4_u8(a.y, b.y)
+            + dot4_u8(a.z, b.z) + dot4_u8(a.w, b.w))
+    }
+    dots: fn(a, b0, b1, b2, b3) {
+        return vec4i(self.dot16(a, b0), self.dot16(a, b1), self.dot16(a, b2), self.dot16(a, b3))
+    }
+    store: fn(r, c, v) {
+        if r < self.n {
+            let wm = self.ws[(self.start / 32768) * self.n + r]
+            for t in 0..4 {
+                if c + t < self.m {
+                    let xm = self.xs[(self.start / 32768) * self.m + c + t]
+                    let correction = 128 * (i32(wm.y) + i32(xm.y)) + i32(self.end - self.start) * 16384
+                    self.output(r, c + t, v[t] - correction)
+                }
+            }
+        }
+    }
+    main: fn() {
+        let lane = local_id().x
+        let rn = group_id().x * 64
+        let cm = group_id().y * 64
+        let r = (lane / 16) * self.rows
+        let c = (lane % 16) * 4
+        var c0 = vec4i(0)
+        var c1 = vec4i(0)
+        var c2 = vec4i(0)
+        var c3 = vec4i(0)
+        var c4 = vec4i(0)
+        var c5 = vec4i(0)
+        var c6 = vec4i(0)
+        var c7 = vec4i(0)
+        var base = self.start
+        while base < self.end {
+            var j = lane
+            while j < 256 {
+                let row = j / 4
+                let d = (j % 4) * 16
+                var a = vec4u(0)
+                var b = vec4u(0)
+                if rn + row < self.n { a = self.w4[((rn + row) * self.kp + base + d) / 16] }
+                if cm + row < self.m { b = self.x4[((cm + row) * self.kp + base + d) / 16] }
+                let flip = vec4u(u32(2155905152))
+                self.wt[j] = a ^ flip
+                self.xt[j] = b ^ flip
+                j += self.workgroup_size
+            }
+            barrier()
+            for d in 0..4 {
+                let b0 = self.xt[c * 4 + d]
+                let b1 = self.xt[(c + 1) * 4 + d]
+                let b2 = self.xt[(c + 2) * 4 + d]
+                let b3 = self.xt[(c + 3) * 4 + d]
+                c0 += self.dots(self.wt[r * 4 + d], b0, b1, b2, b3)
+                c1 += self.dots(self.wt[(r + 1) * 4 + d], b0, b1, b2, b3)
+                c2 += self.dots(self.wt[(r + 2) * 4 + d], b0, b1, b2, b3)
+                c3 += self.dots(self.wt[(r + 3) * 4 + d], b0, b1, b2, b3)
+                if self.rows == 8 {
+                    c4 += self.dots(self.wt[(r + 4) * 4 + d], b0, b1, b2, b3)
+                    c5 += self.dots(self.wt[(r + 5) * 4 + d], b0, b1, b2, b3)
+                    c6 += self.dots(self.wt[(r + 6) * 4 + d], b0, b1, b2, b3)
+                    c7 += self.dots(self.wt[(r + 7) * 4 + d], b0, b1, b2, b3)
+                }
+            }
+            barrier()
+            base += 64
+        }
+        self.store(rn + r, cm + c, c0)
+        self.store(rn + r + 1, cm + c, c1)
+        self.store(rn + r + 2, cm + c, c2)
+        self.store(rn + r + 3, cm + c, c3)
+        if self.rows == 8 {
+            self.store(rn + r + 4, cm + c, c4)
+            self.store(rn + r + 5, cm + c, c5)
+            self.store(rn + r + 6, cm + c, c6)
+            self.store(rn + r + 7, cm + c, c7)
+        }
+    }
+}
+
+// Signed cooperative matrices read the same packed bytes as Dot. The
+// 16-row shape uses four column accumulators per subgroup; the 64-row
+// shape uses one. The largest workgroup tile needs 20 KiB shared memory.
+let Coop = Packed{
+    workgroup_size: 128
+    subgroups: 4
+    wide: 0
+    tk: 16
+    A: shader.coopmat(shader.i8, 16, 16, shader.matrix_a)
+    B: shader.coopmat(shader.i8, 16, 16, shader.matrix_b)
+    C: shader.coopmat(i32, 16, 16, shader.matrix_accumulator)
+    wt: shader.workgroup(vec4u, 128)
+    xt: shader.workgroup(vec4u, 128)
+    out: shader.workgroup(i32, 4096)
+    main: fn() {
+        let lane = local_id().x
+        let sg = subgroup_id()
+        var bn = u32(16 * self.subgroups)
+        var bm = u32(64)
+        var sr = sg * 16
+        var sc = u32(0)
+        if self.wide == 1 {
+            bn = u32(64)
+            bm = u32(16 * self.subgroups)
+            sr = u32(0)
+            sc = sg * 16
+        }
+        let rn = group_id().x * bn
+        let cm = group_id().y * bm
+        var c0 = coopmat_fill(self.C, 0)
+        var c1 = coopmat_fill(self.C, 0)
+        var c2 = coopmat_fill(self.C, 0)
+        var c3 = coopmat_fill(self.C, 0)
+        var base = self.start
+        while base < self.end {
+            var j = lane
+            while j < bn * 2 {
+                let r = j / 2
+                let d = (j % 2) * 16
+                var v = vec4u(0)
+                if rn + r < self.n { v = self.w4[((rn + r) * self.kp + base + d) / 16] }
+                self.wt[j] = v
+                j += self.workgroup_size
+            }
+            j = lane
+            while j < bm * 2 {
+                let c = j / 2
+                let d = (j % 2) * 16
+                var v = vec4u(0)
+                if cm + c < self.m { v = self.x4[((cm + c) * self.kp + base + d) / 16] }
+                self.xt[j] = v
+                j += self.workgroup_size
+            }
+            barrier()
+            for d in 0..32 / self.tk {
+                let a = coopmat_load(self.A, self.wt[sr * 2 + d * (self.tk / 16)], 2, 0)
+                let b0 = coopmat_load(self.B, self.xt[sc * 2 + d * (self.tk / 16)], 2, 1)
+                c0 = coopmat_mul_add(a, b0, c0)
+                if self.wide == 0 {
+                    let b1 = coopmat_load(self.B, self.xt[32 + d * (self.tk / 16)], 2, 1)
+                    let b2 = coopmat_load(self.B, self.xt[64 + d * (self.tk / 16)], 2, 1)
+                    let b3 = coopmat_load(self.B, self.xt[96 + d * (self.tk / 16)], 2, 1)
+                    c1 = coopmat_mul_add(a, b1, c1)
+                    c2 = coopmat_mul_add(a, b2, c2)
+                    c3 = coopmat_mul_add(a, b3, c3)
+                }
+            }
+            barrier()
+            base += 32
+        }
+        coopmat_store(c0, self.out[sr * bm + sc], bm, 0)
+        if self.wide == 0 {
+            coopmat_store(c1, self.out[sr * bm + 16], bm, 0)
+            coopmat_store(c2, self.out[sr * bm + 32], bm, 0)
+            coopmat_store(c3, self.out[sr * bm + 48], bm, 0)
+        }
+        barrier()
+        var j = lane
+        while j < bn * bm {
+            let r = j / bm
+            let c = j % bm
+            if rn + r < self.n && cm + c < self.m { self.output(rn + r, cm + c, self.out[j]) }
+            j += self.workgroup_size
+        }
+    }
+}
+{
+    gemm_quantize_columns: Quantize{}
+    gemm_quantize_columns_nt: Quantize{transpose_io: 1}
+    gemm_i8_dot4_4x4: Dot{}
+    gemm_i8_dot4_nt_4x4: Dot{transpose_io: 1}
+    gemm_i8_dot4_8x4: Dot{rows: 8 workgroup_size: 128}
+    gemm_i8_coop_16x16x16: Coop{}
+    gemm_i8_coop_64x16x16: Coop{
+        wide: 1
+        A: shader.coopmat(shader.i8, 64, 16, shader.matrix_a)
+        C: shader.coopmat(i32, 64, 16, shader.matrix_accumulator)
+    }
+    gemm_i8_coop_16x16x32: Coop{
+        tk: 32
+        A: shader.coopmat(shader.i8, 16, 32, shader.matrix_a)
+        B: shader.coopmat(shader.i8, 32, 16, shader.matrix_b)
+    }
+}

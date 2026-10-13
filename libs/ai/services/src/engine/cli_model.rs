@@ -62,7 +62,7 @@ impl CliKind {
     /// Whether the CLI is installed here: `None` when it is, else why not.
     pub fn unavailable(self) -> Option<String> {
         match self.provider().availability() {
-            ProviderAvailability::Unavailable { reason } => Some(reason),
+            ProviderAvailability::Unavailable { .. } => Some("not installed".into()),
             _ => None,
         }
     }
@@ -473,7 +473,7 @@ impl Model for CliModel {
             match event {
                 ProviderEvent::Delta(text) => self.take_delta(&text, &mut out),
                 ProviderEvent::Status { .. } | ProviderEvent::Serving(_) => {}
-                ProviderEvent::FunctionCall { .. } => {}
+                ProviderEvent::FunctionCall { .. } | ProviderEvent::FunctionCallPartial { .. } => {}
                 ProviderEvent::Done { text } => self.finish(text, &mut out),
                 ProviderEvent::Error(e) => {
                     self.in_turn = false;

@@ -2318,22 +2318,18 @@ fn crate_f32_to_f16(v: f32) -> u16 {
 
 #[cfg(windows)]
 mod dynlib {
-    use std::ffi::{c_char, c_void, CString, OsStr};
+    use std::ffi::{c_void, CString, OsStr};
     use std::os::windows::ffi::OsStrExt;
 
     const LOAD_WITH_ALTERED_SEARCH_PATH: u32 = 0x0000_0008;
 
-    extern "system" {
-        fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
-        fn SetDllDirectoryW(name: *const u16) -> i32;
-        fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
-    }
+    use makepad_windows_sys::Win32::System::LibraryLoader::*;
 
     pub unsafe fn set_dll_dir(dir: &std::path::Path) {
         use std::os::windows::ffi::OsStrExt;
         let mut wide: Vec<u16> = dir.as_os_str().encode_wide().collect();
         wide.push(0);
-        let _ = SetDllDirectoryW(wide.as_ptr());
+        let _ = SetDllDirectoryW(Some(makepad_windows_sys::core::PCWSTR(wide.as_ptr())));
     }
 
     pub unsafe fn load(name: &str) -> *mut c_void {
@@ -2344,12 +2340,21 @@ mod dynlib {
         } else {
             0
         };
-        LoadLibraryExW(wide.as_ptr(), std::ptr::null_mut(), flags)
+        LoadLibraryExW(
+            makepad_windows_sys::core::PCWSTR(wide.as_ptr()),
+            None,
+            LOAD_LIBRARY_FLAGS(flags),
+        )
+        .map_or(std::ptr::null_mut(), |module| module.0)
     }
 
     pub unsafe fn sym(lib: *mut c_void, name: &str) -> *mut c_void {
         let c = CString::new(name).unwrap_or_default();
-        GetProcAddress(lib, c.as_ptr())
+        GetProcAddress(
+            makepad_windows_sys::Win32::Foundation::HMODULE(lib),
+            makepad_windows_sys::core::PCSTR(c.as_ptr().cast()),
+        )
+        .map_or(std::ptr::null_mut(), |function| function as *mut c_void)
     }
 }
 

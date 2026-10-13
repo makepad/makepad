@@ -4,6 +4,8 @@
 //!   opcheck                      — per-op numerical gates vs CPU references
 //!                                  (runs every kernel through the exact
 //!                                  planner/dispatch path the session uses)
+//!   opcheck-shared               — shared CPU-reference checks on CUDA
+//!   opcheck-vulkan               — shared CPU-reference checks on Vulkan
 //!   mmvq-error                   — error distribution of the Q8_1-activation
 //!                                  decode mat-vec over many rows, K and
 //!                                  widths: the evidence behind `opcheck`'s
@@ -42,6 +44,9 @@ pub fn main() {
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
         Some("opcheck") => opcheck(),
+        Some("opcheck-shared") => opcheck_shared_cuda(),
+        #[cfg(target_os = "linux")]
+        Some("opcheck-vulkan") => opcheck_vulkan(),
         Some("mmvq-error") => mmvq_error_report(&args[2..]),
         Some("opcheck-q4k-mmq") => opcheck_q4k_mmq(),
         Some("opcheck-q6k-mmq") => opcheck_q6k_mmq(),
@@ -50,7 +55,7 @@ pub fn main() {
         Some("bench") => bench(&args[2..]),
         _ => {
             eprintln!(
-                "usage: llama-cuda-canary <opcheck|mmvq-error|opcheck-q4k-mmq|opcheck-q5k-mmq|opcheck-q6k-mmq|generate|bench> ..."
+                "usage: llama-cuda-canary <opcheck|opcheck-shared|opcheck-vulkan|mmvq-error|opcheck-q4k-mmq|opcheck-q5k-mmq|opcheck-q6k-mmq|generate|bench> ..."
             );
             2
         }
@@ -567,7 +572,7 @@ impl Bench {
 
     fn run(
         &mut self,
-        runtime: &CudaExecRuntime,
+        runtime: &dyn RawExec,
         root: TensorId,
         wanted: &[TensorId],
     ) -> BTreeMap<TensorId, Vec<u8>> {
@@ -2298,29 +2303,60 @@ fn quant_matmul_canary(exec: &CudaExecRuntime, rng: &mut Rng, failures: &mut usi
 }
 
 #[allow(clippy::too_many_lines)]
-fn opcheck() -> i32 {
-    let exec = match ExecRuntime::with_backend(ExecBackendKind::Cuda) {
-        Ok(ExecRuntime::Cuda(runtime)) => runtime,
-        Ok(_) => unreachable!(),
-        Err(err) => {
-            eprintln!("opcheck: CUDA runtime unavailable: {err:?}");
-            return 3;
-        }
-    };
-    println!("device: {}", exec.device_description());
+/// The op checks every executor runs (CUDA and Vulkan): each graph op
+/// through the executor's real planner/dispatch path against a CPU
+/// reference. `tolerant` (Vulkan) counts rejected sections as failures and
+/// continues so one unavailable kernel cannot hide the remaining checks.
+fn generic_opcheck(exec: &dyn RawExec, tolerant: bool, mut rng: Rng) -> usize {
     let mut failures = 0usize;
-    let mut rng = Rng::new(1234);
-
-    quant_matmul_canary(&exec, &mut rng, &mut failures);
-
-    q4k_mmq_canary(&exec, &mut failures);
-    q5k_mmq_canary(&exec, &mut failures);
-    q6k_mmq_canary(&exec, &mut failures);
-    mmvq_swiglu_canary(&exec, &mut failures);
-    cpy_set_rows_canary(&exec, &mut failures);
-    cpy_ssm_state_canary(&exec, &mut failures);
-    iq_kinds_canary(&exec, &mut failures);
-
+    let mut rejected = 0usize;
+    // The quantised mat-vec and mat-mat (Vulkan reads the activations
+    // unrounded; CUDA's routes are gated by quant_matmul_canary instead).
+    if tolerant {
+        rejected += run_section(tolerant, "quantised mat-vec and mat-mat", &mut || {
+            for ty in [TensorType::Q4K, TensorType::Q5K, TensorType::Q6K, TensorType::Q8_0] {
+                for (k, n, m) in [
+                    (512usize, 37usize, 1usize),
+                    (2560, 64, 3),
+                    (512, 70, 40),
+                    (2560, 70, 300),
+                    (512, 37, 513),
+                ] {
+                    let w = quant_blocks(&mut rng, ty, k, n);
+                    let row_bytes = w.len() / n;
+                    let acts = f32s(&mut rng, k * m);
+                    let mut bench = Bench::new(64 << 20);
+                    let wt = bench.tensor("w", ty, &[k as i64, n as i64], &w);
+                    let xt = bench.tensor("x", TensorType::F32, &[k as i64, m as i64], &as_bytes_f32(&acts));
+                    let out = bench.ctx.mul_mat(wt, xt, BufferUsage::Activations).expect("mul_mat");
+                    let outputs = bench.run(&exec, out, &[out]);
+                    let got = bytes_to_f32(&outputs[&out]);
+                    // The activations as the Vulkan gemv sees them: int8 per
+                    // 32 with d = max|x| / 127, q = round(x * (1 / d)).
+                    let mut xq = Vec::with_capacity(acts.len());
+                    for group in acts.chunks(32) {
+                        let amax = group.iter().fold(0.0f32, |a, v| a.max(v.abs()));
+                        let d = amax / 127.0;
+                        let inv = if amax > 0.0 { 1.0 / d } else { 0.0 };
+                        for &v in group {
+                            xq.push((v * inv).round() * d);
+                        }
+                    }
+                    let mut want = vec![0.0f32; n * m];
+                    for row in 0..n {
+                        let wr = dequant_row(ty, &w[row * row_bytes..(row + 1) * row_bytes], k);
+                        for col in 0..m {
+                            let acc: f64 = (0..k).map(|i| wr[i] as f64 * xq[col * k + i] as f64).sum();
+                            want[col * n + row] = acc as f32;
+                        }
+                    }
+                    let name: &'static str = Box::leak(format!("gemv_{}_k{k}_m{m}", quant_type_tag(ty)).into_boxed_str());
+                    compare_tol(name, got, want, 1e-4, 1e-4, &mut failures);
+                }
+            }
+        });
+    }
+    rejected += run_section(tolerant, "f32 mat-vec and GEMM", &mut || {
     // --- f32 mat-vec and cublas GEMM
     {
         let (k, n) = (96usize, 17usize);
@@ -2358,7 +2394,9 @@ fn opcheck() -> i32 {
             compare(case_name, got, want, tol, &mut failures);
         }
     }
+    });
 
+    rejected += run_section(tolerant, "batched strided f16 x f32 with GQA (division) broadcast", &mut || {
     // --- batched strided f16 x f32 with GQA (division) broadcast
     {
         let (k, n, m, a2, b2) = (64usize, 40usize, 3usize, 2usize, 4usize);
@@ -2399,7 +2437,9 @@ fn opcheck() -> i32 {
         }
         compare("mul_mat_batched_f16_gqa", got, want, 1e-3, &mut failures);
     }
+    });
 
+    rejected += run_section(tolerant, "get_rows (quant + f32)", &mut || {
     // --- get_rows (quant + f32)
     {
         let (k, n) = (512usize, 9usize);
@@ -2425,7 +2465,9 @@ fn opcheck() -> i32 {
         }
         compare("get_rows_q4k", got, want, 1e-6, &mut failures);
     }
+    });
 
+    rejected += run_section(tolerant, "set_rows f32 -> f16 (KV write path)", &mut || {
     // --- set_rows f32 -> f16 (KV write path)
     {
         let (width, cache_rows, n_rows) = (64usize, 32usize, 5usize);
@@ -2461,7 +2503,9 @@ fn opcheck() -> i32 {
         // reference's converter may tie-break the halfway case differently.
         compare("set_rows_f32_f16", got, want, 2e-3, &mut failures);
     }
+    });
 
+    rejected += run_section(tolerant, "masked softmax", &mut || {
     // --- masked softmax
     {
         let (kc, nq, h) = (97usize, 4usize, 3usize);
@@ -2515,7 +2559,9 @@ fn opcheck() -> i32 {
         }
         compare("softmax_mask", got, want, 1e-5, &mut failures);
     }
+    });
 
+    rejected += run_section(tolerant, "flash decode vs naive attention (through the real builder shapes)", &mut || {
     // --- flash decode vs naive attention (through the real builder shapes)
     {
         let (d, kc, nq, h, hkv) = (64usize, 40usize, 2usize, 4usize, 2usize);
@@ -2605,7 +2651,9 @@ fn opcheck() -> i32 {
         }
         compare("flash_decode", got, want, 2e-3, &mut failures);
     }
+    });
 
+    rejected += run_section(tolerant, "fattn-mma-f16 D=256 ncols 8x8 (GQA>4, n_q>=20, n_kv%256==0)", &mut || {
     // --- fattn-mma-f16 D=256 ncols 8x8 (GQA>4, n_q>=20, n_kv%256==0)
     {
         let (d, kc, nq, h, hkv) = (256usize, 256usize, 32usize, 8usize, 1usize);
@@ -2693,7 +2741,9 @@ fn opcheck() -> i32 {
         }
         compare_tol("fattn_mma_d256", got, want, 5e-2, 2e-2, &mut failures);
     }
+    });
 
+    rejected += run_section(tolerant, "norms", &mut || {
     // --- norms
     {
         let (ne0, rows) = (96usize, 6usize);
@@ -2731,7 +2781,9 @@ fn opcheck() -> i32 {
             compare(case_name, got, want, 1e-5, &mut failures);
         }
     }
+    });
 
+    rejected += run_section(tolerant, "RMS_NORM + MUL (+ ADD) fusion", &mut || {
     // --- official RMS_NORM + MUL (+ ADD) fusion (ggml-cuda.cu:3994-4004)
     {
         fn rms_scale_add(
@@ -2809,7 +2861,9 @@ fn opcheck() -> i32 {
             compare(case_name, got, want, 1e-5, &mut failures);
         }
     }
+    });
 
+    rejected += run_section(tolerant, "rope IMROPE", &mut || {
     // --- rope IMROPE
     {
         let (d, heads, tokens) = (64usize, 3usize, 4usize);
@@ -2884,7 +2938,9 @@ fn opcheck() -> i32 {
         }
         compare("rope_imrope", got, want, 1e-4, &mut failures);
     }
+    });
 
+    rejected += run_section(tolerant, "binary broadcast, unary, glu", &mut || {
     // --- binary broadcast, unary, glu
     {
         let (ne0, rows) = (64usize, 7usize);
@@ -2950,7 +3006,9 @@ fn opcheck() -> i32 {
             .collect();
         compare("glu_swiglu", got, want, 1e-5, &mut failures);
     }
+    });
 
+    rejected += run_section(tolerant, "cont of a permuted view + concat", &mut || {
     // --- cont of a permuted view + concat
     {
         let (r, c) = (8usize, 6usize);
@@ -3055,7 +3113,9 @@ fn opcheck() -> i32 {
             &mut failures,
         );
     }
+    });
 
+    rejected += run_section(tolerant, "ssm_conv (ggml layout)", &mut || {
     // --- ssm_conv (ggml layout)
     {
         let (d_conv, d_inner, n_t) = (4usize, 16usize, 7usize);
@@ -3090,7 +3150,9 @@ fn opcheck() -> i32 {
         }
         compare("ssm_conv", got, want, 1e-5, &mut failures);
     }
+    });
 
+    rejected += run_section(tolerant, "SSM_CONV + SILU and UNARY + MUL", &mut || {
     // --- official SSM_CONV + SILU (ggml-cuda.cu:4006) and UNARY + MUL (4012)
     {
         let (d_conv, d_inner, n_t) = (4usize, 16usize, 7usize);
@@ -3171,94 +3233,140 @@ fn opcheck() -> i32 {
             compare(case_name, got, want, 1e-5, &mut failures);
         }
     }
+    });
 
-    // --- gated delta net (scalar gate, GQA k-heads) vs sequential reference,
-    // in isolating variants: core loop (h1), head mapping (t1), full case.
-    for (case_name, sv, h, hk, n_t) in [
-        ("gdn_h1_core", 32usize, 1usize, 1usize, 3usize),
-        ("gdn_map_t1", 32, 6, 3, 1),
-        ("gated_delta_net", 32, 6, 3, 3),
+    rejected += run_section(tolerant, "gated delta net and per-token checkpoints vs sequential reference", &mut || {
+    // Include the vec4 path and its unaligned fallback, scalar/vector gates,
+    // and multiple sequences so checkpoint-plane ordering is observable.
+    for (case_name, sv, h, hk, n_t, n_s, gate_g, checkpoints, pad) in [
+        ("gdn_h1_core", 32usize, 1usize, 1usize, 3usize, 1usize, 1usize, false, 0usize),
+        ("gdn_map_t1", 32, 6, 3, 1, 1, 1, false, 0),
+        ("gated_delta_net", 32, 6, 3, 3, 1, 1, false, 0),
+        ("gdn_v4", 128, 6, 3, 3, 2, 1, false, 0),
+        ("gdn_ckpt_t1", 32, 6, 3, 1, 2, 1, true, 0),
+        ("gdn_ckpt_t2", 32, 6, 3, 2, 2, 1, true, 0),
+        ("gdn_ckpt_t3", 64, 6, 3, 3, 2, 1, true, 0),
+        ("gdn_ckpt_t4", 32, 6, 3, 4, 2, 1, true, 0),
+        ("gdn_ckpt_vector_gate", 64, 6, 3, 4, 2, 64, true, 0),
+        ("gdn_v4_ckpt_t1", 128, 6, 3, 1, 2, 1, true, 0),
+        ("gdn_v4_ckpt_t2", 128, 6, 3, 2, 2, 1, true, 0),
+        ("gdn_v4_ckpt_t3", 128, 6, 3, 3, 2, 1, true, 0),
+        ("gdn_v4_ckpt_t4", 128, 6, 3, 4, 2, 1, true, 0),
+        ("gdn_v4_ckpt_vector_gate", 128, 6, 3, 4, 2, 128, true, 0),
+        ("gdn_ckpt_unaligned", 128, 6, 3, 4, 2, 1, true, 1),
     ] {
         let mut rng = Rng::new(4242);
-        let q_data = f32s(&mut rng, sv * hk * n_t);
-        let k_data = f32s(&mut rng, sv * hk * n_t);
-        let v_data = f32s(&mut rng, sv * h * n_t);
-        let g_data: Vec<f32> = f32s(&mut rng, h * n_t).iter().map(|x| -x.abs()).collect();
-        let beta_data: Vec<f32> = f32s(&mut rng, h * n_t).iter().map(|x| 0.5 + 0.4 * x).collect();
-        let state_data = f32s(&mut rng, sv * sv * h);
-        let mut bench = Bench::new(8 << 20);
+        let q_stride = sv + pad;
+        let mut q_data = f32s(&mut rng, q_stride * hk * n_t * n_s);
+        let mut k_data = f32s(&mut rng, q_stride * hk * n_t * n_s);
+        if checkpoints || sv == 128 {
+            // Model q/k are L2-normalized. Keep the original small stress
+            // cases as-is; larger scans should not amplify rounding through
+            // exponentially growing states unrelated to model inputs.
+            for data in [&mut q_data, &mut k_data] {
+                for row in data.chunks_mut(q_stride) {
+                    let norm = row[..sv].iter().map(|x| x * x).sum::<f32>().sqrt();
+                    for x in &mut row[..sv] {
+                        *x /= norm;
+                    }
+                }
+            }
+        }
+        let v_data = f32s(&mut rng, sv * h * n_t * n_s);
+        let g_data: Vec<f32> = f32s(&mut rng, gate_g * h * n_t * n_s).iter().map(|x| -x.abs()).collect();
+        let beta_data: Vec<f32> = f32s(&mut rng, h * n_t * n_s).iter().map(|x| 0.5 + 0.4 * x).collect();
+        let state_data = f32s(&mut rng, sv * sv * h * n_s);
+        let mut bench = Bench::new(16 << 20);
         let q = bench.tensor(
             "q",
             TensorType::F32,
-            &[sv as i64, hk as i64, n_t as i64, 1],
+            &[q_stride as i64, hk as i64, n_t as i64, n_s as i64],
             &as_bytes_f32(&q_data),
         );
         let k = bench.tensor(
             "k",
             TensorType::F32,
-            &[sv as i64, hk as i64, n_t as i64, 1],
+            &[q_stride as i64, hk as i64, n_t as i64, n_s as i64],
             &as_bytes_f32(&k_data),
         );
+        let view = |ctx: &mut Context, id| ctx.view_4d(
+            id, sv as i64, hk as i64, n_t as i64, n_s as i64,
+            q_stride * 4, q_stride * hk * 4, q_stride * hk * n_t * 4, 0,
+        ).expect("gdn q/k view");
+        let q = view(&mut bench.ctx, q);
+        let k = view(&mut bench.ctx, k);
         let v = bench.tensor(
             "v",
             TensorType::F32,
-            &[sv as i64, h as i64, n_t as i64, 1],
+            &[sv as i64, h as i64, n_t as i64, n_s as i64],
             &as_bytes_f32(&v_data),
         );
         let g = bench.tensor(
             "g",
             TensorType::F32,
-            &[1, h as i64, n_t as i64, 1],
+            &[gate_g as i64, h as i64, n_t as i64, n_s as i64],
             &as_bytes_f32(&g_data),
         );
         let beta = bench.tensor(
             "beta",
             TensorType::F32,
-            &[1, h as i64, n_t as i64, 1],
+            &[1, h as i64, n_t as i64, n_s as i64],
             &as_bytes_f32(&beta_data),
         );
         let state = bench.tensor(
             "state",
             TensorType::F32,
-            &[(sv * sv) as i64, h as i64, 1, 1],
+            &[(sv * sv) as i64, h as i64, n_s as i64, 1],
             &as_bytes_f32(&state_data),
         );
         let out = bench
             .ctx
-            .gated_delta_net(q, k, v, g, beta, state, BufferUsage::Activations)
+            .gated_delta_net_with_checkpoints(q, k, v, g, beta, state, checkpoints, BufferUsage::Activations)
             .expect("gated_delta_net");
         let outputs = bench.run(&exec, out, &[out]);
         let got = bytes_to_f32(&outputs[&out]);
-        // Sequential reference (kernel semantics, kda = 0).
+        // Attention is sequence-major; checkpoint planes are token-major,
+        // each containing all sequences' states, including the final plane.
         let scale = 1.0 / (sv as f32).sqrt();
-        let mut state_ref = state_data.clone(); // [h][col sv][row sv] as (head*sv + col)*sv + row
-        let mut attn_ref = vec![0.0f32; sv * h * n_t];
+        let mut state_ref = state_data.clone();
+        let mut checkpoint_ref = Vec::new();
+        let mut attn_ref = vec![0.0f32; sv * h * n_t * n_s];
         for t in 0..n_t {
-            for head in 0..h {
-                let kv_head = head % hk;
-                let qv = &q_data[(t * hk + kv_head) * sv..(t * hk + kv_head + 1) * sv];
-                let kv = &k_data[(t * hk + kv_head) * sv..(t * hk + kv_head + 1) * sv];
-                let vv = &v_data[(t * h + head) * sv..(t * h + head + 1) * sv];
-                let g_scalar = g_data[t * h + head].exp();
-                let beta_val = beta_data[t * h + head];
-                for col in 0..sv {
-                    let scol = &mut state_ref[(head * sv + col) * sv..(head * sv + col + 1) * sv];
-                    let mut kv_dot = 0.0f32;
-                    for row in 0..sv {
-                        kv_dot += scol[row] * kv[row];
+            for seq in 0..n_s {
+                for head in 0..h {
+                    let kv_head = head % hk;
+                    let qi = ((seq * n_t + t) * hk + kv_head) * q_stride;
+                    let qv = &q_data[qi..qi + sv];
+                    let kv = &k_data[qi..qi + sv];
+                    let vi = (seq * n_t + t) * h + head;
+                    let vv = &v_data[vi * sv..(vi + 1) * sv];
+                    let beta_val = beta_data[vi];
+                    let decay: Vec<f32> = (0..sv).map(|row| {
+                        g_data[vi * gate_g + if gate_g == 1 { 0 } else { row }].exp()
+                    }).collect();
+                    for col in 0..sv {
+                        let si = ((seq * h + head) * sv + col) * sv;
+                        let scol = &mut state_ref[si..si + sv];
+                        let mut kv_dot = 0.0f32;
+                        for row in 0..sv {
+                            kv_dot += if gate_g == 1 { scol[row] * kv[row] } else { decay[row] * scol[row] * kv[row] };
+                        }
+                        let delta = (vv[col] - if gate_g == 1 { decay[0] * kv_dot } else { kv_dot }) * beta_val;
+                        let mut attn = 0.0f32;
+                        for row in 0..sv {
+                            scol[row] = decay[row] * scol[row] + kv[row] * delta;
+                            attn += scol[row] * qv[row];
+                        }
+                        attn_ref[vi * sv + col] = attn * scale;
                     }
-                    let delta = (vv[col] - g_scalar * kv_dot) * beta_val;
-                    let mut attn = 0.0f32;
-                    for row in 0..sv {
-                        scol[row] = g_scalar * scol[row] + kv[row] * delta;
-                        attn += scol[row] * qv[row];
-                    }
-                    attn_ref[(t * h + head) * sv + col] = attn * scale;
                 }
+            }
+            if checkpoints {
+                checkpoint_ref.extend_from_slice(&state_ref);
             }
         }
         let mut want = attn_ref;
-        want.extend_from_slice(&state_ref);
+        want.extend_from_slice(if checkpoints { &checkpoint_ref } else { &state_ref });
         if case_name == "gdn_map_t1" {
             let attn_len = sv * h * n_t;
             for head in 0..h {
@@ -3279,6 +3387,460 @@ fn opcheck() -> i32 {
         }
         compare_tol(case_name, got, want, 5e-4, 1e-5, &mut failures);
     }
+    });
+    rejected += run_section(tolerant, "vision float GEMM", &mut || {
+        vision_gemm_opcheck(exec, &mut rng, &mut failures);
+    });
+    rejected += run_section(tolerant, "vision LayerNorm", &mut || {
+        vision_norm_opcheck(exec, &mut rng, &mut failures);
+    });
+    rejected += run_section(tolerant, "vision RoPE", &mut || {
+        vision_rope_opcheck(exec, &mut rng, &mut failures);
+    });
+    rejected += run_section(tolerant, "vision bilinear resize", &mut || {
+        vision_resize_opcheck(exec, &mut rng, &mut failures);
+    });
+    rejected += run_section(tolerant, "vision f32 flash attention", &mut || {
+        vision_attention_opcheck(exec, &mut rng, &mut failures, tolerant);
+    });
+    rejected += run_section(tolerant, "vision softmax/gather/GELU", &mut || {
+        vision_misc_opcheck(exec, &mut rng, &mut failures);
+    });
+    failures + rejected
+}
+
+fn vision_gemm_opcheck(exec: &dyn RawExec, rng: &mut Rng, failures: &mut usize) {
+    // Long image sequences and tails on every tile axis. Padded f16 rows
+    // keep both backends on f32 activations for this arithmetic gate.
+    for (name, ty, padded) in [
+        ("vision_gemm_f32_1031", TensorType::F32, false),
+        ("vision_gemm_f16_1031_strided", TensorType::F16, true),
+    ] {
+        let (k, n, m) = (67usize, 35usize, 1031usize);
+        let pitch = k + if padded { 3 } else { 0 };
+        let wdata = f32s(rng, pitch * (n + 1));
+        let xdata = f32s(rng, k * m);
+        let size = if ty == TensorType::F16 { 2 } else { 4 };
+        let packed = if ty == TensorType::F16 { f16_bytes(&wdata) } else { as_bytes_f32(&wdata) };
+        let mut bench = Bench::new(8 << 20);
+        let w = bench.tensor("w", ty, &[pitch as i64, (n + 1) as i64], &packed);
+        let w = bench.ctx.view_2d(w, k as i64, n as i64, pitch * size, pitch * size).expect("weight view");
+        let x = bench.tensor("x", TensorType::F32, &[k as i64, m as i64], &as_bytes_f32(&xdata));
+        let out = bench.ctx.mul_mat(w, x, BufferUsage::Activations).expect("matmul");
+        let outputs = bench.run(exec, out, &[out]);
+        let mut want = vec![0.0; n * m];
+        for col in 0..m {
+            for row in 0..n {
+                want[col * n + row] = (0..k).map(|d| {
+                    let w = wdata[(row + 1) * pitch + d];
+                    let w = if ty == TensorType::F16 { f16_round(w) } else { w };
+                    w as f64 * xdata[col * k + d] as f64
+                }).sum::<f64>() as f32;
+            }
+        }
+        compare_tol(name, bytes_to_f32(&outputs[&out]), want, 1e-4, 1e-5, failures);
+    }
+    for (name, ty) in [("vision_gemm_f32_4d", TensorType::F32), ("vision_gemm_f16_4d", TensorType::F16)] {
+        let (k, n, m, a2, a3, b2, b3) = (37usize, 19usize, 5usize, 2usize, 2usize, 4usize, 4usize);
+        let wdata = f32s(rng, k * n * a2 * a3);
+        let xdata = f32s(rng, k * m * b2 * b3);
+        let packed = if ty == TensorType::F16 { f16_bytes(&wdata) } else { as_bytes_f32(&wdata) };
+        let mut bench = Bench::new(8 << 20);
+        let w = bench.tensor("w", ty, &[k as i64, n as i64, a2 as i64, a3 as i64], &packed);
+        let x = bench.tensor("x", TensorType::F32, &[k as i64, m as i64, b2 as i64, b3 as i64], &as_bytes_f32(&xdata));
+        let out = bench.ctx.mul_mat(w, x, BufferUsage::Activations).expect("batched matmul");
+        let outputs = bench.run(exec, out, &[out]);
+        let mut want = vec![0.0; n * m * b2 * b3];
+        for i3 in 0..b3 {
+            for i2 in 0..b2 {
+                let batch = i3 * b2 + i2;
+                let weight_batch = (i3 / (b3 / a3)) * a2 + i2 / (b2 / a2);
+                for col in 0..m {
+                    for row in 0..n {
+                        want[(batch * m + col) * n + row] = (0..k).map(|d| {
+                            let w = wdata[(weight_batch * n + row) * k + d];
+                            let w = if ty == TensorType::F16 { f16_round(w) } else { w };
+                            w as f64 * xdata[(batch * m + col) * k + d] as f64
+                        }).sum::<f64>() as f32;
+                    }
+                }
+            }
+        }
+        compare_tol(name, bytes_to_f32(&outputs[&out]), want, 1e-4, 1e-5, failures);
+    }
+}
+
+fn vision_norm_opcheck(exec: &dyn RawExec, rng: &mut Rng, failures: &mut usize) {
+    for (name, width) in [("vision_layer_norm_72", 72usize), ("vision_layer_norm_1152", 1152)] {
+        let (heads, tokens) = (3usize, 5usize);
+        let mut data = f32s(rng, width * heads * tokens);
+        // The constant row checks epsilon and centering, the others have
+        // a nonzero mean. Higher dimensions are permuted in the graph.
+        data[..width].fill(0.5);
+        let mut bench = Bench::new(4 << 20);
+        let x = bench.tensor("x", TensorType::F32, &[width as i64, heads as i64, tokens as i64], &as_bytes_f32(&data));
+        let x = bench.ctx.permute(x, [0, 2, 1, 3]).expect("permute norm");
+        let out = bench.ctx.norm_eps(x, 1e-6, BufferUsage::Activations).expect("layer norm");
+        let outputs = bench.run(exec, out, &[out]);
+        let mut want = vec![0.0; data.len()];
+        for head in 0..heads {
+            for token in 0..tokens {
+                let source = &data[(token * heads + head) * width..(token * heads + head + 1) * width];
+                let mean = source.iter().map(|&x| x as f64).sum::<f64>() / width as f64;
+                let variance = source.iter().map(|&x| (x as f64 - mean).powi(2)).sum::<f64>() / width as f64;
+                for d in 0..width {
+                    want[(head * tokens + token) * width + d] = ((source[d] as f64 - mean) / (variance + 1e-6).sqrt()) as f32;
+                }
+            }
+        }
+        compare(name, bytes_to_f32(&outputs[&out]), want, 2e-5, failures);
+    }
+}
+
+fn vision_rope_opcheck(exec: &dyn RawExec, rng: &mut Rng, failures: &mut usize) {
+    for (name, d, nd, ext, freq_scale) in [
+        ("vision_rope_72", 72usize, 36usize, 0.0f32, 1.0f32),
+        ("vision_rope_yarn_tail", 80, 36, 0.4, 0.75),
+    ] {
+        let (heads, tokens) = (3usize, 7usize);
+        let data = f32s(rng, d * heads * tokens);
+        let mut positions = vec![0i32; 4 * tokens];
+        for t in 0..tokens {
+            positions[t] = (t / 3 + 11) as i32;
+            positions[tokens + t] = (t % 3 + 29) as i32;
+        }
+        let mut bench = Bench::new(4 << 20);
+        let x = bench.tensor("x", TensorType::F32, &[d as i64, tokens as i64, heads as i64], &as_bytes_f32(&data));
+        let x = bench.ctx.permute(x, [0, 2, 1, 3]).expect("permute rope");
+        let pos = bench.tensor("pos", TensorType::I32, &[(4 * tokens) as i64], &as_bytes_i32(&positions));
+        let out = bench.ctx.rope_multi(x, pos, None, nd as i32, [(nd / 2) as i32; 4],
+            makepad_ai_llm::GGML_ROPE_TYPE_VISION, 32768, 10000.0, freq_scale, ext, 1.0, 32.0, 1.0, BufferUsage::Activations).expect("vision rope");
+        let outputs = bench.run(exec, out, &[out]);
+        let correction = |rot: f64| nd as f64 * (32768.0 / (rot * 2.0 * std::f64::consts::PI)).ln() / (2.0 * 10000.0f64.ln());
+        let low = correction(32.0).floor().max(0.0);
+        let high = correction(1.0).ceil().min(nd as f64 - 1.0);
+        let mut want = vec![0.0; data.len()];
+        for t in 0..tokens {
+            for h in 0..heads {
+                let source = (h * tokens + t) * d;
+                let dest = (t * heads + h) * d;
+                want[dest..dest + d].copy_from_slice(&data[source..source + d]);
+                for j in 0..nd {
+                    let sector = j % nd;
+                    let plane = usize::from(sector >= nd / 2);
+                    let exponent = (sector % (nd / 2)) as f64;
+                    let extrap = positions[plane * tokens + t] as f64 * 10000.0f64.powf(-2.0 * exponent / nd as f64);
+                    let ramp = (1.0 - ((j as f64 - low) / (high - low).max(0.001)).clamp(0.0, 1.0)) * ext as f64;
+                    let theta = extrap * (freq_scale as f64 * (1.0 - ramp) + ramp);
+                    let magnitude = if ext != 0.0 { 1.0 + 0.1 * (1.0 / freq_scale as f64).ln() } else { 1.0 };
+                    let c = theta.cos() * magnitude;
+                    let s = theta.sin() * magnitude;
+                    want[dest + j] = (data[source + j] as f64 * c - data[source + j + nd] as f64 * s) as f32;
+                    want[dest + j + nd] = (data[source + j] as f64 * s + data[source + j + nd] as f64 * c) as f32;
+                }
+            }
+        }
+        compare(name, bytes_to_f32(&outputs[&out]), want, 3e-5, failures);
+    }
+}
+
+fn vision_resize_opcheck(exec: &dyn RawExec, rng: &mut Rng, failures: &mut usize) {
+    for (name, sw, sh, dw, dh, aa, corners) in [
+        ("vision_resize_up", 3usize, 2usize, 7usize, 5usize, false, false),
+        ("vision_resize_up_aa", 3, 2, 7, 5, true, false),
+        ("vision_resize_down_aa", 9, 7, 3, 4, true, false),
+        ("vision_resize_mixed_aa", 9, 3, 4, 8, true, false),
+        ("vision_resize_corners", 3, 2, 7, 5, false, true),
+        ("vision_resize_single", 7, 5, 1, 1, true, false),
+    ] {
+        let channels = 3usize;
+        let data = f32s(rng, channels * sw * sh);
+        let mut bench = Bench::new(4 << 20);
+        let x = bench.tensor("x", TensorType::F32, &[channels as i64, sw as i64, sh as i64], &as_bytes_f32(&data));
+        let x = bench.ctx.permute(x, [2, 0, 1, 3]).expect("permute resize");
+        let out = bench.ctx.upscale_ext(x, dw as i64, dh as i64, channels as i64, 1,
+            makepad_ai_llm::ScaleMode::Bilinear, corners, aa, BufferUsage::Activations).expect("resize");
+        let outputs = bench.run(exec, out, &[out]);
+        let scale = |from: usize, to: usize| if corners && from > 1 && to > 1 {
+            (to - 1) as f64 / (from - 1) as f64
+        } else { to as f64 / from as f64 };
+        let sx = scale(sw, dw);
+        let sy = scale(sh, dh);
+        let offset = if corners { 0.0 } else { 0.5 };
+        let mut want = vec![0.0; dw * dh * channels];
+        for chan in 0..channels {
+            let sample = |x: usize, y: usize| data[(y * sw + x) * channels + chan] as f64;
+            for y in 0..dh {
+                for x in 0..dw {
+                    let fx = (x as f64 + offset) / sx - offset;
+                    let fy = (y as f64 + offset) / sy - offset;
+                    let value = if aa {
+                        let support_x = (1.0 / sx).max(1.0);
+                        let support_y = (1.0 / sy).max(1.0);
+                        // Evaluate the separable triangle over the entire
+                        // source for an independent reference to clipped bounds.
+                        let mut sum = 0.0;
+                        let mut weight = 0.0;
+                        for yy in 0..sh {
+                            for xx in 0..sw {
+                                let w = (1.0 - (xx as f64 - fx).abs() / support_x).max(0.0)
+                                    * (1.0 - (yy as f64 - fy).abs() / support_y).max(0.0);
+                                sum += sample(xx, yy) * w;
+                                weight += w;
+                            }
+                        }
+                        if weight > 0.0 { sum / weight } else { 0.0 }
+                    } else {
+                        let x0 = fx.floor().clamp(0.0, (sw - 1) as f64) as usize;
+                        let y0 = fy.floor().clamp(0.0, (sh - 1) as f64) as usize;
+                        let x1 = (x0 + 1).min(sw - 1);
+                        let y1 = (y0 + 1).min(sh - 1);
+                        let ax = (fx - x0 as f64).clamp(0.0, 1.0);
+                        let ay = (fy - y0 as f64).clamp(0.0, 1.0);
+                        sample(x0, y0) * (1.0 - ax) * (1.0 - ay) + sample(x1, y0) * ax * (1.0 - ay)
+                            + sample(x0, y1) * (1.0 - ax) * ay + sample(x1, y1) * ax * ay
+                    };
+                    want[(chan * dh + y) * dw + x] = value as f32;
+                }
+            }
+        }
+        compare(name, bytes_to_f32(&outputs[&out]), want, 3e-6, failures);
+    }
+}
+
+fn vision_attention_opcheck(exec: &dyn RawExec, rng: &mut Rng, failures: &mut usize, vulkan: bool) {
+    let mut cases = vec![
+        ("vision_flash_72_tails", 72usize, 19usize, 37usize, 4usize, 2usize, 2usize),
+        ("vision_flash_72_long", 72, 1009, 1027, 2, 2, 1),
+    ];
+    // The CUDA maskless reference supports head dimensions 32, 64 and 72.
+    // Vulkan additionally traverses larger output heads in panels.
+    if vulkan {
+        cases.push(("vision_flash_256_panels", 256, 9, 35, 4, 2, 2));
+    }
+    for (name, d, nq, nk, heads, kvheads, batches) in cases {
+        let qdata = f32s(rng, d * nq * heads * batches);
+        let kdata = f32s(rng, d * nk * kvheads * batches);
+        let vdata = f32s(rng, d * nk * kvheads * batches);
+        let mut bench = Bench::new(16 << 20);
+        let q = bench.tensor("q", TensorType::F32, &[d as i64, heads as i64, nq as i64, batches as i64], &as_bytes_f32(&qdata));
+        let k = bench.tensor("k", TensorType::F32, &[d as i64, kvheads as i64, nk as i64, batches as i64], &as_bytes_f32(&kdata));
+        let v = bench.tensor("v", TensorType::F32, &[d as i64, kvheads as i64, nk as i64, batches as i64], &as_bytes_f32(&vdata));
+        let q = bench.ctx.permute(q, [0, 2, 1, 3]).expect("Q permute");
+        let k = bench.ctx.permute(k, [0, 2, 1, 3]).expect("K permute");
+        let v = bench.ctx.permute(v, [0, 2, 1, 3]).expect("V permute");
+        let scale = 1.0 / (d as f32).sqrt();
+        let out = bench.ctx.flash_attn_ext(q, k, v, None, scale, 0.0, 0.0, BufferUsage::Activations).expect("maskless flash");
+        bench.ctx.flash_attn_ext_set_prec(out, makepad_ai_llm::Prec::F32).expect("precision");
+        let outputs = bench.run(exec, out, &[out]);
+        let mut want = vec![0.0; d * nq * heads * batches];
+        for batch in 0..batches {
+            for head in 0..heads {
+                let kh = head / (heads / kvheads);
+                for query in 0..nq {
+                    let qo = ((batch * nq + query) * heads + head) * d;
+                    let mut scores: Vec<f64> = (0..nk).map(|key| {
+                        let ko = ((batch * nk + key) * kvheads + kh) * d;
+                        (0..d).map(|dim| qdata[qo + dim] as f64 * kdata[ko + dim] as f64).sum::<f64>() * scale as f64
+                    }).collect();
+                    let maximum = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    for s in &mut scores { *s = (*s - maximum).exp(); }
+                    let sum = scores.iter().sum::<f64>();
+                    for dim in 0..d {
+                        want[qo + dim] = (scores.iter().enumerate().map(|(key, &p)| {
+                            p * vdata[((batch * nk + key) * kvheads + kh) * d + dim] as f64
+                        }).sum::<f64>() / sum) as f32;
+                    }
+                }
+            }
+        }
+        compare_tol(name, bytes_to_f32(&outputs[&out]), want, 3e-5, 2e-5, failures);
+    }
+}
+
+fn vision_misc_opcheck(exec: &dyn RawExec, rng: &mut Rng, failures: &mut usize) {
+    let mut bench = Bench::new(8 << 20);
+    let (width, rows) = (1153usize, 3usize);
+    let data: Vec<f32> = f32s(rng, width * rows).into_iter().map(|x| x * 50.0 + 1000.0).collect();
+    let x = bench.tensor("x", TensorType::F32, &[width as i64, rows as i64], &as_bytes_f32(&data));
+    let out = bench.ctx.soft_max(x, BufferUsage::Activations).expect("softmax");
+    let outputs = bench.run(exec, out, &[out]);
+    let mut want = Vec::new();
+    for row in data.chunks_exact(width) {
+        let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max) as f64;
+        let exp: Vec<_> = row.iter().map(|&x| (x as f64 - max).exp()).collect();
+        let sum = exp.iter().sum::<f64>();
+        want.extend(exp.into_iter().map(|x| (x / sum) as f32));
+    }
+    compare("vision_softmax_unmasked_1153", bytes_to_f32(&outputs[&out]), want, 2e-6, failures);
+
+    let table = f32s(rng, 72 * 11);
+    let indices = [10i32, 0, 7, 7, 1, 4];
+    let x = bench.tensor("table", TensorType::F32, &[72, 11], &as_bytes_f32(&table));
+    let idx = bench.tensor("indices", TensorType::I32, &[indices.len() as i64], &as_bytes_i32(&indices));
+    let out = bench.ctx.get_rows(x, idx, BufferUsage::Activations).expect("f32 get rows");
+    let outputs = bench.run(exec, out, &[out]);
+    let want = indices.iter().flat_map(|&row| table[row as usize * 72..(row as usize + 1) * 72].iter().copied()).collect();
+    compare("vision_position_gather", bytes_to_f32(&outputs[&out]), want, 0.0, failures);
+
+    let data: Vec<_> = f32s(rng, 1031).into_iter().map(|x| x * 5.0).collect();
+    let x = bench.tensor("gelu_input", TensorType::F32, &[data.len() as i64], &as_bytes_f32(&data));
+    let out = bench.ctx.unary(x, UnaryOp::Gelu, BufferUsage::Activations).expect("GELU");
+    let outputs = bench.run(exec, out, &[out]);
+    let want = data.iter().map(|&x| {
+        let x = x as f64;
+        (0.5 * x * (1.0 + (0.7978845608028654 * (x + 0.044715 * x * x * x)).tanh())) as f32
+    }).collect();
+    compare("vision_gelu", bytes_to_f32(&outputs[&out]), want, 2e-5, failures);
+}
+
+#[cfg(target_os = "linux")]
+fn vulkan_raw_session_opcheck(exec: &makepad_ai_llm::vulkan_exec::VulkanExecRuntime) {
+    let mut rng = Rng::new(451);
+    let (k, n, m) = (19usize, 17usize, 35usize);
+    let weights = f32s(&mut rng, k * n);
+    let mut bench = Bench::new(4096);
+    let w = bench.tensor("weights", TensorType::F16, &[k as i64, n as i64], &f16_bytes(&weights));
+    bench.ctx.set_no_alloc(true);
+    let x = bench.ctx.new_tensor(TensorType::F32, 2, &[k as i64, m as i64], BufferUsage::Activations).expect("input");
+    let product = bench.ctx.mul_mat(w, x, BufferUsage::Activations).expect("product");
+    let out = bench.ctx.unary(product, UnaryOp::Gelu, BufferUsage::Activations).expect("GELU");
+    let mut graph = Graph::new();
+    graph.build_forward_expand(&bench.ctx, out).expect("graph");
+    let session = exec.create_raw_graph_session(&bench.ctx, &graph, &[product, out]).expect("raw session");
+    assert!(session.device_bytes() > bench.ctx.mem_size(), "no_alloc device arena must grow beyond host storage");
+    assert_eq!(session.node_count(), 2);
+    assert!(session.execute(&bench.ctx, &[], &[out]).is_err(), "missing inputs must be rejected");
+    let data_a = f32s(&mut rng, k * m);
+    let data_b = f32s(&mut rng, k * m);
+    let mut failures = 0;
+    // The first two calls replay identical command lists with changed data;
+    // the third changes the output list and must retain both pinned values.
+    for (round, data) in [&data_a, &data_b, &data_a].into_iter().enumerate() {
+        let bytes = as_bytes_f32(data);
+        let wanted = if round == 2 { vec![out, product] } else { vec![out] };
+        let got = session.execute(&bench.ctx, &[(x, bytes.as_slice())], &wanted).expect("replay");
+        let mut product_ref = vec![0.0f32; n * m];
+        for col in 0..m {
+            for row in 0..n {
+                product_ref[col * n + row] = (0..k).map(|d| f16_round(weights[row * k + d]) as f64 * data[col * k + d] as f64).sum::<f64>() as f32;
+            }
+        }
+        let want = product_ref.iter().map(|&x| 0.5 * x * (1.0 + (0.7978845608 * (x + 0.044715 * x * x * x)).tanh())).collect();
+        compare_tol("vision_raw_session_replay", bytes_to_f32(&got[&out]), want, 1e-5, 1e-5, &mut failures);
+        if round == 2 {
+            compare_tol("vision_raw_session_pinned", bytes_to_f32(&got[&product]), product_ref, 1e-5, 1e-5, &mut failures);
+        }
+    }
+    assert_eq!(failures, 0, "raw session numerical failures");
+}
+
+fn run_section(tolerant: bool, name: &str, f: &mut dyn FnMut()) -> usize {
+    if !tolerant {
+        f();
+        return 0;
+    }
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f()));
+    std::panic::set_hook(hook);
+    if let Err(e) = r {
+        let msg = e.downcast_ref::<String>().cloned().or_else(|| e.downcast_ref::<&str>().map(|s| s.to_string())).unwrap_or_default();
+        let short: String = msg.chars().take(160).collect();
+        println!("FAIL {name}: {short}");
+        return 1;
+    }
+    0
+}
+
+/// What an op check needs of an executor.
+trait RawExec {
+    fn execute_raw_graph(
+        &self,
+        ctx: &Context,
+        graph: &Graph,
+        pinned: &[TensorId],
+        writes: &[(TensorId, Vec<u8>)],
+        wanted: &[TensorId],
+    ) -> makepad_ai_llm::Result<BTreeMap<TensorId, Vec<u8>>>;
+}
+
+impl RawExec for CudaExecRuntime {
+    fn execute_raw_graph(&self, ctx: &Context, graph: &Graph, pinned: &[TensorId], writes: &[(TensorId, Vec<u8>)], wanted: &[TensorId]) -> makepad_ai_llm::Result<BTreeMap<TensorId, Vec<u8>>> {
+        CudaExecRuntime::execute_raw_graph(self, ctx, graph, pinned, writes, wanted)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl RawExec for makepad_ai_llm::vulkan_exec::VulkanExecRuntime {
+    fn execute_raw_graph(&self, ctx: &Context, graph: &Graph, pinned: &[TensorId], writes: &[(TensorId, Vec<u8>)], wanted: &[TensorId]) -> makepad_ai_llm::Result<BTreeMap<TensorId, Vec<u8>>> {
+        makepad_ai_llm::vulkan_exec::VulkanExecRuntime::execute_raw_graph(self, ctx, graph, pinned, writes, wanted)
+    }
+}
+
+impl<T: RawExec + ?Sized> RawExec for &T {
+    fn execute_raw_graph(&self, ctx: &Context, graph: &Graph, pinned: &[TensorId], writes: &[(TensorId, Vec<u8>)], wanted: &[TensorId]) -> makepad_ai_llm::Result<BTreeMap<TensorId, Vec<u8>>> {
+        (**self).execute_raw_graph(ctx, graph, pinned, writes, wanted)
+    }
+}
+
+/// `opcheck-vulkan`: the shared op checks on the Vulkan executor.
+#[cfg(target_os = "linux")]
+fn opcheck_vulkan() -> i32 {
+    let exec = match makepad_ai_llm::vulkan_exec::VulkanExecRuntime::new() {
+        Ok(exec) => exec,
+        Err(err) => {
+            eprintln!("opcheck-vulkan: Vulkan runtime unavailable: {err:?}");
+            return 3;
+        }
+    };
+    println!("device: {}", exec.device_description());
+    let mut failures = generic_opcheck(&exec, true, Rng::new(1234));
+    failures += run_section(true, "raw session replay", &mut || {
+        vulkan_raw_session_opcheck(&exec);
+    });
+    println!("\nopcheck-vulkan: {failures} failures");
+    if failures == 0 { 0 } else { 1 }
+}
+
+fn opcheck_shared_cuda() -> i32 {
+    let exec = match CudaExecRuntime::new() {
+        Ok(exec) => exec,
+        Err(err) => {
+            eprintln!("opcheck-shared: CUDA runtime unavailable: {err:?}");
+            return 2;
+        }
+    };
+    println!("device: {}", exec.device_description());
+    let failures = generic_opcheck(&exec, false, Rng::new(1234));
+    println!("\nopcheck-shared: {failures} failures");
+    if failures == 0 { 0 } else { 1 }
+}
+
+fn opcheck() -> i32 {
+    let exec = match ExecRuntime::with_backend(ExecBackendKind::Cuda) {
+        Ok(ExecRuntime::Cuda(runtime)) => runtime,
+        Ok(_) => unreachable!(),
+        Err(err) => {
+            eprintln!("opcheck: CUDA runtime unavailable: {err:?}");
+            return 3;
+        }
+    };
+    println!("device: {}", exec.device_description());
+    let mut failures = 0usize;
+    let mut rng = Rng::new(1234);
+
+    quant_matmul_canary(&exec, &mut rng, &mut failures);
+
+    q4k_mmq_canary(&exec, &mut failures);
+    q5k_mmq_canary(&exec, &mut failures);
+    q6k_mmq_canary(&exec, &mut failures);
+    mmvq_swiglu_canary(&exec, &mut failures);
+    cpy_set_rows_canary(&exec, &mut failures);
+    cpy_ssm_state_canary(&exec, &mut failures);
+    iq_kinds_canary(&exec, &mut failures);
+
+    failures += generic_opcheck(&exec, false, rng);
 
     println!(
         "\nopcheck: {} failures{}",

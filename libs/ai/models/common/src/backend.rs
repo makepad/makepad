@@ -27,9 +27,26 @@ pub use metal::{
 /// Activations stay on the GPU across a whole transformer step — see the
 /// flux device path in flux_transformer.rs.
 pub use crate::gpu::{
+    GpuAttentionPrecision, GpuLinearPrecision, GpuLinearScratch,
+    gpu_linear_scratch, gpu_linear_nt_cached_precision_into,
+    gpu_weight_cache_ensure_bf16_precision_keyed,
+    gpu_attention_gqa_decode_split_bf16, gpu_attention_gqa_decode_split_device_bf16,
+    gpu_linear_nt_cached_q8_0_f32acc_keyed, gpu_qk_rms_norm_rope_cache_bf16,
+    gpu_linear_nt_cached_q8_0_swiglu_keyed,
+    gpu_weight_cache_ensure_q8_0_concat_bf16_keyed,
+    gpu_profile_kernels, GpuKernelProfile, GpuKernelTiming,
+    gpu_weight_cache_ensure_q8_0_from_bf16_keyed,
+    gpu_add_rms_norm_keyed, gpu_attention_gqa_decode_split_device,
+    gpu_download_u32_scalar, gpu_increment_u32, gpu_qk_rms_norm_rope_cache,
+    gpu_sample_history_push, gpu_sample_top_k_top_p, gpu_upload_u32_into, GpuSamplingParams,
+    gpu_add_rms_norm_into, gpu_add_row_position_into, gpu_alloc_bf16,
+    gpu_attention_gqa_flash_bf16_buf_into, gpu_conv1d_cached, gpu_copy_f32_to_bf16_into,
+    gpu_linear_nt_cached_bf16_f32acc_into, gpu_qkv_rms_rope_bf16_into,
+    gpu_scaled_sub_bf16_into, gpu_swiglu_value_gate_into, gpu_synchronize,
     gpu_act_f16_enabled, gpu_add, gpu_add_bf16, gpu_add_cols_broadcast, gpu_alias_snake_updown2x,
     gpu_attention_cross_fused_enabled,
-    gpu_attention_gqa_decode_bf16, gpu_attention_gqa_decode_pair_bf16, gpu_attention_packed,
+    gpu_attention_gqa_decode_bf16, gpu_attention_gqa_decode_pair_bf16, gpu_attention_gqa_flash_bf16, gpu_attention_gqa_decode_split, gpu_alloc_f32,
+    gpu_attention_packed,
     gpu_attention_packed_f32,
     gpu_attention_packed_bf16,
     gpu_attention_packed_causal, gpu_attention_packed_causal_bf16,
@@ -40,7 +57,7 @@ pub use crate::gpu::{
     gpu_attention_packed_composite_bf16, gpu_attention_packed_composite_f32,
     gpu_attention_packed_motion_text,
     gpu_attention_packed_cross, gpu_attention_packed_cross_bias, gpu_rpb_expand, gpu_sam3_sine_embed, gpu_sam3_rpb_axial, gpu_sam3_refine_boxes, gpu_attention_packed_cross_bf16,
-    gpu_attention_packed_cross_composite_bf16, gpu_gather_rows_colblock,
+    gpu_attention_packed_cross_composite_bf16, gpu_gather_rows_colblock, gpu_gather_rows_cached_bf16,
     gpu_attention_packed_flash_bf16, gpu_attention_packed_flash2_d64,
     gpu_gelu_erf, gpu_rms_norm_mul_perhead,
     gpu_attention_planar_single,
@@ -63,7 +80,7 @@ pub use crate::gpu::{
     gpu_swiglu_gate_first_from_bf16, gpu_concat_f32rn_bf16buf,
     gpu_linear_nt_cached, gpu_linear_nt_cached_with_precision,
     gpu_linear_nt_cached_f16_with_precision, gpu_linear_nt_cached_bf16_bias_epilogue,
-    gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_mm,
+    gpu_linear_nt_cached_bf16_f32acc, gpu_linear_nt_cached_bf16_f32acc_keyed, gpu_linear_nt_cached_bf16_mm,
     gpu_linear_nt_cached_bf16_mm_from_buf, gpu_linear_nt_cached_bf16_mm_from_buf_to_buf,
     gpu_linear_nt_cached_f8_mm, gpu_linear_nt_cached_f8_mm_from_buf,
     gpu_linear_nt_cached_f8_mm_from_buf_to_buf,
@@ -72,7 +89,7 @@ pub use crate::gpu::{
     gpu_linear_nt_cached_f16_f32acc,
     gpu_linear_nt_cached_f16,
     gpu_perf_stats, gpu_pool_cap_override, gpu_pool_clear, gpu_pool_trim,
-    gpu_rms_norm_mod_indexed, gpu_rms_norm_mul, gpu_rms_norm_mul_bf16, gpu_rms_norm_qwen3,
+    gpu_rms_norm_mod_indexed, gpu_rms_norm_mul, gpu_rms_norm_mul_keyed, gpu_rms_norm_mul_bf16, gpu_rms_norm_qwen3,
     gpu_sparse_conv27,
     gpu_skintokens_michelangelo_fourier,
     gpu_pixel_shuffle_planar, gpu_pixel_shuffle_planar_cached, gpu_reshape,
@@ -90,7 +107,7 @@ pub use crate::gpu::{
     gpu_swiglu_gate_first, gpu_swiglu_value_gate, gpu_to_f16, gpu_upload, gpu_wavenet_gate,
     gpu_quant_linear_type_supported,
     gpu_release_cached, gpu_runtime_trim, gpu_upload_into, gpu_upload_u32, gpu_weight_cache_ensure,
-    gpu_weight_cache_ensure_quant,
+    gpu_weight_cache_ensure_quant, gpu_weight_cache_ensure_bf16_keyed,
     gpu_weight_cache_evict_prefix, gpu_weight_cache_evict_prefix_if_loaded,
     gpu_weight_cache_protect_prefixes,
     gpu_upsample_nearest2x, GemmPrecision, GpuBf16Buf, GpuLinearPart, GpuPerfStats, GpuStepGraph, GpuTensor,
@@ -203,6 +220,47 @@ fn requested_graph_device() -> Option<GraphDevice> {
 }
 
 impl DeviceRuntime {
+    /// Compile a family over one context image. Execute these sessions only
+    /// sequentially: their activation plans reuse the same scratch address
+    /// space. Allocated leaves (weights, inputs, caches) persist across every
+    /// member. Creating independent sessions with `compile_graph` does not
+    /// share those writes.
+    pub fn compile_graphs(
+        &self,
+        ctx: &Context,
+        graphs: &[(&Graph, &[makepad_ai_llm::TensorId])],
+    ) -> Result<Vec<DeviceGraphSession>> {
+        match self {
+            DeviceRuntime::Cuda(runtime) => runtime.create_raw_graph_sessions(ctx, graphs)
+                .map(|sessions| sessions.into_iter().map(DeviceGraphSession::Cuda).collect())
+                .map_err(|e| DiffusionError::model(e.to_string())),
+            DeviceRuntime::Metal(runtime) => {
+                let prepared = graphs.iter().map(|(graph, outputs)| {
+                    let mut graph = (*graph).clone();
+                    for &output in *outputs { graph.add_leaf(output); }
+                    prepare_graph(runtime, ctx, &graph)
+                }).collect::<Result<Vec<_>>>()?;
+                if prepared.is_empty() { return Ok(Vec::new()); }
+                let size = prepared.iter().map(|p| p.main_buffer_size).max().unwrap();
+                let buffers = metal::MetalContextBuffers {
+                    ro_buffer: metal::create_context_ro_buffer(runtime, ctx)
+                        .map_err(DiffusionError::model)?,
+                    ro_split: ctx.ro_split(),
+                    // Upload the prefix directly; do not make another
+                    // whole-model host Vec just to initialize the buffer.
+                    main_buffer: metal::create_context_dirty_buffer(
+                        runtime, ctx, size.saturating_sub(ctx.ro_split()), BufferStorageMode::Shared,
+                    ).map_err(DiffusionError::model)?,
+                };
+                prepared.iter().map(|p| {
+                    GraphSession::from_runtime_with_context_buffers(
+                        runtime.clone(), p, &buffers, BufferStorageMode::Shared,
+                    ).map(DeviceGraphSession::Metal).map_err(DiffusionError::model)
+                }).collect()
+            }
+        }
+    }
+
     /// Bind a device: the pinned one if `MAKEPAD_AI_GRAPH_BACKEND` names it,
     /// else CUDA, else Metal. An explicit request that cannot be honoured is
     /// an error rather than a silent fallback — a fleet job that quietly ran

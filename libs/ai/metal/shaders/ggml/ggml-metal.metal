@@ -4507,6 +4507,42 @@ kernel void kernel_im2col(
 template [[host_name("kernel_im2col_f32")]] kernel im2col_t kernel_im2col<float>;
 template [[host_name("kernel_im2col_f16")]] kernel im2col_t kernel_im2col<half>;
 
+// Planar 1D input -> contiguous [kernel*channels, output_time, batch].
+// Flatten the destination so a seven-tap convolution uses full groups,
+// rather than millions of seven-thread groups. Same arguments/layout as
+// kernel_im2col, including dilation, zero padding and batch/channel strides.
+typedef void (im2col_1d_t)(
+        constant ggml_metal_kargs_im2col & args,
+        device const float * x,
+        device char * dst,
+        uint tgpig [[threadgroup_position_in_grid]],
+        uint tpitg [[thread_position_in_threadgroup]],
+        uint ntg [[threads_per_threadgroup]]);
+
+template <typename T>
+kernel void kernel_im2col_1d(
+        constant ggml_metal_kargs_im2col & args,
+        device const float * x,
+        device char * dst,
+        uint tgpig [[threadgroup_position_in_grid]],
+        uint tpitg [[thread_position_in_threadgroup]],
+        uint ntg [[threads_per_threadgroup]]) {
+    const ulong ow = (args.IW + 2L*args.p0 - (args.KW - 1L)*args.d0 - 1)/args.s0 + 1;
+    const ulong idx = ulong(tgpig)*ntg + tpitg;
+    if (idx >= ulong(args.N)*ow*args.CHW) {
+        return;
+    }
+    const ulong row = idx/args.CHW;
+    const ulong tap = idx%args.CHW;
+    const ulong c = tap/args.KW;
+    const long t = long(row%ow)*args.s0 + long(tap%args.KW)*args.d0 - args.p0;
+    device T * out = (device T *)dst;
+    out[idx] = (t < 0 || t >= args.IW) ? T(0) : T(x[(row/ow)*args.ofs0 + c*args.ofs1 + ulong(t)]);
+}
+
+template [[host_name("kernel_im2col_1d_f32")]] kernel im2col_1d_t kernel_im2col_1d<float>;
+template [[host_name("kernel_im2col_1d_f16")]] kernel im2col_1d_t kernel_im2col_1d<half>;
+
 // TODO: obsolete -- remove
 //typedef void (im2col_ext_t)(
 //        constant ggml_metal_kargs_im2col & args,

@@ -10,7 +10,7 @@ use makepad_ai_common::backend::cuda::{
     gpu_add, gpu_concat_cols, gpu_concat_rows_many, gpu_download,
     gpu_group_norm_nchw, gpu_group_norm_planar, gpu_nchw_to_tokens, gpu_paint_group_norm_batched,
     gpu_paint_pose_rope, gpu_paint_pose_rope_dev,
-    gpu_planar_tokens_transpose, gpu_slice_cols, gpu_slice_rows, gpu_tokens_to_nchw, gpu_upload,
+    gpu_planar_tokens_transpose, gpu_slice_rows, gpu_tokens_to_nchw, gpu_upload,
     GpuTensor,
 };
 

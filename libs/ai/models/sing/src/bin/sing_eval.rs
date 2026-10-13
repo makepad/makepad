@@ -20,6 +20,14 @@
 //! hold sung words of the next line at its edges, so `gt` is the floor. Also: how well the
 //! duration head's lengths follow the score-aligned ones (correlation of
 //! ln(1 + frames)).
+//!
+//! Other engines on the same segments: `--dump DIR` writes each picked
+//! segment's score (`NN.score.tsv`: its notes with the word each sings, the
+//! words, the lyric) and its recording (`NN-gt.wav`, 48 kHz); `--ext DIR`
+//! scores `DIR/NN.wav` (any rate, time 0 at the segment start) against the
+//! lyric beside the recording and the free render, with one note pitch
+//! measure for all three (median |cents| from the note over each note's
+//! middle half, as voice_eval).
 
 use makepad_ai_sing::acoustic;
 use makepad_ai_sing::cantor::{F0Mode, RenderOpts};
@@ -78,6 +86,22 @@ fn median(mut v: Vec<f32>) -> f32 {
     v[v.len() / 2]
 }
 
+/// Per note (time 0 at the segment start), |median cents| of the sung f0 from
+/// the note over its middle half, where at least 3 frames are voiced.
+fn note_pitch(audio: &[f32], sc: &score::SingScore) -> Vec<f32> {
+    let f0 = dsp::f0_yin(audio, 55.0, 1400.0);
+    let mut out = Vec::new();
+    for n in &sc.notes {
+        let (s, e) = (n.start, n.start + n.dur);
+        let (a, b) = (((s + 0.25 * (e - s)) * 100.0) as usize, ((s + 0.75 * (e - s)) * 100.0) as usize);
+        let c: Vec<f32> = (a..b.min(f0.len())).filter(|q| f0[*q] > 0.0).map(|q| 100.0 * (hz_to_midi(f0[q]) - n.midi)).collect();
+        if c.len() >= 3 {
+            out.push(median(c).abs());
+        }
+    }
+    out
+}
+
 fn corr(a: &[f32], b: &[f32]) -> f32 {
     let n = a.len().max(1) as f32;
     let (ma, mb) = (a.iter().sum::<f32>() / n, b.iter().sum::<f32>() / n);
@@ -90,18 +114,19 @@ fn corr(a: &[f32], b: &[f32]) -> f32 {
     sab / (saa * sbb).sqrt().max(1e-9)
 }
 
-/// Segments of one timed-words file: (shard, item index, words, lyric).
-fn read_words(path: &Path) -> Vec<(String, usize, Vec<SungWord>, String)> {
-    let mut out: Vec<(String, usize, Vec<SungWord>, String)> = Vec::new();
+/// Segments of one timed-words file: (shard, item index, words, lyric, word texts).
+fn read_words(path: &Path) -> Vec<(String, usize, Vec<SungWord>, String, Vec<String>)> {
+    let mut out: Vec<(String, usize, Vec<SungWord>, String, Vec<String>)> = Vec::new();
     for line in std::fs::read_to_string(path).unwrap_or_default().lines() {
         let c: Vec<&str> = line.split('\t').collect();
         match c[0] {
-            "seg" => out.push((c[1].to_string(), c[2].parse().unwrap(), Vec::new(), String::new())),
+            "seg" => out.push((c[1].to_string(), c[2].parse().unwrap(), Vec::new(), String::new(), Vec::new())),
             "w" => {
                 if let Some(s) = out.last_mut() {
                     s.2.push(SungWord { start: c[1].parse().unwrap(), end: c[2].parse().unwrap(), phones: ph::parse(c[4]) });
                     s.3.push_str(c.get(5).copied().unwrap_or(""));
                     s.3.push(' ');
+                    s.4.push(c.get(5).copied().unwrap_or("").to_string());
                 }
             }
             _ => {}
@@ -128,6 +153,14 @@ fn main() {
     let step = (groups.len() / items.max(1)).max(1);
     let picked: Vec<PathBuf> = groups.iter().step_by(step).take(items).cloned().collect();
 
+    let dump = arg("--dump").map(PathBuf::from);
+    let ext = arg("--ext").map(PathBuf::from);
+    if let Some(d) = &dump {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let ext_names = ["gt", "free", "ext"];
+    let mut ext_sum = [0.0f32; 3];
+    let mut ext_pitch: [Vec<f32>; 3] = Default::default();
     let names = ["gt", "copy", "tf", "free"];
     let mut sum = [0.0f32; 4];
     let mut pitch_follow: [Vec<f32>; 4] = Default::default();
@@ -136,10 +169,48 @@ fn main() {
     let mut n_lines = 0usize;
     for (k, g) in picked.iter().enumerate() {
         let segs = read_words(g);
-        let Some((shard, idx, ws, lyric)) = segs.get(segs.len() / 2).cloned() else { continue };
+        let Some((shard, idx, ws, lyric, wtext)) = segs.get(segs.len() / 2).cloned() else { continue };
         let Some(it): Option<Item> = data::read_shard(Path::new(&shard)).ok().and_then(|v| v.get(idx).cloned()) else { continue };
-        let sc = score::score_from_words(&ws, &it.f0, it.speaker as usize);
+        let (sc, word_of) = score::score_from_words_by_word(&ws, &it.f0, it.speaker as usize);
         if sc.notes.is_empty() {
+            continue;
+        }
+        if dump.is_some() || ext.is_some() {
+            let t = it.frames();
+            let rec = it.audio_f32();
+            let rec = rec[..(t * HOP).min(rec.len())].to_vec();
+            let reference = lyric.trim().to_string();
+            if let Some(d) = &dump {
+                let mut o = format!("item\t{k}\t{}\t{t}\t{}\t{}\n", it.speaker, g.file_stem().unwrap().to_string_lossy(), reference);
+                for (i, w) in wtext.iter().enumerate() {
+                    o.push_str(&format!("word\t{i}\t{w}\t{:.3}\t{:.3}\n", ws[i].start, ws[i].end));
+                }
+                for (n, wi) in sc.notes.iter().zip(&word_of) {
+                    let syl = n.syllable.as_ref().map(|s| s.onset.iter().chain(&s.nucleus).chain(&s.coda).map(|p| ph::symbol(*p)).collect::<String>()).unwrap_or_default();
+                    o.push_str(&format!("note\t{:.4}\t{:.4}\t{}\t{wi}\t{syl}\n", n.start, n.dur, n.midi));
+                }
+                std::fs::write(d.join(format!("{k:02}.score.tsv")), o).unwrap();
+                std::fs::write(d.join(format!("{k:02}-gt.wav")), dsp::wav_bytes(48_000, &rec)).unwrap();
+            }
+            let Some(ext_dir) = &ext else { continue };
+            let Some((x, rate)) = std::fs::read(ext_dir.join(format!("{k:02}.wav"))).ok().and_then(|b| dsp::read_wav(&b)) else {
+                println!("#{k:02} no {k:02}.wav in {}", ext_dir.display());
+                continue;
+            };
+            let x = if rate == 48_000 { x } else { dsp::resample(&x, rate, 48_000) };
+            let opts = RenderOpts { f0: F0Mode::Model, ..RenderOpts::default() };
+            let (free, _) = cantor.render(&sc, &opts);
+            println!("#{k:02} singer {} {} frames  lyric [{}]", it.speaker, t, reference);
+            for (i, a) in [rec, free, x].iter().enumerate() {
+                let text = transcribe(&whisper, a);
+                let (err, nw) = wer(&reference, &text);
+                let w = (err as f32 / nw.max(1) as f32).min(1.0);
+                ext_sum[i] += w;
+                let p = note_pitch(a, &sc);
+                ext_pitch[i].extend(p.iter().copied());
+                println!("    {:<5} {:4.0}%  {:5.1} c  [{}]", ext_names[i], w * 100.0, p.iter().sum::<f32>() / p.len().max(1) as f32, text.trim());
+            }
+            n_lines += 1;
             continue;
         }
         let f = score::align_segment(&sc, it.frames());
@@ -230,6 +301,28 @@ fn main() {
             }
         }
         n_lines += 1;
+    }
+    if ext.is_some() {
+        println!();
+        println!("{} {} segments (one per song), WER* against the lyric; note pitch = mean over notes of |median cents| (middle half)", n_lines, if held { "held-out" } else { "training" });
+        for e in 0..3 {
+            let p = &ext_pitch[e];
+            let near: Vec<f32> = p.iter().copied().filter(|c| *c <= 600.0).collect();
+            println!(
+                "{:<6} {:5.1}%  note pitch {:5.1} c over {} notes; {} an octave or more off; {:5.1} c without them (median {:4.1} c)",
+                ext_names[e],
+                100.0 * ext_sum[e] / n_lines.max(1) as f32,
+                p.iter().sum::<f32>() / p.len().max(1) as f32,
+                p.len(),
+                p.len() - near.len(),
+                near.iter().sum::<f32>() / near.len().max(1) as f32,
+                median(near.clone())
+            );
+        }
+        return;
+    }
+    if dump.is_some() {
+        return;
     }
     println!();
     println!("{} {} segments (one per song), WER* against the lyric", n_lines, if held { "held-out" } else { "training" });

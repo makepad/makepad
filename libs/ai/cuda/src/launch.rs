@@ -1,13 +1,36 @@
+/// One Whisper encoder layer. Matrices are raw row-major ggml Q8_0 blocks:
+/// q/k/v/out are [n_state, n_state], fc1 is [4*n_state, n_state], and fc2
+/// is [n_state, 4*n_state]. The caller must reject other ggml weight types.
+pub struct WhisperEncLayerQ8<'a> {
+    pub attn_ln_w: &'a [f32],
+    pub attn_ln_b: &'a [f32],
+    pub q_w: &'a [u8],
+    pub q_b: &'a [f32],
+    pub k_w: &'a [u8],
+    pub v_w: &'a [u8],
+    pub v_b: &'a [f32],
+    pub out_w: &'a [u8],
+    pub out_b: &'a [f32],
+    pub mlp_ln_w: &'a [f32],
+    pub mlp_ln_b: &'a [f32],
+    pub fc1_w: &'a [u8],
+    pub fc1_b: &'a [f32],
+    pub fc2_w: &'a [u8],
+    pub fc2_b: &'a [f32],
+}
+
 #[cfg(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels))]
 mod imp {
+    use super::WhisperEncLayerQ8;
     use crate::accel::{AffineQuantizedMatmulRowsSpec, AffineQuantizedMatmulSpec};
     use crate::quant::{
         block_elements, block_size, h3_nvfp4_pairs_bytes, quantize_bf16_to_q8_1,
         quantize_f32_to_q8_1, GGML_TYPE_BF16, GGML_TYPE_F16, GGML_TYPE_H3_NVFP4_PAIRS,
         GGML_TYPE_F8_E4M3, GGML_TYPE_H3_NVFP4_PAIRS_PRESCALE, GGML_TYPE_NVFP4,
-        GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, QK, QK_NVFP4,
+        GGML_TYPE_Q4_0, GGML_TYPE_Q4_K, GGML_TYPE_Q5_K, GGML_TYPE_Q6_K, GGML_TYPE_Q8_0, QK, QK_NVFP4,
     };
     use crate::{cudaError_t, cudaStream_t};
+    use std::borrow::Cow;
     use std::cell::RefCell;
     use std::collections::HashMap;
     use std::ffi::c_void;
@@ -18,7 +41,144 @@ mod imp {
 
     pub use crate::{CudaGraph, CudaGraphExec};
 
+    /// FA2 arithmetic policy; Q/K/V storage remains bf16 in every mode.
+    #[repr(i32)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum GpuAttentionPrecision {
+        Bf16F32 = 0,
+        /// bf16 QK/f32 accumulation, f16 PV/f16 accumulation.
+        F16Pv = 1,
+        /// Experimental: f16 accumulation for both QK and PV.
+        F16QkPv = 2,
+    }
+
+    /// Explicit dense-linear arithmetic, independent of global Flux options.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum GpuLinearPrecision {
+        Bf16F32,
+        F16F16,
+        Fp8F32,
+    }
+
+    /// Generic windowed categorical sampler. Mask entries and all indices
+    /// are raw u32; `seed` uses Philox4x32-10 with full-vocab subsequences.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct GpuSamplingParams {
+        pub vocab_start: u32,
+        pub end_token: u32,
+        pub min_tokens: u32,
+        pub top_k: u32,
+        pub penalty_window: u32,
+        pub keep_first: u32,
+        pub round_logits_bf16: u32,
+        pub temperature: f32,
+        pub top_p: f32,
+        pub repetition_penalty: f32,
+        pub guidance: f32,
+        pub seed: u64,
+    }
+
+    // Sequence operations and weight/activation conversion kernels.
     unsafe extern "C" {
+        fn makepad_cuda_quant_scaled_f8_e4m3(
+            src: *const c_void, dst: *mut u8, scale: *mut f32, count: u32,
+            bf16: i32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_f32_to_bf16_trunc_f16(
+            src: *const f32, dst: *mut u16, count: u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_quant_bf16_q8_0(
+            src: *const u16, dst: *mut u8, blocks: u32,
+            nonfinite: *mut u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_q8_0_gemv_f32(
+            x: *const f32, weights: *const u8, out: *mut f32,
+            m: u32, k: u32, n: u32, out_stride: u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_q8_0_gemv_swiglu_f32(
+            x: *const f32, weights: *const u8, out: *mut f32,
+            k: u32, n: u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_add_rms_norm_into_f32(
+            x: *const f32, update: *const f32, weight: *const f32,
+            residual: *mut f32, normed: *mut f32, rows: u32, cols: u32,
+            eps: f32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_qkv_rms_rope_into_bf16(
+            qkv: *const f32, qw: *const f32, kw: *const f32,
+            cos: *const f32, sin: *const f32,
+            q: *mut u16, k: *mut u16, v: *mut u16, rows: u32,
+            heads: u32, kv_heads: u32, dim: u32, kv_offset: u32,
+            eps: f32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_add_row_position_into_f32(
+            x: *const f32, row: *const f32, position: *const f32,
+            out: *mut f32, rows: u32, cols: u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_scaled_sub_into_bf16_f32(
+            state: *const f32, velocity: *const f32, out: *mut f32,
+            n: u32, step: f32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_conv1d_im2col_f16(
+            x: *const f32, col: *mut u16, len: u32, out_len: u32,
+            channels: u32, taps: u32, dilation: u32, padding: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+    }
+
+    unsafe extern "C" {
+        fn makepad_cuda_sample_top_k_top_p_f32(
+            logits: *const f32, unconditional: *const f32, allowed: *const u32,
+            counts: *const u32, state: *mut u32, out: *mut u32,
+            workspace: *mut f32, n: u32, params: *const GpuSamplingParams,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_sample_history_push(
+            counts: *mut u32, history: *mut u32, state: *mut u32, token: *const u32,
+            n: u32, vocab_start: u32, window: u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_qk_rms_norm_rope_cache_f32(
+            qkv: *const f32, q_weight: *const f32, k_weight: *const f32,
+            cos: *const f32, sin: *const f32, position: *const u32,
+            query: *mut f32, key_cache: *mut f32, value_cache: *mut f32,
+            heads: u32, kv_heads: u32, head_dim: u32, capacity: u32,
+            table_rows: u32, eps: f32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_qk_rms_norm_rope_cache_bf16(
+            qkv: *const f32, q_weight: *const f32, k_weight: *const f32,
+            cos: *const f32, sin: *const f32, position: *const u32,
+            query: *mut f32, key_cache: *mut u16, value_cache: *mut u16,
+            heads: u32, kv_heads: u32, head_dim: u32, capacity: u32,
+            table_rows: u32, eps: f32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_attention_gqa_decode_split_bf16(
+            query: *const f32, key: *const u16, value: *const u16,
+            workspace: *mut f32, output: *mut f32, sequence: u32,
+            heads: u32, kv_heads: u32, scale: f32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_attention_gqa_decode_split_device_bf16(
+            query: *const f32, key: *const u16, value: *const u16,
+            workspace: *mut f32, output: *mut f32, sequence: *const u32,
+            capacity: u32, heads: u32, kv_heads: u32, scale: f32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_attention_gqa_decode_split_device_f32(
+            query: *const f32, key: *const f32, value: *const f32,
+            workspace: *mut f32, output: *mut f32, sequence: *const u32,
+            capacity: u32, heads: u32, kv_heads: u32, scale: f32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_increment_u32(
+            values: *mut u32, count: u32, amount: u32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn makepad_cuda_gather_rows_bf16_f32(
+            table: *const u16,
+            indices: *const u32,
+            out: *mut f32,
+            table_rows: u32,
+            cols: u32,
+            count: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
         fn makepad_cuda_pixal_naf_sample_f32(
             q: *const f32, k: *const f32, v: *const f32, uv: *const f32, out: *mut f32,
             count: u32, width: u32, height: u32, low_width: u32, low_height: u32,
@@ -320,6 +480,57 @@ mod imp {
             n_cols: u32,
             row_count: u32,
             output_row_stride: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn mkq8_gemm_nt(
+            x: *const f32,
+            w: *const u8,
+            y: *mut f32,
+            m: i32,
+            k: i32,
+            n: i32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn mkwe_layer_norm(
+            x: *const f32,
+            weight: *const f32,
+            bias: *const f32,
+            y: *mut f32,
+            rows: i32,
+            cols: i32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn mkwe_bias_add(
+            y: *mut f32,
+            bias: *const f32,
+            rows: i32,
+            cols: i32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn mkwe_bias_gelu_tanh(
+            y: *mut f32,
+            bias: *const f32,
+            rows: i32,
+            cols: i32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn mkwe_residual_add(
+            y: *mut f32,
+            x: *const f32,
+            rows: i32,
+            cols: i32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn mkwe_softmax(
+            scores: *mut f32,
+            rows: i32,
+            cols: i32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
@@ -1638,6 +1849,17 @@ mod imp {
             stream: cudaStream_t,
         ) -> cudaError_t;
 
+        fn makepad_cuda_dwconv1d_f32(
+            input: *const f32,
+            weight: *const f32,
+            bias: *const f32,
+            output: *mut f32,
+            rows: u32,
+            ch: u32,
+            k: u32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
         fn makepad_cuda_alias_snake_updown2x_f32(
             input: *const f32,
             params: *const f32,
@@ -1820,6 +2042,34 @@ mod imp {
             hidden: u32,
             scale: f32,
             window: i32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_attention_gqa_decode_split_f32(
+            query: *const f32,
+            key: *const f32,
+            value: *const f32,
+            workspace: *mut f32,
+            output: *mut f32,
+            sequence: u32,
+            query_heads: u32,
+            kv_heads: u32,
+            scale: f32,
+            stream: cudaStream_t,
+        ) -> cudaError_t;
+
+        fn makepad_cuda_flash_attention2_gqa_bf16(
+            q: *const u16,
+            k: *const u16,
+            v: *const u16,
+            out: *mut f32,
+            q_len: u32,
+            kv_len: u32,
+            head_count: u32,
+            kv_heads: u32,
+            scale: f32,
+            causal: i32,
+            precision: i32,
             stream: cudaStream_t,
         ) -> cudaError_t;
 
@@ -3900,17 +4150,27 @@ mod imp {
 
     thread_local! {
         // Addresses of pool buffers referenced by a live captured CUDA graph:
-        // they may be REUSED freely (replays rewrite them front to back) but
-        // must never be cudaFree'd while the graph exec exists.
+        // unrelated work cannot reuse or free them while its exec exists.
         static GPU_GRAPH_PINNED: RefCell<std::collections::HashSet<usize>> =
+            RefCell::new(std::collections::HashSet::new());
+        // Current capture may reuse its own scratch in stream order, just
+        // like its warm run. Pinning each acquisition as a LIVE graph used
+        // to force a fresh allocation at every op during capture.
+        static GPU_GRAPH_CURRENT: RefCell<std::collections::HashSet<usize>> =
             RefCell::new(std::collections::HashSet::new());
         static GPU_GRAPH_CAPTURING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     }
 
-    fn gpu_graph_pinned(buffer: &DeviceBuffer) -> bool {
+    fn gpu_graph_live_pinned(buffer: &DeviceBuffer) -> bool {
         // try_with: during thread teardown this TLS may already be destroyed
         // (a graph-state destructor releasing tensors) — treat as unpinned.
         GPU_GRAPH_PINNED
+            .try_with(|set| set.borrow().contains(&(buffer.ptr.as_ptr() as usize)))
+            .unwrap_or(false)
+    }
+
+    fn gpu_graph_pinned(buffer: &DeviceBuffer) -> bool {
+        gpu_graph_live_pinned(buffer) || GPU_GRAPH_CURRENT
             .try_with(|set| set.borrow().contains(&(buffer.ptr.as_ptr() as usize)))
             .unwrap_or(false)
     }
@@ -3927,11 +4187,11 @@ mod imp {
             let mut pool = pool.borrow_mut();
             let size = pool
                 .range(rounded..limit)
-                .find(|(_, buffers)| buffers.iter().any(|b| !gpu_graph_pinned(b)))
+                .find(|(_, buffers)| buffers.iter().any(|b| !gpu_graph_live_pinned(b)))
                 .map(|(size, _)| *size);
             size.and_then(|size| {
                 let buffers = pool.get_mut(&size)?;
-                let idx = buffers.iter().rposition(|b| !gpu_graph_pinned(b))?;
+                let idx = buffers.iter().rposition(|b| !gpu_graph_live_pinned(b))?;
                 let buffer = buffers.remove(idx);
                 if buffers.is_empty() {
                     pool.remove(&size);
@@ -3959,7 +4219,7 @@ mod imp {
             }
         };
         if GPU_GRAPH_CAPTURING.with(|flag| flag.get()) {
-            GPU_GRAPH_PINNED
+            GPU_GRAPH_CURRENT
                 .with(|set| set.borrow_mut().insert(buffer.ptr.as_ptr() as usize));
         }
         Ok(buffer)
@@ -4029,7 +4289,8 @@ mod imp {
     /// e.g. denoise -> VAE decode — so the two phases' working sets never
     /// coexist in VRAM). Buffers pinned by a live captured graph are kept.
     pub fn gpu_pool_clear() {
-        let has_pins = GPU_GRAPH_PINNED.with(|set| !set.borrow().is_empty());
+        let has_pins = GPU_GRAPH_PINNED.with(|set| !set.borrow().is_empty())
+            || GPU_GRAPH_CURRENT.with(|set| !set.borrow().is_empty());
         if has_pins {
             GPU_TENSOR_POOL.with(|pool| {
                 let mut pool = pool.borrow_mut();
@@ -4085,14 +4346,20 @@ mod imp {
     /// kernel sequence with one launch. Dropping it unpins the pool buffers
     /// it references.
     pub struct GpuStepGraph {
-        exec: crate::CudaGraphExec,
+        exec: Option<crate::CudaGraphExec>,
+        buffers: Vec<usize>,
     }
 
     impl Drop for GpuStepGraph {
         fn drop(&mut self) {
+            // Destroy the executable before releasing the addresses it uses.
+            drop(self.exec.take());
             // try_with: the graph state can be destroyed by TLS teardown
             // after the pinned set is already gone.
-            let _ = GPU_GRAPH_PINNED.try_with(|set| set.borrow_mut().clear());
+            let _ = GPU_GRAPH_PINNED.try_with(|set| {
+                let mut set = set.borrow_mut();
+                for address in &self.buffers { set.remove(address); }
+            });
         }
     }
 
@@ -4104,6 +4371,9 @@ mod imp {
     pub fn gpu_graph_capture<T>(
         run: impl FnOnce() -> Result<T, String>,
     ) -> Result<(GpuStepGraph, T), String> {
+        if GPU_GRAPH_CAPTURING.with(|flag| flag.get()) {
+            return Err("nested GPU graph capture is not supported".to_string());
+        }
         with_dense_linear_backend(|backend| {
             backend.prepare_device()?;
             crate::begin_stream_capture(
@@ -4119,21 +4389,17 @@ mod imp {
             crate::end_stream_capture(backend.stream)
                 .map_err(|err| format!("graph capture end failed: {err}"))
         });
+        let buffers: Vec<usize> = GPU_GRAPH_CURRENT.with(|set| set.borrow_mut().drain().collect());
         match (result, graph) {
             (Ok(value), Ok(graph)) => {
                 let exec = graph
                     .instantiate()
                     .map_err(|err| format!("graph instantiate failed: {err}"))?;
-                Ok((GpuStepGraph { exec }, value))
+                GPU_GRAPH_PINNED.with(|set| set.borrow_mut().extend(buffers.iter().copied()));
+                Ok((GpuStepGraph { exec: Some(exec), buffers }, value))
             }
-            (result, graph) => {
-                GPU_GRAPH_PINNED.with(|set| set.borrow_mut().clear());
-                drop(graph);
-                match result {
-                    Err(err) => Err(format!("graph capture run failed: {err}")),
-                    Ok(_) => Err("graph capture failed".to_string()),
-                }
-            }
+            (Err(err), _) => Err(format!("graph capture run failed: {err}")),
+            (Ok(_), Err(err)) => Err(err),
         }
     }
 
@@ -4142,9 +4408,109 @@ mod imp {
             backend.prepare_device()?;
             graph
                 .exec
+                .as_ref().ok_or_else(|| "GPU graph already released".to_string())?
                 .launch(backend.stream)
                 .map_err(|err| format!("graph launch failed: {err}"))
         })
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct GpuKernelTiming {
+        pub class: String,
+        pub rows: u32,
+        pub cols: u32,
+        pub count: usize,
+        pub microseconds: f64,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct GpuKernelProfile {
+        pub classes: Vec<GpuKernelTiming>,
+        /// Sum of the instrumented per-launch event intervals.
+        pub kernel_microseconds: f64,
+        /// Entire instrumented replay, including event-node overhead/gaps.
+        pub span_microseconds: f64,
+    }
+
+    #[repr(C)]
+    struct KernelTimingRaw {
+        name: *const std::ffi::c_char,
+        rows: u32,
+        cols: u32,
+        microseconds: f64,
+    }
+
+    unsafe extern "C" {
+        fn makepad_cuda_launch_profile_begin(reserve: u32, stream: cudaStream_t) -> cudaError_t;
+        fn makepad_cuda_launch_profile_capture_start() -> cudaError_t;
+        fn makepad_cuda_launch_profile_capture_stop() -> cudaError_t;
+        fn makepad_cuda_launch_profile_end(span_us: *mut f64, count: *mut usize) -> cudaError_t;
+        fn makepad_cuda_launch_profile_read(index: usize, out: *mut KernelTimingRaw) -> cudaError_t;
+        fn makepad_cuda_launch_profile_clear();
+    }
+
+    /// Capture an already warm device step with event nodes, then execute
+    /// it exactly once. This excludes host submission stalls from per-kernel
+    /// times (especially the first small kernel on an otherwise idle stream).
+    /// The Q8 path instruments every launch, including sampler merge passes.
+    /// BLAS/library-internal kernels are not instrumented. `run` must obey
+    /// gpu_graph_capture's contract; no synchronization occurs between kernels.
+    /// `reserve_launches` preallocates event pairs; it is only a size hint.
+    pub fn gpu_profile_kernels<T>(
+        reserve_launches: usize,
+        run: impl FnOnce() -> Result<T, String>,
+    ) -> Result<(T, GpuKernelProfile), String> {
+        thread_local! {
+            static PROFILING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+        }
+        if GPU_GRAPH_CAPTURING.with(|flag| flag.get()) || PROFILING.with(|flag| flag.get()) {
+            return Err("kernel profiling requires a non-nested, capture-safe step".into());
+        }
+        let reserve = u32::try_from(reserve_launches).map_err(|_| "event reserve exceeds u32")?;
+        struct Cleanup;
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                unsafe { makepad_cuda_launch_profile_clear(); }
+                PROFILING.with(|flag| flag.set(false));
+            }
+        }
+        let _cleanup = Cleanup;
+        PROFILING.with(|flag| flag.set(true));
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe { makepad_cuda_launch_profile_begin(reserve, backend.stream) })
+        })?;
+        let (graph, value) = gpu_graph_capture(|| {
+            gpu_check(unsafe { makepad_cuda_launch_profile_capture_start() })?;
+            let result = run();
+            let stopped = gpu_check(unsafe { makepad_cuda_launch_profile_capture_stop() });
+            let value = result?;
+            stopped?;
+            Ok(value)
+        })?;
+        gpu_graph_launch(&graph)?;
+        let mut span_microseconds = 0.0;
+        let mut count = 0usize;
+        gpu_check(unsafe { makepad_cuda_launch_profile_end(&mut span_microseconds, &mut count) })?;
+        let mut classes = std::collections::BTreeMap::new();
+        let mut kernel_microseconds = 0.0;
+        for i in 0..count {
+            let mut raw = KernelTimingRaw {
+                name: std::ptr::null(), rows: 0, cols: 0, microseconds: 0.0,
+            };
+            gpu_check(unsafe { makepad_cuda_launch_profile_read(i, &mut raw) })?;
+            if raw.name.is_null() { return Err("missing kernel profile class".into()); }
+            let class = unsafe { std::ffi::CStr::from_ptr(raw.name) }.to_string_lossy().into_owned();
+            let entry = classes.entry((class.clone(), raw.rows, raw.cols)).or_insert(GpuKernelTiming {
+                class, rows: raw.rows, cols: raw.cols, count: 0, microseconds: 0.0,
+            });
+            entry.count += 1;
+            entry.microseconds += raw.microseconds;
+            kernel_microseconds += raw.microseconds;
+        }
+        Ok((value, GpuKernelProfile {
+            classes: classes.into_values().collect(), kernel_microseconds, span_microseconds,
+        }))
     }
 
     /// Overwrite a persistent f32 tensor's contents (graph step inputs).
@@ -4173,6 +4539,135 @@ mod imp {
                 .as_ref()
                 .ok_or_else(|| "GPU tensor already released".to_string())?
                 .write_at(tensor.offset_units * size_of::<f32>(), raw, backend.stream)
+        })
+    }
+
+    /// Overwrite persistent raw-u32 storage (including row views).
+    pub fn gpu_upload_u32_into(tensor: &GpuTensor, values: &[u32]) -> Result<(), String> {
+        if tensor.half || values.len() != tensor.rows * tensor.cols {
+            return Err("gpu_upload_u32_into shape mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let raw = unsafe {
+                std::slice::from_raw_parts(values.as_ptr().cast::<u8>(), std::mem::size_of_val(values))
+            };
+            tensor.buf.as_ref().ok_or_else(|| "GPU tensor already released".to_string())?
+                .write_at(tensor.offset_units * size_of::<u32>(), raw, backend.stream)
+        })
+    }
+
+    /// Read exactly four bytes, without allocating a host vector.
+    pub fn gpu_download_u32_scalar(tensor: &GpuTensor) -> Result<u32, String> {
+        if tensor.half || tensor.rows != 1 || tensor.cols != 1 {
+            return Err("gpu_download_u32_scalar expects one u32".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let mut value = 0u32;
+            let src = NonNull::new(tensor.device_ptr()?.cast::<c_void>())
+                .ok_or_else(|| "null GPU scalar".to_string())?;
+            unsafe {
+                crate::memcpy_async_device_to_host(
+                    (&mut value as *mut u32).cast::<c_void>(), src, size_of::<u32>(), backend.stream,
+                ).map_err(|e| e.to_string())?;
+            }
+            crate::synchronize_stream(backend.stream).map_err(|e| e.to_string())?;
+            Ok(value)
+        })
+    }
+
+    /// In-place device increment, for persistent graph positions/counters.
+    pub fn gpu_increment_u32(tensor: &GpuTensor, amount: u32) -> Result<(), String> {
+        if tensor.half || tensor.rows * tensor.cols == 0 {
+            return Err("gpu_increment_u32 expects u32 storage".to_string());
+        }
+        let count = u32::try_from(tensor.rows * tensor.cols)
+            .map_err(|_| "gpu_increment_u32 count exceeds u32".to_string())?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe {
+                makepad_cuda_increment_u32(tensor.device_ptr()?.cast::<u32>(), count, amount, backend.stream)
+            })
+        })
+    }
+
+    /// Device sampling over one head window, without a logits readback.
+    /// `allowed` and `counts`: [vocab,1] raw u32; `state`: [4,1] raw u32
+    /// [Philox counter low, high, draw count, history head]; `out`: [1,1] raw u32;
+    /// `workspace`: at least 5*vocab f32 words. All must be persistent for
+    /// graph replay. The state advances once, including for a greedy draw.
+    pub fn gpu_sample_top_k_top_p(
+        logits: &GpuTensor,
+        unconditional: Option<&GpuTensor>,
+        allowed: &GpuTensor,
+        counts: &GpuTensor,
+        state: &GpuTensor,
+        out: &GpuTensor,
+        workspace: &GpuTensor,
+        params: GpuSamplingParams,
+    ) -> Result<(), String> {
+        let n = logits.cols;
+        if [logits, allowed, counts, state, out, workspace].iter().any(|t| t.half)
+            || logits.rows != 1 || n == 0 || n > i32::MAX as usize
+            || allowed.rows != n || allowed.cols != 1 || counts.rows != n || counts.cols != 1
+            || state.rows != 4 || state.cols != 1 || out.rows != 1 || out.cols != 1
+            || workspace.rows * workspace.cols < 5 * n
+            || unconditional.is_some_and(|u| u.half || u.rows != 1 || u.cols != n)
+            || !params.temperature.is_finite() || params.temperature < 0.0
+            || !params.top_p.is_finite() || !params.repetition_penalty.is_finite()
+            || params.repetition_penalty <= 0.0 || !params.guidance.is_finite()
+            || params.keep_first == 0
+            || (params.vocab_start as u64 + n as u64) > u32::MAX as u64
+        {
+            return Err("gpu_sample_top_k_top_p shape/parameter mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let uncond = match unconditional {
+                Some(u) => u.device_ptr()?.cast_const(),
+                None => std::ptr::null(),
+            };
+            gpu_check(unsafe {
+                makepad_cuda_sample_top_k_top_p_f32(
+                    logits.device_ptr()?, uncond, allowed.device_ptr()?.cast::<u32>(),
+                    counts.device_ptr()?.cast::<u32>(), state.device_ptr()?.cast::<u32>(),
+                    out.device_ptr()?.cast::<u32>(), workspace.device_ptr()?, n as u32,
+                    &params, backend.stream,
+                )
+            })
+        })
+    }
+
+    /// Accept the preceding draw into the repetition window. `history`
+    /// starts filled with u32::MAX; counts and all four state words start
+    /// at zero. The fourth word is the device ring head. Call exactly once
+    /// after a draw if that sequence will continue.
+    pub fn gpu_sample_history_push(
+        counts: &GpuTensor,
+        history: &GpuTensor,
+        state: &GpuTensor,
+        token: &GpuTensor,
+        vocab_start: u32,
+        window: usize,
+    ) -> Result<(), String> {
+        if [counts, history, state, token].iter().any(|t| t.half)
+            || counts.rows == 0 || counts.cols != 1 || history.cols != 1
+            || history.rows < window || state.rows != 4 || state.cols != 1
+            || token.rows != 1 || token.cols != 1
+            || counts.rows > u32::MAX as usize || window > u32::MAX as usize
+        {
+            return Err("gpu_sample_history_push shape mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe {
+                makepad_cuda_sample_history_push(
+                    counts.device_ptr()?.cast::<u32>(), history.device_ptr()?.cast::<u32>(),
+                    state.device_ptr()?.cast::<u32>(), token.device_ptr()?.cast::<u32>(),
+                    counts.rows as u32, vocab_start, window as u32, backend.stream,
+                )
+            })
         })
     }
 
@@ -4241,7 +4736,7 @@ mod imp {
     /// Synchronize around device-resident ops so non-env callers of the
     /// profiling API can attribute their GPU work.
     fn gpu_prof(stream: cudaStream_t, cat: usize, start: std::time::Instant, bytes: u64) {
-        if crate::prof::enabled() {
+        if crate::prof::enabled() && !GPU_GRAPH_CAPTURING.with(|flag| flag.get()) {
             let _ = crate::synchronize_stream(stream);
             crate::prof::record(cat, start, bytes);
         }
@@ -4411,6 +4906,464 @@ mod imp {
                 }
             }
         }
+    }
+
+    // ---- Fixed-workspace sequence operations --------------------------------
+
+    /// Wait for the dense device stream, without copying a tensor to the host.
+    pub fn gpu_synchronize() -> Result<(), String> {
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            crate::synchronize_stream(backend.stream).map_err(|e| e.to_string())
+        })
+    }
+
+    /// Persistent bf16 storage. It is deliberately distinct from f16 tensors.
+    pub fn gpu_alloc_bf16(rows: usize, cols: usize) -> Result<GpuBf16Buf, String> {
+        if rows == 0 || cols == 0 {
+            return Err("gpu_alloc_bf16 empty shape".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            GpuBf16Buf::from_pool(rows, cols)
+        })
+    }
+
+    /// RN-even f32 -> bf16 into a row range; other destination rows survive.
+    pub fn gpu_copy_f32_to_bf16_into(
+        src: &GpuTensor, dst: &GpuBf16Buf, start: usize,
+    ) -> Result<(), String> {
+        if src.half || src.cols != dst.cols || start > dst.rows || src.rows > dst.rows - start {
+            return Err("gpu_copy_f32_to_bf16_into shape/dtype mismatch".into());
+        }
+        let n = u32::try_from(src.rows * src.cols).map_err(|_| "bf16 copy exceeds u32")?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe { makepad_cuda_f32_to_bf16_rn(
+                src.device_ptr()?, dst.device_ptr_u16()?.add(start * dst.cols), n, backend.stream,
+            ) })
+        })
+    }
+
+    /// GQA FA2 consuming bf16 storage directly and writing a persistent f32
+    /// output. Uses the same kernel as the f32-input staging wrapper.
+    pub fn gpu_attention_gqa_flash_bf16_buf_into(
+        q: &GpuBf16Buf, k: &GpuBf16Buf, v: &GpuBf16Buf, out: &GpuTensor,
+        heads: usize, kv_heads: usize, scale: f32, causal: bool,
+        precision: GpuAttentionPrecision,
+    ) -> Result<(), String> {
+        if heads == 0 || kv_heads == 0 || heads % kv_heads != 0 || q.rows == 0 || k.rows == 0
+            || q.cols != heads * 128 || k.cols != kv_heads * 128
+            || v.rows != k.rows || v.cols != k.cols || out.half
+            || out.rows != q.rows || out.cols != q.cols || (causal && q.rows != k.rows)
+        {
+            return Err("gpu_attention_gqa_flash_bf16_buf_into shape/dtype mismatch".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe { makepad_cuda_flash_attention2_gqa_bf16(
+                q.device_ptr_u16()?, k.device_ptr_u16()?, v.device_ptr_u16()?, out.device_ptr()?,
+                q.rows as u32, k.rows as u32, heads as u32, kv_heads as u32, scale,
+                causal as i32, precision as i32, backend.stream,
+            ) })
+        })
+    }
+
+    /// The explicit bf16/f32acc linear contract, using caller-owned output
+    /// and conversion scratch. Parts are (fully qualified bf16 cache key,
+    /// output width), already resident in the weight cache. Qualified keys
+    /// avoid constructing strings in a fixed-workspace evaluation.
+    /// No allocation, upload, or backend scratch growth occurs during replay.
+    pub fn gpu_linear_nt_cached_bf16_f32acc_into(
+        x: &GpuTensor, scratch: &GpuBf16Buf,
+        parts: &[(&str, usize)], bias: Option<&GpuTensor>, out: &GpuTensor,
+    ) -> Result<(), String> {
+        let (m, k, n) = (x.rows, x.cols, out.cols);
+        if x.half || out.half || m == 0 || k == 0 || n == 0 || out.rows != m
+            || parts.is_empty() || parts.iter().any(|p| p.1 == 0)
+            || parts.iter().map(|p| p.1).sum::<usize>() != n
+            || scratch.rows * scratch.cols < m * k
+            || bias.is_some_and(|b| b.half || b.rows * b.cols != n)
+            || x.same_storage(out)
+        {
+            return Err("gpu_linear_nt_cached_bf16_f32acc_into shape/dtype mismatch".into());
+        }
+        let elems = u32::try_from(m * k).map_err(|_| "linear input exceeds u32")?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            // Match gpu_linear_nt_cached_bf16_f32acc's operand conversion
+            // (truncation, distinct from attention's RN-even conversion).
+            gpu_check(unsafe { makepad_cuda_f32_to_bf16(
+                x.device_ptr()?, scratch.device_ptr_u16()?, elems, backend.stream,
+            ) })?;
+            let (alpha, beta) = (1.0f32, 0.0f32);
+            let mut offset = 0;
+            for &(key, width) in parts {
+                let (weight, bytes) = backend.weight_ptr(key)?;
+                if bytes != width * k * size_of::<u16>() {
+                    return Err(format!("short bf16 weight {key}"));
+                }
+                unsafe { crate::cublas_gemm_strided_batched_ex(
+                    backend.blas, crate::CUBLAS_OP_T, crate::CUBLAS_OP_N,
+                    width as i32, m as i32, k as i32,
+                    &alpha, weight, crate::CUDA_R_16BF, k as i32, 0,
+                    scratch.device_ptr_u16()?.cast(), crate::CUDA_R_16BF, k as i32, 0,
+                    &beta, out.device_ptr()?.add(offset).cast(), crate::CUDA_R_32F, n as i32, 0,
+                    1, crate::CUBLAS_COMPUTE_32F, crate::CUBLAS_GEMM_DEFAULT,
+                ) }.map_err(|e| e.to_string())?;
+                offset += width;
+            }
+            if let Some(bias) = bias {
+                gpu_check(unsafe { makepad_cuda_add_rows_vec_f32(
+                    out.device_ptr()?, bias.device_ptr()?, out.device_ptr()?, m as u32, n as u32,
+                    backend.stream,
+                ) })?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Caller-owned staging shared by every linear of a sequence evaluation.
+    /// Only the selected arithmetic's buffers are allocated. FP8 uses the
+    /// first byte per element of `input` and a device scalar, never a host
+    /// absmax download. The Lt workspace is an algorithm-selection budget,
+    /// not a tensor-size limit; all input rows are always processed.
+    pub struct GpuLinearScratch {
+        precision: GpuLinearPrecision,
+        input: GpuBf16Buf,
+        output_half: Option<DeviceBuffer>,
+        fp8_scale: Option<DeviceBuffer>,
+        fp8_workspace: Option<DeviceBuffer>,
+    }
+
+    pub fn gpu_linear_scratch(
+        rows: usize, max_input: usize, max_output: usize, precision: GpuLinearPrecision,
+    ) -> Result<GpuLinearScratch, String> {
+        if rows == 0 || max_input == 0 || max_output == 0 {
+            return Err("gpu_linear_scratch empty shape".into());
+        }
+        let output_bytes = rows.checked_mul(max_output).and_then(|n| n.checked_mul(2))
+            .ok_or_else(|| "linear scratch size overflow".to_string())?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            Ok(GpuLinearScratch {
+                precision,
+                input: GpuBf16Buf::from_pool(rows, max_input)?,
+                output_half: if precision == GpuLinearPrecision::F16F16 {
+                    Some(DeviceBuffer::new(output_bytes)?)
+                } else { None },
+                fp8_scale: if precision == GpuLinearPrecision::Fp8F32 {
+                    Some(DeviceBuffer::new(4)?)
+                } else { None },
+                fp8_workspace: if precision == GpuLinearPrecision::Fp8F32 {
+                    Some(DeviceBuffer::new(32 * 1024 * 1024)?)
+                } else { None },
+            })
+        })
+    }
+
+    /// Upload a bf16 weight in the selected resident format, once. The key
+    /// must include its precision, and is passed unchanged to the linear.
+    /// FP8 stores [n*k E4M3 bytes | one aligned f32 dequant scale] together,
+    /// so ordinary prefix eviction also releases the scale. No bf16 shadow
+    /// remains in the cache for either fast format.
+    pub fn gpu_weight_cache_ensure_bf16_precision_keyed<F>(
+        key: &str, n: usize, k: usize, precision: GpuLinearPrecision, load: F,
+    ) -> Result<(), String>
+    where F: FnOnce() -> Result<Vec<u8>, String> {
+        let values = n.checked_mul(k).filter(|&n| n > 0)
+            .ok_or_else(|| "linear weight size overflow/empty".to_string())?;
+        let bf16_bytes = values.checked_mul(2).ok_or("linear weight size overflow")?;
+        if precision == GpuLinearPrecision::Bf16F32 {
+            return gpu_weight_cache_ensure_bf16_keyed(key, n, k, load);
+        }
+        if precision == GpuLinearPrecision::Fp8F32 && (n % 16 != 0 || k % 16 != 0) {
+            return Err("FP8 linear requires n/k multiples of 16".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            if precision == GpuLinearPrecision::F16F16 {
+                return backend.cached_weight_buffer(key, bf16_bytes, || {
+                    let mut bytes = load()?;
+                    if bytes.len() != bf16_bytes { return Err(format!("bf16 weight size: {key}")); }
+                    for word in bytes.chunks_exact_mut(2) {
+                        let value = f32::from_bits((u16::from_le_bytes([word[0], word[1]]) as u32) << 16);
+                        let half = crate::quant::f32_to_f16_rn(value);
+                        if !value.is_finite() || half & 0x7c00 == 0x7c00 {
+                            return Err(format!("weight {key} cannot be represented as finite f16"));
+                        }
+                        word.copy_from_slice(&half.to_le_bytes());
+                    }
+                    Ok(bytes)
+                });
+            }
+            let expected = values.checked_add(4).ok_or("FP8 weight size overflow")?;
+            if backend.weight_buffers.get(key).is_some_and(|b| b.size_bytes == expected) {
+                return Ok(());
+            }
+            let count = u32::try_from(values).map_err(|_| "FP8 weight exceeds u32")?;
+            let bytes = load()?;
+            if bytes.len() != bf16_bytes { return Err(format!("bf16 weight size: {key}")); }
+            let source = DeviceBuffer::new(bf16_bytes)?;
+            source.write(&bytes, backend.stream)?;
+            let weight = backend.alloc_with_evict(expected)?;
+            let dst = weight.ptr.as_ptr().cast::<u8>();
+            gpu_check(unsafe { makepad_cuda_quant_scaled_f8_e4m3(
+                source.ptr.as_ptr(), dst, dst.add(values).cast(), count, 1, backend.stream,
+            ) })?;
+            crate::synchronize_stream(backend.stream).map_err(|e| e.to_string())?;
+            perf_count(&PERF_WEIGHT_STREAM_COUNT, 1);
+            perf_count(&PERF_WEIGHT_STREAM_BYTES, bf16_bytes as u64);
+            backend.weight_buffers.insert(key.to_owned(), weight);
+            Ok(())
+        })
+    }
+
+    /// Same f32 input/output and bf16 input-grid boundary as the current
+    /// cached linear. Weights must be prepared in scratch's precision.
+    /// Includes per-call input conversion (dynamic device absmax for FP8),
+    /// GEMM and f16->f32 output expansion. No process-wide precision switch.
+    pub fn gpu_linear_nt_cached_precision_into(
+        x: &GpuTensor, scratch: &GpuLinearScratch, parts: &[(&str, usize)],
+        bias: Option<&GpuTensor>, out: &GpuTensor,
+    ) -> Result<(), String> {
+        if scratch.precision == GpuLinearPrecision::Bf16F32 {
+            return gpu_linear_nt_cached_bf16_f32acc_into(x, &scratch.input, parts, bias, out);
+        }
+        let (m, k, n) = (x.rows, x.cols, out.cols);
+        if x.half || out.half || m == 0 || k == 0 || n == 0 || out.rows != m
+            || parts.is_empty() || parts.iter().any(|p| p.1 == 0)
+            || parts.iter().map(|p| p.1).sum::<usize>() != n
+            || scratch.input.rows * scratch.input.cols < m * k
+            || bias.is_some_and(|b| b.half || b.rows * b.cols != n) || x.same_storage(out)
+            || [m, k, n].iter().any(|&d| d > i32::MAX as usize)
+        {
+            return Err("gpu_linear_nt_cached_precision_into shape/dtype mismatch".into());
+        }
+        let count = u32::try_from(m * k).map_err(|_| "linear input exceeds u32")?;
+        let output_count = u32::try_from(m * n).map_err(|_| "linear output exceeds u32")?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let input = scratch.input.device_ptr_u16()?;
+            let half = scratch.output_half.as_ref();
+            if scratch.precision == GpuLinearPrecision::F16F16 {
+                if !half.is_some_and(|b| b.size_bytes / 2 >= m * n) {
+                    return Err("linear f16 output scratch too small".into());
+                }
+                gpu_check(unsafe { makepad_cuda_f32_to_bf16_trunc_f16(
+                    x.device_ptr()?, input, count, backend.stream,
+                ) })?;
+            } else {
+                gpu_check(unsafe { makepad_cuda_quant_scaled_f8_e4m3(
+                    x.device_ptr()?.cast(), input.cast(),
+                    scratch.fp8_scale.as_ref().ok_or("missing FP8 scale")?.ptr.as_ptr().cast(),
+                    count, 0, backend.stream,
+                ) })?;
+            }
+            let mut offset = 0;
+            for &(key, width) in parts {
+                let (weight, bytes) = backend.weight_ptr(key)?;
+                if scratch.precision == GpuLinearPrecision::F16F16 {
+                    if bytes != width * k * 2 { return Err(format!("f16 weight size: {key}")); }
+                    let (alpha, beta) = (0x3c00u16, 0u16);
+                    unsafe { crate::cublas_gemm_ex_raw(
+                        backend.blas, crate::CUBLAS_OP_T, crate::CUBLAS_OP_N,
+                        width as i32, m as i32, k as i32, (&alpha as *const u16).cast(),
+                        weight, crate::CUDA_R_16F, k as i32,
+                        input.cast(), crate::CUDA_R_16F, k as i32, (&beta as *const u16).cast(),
+                        half.ok_or("missing f16 output")?.ptr.as_ptr().cast::<u16>().add(offset).cast(),
+                        crate::CUDA_R_16F, n as i32, crate::CUBLAS_COMPUTE_16F, crate::CUBLAS_GEMM_DEFAULT,
+                    ) }.map_err(|e| format!("f16acc GEMM m={m} k={k} n={width}: {e}"))?;
+                } else {
+                    if bytes != width * k + 4 { return Err(format!("FP8 weight size: {key}")); }
+                    fp8_dynamic_linear_gemm(backend, weight, input.cast(), scratch,
+                        m, k, width, n, unsafe { out.device_ptr()?.add(offset) })?;
+                }
+                offset += width;
+            }
+            if let Some(half) = half {
+                gpu_check(unsafe { makepad_cuda_f16_to_f32_precise(
+                    half.ptr.as_ptr().cast(), out.device_ptr()?, output_count, backend.stream,
+                ) })?;
+            }
+            if let Some(bias) = bias {
+                gpu_check(unsafe { makepad_cuda_add_rows_vec_f32(
+                    out.device_ptr()?, bias.device_ptr()?, out.device_ptr()?, m as u32, n as u32,
+                    backend.stream,
+                ) })?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Residual addition + precise RMSNorm in one pass. `update=None` is
+    /// plain RMSNorm. `residual` may alias x; normed must be separate storage.
+    pub fn gpu_add_rms_norm_into(
+        x: &GpuTensor, update: Option<&GpuTensor>, weight: &GpuTensor,
+        residual: &GpuTensor, normed: &GpuTensor, eps: f32,
+    ) -> Result<(), String> {
+        if x.half || weight.half || residual.half || normed.half || x.rows == 0 || x.cols == 0
+            || weight.rows * weight.cols != x.cols || residual.rows != x.rows
+            || residual.cols != x.cols || normed.rows != x.rows || normed.cols != x.cols
+            || normed.same_storage(residual) || normed.same_storage(x)
+            || update.is_some_and(|u| u.half || u.rows != x.rows || u.cols != x.cols)
+        {
+            return Err("gpu_add_rms_norm_into shape/dtype/alias mismatch".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe { makepad_cuda_add_rms_norm_into_f32(
+                x.device_ptr()?, update.map(|u| u.device_ptr().map(|p| p.cast_const()))
+                    .transpose()?.unwrap_or(std::ptr::null()), weight.device_ptr()?,
+                residual.device_ptr()?, normed.device_ptr()?, x.rows as u32, x.cols as u32,
+                eps, backend.stream,
+            ) })
+        })
+    }
+
+    /// Fused split, per-head Q/K RMSNorm, rotate-half RoPE and RN-even
+    /// bf16 Q/K/V stores. K/V are written only at `kv_offset..+qkv.rows`.
+    pub fn gpu_qkv_rms_rope_bf16_into(
+        qkv: &GpuTensor, qw: &GpuTensor, kw: &GpuTensor, cos: &GpuTensor, sin: &GpuTensor,
+        q: &GpuBf16Buf, k: &GpuBf16Buf, v: &GpuBf16Buf,
+        head_dim: usize, kv_offset: usize, eps: f32,
+    ) -> Result<(), String> {
+        if head_dim == 0 || head_dim % 2 != 0 || q.cols % head_dim != 0 || k.cols % head_dim != 0
+            || q.cols == 0 || k.cols == 0 || qkv.rows == 0 || qkv.half || qw.half || kw.half
+            || cos.half || sin.half || qkv.cols != q.cols + 2 * k.cols || q.rows != qkv.rows
+            || v.cols != k.cols || v.rows != k.rows || kv_offset > k.rows || q.rows > k.rows - kv_offset
+            || qw.rows * qw.cols != head_dim || kw.rows * kw.cols != head_dim
+            || cos.rows != q.rows || sin.rows != q.rows || cos.cols != head_dim / 2 || sin.cols != cos.cols
+        {
+            return Err("gpu_qkv_rms_rope_bf16_into shape/dtype mismatch".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe { makepad_cuda_qkv_rms_rope_into_bf16(
+                qkv.device_ptr()?, qw.device_ptr()?, kw.device_ptr()?, cos.device_ptr()?, sin.device_ptr()?,
+                q.device_ptr_u16()?, k.device_ptr_u16()?, v.device_ptr_u16()?, q.rows as u32,
+                (q.cols / head_dim) as u32, (k.cols / head_dim) as u32, head_dim as u32,
+                kv_offset as u32, eps, backend.stream,
+            ) })
+        })
+    }
+
+    pub fn gpu_swiglu_value_gate_into(x: &GpuTensor, out: &GpuTensor) -> Result<(), String> {
+        if x.half || out.half || x.cols != 2 * out.cols || x.rows != out.rows {
+            return Err("gpu_swiglu_value_gate_into shape/dtype mismatch".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe { makepad_cuda_swiglu_value_gate_f32(
+                x.device_ptr()?, out.device_ptr()?, x.rows as u32, out.cols as u32, backend.stream,
+            ) })
+        })
+    }
+
+    /// `(x + broadcast(row)) + position`, preserving the two f32 roundings.
+    pub fn gpu_add_row_position_into(
+        x: &GpuTensor, row: &GpuTensor, position: &GpuTensor, out: &GpuTensor,
+    ) -> Result<(), String> {
+        if x.half || row.half || position.half || out.half || row.rows != 1 || row.cols != x.cols
+            || position.rows != x.rows || position.cols != x.cols || out.rows != x.rows || out.cols != x.cols
+        {
+            return Err("gpu_add_row_position_into shape/dtype mismatch".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe { makepad_cuda_add_row_position_into_f32(
+                x.device_ptr()?, row.device_ptr()?, position.device_ptr()?, out.device_ptr()?,
+                x.rows as u32, x.cols as u32, backend.stream,
+            ) })
+        })
+    }
+
+    /// RN-bf16(state - RN-bf16(RN-bf16(velocity) * step)). Output may
+    /// alias state. Explicit operations prohibit a fused multiply/subtract.
+    pub fn gpu_scaled_sub_bf16_into(
+        state: &GpuTensor, velocity: &GpuTensor, step: f32, out: &GpuTensor,
+    ) -> Result<(), String> {
+        if state.half || velocity.half || out.half || state.rows != velocity.rows
+            || state.cols != velocity.cols || out.rows != state.rows || out.cols != state.cols
+        {
+            return Err("gpu_scaled_sub_bf16_into shape/dtype mismatch".into());
+        }
+        let n = u32::try_from(state.rows * state.cols).map_err(|_| "scaled sub exceeds u32")?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            gpu_check(unsafe { makepad_cuda_scaled_sub_into_bf16_f32(
+                state.device_ptr()?, velocity.device_ptr()?, out.device_ptr()?, n, step, backend.stream,
+            ) })
+        })
+    }
+
+    /// Time-major stride-one conv1d: one im2col/half-conversion pass and
+    /// one f16-input, f32-accumulating GEMM. Weight input is [out, in, tap].
+    /// Weights are repacked once on a cache miss; no host padding or tap
+    /// tensors are constructed on subsequent calls. Callers tile the time
+    /// axis with their receptive-field halo to bound activation storage.
+    pub fn gpu_conv1d_cached(
+        x: &GpuTensor, weight: &[f32], bias: &[f32], out_channels: usize,
+        taps: usize, dilation: usize, padding: usize, namespace: &str, key: &str,
+    ) -> Result<GpuTensor, String> {
+        let channels = x.cols;
+        if x.half || x.rows == 0 || channels == 0 || taps == 0 || dilation == 0 || out_channels == 0
+            || weight.len() != out_channels * channels * taps
+            || (!bias.is_empty() && bias.len() != out_channels)
+        {
+            return Err("gpu_conv1d_cached shape/dtype mismatch".into());
+        }
+        let out_len = x.rows.checked_add(2 * padding)
+            .and_then(|n| n.checked_sub((taps - 1) * dilation))
+            .filter(|&n| n > 0).ok_or("gpu_conv1d_cached empty output")?;
+        let width = channels * taps;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let wk = format!("{namespace}::{key}::conv1d");
+            backend.cached_weight_buffer(&wk, weight.len() * 2, || {
+                let mut bytes = Vec::with_capacity(weight.len() * 2);
+                for o in 0..out_channels {
+                    for t in 0..taps {
+                        for c in 0..channels {
+                            bytes.extend_from_slice(&crate::quant::f32_to_f16(
+                                weight[(o * channels + c) * taps + t],
+                            ).to_le_bytes());
+                        }
+                    }
+                }
+                Ok(bytes)
+            })?;
+            let bk = format!("{wk}::bias");
+            if !bias.is_empty() {
+                backend.cached_weight_buffer(&bk, bias.len() * 4, || {
+                    Ok(bias.iter().flat_map(|b| b.to_le_bytes()).collect())
+                })?;
+            }
+            let out = GpuTensor::from_pool(out_len, out_channels)?;
+            let col = GpuTensor::from_pool_half(out_len, width)?;
+            gpu_check(unsafe { makepad_cuda_conv1d_im2col_f16(
+                x.device_ptr()?, col.device_ptr_u16()?, x.rows as u32, out_len as u32,
+                channels as u32, taps as u32, dilation as u32, padding as u32, backend.stream,
+            ) })?;
+            let (w, _) = backend.weight_ptr(&wk)?;
+            let (alpha, beta) = (1.0f32, 0.0f32);
+            unsafe { crate::cublas_gemm_strided_batched_ex(
+                backend.blas, crate::CUBLAS_OP_T, crate::CUBLAS_OP_N,
+                out_channels as i32, out_len as i32, width as i32,
+                &alpha, w, crate::CUDA_R_16F, width as i32, 0,
+                col.device_ptr_u16()?.cast(), crate::CUDA_R_16F, width as i32, 0,
+                &beta, out.device_ptr()?.cast(), crate::CUDA_R_32F, out_channels as i32, 0,
+                1, crate::CUBLAS_COMPUTE_32F, crate::CUBLAS_GEMM_DEFAULT,
+            ) }.map_err(|e| e.to_string())?;
+            if !bias.is_empty() {
+                let (b, _) = backend.weight_ptr(&bk)?;
+                gpu_check(unsafe { makepad_cuda_add_rows_vec_f32(
+                    out.device_ptr()?, b.cast(), out.device_ptr()?, out_len as u32,
+                    out_channels as u32, backend.stream,
+                ) })?;
+            }
+            Ok(out)
+        })
     }
 
     /// One weight matrix part of a (possibly column-concatenated) linear
@@ -4611,6 +5564,7 @@ mod imp {
             false,
             false,
             precision,
+            false,
         )
     }
 
@@ -4639,7 +5593,104 @@ mod imp {
             true,
             false,
             GemmPrecision::default(),
+            false,
         )
+    }
+
+    /// Bias-free BF16 linear with precomputed, fully qualified cache keys.
+    /// Each `cache_key` is the exact key used by
+    /// `gpu_weight_cache_ensure_bf16_keyed`; warm calls allocate no key strings.
+    pub fn gpu_linear_nt_cached_bf16_f32acc_keyed(
+        x: &GpuTensor,
+        parts: &[GpuLinearPart<'_>],
+    ) -> Result<GpuTensor, String> {
+        if parts.iter().any(|part| part.bt_ggml_type != GGML_TYPE_BF16) {
+            return Err("gpu_linear_nt_cached_bf16_f32acc_keyed requires BF16 weights".to_string());
+        }
+        gpu_linear_nt_impl(
+            x,
+            "",
+            parts,
+            &[],
+            false,
+            true,
+            false,
+            GemmPrecision::default(),
+            true,
+        )
+    }
+
+    /// Bias-free Q8_0 GEMV for one or two rows. Weights must already be in
+    /// the cache under each fully qualified key. Activations are f32 storage
+    /// truncated to bf16 in the kernel, matching the native BF16 linear's
+    /// staging; products and output are f32. No full-weight dequantization.
+    pub fn gpu_linear_nt_cached_q8_0_f32acc_keyed(
+        x: &GpuTensor,
+        parts: &[GpuLinearPart<'_>],
+    ) -> Result<GpuTensor, String> {
+        if x.half || !(1..=2).contains(&x.rows) || x.cols == 0 || x.cols % 32 != 0
+            || parts.is_empty() || parts.iter().any(|p| p.bt_ggml_type != GGML_TYPE_Q8_0 || p.n == 0)
+        {
+            return Err("gpu_linear_nt_cached_q8_0_f32acc_keyed shape/dtype mismatch".into());
+        }
+        let n = parts.iter().try_fold(0usize, |n, p| n.checked_add(p.n))
+            .ok_or_else(|| "Q8_0 output width overflow".to_string())?;
+        let k32 = u32::try_from(x.cols).map_err(|_| "Q8_0 input width exceeds u32")?;
+        let n32 = u32::try_from(n).map_err(|_| "Q8_0 output width exceeds u32")?;
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(x.rows, n)?;
+            let mut offset = 0;
+            for part in parts {
+                let expected = part.n.checked_mul(x.cols / 32).and_then(|b| b.checked_mul(34))
+                    .ok_or_else(|| "Q8_0 weight size overflow".to_string())?;
+                let (weight, bytes) = backend.weight_ptr(part.cache_key)?;
+                if bytes != expected {
+                    return Err(format!("Q8_0 weight {}: {bytes} bytes, expected {expected}", part.cache_key));
+                }
+                gpu_check(unsafe {
+                    makepad_cuda_q8_0_gemv_f32(
+                        x.device_ptr()?, weight.cast::<u8>(), out.device_ptr()?.add(offset),
+                        x.rows as u32, k32, part.n as u32, n32, backend.stream,
+                    )
+                })?;
+                offset += part.n;
+            }
+            gpu_prof(backend.stream, crate::prof::CAT_DENSE_TOTAL, prof_start, 0);
+            Ok(out)
+        })
+    }
+
+    /// One-row Q8_0 projection over packed [value; gate] weights followed
+    /// by value * silu(gate) in the GEMV epilogue. `n` is the output width;
+    /// the cache entry has 2*n rows. The next GEMV does activation staging.
+    pub fn gpu_linear_nt_cached_q8_0_swiglu_keyed(
+        x: &GpuTensor,
+        qualified_key: &str,
+        n: usize,
+    ) -> Result<GpuTensor, String> {
+        if x.half || x.rows != 1 || x.cols == 0 || x.cols % 32 != 0 || n == 0 {
+            return Err("gpu_linear_nt_cached_q8_0_swiglu_keyed shape/dtype mismatch".into());
+        }
+        let k32 = u32::try_from(x.cols).map_err(|_| "Q8_0 input width exceeds u32")?;
+        let n32 = u32::try_from(n).map_err(|_| "Q8_0 output width exceeds u32")?;
+        let rows = n.checked_mul(2).ok_or("Q8_0 packed row count overflow")?;
+        u32::try_from(rows).map_err(|_| "Q8_0 packed row count exceeds u32")?;
+        let expected = rows.checked_mul(x.cols / 32)
+            .and_then(|v| v.checked_mul(34)).ok_or("Q8_0 weight size overflow")?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let (weight, bytes) = backend.weight_ptr(qualified_key)?;
+            if bytes != expected {
+                return Err(format!("Q8_0 weight {qualified_key}: {bytes} bytes, expected {expected}"));
+            }
+            let out = GpuTensor::from_pool(1, n)?;
+            gpu_check(unsafe { makepad_cuda_q8_0_gemv_swiglu_f32(
+                x.device_ptr()?, weight.cast::<u8>(), out.device_ptr()?, k32, n32, backend.stream,
+            ) })?;
+            Ok(out)
+        })
     }
 
     /// PyTorch 2.7's bias-free BF16 `nn.Linear` contract: the contiguous 3-D
@@ -5067,6 +6118,7 @@ mod imp {
             false,
             true,
             GemmPrecision::default(),
+            false,
         )
     }
 
@@ -5105,6 +6157,7 @@ mod imp {
             false,
             false,
             precision,
+            false,
         )
     }
 
@@ -5117,6 +6170,7 @@ mod imp {
         force_native_bf16: bool,
         force_f16_operands: bool,
         precision: GemmPrecision,
+        qualified_keys: bool,
     ) -> Result<GpuTensor, String> {
         let m = x.rows;
         let k = x.cols;
@@ -5170,20 +6224,23 @@ mod imp {
             } else {
                 native_type
             };
-            let part_key = |part: &GpuLinearPart<'_>| {
-                if quant_call {
-                    quant_part_key(cache_namespace, part.cache_key, part.bt_ggml_type)
+            let part_key = |index: usize| {
+                let part = &parts[index];
+                if qualified_keys {
+                    Cow::Borrowed(part.cache_key)
+                } else if quant_call {
+                    Cow::Owned(quant_part_key(cache_namespace, part.cache_key, part.bt_ggml_type))
                 } else if f16acc {
-                    format!("{cache_namespace}::{}::a16", part.cache_key)
+                    Cow::Owned(format!("{cache_namespace}::{}::a16", part.cache_key))
                 } else {
-                    format!("{cache_namespace}::{}", part.cache_key)
+                    Cow::Owned(format!("{cache_namespace}::{}", part.cache_key))
                 }
             };
 
             // Warm every weight part FIRST: a cold-weight upload can trigger
             // alloc_with_evict, which clears input_half — converting the
             // activations before that would silently lose them.
-            for part in parts {
+            for (index, part) in parts.iter().enumerate() {
                 let weight_bytes = if quant_call {
                     quant_linear_payload_bytes(part.bt_ggml_type, part.n, k)?
                 } else {
@@ -5192,7 +6249,7 @@ mod imp {
                         .and_then(|len| len.checked_mul(size_of::<u16>()))
                         .ok_or_else(|| "gpu_linear weight size overflow".to_string())?
                 };
-                let qualified_key = part_key(part);
+                let qualified_key = part_key(index);
                 let part_bytes = part.bytes;
                 let needs_convert = f16acc && part.bt_ggml_type == GGML_TYPE_BF16;
                 backend.cached_weight_buffer(&qualified_key, weight_bytes, || {
@@ -5243,6 +6300,14 @@ mod imp {
                 out.device_ptr()?
             };
 
+            // Keyed linears use pooled staging so a graph owns its captured
+            // addresses. The backend's growable input_half could otherwise
+            // be replaced by a later prefill while this graph is still live.
+            let keyed_input = if qualified_keys && !x.half {
+                Some(gpu_pool_acquire(input_len * size_of::<u16>())?)
+            } else {
+                None
+            };
             // The gemm's activation operand, computed only after every other
             // allocation: an eviction pass clears the input_half staging
             // buffer, so nothing may allocate between the convert and the
@@ -5251,11 +6316,11 @@ mod imp {
             let b_operand: *const std::ffi::c_void = if x.half {
                 x.device_ptr_u16()?.cast_const().cast::<std::ffi::c_void>()
             } else {
-                backend.ensure_input_half(input_len * size_of::<u16>())?;
+                if keyed_input.is_none() {
+                    backend.ensure_input_half(input_len * size_of::<u16>())?;
+                }
                 let x_ptr = x.device_ptr()?;
-                let input_half = backend
-                    .input_half
-                    .as_ref()
+                let input_half = keyed_input.as_ref().or(backend.input_half.as_ref())
                     .ok_or_else(|| "missing gpu_linear half input buffer".to_string())?;
                 let status = unsafe {
                     if half_type == crate::CUDA_R_16BF {
@@ -5278,11 +6343,11 @@ mod imp {
                 input_half.ptr.as_ptr().cast_const()
             };
             let mut col_off = 0usize;
-            for part in parts {
-                let qualified_key = part_key(part);
+            for (index, part) in parts.iter().enumerate() {
+                let qualified_key = part_key(index);
                 let weight = backend
                     .weight_buffers
-                    .get(&qualified_key)
+                    .get(qualified_key.as_ref())
                     .ok_or_else(|| format!("missing cached CUDA weight buffer {qualified_key}"))?;
                 // Quantized part: bulk-dequantize the cached payload into
                 // pooled bf16 scratch; the gemm below then reads the scratch
@@ -5515,6 +6580,7 @@ mod imp {
                 };
                 gpu_check(status)?;
             }
+            if let Some(input) = keyed_input { gpu_pool_release(input); }
             gpu_prof(backend.stream, crate::prof::CAT_DENSE_TOTAL, prof_start, 0);
             Ok(out)
         })
@@ -5851,6 +6917,18 @@ mod imp {
         scale: &[f32],
         eps: f32,
     ) -> Result<GpuTensor, String> {
+        let key = format!("{cache_namespace}::{cache_key}::rms");
+        gpu_rms_norm_mul_keyed(x, group_cols, &key, scale, eps)
+    }
+
+    /// RMSNorm with a precomputed, fully qualified scale-cache key.
+    pub fn gpu_rms_norm_mul_keyed(
+        x: &GpuTensor,
+        group_cols: usize,
+        qualified_key: &str,
+        scale: &[f32],
+        eps: f32,
+    ) -> Result<GpuTensor, String> {
         if group_cols == 0 || (x.rows * x.cols) % group_cols != 0 || scale.len() != group_cols {
             return Err("gpu_rms_norm_mul shape mismatch".to_string());
         }
@@ -5860,9 +6938,8 @@ mod imp {
             backend.prepare_device()?;
             // The scale vector is model-constant: device-cache it instead of
             // re-uploading on every one of the ~600 calls per image.
-            let vec_key = format!("{cache_namespace}::{cache_key}::rms");
             let vec_bytes = scale.len() * size_of::<f32>();
-            backend.cached_weight_buffer(&vec_key, vec_bytes, || {
+            backend.cached_weight_buffer(qualified_key, vec_bytes, || {
                 let raw = unsafe {
                     std::slice::from_raw_parts(scale.as_ptr().cast::<u8>(), vec_bytes)
                 };
@@ -5875,8 +6952,8 @@ mod imp {
             };
             let scale_buf = backend
                 .weight_buffers
-                .get(&vec_key)
-                .ok_or_else(|| format!("missing cached CUDA rms scale buffer {vec_key}"))?;
+                .get(qualified_key)
+                .ok_or_else(|| format!("missing cached CUDA rms scale buffer {qualified_key}"))?;
             let status = if x.half {
                 unsafe {
                     makepad_cuda_rms_norm_rows_weighted_f16(
@@ -5906,6 +6983,149 @@ mod imp {
             };
             gpu_check(status)?;
             gpu_prof(backend.stream, crate::prof::CAT_RMS_NORM, prof_start, 0);
+            Ok(out)
+        })
+    }
+
+    /// `residual = x + add`, followed by the precise weighted RMSNorm.
+    /// Returns both f32 tensors. Scale keys use the same cache as
+    /// `gpu_rms_norm_mul_keyed`. This allocating, cached-scale wrapper uses
+    /// the same launcher as `gpu_add_rms_norm_into` and its device weights.
+    pub fn gpu_add_rms_norm_keyed(
+        x: &GpuTensor,
+        add: &GpuTensor,
+        qualified_key: &str,
+        scale: &[f32],
+        eps: f32,
+    ) -> Result<(GpuTensor, GpuTensor), String> {
+        if x.half || add.half || x.rows != add.rows || x.cols != add.cols
+            || x.rows == 0 || x.cols == 0 || scale.len() != x.cols
+        {
+            return Err("gpu_add_rms_norm_keyed shape mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let bytes = std::mem::size_of_val(scale);
+            backend.cached_weight_buffer(qualified_key, bytes, || {
+                Ok(unsafe { std::slice::from_raw_parts(scale.as_ptr().cast::<u8>(), bytes) }.to_vec())
+            })?;
+            let residual = GpuTensor::from_pool(x.rows, x.cols)?;
+            let normed = GpuTensor::from_pool(x.rows, x.cols)?;
+            let weight = backend.weight_buffers.get(qualified_key)
+                .ok_or_else(|| format!("missing RMS weight {qualified_key}"))?;
+            gpu_check(unsafe {
+                makepad_cuda_add_rms_norm_into_f32(
+                    x.device_ptr()?, add.device_ptr()?, weight.ptr.as_ptr().cast::<f32>(),
+                    residual.device_ptr()?, normed.device_ptr()?, x.rows as u32, x.cols as u32,
+                    eps, backend.stream,
+                )
+            })?;
+            Ok((residual, normed))
+        })
+    }
+
+    /// One packed Q|K|V decode row -> per-head Q/K RMSNorm + rotate-half
+    /// RoPE + K/V cache write. `position` is one raw device u32. RoPE tables
+    /// cover all positions, and the caller must keep position < capacity.
+    pub fn gpu_qk_rms_norm_rope_cache(
+        qkv: &GpuTensor,
+        q_key: &str,
+        q_scale: &[f32],
+        k_key: &str,
+        k_scale: &[f32],
+        cos: &GpuTensor,
+        sin: &GpuTensor,
+        position: &GpuTensor,
+        key_cache: &GpuTensor,
+        value_cache: &GpuTensor,
+        heads: usize,
+        kv_heads: usize,
+        eps: f32,
+    ) -> Result<GpuTensor, String> {
+        let dim = q_scale.len();
+        if [qkv, cos, sin, position, key_cache, value_cache].iter().any(|t| t.half)
+            || heads == 0 || kv_heads == 0 || dim == 0 || dim % 2 != 0
+            || k_scale.len() != dim || qkv.rows != 1 || qkv.cols != (heads + 2 * kv_heads) * dim
+            || cos.rows == 0 || sin.rows != cos.rows || cos.cols != dim / 2 || sin.cols != cos.cols
+            || position.rows != 1 || position.cols != 1 || key_cache.rows == 0
+            || key_cache.cols != kv_heads * dim || value_cache.rows != key_cache.rows
+            || value_cache.cols != key_cache.cols
+        {
+            return Err("gpu_qk_rms_norm_rope_cache shape mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            for (key, scale) in [(q_key, q_scale), (k_key, k_scale)] {
+                let bytes = std::mem::size_of_val(scale);
+                backend.cached_weight_buffer(key, bytes, || {
+                    Ok(unsafe { std::slice::from_raw_parts(scale.as_ptr().cast::<u8>(), bytes) }.to_vec())
+                })?;
+            }
+            let out = GpuTensor::from_pool(1, heads * dim)?;
+            let qw = backend.weight_buffers.get(q_key).ok_or_else(|| "missing Q norm".to_string())?;
+            let kw = backend.weight_buffers.get(k_key).ok_or_else(|| "missing K norm".to_string())?;
+            gpu_check(unsafe {
+                makepad_cuda_qk_rms_norm_rope_cache_f32(
+                    qkv.device_ptr()?, qw.ptr.as_ptr().cast::<f32>(), kw.ptr.as_ptr().cast::<f32>(),
+                    cos.device_ptr()?, sin.device_ptr()?, position.device_ptr()?.cast::<u32>(),
+                    out.device_ptr()?, key_cache.device_ptr()?, value_cache.device_ptr()?,
+                    heads as u32, kv_heads as u32, dim as u32, key_cache.rows as u32,
+                    cos.rows as u32, eps, backend.stream,
+                )
+            })?;
+            Ok(out)
+        })
+    }
+
+    /// Fused decode Q/K RMSNorm + rotate-half RoPE with RN-even bf16 K/V
+    /// stores. Q remains f32; the norm/rotation math matches the f32-cache
+    /// variant. `position` is a device u32 and must stay below capacity.
+    pub fn gpu_qk_rms_norm_rope_cache_bf16(
+        qkv: &GpuTensor,
+        q_key: &str,
+        q_scale: &[f32],
+        k_key: &str,
+        k_scale: &[f32],
+        cos: &GpuTensor,
+        sin: &GpuTensor,
+        position: &GpuTensor,
+        key_cache: &GpuBf16Buf,
+        value_cache: &GpuBf16Buf,
+        heads: usize,
+        kv_heads: usize,
+        eps: f32,
+    ) -> Result<GpuTensor, String> {
+        let dim = q_scale.len();
+        if [qkv, cos, sin, position].iter().any(|t| t.half)
+            || heads == 0 || kv_heads == 0 || dim == 0 || dim % 2 != 0
+            || k_scale.len() != dim || qkv.rows != 1 || qkv.cols != (heads + 2 * kv_heads) * dim
+            || cos.rows == 0 || sin.rows != cos.rows || cos.cols != dim / 2 || sin.cols != cos.cols
+            || position.rows != 1 || position.cols != 1 || key_cache.rows == 0
+            || key_cache.cols != kv_heads * dim || value_cache.rows != key_cache.rows
+            || value_cache.cols != key_cache.cols
+        {
+            return Err("gpu_qk_rms_norm_rope_cache_bf16 shape mismatch".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            for (key, scale) in [(q_key, q_scale), (k_key, k_scale)] {
+                let bytes = std::mem::size_of_val(scale);
+                backend.cached_weight_buffer(key, bytes, || {
+                    Ok(unsafe { std::slice::from_raw_parts(scale.as_ptr().cast::<u8>(), bytes) }.to_vec())
+                })?;
+            }
+            let out = GpuTensor::from_pool(1, heads * dim)?;
+            let qw = backend.weight_buffers.get(q_key).ok_or_else(|| "missing Q norm".to_string())?;
+            let kw = backend.weight_buffers.get(k_key).ok_or_else(|| "missing K norm".to_string())?;
+            gpu_check(unsafe {
+                makepad_cuda_qk_rms_norm_rope_cache_bf16(
+                    qkv.device_ptr()?, qw.ptr.as_ptr().cast::<f32>(), kw.ptr.as_ptr().cast::<f32>(),
+                    cos.device_ptr()?, sin.device_ptr()?, position.device_ptr()?.cast::<u32>(),
+                    out.device_ptr()?, key_cache.device_ptr_u16()?, value_cache.device_ptr_u16()?,
+                    heads as u32, kv_heads as u32, dim as u32, key_cache.rows as u32,
+                    cos.rows as u32, eps, backend.stream,
+                )
+            })?;
             Ok(out)
         })
     }
@@ -6452,6 +7672,55 @@ mod imp {
             }
             gpu_pool_release(scores);
             gpu_prof(backend.stream, crate::prof::CAT_FLASH_ATTN, prof_start, 0);
+            Ok(out)
+        })
+    }
+
+    /// Gather rows from a resident BF16 weight table, expanding to f32.
+    /// `qualified_key` names an entry uploaded by
+    /// `gpu_weight_cache_ensure_bf16_keyed`. `indices` holds raw u32 ids
+    /// (one per row, uploaded with `gpu_upload_u32` or produced on device).
+    /// Ids must be less than `table_rows`; invalid ids yield NaN rows.
+    pub fn gpu_gather_rows_cached_bf16(
+        indices: &GpuTensor,
+        qualified_key: &str,
+        table_rows: usize,
+        cols: usize,
+    ) -> Result<GpuTensor, String> {
+        if indices.half || indices.cols != 1 || indices.rows == 0 || table_rows == 0 || cols == 0 {
+            return Err("gpu_gather_rows_cached_bf16 shape mismatch".to_string());
+        }
+        let table_bytes = table_rows
+            .checked_mul(cols)
+            .and_then(|n| n.checked_mul(size_of::<u16>()))
+            .ok_or_else(|| "gpu_gather_rows_cached_bf16 size overflow".to_string())?;
+        let rows_u32 = u32::try_from(table_rows)
+            .map_err(|_| "gpu_gather_rows_cached_bf16 table rows exceed u32".to_string())?;
+        let cols_u32 = u32::try_from(cols)
+            .map_err(|_| "gpu_gather_rows_cached_bf16 columns exceed u32".to_string())?;
+        let count = u32::try_from(indices.rows)
+            .map_err(|_| "gpu_gather_rows_cached_bf16 index count exceeds u32".to_string())?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(indices.rows, cols)?;
+            let table = backend
+                .weight_buffers
+                .get(qualified_key)
+                .ok_or_else(|| format!("missing cached CUDA gather table {qualified_key}"))?;
+            if table.size_bytes != table_bytes {
+                return Err("gpu_gather_rows_cached_bf16 table shape mismatch".to_string());
+            }
+            gpu_check(unsafe {
+                makepad_cuda_gather_rows_bf16_f32(
+                    table.ptr.as_ptr().cast::<u16>(),
+                    indices.device_ptr()?.cast::<u32>(),
+                    out.device_ptr()?,
+                    rows_u32,
+                    cols_u32,
+                    count,
+                    backend.stream,
+                )
+            })?;
             Ok(out)
         })
     }
@@ -9164,6 +10433,68 @@ mod imp {
         run
     }
 
+    // Dynamic per-tensor FP8 twin. Descriptor setup/heuristic selection is
+    // deliberately included in the microbench, as in the existing scaled-mm
+    // path; neither activation absmax nor a tensor crosses to the host.
+    #[allow(clippy::too_many_arguments)]
+    fn fp8_dynamic_linear_gemm(
+        backend: &CudaDenseLinearBackend, weight: *const c_void, input: *const c_void,
+        scratch: &GpuLinearScratch, m: usize, k: usize, n: usize, ldc: usize, out: *mut f32,
+    ) -> Result<(), String> {
+        let workspace = scratch.fp8_workspace.as_ref().ok_or("missing FP8 workspace")?;
+        let b_scale = scratch.fp8_scale.as_ref().ok_or("missing FP8 input scale")?.ptr.as_ptr();
+        let a_scale = unsafe { weight.cast::<u8>().add(n * k).cast::<c_void>() };
+        let operation = crate::cublas_lt_matmul_desc_create(crate::CUBLAS_COMPUTE_32F, crate::CUDA_R_32F)
+            .map_err(|e| e.to_string())?;
+        let a_desc = crate::cublas_lt_matrix_layout_create(crate::CUDA_R_8F_E4M3, k as u64, n as u64, k as i64);
+        let b_desc = crate::cublas_lt_matrix_layout_create(crate::CUDA_R_8F_E4M3, k as u64, m as u64, k as i64);
+        let d_desc = crate::cublas_lt_matrix_layout_create(crate::CUDA_R_32F, n as u64, m as u64, ldc as i64);
+        let preference = crate::cublas_lt_matmul_preference_create();
+        let result = (|| -> Result<(), String> {
+            let a = *a_desc.as_ref().map_err(|e| e.to_string())?;
+            let b = *b_desc.as_ref().map_err(|e| e.to_string())?;
+            let d = *d_desc.as_ref().map_err(|e| e.to_string())?;
+            let pref = *preference.as_ref().map_err(|e| e.to_string())?;
+            crate::cublas_lt_matmul_desc_set_attribute(operation, crate::CUBLASLT_MATMUL_DESC_TRANSA, &crate::CUBLAS_OP_T)
+                .map_err(|e| e.to_string())?;
+            crate::cublas_lt_matmul_desc_set_attribute(operation, crate::CUBLASLT_MATMUL_DESC_TRANSB, &crate::CUBLAS_OP_N)
+                .map_err(|e| e.to_string())?;
+            crate::cublas_lt_matmul_desc_set_attribute(operation, crate::CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &a_scale)
+                .map_err(|e| e.to_string())?;
+            crate::cublas_lt_matmul_desc_set_attribute(operation, crate::CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &b_scale)
+                .map_err(|e| e.to_string())?;
+            crate::cublas_lt_matmul_preference_set_attribute(pref, crate::CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES, &workspace.size_bytes)
+                .map_err(|e| e.to_string())?;
+            for (attribute, pointer) in [
+                (crate::CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES, weight),
+                (crate::CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES, input),
+                (crate::CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES, out.cast_const().cast()),
+                (crate::CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES, out.cast_const().cast()),
+            ] {
+                crate::cublas_lt_matmul_preference_set_attribute(pref, attribute, &crate::cublas_lt_pointer_alignment(pointer))
+                    .map_err(|e| e.to_string())?;
+            }
+            let heuristic = crate::cublas_lt_matmul_algo_get_heuristic(backend.blas_lt, operation, a, b, d, d, pref)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("FP8 Lt no algorithm m={m} k={k} n={n} ldc={ldc}"))?;
+            if heuristic.state != crate::CUBLAS_STATUS_SUCCESS {
+                return Err(format!("FP8 Lt heuristic status {} for m={m} k={k} n={n}", heuristic.state));
+            }
+            let (alpha, beta) = (1.0f32, 0.0f32);
+            unsafe { crate::cublas_lt_matmul(
+                backend.blas_lt, operation, (&alpha as *const f32).cast(), weight, a,
+                input, b, (&beta as *const f32).cast(), out.cast(), d, out.cast(), d,
+                &heuristic.algo, workspace.ptr.as_ptr(), workspace.size_bytes, backend.stream,
+            ) }.map_err(|e| format!("FP8 Lt m={m} k={k} n={n}: {e}"))
+        })();
+        if let Ok(desc) = preference { let _ = crate::cublas_lt_matmul_preference_destroy(desc); }
+        if let Ok(desc) = d_desc { let _ = crate::cublas_lt_matrix_layout_destroy(desc); }
+        if let Ok(desc) = b_desc { let _ = crate::cublas_lt_matrix_layout_destroy(desc); }
+        if let Ok(desc) = a_desc { let _ = crate::cublas_lt_matrix_layout_destroy(desc); }
+        let _ = crate::cublas_lt_matmul_desc_destroy(operation);
+        result
+    }
+
     fn require_one_f8_part<'a, 'b>(
         parts: &'b [GpuLinearPart<'a>],
         who: &str,
@@ -9566,6 +10897,50 @@ mod imp {
         })
     }
 
+    /// Depthwise 1-D convolution over time on (rows, ch) f32 rows, zero
+    /// padded by (k - 1) / 2 each side: `out[t, c] = bias[c] + sum_j
+    /// weight[c, j] * x[t + j - pad, c]`. `weight` is a resident (ch, k) f32
+    /// tensor, `bias` a resident (1, ch) one; k odd, rows <= 65535.
+    pub fn gpu_dwconv1d(
+        x: &GpuTensor,
+        weight: &GpuTensor,
+        bias: Option<&GpuTensor>,
+    ) -> Result<GpuTensor, String> {
+        if x.half || weight.half || bias.map(|b| b.half).unwrap_or(false) {
+            return Err("gpu_dwconv1d expects f32 tensors".to_string());
+        }
+        if weight.rows != x.cols || bias.map(|b| b.rows * b.cols != x.cols).unwrap_or(false) {
+            return Err(format!(
+                "gpu_dwconv1d shape mismatch: x {}x{}, weight {}x{}",
+                x.rows, x.cols, weight.rows, weight.cols
+            ));
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(x.rows, x.cols)?;
+            let bias_ptr = match bias {
+                Some(b) => b.device_ptr()?.cast_const(),
+                None => std::ptr::null(),
+            };
+            let status = unsafe {
+                makepad_cuda_dwconv1d_f32(
+                    x.device_ptr()?,
+                    weight.device_ptr()?,
+                    bias_ptr,
+                    out.device_ptr()?,
+                    x.rows as u32,
+                    x.cols as u32,
+                    weight.cols as u32,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
+            gpu_prof(backend.stream, crate::prof::CAT_ELEMENTWISE, prof_start, 0);
+            Ok(out)
+        })
+    }
+
     /// Fused anti-aliased SnakeBeta (BigVGAN Activation1d, ratio 2, 12-tap
     /// Kaiser filters) on time-major (t, ch) rows. `params` is the combined
     /// per-activation buffer [alpha(ch) | inv_beta(ch) | up_filter(12) |
@@ -9734,6 +11109,117 @@ mod imp {
                     Ok(raw)
                 }
             })
+        })
+    }
+
+    /// Ensure a native BF16 weight under an already qualified cache key.
+    /// This shares the ordinary weight cache and eviction policy, without
+    /// rebuilding `namespace::key` on each decode step.
+    pub fn gpu_weight_cache_ensure_bf16_keyed<F>(
+        qualified_key: &str,
+        n: usize,
+        k: usize,
+        load: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<Vec<u8>, String>,
+    {
+        let bytes = n
+            .checked_mul(k)
+            .and_then(|v| v.checked_mul(size_of::<u16>()))
+            .ok_or_else(|| "gpu_weight_cache_ensure_bf16_keyed size overflow".to_string())?;
+        if bytes == 0 {
+            return Err("gpu_weight_cache_ensure_bf16_keyed empty shape".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            backend.cached_weight_buffer(qualified_key, bytes, load)
+        })
+    }
+
+    /// Quantize an already cached BF16 weight on the device into a separate
+    /// GGML Q8_0 copy: f16 scale followed by 32 signed bytes (34 bytes/block).
+    /// Scales round RN-even; quants round nearest, ties away from zero. Only
+    /// a nonfinite flag is read back on a miss; no host weight load or copy.
+    /// The BF16 cache is retained, and warm calls are safe during capture.
+    pub fn gpu_weight_cache_ensure_q8_0_from_bf16_keyed(
+        qualified_key: &str,
+        bf16_key: &str,
+        n: usize,
+        k: usize,
+    ) -> Result<(), String> {
+        gpu_weight_cache_ensure_q8_0_concat_bf16_keyed(qualified_key, &[GpuLinearPart {
+            bt_ggml_type: GGML_TYPE_BF16, n, cache_key: bf16_key, bytes: &[],
+        }], k)
+    }
+
+    /// Quantize already cached BF16 parts directly into one row-concatenated
+    /// Q8_0 allocation. No intermediate individual Q8 copies or host weights.
+    /// Part keys are fully qualified; warm calls are safe during capture.
+    pub fn gpu_weight_cache_ensure_q8_0_concat_bf16_keyed(
+        qualified_key: &str,
+        parts: &[GpuLinearPart<'_>],
+        k: usize,
+    ) -> Result<(), String> {
+        if k == 0 || k % 32 != 0 || parts.is_empty()
+            || parts.iter().any(|p| p.n == 0 || p.bt_ggml_type != GGML_TYPE_BF16)
+        {
+            return Err("gpu_weight_cache_ensure_q8_0_concat_bf16_keyed invalid shape/dtype".into());
+        }
+        if parts.iter().any(|p| qualified_key == p.cache_key) {
+            return Err("Q8_0 destination must differ from the BF16 source key".into());
+        }
+        let n = parts.iter().try_fold(0usize, |sum, p| sum.checked_add(p.n))
+            .ok_or("Q8_0 row count overflow")?;
+        let blocks = n.checked_mul(k / 32)
+            .ok_or_else(|| "Q8_0 block count overflow".to_string())?;
+        let bytes = blocks.checked_mul(34)
+            .ok_or_else(|| "Q8_0 weight size overflow".to_string())?;
+        u32::try_from(blocks).map_err(|_| "Q8_0 block count exceeds u32")?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            if let Some(existing) = backend.weight_buffers.get(qualified_key) {
+                if existing.size_bytes != bytes {
+                    return Err(format!(
+                        "Q8_0 weight {qualified_key}: {} bytes, expected {bytes}", existing.size_bytes,
+                    ));
+                }
+                return Ok(());
+            }
+            if GPU_GRAPH_CAPTURING.with(|flag| flag.get()) {
+                return Err(format!("Q8_0 weight {qualified_key} must be warmed before CUDA graph capture"));
+            }
+            // Do not use alloc_with_evict: it can invalidate the source and
+            // discard BF16 weights still needed by subsequent prefills.
+            let buffer = DeviceBuffer::new(bytes)?;
+            let nonfinite = GpuTensor::from_pool(1, 1)?;
+            let status = nonfinite.buf.as_ref().expect("allocated Q8_0 status buffer");
+            unsafe { crate::memset_async(status.ptr, 0, size_of::<u32>(), backend.stream) }
+                .map_err(|err| err.to_string())?;
+            let mut offset = 0;
+            for part in parts {
+                let raw_bytes = part.n.checked_mul(k).and_then(|v| v.checked_mul(2))
+                    .ok_or("Q8_0 source size overflow")?;
+                let (source, source_bytes) = backend.weight_ptr(part.cache_key)?;
+                if source_bytes != raw_bytes {
+                    return Err(format!("Q8_0 source {}: {source_bytes} bytes, expected {raw_bytes}", part.cache_key));
+                }
+                let part_blocks = part.n * (k / 32);
+                gpu_check(unsafe {
+                    makepad_cuda_quant_bf16_q8_0(
+                        source.cast::<u16>(), buffer.ptr.as_ptr().cast::<u8>().add(offset),
+                        part_blocks as u32, status.ptr.as_ptr().cast::<u32>(), backend.stream,
+                    )
+                })?;
+                offset += part_blocks * 34;
+            }
+            // Finish the kernel and check only four bytes before publishing
+            // the cache entry. The pooled flag is reused for the next weight.
+            if status.read_u32s(1, backend.stream)?[0] != 0 {
+                return Err(format!("nonfinite Q8_0 source for {qualified_key}"));
+            }
+            backend.weight_buffers.insert(qualified_key.to_owned(), buffer);
+            Ok(())
         })
     }
 
@@ -10537,6 +12023,260 @@ mod imp {
                     head_count as u32,
                     hidden as u32,
                     scale,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
+            gpu_pool_release(q16);
+            gpu_pool_release(k16);
+            gpu_pool_release(v16);
+            gpu_prof(backend.stream, crate::prof::CAT_FLASH_ATTN, prof_start, 0);
+            Ok(out)
+        })
+    }
+
+    // Must match SPLIT_KV_CHUNK in kernels/diffusion_ops.cu for both cache
+    // dtypes and both host-length and graph-replay workspace layouts.
+    const ATTENTION_DECODE_SPLIT_POSITIONS: usize = 32;
+
+    /// Split-KV grouped-query decode attention (head_dim 128, f32): one
+    /// query row `q [1, heads*128]` over rows `0..sequence` of preallocated
+    /// caches `k`/`v [cap, kv_heads*128]` (no slicing, no repeat). Chunks of
+    /// 32 positions run in parallel, eight positions per warp, then merge
+    /// in a second pass. Softmax and accumulation stay f32.
+    pub fn gpu_attention_gqa_decode_split(
+        q: &GpuTensor,
+        k: &GpuTensor,
+        v: &GpuTensor,
+        sequence: usize,
+        head_count: usize,
+        kv_heads: usize,
+        scale: f32,
+    ) -> Result<GpuTensor, String> {
+        if q.half || k.half || v.half {
+            return Err("gpu_attention_gqa_decode_split expects f32 storage".to_string());
+        }
+        if q.rows != 1
+            || head_count == 0
+            || kv_heads == 0
+            || head_count % kv_heads != 0
+            || head_count / kv_heads > 4
+            || q.cols != head_count * 128
+            || k.cols != kv_heads * 128
+            || v.cols != k.cols
+            || sequence == 0
+            || sequence > k.rows
+            || sequence > v.rows
+        {
+            return Err("gpu_attention_gqa_decode_split shape mismatch".to_string());
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            // Bucket the workspace (64 chunks = 2k positions per step) so a
+            // growing cache does not miss the pool every token.
+            let splits = sequence.div_ceil(ATTENTION_DECODE_SPLIT_POSITIONS).div_ceil(64) * 64;
+            let workspace = GpuTensor::from_pool(head_count * splits, 130)?;
+            let out = GpuTensor::from_pool(1, q.cols)?;
+            let status = unsafe {
+                makepad_cuda_attention_gqa_decode_split_f32(
+                    q.device_ptr()?,
+                    k.device_ptr()?,
+                    v.device_ptr()?,
+                    workspace.device_ptr()?,
+                    out.device_ptr()?,
+                    sequence as u32,
+                    head_count as u32,
+                    kv_heads as u32,
+                    scale,
+                    backend.stream,
+                )
+            };
+            gpu_check(status)?;
+            gpu_prof(backend.stream, crate::prof::CAT_FLASH_ATTN, prof_start, 0);
+            Ok(out)
+        })
+    }
+
+    /// Graph-safe split-KV decode followed by a separate merge. `sequence`
+    /// is one device u32 in `1..=min(k.rows(), v.rows())`. The fixed grid
+    /// covers capacity; inactive chunks return and merge ignores them.
+    pub fn gpu_attention_gqa_decode_split_device(
+        q: &GpuTensor,
+        k: &GpuTensor,
+        v: &GpuTensor,
+        sequence: &GpuTensor,
+        head_count: usize,
+        kv_heads: usize,
+        scale: f32,
+    ) -> Result<GpuTensor, String> {
+        if q.half || k.half || v.half || sequence.half || q.rows != 1
+            || head_count == 0 || kv_heads == 0 || head_count % kv_heads != 0
+            || head_count / kv_heads > 4 || q.cols != head_count * 128
+            || k.cols != kv_heads * 128 || v.cols != k.cols || k.rows == 0 || v.rows != k.rows
+            || sequence.rows != 1 || sequence.cols != 1
+        {
+            return Err("gpu_attention_gqa_decode_split_device shape mismatch".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let splits = k.rows.div_ceil(ATTENTION_DECODE_SPLIT_POSITIONS);
+            let workspace = GpuTensor::from_pool(head_count * splits, 130)?;
+            let out = GpuTensor::from_pool(1, q.cols)?;
+            gpu_check(unsafe {
+                makepad_cuda_attention_gqa_decode_split_device_f32(
+                    q.device_ptr()?, k.device_ptr()?, v.device_ptr()?, workspace.device_ptr()?,
+                    out.device_ptr()?, sequence.device_ptr()?.cast::<u32>(), k.rows as u32,
+                    head_count as u32, kv_heads as u32, scale, backend.stream,
+                )
+            })?;
+            Ok(out)
+        })
+    }
+
+    /// Split-KV decode over native bf16 caches; query, softmax, products,
+    /// partials and output stay f32. The host supplies the live row count.
+    pub fn gpu_attention_gqa_decode_split_bf16(
+        q: &GpuTensor,
+        k: &GpuBf16Buf,
+        v: &GpuBf16Buf,
+        sequence: usize,
+        head_count: usize,
+        kv_heads: usize,
+        scale: f32,
+    ) -> Result<GpuTensor, String> {
+        if q.half || q.rows != 1 || head_count == 0 || kv_heads == 0
+            || head_count % kv_heads != 0 || head_count / kv_heads > 4
+            || q.cols != head_count * 128 || k.cols != kv_heads * 128 || v.cols != k.cols
+            || sequence == 0 || sequence > k.rows || sequence > v.rows
+        {
+            return Err("gpu_attention_gqa_decode_split_bf16 shape mismatch".into());
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let splits = sequence.div_ceil(ATTENTION_DECODE_SPLIT_POSITIONS).div_ceil(64) * 64;
+            let workspace = GpuTensor::from_pool(head_count * splits, 130)?;
+            let out = GpuTensor::from_pool(1, q.cols)?;
+            gpu_check(unsafe {
+                makepad_cuda_attention_gqa_decode_split_bf16(
+                    q.device_ptr()?, k.device_ptr_u16()?, v.device_ptr_u16()?, workspace.device_ptr()?,
+                    out.device_ptr()?, sequence as u32, head_count as u32, kv_heads as u32,
+                    scale, backend.stream,
+                )
+            })?;
+            gpu_prof(backend.stream, crate::prof::CAT_FLASH_ATTN, prof_start, 0);
+            Ok(out)
+        })
+    }
+
+    /// Graph-safe bf16-cache split-KV decode followed by a separate merge.
+    /// `sequence` follows the f32 variant's contract. BF16 loads expand
+    /// directly into f32 registers; dot products, softmax and PV stay f32.
+    pub fn gpu_attention_gqa_decode_split_device_bf16(
+        q: &GpuTensor,
+        k: &GpuBf16Buf,
+        v: &GpuBf16Buf,
+        sequence: &GpuTensor,
+        head_count: usize,
+        kv_heads: usize,
+        scale: f32,
+    ) -> Result<GpuTensor, String> {
+        if q.half || sequence.half || q.rows != 1 || head_count == 0 || kv_heads == 0
+            || head_count % kv_heads != 0 || head_count / kv_heads > 4
+            || q.cols != head_count * 128 || k.cols != kv_heads * 128 || v.cols != k.cols
+            || k.rows == 0 || v.rows != k.rows || sequence.rows != 1 || sequence.cols != 1
+        {
+            return Err("gpu_attention_gqa_decode_split_device_bf16 shape mismatch".into());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let splits = k.rows.div_ceil(ATTENTION_DECODE_SPLIT_POSITIONS);
+            let workspace = GpuTensor::from_pool(head_count * splits, 130)?;
+            let out = GpuTensor::from_pool(1, q.cols)?;
+            gpu_check(unsafe {
+                makepad_cuda_attention_gqa_decode_split_device_bf16(
+                    q.device_ptr()?, k.device_ptr_u16()?, v.device_ptr_u16()?, workspace.device_ptr()?,
+                    out.device_ptr()?, sequence.device_ptr()?.cast::<u32>(), k.rows as u32,
+                    head_count as u32, kv_heads as u32, scale, backend.stream,
+                )
+            })?;
+            Ok(out)
+        })
+    }
+
+    /// Grouped-query FA2 (head_dim 128, RN-even bf16 staging). `precision`
+    /// selects bf16/f32, f16 PV accumulation, or experimental f16 QK+PV.
+    /// `q` is `[q_len, heads*128]`, `k`/`v` are `[kv_len, kv_heads*128]` —
+    /// K/V are never repeated per query head. `causal` aligns query i with
+    /// key i (self-attention prefill); otherwise every key is visible
+    /// (YuE2's NAR pass over the AR prefix cache + its latent tokens).
+    pub fn gpu_attention_gqa_flash_bf16(
+        q: &GpuTensor,
+        k: &GpuTensor,
+        v: &GpuTensor,
+        head_count: usize,
+        kv_heads: usize,
+        scale: f32,
+        causal: bool,
+        precision: GpuAttentionPrecision,
+    ) -> Result<GpuTensor, String> {
+        let q_len = q.rows;
+        let kv_len = k.rows;
+        if head_count == 0
+            || kv_heads == 0
+            || head_count % kv_heads != 0
+            || q.cols != head_count * 128
+            || k.cols != kv_heads * 128
+            || v.cols != k.cols
+            || v.rows != kv_len
+            || kv_len == 0
+        {
+            return Err("gpu_attention_gqa_flash_bf16 shape mismatch".to_string());
+        }
+        if causal && kv_len != q_len {
+            return Err("gpu_attention_gqa_flash_bf16 causal needs q_len == kv_len".to_string());
+        }
+        if q.half || k.half || v.half {
+            return Err("gpu_attention_gqa_flash_bf16 expects f32 storage".to_string());
+        }
+        let prof_start = std::time::Instant::now();
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let q_elems = q_len * q.cols;
+            let kv_elems = kv_len * k.cols;
+            let q16 = gpu_pool_acquire(q_elems * size_of::<u16>())?;
+            let k16 = gpu_pool_acquire(kv_elems * size_of::<u16>())?;
+            let v16 = gpu_pool_acquire(kv_elems * size_of::<u16>())?;
+            for (src, dst, elems) in [
+                (q, &q16, q_elems),
+                (k, &k16, kv_elems),
+                (v, &v16, kv_elems),
+            ] {
+                let status = unsafe {
+                    makepad_cuda_f32_to_bf16_rn(
+                        src.device_ptr()?,
+                        dst.ptr.as_ptr().cast::<u16>(),
+                        elems as u32,
+                        backend.stream,
+                    )
+                };
+                gpu_check(status)?;
+            }
+            let out = GpuTensor::from_pool(q_len, q.cols)?;
+            let status = unsafe {
+                makepad_cuda_flash_attention2_gqa_bf16(
+                    q16.ptr.as_ptr().cast::<u16>(),
+                    k16.ptr.as_ptr().cast::<u16>(),
+                    v16.ptr.as_ptr().cast::<u16>(),
+                    out.device_ptr()?,
+                    q_len as u32,
+                    kv_len as u32,
+                    head_count as u32,
+                    kv_heads as u32,
+                    scale,
+                    causal as i32,
+                    precision as i32,
                     backend.stream,
                 )
             };
@@ -14398,6 +16138,18 @@ mod imp {
                     backend.stream,
                 )
             })
+        })
+    }
+
+    /// Pool-allocated `[rows, cols]` f32 tensor, contents undefined: a
+    /// destination for `gpu_copy_into` (preallocated KV caches, ODE state).
+    pub fn gpu_alloc_f32(rows: usize, cols: usize) -> Result<GpuTensor, String> {
+        if rows == 0 || cols == 0 {
+            return Err("gpu_alloc_f32 needs a non-empty extent".to_string());
+        }
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            GpuTensor::from_pool(rows, cols)
         })
     }
 
@@ -20388,6 +22140,599 @@ mod imp {
         })
     }
 
+    impl WhisperEncLayerQ8<'_> {
+        fn matrices(&self, n_state: usize) -> [(&'static str, &[u8], usize, usize); 6] {
+            [
+                ("q", self.q_w, n_state, n_state),
+                ("k", self.k_w, n_state, n_state),
+                ("v", self.v_w, n_state, n_state),
+                ("out", self.out_w, n_state, n_state),
+                ("fc1", self.fc1_w, 4 * n_state, n_state),
+                ("fc2", self.fc2_w, n_state, 4 * n_state),
+            ]
+        }
+    }
+
+    /// Run the complete encoder, including its final affine layer norm.
+    /// Activations remain f32 on the device between layers. The namespace
+    /// must identify immutable model weights, as for the cached dense GEMM.
+    #[allow(clippy::too_many_arguments)]
+    pub fn whisper_encoder_stack_q8(
+        x: &[f32],
+        seq: usize,
+        n_state: usize,
+        n_head: usize,
+        layers: &[WhisperEncLayerQ8<'_>],
+        final_ln_w: &[f32],
+        final_ln_b: &[f32],
+        cache_namespace: &str,
+    ) -> Result<Vec<f32>, String> {
+        if n_state == 0 || n_head == 0 || n_state % n_head != 0 || n_state % 32 != 0 {
+            return Err("CUDA Whisper encoder has invalid state/head dimensions".to_string());
+        }
+        let n_ff = n_state
+            .checked_mul(4)
+            .ok_or_else(|| "CUDA Whisper encoder MLP size overflow".to_string())?;
+        let m = i32::try_from(seq)
+            .map_err(|_| "CUDA Whisper encoder sequence exceeds i32".to_string())?;
+        let ff = i32::try_from(n_ff)
+            .map_err(|_| "CUDA Whisper encoder MLP width exceeds i32".to_string())?;
+        let hidden = n_state as i32;
+        let heads = n_head as i32;
+        let head_dim = (n_state / n_head) as i32;
+        let score_rows = seq
+            .checked_mul(n_head)
+            .and_then(|rows| i32::try_from(rows).ok())
+            .ok_or_else(|| "CUDA Whisper encoder score row count exceeds i32".to_string())?;
+        let score_stride = i64::from(m) * i64::from(m);
+        let input_len = seq
+            .checked_mul(n_state)
+            .ok_or_else(|| "CUDA Whisper encoder activation size overflow".to_string())?;
+        if x.len() != input_len || final_ln_w.len() != n_state || final_ln_b.len() != n_state {
+            return Err("CUDA Whisper encoder input/final layer norm shape mismatch".to_string());
+        }
+
+        // Small parameters are packed once per call, in n_state-wide slots:
+        // LN1 w/b, Q/V/out bias, LN2 w/b, fc1 bias (four slots), fc2 bias.
+        let param_len = layers
+            .len()
+            .checked_mul(12)
+            .and_then(|slots| slots.checked_add(2))
+            .and_then(|slots| slots.checked_mul(n_state))
+            .ok_or_else(|| "CUDA Whisper encoder parameter size overflow".to_string())?;
+        let mut params = Vec::with_capacity(param_len);
+        for (index, layer) in layers.iter().enumerate() {
+            for (name, bytes, n, k) in layer.matrices(n_state) {
+                let expected = n
+                    .checked_mul(k / 32)
+                    .and_then(|blocks| blocks.checked_mul(34))
+                    .ok_or_else(|| "CUDA Whisper encoder Q8_0 size overflow".to_string())?;
+                if bytes.len() != expected {
+                    return Err(format!(
+                        "CUDA Whisper encoder layer {index} {name}: Q8_0 length {} != {expected}",
+                        bytes.len()
+                    ));
+                }
+            }
+            for (name, values, len) in [
+                ("attn_ln_w", layer.attn_ln_w, n_state),
+                ("attn_ln_b", layer.attn_ln_b, n_state),
+                ("q_b", layer.q_b, n_state),
+                ("v_b", layer.v_b, n_state),
+                ("out_b", layer.out_b, n_state),
+                ("mlp_ln_w", layer.mlp_ln_w, n_state),
+                ("mlp_ln_b", layer.mlp_ln_b, n_state),
+                ("fc1_b", layer.fc1_b, n_ff),
+                ("fc2_b", layer.fc2_b, n_state),
+            ] {
+                if values.len() != len {
+                    return Err(format!(
+                        "CUDA Whisper encoder layer {index} {name}: length {} != {len}",
+                        values.len()
+                    ));
+                }
+                params.extend_from_slice(values);
+            }
+        }
+        params.extend_from_slice(final_ln_w);
+        params.extend_from_slice(final_ln_b);
+        if seq == 0 {
+            return Ok(Vec::new());
+        }
+
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            // RAII returns all scratch to the pool, including on errors. Q
+            // also holds the projected branches; tmp alternates LN/attention.
+            let state = GpuTensor::from_pool(seq, n_state)?;
+            let tmp = GpuTensor::from_pool(seq, n_state)?;
+            let q = GpuTensor::from_pool(seq, n_state)?;
+            let k = GpuTensor::from_pool(seq, n_state)?;
+            let v = GpuTensor::from_pool(seq, n_state)?;
+            let mlp = GpuTensor::from_pool(seq, n_ff)?;
+            let scores = GpuTensor::from_pool(score_rows as usize, seq)?;
+            let parameters = GpuTensor::from_pool(1, param_len)?;
+            let result = (|| {
+                // Finish allocations/uploads before acquiring weight pointers:
+                // the dense cache may evict unprotected weights on OOM.
+                for (index, layer) in layers.iter().enumerate() {
+                    for (name, bytes, _, _) in layer.matrices(n_state) {
+                        let key = format!("{cache_namespace}::enc{index}::{name}::q8");
+                        backend.cached_weight_buffer(&key, bytes.len(), || Ok(bytes.to_vec()))?;
+                    }
+                }
+                parameters
+                    .buf
+                    .as_ref()
+                    .expect("freshly pooled GPU tensor")
+                    .write(f32s_as_bytes(&params), backend.stream)?;
+                state
+                    .buf
+                    .as_ref()
+                    .expect("freshly pooled GPU tensor")
+                    .write(f32s_as_bytes(x), backend.stream)?;
+
+                let xp = state.device_ptr()?;
+                let tp = tmp.device_ptr()?;
+                let qp = q.device_ptr()?;
+                let kp = k.device_ptr()?;
+                let vp = v.device_ptr()?;
+                let fp = mlp.device_ptr()?;
+                let sp = scores.device_ptr()?;
+                let pp = parameters.device_ptr()?;
+                let stream = backend.stream;
+                let scale = 1.0 / (head_dim as f32).sqrt();
+                let one = 1.0f32;
+                let zero = 0.0f32;
+                for index in 0..layers.len() {
+                    let param = |slot| unsafe { pp.add((12 * index + slot) * n_state) };
+                    let gemm = |input, output, name: &str, k, n| {
+                        let key = format!("{cache_namespace}::enc{index}::{name}::q8");
+                        let weight = backend.weight_buffers.get(&key).ok_or_else(|| {
+                            format!("missing cached CUDA Whisper weight {key}")
+                        })?;
+                        gpu_check(unsafe {
+                            mkq8_gemm_nt(
+                                input, weight.ptr.as_ptr().cast::<u8>(), output, m, k, n, stream,
+                            )
+                        })
+                        .map_err(|err| format!("CUDA Whisper encoder layer {index} {name}: {err}"))
+                    };
+                    unsafe {
+                        gpu_check(mkwe_layer_norm(xp, param(0), param(1), tp, m, hidden, stream))?;
+                    }
+                    gemm(tp, qp, "q", hidden, hidden)?;
+                    gemm(tp, kp, "k", hidden, hidden)?;
+                    gemm(tp, vp, "v", hidden, hidden)?;
+                    unsafe {
+                        gpu_check(mkwe_bias_add(qp, param(2), m, hidden, stream))?;
+                        gpu_check(mkwe_bias_add(vp, param(3), m, hidden, stream))?;
+
+                        // Column-major views of packed [seq, heads, dim]:
+                        // scores[h][i][j] = scale * dot(q[i][h], k[j][h]).
+                        // Explicit f32 compute avoids the environment-selected
+                        // f16/bf16 paths used by other attention composites.
+                        crate::cublas_gemm_strided_batched_ex(
+                            backend.blas,
+                            crate::CUBLAS_OP_T,
+                            crate::CUBLAS_OP_N,
+                            m,
+                            m,
+                            head_dim,
+                            &scale,
+                            kp.cast::<c_void>(),
+                            crate::CUDA_R_32F,
+                            hidden,
+                            i64::from(head_dim),
+                            qp.cast::<c_void>(),
+                            crate::CUDA_R_32F,
+                            hidden,
+                            i64::from(head_dim),
+                            &zero,
+                            sp.cast::<c_void>(),
+                            crate::CUDA_R_32F,
+                            m,
+                            score_stride,
+                            heads,
+                            crate::CUBLAS_COMPUTE_32F,
+                            crate::CUBLAS_GEMM_DEFAULT,
+                        )
+                        .map_err(|err| format!("CUDA Whisper encoder QK gemm failed: {err}"))?;
+                        gpu_check(mkwe_softmax(sp, score_rows, m, stream))?;
+                        // tmp[i][h][d] = sum_j scores[h][i][j] * v[j][h][d].
+                        crate::cublas_gemm_strided_batched_ex(
+                            backend.blas,
+                            crate::CUBLAS_OP_N,
+                            crate::CUBLAS_OP_N,
+                            head_dim,
+                            m,
+                            m,
+                            &one,
+                            vp.cast::<c_void>(),
+                            crate::CUDA_R_32F,
+                            hidden,
+                            i64::from(head_dim),
+                            sp.cast::<c_void>(),
+                            crate::CUDA_R_32F,
+                            m,
+                            score_stride,
+                            &zero,
+                            tp.cast::<c_void>(),
+                            crate::CUDA_R_32F,
+                            hidden,
+                            i64::from(head_dim),
+                            heads,
+                            crate::CUBLAS_COMPUTE_32F,
+                            crate::CUBLAS_GEMM_DEFAULT,
+                        )
+                        .map_err(|err| format!("CUDA Whisper encoder PV gemm failed: {err}"))?;
+                    }
+                    gemm(tp, qp, "out", hidden, hidden)?;
+                    unsafe {
+                        gpu_check(mkwe_bias_add(qp, param(4), m, hidden, stream))?;
+                        gpu_check(mkwe_residual_add(xp, qp, m, hidden, stream))?;
+                        gpu_check(mkwe_layer_norm(xp, param(5), param(6), tp, m, hidden, stream))?;
+                    }
+                    gemm(tp, fp, "fc1", hidden, ff)?;
+                    unsafe {
+                        gpu_check(mkwe_bias_gelu_tanh(fp, param(7), m, ff, stream))?;
+                    }
+                    gemm(fp, qp, "fc2", ff, hidden)?;
+                    unsafe {
+                        gpu_check(mkwe_bias_add(qp, param(11), m, hidden, stream))?;
+                        gpu_check(mkwe_residual_add(xp, qp, m, hidden, stream))?;
+                    }
+                }
+                unsafe {
+                    let final_w = pp.add(12 * layers.len() * n_state);
+                    gpu_check(mkwe_layer_norm(
+                        xp, final_w, final_w.add(n_state), tp, m, hidden, stream,
+                    ))?;
+                }
+                tmp.buf
+                    .as_ref()
+                    .expect("freshly pooled GPU tensor")
+                    .read_f32s(input_len, stream)
+            })();
+            if result.is_err() {
+                // An early launch error must not return in-flight scratch to
+                // a pool that another composite/stream can immediately reuse.
+                let _ = crate::synchronize_stream(backend.stream);
+            }
+            result
+        })
+    }
+
+    /// F32 activations times resident raw Q8_0 weights, with f32 accumulation
+    /// and output. Dequantization happens only inside the GEMV/GEMM kernel.
+    pub fn try_matmul_nt_q8_0_cached<F>(
+        a: &[f32],
+        m: usize,
+        k: usize,
+        n: usize,
+        cache_namespace: &str,
+        bt_cache_key: &str,
+        load_q8_bytes: F,
+    ) -> Result<Vec<f32>, String>
+    where
+        F: FnOnce() -> Result<Vec<u8>, String>,
+    {
+        if m == 0 || n == 0 {
+            return Ok(Vec::new());
+        }
+        if k % 32 != 0 {
+            return Err("CUDA Q8_0 matmul requires k to be a multiple of 32".to_string());
+        }
+        if m > i32::MAX as usize || k > i32::MAX as usize || n > i32::MAX as usize {
+            return Err("CUDA Q8_0 matmul dimensions exceed i32".to_string());
+        }
+        let input_len = m
+            .checked_mul(k)
+            .ok_or_else(|| "CUDA dense matmul input size overflow".to_string())?;
+        if a.len() != input_len {
+            return Err(format!(
+                "CUDA dense matmul activation length mismatch: got {} expected {input_len}",
+                a.len()
+            ));
+        }
+        let out_len = m
+            .checked_mul(n)
+            .ok_or_else(|| "CUDA dense matmul output size overflow".to_string())?;
+        if k == 0 {
+            return Ok(vec![0.0; out_len]);
+        }
+        let input_bytes = input_len
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| "CUDA dense matmul input size overflow".to_string())?;
+        let weight_bytes = n
+            .checked_mul(k / 32)
+            .and_then(|blocks| blocks.checked_mul(34))
+            .ok_or_else(|| "CUDA dense matmul weight size overflow".to_string())?;
+
+        with_dense_linear_backend(|backend| {
+            let prof_on = crate::prof::enabled();
+            let t_weight = std::time::Instant::now();
+            backend.prepare_device()?;
+            let qualified_key = format!("{cache_namespace}::{bt_cache_key}::q8");
+            // The cache validates the closure's byte length on a miss.
+            backend.cached_weight_buffer(&qualified_key, weight_bytes, load_q8_bytes)?;
+            crate::prof::record(crate::prof::CAT_DENSE_WEIGHT_UPLOAD, t_weight, 0);
+
+            let t_upload = std::time::Instant::now();
+            backend.ensure_input_f32(input_bytes)?;
+            backend.ensure_output_f32(out_len)?;
+            // Look up buffers after allocation, which can evict scratch or
+            // unprotected weights during OOM recovery.
+            let weight = backend
+                .weight_buffers
+                .get(&qualified_key)
+                .ok_or_else(|| format!("missing cached CUDA weight buffer {qualified_key}"))?;
+            let input = backend
+                .input_f32
+                .as_ref()
+                .ok_or_else(|| "missing CUDA dense matmul f32 input buffer".to_string())?;
+            let output = backend
+                .output_f32
+                .as_ref()
+                .ok_or_else(|| "missing CUDA dense matmul output buffer".to_string())?;
+            let raw = unsafe {
+                std::slice::from_raw_parts(a.as_ptr().cast::<u8>(), input_bytes)
+            };
+            input.write(raw, backend.stream)?;
+            if prof_on {
+                crate::synchronize_stream(backend.stream).map_err(|err| err.to_string())?;
+            }
+            crate::prof::record(crate::prof::CAT_DENSE_UPLOAD, t_upload, input_bytes as u64);
+
+            let t_gemm = std::time::Instant::now();
+            let status = unsafe {
+                mkq8_gemm_nt(
+                    input.ptr.as_ptr().cast::<f32>(),
+                    weight.ptr.as_ptr().cast::<u8>(),
+                    output.ptr.as_ptr().cast::<f32>(),
+                    m as i32,
+                    k as i32,
+                    n as i32,
+                    backend.stream,
+                )
+            };
+            crate::check(status).map_err(|err| {
+                format!("CUDA Q8_0 dense NT gemm failed: m={m} k={k} n={n}: {err}")
+            })?;
+            if prof_on {
+                crate::synchronize_stream(backend.stream).map_err(|err| err.to_string())?;
+            }
+            crate::prof::record(crate::prof::CAT_DENSE_GEMM, t_gemm, 0);
+
+            let t_download = std::time::Instant::now();
+            let result = output.read_f32s(out_len, backend.stream);
+            crate::prof::record(
+                crate::prof::CAT_DENSE_DOWNLOAD,
+                t_download,
+                (out_len * size_of::<f32>()) as u64,
+            );
+            result
+        })
+    }
+
+    // Kokoro f32 kernels (kernels/kokoro_ops.cu). Kept on the dense
+    // backend's stream and allocator, including the per-timestep launches.
+    unsafe extern "C" {
+        fn mkko_conv1d(
+            x: *const f32, weight: *const f32, bias: *const f32, y: *mut f32,
+            in_ch: i32, time: i32, out_ch: i32, kernel: i32, out_time: i32,
+            pad: i32, stride: i32, dilation: i32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn mkko_lstm_input(
+            x: *const f32, weight: *const f32, bias_ih: *const f32, bias_hh: *const f32,
+            gates: *mut f32, time: i32, input: i32, hidden: i32, stream: cudaStream_t,
+        ) -> cudaError_t;
+        fn mkko_lstm_recurrent(
+            gates: *const f32, weight: *const f32, c: *mut f32, y: *mut f32,
+            time: i32, hidden: i32, reverse: i32, stream: cudaStream_t,
+        ) -> cudaError_t;
+    }
+
+    /// Shared by Kokoro's linear, convolution, and LSTM paths. Keys use the
+    /// caller's existing content fingerprint plus the f32 element count.
+    #[derive(Default)]
+    pub struct KokoroWeightCache {
+        weights: HashMap<(u64, usize), GpuTensor>,
+        resident_bytes: usize,
+    }
+
+    impl KokoroWeightCache {
+        const MAX_RESIDENT_BYTES: usize = 640 << 20;
+        const MAX_CACHED_OPERAND_BYTES: usize = 40 << 20;
+
+        pub fn clear(&mut self) {
+            self.weights.clear();
+            self.resident_bytes = 0;
+        }
+
+        pub fn weight(
+            &mut self,
+            values: &[f32],
+            rows: usize,
+            cols: usize,
+            fingerprint: u64,
+        ) -> Result<GpuTensor, String> {
+            if rows.checked_mul(cols) != Some(values.len()) {
+                return Err("CUDA Kokoro weight shape mismatch".to_string());
+            }
+            let bytes = values.len().checked_mul(size_of::<f32>())
+                .ok_or_else(|| "CUDA Kokoro weight size overflow".to_string())?;
+            // Match the original Kokoro linear cache: large operands are
+            // transient, and crossing the resident cap evicts the cache.
+            if bytes > Self::MAX_CACHED_OPERAND_BYTES {
+                return gpu_upload(values, rows, cols);
+            }
+            let key = (fingerprint, values.len());
+            if !self.weights.contains_key(&key) {
+                if self.resident_bytes + bytes > Self::MAX_RESIDENT_BYTES {
+                    self.clear();
+                }
+                self.weights.insert(key, gpu_upload(values, rows, cols)?);
+                self.resident_bytes += bytes;
+            }
+            let weight = &self.weights[&key];
+            // A view pins the allocation through a composite call even if
+            // loading another operand evicts its cache entry. Shape is a
+            // property of this use, not of the content fingerprint.
+            Ok(GpuTensor {
+                buf: weight.buf.clone(),
+                rows,
+                cols,
+                half: false,
+                offset_units: 0,
+            })
+        }
+    }
+
+    fn kokoro_len(dims: &[usize]) -> Result<usize, String> {
+        dims.iter().try_fold(1usize, |len, &dim| len.checked_mul(dim))
+            .filter(|len| len.checked_mul(size_of::<f32>()).is_some())
+            .ok_or_else(|| "CUDA Kokoro tensor size overflow".to_string())
+    }
+
+    fn kokoro_dims(dims: &[usize]) -> Result<(), String> {
+        if dims.iter().any(|&dim| dim > i32::MAX as usize) {
+            return Err("CUDA Kokoro dimensions exceed i32".to_string());
+        }
+        Ok(())
+    }
+
+    /// Direct `[out_ch, in_ch, kernel]` convolution of `[in_ch, time]`.
+    /// `keys` are the caller's fingerprints of weight and bias, respectively.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kokoro_conv1d(
+        x: &[f32],
+        in_ch: usize,
+        time: usize,
+        weight: &[f32],
+        bias: &[f32],
+        out_ch: usize,
+        pad: usize,
+        stride: usize,
+        dilation: usize,
+        keys: [u64; 2],
+        cache: &mut KokoroWeightCache,
+    ) -> Result<Vec<f32>, String> {
+        if in_ch == 0 || out_ch == 0 || stride == 0 || dilation == 0 {
+            return Err("CUDA Kokoro conv1d invalid dimensions".to_string());
+        }
+        let channels = kokoro_len(&[out_ch, in_ch])?;
+        let kernel = weight.len() / channels;
+        if kernel == 0 || weight.len() % channels != 0 || bias.len() != out_ch
+            || x.len() != kokoro_len(&[in_ch, time])?
+        {
+            return Err("CUDA Kokoro conv1d shape mismatch".to_string());
+        }
+        let span = dilation.checked_mul(kernel - 1).and_then(|v| v.checked_add(1))
+            .ok_or_else(|| "CUDA Kokoro conv1d span overflow".to_string())?;
+        let padded = pad.checked_mul(2).and_then(|v| time.checked_add(v))
+            .ok_or_else(|| "CUDA Kokoro conv1d padding overflow".to_string())?;
+        // Preserve conv1d_general's saturating extent for short inputs.
+        let out_time = (padded.saturating_sub(span) / stride).checked_add(1)
+            .ok_or_else(|| "CUDA Kokoro conv1d output overflow".to_string())?;
+        kokoro_dims(&[in_ch, time, out_ch, kernel, out_time, pad, stride, dilation])?;
+        let out_len = kokoro_len(&[out_ch, out_time])?;
+        let wd = cache.weight(weight, out_ch, in_ch * kernel, keys[0])?;
+        let bd = cache.weight(bias, 1, out_ch, keys[1])?;
+        let xd = gpu_upload(x, in_ch, time)?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let out = GpuTensor::from_pool(out_ch, out_time)?;
+            let result = (|| {
+                let status = unsafe {
+                    mkko_conv1d(
+                        xd.device_ptr()?, wd.device_ptr()?, bd.device_ptr()?, out.device_ptr()?,
+                        in_ch as i32, time as i32, out_ch as i32, kernel as i32, out_time as i32,
+                        pad as i32, stride as i32, dilation as i32, backend.stream,
+                    )
+                };
+                gpu_check(status).map_err(|err| format!("CUDA Kokoro conv1d failed: {err}"))?;
+                out.buf.as_ref().expect("freshly pooled GPU tensor")
+                    .read_f32s(out_len, backend.stream)
+            })();
+            if result.is_err() {
+                // Drain before returning any in-flight buffers to the pool.
+                let _ = crate::synchronize_stream(backend.stream);
+            }
+            result
+        })
+    }
+
+    /// F32 PyTorch i/f/g/o LSTM. All input projections are one GEMM; h/c
+    /// remain on the device until the complete `[time, hidden]` result is read.
+    /// `keys` fingerprint weight_ih, weight_hh, bias_ih, bias_hh in that order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn kokoro_lstm(
+        x: &[f32],
+        time: usize,
+        input: usize,
+        hidden: usize,
+        weight_ih: &[f32],
+        weight_hh: &[f32],
+        bias_ih: &[f32],
+        bias_hh: &[f32],
+        reverse: bool,
+        keys: [u64; 4],
+        cache: &mut KokoroWeightCache,
+    ) -> Result<Vec<f32>, String> {
+        if input == 0 || hidden == 0 {
+            return Err("CUDA Kokoro LSTM invalid dimensions".to_string());
+        }
+        let gates = kokoro_len(&[4, hidden])?;
+        kokoro_dims(&[time, input, hidden, gates])?;
+        if x.len() != kokoro_len(&[time, input])?
+            || weight_ih.len() != kokoro_len(&[gates, input])?
+            || weight_hh.len() != kokoro_len(&[gates, hidden])?
+            || bias_ih.len() != gates || bias_hh.len() != gates
+        {
+            return Err("CUDA Kokoro LSTM shape mismatch".to_string());
+        }
+        let out_len = kokoro_len(&[time, hidden])?;
+        if time == 0 {
+            return Ok(Vec::new());
+        }
+        let ih = cache.weight(weight_ih, gates, input, keys[0])?;
+        let hh = cache.weight(weight_hh, gates, hidden, keys[1])?;
+        let bi = cache.weight(bias_ih, 1, gates, keys[2])?;
+        let bh = cache.weight(bias_hh, 1, gates, keys[3])?;
+        let xd = gpu_upload(x, time, input)?;
+        with_dense_linear_backend(|backend| {
+            backend.prepare_device()?;
+            let projected = GpuTensor::from_pool(time, gates)?;
+            let cell = GpuTensor::from_pool(1, hidden)?;
+            let out = GpuTensor::from_pool(time, hidden)?;
+            let result = (|| {
+                let status = unsafe {
+                    mkko_lstm_input(
+                        xd.device_ptr()?, ih.device_ptr()?, bi.device_ptr()?, bh.device_ptr()?,
+                        projected.device_ptr()?, time as i32, input as i32, hidden as i32,
+                        backend.stream,
+                    )
+                };
+                gpu_check(status).map_err(|err| format!("CUDA Kokoro LSTM input GEMM failed: {err}"))?;
+                let status = unsafe {
+                    mkko_lstm_recurrent(
+                        projected.device_ptr()?, hh.device_ptr()?, cell.device_ptr()?,
+                        out.device_ptr()?, time as i32, hidden as i32, reverse as i32,
+                        backend.stream,
+                    )
+                };
+                gpu_check(status).map_err(|err| format!("CUDA Kokoro LSTM recurrence failed: {err}"))?;
+                out.buf.as_ref().expect("freshly pooled GPU tensor")
+                    .read_f32s(out_len, backend.stream)
+            })();
+            if result.is_err() {
+                let _ = crate::synchronize_stream(backend.stream);
+            }
+            result
+        })
+    }
+
     pub fn try_matmul_nt_ggml_bytes_cached<F>(
         a: &[f32],
         bt_ggml_type: u32,
@@ -20690,11 +23035,23 @@ mod imp {
 }
 
 #[cfg(not(all(any(target_os = "linux", target_os = "windows"), makepad_ai_cuda_kernels)))]
-mod imp {}
+mod imp {
+    #[allow(clippy::too_many_arguments)]
+    pub fn whisper_encoder_stack_q8(
+        _x: &[f32],
+        _seq: usize,
+        _n_state: usize,
+        _n_head: usize,
+        _layers: &[super::WhisperEncLayerQ8<'_>],
+        _final_ln_w: &[f32],
+        _final_ln_b: &[f32],
+        _cache_namespace: &str,
+    ) -> Result<Vec<f32>, String> {
+        Err("CUDA kernels are not compiled into this build".to_string())
+    }
+}
 
 // `imp` is a populated module (the real CUDA kernel launch surface) on
-// linux/windows with the `makepad_ai_cuda_kernels` cfg, and an empty stub
-// otherwise (e.g. this macOS build) — the glob is only unused in the
-// stub configuration.
+// linux/windows with the `makepad_ai_cuda_kernels` cfg, and stubs otherwise.
 #[allow(unused_imports)]
 pub use imp::*;

@@ -41,8 +41,9 @@ use makepad_micro_serde::*;
 
 /// Bytes a service brief may occupy in the system prompt.
 pub const MAX_BRIEF_BYTES: usize = 4 * 1024;
-/// Bytes of a tool description.
-pub const MAX_DESCRIPTION_BYTES: usize = 512;
+/// Bytes of a tool description. A tool with many options says what each does
+/// and when to use it; the longest of a large service runs to about a kilobyte.
+pub const MAX_DESCRIPTION_BYTES: usize = 1536;
 /// Bytes of one tool's JSON-schema text.
 pub const MAX_PARAMETERS_BYTES: usize = 8 * 1024;
 /// Tools one service may declare. Studio's F10 service alone carries its
@@ -59,6 +60,8 @@ pub const MAX_FILTER_BYTES: usize = 1024;
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024;
 /// Bytes of a result's model-facing text; the router truncates past this.
 pub const MAX_RESULT_BYTES: usize = 16 * 1024;
+/// Combined base64 bytes of a result's PNG images, separate from its text.
+pub const MAX_RESULT_IMAGE_BYTES: usize = 900 * 1024;
 /// Bytes of a result's structured data (JSON).
 pub const MAX_DATA_BYTES: usize = 16 * 1024;
 /// Bytes of a result's transcript note.
@@ -77,10 +80,10 @@ pub const MAX_ID_BYTES: usize = 64;
 /// tool's and topic's name, description and schema. Sized so a manifest at
 /// every per-field cap still fits ([`MAX_TOOLS`] tools and [`MAX_TOPICS`]
 /// topics, each at [`MAX_DESCRIPTION_BYTES`] + [`MAX_PARAMETERS_BYTES`] +
-/// [`MAX_TOOL_NAME`], plus [`MAX_BRIEF_BYTES`] and the label): 1,262,128
-/// bytes, rounded up to 5 × 256 KiB. The compile-time check below keeps it
+/// [`MAX_TOOL_NAME`] + [`MAX_LAYOUT_BYTES`], plus [`MAX_BRIEF_BYTES`] and the
+/// label): about 1.7 million bytes, rounded up to 7 × 256 KiB. The compile-time check below keeps it
 /// consistent with the per-field caps.
-pub const MAX_MANIFEST_BYTES: usize = 1280 * 1024;
+pub const MAX_MANIFEST_BYTES: usize = 1792 * 1024;
 /// Bytes of one hosted frame. Anything larger is dropped unread. A
 /// `Register` frame carries a whole manifest as JSON, and JSON escaping can
 /// at worst double a text field (every byte a quote or a backslash), so the
@@ -90,8 +93,10 @@ pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// Bytes the label may occupy (checked in [`ServiceManifest::validate`]).
 const MAX_LABEL_BYTES: usize = 48;
+/// Bytes of one tool's card layout text.
+pub const MAX_LAYOUT_BYTES: usize = 2 * 1024;
 /// Worst-case text bytes of one tool or topic at every per-field cap.
-const MAX_ENTRY_BYTES: usize = MAX_DESCRIPTION_BYTES + MAX_PARAMETERS_BYTES + MAX_TOOL_NAME;
+const MAX_ENTRY_BYTES: usize = MAX_DESCRIPTION_BYTES + MAX_PARAMETERS_BYTES + MAX_TOOL_NAME + MAX_LAYOUT_BYTES;
 const _: () = assert!(
     MAX_MANIFEST_BYTES >= MAX_TOOLS * MAX_ENTRY_BYTES + MAX_TOPICS * MAX_ENTRY_BYTES + MAX_BRIEF_BYTES + MAX_LABEL_BYTES,
     "MAX_MANIFEST_BYTES must hold a manifest at every per-field cap"
@@ -116,6 +121,10 @@ pub enum Risk {
     /// Changes the app's own state — a route, a level, a selection. Runs
     /// immediately; the app can undo or redo it on its own terms.
     Act,
+    /// Makes something: generate, render, export, new. The router parks the
+    /// call as a settings card whose arguments the person can edit; the
+    /// confirmed (possibly edited) arguments run it.
+    Request,
     /// Deletes, sends, spends, installs, or otherwise reaches past the
     /// app. The router parks the call until the person confirms it.
     Destructive,
@@ -134,6 +143,54 @@ pub struct ToolDef {
     pub risk: Risk,
     /// A successful call wants a live preview of the app under its card.
     pub preview: bool,
+    /// How the settings card of a parked call is presented; absent = the
+    /// defaults (title from the name, fields in schema order).
+    pub layout: Option<CardLayout>,
+}
+
+/// How a tool's settings card is presented. Everything is optional in
+/// effect: an empty title or confirm label takes the default.
+#[derive(Clone, Debug, PartialEq, Default, SerJson, DeJson)]
+pub struct CardLayout {
+    /// The card's heading.
+    pub title: String,
+    /// The confirm button's label (`Make it` when empty).
+    pub confirm: String,
+    /// Arguments shown first, in this order, with their labels.
+    pub order: Vec<FieldLabel>,
+    /// Arguments the card does not show (passed through when prefilled).
+    pub hide: Vec<String>,
+}
+
+/// One argument's place and label on a card.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct FieldLabel {
+    pub arg: String,
+    pub label: String,
+}
+
+impl CardLayout {
+    pub fn new(title: impl Into<String>, confirm: impl Into<String>) -> CardLayout {
+        CardLayout { title: title.into(), confirm: confirm.into(), order: Vec::new(), hide: Vec::new() }
+    }
+
+    /// Show `arg` next, with `label`.
+    pub fn field(mut self, arg: impl Into<String>, label: impl Into<String>) -> CardLayout {
+        self.order.push(FieldLabel { arg: arg.into(), label: label.into() });
+        self
+    }
+
+    pub fn hidden(mut self, arg: impl Into<String>) -> CardLayout {
+        self.hide.push(arg.into());
+        self
+    }
+
+    fn bytes(&self) -> usize {
+        self.title.len()
+            + self.confirm.len()
+            + self.order.iter().map(|f| f.arg.len() + f.label.len()).sum::<usize>()
+            + self.hide.iter().map(String::len).sum::<usize>()
+    }
 }
 
 /// One named stream a service may publish.
@@ -171,7 +228,14 @@ impl ToolDef {
             parameters: parameters.into(),
             risk,
             preview: false,
+            layout: None,
         }
+    }
+
+    /// The same tool, with a presentation for its settings card.
+    pub fn with_layout(mut self, layout: CardLayout) -> ToolDef {
+        self.layout = Some(layout);
+        self
     }
 
     /// The same tool, asking for a preview card when it succeeds.
@@ -270,6 +334,12 @@ impl ServiceManifest {
                 }
                 Ok(_) => return Err(format!("tool '{}.{}' schema is not a JSON object", self.id, tool.name)),
                 Err(e) => return Err(format!("tool '{}.{}' schema does not parse: {e}", self.id, tool.name)),
+            }
+            if let Some(layout) = &tool.layout {
+                if layout.bytes() > MAX_LAYOUT_BYTES {
+                    return Err(format!("tool '{}.{}' card layout is {} bytes; the cap is {}", self.id, tool.name, layout.bytes(), MAX_LAYOUT_BYTES));
+                }
+                total += layout.bytes();
             }
             total += tool.description.len() + tool.parameters.len() + tool.name.len();
         }
@@ -440,6 +510,9 @@ pub struct InstanceMeta {
     /// Bumped by the host whenever this instance gains focus; the highest
     /// wins a tie when the model does not say which instance it means.
     pub focus_epoch: u64,
+    /// The process the instance runs in, when a host serves it for another process (a window
+    /// manager's hosted app): its own endpoint answers `ui` and `inspect` there. 0: this process.
+    pub pid: u32,
 }
 
 /// One call, as the service receives it.
@@ -452,6 +525,10 @@ pub struct ServiceCall {
     /// The argument object as JSON text. The service parses it with its
     /// own typed reader and refuses what it does not expect.
     pub args: String,
+    /// A capability the remote caller presented (`makepad-remote mcp --caller-env`): an app
+    /// that scopes what its callers may do (Scope's per-lane token) checks it; others ignore it.
+    /// `None` for the conversation's own calls.
+    pub caller: Option<String>,
 }
 
 /// How a call ended.
@@ -519,6 +596,9 @@ pub struct ToolResult {
     pub data: String,
     /// One dim transcript line: "planned Dam → Utrecht, 41 min".
     pub note: String,
+    /// PNG images encoded as base64. The app sizes them before replying;
+    /// their combined size is bounded at [`MAX_RESULT_IMAGE_BYTES`].
+    pub images: Vec<String>,
     /// Show the service's live preview under this call's card.
     pub preview: bool,
     pub disposition: Disposition,
@@ -534,6 +614,7 @@ impl ToolResult {
             text,
             data: String::new(),
             note,
+            images: Vec::new(),
             preview: false,
             disposition: Disposition::Continue,
             subscribe: Vec::new(),
@@ -597,6 +678,18 @@ impl ToolResult {
     /// model knows it is reading a head, not the whole. Data that does not
     /// fit is dropped whole — a truncated JSON is worse than none.
     pub fn bound(&mut self) {
+        let count = self.images.len();
+        let mut remaining = MAX_RESULT_IMAGE_BYTES;
+        self.images.retain(|image| {
+            if image.len() > remaining {
+                return false;
+            }
+            remaining -= image.len();
+            true
+        });
+        if self.images.len() != count {
+            self.text.push_str("\n…[images truncated by the router]");
+        }
         if self.text.len() > MAX_RESULT_BYTES {
             truncate_to_char_boundary(&mut self.text, MAX_RESULT_BYTES - 32);
             self.text.push_str("\n…[truncated by the router]");
@@ -677,6 +770,9 @@ impl ServiceUp {
                 }
                 if r.data.len() > MAX_DATA_BYTES {
                     return Err("result: data over cap".into());
+                }
+                if r.images.iter().fold(0usize, |bytes, image| bytes.saturating_add(image.len())) > MAX_RESULT_IMAGE_BYTES {
+                    return Err("result: images over cap".into());
                 }
                 if r.note.len() > MAX_NOTE_BYTES + 4 {
                     return Err("result: note over cap".into());
@@ -849,6 +945,95 @@ impl HostedDown {
     }
 }
 
+/// One answer line of the process's `app` service (makepad-remote `app/1`, served by
+/// `app_service`), as JSON. A channel is one request: its OPEN arguments are a first line
+/// `list`, `context` or `call <service>.<tool> [<instance>]`, then for a call the argument object
+/// as JSON. `list` answers an `Instance` line per running instance and a `Launchable` line per
+/// app the host can start; `context` one `Context` line; a call `Progress` lines and one
+/// `Result`. Closing the channel cancels a call.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub enum AppLine {
+    Instance { endpoint: EndpointId, meta: InstanceMeta, manifest: ServiceManifest },
+    Launchable { id: String, label: String },
+    Context { text: String },
+    Progress { note: String, permille: u16 },
+    Result(ToolResult),
+}
+
+impl AppLine {
+    pub fn to_json(&self) -> String {
+        self.serialize_json()
+    }
+
+    pub fn parse(json: &str) -> Option<AppLine> {
+        AppLine::deserialize_json(json).ok()
+    }
+}
+
+/// A parsed `app` request (the OPEN arguments).
+#[derive(Clone, Debug, PartialEq)]
+pub enum AppRequest {
+    List,
+    Context,
+    Call { service: String, tool: String, instance: Option<String>, args: String, caller: Option<String> },
+}
+
+impl AppRequest {
+    pub fn parse(text: &str) -> Result<AppRequest, String> {
+        let (head, body) = text.split_once('\n').unwrap_or((text, ""));
+        let mut words = head.split_whitespace();
+        match words.next() {
+            Some("list") => Ok(AppRequest::List),
+            Some("context") => Ok(AppRequest::Context),
+            Some("call") => {
+                let name = words.next().ok_or("call: which tool (`service.tool`)?")?;
+                let (service, tool) = name.split_once('.').ok_or("call: the tool is `service.tool`")?;
+                let mut caller = None;
+                let instance = words
+                    .filter(|w| match w.strip_prefix("caller=") {
+                        Some(c) => {
+                            caller = Some(c.to_string());
+                            false
+                        }
+                        None => true,
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let args = if body.trim().is_empty() { "{}".to_string() } else { body.trim().to_string() };
+                if args.len() > MAX_ARGS_BYTES {
+                    return Err("call: the arguments are over the cap".into());
+                }
+                Ok(AppRequest::Call {
+                    service: service.to_string(),
+                    tool: tool.to_string(),
+                    instance: if instance.is_empty() { None } else { Some(instance) },
+                    args,
+                    caller,
+                })
+            }
+            Some(other) => Err(format!("unknown app request `{other}` (list, context, call)")),
+            None => Err("empty app request (list, context, call)".into()),
+        }
+    }
+
+    pub fn to_args(&self) -> String {
+        match self {
+            AppRequest::List => "list".into(),
+            AppRequest::Context => "context".into(),
+            AppRequest::Call { service, tool, instance, args, caller } => {
+                let mut head = format!("call {service}.{tool}");
+                if let Some(i) = instance {
+                    head.push_str(&format!(" {i}"));
+                }
+                if let Some(c) = caller {
+                    head.push_str(&format!(" caller={c}"));
+                }
+                format!("{head}\n{args}")
+            }
+        }
+    }
+}
+
 /// Cut `s` to at most `max` bytes without splitting a character.
 pub fn truncate_to_char_boundary(s: &mut String, max: usize) {
     if s.len() <= max {
@@ -943,7 +1128,7 @@ mod tests {
         }
         let downs = vec![
             ServiceDown::Registered { port_tag: 1, endpoint: ep("e9") },
-            ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "plan".into(), args: r#"{"to":"Utrecht"}"#.into() }),
+            ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "plan".into(), args: r#"{"to":"Utrecht"}"#.into(), caller: None }),
             ServiceDown::Cancel { call_id: "c1".into() },
             ServiceDown::Subscribe {
                 sub_id: "s1".into(),
@@ -974,10 +1159,10 @@ mod tests {
         assert_eq!(HostedUp::parse(&huge), None);
         let call = HostedDown {
             to: Some(ep("e1")),
-            msg: ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "plan".into(), args: "x".repeat(MAX_ARGS_BYTES + 1) }),
+            msg: ServiceDown::Call(ServiceCall { call_id: "c1".into(), tool: "plan".into(), args: "x".repeat(MAX_ARGS_BYTES + 1), caller: None }),
         };
         assert_eq!(HostedDown::parse(&call.to_json()), None, "oversized args are dropped, not truncated");
-        let bad = HostedDown { to: None, msg: ServiceDown::Call(ServiceCall { call_id: "c 1".into(), tool: "Plan".into(), args: "{}".into() }) };
+        let bad = HostedDown { to: None, msg: ServiceDown::Call(ServiceCall { call_id: "c 1".into(), tool: "Plan".into(), args: "{}".into(), caller: None }) };
         assert_eq!(HostedDown::parse(&bad.to_json()), None);
     }
 
@@ -1018,7 +1203,7 @@ mod tests {
         assert!(topic_schema.validate().unwrap_err().contains("schema is not a JSON object"));
     }
 
-    /// A tool at every per-field cap: a 32-byte name, a 512-byte
+    /// A tool at every per-field cap: a 32-byte name, a 1536-byte
     /// description and an 8 KiB schema that is still a valid argument object.
     fn maximal_tool(index: usize) -> ToolDef {
         let name = format!("{:_<width$}", format!("t{index}"), width = MAX_TOOL_NAME);
@@ -1027,6 +1212,7 @@ mod tests {
         let schema = format!("{head}{}{tail}", "s".repeat(MAX_PARAMETERS_BYTES - head.len() - tail.len()));
         assert_eq!(schema.len(), MAX_PARAMETERS_BYTES);
         ToolDef::new(name, "d".repeat(MAX_DESCRIPTION_BYTES), &schema, Risk::Act)
+            .with_layout(CardLayout::new("c".repeat(MAX_LAYOUT_BYTES), ""))
     }
 
     fn maximal_topic(index: usize) -> TopicDef {
@@ -1066,7 +1252,7 @@ mod tests {
         assert!(m.validate().is_ok(), "{:?}", m.validate());
         let text_bytes = m.brief.len()
             + m.label.len()
-            + m.tools.iter().map(|t| t.name.len() + t.description.len() + t.parameters.len()).sum::<usize>()
+            + m.tools.iter().map(|t| t.name.len() + t.description.len() + t.parameters.len() + t.layout.as_ref().map_or(0, CardLayout::bytes)).sum::<usize>()
             + m.topics.iter().map(|t| t.name.len() + t.description.len() + t.schema.as_ref().map_or(0, |s| s.len())).sum::<usize>();
         assert!(text_bytes <= MAX_MANIFEST_BYTES, "{text_bytes} > {MAX_MANIFEST_BYTES}");
         assert!(text_bytes > MAX_MANIFEST_BYTES * 9 / 10, "the cap is not slack: {text_bytes}");
