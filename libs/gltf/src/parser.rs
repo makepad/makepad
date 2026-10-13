@@ -1,9 +1,7 @@
-use crate::{document::GltfDocument, error::GltfError};
+use crate::{container::read_chunk, document::GltfDocument, error::GltfError, split_glb};
 use makepad_micro_serde::DeJson;
 
 const GLB_MAGIC: u32 = 0x4654_6C67;
-const GLB_JSON_CHUNK: u32 = 0x4E4F_534A;
-const GLB_BIN_CHUNK: u32 = 0x004E_4942;
 
 #[derive(Clone, Debug)]
 pub struct GlbChunk {
@@ -36,85 +34,22 @@ pub fn parse_gltf_json(json: &str) -> Result<GltfDocument, GltfError> {
 }
 
 pub fn parse_glb_bytes(bytes: &[u8]) -> Result<ParsedGlb, GltfError> {
-    if bytes.len() < 12 {
-        return Err(GltfError::InvalidGlb(
-            "header is shorter than 12 bytes".to_string(),
-        ));
-    }
-    let magic = read_u32(bytes, 0)?;
-    if magic != GLB_MAGIC {
-        return Err(GltfError::InvalidGlb(
-            "bad magic, expected 'glTF'".to_string(),
-        ));
-    }
-
-    let version = read_u32(bytes, 4)?;
-    if version != 2 {
-        return Err(GltfError::InvalidGlb(format!(
-            "unsupported glb version {version}, only version 2 is supported"
-        )));
-    }
-
-    let declared_length = read_u32(bytes, 8)? as usize;
-    if declared_length != bytes.len() {
-        return Err(GltfError::InvalidGlb(format!(
-            "declared length {declared_length} does not match actual length {}",
-            bytes.len()
-        )));
-    }
-
-    let mut offset = 12;
-    let json_len = read_u32(bytes, offset)? as usize;
-    let json_type = read_u32(bytes, offset + 4)?;
-    if json_type != GLB_JSON_CHUNK {
-        return Err(GltfError::InvalidGlb(
-            "first chunk must be JSON for glTF 2.0".to_string(),
-        ));
-    }
-    offset += 8;
-    let json_end = offset + json_len;
-    if json_end > bytes.len() {
-        return Err(GltfError::InvalidGlb(
-            "json chunk overruns file bounds".to_string(),
-        ));
-    }
-
-    let json_raw = std::str::from_utf8(&bytes[offset..json_end])?;
-    let json_trimmed = json_raw.trim_end_matches(['\0', ' ', '\n', '\r', '\t']);
+    let chunks = split_glb(bytes)?;
+    let json_trimmed = chunks.json.trim_end_matches(['\0', ' ', '\n', '\r', '\t']);
     let document = parse_gltf_json(json_trimmed)?;
-    offset = json_end;
-
-    let mut bin_chunk = None;
+    // An explicit empty BIN still has an eight-byte header between JSON and rest.
+    let bin_chunk = (bytes.len() > 20 + chunks.json.len() + chunks.rest.len())
+        .then(|| chunks.bin.to_vec());
     let mut extra_chunks = Vec::new();
-    while offset < bytes.len() {
-        if offset + 8 > bytes.len() {
-            return Err(GltfError::InvalidGlb(
-                "trailing chunk header overruns file bounds".to_string(),
-            ));
-        }
-        let chunk_len = read_u32(bytes, offset)? as usize;
-        let chunk_type = read_u32(bytes, offset + 4)?;
-        offset += 8;
-
-        let chunk_end = offset + chunk_len;
-        if chunk_end > bytes.len() {
-            return Err(GltfError::InvalidGlb(
-                "trailing chunk data overruns file bounds".to_string(),
-            ));
-        }
-
-        let data = bytes[offset..chunk_end].to_vec();
-        if chunk_type == GLB_BIN_CHUNK && bin_chunk.is_none() {
-            bin_chunk = Some(data);
-        } else {
-            extra_chunks.push(GlbChunk { chunk_type, data });
-        }
-
-        offset = chunk_end;
+    let mut rest = chunks.rest;
+    while !rest.is_empty() {
+        let (chunk_type, data, tail) = read_chunk(rest)?;
+        extra_chunks.push(GlbChunk { chunk_type, data: data.to_vec() });
+        rest = tail;
     }
 
     Ok(ParsedGlb {
-        version,
+        version: 2,
         document,
         bin_chunk,
         extra_chunks,
@@ -342,20 +277,12 @@ fn ensure_index(label: impl FnOnce() -> String, index: usize, len: usize) -> Res
     Ok(())
 }
 
-fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, GltfError> {
-    if offset + 4 > bytes.len() {
-        return Err(GltfError::InvalidGlb(format!(
-            "u32 read at byte offset {offset} overruns file bounds"
-        )));
-    }
-    let mut v = [0_u8; 4];
-    v.copy_from_slice(&bytes[offset..offset + 4]);
-    Ok(u32::from_le_bytes(v))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{parse_glb_bytes, GLB_BIN_CHUNK, GLB_JSON_CHUNK, GLB_MAGIC};
+    use super::{parse_glb_bytes, GLB_MAGIC};
+
+    const GLB_JSON_CHUNK: u32 = 0x4E4F_534A;
+    const GLB_BIN_CHUNK: u32 = 0x004E_4942;
 
     #[test]
     fn parses_minimal_glb() {

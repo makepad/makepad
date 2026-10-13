@@ -8,10 +8,12 @@
 //! zero is its default: a zero `rot` is the identity, a zero `density`,
 //! `friction`, `color` or `scale` is the default value, and so on.
 
-use makepad_render_kernels::compute::kernel::{FieldTy, Layout, LayoutField};
+use makepad_render_kernels::compute::boundary::{register_layout, LayoutFieldView, LayoutView};
+use makepad_render_kernels::compute::kernel::FieldTy;
+use FieldTy::*;
 
-fn field(name: &str, ty: FieldTy, offset: u32) -> LayoutField {
-    LayoutField { name: name.into(), ty, offset }
+const fn field(name: &'static str, ty: FieldTy, offset: u32) -> LayoutFieldView<'static> {
+    LayoutFieldView { name, ty, offset }
 }
 
 /// Words per `Body` record.
@@ -24,88 +26,87 @@ pub const CONTACT_WORDS: usize = 12;
 pub const EVENT_WORDS: usize = 8;
 
 /// A body to create: where, how big, how it moves, how it looks.
-pub fn body_layout() -> Layout {
-    use FieldTy::*;
-    Layout {
-        name: "Body".into(),
-        stride: BODY_WORDS as u32,
-        fields: vec![
-            field("pos", Vec3, 0),
-            field("size", Vec3, 3),
-            field("rot", Vec4, 6),
-            field("vel", Vec3, 10),
-            field("spin", Vec3, 13),
-            field("drag", F32, 16),
-            field("spin_drag", F32, 17),
-            field("density", F32, 18),
-            field("friction", F32, 19),
-            field("bounce", F32, 20),
-            field("lift", F32, 21),
-            field("delay", F32, 22),
-            field("life", F32, 23),
-            field("color", Vec4, 24),
-            field("scale", Vec3, 28),
-            field("shape", I32, 31),
-        ],
-    }
-}
+pub const BODY: LayoutView<'static> = LayoutView {
+    name: "Body",
+    stride: BODY_WORDS as u32,
+    fields: &[
+        field("pos", Vec3, 0),
+        field("size", Vec3, 3),
+        field("rot", Vec4, 6),
+        field("vel", Vec3, 10),
+        field("spin", Vec3, 13),
+        field("drag", F32, 16),
+        field("spin_drag", F32, 17),
+        field("density", F32, 18),
+        field("friction", F32, 19),
+        field("bounce", F32, 20),
+        field("lift", F32, 21),
+        field("delay", F32, 22),
+        field("life", F32, 23),
+        field("color", Vec4, 24),
+        field("scale", Vec3, 28),
+        field("shape", I32, 31),
+    ],
+};
 
 /// A body as drawn: its pose at the frame's time (interpolated between
 /// steps), its pose one step earlier, and its render fields.
-pub fn rigid_layout() -> Layout {
-    use FieldTy::*;
-    Layout {
-        name: "Rigid".into(),
-        stride: RIGID_WORDS as u32,
-        fields: vec![
-            field("pos", Vec3, 0),
-            field("rot", Vec4, 3),
-            field("scale", Vec3, 7),
-            field("color", Vec4, 10),
-            field("seed", I32, 14),
-            field("id", I32, 15),
-            field("prev_pos", Vec3, 16),
-            field("prev_rot", Vec4, 19),
-            field("age", F32, 23),
-            field("radius", F32, 24),
-            field("speed", F32, 25),
-            field("group", I32, 26),
-        ],
-    }
-}
+pub const RIGID: LayoutView<'static> = LayoutView {
+    name: "Rigid",
+    stride: RIGID_WORDS as u32,
+    fields: &[
+        field("pos", Vec3, 0),
+        field("rot", Vec4, 3),
+        field("scale", Vec3, 7),
+        field("color", Vec4, 10),
+        field("seed", I32, 14),
+        field("id", I32, 15),
+        field("prev_pos", Vec3, 16),
+        field("prev_rot", Vec4, 19),
+        field("age", F32, 23),
+        field("radius", F32, 24),
+        field("speed", F32, 25),
+        field("group", I32, 26),
+    ],
+};
 
 /// A hit between two bodies: where, along which normal, how hard, when.
-pub fn contact_layout() -> Layout {
-    use FieldTy::*;
-    Layout {
-        name: "Contact".into(),
-        stride: CONTACT_WORDS as u32,
-        fields: vec![
-            field("pos", Vec3, 0),
-            field("normal", Vec3, 3),
-            field("impulse", F32, 6),
-            field("speed", F32, 7),
-            field("time", F32, 8),
-            field("a", I32, 9),
-            field("b", I32, 10),
-            field("step", I32, 11),
-        ],
-    }
-}
+pub const CONTACT: LayoutView<'static> = LayoutView {
+    name: "Contact",
+    stride: CONTACT_WORDS as u32,
+    fields: &[
+        field("pos", Vec3, 0),
+        field("normal", Vec3, 3),
+        field("impulse", F32, 6),
+        field("speed", F32, 7),
+        field("time", F32, 8),
+        field("a", I32, 9),
+        field("b", I32, 10),
+        field("step", I32, 11),
+    ],
+};
 
 /// Something that happened to a body: spawned, expired, fell asleep.
-pub fn event_layout() -> Layout {
-    use FieldTy::*;
-    Layout {
-        name: "Event".into(),
-        stride: EVENT_WORDS as u32,
-        fields: vec![field("kind", I32, 0), field("id", I32, 1), field("time", F32, 2), field("step", I32, 3), field("pos", Vec3, 4)],
-    }
-}
+pub const EVENT: LayoutView<'static> = LayoutView {
+    name: "Event",
+    stride: EVENT_WORDS as u32,
+    fields: &[field("kind", I32, 0), field("id", I32, 1), field("time", F32, 2), field("step", I32, 3), field("pos", Vec3, 4)],
+};
 
-/// Every physics layout, for a kernel compile.
-pub fn layouts() -> Vec<Layout> {
-    vec![body_layout(), rigid_layout(), contact_layout(), event_layout()]
+const LAYOUTS: [LayoutView<'static>; 4] = [BODY, RIGID, CONTACT, EVENT];
+
+/// Every physics layout, for a kernel compile. These tables are registered
+/// with the kernel compiler as the physics records, so a kernel compiled
+/// with a different `Body` (`Rigid`, ...) fails with a mismatch error.
+pub fn layouts() -> &'static [LayoutView<'static>] {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        for layout in &LAYOUTS {
+            // false: another table holds the name; compiles with this one report the mismatch.
+            register_layout(layout);
+        }
+    });
+    &LAYOUTS
 }
 
 /// A shape a `Body` record names (`shape` field); 0 takes the spawn's.
@@ -361,10 +362,10 @@ impl RigidRecord {
     /// of `layout.stride` words; the rest stay as they are (zero in a
     /// fresh slot). A draw shader's reflected instance record takes the
     /// fields it declares.
-    pub fn write_as(&self, layout: &Layout, w: &mut [u32]) {
-        for fl in &layout.fields {
+    pub fn write_as(&self, layout: &LayoutView<'_>, w: &mut [u32]) {
+        for fl in layout.fields {
             let o = fl.offset as usize;
-            let vals: &[f32] = match (fl.name.as_str(), fl.ty) {
+            let vals: &[f32] = match (fl.name, fl.ty) {
                 ("pos", FieldTy::Vec3) => &self.pos,
                 ("rot", FieldTy::Vec4) => &self.rot,
                 ("scale", FieldTy::Vec3) => &self.scale,
@@ -411,7 +412,7 @@ mod tests {
     fn layouts_are_packed_without_overlap() {
         for l in layouts() {
             let mut used = vec![false; l.stride as usize];
-            for fl in &l.fields {
+            for fl in l.fields {
                 for k in 0..fl.ty.words() {
                     let i = (fl.offset + k) as usize;
                     assert!(!used[i], "{}.{} overlaps", l.name, fl.name);

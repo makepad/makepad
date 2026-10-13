@@ -549,7 +549,7 @@ impl Environment {
             // The pinned repository commits are the lock: Cargo may bring the
             // lockfile in line with the pinned path crates (--locked failed when an
             // app's own lock went stale). No --offline: the graph names crates for
-            // other targets (Android, OpenHarmony) that are never built here, and
+            // other targets (Android) that are never built here, and
             // resolving them needs their registry entries, which a new private
             // CARGO_HOME does not have yet. Once cached, Cargo stays off the network.
             // A release is the app without its development defaults (the design
@@ -559,9 +559,8 @@ impl Environment {
             if let Some(resources) = &resources {
                 cmd.args(["--", "-C"]).arg(format!("link-arg={}", resources.display()));
                 // A windowed program: started from Explorer it opens no console
-                // window. stdin/stdout still work through pipes (an MCP client
-                // starting `--mcp`), and from a terminal the app joins that
-                // terminal's console (platform attach_parent_console).
+                // window. stdin/stdout still work through pipes. From a terminal
+                // the app joins its console (platform attach_parent_console).
                 if vars.get("MAKEPAD_BUILDER_LINK").is_some_and(|l| l == "gnu") {
                     cmd.args(["-C", "link-arg=--subsystem", "-C", "link-arg=windows"]);
                 } else {
@@ -1504,7 +1503,7 @@ pub fn rebuild_local() -> Result<(), String> {
 /// `makepad-builder build APP`: compile an app whose sources are already in
 /// this installation, offline, exactly as the Builder does (its compiler,
 /// flags, features and shared target), and publish it. What the macOS/Linux
-/// `makepad build APP` is; the WM hands its builds here, so an app it opens
+/// `makepad-builder.sh build APP` is; the WM hands its builds here, so an app it opens
 /// builds the same way whether the WM was started from the Builder or on
 /// its own.
 pub fn build_local(app: &str) -> Result<(), String> {

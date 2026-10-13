@@ -75,15 +75,17 @@ impl Runtime {
         }
         true
     }
-    fn request(&mut self, i: usize, route: &str, mutate: bool) -> Result<String> {
-        if !route.starts_with('/')
-            || route
-                .bytes()
-                .any(|b| b.is_ascii_whitespace() || b.is_ascii_control())
-            || route.contains("if_user_seq")
+    /// One remote command: `argv` is its words and `k=v` arguments (`snap q=x`, `key k=down
+    /// c=KeyA wait=1`); the answer's lines come back joined by newlines.
+    fn request(&mut self, i: usize, argv: &[String], mutate: bool) -> Result<String> {
+        if argv.is_empty()
+            || argv
+                .iter()
+                .any(|a| a.bytes().any(|b| b.is_ascii_control()) || a.starts_with("if_user_seq"))
         {
-            return Err("invalid route (or attempt to replace the pinned user sequence)".into());
+            return Err("invalid command (or attempt to replace the pinned user sequence)".into());
         }
+        let route = argv.join(" ");
         let app = self.apps.get_mut(i).ok_or("invalid app handle")?;
         if app.interrupted {
             return Err("human intervention; app is no longer owned".into());
@@ -92,15 +94,15 @@ impl Runtime {
             return Err(format!("{} already closed", app.name));
         }
         let remote = app.remote.as_ref().ok_or("remote unavailable")?;
-        self.run.log(&format!("{} GET {route}", app.name));
-        // A grab the bridge could not place, or a grab budget that is full,
+        self.run.log(&format!("{} {route}", app.name));
+        // A grab the app could not place, or a grab budget that is full,
         // ends in "; retry": ask again. An input is never asked again: the
         // app applied it when it took the request, whatever it answered
         // about the frame after it, and a second request is a second key.
         let mut attempt = 0;
         let result = loop {
-            let result = remote.request(route, mutate);
-            let again = !applies_input(route)
+            let result = remote.request(argv, mutate);
+            let again = !applies_input(argv)
                 && matches!(&result, Err(e) if e.to_string().contains("; retry"));
             if !again || attempt == 5 {
                 break result;
@@ -116,13 +118,13 @@ impl Runtime {
         let text = result.map_err(|e| e.to_string())?;
         if let Ok(v) = json::parse_depth(text.as_bytes(), 64) {
             if let Some(e) = v.get("err") {
-                return Err(format!("GET {route}: {}", e.to_json()));
+                return Err(format!("{route}: {}", e.to_json()));
             }
         }
         Ok(text)
     }
-    fn request_json(&mut self, i: usize, route: &str, mutate: bool) -> Result<Value> {
-        json::parse_depth(self.request(i, route, mutate)?.as_bytes(), 64).map_err(str::to_string)
+    fn request_json(&mut self, i: usize, argv: &[String], mutate: bool) -> Result<Value> {
+        json::parse_depth(self.request(i, argv, mutate)?.as_bytes(), 64).map_err(str::to_string)
     }
     fn drain_app(&mut self, i: usize) -> Result<()> {
         let run = &mut self.run;
@@ -190,14 +192,16 @@ impl Runtime {
             self.drain_app(index)?;
             let app = &mut self.apps[index];
             let pid = app.child.child.id();
-            if let Some(port) = app
+            if let Some(socket) = app
                 .child
                 .text
                 .lines()
                 .find_map(|line| parse_startup(line, pid))
             {
+                let client = makepad_remote::Client::connect(&socket)
+                    .map_err(|e| format!("{} remote endpoint {socket}: {e}", app.name))?;
                 app.remote = Some(Remote {
-                    port,
+                    client,
                     user_seq: None,
                 });
                 break;
@@ -220,7 +224,7 @@ impl Runtime {
             if !self.alive(index)? {
                 return Err("app died before ready".into());
             }
-            if let Ok(v) = self.request_json(index, "/s", false) {
+            if let Ok(v) = self.request_json(index, &argv(&["status"]), false) {
                 if v.get("w")
                     .and_then(Value::as_arr)
                     .is_some_and(|w| !w.is_empty())
@@ -232,11 +236,11 @@ impl Runtime {
                 return Err("human intervention during startup".into());
             }
             if Instant::now() >= deadline {
-                return Err("/s readiness timed out".into());
+                return Err("status readiness timed out".into());
             }
             self.run.control.sleep(0.2)?;
         }
-        let activity = self.request_json(index, "/activity", false)?;
+        let activity = self.request_json(index, &argv(&["activity"]), false)?;
         let seq = activity
             .get("user_seq")
             .and_then(Value::as_u64)
@@ -248,33 +252,33 @@ impl Runtime {
             self.run.held_pids.push(self.apps[index].child.child.id());
             return Err("human active at startup; leaving app running".into());
         }
-        let help = self.request(index, "/", false)?;
+        let help = self.request(index, &argv(&["help"]), false)?;
         let path = self.run.path("remote-help.txt");
         fs::write(path, help).map_err(|e| e.to_string())?;
         Ok(index)
     }
-    fn key(&mut self, i: usize, code: &str, mods: &str) -> Result<()> {
+    fn key(&mut self, i: usize, code: &str, mods: &[&str]) -> Result<()> {
         self.run.control.check()?;
         self.request_json(
             i,
-            &format!("/k?k=down&c={}{mods}&wait=1", encode(code)),
+            &key_args("down", code, mods),
             true,
         )?;
         // Always release a successfully pressed key, including on Stop.
         std::thread::sleep(Duration::from_millis(180));
-        self.request_json(i, &format!("/k?k=up&c={}{mods}&wait=1", encode(code)), true)?;
+        self.request_json(i, &key_args("up", code, mods), true)?;
         self.run.control.check()
     }
     fn type_text(&mut self, i: usize, text: &str) -> Result<()> {
         for c in text.chars() {
             let (code, shift) = character_key(c)?;
-            self.key(i, &code, if shift { "&shift=1" } else { "" })?;
+            self.key(i, &code, if shift { &["shift"] } else { &[] })?;
         }
         Ok(())
     }
     fn log_text(&mut self, i: usize) -> Result<String> {
         self.drain_app(i)?;
-        let v = self.request_json(i, "/log?n=10000", false)?;
+        let v = self.request_json(i, &argv(&["log", "n=10000"]), false)?;
         let mut lines = Vec::new();
         collect_log(&v, &mut lines);
         Ok(lines.join("\n"))
@@ -327,7 +331,7 @@ impl Runtime {
         }
     }
     fn grab(&mut self, i: usize, name: &str) -> Result<usize> {
-        let value = self.request_json(i, "/g", false)?;
+        let value = self.request_json(i, &argv(&["grab"]), false)?;
         let mut paths = Vec::new();
         png_paths(&value, &mut paths);
         let source = paths.first().ok_or("grab did not return a PNG path")?;
@@ -365,7 +369,7 @@ impl Runtime {
             .as_ref()
             .is_some_and(|r| r.user_seq.is_none())
         {
-            let a = self.request_json(i, "/activity", false)?;
+            let a = self.request_json(i, &argv(&["activity"]), false)?;
             let seq = a
                 .get("user_seq")
                 .and_then(Value::as_u64)
@@ -379,13 +383,13 @@ impl Runtime {
         }
         let mut error = None;
         if self.apps[i].remote.is_some() {
-            if let Err(e) = self.request_json(i, "/gq", true) {
+            if let Err(e) = self.request_json(i, &argv(&["gq"]), true) {
                 if self.apps[i].interrupted {
                     return Err(e);
                 }
-                self.run.log(&format!("/gq failed: {e}; trying /quit"));
+                self.run.log(&format!("gq failed: {e}; trying quit"));
                 error = Some(e);
-                if let Err(e) = self.request(i, "/quit", true) {
+                if let Err(e) = self.request(i, &argv(&["quit"]), true) {
                     if self.apps[i].interrupted {
                         return Err(e);
                     }
@@ -399,7 +403,7 @@ impl Runtime {
         }
         if self.apps[i].child.alive()? {
             if self.apps[i].remote.is_some() {
-                if let Err(e) = self.request(i, "/activity", false) {
+                if let Err(e) = self.request(i, &argv(&["activity"]), false) {
                     if self.apps[i].interrupted {
                         return Err(e);
                     }
@@ -419,19 +423,25 @@ impl Runtime {
         error.map_or(Ok(()), Err)
     }
 }
-fn parse_startup(line: &str, pid: u32) -> Option<u16> {
-    if !line.starts_with("[makepad-remote] listening on 127.0.0.1:") {
+/// `[makepad-remote] pid=<pid> app=<app> socket=<path>` of the process this run owns: the
+/// socket path (the rest of the line, so a path may hold spaces).
+fn parse_startup(line: &str, pid: u32) -> Option<String> {
+    let rest = line.strip_prefix("[makepad-remote] pid=")?;
+    let (actual, rest) = rest.split_once(' ')?;
+    if actual.parse::<u32>().ok()? != pid {
         return None;
     }
-    let fields: Vec<_> = line.split_whitespace().collect();
-    let actual = fields
-        .iter()
-        .find_map(|s| s.strip_prefix("pid="))
-        .and_then(|s| s.parse::<u32>().ok())?;
-    if actual != pid {
-        return None;
-    }
-    fields.get(3)?.rsplit(':').next()?.parse().ok()
+    let socket = rest.split_once(" socket=")?.1.trim();
+    (!socket.is_empty()).then(|| socket.to_string())
+}
+fn argv(words: &[&str]) -> Vec<String> {
+    words.iter().map(|w| w.to_string()).collect()
+}
+fn key_args(kind: &str, code: &str, mods: &[&str]) -> Vec<String> {
+    let mut v = argv(&["key", &format!("k={kind}"), &format!("c={code}")]);
+    v.extend(mods.iter().map(|m| format!("{m}=1")));
+    v.push("wait=1".into());
+    v
 }
 fn character_key(c: char) -> Result<(String, bool)> {
     match c {
@@ -444,26 +454,14 @@ fn character_key(c: char) -> Result<(String, bool)> {
         _ => Err(format!("type_text does not support character {c:?}")),
     }
 }
-/// The routes that apply an input to the app when it takes the request
+/// The commands that apply an input to the app when it takes the request
 /// (keys, pointer, text, a dropped file, the tweaker, the AI pane): a
 /// second request is a second input, so these are never asked again.
-fn applies_input(route: &str) -> bool {
-    ["/k?", "/m?", "/t?", "/click?", "/drop?", "/tweak?", "/ai?"]
-        .iter()
-        .any(|prefix| route.starts_with(prefix))
+fn applies_input(argv: &[String]) -> bool {
+    argv.first()
+        .is_some_and(|c| ["key", "mouse", "text", "click", "drop", "tweak", "ai"].contains(&c.as_str()))
 }
 
-fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| {
-            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            }
-        })
-        .collect()
-}
 fn collect_log(v: &Value, out: &mut Vec<String>) {
     match v {
         Value::Str(s) => out.push(s.clone()),
@@ -519,10 +517,10 @@ fn inside(root: &Path, path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 fn rt<'a>(vm: &'a mut ScriptVm) -> &'a mut Runtime {
-    vm.host.as_any_mut().downcast_mut::<Runtime>().unwrap()
+    vm.host.get_mut::<Runtime>().unwrap()
 }
 fn value(vm: &ScriptVm, args: ScriptObject, key: LiveId) -> ScriptValue {
-    vm.bx.heap.value(args, key.into(), NoTrap)
+    vm.value(args, key)
 }
 fn text(vm: &mut ScriptVm, v: ScriptValue) -> Result<String> {
     vm.string_with(v, |_, s| s.to_string())
@@ -565,7 +563,7 @@ fn json_value(vm: &mut ScriptVm, v: Value) -> ScriptValue {
         Value::Str(v) => vm.new_string_with(|_, out| out.push_str(&v)),
         v => {
             let mut parser = makepad_script::json::JsonParserThread::default();
-            parser.read_json(&v.to_json(), &mut vm.bx.heap)
+            parser.read_json(&v.to_json(), vm.heap_mut())
         }
     }
 }
@@ -579,14 +577,9 @@ fn result(vm: &mut ScriptVm, r: Result<Value>) -> ScriptValue {
     }
 }
 fn allow(vm: &mut ScriptVm) -> bool {
-    if vm
-        .bx
-        .captured_errors
-        .as_ref()
-        .is_some_and(|a| !a.is_empty())
-    {
+    if vm.has_captured_errors() {
         let e = vm.take_errors().join("\n");
-        vm.bx.captured_errors = Some(Vec::new());
+        vm.capture_errors();
         rt(vm).fail(&e);
         return false;
     }
@@ -612,7 +605,7 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
     } else {
         NIL
     };
-    vm.bx.heap.set_value_def(ci, id!(target).into(), v);
+    vm.set_value_def(ci, id!(target), v);
     vm.add_method(
         ci,
         id_lut!(step),
@@ -631,7 +624,7 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
                 return NIL;
             }
             let before = vm.take_errors();
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             if !before.is_empty() {
                 rt(vm).fail(&before.join("\n"));
             }
@@ -652,7 +645,7 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
             runtime.validated_steps.push(name);
             let answer = vm.call(body, &[]);
             let errors = vm.take_errors();
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             if !errors.is_empty() {
                 rt(vm).fail(&errors.join("\n"));
             }
@@ -875,8 +868,8 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
                 let av = value(vm, args, id!(args));
                 let array = av.as_array().ok_or("run args must be an array")?;
                 let mut argv = Vec::new();
-                for i in 0..vm.bx.heap.array_len(array) {
-                    let v = vm.bx.heap.array_index(array, i, NoTrap);
+                for i in 0..vm.heap().array_len(array) {
+                    let v = vm.heap().array_index(array, i, NoTrap);
                     argv.push(text(vm, v)?);
                 }
                 let options = value(vm, args, id!(options));
@@ -895,16 +888,14 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
                 let envobj = object_field(vm, options, id!(env));
                 let mut env = Vec::new();
                 if let Some(obj) = envobj.as_object() {
-                    let fields: Vec<_> = vm
-                        .bx
-                        .heap
-                        .map_ref(obj)
-                        .iter()
-                        .map(|(k, v)| (*k, v.value))
+                    let fields: Vec<_> = vm.heap()
+                        .map_entries(obj)
+                        .into_iter()
+                        .map(|e| (e.key, e.value))
                         .collect();
                     for (k, v) in fields {
                         let mut key = String::new();
-                        vm.bx.heap.cast_to_string(k, &mut key);
+                        vm.heap().cast_to_string(k, &mut key);
                         env.push((key, text(vm, v)?));
                     }
                 }
@@ -940,7 +931,7 @@ fn register(vm: &mut ScriptVm, target: Option<&Target>) {
 }
 
 fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
-    let obj = vm.bx.heap.new_object();
+    let obj = vm.new_object();
     vm.add_method(
         obj,
         id_lut!(key),
@@ -952,7 +943,7 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
             let r = (|| {
                 let code = str_arg(vm, args, id!(code))?;
                 let options = value(vm, args, id!(options));
-                let mut mods = String::new();
+                let mut mods: Vec<&str> = Vec::new();
                 for (k, s) in [
                     (id!(cmd), "cmd"),
                     (id!(shift), "shift"),
@@ -960,7 +951,7 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
                     (id!(alt), "alt"),
                 ] {
                     if object_field(vm, options, k).as_bool() == Some(true) {
-                        mods.push_str(&format!("&{s}=1"));
+                        mods.push(s);
                     }
                 }
                 if !rt(vm).validate {
@@ -1004,17 +995,21 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
                 let r = (|| {
                     let x = num_arg(vm, args, id!(x))?;
                     let y = num_arg(vm, args, id!(y))?;
-                    let route = if scroll {
-                        format!(
-                            "/m?k=scroll&x={x}&y={y}&dx={}&dy={}&wait=1",
-                            num_arg(vm, args, id!(dx))?,
-                            num_arg(vm, args, id!(dy))?
-                        )
+                    let command = if scroll {
+                        argv(&[
+                            "mouse",
+                            "k=scroll",
+                            &format!("x={x}"),
+                            &format!("y={y}"),
+                            &format!("dx={}", num_arg(vm, args, id!(dx))?),
+                            &format!("dy={}", num_arg(vm, args, id!(dy))?),
+                            "wait=1",
+                        ])
                     } else {
-                        format!("/click?x={x}&y={y}&wait=1")
+                        argv(&["click", &format!("x={x}"), &format!("y={y}"), "wait=1"])
                     };
                     if !rt(vm).validate {
-                        rt(vm).request_json(index, &route, true)?;
+                        rt(vm).request_json(index, &command, true)?;
                     }
                     Ok(Value::Null)
                 })();
@@ -1024,17 +1019,19 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
     }
     vm.add_method(
         obj,
-        id_lut!(get),
-        script_args!(route = NIL),
+        id_lut!(cmd),
+        script_args!(command = NIL),
         move |vm, args| {
             if !allow(vm) {
                 return NIL;
             }
-            let r = str_arg(vm, args, id!(route)).and_then(|s| {
+            // one remote command, words and k=v arguments split on spaces (`snap q=x`)
+            let r = str_arg(vm, args, id!(command)).and_then(|s| {
                 if rt(vm).validate {
                     Ok(json::s("{}"))
                 } else {
-                    rt(vm).request(index, &s, true).map(json::s)
+                    let words: Vec<String> = s.split_whitespace().map(str::to_string).collect();
+                    rt(vm).request(index, &words, true).map(json::s)
                 }
             });
             result(vm, r)
@@ -1053,7 +1050,7 @@ fn app_object(vm: &mut ScriptVm, index: usize) -> ScriptValue {
                     Ok(Value::Arr(vec![]))
                 } else {
                     rt(vm)
-                        .request_json(index, &format!("/snap?q={}", encode(&s)), false)
+                        .request_json(index, &argv(&["snap", &format!("q={s}")]), false)
                         .map(|v| {
                             v.get("s")
                                 .or_else(|| v.get("entries"))
@@ -1262,17 +1259,13 @@ fn execute_with(
             .fail(&script.name, &format!("{}: {e}", script.path.display())),
         Ok(code) => {
             let mut vm = ScriptVm {
-                host: &mut host,
+                host: host.host_context(),
                 bx: Box::new(ScriptVmBase::new()),
             };
             register(&mut vm, script.target.as_ref());
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             let answer = vm.with_instruction_limit(5_000_000, |vm| {
-                vm.eval(ScriptMod {
-                    file: script.path.display().to_string(),
-                    code,
-                    ..Default::default()
-                })
+                vm.eval(ScriptMod::new("", "", &script.path.display().to_string(), 0, 0, &code, &[]))
             });
             let errors = vm.take_errors();
             if !errors.is_empty() {
@@ -1289,7 +1282,7 @@ fn execute_with(
             "{} / cleanup {}",
             runtime.group, runtime.apps[i].name
         ));
-        runtime.run.begin(stage, "GET /gq");
+        runtime.run.begin(stage, "gq");
         match runtime.quit(i) {
             Ok(()) => runtime.run.end(stage, "passed", ""),
             Err(e) => runtime.run.end(stage, "failed", &e),
@@ -1303,13 +1296,20 @@ mod tests {
     use super::*;
     use crate::{process::Control, report::Notify};
     #[test]
-    fn an_input_route_is_never_asked_twice_a_grab_is() {
-        for route in ["/k?k=down&c=KeyB&wait=1", "/m?k=click&x=1&y=2", "/t?t=browser", "/click?x=1&y=2", "/drop?path=/a&x=1&y=1"] {
-            assert!(applies_input(route), "{route}");
+    fn an_input_command_is_never_asked_twice_a_grab_is() {
+        for command in [
+            &["key", "k=down", "c=KeyB", "wait=1"][..],
+            &["mouse", "k=click", "x=1", "y=2"],
+            &["text", "t=browser"],
+            &["click", "x=1", "y=2"],
+            &["drop", "path=/a", "x=1", "y=1"],
+        ] {
+            assert!(applies_input(&argv(command)), "{command:?}");
         }
-        for route in ["/g", "/gseq?n=8", "/log?n=10", "/gq", "/quit", "/activity", "/snap?q=x"] {
-            assert!(!applies_input(route), "{route}");
+        for command in [&["grab"][..], &["gseq", "n=8"], &["log", "n=10"], &["gq"], &["quit"], &["activity"], &["snap", "q=x"]] {
+            assert!(!applies_input(&argv(command)), "{command:?}");
         }
+        assert_eq!(key_args("down", "KeyA", &["shift"]), ["key", "k=down", "c=KeyA", "shift=1", "wait=1"]);
     }
     #[test]
     fn contract_scripts_execute_on_real_vm_without_io() {
@@ -1408,16 +1408,12 @@ mod tests {
     #[test]
     fn startup_requires_owned_pid_and_type_text_rejects_unsupported_input() {
         assert_eq!(
-            parse_startup(
-                "[makepad-remote] listening on 127.0.0.1:1234 pid=7 app=test",
-                7
-            ),
-            Some(1234)
+            parse_startup("[makepad-remote] pid=7 app=test socket=/tmp/a b/makepad-remote-7.sock", 7).as_deref(),
+            Some("/tmp/a b/makepad-remote-7.sock")
         );
-        assert_eq!(
-            parse_startup("[makepad-remote] listening on 127.0.0.1:1234 pid=8", 7),
-            None
-        );
+        assert_eq!(parse_startup("[makepad-remote] pid=8 app=test socket=/tmp/x.sock", 7), None);
+        assert_eq!(parse_startup("[makepad-remote] cannot listen: nope", 7), None);
+        assert_eq!(parse_startup("[makepad-remote] pid=7 app=test socket=", 7), None);
         assert!(character_key('é').is_err());
         assert_eq!(character_key('A').unwrap(), ("KeyA".into(), true));
     }
@@ -1457,4 +1453,8 @@ mod log_has_tests {
         assert!(!log_has(log, "launched terminal * first frame"), "the parts are on different lines");
         assert!(!log_has(log, "first frame * terminal client"), "order matters");
     }
+}
+
+unsafe impl makepad_script::ScriptHostCapability for Runtime {
+    const ID: makepad_script::LiveId = makepad_script::LiveId::from_str("makepad.ci.runtime.v1");
 }

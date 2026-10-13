@@ -16,6 +16,8 @@
 //! validator requires (POSITION and animation-input min/max, scene graph
 //! reachability for every joint, VEC4 u8/u16 joints, f32 weights).
 
+use crate::assemble_glb_with_rest;
+
 /// Area-weighted smooth vertex normals from triangle faces. Degenerate
 /// vertices (no face contribution) get +Y so the data stays normalized.
 pub fn compute_vertex_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
@@ -182,24 +184,7 @@ pub fn write_glb_mesh_colored(
         color_view,
         bin.len(),
     );
-    let mut json_bytes = json.into_bytes();
-    while json_bytes.len() % 4 != 0 {
-        json_bytes.push(b' ');
-    }
-
-    // ---- GLB container ----
-    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(b"glTF");
-    out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // "JSON"
-    out.extend_from_slice(&json_bytes);
-    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x004E_4942u32.to_le_bytes()); // "BIN\0"
-    out.extend_from_slice(&bin);
-    out
+    assemble_glb_with_rest(&json, Some(&bin), &[])
 }
 
 /// POSITION + NORMAL + TEXCOORD_0, no embedded images. Hunyuan paint
@@ -301,22 +286,7 @@ pub fn write_glb_mesh_unwrapped(
         uv_bytes,
         bin.len(),
     );
-    let mut json_bytes = json.into_bytes();
-    while json_bytes.len() % 4 != 0 {
-        json_bytes.push(b' ');
-    }
-    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(b"glTF");
-    out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
-    out.extend_from_slice(&json_bytes);
-    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x004E_4942u32.to_le_bytes());
-    out.extend_from_slice(&bin);
-    out
+    assemble_glb_with_rest(&json, Some(&bin), &[])
 }
 
 /// Input for [`write_glb_mesh_textured`]: a UV-unwrapped mesh with baked
@@ -548,22 +518,7 @@ pub fn write_glb_mesh_textured(mesh: &GlbTexturedMesh) -> Vec<u8> {
         mr_view_json,
         bin.len(),
     );
-    let mut json_bytes = json.into_bytes();
-    while json_bytes.len() % 4 != 0 {
-        json_bytes.push(b' ');
-    }
-    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(b"glTF");
-    out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // "JSON"
-    out.extend_from_slice(&json_bytes);
-    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x004E_4942u32.to_le_bytes()); // "BIN\0"
-    out.extend_from_slice(&bin);
-    out
+    assemble_glb_with_rest(&json, Some(&bin), &[])
 }
 
 /// One textured triangle set with its own base-color PNG. UVs may go
@@ -838,26 +793,7 @@ pub fn write_glb_named_parts(parts: &[GlbNamedPart]) -> Vec<u8> {
         b.views.join(","),
         b.bin.len(),
     );
-    let mut json_bytes = json.into_bytes();
-    while json_bytes.len() % 4 != 0 {
-        json_bytes.push(b' ');
-    }
-    let mut bin = b.bin;
-    while bin.len() % 4 != 0 {
-        bin.push(0);
-    }
-    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(b"glTF");
-    out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
-    out.extend_from_slice(&json_bytes);
-    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x004E_4942u32.to_le_bytes());
-    out.extend_from_slice(&bin);
-    out
+    assemble_glb_with_rest(&json, Some(&b.bin), &[])
 }
 
 /// Several textured parts as one mesh (one primitive per part).
@@ -1038,29 +974,8 @@ fn write_glb_mesh_textured_parts_filtered(parts: &[GlbTexturedPart], double_side
         b.views.join(","),
         b.bin.len(),
     );
-    let mut json_bytes = json.into_bytes();
-    while json_bytes.len() % 4 != 0 {
-        json_bytes.push(b' ');
-    }
-    // The BIN chunk must be zero-padded to 4 bytes (the trailing image blob
-    // has arbitrary length); the JSON buffer byteLength stays unpadded,
-    // which the GLB spec allows.
-    let mut bin = b.bin;
-    while bin.len() % 4 != 0 {
-        bin.push(0);
-    }
-    let total = 12 + 8 + json_bytes.len() + 8 + bin.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(b"glTF");
-    out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes());
-    out.extend_from_slice(&json_bytes);
-    out.extend_from_slice(&(bin.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x004E_4942u32.to_le_bytes());
-    out.extend_from_slice(&bin);
-    out
+    // Container padding leaves the JSON buffer byteLength unpadded.
+    assemble_glb_with_rest(&json, Some(&b.bin), &[])
 }
 
 // ------------------------------------------------------------ skinned+anim
@@ -1463,22 +1378,7 @@ pub fn write_glb_mesh_skinned(mesh: &GlbSkinnedMesh) -> Vec<u8> {
         bin_len = b.bin.len(),
     );
 
-    let mut json_bytes = json.into_bytes();
-    while json_bytes.len() % 4 != 0 {
-        json_bytes.push(b' ');
-    }
-    let total = 12 + 8 + json_bytes.len() + 8 + b.bin.len();
-    let mut out = Vec::with_capacity(total);
-    out.extend_from_slice(b"glTF");
-    out.extend_from_slice(&2u32.to_le_bytes());
-    out.extend_from_slice(&(total as u32).to_le_bytes());
-    out.extend_from_slice(&(json_bytes.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x4E4F_534Au32.to_le_bytes()); // "JSON"
-    out.extend_from_slice(&json_bytes);
-    out.extend_from_slice(&(b.bin.len() as u32).to_le_bytes());
-    out.extend_from_slice(&0x004E_4942u32.to_le_bytes()); // "BIN\0"
-    out.extend_from_slice(&b.bin);
-    out
+    assemble_glb_with_rest(&json, Some(&b.bin), &[])
 }
 
 #[cfg(test)]

@@ -98,7 +98,7 @@ pub fn fetch_bytes(url: &str, max_bytes: usize) -> Result<Vec<u8>, String> {
     }
     let mut current = url.to_string();
     for _ in 0..=MAX_REDIRECTS {
-        let limits = Limits { max_body_bytes: max_bytes, total_timeout: Duration::from_secs(120), ..Limits::default() };
+        let limits = Limits { max_body_bytes: max_bytes, idle_timeout: Duration::from_secs(120), ..Limits::default() };
         let request = Request::get(current.clone()).limits(limits);
         let response = blocking_http::request_no_redirect(request).map_err(|e| format!("GET {current}: {e:?}"))?;
         match response.status {

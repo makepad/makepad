@@ -1,6 +1,6 @@
 # makepad_test
 
-`makepad_test` provides Rust-native UI regression tests for Makepad apps. Tests live next to the package they exercise, run through normal `cargo test`, and drive an owned standalone release app through its `--remote` HTTP surface. Test windows are hidden by default; no Studio instance or hub is required.
+`makepad_test` provides Rust-native UI regression tests for Makepad apps. Tests live next to the package they exercise, run through normal `cargo test`, and drive an owned standalone release app through its `--remote` makepad-remote endpoint (a Unix socket). Test windows are hidden by default; no Studio instance or hub is required.
 
 ## Quick Start
 
@@ -49,8 +49,8 @@ release target. An inherited `CARGO_TARGET_DIR` or explicit
 `TestConfig::env["CARGO_TARGET_DIR"]` override is respected; the harness does not
 create a separate build target per example.
 
-The runner starts only its own executable, reads its PID and ephemeral port from
-the startup line, and closes it with `/gq` (grab and quit), falling back to `/quit`
+The runner starts only its own executable, reads its PID and socket path from
+the startup line (`[makepad-remote] pid=.. app=.. socket=..`), and closes it with `gq` (grab and quit; the PNG files are written by the test client), falling back to `quit`
 when needed. It waits for the owned process to exit and kills that exact child
 only if graceful shutdown fails. Existing user instances are never reused.
 

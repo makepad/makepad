@@ -212,13 +212,13 @@ const _: () = {
 
 pub(crate) fn fab_vertex_pod(vm: &mut ScriptVm) -> ScriptValue {
     let v = FabVertex::script_pod(vm).expect("FabVertex pod");
-    vm.bx.heap.pod_type_name_set(v, id_lut!(FabVertex));
+    vm.heap_mut().pod_type_name_set(v, id_lut!(FabVertex));
     v.into()
 }
 
 pub(crate) fn fab_line_vertex_pod(vm: &mut ScriptVm) -> ScriptValue {
     let v = FabLineVertex::script_pod(vm).expect("FabLineVertex pod");
-    vm.bx.heap.pod_type_name_set(v, id_lut!(FabLineVertex));
+    vm.heap_mut().pod_type_name_set(v, id_lut!(FabLineVertex));
     v.into()
 }
 

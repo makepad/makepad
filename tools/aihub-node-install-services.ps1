@@ -17,7 +17,7 @@
 #   checkout), the cargo cache, C:\ai\services\node (node updates) and
 #   C:\ai\services\tunnel (its own binary, keys and identity); it may start,
 #   stop and query MakepadAiNode and no other service. Those are the only
-#   privileged actions reachable through the tunnel (see tools/remote/TUNNEL.md).
+#   privileged actions reachable through the tunnel (see libs/remote/TUNNEL.md).
 #
 # The tunnel keeps its TLS identity and keys from phase 1 (the per-user
 # server in %USERPROFILE%\.makepad\tunnel, or -SeedDir), so clients' pins and
@@ -108,7 +108,7 @@ if ($doNode -and -not (Test-Path (Join-Path $CacheDir 'node-key'))) {
     throw "no node-key in $CacheDir; pass the node's existing -CacheDir so it keeps its identity"
 }
 if ($doTunnel -and -not (Test-Path (Join-Path $SeedDir 'server-keys')) -and -not (Test-Path $tunnelKeys)) {
-    throw "no tunnel keys: neither $SeedDir\server-keys nor $tunnelKeys exists (makepad-remote keygen <host> on the client, see tools/remote/TUNNEL.md)"
+    throw "no tunnel keys: neither $SeedDir\server-keys nor $tunnelKeys exists (makepad-remote keygen <host> on the client, see libs/remote/TUNNEL.md)"
 }
 
 function Get-Listener([int]$port) {

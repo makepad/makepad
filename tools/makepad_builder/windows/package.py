@@ -53,8 +53,8 @@ def main():
     for line in tree.splitlines():
         match = re.search(r"\((/[^)]*)\)", line)
         if not match:
-            # A crates.io package of another platform (OpenHarmony's
-            # hilog-sys): resolved from Cargo.lock, never compiled here.
+            # A crates.io package of another platform: resolved from
+            # Cargo.lock, never compiled here.
             continue
         dirs.add(os.path.relpath(match.group(1), repo))
         if member is None:

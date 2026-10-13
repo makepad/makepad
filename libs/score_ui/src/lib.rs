@@ -55,7 +55,7 @@ mod tests {
     fn score_widget_dsl_registers_without_errors() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
         let errors = cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             makepad_widgets_core::makepad_platform::script::script_mod(vm);
             makepad_widgets_core::script_mod(vm);
             super::script_mod(vm);

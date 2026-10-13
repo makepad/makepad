@@ -1080,14 +1080,86 @@ fn literal(s: &str) -> Option<(String, usize)> {
 }
 
 /// Whether the match at `at` is code: not preceded by an identifier
-/// character and not after `//` on its line.
-fn code_at(code: &str, at: usize) -> bool {
+/// character, not after `//` on its line and not inside a comment or a
+/// string literal (`skip`, from [`not_code`]): a test that writes a
+/// fixture's source as a string names no file of its own crate.
+fn code_at(code: &str, at: usize, skip: &[(usize, usize)]) -> bool {
     let before = code[..at].chars().next_back();
     if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
         return false;
     }
+    if skip.iter().any(|&(start, end)| start <= at && at < end) {
+        return false;
+    }
     let line = &code[code[..at].rfind('\n').map_or(0, |i| i + 1)..at];
     !line.contains("//")
+}
+
+/// The byte ranges of `code` that are not code: comments and the insides of
+/// string literals (plain, byte and raw; the opening quote itself is code).
+fn not_code(code: &str) -> Vec<(usize, usize)> {
+    let b = code.as_bytes();
+    let ident = |i: usize| i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'/' if b.get(i + 1) == Some(&b'/') => {
+                let end = code[i..].find('\n').map_or(b.len(), |n| i + n);
+                out.push((i, end));
+                i = end;
+            }
+            b'/' if b.get(i + 1) == Some(&b'*') => {
+                let (mut depth, mut j) = (1, i + 2);
+                while j < b.len() && depth > 0 {
+                    if b[j] == b'/' && b.get(j + 1) == Some(&b'*') {
+                        depth += 1;
+                        j += 2;
+                    } else if b[j] == b'*' && b.get(j + 1) == Some(&b'/') {
+                        depth -= 1;
+                        j += 2;
+                    } else {
+                        j += 1;
+                    }
+                }
+                out.push((i, j));
+                i = j;
+            }
+            b'r' if !ident(i) || (i > 0 && b[i - 1] == b'b' && !ident(i - 1)) => {
+                let hashes = b[i + 1..].iter().take_while(|c| **c == b'#').count();
+                if b.get(i + 1 + hashes) != Some(&b'"') {
+                    i += 1;
+                    continue;
+                }
+                let open = i + 1 + hashes;
+                let close = format!("\"{}", "#".repeat(hashes));
+                let end = code[open + 1..].find(&close).map_or(b.len(), |n| open + 1 + n);
+                out.push((open + 1, end));
+                i = (end + close.len()).min(b.len());
+            }
+            b'"' => {
+                let mut j = i + 1;
+                while j < b.len() && b[j] != b'"' {
+                    j += if b[j] == b'\\' { 2 } else { 1 };
+                }
+                out.push((i + 1, j.min(b.len())));
+                i = j + 1;
+            }
+            // A char literal ('"', '\'') rather than a lifetime.
+            b'\'' => {
+                if b.get(i + 1) == Some(&b'\\') {
+                    i = code[i + 3..].find('\'').map_or(b.len(), |n| i + 3 + n + 1);
+                } else if let Some(c) = code[i + 1..].chars().next() {
+                    let after = i + 1 + c.len_utf8();
+                    i = if b.get(after) == Some(&b'\'') { after + 1 } else { i + 1 };
+                } else {
+                    i += 1;
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    out
 }
 
 fn line_of(code: &str, at: usize) -> usize {
@@ -1098,12 +1170,13 @@ fn line_of(code: &str, at: usize) -> usize {
 /// script when `script`).
 fn references(code: &str, script: bool) -> Vec<Reference> {
     let mut out = Vec::new();
+    let skip = not_code(code);
     let find = |needle: &str, f: &mut dyn FnMut(usize, &str)| {
         let mut from = 0;
         while let Some(i) = code[from..].find(needle) {
             let at = from + i;
             from = at + needle.len();
-            if code_at(code, at) {
+            if code_at(code, at, &skip) {
                 f(at, &code[at + needle.len()..]);
             }
         }

@@ -223,6 +223,40 @@ impl DeJsonState {
         }
     }
 
+    /// A struct field's value after its name: the colon, then the value.
+    #[doc(hidden)]
+    pub fn de_field<T: DeJson>(&mut self, i: &mut Chars) -> Result<T, DeJsonErr> {
+        self.next_colon(i)?;
+        T::de_json(self, i)
+    }
+
+    /// A field name the struct does not have: skipped when lenient, else an error.
+    #[doc(hidden)]
+    pub fn de_unknown_field(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
+        if self.lenient {
+            self.next_colon(i)?;
+            self.skip_value(i)
+        } else {
+            Err(self.err_exp(&self.strbuf))
+        }
+    }
+
+    /// A required field's value, or the not-found error naming it.
+    #[doc(hidden)]
+    pub fn de_required<T>(&self, value: Option<T>, name: &str) -> Result<T, DeJsonErr> {
+        match value {
+            Some(t) => Ok(t),
+            None => Err(self.err_nf(name)),
+        }
+    }
+
+    /// The `[]` body of a unit enum variant.
+    #[doc(hidden)]
+    pub fn de_unit_variant(&mut self, i: &mut Chars) -> Result<(), DeJsonErr> {
+        self.block_open(i)?;
+        self.block_close(i)
+    }
+
     pub fn err_nf(&self, name: &str) -> DeJsonErr {
         DeJsonErr {
             msg: format!("Key not found {}", name),

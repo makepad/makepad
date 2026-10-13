@@ -1,7 +1,5 @@
 //! `makepad-lz4 [-d] <in|-> <out|->`: an LZ4 frame from a file or stdin
-//! to a file or stdout, and back. What local/wm-dyn/pack.py uses to turn
-//! the super-app's tarballs into the frames the phone streams through
-//! `makepad_tar` (no whole-archive buffer, see apps/wm/src/dylib_host.rs).
+//! to a file or stdout, and back.
 
 use makepad_lz4::{FrameDecoder, FrameEncoder};
 use std::fs::File;

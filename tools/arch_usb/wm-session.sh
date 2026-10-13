@@ -5,10 +5,9 @@ if test -f /etc/makepad/wm.env; then
     source /etc/makepad/wm.env
     set +a
 fi
-export MAKEPAD=linux_direct+vulkan
+export MAKEPAD=linux_direct
 export MAKEPAD_WM_ROOT=${MAKEPAD_WM_ROOT:-/home/arch/makepad}
 export CARGO_NET_OFFLINE=true
-export MAKEPAD_CEF_OFFLINE=1
 export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
 cd "$MAKEPAD_WM_ROOT"
 if test ! -x target/release/makepad-app-wm || test "${MAKEPAD_WM_BUILD:-0}" = 1; then

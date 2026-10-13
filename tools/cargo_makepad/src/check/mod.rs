@@ -7,7 +7,6 @@ enum BuildTy {
     Binary,
     BinaryBuildStd,
     Lib,
-    LinuxDirect,
 }
 
 impl BuildTy {
@@ -16,7 +15,6 @@ impl BuildTy {
             Self::Binary => false,
             Self::BinaryBuildStd => true,
             Self::Lib => false,
-            Self::LinuxDirect => false,
         }
     }
 }
@@ -26,21 +24,15 @@ enum Platform {
     Web,
     Mobile,
     Desktop,
-    Embedded,
 }
 
-const TOOLCHAINS: [(&'static str, BuildTy, Platform); 16] = [
+const TOOLCHAINS: [(&'static str, BuildTy, Platform); 15] = [
     ("aarch64-apple-darwin", BuildTy::Binary, Platform::Desktop),
     ("x86_64-pc-windows-msvc", BuildTy::Binary, Platform::Desktop),
     (
         "x86_64-unknown-linux-gnu",
         BuildTy::Binary,
         Platform::Desktop,
-    ),
-    (
-        "x86_64-unknown-linux-gnu",
-        BuildTy::LinuxDirect,
-        Platform::Embedded,
     ),
     ("wasm32-unknown-unknown", BuildTy::Lib, Platform::Web),
     ("aarch64-linux-android", BuildTy::Lib, Platform::Mobile),
@@ -99,7 +91,6 @@ fn check_crate(
             "desktop" => platform_filter.push(Platform::Desktop),
             "mobile" => platform_filter.push(Platform::Mobile),
             "web" => platform_filter.push(Platform::Web),
-            "embedded" => platform_filter.push(Platform::Embedded),
             e => return Err(format!("Unexpected platform in makepad-check-platform {e}")),
         }
     }
@@ -253,13 +244,6 @@ fn check(
                 run(" ", &args_out)
             } else {
                 run("lines", &args_out)
-            }
-        }
-        BuildTy::LinuxDirect => {
-            if branch == "stable" {
-                run("linux_direct", &args_out)
-            } else {
-                run("lines,linux_direct", &args_out)
             }
         }
     }

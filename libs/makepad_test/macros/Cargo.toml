@@ -9,6 +9,4 @@ description = "Proc macros for makepad-test"
 proc-macro = true
 
 [dependencies]
-proc-macro2 = "1"
-quote = "1"
-syn = { version = "2", features = ["full"] }
+makepad-micro-proc-macro = { path = "../../micro_proc_macro", version = "1.0.0" }

@@ -14,7 +14,7 @@ General Makepad Splash DSL patterns that apply to ANY app body.
 - **Colons inside string arguments work correctly** — `"Time: 2:30"` is fine
 - Every `TextInput` must have a fixed numeric height (e.g. `34`)
 - `on_render` works for dynamic lists. Store results in an array, render rows inside a `ScrollYView{on_render: || {...}}`, and call `ui.<view>.render()` after the array changes. Give the scroll view a fixed `height` (e.g. `height: 360`) — a `Fill` height inside a `Fit` parent collapses to zero.
-- **A `:=` id is only a field of its DIRECT parent.** In `Card{ a := Image{} inner := View{ b := Label{} } }`, reach the label as `Card{inner.b.text: "x"}` — `Card{b.text: ...}` fails with "field b not found in type-check". Name every wrapper you need to address through.
+- **A `:=` id is only a field of its DIRECT parent.** In `Card{ a := Image{} inner := View{ b := Label{} } }`, reach the label as `Card{inner.b.text: "x"}` — `Card{b.text: ...}` fails with "no property or named child `b` on View (named children: a, inner); `b` is at inner.b". Name every wrapper you need to address through.
 - AI Chat `runsplash` blocks run in a sandbox with `net.http_request`, `http_resource(...)`, `parse_json()`, and `url_encode()` enabled. Use these for HTTP-backed mini apps.
 - **Array / argument / object-body items may be separated by whitespace, newlines, OR commas — all work.** Adjacent values like `{a:1} {b:2}` (or one per line) are TWO separate items. Two object literals next to each other are NEVER "object inherits from object" — to extend/merge an object use `base += {field: val}` or a named prototype `Proto{...}`, not bare `{...}{...}`. (So `let days = [{...} {...} {...}]` correctly yields a 3-element array; a stray earlier bug collapsed comma-less object arrays to length 1.)
 
@@ -94,6 +94,28 @@ RoundedView{width:Fill height:Fit show_bg:true draw_bg.color:#x334
 | **`Image`** | `src: http_resource(url)`, `set_src(http_resource(url))`, `fit: ImageFit.CropToFill/Smallest` | Thumbnails and remote images |
 | **`Hr`** | Full-width line divider | Visual separation |
 | **`RoundedView`** | Container with rounded corners | App root, groups |
+
+## Default imports per domain
+
+Each kind of document gets a default set of `use` lines and system modules
+(the table is `makepad_script::domain`). Anything beyond the set is ONE
+`use` away in every domain -- the sets are defaults, not walls. Generated
+code adds only the imports beyond its domain's set.
+
+| Domain | Gets by default | Typical extra imports |
+|---|---|---|
+| UI Splash (Splash bodies, panels, mini-apps) | `use mod.prelude.widgets.*` (every widget, the theme), `fs` (jailed), `host` | `use mod.net` (net-enabled apps) |
+| Motion (SHOW plates, CUT graphics) | `mod.motion`, `mod.forms`, `mod.shared`, `mod.post`, `mod.scene`, `mod.kernel` | `use mod.prelude.widgets.*` to put widgets on a slide |
+| Cut / show | `mod.flow`, `mod.cut`, `mod.show` | |
+| Score | `mod.score` | |
+| Flow | `mod.flow` | |
+| 3D scene | `mod.forms`, `mod.shared`, `mod.post`, `mod.kernel`, `mod.scene` | |
+
+A name used without its module in scope fails with the import to add, e.g.
+`variable Glow not found in scope. It is a system module's: import it with
+`use mod.kits.Glow``: add that line and run again. Big system modules
+(the widget library and theme in UI Splash) are registered on first use, so
+an import costs nothing until the document touches it.
 
 ## Splash VM Variable Scope
 
@@ -180,7 +202,7 @@ row_0 := ItemRow{
 }
 ```
 
-Override syntax: `<child-name>.<property>: <value>` — every segment in the path must use `:=`.
+Override syntax: `<child-name>.<property>: <value>` — every segment in the path must use `:=`. A named child is also a slot: `<slot> +: {...}` merges into it (add children, change properties), `<slot> := Widget{...}` replaces it in place; see "Named children as slots" below.
 
 ### Pre-allocated Fixed Slots
 
@@ -264,7 +286,7 @@ let ResultCard = glass.Card{
     thumb := Image{width: 92 height: 72 fit: ImageFit.CropToFill}
     // Name every wrapper you need to reach through: a `:=` id is only a field of its
     // DIRECT parent. Under an unnamed `View{...}`, `title`/`source` would be unreachable
-    // from `ResultCard{...}` ("field title not found in type-check").
+    // from `ResultCard{...}` ("no property or named child `title` on View ...").
     info := View{width: Fill height: Fit flow: Down spacing: 3
         title := glass.Body{text: "" width: Fill}
         source := glass.Caption{text: ""}
@@ -358,6 +380,39 @@ let Item = View{flow:Right
 }
 Item{label.text:"new text"}  // silent failure
 ```
+
+### Named children as slots
+
+A `:=` child of a template is a slot an instance can change without touching the template (every instance gets its own copy):
+
+```splash
+let Shell = View{
+    title := Label{text: "T"}
+    body := View{ slot := View{ a := Label{text: "A"} } }
+}
+Shell{ body +: { slot +: { b := Label{text: "B"} } } }  // merge: slot now holds a and b
+Shell{ body.slot +: { b := Label{text: "B"} } }          // same, dotted
+Shell{ body.slot := View{ c := Label{text: "C"} } }      // replace slot in place: only c
+Shell{ body.extra := Label{text: "E"} }                  // no child `extra` yet: appended to body
+```
+
+- `slot +: {...}` deep-merges into what `slot` holds (a property, a typed field such as `Splitter{a +: {...}}`, or a direct named child). The block overrides properties; `x := ...` inside replaces or adds ITS named children by the same rules; unnamed children append. A replaced or merged child keeps its position.
+- `slot := V` replaces the direct named child `slot` in place (any widget type), else appends it.
+- A dotted left side is the nested-block form for all three operators: `a.b.c +: {...}` is `a +: { b +: { c +: {...} } }`, `a.b.c := V` is `a +: { b +: { c := V } }`. Every segment before the last is a property or a direct named child.
+- Errors, never silent drops: `a := V` with an object `V` where `a` is a declared property of a typed widget (`Splitter{ a := View{} }`) fails with "`a` is a property of Splitter, not a child: write `a: ...` or `a +: {...}`"; a name that is neither a property nor a direct named child fails with "no property or named child `left` on View (named children: title, split); `left` is at split.a.left". A plain value (string, number, `@id`) under `:=` stays a named entry beside the children, read by hosts as metadata, even where the widget has a property of that name.
+
+### Search scopes (several instances of one shell)
+
+`search_scope: true` on a widget makes its subtree a lookup scope: a lookup from outside never finds ids inside it unless the path names the scope. Ids only need to be unique per scope.
+
+```splash
+let Page = View{ search_scope: true  chat := Label{text: ""} }
+View{ cut := Page{}  show := Page{} }
+```
+
+- From outside: `ui.cut.chat` / Rust `ids!(cut.chat)`; a bare `chat` from the root finds nothing.
+- From inside a scope (a callback on a widget in `show`), `ui.chat` is `show`'s own `chat`; lookups still reach widgets outside any scope.
+- An unscoped `ui.chat` that matches in several scopes is an error naming the candidates (`cut.chat, show.chat`), never the first match.
 
 ## Styling Reference
 

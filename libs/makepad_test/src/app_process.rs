@@ -14,8 +14,8 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const LISTENING_PREFIX: &str = "[makepad-remote] listening on ";
-const BIND_FAILED_PREFIX: &str = "[makepad-remote] bind ";
+const LISTENING_PREFIX: &str = "[makepad-remote] pid=";
+const LISTEN_FAILED_PREFIX: &str = "[makepad-remote] cannot listen";
 const GRACEFUL_EXIT_TIMEOUT: Duration = Duration::from_secs(8);
 const LOST_RESPONSE_EXIT_TIMEOUT: Duration = Duration::from_millis(250);
 const TAIL_BYTES: usize = 4096;
@@ -33,11 +33,9 @@ pub struct LaunchSpec {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListeningLine {
-    pub host: String,
-    pub port: u16,
     pub pid: u32,
     pub app: String,
-    pub grab_dir: PathBuf,
+    pub socket: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,7 +54,8 @@ pub struct OwnedApp {
     pub pid: u32,
     pub executable: PathBuf,
     pub client: RemoteClient,
-    /// Where the app writes its own grabs (`/g`), from the listening line.
+    /// Where `grab` and `gq` write their PNG files (client side): the folder
+    /// `makepad_remote::app` names `<tmp>/makepad-remote/<app>-<pid>`.
     pub grab_dir: PathBuf,
     pub stderr_path: PathBuf,
     exit_status: Option<ExitStatus>,
@@ -330,7 +329,7 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
                 }
             }
         }
-        if let Some(line) = stdout.lines().find(|line| line.starts_with(BIND_FAILED_PREFIX)) {
+        if let Some(line) = stdout.lines().find(|line| line.starts_with(LISTEN_FAILED_PREFIX)) {
             let _ = child.kill();
             let _ = child.wait();
             return Err(TestError::new(format!("app remote failed to start: {line}")));
@@ -363,19 +362,42 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
         )));
     }
 
-    let client = RemoteClient::new(listening.host.clone(), listening.port);
+    // The socket is bound before the line is printed, but a dial can still
+    // race the first accept: retry until the deadline.
+    let client = loop {
+        match RemoteClient::connect(&listening.socket) {
+            Ok(client) => break client,
+            Err(err) => {
+                if let Ok(Some(status)) = child.try_wait() {
+                    return Err(TestError::new(format!(
+                        "{} exited ({status}) during startup; stderr tail:\n{}",
+                        executable.display(),
+                        file_tail(&stderr_path)
+                    )));
+                }
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(err);
+                }
+                thread::sleep(spec.poll_interval);
+            }
+        }
+    };
     let mut app = OwnedApp {
         child,
         pid,
         executable: executable.to_path_buf(),
         client,
-        grab_dir: listening.grab_dir,
+        grab_dir: std::env::temp_dir()
+            .join("makepad-remote")
+            .join(format!("{}-{pid}", listening.app)),
         stderr_path,
         exit_status: None,
     };
 
-    // The service is up once `GET /` answers; a window follows on the first
-    // frame. Waiting here keeps `/snap` from answering an empty tree to the
+    // The service is up once `help` answers; a window follows on the first
+    // frame. Waiting here keeps `snap` from answering an empty tree to the
     // test's first locator.
     let mut help_seen = false;
     loop {
@@ -397,32 +419,26 @@ pub fn launch(spec: &LaunchSpec, executable: &Path) -> TestResult<OwnedApp> {
             return Err(TestError::new(format!(
                 "timed out waiting for {} to open a window on {}",
                 app.executable.display(),
-                app.client.endpoint()
+                app.client.socket()
             )));
         }
         thread::sleep(spec.poll_interval);
     }
 }
 
-/// `[makepad-remote] listening on 127.0.0.1:53412 pid=9931 app=NAME grabs=DIR`
+/// `[makepad-remote] pid=9931 app=NAME socket=/tmp/makepad-remote-9931.sock`
 pub fn parse_listening_line(line: &str) -> TestResult<ListeningLine> {
     let rest = line
-        .strip_prefix(LISTENING_PREFIX)
+        .strip_prefix("[makepad-remote] ")
+        .filter(|rest| rest.starts_with("pid="))
         .ok_or_else(|| TestError::new(format!("not a remote listening line: {line}")))?;
-    let mut parts = rest.splitn(2, ' ');
-    let endpoint = parts.next().unwrap_or_default();
-    let (host, port) = endpoint
-        .rsplit_once(':')
-        .and_then(|(host, port)| port.parse::<u16>().ok().map(|port| (host, port)))
-        .ok_or_else(|| TestError::new(format!("bad endpoint in listening line: {line}")))?;
-    let tail = parts.next().unwrap_or_default();
-    let grab_dir = tail
-        .split_once("grabs=")
-        .map(|(_, dir)| dir.trim().to_string())
-        .unwrap_or_default();
+    // The socket path comes last and may hold spaces.
+    let (head, socket) = rest
+        .split_once(" socket=")
+        .ok_or_else(|| TestError::new(format!("no socket in listening line: {line}")))?;
     let mut pid = None;
     let mut app = String::new();
-    for token in tail.split(' ') {
+    for token in head.split(' ') {
         if let Some(value) = token.strip_prefix("pid=") {
             pid = value.parse::<u32>().ok();
         } else if let Some(value) = token.strip_prefix("app=") {
@@ -430,12 +446,14 @@ pub fn parse_listening_line(line: &str) -> TestResult<ListeningLine> {
         }
     }
     let pid = pid.ok_or_else(|| TestError::new(format!("no pid in listening line: {line}")))?;
+    let socket = socket.trim();
+    if socket.is_empty() {
+        return Err(TestError::new(format!("empty socket in listening line: {line}")));
+    }
     Ok(ListeningLine {
-        host: host.to_string(),
-        port,
         pid,
         app,
-        grab_dir: PathBuf::from(grab_dir),
+        socket: PathBuf::from(socket),
     })
 }
 
@@ -457,20 +475,19 @@ mod tests {
 
     #[test]
     fn listening_line_parses_every_field() {
-        let line = "[makepad-remote] listening on 127.0.0.1:53412 pid=9931 app=makepad-example-counter grabs=/tmp/makepad-remote/makepad-example-counter-9931";
+        let line = "[makepad-remote] pid=9931 app=makepad-example-counter socket=/tmp/my dir/makepad-remote-9931.sock";
         let parsed = parse_listening_line(line).unwrap();
         assert_eq!(
             parsed,
             ListeningLine {
-                host: "127.0.0.1".to_string(),
-                port: 53412,
                 pid: 9931,
                 app: "makepad-example-counter".to_string(),
-                grab_dir: PathBuf::from("/tmp/makepad-remote/makepad-example-counter-9931"),
+                socket: PathBuf::from("/tmp/my dir/makepad-remote-9931.sock"),
             }
         );
-        assert!(parse_listening_line("[makepad-remote] bind 127.0.0.1:0 failed").is_err());
-        assert!(parse_listening_line("[makepad-remote] listening on nope pid=1").is_err());
+        assert!(parse_listening_line("[makepad-remote] cannot listen: denied").is_err());
+        assert!(parse_listening_line("[makepad-remote] pid=1 app=x").is_err());
+        assert!(parse_listening_line("[makepad-remote] pid=nope app=x socket=/s").is_err());
     }
 
     #[test]
@@ -530,15 +547,15 @@ mod tests {
     }
 
     /// A shell script standing in for the app binary: it prints the remote
-    /// listening line (pointing at a fixture server) and then lives until
+    /// startup line (pointing at a fixture endpoint) and then lives until
     /// killed, ignoring shutdown requests like a wedged app would.
-    fn write_fake_app(dir: &Path, port: u16, script_tail: &str) -> PathBuf {
+    fn write_fake_app(dir: &Path, socket: &Path, script_tail: &str) -> PathBuf {
         let path = dir.join("fake-app.sh");
         fs::write(
             &path,
             format!(
-                "#!/bin/sh\necho \"[makepad-remote] listening on 127.0.0.1:{port} pid=$$ app=fake-app grabs={}\"\n{script_tail}\n",
-                dir.display()
+                "#!/bin/sh\necho \"[makepad-remote] pid=$$ app=fake-app socket={}\"\n{script_tail}\n",
+                socket.display()
             ),
         )
         .unwrap();
@@ -560,80 +577,91 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn fixture_with_window() -> crate::fixture::FixtureServer {
         let server = crate::fixture::FixtureServer::start();
-        server.route("/", 200, "makepad-remote app=fake-app");
+        server.route("help", "makepad-remote app=fake-app");
         server.route(
-            "/s",
-            200,
+            "status",
             r#"{"app":"fake-app","pid":1,"w":[{"i":0,"t":"fake","sz":[10,10],"px":[10,10],"dpi":1,"pos":[0,0]}]}"#,
         );
-        server.route("/quit", 200, r#"{"ok":1}"#);
         server
     }
 
+    #[cfg(unix)]
     #[test]
     fn launch_reads_the_listening_line_and_kill_fallback_ends_the_owned_pid() {
         let dir = scratch_dir("launch");
         let server = fixture_with_window();
-        let script = write_fake_app(&dir, server.port(), "exec sleep 60");
+        let script = write_fake_app(&dir, server.socket(), "exec sleep 60");
         let spec = fake_app_spec(dir.clone());
 
         let mut app = launch(&spec, &script).unwrap();
-        assert_eq!(app.client.endpoint(), format!("127.0.0.1:{}", server.port()));
-        assert_eq!(app.grab_dir, dir);
+        assert_eq!(app.client.socket(), server.socket().display().to_string());
+        assert_eq!(
+            app.grab_dir,
+            std::env::temp_dir()
+                .join("makepad-remote")
+                .join(format!("fake-app-{}", app.pid))
+        );
         assert!(app.poll_exit().is_none());
         assert!(fs::read_to_string(spec.artifacts_dir.join("app-stdout.txt"))
             .unwrap()
-            .contains("listening on"));
-        assert!(server.requests().iter().any(|target| target == "/"));
-        assert!(server.requests().iter().any(|target| target == "/s"));
+            .contains("socket="));
+        assert!(server.requests().iter().any(|target| target == "help"));
+        assert!(server.requests().iter().any(|target| target == "status"));
 
-        // `/gq` is unavailable and `/quit` is acknowledged, but the process stays up, so
-        // shutdown must fall back to killing exactly this pid.
+        // `gq` and `quit` are both refused (unknown command) and the
+        // process stays up, so shutdown must fall back to killing exactly this pid.
         let outcome = app.shutdown(Duration::from_millis(20));
         assert_eq!(outcome, ShutdownOutcome::Killed);
         assert!(app.poll_exit().is_some());
-        assert!(server.requests().iter().any(|target| target == "/quit"));
         let requests = server.requests();
-        assert!(requests.iter().position(|target| target == "/gq").unwrap()
-            < requests.iter().position(|target| target == "/quit").unwrap());
+        assert!(requests.iter().any(|target| target == "quit"));
+        assert!(requests.iter().position(|t| t.starts_with("frames ")).unwrap()
+            < requests.iter().position(|target| target == "quit").unwrap());
+        assert!(requests.iter().filter(|target| *target == "quit").count() >= 2);
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn graceful_quit_is_reported_when_the_process_exits_on_its_own() {
         let dir = scratch_dir("graceful");
         let server = fixture_with_window();
-        server.route("/gq", 200, r#"{"quit":1}"#);
+        server.route("quit", r#"{"ok":1}"#);
         // Lives just long enough for startup to complete, then exits like an
         // app answering `/quit` would.
-        let script = write_fake_app(&dir, server.port(), "exec sleep 0.5");
+        let script = write_fake_app(&dir, server.socket(), "exec sleep 0.5");
         let spec = fake_app_spec(dir.clone());
 
         let mut app = launch(&spec, &script).unwrap();
         assert_eq!(app.shutdown(Duration::from_millis(20)), ShutdownOutcome::Graceful);
         assert_eq!(app.shutdown(Duration::from_millis(20)), ShutdownOutcome::AlreadyExited);
-        assert!(server.requests().iter().any(|target| target == "/gq"));
-        assert!(!server.requests().iter().any(|target| target == "/quit"));
+        // `gq` (frames written client side, then `quit`) was enough: no second `quit`.
+        let requests = server.requests();
+        assert!(requests.iter().any(|target| target.starts_with("frames ")));
+        assert_eq!(requests.iter().filter(|target| *target == "quit").count(), 1);
         assert!(app.poll_exit().unwrap().success());
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn lost_shutdown_responses_still_allow_the_owned_child_to_exit() {
         let dir = scratch_dir("lost-shutdown-responses");
         let server = fixture_with_window();
-        server.disconnect("/gq");
-        server.disconnect("/quit");
-        let script = write_fake_app(&dir, server.port(), "exec sleep 1");
+        // `gq` ends in `quit`, whose answer is lost: the exiting child still counts as graceful.
+        server.disconnect("quit");
+        let script = write_fake_app(&dir, server.socket(), "exec sleep 1");
         let spec = fake_app_spec(dir.clone());
         let mut app = launch(&spec, &script).unwrap();
 
         assert_eq!(app.shutdown(Duration::from_millis(20)), ShutdownOutcome::Graceful);
         assert!(app.poll_exit().unwrap().success());
-        assert!(server.requests().iter().any(|target| target == "/gq"));
-        assert!(server.requests().iter().any(|target| target == "/quit"));
+        let requests = server.requests();
+        assert!(requests.iter().any(|target| target.starts_with("frames ")));
+        assert!(requests.iter().any(|target| target == "quit"));
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -654,6 +682,7 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn a_listening_line_for_another_pid_is_rejected() {
         let dir = scratch_dir("wrong-pid");
@@ -662,8 +691,8 @@ mod tests {
         fs::write(
             &script,
             format!(
-                "#!/bin/sh\necho \"[makepad-remote] listening on 127.0.0.1:{} pid=1 app=x grabs=/tmp\"\nexec sleep 60\n",
-                server.port()
+                "#!/bin/sh\necho \"[makepad-remote] pid=1 app=x socket={}\"\nexec sleep 60\n",
+                server.socket().display()
             ),
         )
         .unwrap();

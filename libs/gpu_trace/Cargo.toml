@@ -1,0 +1,10 @@
+[package]
+name = "makepad-gpu-trace"
+version = "1.0.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2021"
+description = "GPU profiler recordings: the .mkgp format, its writer and reader, and the queries answered on a recording (frames, hitches, top shaders / owners / passes, utilisation, diff)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]

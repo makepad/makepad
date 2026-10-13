@@ -56,7 +56,7 @@ pub fn send(package: &Package, email: Option<&str>) -> Result<i64, String> {
 /// [`send`] to a given endpoint.
 pub fn send_to(url: &str, package: &Package, email: Option<&str>) -> Result<i64, String> {
     let mut request = Request::post(url)
-        .limits(Limits { max_body_bytes: 64 * 1024, total_timeout: Duration::from_secs(60), ..Limits::default() })
+        .limits(Limits { max_body_bytes: 64 * 1024, idle_timeout: Duration::from_secs(60), ..Limits::default() })
         .header("Content-Type", "application/zip")?
         .header(report::FEEDBACK_HEADER, "1")?
         .body(package.zip.clone());

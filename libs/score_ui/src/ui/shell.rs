@@ -740,9 +740,9 @@ impl Widget for ScoreContextMenu {
 ///
 /// The whole answer is [`DrawList2d::begin_overlay_reuse`]: an overlay draw
 /// list composites after the body **and** above it in depth, because
-/// `begin_overlay_inner` gives every overlay a depth floor well clear of any
+/// `begin_overlay_reuse` / `begin_popup_overlay` gives every overlay a depth floor well clear of any
 /// `draw_depth` an app spends. Nothing about the score is special, and this
-/// widget does no matrix work — read the docs on `begin_overlay_inner` for the
+/// widget does no matrix work — read the docs on `begin_overlay_reuse` / `begin_popup_overlay` for the
 /// guarantee and its budget.
 ///
 /// What is left here is layout: this layer claims no slot in the shell,

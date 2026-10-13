@@ -186,7 +186,7 @@ if test -f "$seed/clone.json"; then
     install -o arch -g arch -m 0644 "$seed/clone.json" /home/arch/makepad/CLONE-REVISION.json
 else
     stage 'Building release WM and CUDA AI Hub offline'
-    runuser -u arch -- env HOME=/home/arch MAKEPAD=linux_direct+vulkan CARGO_NET_OFFLINE=true MAKEPAD_CEF_OFFLINE=1 MAKEPAD_CUDA_ROOT=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo build --offline --release -p makepad-app-wm -p makepad-app-ai-hub'
+    runuser -u arch -- env HOME=/home/arch CARGO_NET_OFFLINE=true MAKEPAD_CUDA_ROOT=/opt/cuda NVCC_CCBIN=/usr/bin/g++-15 CUDAHOSTCXX=/usr/bin/g++-15 PATH="$PATH" bash -c 'cd /home/arch/makepad && cargo build --offline --release -p makepad-app-wm -p makepad-app-ai-hub'
 fi
 sshd -t
 systemctl reload sshd

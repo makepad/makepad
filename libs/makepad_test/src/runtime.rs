@@ -67,7 +67,7 @@ pub struct TestConfig {
     pub test_name: String,
     pub artifacts_dir: PathBuf,
     /// Extra environment for the app process. `CARGO_TARGET_DIR`, when set,
-    /// also applies to the build. `MAKEPAD_GPUSIM_DPI=N` scales screenshots
+    /// also applies to the build. `MAKEPAD_TEST_DPI=N` scales screenshots
     /// to N pixels per layout point.
     pub env: HashMap<String, String>,
     /// Extra arguments appended after `--remote`.
@@ -138,12 +138,12 @@ impl TestConfig {
         }
     }
 
-    /// Screenshot scale that honours `MAKEPAD_GPUSIM_DPI` from `env`: the
-    /// old software backend rendered at that dpi, so a suite that asked for
-    /// `1` expects layout points to equal PNG pixels.
+    /// Screenshot scale that honours `MAKEPAD_TEST_DPI` from `env`: the
+    /// screenshot is rescaled by the native remote capture path; a suite that
+    /// asks for `1` expects layout points to equal PNG pixels.
     fn requested_screenshot_dpi(&self) -> Option<f64> {
         self.env
-            .get("MAKEPAD_GPUSIM_DPI")
+            .get("MAKEPAD_TEST_DPI")
             .and_then(|value| value.trim().parse::<f64>().ok())
             .filter(|dpi| *dpi > 0.0)
     }
@@ -203,12 +203,12 @@ impl TestApp {
         self.inner.borrow().app.pid
     }
 
-    /// `host:port` of the owned app's remote surface, for diagnostics.
+    /// The Unix socket path of the owned app's remote endpoint, for diagnostics.
     pub fn remote_endpoint(&self) -> String {
-        self.inner.borrow().app.client.endpoint()
+        self.inner.borrow().app.client.socket()
     }
 
-    /// The directory the app writes its own grabs into (`/g`).
+    /// The directory `grab` and `gq` write PNG files into (client side).
     pub fn grab_dir(&self) -> PathBuf {
         self.inner.borrow().app.grab_dir.clone()
     }
@@ -1159,13 +1159,13 @@ fn studio_msg_name(msg: &StudioToApp) -> &'static str {
         StudioToApp::TextInput(_) => "TextInput",
         StudioToApp::TextCopy => "TextCopy",
         StudioToApp::TextCut => "TextCut",
+        StudioToApp::DropFiles(_) => "DropFiles",
         StudioToApp::Scroll(_) => "Scroll",
         StudioToApp::Pinch(_) => "Pinch",
         StudioToApp::GameInput(_) => "GameInput",
         StudioToApp::Custom(_) => "Custom",
         StudioToApp::None => "None",
         StudioToApp::Kill => "Kill",
-        StudioToApp::Gpu(_) => "Gpu",
         StudioToApp::Relay(_) => "Relay",
     }
 }
@@ -1337,6 +1337,7 @@ mod tests {
             value: None,
             checked: None,
             selected: None,
+            path: None,
         }
     }
 
@@ -1396,12 +1397,12 @@ mod tests {
     }
 
     #[test]
-    fn gpusim_dpi_env_scales_screenshots() {
+    fn requested_dpi_env_scales_screenshots() {
         let mut config =
             TestConfig::current_package("/tmp/example", "makepad-example", "ui::test").unwrap();
         config
             .env
-            .insert("MAKEPAD_GPUSIM_DPI".to_string(), "1".to_string());
+            .insert("MAKEPAD_TEST_DPI".to_string(), "1".to_string());
         assert_eq!(config.requested_screenshot_dpi(), Some(1.0));
     }
 

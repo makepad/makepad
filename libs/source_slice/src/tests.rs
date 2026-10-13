@@ -384,6 +384,17 @@ fn lint_leaves_test_fixtures_alone() {
 }
 
 #[test]
+fn lint_skips_references_inside_string_literals_and_block_comments() {
+    let f = commercial("lint-literals");
+    f.write(
+        "scope/src/fixture.rs",
+        "#[test]\nfn t() {\n    let _ = r#\"\ninclude!(\"included.rs\");\n\"#;\n    let _ = \"include_str!(\\\"../x.txt\\\")\";\n    let _ = '\"';\n}\n/* include!(\"gone.rs\"); */\n",
+    );
+    let commit = f.commit();
+    assert!(lint(&f.dir, &commit, &roots(&["makepad-scope"]), &[]).unwrap().is_empty());
+}
+
+#[test]
 fn materialize_writes_the_slice_tree() {
     let f = commercial("materialize");
     let commit = f.commit();

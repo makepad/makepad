@@ -150,14 +150,14 @@ Read it all or Don't send), or the agent sends it after the person approved
 the list in the conversation:
 
     makepad-builder.exe send-changes <app> [PATH] [--yes] [--with-email]   (Windows)
-    ./makepad send-changes <app> [PATH] [--yes] [--with-email]             (macOS, Linux)
+    ./makepad-builder.sh send-changes <app> [PATH] [--yes] [--with-email]  (macOS, Linux)
 
 Without `--yes` it only checks the report and prints what would be sent.
 `--with-email` includes the address the Builder is logged in with, so
 Makepad can reply; the agent never sees it. A sent report is renamed
 `<app>-report-sent-<id>` in `builder/changes/`.
 
-`makepad-builder.exe changes <app>` / `./makepad changes <app>` prints the
+`makepad-builder.exe changes <app>` / `./makepad-builder.sh changes <app>` prints the
 edits to describe: the diff of the app's source snapshot against the
 release it was checked out at (`--files` lists the files).
 

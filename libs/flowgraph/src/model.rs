@@ -129,16 +129,12 @@ impl ScriptHook for CanvasStyles {
                 let Some(object) = entry.value.as_object() else {
                     continue;
                 };
-                if vm
-                    .bx
-                    .heap
+                if vm.heap()
                     .type_matches_id(object, NodeStyle::script_type_id_static())
                 {
                     let style = NodeStyle::script_from_value(vm, entry.value);
                     node_styles.insert(style.kind.clone(), style);
-                } else if vm
-                    .bx
-                    .heap
+                } else if vm.heap()
                     .type_matches_id(object, PortStyle::script_type_id_static())
                 {
                     let style = PortStyle::script_from_value(vm, entry.value);

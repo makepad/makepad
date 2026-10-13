@@ -6,12 +6,13 @@ description = "Build, audit, and probe disk-streamable OpenStreetMap tile archiv
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-brotli = "8.0"
+brotli = { path = "../../libs/brotli/brotli" }
 makepad-fast-inflate = { path = "../../libs/fast_inflate" }
 makepad-geodata = { path = "../../libs/geodata" }
 makepad-map-build = { path = "../../libs/map_build", features = ["faces"] }
 makepad-map-nav = { path = "../../libs/map_nav" }
 makepad-mbtile-reader = { path = "../../libs/mbtile_reader" }
+makepad-platform = { path = "../../platform" }
 makepad-network = { path = "../../platform/network" }   # testmap: fetch the extract
 makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 smallvec = { path = "../../libs/smallvec" }

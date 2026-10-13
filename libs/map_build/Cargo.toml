@@ -19,7 +19,7 @@ default = []
 faces = ["dep:makepad-widgets-core", "dep:makepad-widgets-maps"]
 
 [dependencies]
-brotli = "8.0"
+brotli = { path = "../brotli/brotli" }
 makepad-fast-inflate = { path = "../fast_inflate" }
 makepad-map-nav = { path = "../map_nav" }
 makepad-mbtile-reader = { path = "../mbtile_reader" }

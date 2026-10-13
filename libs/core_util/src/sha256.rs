@@ -122,9 +122,8 @@ impl Sha256 {
         {
             if hw::verified() {
                 // SAFETY: `verified()` only returns true after confirming
-                // `is_x86_feature_detected!("sha")` is true, which is
-                // exactly what this kernel requires (sse2 is x86_64
-                // baseline and needs no runtime check).
+                // sha, ssse3 and sse4.1 are present, which is exactly
+                // what this kernel requires (sse2 is x86_64 baseline).
                 unsafe { hw::x86_64::compress(&mut self.h, chunk) };
                 return;
             }
@@ -235,7 +234,10 @@ mod hw {
         }
         #[cfg(target_arch = "x86_64")]
         {
-            if std::is_x86_feature_detected!("sha") {
+            if std::is_x86_feature_detected!("sha")
+                && std::is_x86_feature_detected!("ssse3")
+                && std::is_x86_feature_detected!("sse4.1")
+            {
                 let mut h = super::H0;
                 // SAFETY: feature presence just confirmed above.
                 unsafe { x86_64::compress(&mut h, &ABC_BLOCK) };
@@ -301,18 +303,19 @@ mod hw {
 
     /// Intel/AMD SHA Extensions (`sha`): `_mm_sha256rnds2_epu32` folds two
     /// rounds per call, so 32 calls cover all 64 rounds. The instruction
-    /// requires state packed as `ABEF = {a,b,e,f}` / `CDGH = {c,d,g,h}`
-    /// (Intel's documented layout for this instruction pair) — built here
-    /// with `_mm_unpacklo/hi_epi64`, which needs no shuffle-immediate
-    /// bit-twiddling to get right, unlike the classic reference's
-    /// `_mm_shuffle_epi32`/`_mm_alignr_epi8`/`_mm_blend_epi16` dance. As
-    /// with the aarch64 kernel, the message schedule is the plain scalar
-    /// expansion, not `_mm_sha256msg1/2_epu32`.
+    /// wants the state as ABEF / CDGH with A in the HIGHEST dword (lane 3)
+    /// and F / H in lane 0 -- the reverse of the {a,b,c,d} order a plain load
+    /// gives -- so the state is packed and unpacked with Intel's documented
+    /// shuffle/alignr/blend sequence. (An earlier version packed {a,b,e,f}
+    /// with A in lane 0; every hash came out wrong, the self-check in
+    /// `check()` caught it and x86 always used the scalar path.) As with the
+    /// aarch64 kernel, the message schedule is the plain scalar expansion,
+    /// not `_mm_sha256msg1/2_epu32`.
     #[cfg(target_arch = "x86_64")]
     pub mod x86_64 {
         use core::arch::x86_64::*;
 
-        #[target_feature(enable = "sha")]
+        #[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
         pub unsafe fn compress(h: &mut [u32; 8], chunk: &[u8; 64]) {
             let mut w = [0u32; 64];
             for (i, word) in chunk.chunks_exact(4).enumerate() {
@@ -327,10 +330,13 @@ mod hw {
                     .wrapping_add(s1);
             }
 
-            let abcd = _mm_loadu_si128(h[0..4].as_ptr().cast());
-            let efgh = _mm_loadu_si128(h[4..8].as_ptr().cast());
-            let mut abef = _mm_unpacklo_epi64(abcd, efgh); // {a,b,e,f}
-            let mut cdgh = _mm_unpackhi_epi64(abcd, efgh); // {c,d,g,h}
+            // Lanes listed from 3 down to 0, as Intel's reference names them.
+            let dcba = _mm_loadu_si128(h[0..4].as_ptr().cast()); // DCBA
+            let hgfe = _mm_loadu_si128(h[4..8].as_ptr().cast()); // HGFE
+            let cdab = _mm_shuffle_epi32(dcba, 0xB1); // CDAB
+            let efgh = _mm_shuffle_epi32(hgfe, 0x1B); // EFGH
+            let mut abef = _mm_alignr_epi8(cdab, efgh, 8); // ABEF
+            let mut cdgh = _mm_blend_epi16(efgh, cdab, 0xF0); // CDGH
             let abef_save = abef;
             let cdgh_save = cdgh;
 
@@ -348,8 +354,10 @@ mod hw {
 
             abef = _mm_add_epi32(abef, abef_save);
             cdgh = _mm_add_epi32(cdgh, cdgh_save);
-            let abcd_out = _mm_unpacklo_epi64(abef, cdgh);
-            let efgh_out = _mm_unpackhi_epi64(abef, cdgh);
+            let feba = _mm_shuffle_epi32(abef, 0x1B); // FEBA
+            let dchg = _mm_shuffle_epi32(cdgh, 0xB1); // DCHG
+            let abcd_out = _mm_blend_epi16(feba, dchg, 0xF0); // DCBA = a,b,c,d in memory order
+            let efgh_out = _mm_alignr_epi8(dchg, feba, 8); // HGFE = e,f,g,h in memory order
             _mm_storeu_si128(h[0..4].as_mut_ptr().cast(), abcd_out);
             _mm_storeu_si128(h[4..8].as_mut_ptr().cast(), efgh_out);
         }
@@ -518,7 +526,10 @@ mod tests {
         }
         #[cfg(target_arch = "x86_64")]
         {
-            if !std::is_x86_feature_detected!("sha") {
+            if !(std::is_x86_feature_detected!("sha")
+                && std::is_x86_feature_detected!("ssse3")
+                && std::is_x86_feature_detected!("sse4.1"))
+            {
                 return;
             }
             assert!(

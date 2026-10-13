@@ -38,11 +38,11 @@ in [Change reports](docs/agents/change-report.md); the steps:
 
 1. Find the installation. This checkout is `builder/sources/<release>/makepad`
    inside it (app repositories at `makepad/apps/<name>`); the installation
-   folder holds `makepad-builder.exe` (Windows) or the `makepad` command
+   folder holds `makepad-builder.exe` (Windows) or `makepad-builder.sh`
    (macOS, Linux). `builder/installed/<app>.json` names the app (`"id"`) and
    the release its source came from (`"release"`, `"repositories"`). Below,
    `BUILDER` is `<installation>\makepad-builder.exe` or
-   `<installation>/makepad`.
+   `<installation>/makepad-builder.sh`.
 2. Collect the changes: `BUILDER changes <app>` prints the diff of the app's
    source against that release (`--files` lists the files). Edits saved by
    an earlier update are in `builder/changes/<app>-<date>.diff`. With git
@@ -204,19 +204,19 @@ in [Change reports](docs/agents/change-report.md); the steps:
   a delete at `/` or `$HOME` and raises a macOS permission popup for the
   user. Delete literal, absolute paths inside the repo or scratchpad, or
   guard first (`: "${DIR:?}"` / `[ -n "$DIR" ] || exit 1`).
-- Rendering is verified on the real GPU backend, never on the gpusim
-  raster (the CPU simulated-GPU backend, `MAKEPAD=gpusim`, formerly called
-  "headless"; user, 2026-09-11: "chasing bugs in headless is useless"). Any
-  picture, pixel, outline, colour, LOD, tile or frame-timing question is
-  answered with an owned `--remote` instance of the release build on the
-  native backend (Metal here) and `/g` / `/gseq` grabs, compared in RGB.
-  `MAKEPAD=gpusim` suites are for logic and data-structure tests only
-  (layout, budgets, orderings, parsers); a gpusim raster gate never
-  stands in for a GPU proof and is never used to diagnose a rendering bug.
+- Rendering is verified on the real GPU backend, never on the HAL headless
+  backend (`MAKEPAD_HAL_BACKEND=headless`: no GPU, no raster; user,
+  2026-09-11: "chasing bugs in headless is useless"). Any picture, pixel,
+  outline, colour, LOD, tile or frame-timing question is answered with an
+  owned `--remote` instance of the release build on the native backend
+  (Metal here) and `grab` / `gseq` grabs, compared in RGB. Headless suites
+  are for logic and data-structure tests only (layout, budgets, orderings,
+  parsers); they never stand in for a GPU proof and are never used to
+  diagnose a rendering bug.
   The window need not be visible: a hidden instance (`MAKEPAD_HIDE_WINDOWS=1`)
-  on the native backend is the normal pixel-proof rig; `/g` forces a present
+  on the native backend is the normal pixel-proof rig; `grab` forces a present
   (about 2 s per grab on a hidden window). Only rest/settle timing proofs
-  need a window that presents on its own. Close it with `/gq`.
+  need a window that presents on its own. Close it with `gq`.
 - Apps that embed the AI chat build only its CLI/MCP/cloud backends. The
   local model runtimes (Qwen on Metal/CUDA, the metallib and kernel builds)
   come in through the app's own `localai` cargo feature
@@ -237,8 +237,8 @@ in [Change reports](docs/agents/change-report.md); the steps:
   suspend agent testing or require a handoff. Continue inspecting, driving,
   closing and restarting that app as needed, preserving its workspace and
   saved state. This is the user's standing authorization (2026-09-22).
-- Read `/activity` and use `if_user_seq` for each bounded input sequence.
-  A changed counter or HTTP 409 invalidates that sequence's evidence, not
+- Read `activity` and pass `if_user_seq` to each bounded input sequence.
+  A changed counter or a `user_intervened` answer invalidates that sequence's evidence, not
   authorization to continue: inspect whether the action was applied, read a
   fresh counter and retry or restart the sequence without asking permission.
   Never replay an already-applied toggle or edit blindly. See
@@ -253,14 +253,14 @@ in [Change reports](docs/agents/change-report.md); the steps:
   their own distinct test profile. Never run two instances on the user's
   profile at once. `MAKEPAD_HOME` and asset roots are separate state; keep
   them as they were.
-- Capture only the app's own drawable through `/g`, `/gq`, `/tweak/grab`,
+- Capture only the app's own drawable through `grab`, `gq`, `tweak grab`,
   or an app-provided capture hook. OS/window/display screenshots are forbidden.
   If native chrome or another app matters, ask the user for an image.
 - A `user closed` log entry means the human dismissed the window, not a crash.
   Continue the active workflow, including launching a needed replacement,
   unless the user has asked to stop.
-- Finish test sessions with `GET /gq` (grab and quit). If grabbing is
-  unavailable, use `/close` and/or `/quit`. Verify your process exits;
+- Finish test sessions with `gq` (grab and quit). If grabbing is
+  unavailable, use `close` and/or `quit`. Verify your process exits;
   only fall back to stopping its exact owned PID if graceful cleanup fails.
 - The exception is an app the user explicitly asks to keep open for them:
   hand off that instance and close any separate test/capture instances.
@@ -268,17 +268,22 @@ in [Change reports](docs/agents/change-report.md); the steps:
 
 ## Remote control quick start
 
-1. Build the release binary and launch your own instance with `--remote`.
-2. Read its startup line for port, PID, and grab directory.
-3. Fetch `GET /` for the running binary's current protocol.
-4. Use `/snap?q=...` to find widget rectangles, then inject input.
-5. Inspect results through snapshots/logs and, when needed, `/g`.
-6. Finish with `/gq` and confirm shutdown.
+1. Build the release binary and the client (`cargo build --release -p makepad-remote`);
+   launch your own instance with `--remote` (a Unix socket, no TCP port).
+2. Read its startup line `[makepad-remote] pid=<pid> app=<app> socket=<path>`.
+3. Run `makepad-remote app <pid> help` for the running binary's commands.
+4. Use `snap q=...` to find widget rectangles, then inject input.
+5. Inspect results through snapshots/logs and, when needed, `grab`.
+6. Finish with `gq` and confirm shutdown.
+
+Commands are `makepad-remote app <pid|app-name|socket> <command> [k=v ...]`
+(`makepad inspect <pid> <command>` is the same); exit status 1 means an error
+line, 2 an unreachable app. Details: [App remote control](docs/agents/app-remote.md).
 
 Coordinates are window-local layout points; no DPI conversion is needed.
-Add `wait=1` to input requests to wait for the resulting frame.
+Add `wait=1` to input commands to wait for the resulting frame.
 
-Read [App remote control](docs/agents/app-remote.md) for routes and examples,
+Read [App remote control](docs/agents/app-remote.md) for commands and examples,
 or [Tweaker](docs/agents/tweaker.md) for live styling and source write-back.
 
 ## Drag and drop, and pointer feedback

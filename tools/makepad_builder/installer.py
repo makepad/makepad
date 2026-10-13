@@ -467,7 +467,7 @@ This shell already has the private Rust, Cargo home and build paths. Do not inst
 Rebuild and publish edited sources with: {shlex.join([sys.executable, str(ROOT / 'makepad-builder.py'), str(ROOT), '--rebuild'])}
 This runs cargo build --release (reusing Cargo.lock when present) with MAKEPAD_PACKAGE_DIR=., updates makepad-package-paths and puts {release['binary']}.bin beside the {APP} shell command. It never downloads or overwrites source edits.
 Fonts, SVGs, icons, images and all crate resources remain in the downloaded source. The resource map contains package and target names mapped to paths relative to the executable. Never hardcode the installation root or copy resources elsewhere.
-Launch {shlex.quote(str(ROOT / APP))} PROJECT_DIRECTORY --remote to verify on the native GPU. Keep project/state, gracefully close only your own app before replacing its executable, and use app remote captures and quit routes. Do not use simulated GPU or display screenshots.
+Launch {shlex.quote(str(ROOT / APP))} PROJECT_DIRECTORY --remote to verify on the native GPU. Keep project/state, gracefully close only your own app before replacing its executable, and use the app remote commands (its startup line names the socket; `makepad-remote app PID snap q=TEXT`, `makepad-remote app PID gq` grabs every window and quits; build the client with cargo build --release -p makepad-remote from the Makepad source workspace). Do not use simulated GPU or display screenshots.
 The installation folder can move. Reopen the agent through Makepad Builder after moving to refresh paths. Do not read or expose makepad-builder.json, email credentials, unrelated user files or authentication storage.
 """)
     return context

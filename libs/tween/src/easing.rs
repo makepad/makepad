@@ -123,6 +123,9 @@ pub enum Easing {
         /// Second control point y.
         y2: f64,
     },
+    /// Material's emphasized easing, i.e., Android's `fast_out_extra_slow_in`,
+    /// which Android uses for its activity transitions (`Ease::Emphasized`).
+    Emphasized,
     // --- GSAP / CSS family ---
     /// CSS `cubic-bezier(x1, y1, x2, y2)` solved precisely (Newton, then
     /// bisection, to 1e-12 in x). Build it with [`Easing::css`], which clamps x1 and x2.
@@ -546,6 +549,24 @@ impl Easing {
                 (-a * b + b * a * t2) / (a * t2 - b)
             }
             Self::Bezier { x1, y1, x2, y2 } => parity_bezier(x1, y1, x2, y2, t),
+            Self::Emphasized => {
+                // Android's path is the emphasized-accelerate curve up to 40% at a sixth of
+                // the time, then the emphasized-decelerate curve for the rest. Solved precisely:
+                // the loose parity solver steps backwards on these steep curves.
+                const SPLIT_TIME: f64 = 1.0 / 6.0;
+                const SPLIT_PROGRESS: f64 = 0.4;
+                if t <= 0. {
+                    return 0.;
+                }
+                if t >= 1. {
+                    return 1.;
+                }
+                if t < SPLIT_TIME {
+                    return SPLIT_PROGRESS * precise_bezier(0.3, 0.0, 0.8, 0.15, t / SPLIT_TIME);
+                }
+                let t = (t - SPLIT_TIME) / (1. - SPLIT_TIME);
+                SPLIT_PROGRESS + (1. - SPLIT_PROGRESS) * precise_bezier(0.05, 0.7, 0.1, 1.0, t)
+            }
             Self::CubicBezier { x1, y1, x2, y2 } => precise_bezier(x1, y1, x2, y2, t),
             Self::Back { dir, overshoot } => {
                 let out = |p: f64| back_out(overshoot, p);

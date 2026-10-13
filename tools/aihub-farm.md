@@ -46,8 +46,8 @@ The node runs in the console user's session as that user when someone is
 logged on, because local-use admission watches that session; otherwise it
 runs as LocalSystem in session 0. Its binary is in `C:\ai\services\node`.
 
-The tunnel is the TLS server from `tools/remote` (see
-`tools/remote/TUNNEL.md`). It runs as the virtual account
+The tunnel is the TLS server from `libs/remote` (see
+`libs/remote/TUNNEL.md`). It runs as the virtual account
 `NT SERVICE\MakepadTunnel`, not as an administrator. That account may:
 - modify the tunnel's working directory, the cargo cache, `C:\ai\services\node`
   and its own `C:\ai\services\tunnel`;

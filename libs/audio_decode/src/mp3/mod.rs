@@ -21,6 +21,8 @@
 //! [`Mp3Decoder::set_gapless`] turns it off for a caller that wants the raw
 //! filterbank output, and [`Mp3Decoder::gapless`] reports the tag's values.
 
+use makepad_relax::relax;
+
 mod bits;
 mod header;
 mod layer3;
@@ -79,6 +81,7 @@ pub struct Mp3Decoder<'a> {
     skip_front: u64,
 }
 
+#[relax(O3, always)]
 impl<'a> Mp3Decoder<'a> {
     /// Sync to the first frame of `bytes`. Fails only when there is no MP3
     /// stream at all; per-frame damage is handled during decoding.
@@ -355,6 +358,7 @@ pub fn decode_all(bytes: &[u8]) -> Result<DecodedAudio, AudioError> {
     decode_all_limited(bytes, Limits::default())
 }
 
+#[relax(O3, always)]
 pub fn decode_all_limited(bytes: &[u8], limits: Limits) -> Result<DecodedAudio, AudioError> {
     let mut decoder = Mp3Decoder::with_limits(bytes, limits)?;
     // The stream's length from its headers (exact with a Xing/Info header,
