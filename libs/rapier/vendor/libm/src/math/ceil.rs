@@ -2,7 +2,6 @@
 ///
 /// Finds the nearest integer greater than or equal to `x`.
 #[cfg(f16_enabled)]
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn ceilf16(x: f16) -> f16 {
     super::generic::ceil(x)
 }
@@ -10,11 +9,10 @@ pub fn ceilf16(x: f16) -> f16 {
 /// Ceil (f32)
 ///
 /// Finds the nearest integer greater than or equal to `x`.
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn ceilf(x: f32) -> f32 {
     select_implementation! {
         name: ceilf,
-        use_arch: all(target_arch = "wasm32", intrinsics_enabled),
+        use_arch: all(target_arch = "wasm32", all(feature = "unstable-intrinsics", not(feature = "force-soft-floats"))),
         args: x,
     }
 
@@ -24,11 +22,10 @@ pub fn ceilf(x: f32) -> f32 {
 /// Ceil (f64)
 ///
 /// Finds the nearest integer greater than or equal to `x`.
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn ceil(x: f64) -> f64 {
     select_implementation! {
         name: ceil,
-        use_arch: all(target_arch = "wasm32", intrinsics_enabled),
+        use_arch: all(target_arch = "wasm32", all(feature = "unstable-intrinsics", not(feature = "force-soft-floats"))),
         use_arch_required: all(target_arch = "x86", not(target_feature = "sse2")),
         args: x,
     }
@@ -40,7 +37,6 @@ pub fn ceil(x: f64) -> f64 {
 ///
 /// Finds the nearest integer greater than or equal to `x`.
 #[cfg(f128_enabled)]
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn ceilf128(x: f128) -> f128 {
     super::generic::ceil(x)
 }

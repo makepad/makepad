@@ -81,11 +81,10 @@ const P5: f64 = 4.13813679705723846039e-08; /* 0x3E663769, 0x72BEA4D0 */
 ///
 /// Calculate the exponential of `x`, that is, *e* raised to the power `x`
 /// (where *e* is the base of the natural system of logarithms, approximately 2.71828).
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn exp(mut x: f64) -> f64 {
     select_implementation! {
         name: x87_exp,
-        use_arch_required: x86_no_sse,
+        use_arch_required: all(target_arch = "x86", not(target_feature = "sse")),
         args: x,
     }
 

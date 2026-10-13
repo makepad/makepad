@@ -44,7 +44,6 @@ use super::{k_cos, k_sin, rem_pio2};
 /// The sine of `x` (f64).
 ///
 /// `x` is specified in radians.
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn sin(x: f64) -> f64 {
     let x1p120 = f64::from_bits(0x4770000000000000); // 0x1p120f === 2 ^ 120
 
@@ -86,7 +85,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[cfg_attr(x86_no_sse, ignore = "FIXME(i586): possible incorrect rounding")]
+    #[cfg_attr(all(target_arch = "x86", not(target_feature = "sse")), ignore = "FIXME(i586): possible incorrect rounding")]
     fn test_near_pi() {
         let x = f64::from_bits(0x400921fb000FD5DD); // 3.141592026217707
         let sx = f64::from_bits(0x3ea50d15ced1a4a2); // 6.273720864039205e-7

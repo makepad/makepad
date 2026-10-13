@@ -73,11 +73,10 @@ static EXP2FT: [u64; TBLSIZE] = [
 /// Exponential, base 2 (f32)
 ///
 /// Calculate `2^x`, that is, 2 raised to the power `x`.
-#[cfg_attr(assert_no_panic, no_panic::no_panic)]
 pub fn exp2f(mut x: f32) -> f32 {
     select_implementation! {
         name: x87_exp2f,
-        use_arch_required: x86_no_sse,
+        use_arch_required: all(target_arch = "x86", not(target_feature = "sse")),
         args: x,
     }
 

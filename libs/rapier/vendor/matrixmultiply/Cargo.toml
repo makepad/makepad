@@ -6,7 +6,6 @@ authors = [
     "bluss",
     "R. Janis Goldschmidt",
 ]
-build = "build.rs"
 exclude = ["docs/*"]
 autolib = false
 autobins = false
@@ -43,3 +42,6 @@ threading = ["std"]
 name = "matrixmultiply"
 path = "src/lib.rs"
 bench = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(has_aarch64_simd)"] }
