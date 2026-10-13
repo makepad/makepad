@@ -1,0 +1,11 @@
+[package]
+name = "relax-front"
+version = "0.1.0"
+edition = "2021"
+description = "Relax front layer (see src/lib.rs)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+relax-base = { workspace = true }
+relax-session = { workspace = true }

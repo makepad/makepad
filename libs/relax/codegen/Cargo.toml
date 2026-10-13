@@ -1,0 +1,10 @@
+[package]
+name = "relax-codegen"
+version = "0.1.0"
+edition = "2021"
+description = "Relax's middle and back end: RIR, the O1 optimiser, register allocation, x86-64 and AArch64 machine code, the C ABI planner and executable memory. Front ends: Relax's Rust"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+relax-session = { workspace = true }

@@ -1,0 +1,30 @@
+[
+  {
+    "name": "body-error",
+    "replace": [
+      "() => { 1 }",
+      "() => { \"bad\" }"
+    ]
+  },
+  {
+    "name": "revert"
+  },
+  {
+    "name": "signature",
+    "replace": [
+      "helper() -> u32 { 1 }",
+      "helper() -> bool { 1 }"
+    ]
+  },
+  {
+    "name": "new-fn",
+    "append": "\nfn added() { let _: u32 = \"bad\"; }\n"
+  },
+  {
+    "name": "unresolved",
+    "replace": [
+      "() => { 1 }",
+      "() => { missing() }"
+    ]
+  }
+]

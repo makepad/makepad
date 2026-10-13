@@ -1,0 +1,20 @@
+[package]
+name = "makepad-run-android"
+version = "0.1.0"
+edition = "2021"
+description = "libmakepad.so: the makepad run host as an Android shared library (compiles the packed app on the phone)"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# libmakepad.so (the APK's host library; cdylib) and an rlib for the Linux probe
+[lib]
+name = "makepad"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+makepad-run = { path = ".." }
+makepad-network = { path = "../../../platform/network" }
+relax-compiler = { workspace = true }
+makepad-jni-sys = { path = "../../../libs/jni-sys", version = "0.4.0" }
+makepad-hal = { path = "../../../platform/hal", features = ["host-shims"] }

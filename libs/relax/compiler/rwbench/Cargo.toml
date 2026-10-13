@@ -1,0 +1,29 @@
+[package]
+name = "relax-rwbench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Real-world benchmark suite for Relax's code quality: real makepad/library code paths on real
+# in-repo inputs, run under rustc --release and under `makepad run` (see run.py). Each workload
+# reports steady-state ms per iteration, time-to-steady and a checksum. A member of makepad's
+# workspace (its patches and release profile); OSS crates only.
+[[bin]]
+name = "relax-rwbench"
+path = "src/main.rs"
+
+[dependencies]
+rustybuzz = { workspace = true }
+ab_glyph_rasterizer = { workspace = true }
+sdfer = { workspace = true }
+makepad-fast-inflate = { workspace = true }
+makepad-zip-file = { workspace = true }
+makepad-zune-png = { workspace = true }
+brotli = { workspace = true }
+makepad-rust-tokenizer = { workspace = true }
+makepad-html = { workspace = true }
+makepad-live-id = { workspace = true }
+pulldown-cmark = { workspace = true }
+makepad-ai-llm = { workspace = true }
+makepad-widgets-core = { workspace = true }
+makepad-mbtile-reader = { workspace = true }

@@ -1,0 +1,45 @@
+[package]
+name = "makepad-run"
+version = "0.1.0"
+edition = "2021"
+description = "makepad run: boots makepad apps from source (the JIT plus the provided crates)"
+license = "MIT OR Apache-2.0"
+publish = false
+# tests/ are `makepad test` programs (they use makepad's macros), not cargo tests
+autotests = false
+
+[lib]
+name = "makepad_run"
+path = "src/lib.rs"
+
+[[bin]]
+name = "makepad"
+path = "src/main.rs"
+
+[dependencies]
+makepad-relax-api = { workspace = true, features = ["host-shims"] }
+relax-compiler = { workspace = true }
+relax-session = { workspace = true }
+makepad-remote = { workspace = true }
+# provided crates (Relax binds their C-shaped fns to this binary's code; loader-core.md section 8)
+relax-provided-fixture = { workspace = true, features = ["host-shims"] }
+# fetching sources (`run <git url>`): Relax's git client (relax's `git` module) on the
+# system's HTTP stack
+relax-light-http = { workspace = true }
+
+makepad-live-id = { path = "../../libs/live_id", features = ["host-shims"] }
+makepad-script = { path = "../../platform/script", features = ["host-shims"] }
+makepad-script-std = { path = "../../platform/script/std", features = ["host-shims"] }
+makepad-script-compute = { path = "../../platform/script/compute", features = ["host-shims", "vm"] }
+makepad-shader = { path = "../../platform/shader", features = ["host-shims"] }
+makepad-tween-script = { path = "../../libs/tween/script", features = ["host-shims"] }
+makepad-script-audio-aot = { path = "../../platform/script/audio_aot", features = ["host-shims"] }
+makepad-hal = { path = "../../platform/hal", features = ["host-shims"] }
+
+makepad-script-census = { path = "../../platform/script/census", features = ["host-shims"] }
+
+relax-boot = { path = "boot" }
+makepad-filesystem-watcher = { path = "../../libs/filesystem_watcher" }
+# Host keyboard codes and the existing Studio JumpToFile transport; no UI client.
+makepad-studio-protocol = { path = "../../platform/studio" }
+makepad-network = { path = "../../platform/network" }

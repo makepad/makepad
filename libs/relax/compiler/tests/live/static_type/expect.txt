@@ -1,0 +1,2 @@
+# the static's type changes (AtomicU32 -> AtomicU64): migrated by name (7 -> 8 as u64)
+v1 reinst out=file

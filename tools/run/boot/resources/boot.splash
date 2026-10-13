@@ -1,0 +1,190 @@
+// Phone-first session-0 document. All dimensions are logical points: Android
+// dp = pixels / (densityDpi / 160), desktop points = pixels / backing scale.
+// The host supplies real work, measured phase durations and the shell environment.
+use mod.pod.*
+use mod.math.*
+use mod.shader.*
+
+let phase_target = fn(previous, completed, weight, total_weight, done, total, elapsed) {
+    let fraction = if total > 0.0 {
+        clamp(done / total, 0.0, 1.0)
+    } else {
+        elapsed / max(weight + elapsed, 0.000001)
+    }
+    // Unknown-unit phases approach their measured share; only real phase changes
+    // release the next share. A changed estimate can never move backwards.
+    return max(previous, min(0.999999, (completed + weight * fraction) / max(total_weight, 0.000001)))
+}
+let ease = fn(from, target, seconds) {
+    return mix(from, target, 1.0 - exp(-7.0 * max(0.0, seconds)))
+}
+let rounded = fn(p: vec2, size: vec2, radius: float) -> float {
+    let q = abs(p - size * 0.5) - size * 0.5 + vec2(radius)
+    return length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - radius
+}
+let marker = fn(p: vec2, boundary: float, size: vec2) -> float {
+    let point = vec2(5.0 + boundary * (size.x - 10.0), size.y * 0.4 + 16.0)
+    return (1.0 - smoothstep(1.2, 2.1, length(p - point))) * step(0.001, boundary) * (1.0 - step(0.999, boundary))
+}
+let Quad = {
+    geom: vertex_buffer(vec2f)
+    rect: instance(vec4(0.0))
+    clip_rect: instance(vec4(0.0))
+    viewport: uniform(vec2(1.0))
+    dark: uniform(0.0)
+    dpi: uniform(1.0)
+    insets: uniform(vec4(0.0))
+    touch: uniform(0.0)
+    reduce_motion: uniform(0.0)
+    overlay: uniform(0.0)
+    pos: varying(vec2f)
+    vertex_pos: vertex_position(vec4f)
+    fb0: fragment_output(0, vec4f)
+    vertex: fn() {
+        self.pos = self.geom
+        let p = self.rect.xy + self.geom * self.rect.zw
+        self.vertex_pos = vec4(p.x / self.viewport.x * 2.0 - 1.0, 1.0 - p.y / self.viewport.y * 2.0, 0.0, 1.0)
+    }
+    fragment: fn() {
+        let p = self.rect.xy + self.pos * self.rect.zw
+        let clip = if self.clip_rect.z > 0.0 { self.clip_rect } else { vec4(0.0, 0.0, self.viewport.x, self.viewport.y) }
+        let inside = step(clip.x, p.x) * step(clip.y, p.y)
+            * step(p.x, clip.x + clip.z) * step(p.y, clip.y + clip.w)
+        self.fb0 = self.pixel() * inside
+    }
+}
+{
+    phase_target: phase_target
+    ease: ease
+    landscape_height: 540
+    settle_seconds: 1.5
+    boot: {margin: 24 padding: 0 top: 0 max_width: 480 max_height: 0 center: 0.38 column_split: 0 icon_size: 80 card_padding: 16 action_height: 52 action_width: 152 action_gap: 8}
+    landscape: {margin: 24 padding: 0 top: 0 max_width: 880 max_height: 0 center: 0.42 column_split: 0.36 icon_size: 64 card_padding: 16 action_height: 52 action_width: 152 action_gap: 8}
+    overlay: {margin: 16 padding: 20 top: 0 max_width: 720 max_height: 480 center: 0 column_split: 0 icon_size: 32 card_padding: 16 action_height: 52 action_width: 152 action_gap: 8}
+    lines: [
+        {role: @app size: 34 height: 42 gap: 24 align: 0.5 color: #edf3f2 light_color: #182e30}
+        {role: @progress height: 52 gap: 16}
+        {role: @status size: 18 height: 26 gap: 8 align: 0.5 color: #d5e6e4 light_color: #294f51}
+        {role: @current size: 16 height: 23 gap: 8 align: 0.5 color: #a5beba light_color: #4e6969}
+        {role: @domain size: 16 height: 23 gap: 12 color: #b7cdc9 light_color: #496263}
+        {role: @location size: 14 height: 21 gap: 8 color: #bad4ce light_color: #3f6560}
+        {role: @errors size: 17 height: 25 gap: 12 color: #f3d5cf light_color: #763d35}
+        {role: @panic size: 17 height: 25 gap: 12 color: #f3d5cf light_color: #763d35}
+        {role: @hints size: 14 height: 21 gap: 0 color: #abc1bd light_color: #4e6969}
+    ]
+    hints: {
+        tap_restart: "Restart"
+        tap_copy: "Copy"
+        tap_open: "Open on dev machine"
+        tap_dismiss: "Dismiss"
+        tap_submit: "Submit"
+        tap_cancel: "Cancel"
+        tap_resume: "Resume"
+        input_label: "Return value"
+        paused: "Paused after a panic"
+        resolve: "Resolving dependencies"
+        parse: "Reading source"
+        typecheck: "Checking types"
+        codegen: "Compiling"
+        link: "Linking"
+        first_frame: "Opening your app"
+        restart: "R restart"
+        retry: "R retry compile"
+        copy: "C copy error"
+        open: "E open in editor"
+        dismiss: "Esc dismiss"
+        errors: "↑/↓ select error"
+        scroll: "PgUp/PgDn scroll"
+        return_value: "Return value: "
+        submit: "Enter submit · Esc cancel"
+    }
+    background: Quad{
+        pixel: fn() {
+            let base = mix(#f5f7f3, #101c20, self.dark)
+            let tint = mix(#dcece3, #183a38, self.dark)
+            let q = (self.pos - vec2(0.52, 0.40)) * vec2(self.rect.z / max(self.rect.w, 1.0), 1.0)
+            let wash = exp(-7.0 * dot(q, q)) * 0.32
+            let c = mix(base, tint, wash)
+            let edge = 1.0 - smoothstep(-0.7, 0.7, rounded(self.pos * self.rect.zw, self.rect.zw, 20.0))
+            return c * mix(1.0, edge, self.overlay)
+        }
+    }
+    progress: Quad{
+        from: uniform(0.0)
+        previous: uniform(0.0)
+        changed: uniform(0.0)
+        time: uniform(0.0)
+        phase_marks: uniform(vec4(0.0))
+        phase_last: uniform(0.0)
+        pixel: fn() {
+            let fill = mix(ease(self.from, self.previous, self.time - self.changed), self.previous, self.reduce_motion)
+            let p = self.pos * self.rect.zw
+            let aa = max(0.35, 0.75 / max(self.dpi, 1.0))
+            let distance = rounded(p - vec2(0.0, self.rect.w * 0.4 - 5.0), vec2(self.rect.z, 10.0), 5.0)
+            let track_mask = 1.0 - smoothstep(-aa, aa, distance)
+            let x = clamp((p.x - 5.0) / max(self.rect.z - 10.0, 1.0), 0.0, 1.0)
+            let edge = max(aa / max(self.rect.z, 1.0), 0.00001)
+            let filled = (1.0 - smoothstep(fill - edge, fill + edge, x)) * step(0.000001, fill)
+            let track = mix(#d7e3dc, #293e40, self.dark)
+            let ink = mix(#20796f, #68c8ae, self.dark)
+            let tip = mix(#449c89, #a5dec9, self.dark)
+            let color = mix(track, mix(ink, tip, x * 0.65), filled)
+            let marks = clamp(marker(p, self.phase_marks.x, self.rect.zw)
+                + marker(p, self.phase_marks.y, self.rect.zw)
+                + marker(p, self.phase_marks.z, self.rect.zw)
+                + marker(p, self.phase_marks.w, self.rect.zw)
+                + marker(p, self.phase_last, self.rect.zw), 0.0, 1.0)
+            let marker_color = mix(track, ink, step(x, fill))
+            return color * track_mask + marker_color * marks * 0.65
+        }
+    }
+    error_band: Quad{
+        selected: instance(0.0)
+        action: instance(0.0)
+        pressed: instance(0.0)
+        pixel: fn() {
+            let distance = rounded(self.pos * self.rect.zw, self.rect.zw, 14.0)
+            let aa = max(0.35, 0.75 / max(self.dpi, 1.0))
+            let mask = 1.0 - smoothstep(-aa, aa, distance)
+            let surface = mix(#ffffff, #1a2b30, self.dark)
+            let button = mix(#dfede6, #28443f, self.dark)
+            let active = mix(#c9e2d6, #36594f, self.dark)
+            let fill = mix(mix(surface, button, self.action), active, self.pressed)
+            let border = mix(mix(#d2dfd8, #344b4c, self.dark), mix(#438877, #76c6ab, self.dark), self.selected)
+            let stroke = 1.0 - smoothstep(0.8, 1.6, abs(distance))
+            return mix(fill, border, stroke) * mask
+        }
+    }
+    icon: Quad{
+        image_texture: texture_2d(float)
+        pixel: fn() {
+            let c = self.image_texture.sample(self.pos)
+            return vec4(c.rgb * c.a, c.a)
+        }
+    }
+    glyph: Quad{
+        ..mod.glyph_coverage.AtlasCoverage
+        uv: instance(vec4(0.0))
+        atlas_plane: instance(0.0)
+        color_glyph: instance(0.0)
+        color: instance(#fff)
+        grayscale_texture: texture_2d(float)
+        radius: uniform(8.0)
+        cutoff: uniform(0.25)
+        sdf_sharpness: uniform(1.0)
+        sdf_luma_bias: uniform(0.03)
+        pixel: fn() {
+            let t = mix(self.uv.xy, self.uv.zw, self.pos)
+            let tex_size = self.grayscale_texture.size()
+            let half_texel = vec2(0.5) / tex_size
+            let p = clamp(t, self.uv.xy + half_texel, self.uv.zw - half_texel)
+            if self.color_glyph > 0.5 {
+                let c = self.grayscale_texture.sample(p)
+                return vec4(c.rgb * c.a, c.a)
+            }
+            let scale = (length(dFdx(t) * tex_size) + length(dFdy(t) * tex_size)) * 0.5
+            let coverage = self.sdf(scale, p, self.color)
+            return coverage * vec4(self.color.rgb * self.color.a, self.color.a)
+        }
+    }
+}

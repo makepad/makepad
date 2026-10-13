@@ -1,0 +1,8 @@
+[package]
+name = "vendored-withc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+cbuild = "0.1"

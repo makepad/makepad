@@ -1,0 +1,19 @@
+[package]
+name = "relax-native-macros"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+relax-base = { workspace = true }
+makepad-micro-proc-macro = { workspace = true, features = ["relax-tokens"] }
+makepad-live-id-macros-impl = { workspace = true }
+makepad-micro-serde-derive-impl = { workspace = true }
+makepad-script-derive-impl = { path = "../../../platform/script/derive_impl" }
+makepad-derive-widget-impl = { workspace = true }
+makepad-relax-api-macro-impl = { workspace = true }
+
+[build-dependencies]
+relax-lex = { workspace = true }
+

@@ -1,0 +1,3 @@
+# RefCell<T> is outside the app scope and embeds T by value: both edits must restart.
+v1 restart out=file note=embedded by value in `core::cell::RefCell<live::Item>` outside the app scope
+v2 restart out=file note=embedded by value in `core::cell::RefCell<live::Item>` outside the app scope

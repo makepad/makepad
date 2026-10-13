@@ -1,0 +1,15 @@
+[package]
+name = "relax-boot"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+# The exact same provided crate instances/features as the Relax host.
+makepad-hal = { path = "../../../platform/hal", features = ["host-shims"] }
+makepad-font-core = { path = "../../../libs/font_core" }
+makepad-zune-png = { path = "../../../libs/zune/zune-png" }
+makepad-shader = { path = "../../../platform/shader", features = ["host-shims"] }
+makepad-script = { path = "../../../platform/script", features = ["host-shims"] }
+relax-base = { workspace = true }

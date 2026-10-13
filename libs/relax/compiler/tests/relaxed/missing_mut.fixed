@@ -1,0 +1,7 @@
+struct P { x: u32 }
+fn main() {
+    let mut x = 1; x = 2;
+    let mut v = Vec::<u8>::new(); v.push(1);
+    let mut p = P { x: 0 }; p.x = 3;
+    println!("{} {} {}", x, v.len(), p.x);
+}

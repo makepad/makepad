@@ -1,0 +1,9 @@
+[package]
+name = "relax-session"
+version = "0.1.0"
+edition = "2021"
+description = "Relax compilation session inputs and stable hashing"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]

@@ -1,0 +1,13 @@
+[package]
+name = "cache-prelink-reload"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# A program whose start comes from the disk cache's prelinked startup image, edited while it
+# runs (tests/cache_prelink_reload/run.py).
+[[bin]]
+name = "cache-prelink-reload"
+path = "src/main.rs"
+
+[workspace]

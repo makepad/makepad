@@ -1,0 +1,10 @@
+# Successive byte prefixes; the final version is checked against a fresh run.
+v1 patch out=file note=incomplete:
+v2 patch out=file note=incomplete:
+v3 patch out=file note=incomplete:
+v4 patch out=file note=incomplete:
+v5 patch out=file note=incomplete:
+v6 patch out=file note=incomplete:
+v7 patch out=file note=incomplete:
+v8 patch out=file note=incomplete:
+v9 patch out=oracle
