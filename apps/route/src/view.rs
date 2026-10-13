@@ -247,14 +247,14 @@ impl RouteView {
         let Some(paths) = self.paths.clone() else {
             return;
         };
-        let nav_basename = nav_data::nav_basename(&paths.maps);
-        if let Some(basename) = nav_basename.clone() {
-            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename, paths.chargers());
+        let nav_basenames = nav_data::nav_basenames(&paths.maps);
+        if !nav_basenames.is_empty() {
+            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), nav_basenames.clone(), paths.chargers());
         }
         let map = self.map(cx);
         if let Some(basename) = self.provisioner.ensure_source(cx, &map, &paths.maps) {
-            if nav_basename.is_none() {
-                nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename, paths.chargers());
+            if nav_basenames.is_empty() {
+                nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), vec![basename], paths.chargers());
             }
         }
         self.refresh_testmap_ui(cx);
@@ -1189,7 +1189,7 @@ impl Widget for RouteView {
         let provisioner_update = self.provisioner.handle_event(cx, &map);
         if let Some(basename) = provisioner_update.nav_basename {
             let chargers = self.paths.as_ref().map(|p| p.chargers()).unwrap_or_default();
-            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), basename, chargers);
+            nav_data::start_nav_load(cx.task_pool(), self.nav_rx.sender(), vec![basename], chargers);
             self.push_entry(
                 cx,
                 EntryKind::Info,

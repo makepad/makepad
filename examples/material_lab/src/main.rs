@@ -362,7 +362,7 @@ impl MaterialLab {
     /// Build the materials in the app's VM and install them by column name.
     fn install_materials(&mut self, cx: &mut Cx) {
         let built = cx.with_vm(|vm| {
-            let f = |vm: &mut ScriptVm, v: ScriptValue| v.as_object().filter(|o| vm.bx.heap.is_fn(*o)).expect("lab hook");
+            let f = |vm: &mut ScriptVm, v: ScriptValue| v.as_object().filter(|o| vm.is_fn(*o)).expect("lab hook");
             let red = script_eval!(vm, { mod.widgets.lab_finish_red });
             let green = script_eval!(vm, { mod.widgets.lab_surface_green });
             let up = script_eval!(vm, { mod.widgets.lab_vertex_up });

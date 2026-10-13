@@ -16,7 +16,6 @@ use makepad_widgets::makepad_platform::script::timer::script_local_utc_offset_se
 use makepad_widgets::makepad_platform::storage::{
     StorageHandle, StorageOp, StorageRequestId, StorageResponse, StorageResult,
 };
-use makepad_widgets::makepad_platform::trap::NoTrap;
 use makepad_widgets::*;
 
 // Apply partial runtime values in the root's VM. The animation apply mode
@@ -29,8 +28,7 @@ macro_rules! apply_owned {
                     use mod.prelude.widgets.*
                     $body
                 };
-                script.line = line!() as usize;
-                script.column = column!() as usize;
+                script.set_line_column(line!() as usize, column!() as usize);
                 let value = vm.eval(script);
                 $target.script_apply(vm, &Apply::Animate, &mut Scope::empty(), value);
             });
@@ -694,6 +692,20 @@ impl RemindersView {
         self.rebuild(cx);
     }
 
+    /// Returns whether it discarded the draft or went back a screen.
+    fn go_back(&mut self, cx: &mut Cx) -> bool {
+        if self.draft.is_some() {
+            self.discard_draft(cx);
+        } else if self.nav.layout.is_compact() && !matches!(self.nav.current(), Route::Home) {
+            self.nav.back();
+            self.sync_compact_nav(cx);
+            self.rebuild(cx);
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn sync_compact_nav(&mut self, cx: &mut Cx) {
         if !self.nav.layout.is_compact() {
             return;
@@ -704,11 +716,7 @@ impl RemindersView {
             return;
         }
         let want = self.nav.current();
-        let visual = match nav.current_view() {
-            Some(id) if id == live_id!(detail_view) => Route::Detail,
-            Some(_) => Route::List(self.nav.filter),
-            None => Route::Home,
-        };
+        let visual = self.get_route_shown_by(nav.current_view());
         self.visual_route = visual;
         match compact_nav_step(visual, want, self.nav.filter) {
             None => self.visual_route = want,
@@ -731,6 +739,14 @@ impl RemindersView {
                 nav.pop_to_view(cx, live_id!(list_view));
                 self.visual_route = next;
             }
+        }
+    }
+
+    fn get_route_shown_by(&self, stack_view: Option<LiveId>) -> Route {
+        match stack_view {
+            Some(live_id!(detail_view)) => Route::Detail,
+            Some(_) => Route::List(self.nav.filter),
+            None => Route::Home,
         }
     }
 
@@ -1144,7 +1160,7 @@ impl RemindersView {
         cx.with_script_vm_id(vm_id, |vm| {
             let theme = vm.module(id!(theme));
             let mut read = |key: LiveId, fallback: Vec4| {
-                let value = vm.bx.heap.value(theme, key.into(), NoTrap);
+                let value = vm.value(theme, key);
                 if value.is_nil() || value.is_err() {
                     fallback
                 } else {
@@ -1749,6 +1765,8 @@ impl RemindersView {
     fn apply_layout(&mut self, cx: &mut Cx, size: Vec2d) {
         let layout = decide_layout(size.x, size.y, Some(self.nav.layout));
         if layout != self.nav.layout {
+            // The other layout hides our stack, so a swipe or back gesture on it could never finish.
+            self.view.stack_navigation(cx, ids!(compact.nav)).end_interactive_pop_without_animation(cx);
             self.capture_form(cx);
             let previous = self
                 .list_parent(cx, self.nav.layout.is_compact())
@@ -1976,18 +1994,43 @@ impl Widget for RemindersView {
                 return;
             }
         }
+        // We handle our stack's actions before it does, so Back on one of its views
+        // pops to the screen we go back to, not to its root.
+        if let Event::Actions(actions) = event {
+            let nav = self.view.stack_navigation(cx, ids!(compact.nav));
+            for view_id in [live_id!(list_view), live_id!(detail_view)] {
+                let view_uid = nav.view_by_id(cx, view_id).widget_uid();
+                if actions
+                    .filter_widget_actions_cast::<StackNavigationAction>(view_uid)
+                    .any(|action| matches!(action, StackNavigationAction::Pop))
+                {
+                    self.go_back(cx);
+                }
+            }
+            for action in actions.filter_widget_actions_cast::<StackNavigationTransitionAction>(nav.widget_uid()) {
+                let is_on_popped_screen = self.nav.current() == self.get_route_shown_by(nav.current_view());
+                match action {
+                    StackNavigationTransitionAction::InteractivePopStarted if is_on_popped_screen => {
+                        // Home is the stack's root, which it shows beneath a list by itself.
+                        if self.nav.current() == Route::Detail {
+                            nav.set_interactive_pop_view(cx, Some(live_id!(list_view)));
+                        }
+                    }
+                    StackNavigationTransitionAction::InteractivePopStarted => nav.cancel_interactive_pop(cx),
+                    // The stack finishes popping by itself, and our sync waits for that.
+                    // Escape may have closed the draft mid-swipe, which already went back.
+                    StackNavigationTransitionAction::InteractivePopCommitted if is_on_popped_screen => {
+                        self.go_back(cx);
+                    }
+                    _ => {}
+                }
+            }
+        }
         if let Event::BackPressed { .. } = event {
-            if event.back_pressed() {
-                if self.draft.is_some() {
-                    self.discard_draft(cx);
-                    return;
-                }
-                if self.nav.layout.is_compact() && !matches!(self.nav.current(), Route::Home) {
-                    self.nav.back();
-                    self.sync_compact_nav(cx);
-                    self.rebuild(cx);
-                    return;
-                }
+            // A swipe or back gesture's pop gets this Back instead, since the system's back gesture ends with one.
+            let has_pending_pop = self.view.stack_navigation(cx, ids!(compact.nav)).has_pending_interactive_pop();
+            if !has_pending_pop && event.back_pressed() && self.go_back(cx) {
+                return;
             }
         }
         let overlay_up = self.draft.is_some() && self.nav.layout.is_wide();

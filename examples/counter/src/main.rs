@@ -15,6 +15,8 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(420, 220)
                 body +: {
+                    // the system bars sit over the window's edges: stay inside the safe area
+                    padding: Inset{top: mod.widgets.SAFE_INSET_PAD_TOP right: mod.widgets.SAFE_INSET_PAD_RIGHT bottom: mod.widgets.SAFE_INSET_PAD_BOTTOM left: mod.widgets.SAFE_INSET_PAD_LEFT}
                     main_view := View{
                         width: Fill
                         height: Fill
@@ -73,3 +75,6 @@ impl AppMain for App {
         self.ui.handle_event(cx, event, &mut Scope::empty());
     }
 }
+
+#[cfg(test)]
+makepad_script_test::shader_inventory_test!("counter", <App as AppMain>::script_mod);

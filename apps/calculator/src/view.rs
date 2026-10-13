@@ -711,15 +711,26 @@ impl CalculatorView {
         if let Some(text) = out.copied {
             cx.copy_to_clipboard(&text);
         }
-        if out.open_history {
-            self.stack_navigation(cx, ids!(navigation))
-                .push(cx, live_id!(history_page));
-        }
-        if out.close_history {
-            self.stack_navigation(cx, ids!(navigation)).pop_to_root(cx);
+        if out.open_history || out.close_history {
+            self.sync_navigation(cx);
         }
         self.sync_chrome(cx);
         self.view.redraw(cx);
+    }
+
+    /// Points the stack at the page `ui.route` names, unless it's already headed there.
+    /// It won't push or pop mid-swipe, so we end any swipe first.
+    fn sync_navigation(&mut self, cx: &mut Cx) {
+        let navigation = self.stack_navigation(cx, ids!(navigation));
+        let page = (self.ui.route == Route::History).then_some(live_id!(history_page));
+        if navigation.destination_view() == page {
+            return;
+        }
+        navigation.end_interactive_pop_without_animation(cx);
+        match page {
+            Some(page) => navigation.push(cx, page),
+            None => navigation.pop_to_root(cx),
+        }
     }
 
     fn sync_chrome(&mut self, cx: &mut Cx) {
@@ -775,7 +786,7 @@ impl CalculatorView {
         }
         if metrics.class.history_tape() && self.ui.route == Route::History {
             self.ui.route = Route::Calculator;
-            self.stack_navigation(cx, ids!(navigation)).pop_to_root(cx);
+            self.sync_navigation(cx);
         }
         self.last_layout = Some(metrics);
         self.last_size = size;
@@ -1075,10 +1086,12 @@ impl CalculatorView {
         if n == 0 {
             return;
         }
+        // Only rows the list holds can have been clicked: `item` would build
+        // (or reload from the pool) a row for every hidden entry on each event.
         let mut hit = None;
-        if let Some(mut list) = self.portal_list(cx, list_id).borrow_mut() {
+        if let Some(list) = self.portal_list(cx, list_id).borrow() {
             for index in 0..n {
-                let item = list.item(cx, index, live_id!(Item));
+                let Some((_, item)) = list.get_item(index) else { continue };
                 if item.button(cx, ids!(recall)).clicked(actions) {
                     hit = self.doc.history.get(index).map(|e| e.id);
                     break;
@@ -1232,7 +1245,9 @@ impl Widget for CalculatorView {
             }
         }
         if let Event::BackPressed { .. } = event {
-            if self.ui.route == Route::History && event.back_pressed() {
+            // A swipe or back gesture's pop gets this Back instead, since the system's back gesture ends with one.
+            let has_pending_pop = self.stack_navigation(cx, ids!(navigation)).has_pending_interactive_pop();
+            if self.ui.route == Route::History && !has_pending_pop && event.back_pressed() {
                 self.dispatch(cx, Command::CloseHistory);
                 return;
             }
@@ -1247,6 +1262,12 @@ impl Widget for CalculatorView {
             if self.view.area().rect(cx).contains(mouse.abs) { self.focus_calculator(cx); }
         }
         if let Event::Actions(actions) = event {
+            // The stack pops history itself on Back, its back button or a committed swipe, so we follow it.
+            if self.ui.route == Route::History
+                && self.stack_navigation(cx, ids!(navigation)).destination_view().is_none()
+            {
+                self.dispatch(cx, Command::CloseHistory);
+            }
             self.handle_keys(cx, actions);
         }
     }
@@ -1512,6 +1533,48 @@ mod tests {
         assert_eq!(view.ui.route, Route::Calculator);
     }
 
+    /// Opens history and lands its slide-in, like the stack's animation would.
+    fn open_history(cx: &mut Cx, view: &mut CalculatorView) -> StackNavigationRef {
+        view.dispatch(cx, Command::OpenHistory);
+        let navigation = view.stack_navigation(cx, ids!(navigation));
+        let page = navigation.view_by_id(cx, live_id!(history_page));
+        let actions = cx.capture_actions(|cx| cx.widget_action(page.widget_uid(), StackNavigationTransitionAction::ShowDone));
+        view.handle_event(cx, &Event::Actions(actions), &mut Scope::empty());
+        assert_eq!(navigation.current_view(), Some(live_id!(history_page)));
+        assert!(!navigation.is_transitioning());
+        navigation
+    }
+
+    #[test]
+    fn history_follows_a_pop_the_stack_makes_itself() {
+        let (mut cx, mut view) = fixture();
+        load(&mut cx, &mut view, &seed::initial());
+        let navigation = open_history(&mut cx, &mut view);
+        let back_button = view.button(&cx, ids!(history_page.left_button));
+        let click = cx.capture_actions(|cx| cx.widget_action(back_button.widget_uid(), ButtonAction::Clicked(KeyModifiers::default())));
+        let pop = cx.capture_actions(|cx| view.handle_event(cx, &Event::Actions(click), &mut Scope::empty()));
+        view.handle_event(&mut cx, &Event::Actions(pop), &mut Scope::empty());
+        assert_eq!(view.ui.route, Route::Calculator);
+        assert_eq!(navigation.destination_view(), None);
+        assert!(navigation.is_transitioning(), "the stack's own pop keeps going, with no push back");
+    }
+
+    #[test]
+    fn back_the_stack_passes_on_closes_history_and_falls_through_at_the_calculator() {
+        let (mut cx, mut view) = fixture();
+        load(&mut cx, &mut view, &seed::initial());
+        let navigation = open_history(&mut cx, &mut view);
+        // No platform dispatch hands the page this Back, same as with a host's synthetic Back.
+        let back = Event::BackPressed { handled: std::cell::Cell::new(false) };
+        view.handle_event(&mut cx, &back, &mut Scope::empty());
+        assert!(matches!(&back, Event::BackPressed { handled } if handled.get()));
+        assert_eq!(view.ui.route, Route::Calculator);
+        assert_eq!(navigation.destination_view(), None);
+        let back = Event::BackPressed { handled: std::cell::Cell::new(false) };
+        view.handle_event(&mut cx, &back, &mut Scope::empty());
+        assert!(matches!(&back, Event::BackPressed { handled } if !handled.get()), "nothing to pop, so the OS gets it");
+    }
+
     #[test]
     fn keyboard_routes_from_actual_root_and_key_areas_but_not_another_instance() {
         let (mut cx, mut view) = fixture();
@@ -1679,6 +1742,7 @@ mod tests {
             call_id: "test".into(),
             tool: "eval".into(),
             args: r#"{"expression":"sin(pi/2)"}"#.into(),
+            caller: None,
         };
         let result = crate::ai::answer(a.doc(), &call);
         assert_eq!(result.outcome, ToolOutcome::Ok);
@@ -1747,4 +1811,42 @@ mod tests {
         assert!(view.save_id.is_none());
     }
 
+    /// The generic UI checks over the main view, headless at a phone, a
+    /// split-half and a desktop pane. The keypad's own text is small by
+    /// design, so the floor for text is 0.5% of the pane height.
+    #[test]
+    fn main_view_holds_to_the_ui_checks() {
+        use makepad_widgets::ui_checks::{draw_and_check, UiCheckOptions};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let root = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::script_mod(vm);
+            let value = makepad_widgets::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                CalculatorView{}
+            });
+            assert!(vm.take_errors().is_empty());
+            WidgetRef::script_from_value(vm, value)
+        });
+        {
+            let storage = cx.storage("");
+            let mut view = root.borrow_mut::<CalculatorView>().unwrap();
+            view.set_storage(storage);
+            view.ensure_started(&mut cx);
+            let id = view.load_id.unwrap();
+            let doc = seed::initial().to_bytes();
+            view.on_storage(&mut cx, &[response(id, StorageOp::Get, Ok(StorageResult::Value(Some(doc))))]);
+        }
+        let mut findings = Vec::new();
+        for size in [dvec2(402.0, 780.0), dvec2(960.0, 1080.0), dvec2(1920.0, 1080.0)] {
+            let mut opts = UiCheckOptions::for_pane(size);
+            opts.tiny = 0.005;
+            for issue in draw_and_check(&mut cx, &root, size, &opts) {
+                findings.push(format!("{}x{}: {issue}", size.x, size.y));
+            }
+        }
+        assert!(findings.is_empty(), "{}", findings.join("\n"));
+    }
 }

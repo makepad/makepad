@@ -20,10 +20,6 @@ name = "makepad_app_clock"
 path = "src/lib.rs"
 
 [features]
-# On-demand dylib for the Android super-app (apps/wm-dyn). No engine dep
-# here: the host that builds the lib binds it to its engine dylib itself
-# (apps/wm/src/dylib_host.rs), so this crate's manifest is the desktop's.
-dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
@@ -39,7 +35,6 @@ localai = ["makepad-app-aichat?/localai"]
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-civil-time = { path = "../../libs/civil_time" }
 # The assistant: the F10 overlay in this window, and the clock's one tool.
 makepad-app-aichat = { path = "../aichat", default-features = false, features = ["engine"], optional = true }

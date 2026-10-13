@@ -162,6 +162,13 @@ impl Countdown {
     }
 }
 
+/// The compact forms the clock declares to a host that parks it (see
+/// `Cx::declare_compact_forms`): one row, a landscape tile (see
+/// `apply_sizing`) with room for the dial and the time.
+pub fn compact_forms() -> Vec<makepad_widgets::makepad_platform::ime::CompactForm> {
+    vec![makepad_widgets::makepad_platform::ime::CompactForm::flexible("row", 320.0, 130.0, 100.0)]
+}
+
 /// Which face the home tile shows when nothing is live.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum TileFace {
@@ -521,6 +528,10 @@ pub struct ClockView {
     last_face: HostedViewMode,
     #[rust]
     tile_face: TileFace,
+    /// The host shows this window parked and small (`set_compact`): the
+    /// tile face is one row, the time and the date.
+    #[rust]
+    compact: bool,
     /// The last sizing was landscape (the stopwatch reads it for its split).
     #[rust]
     landscape: bool,
@@ -560,6 +571,20 @@ impl ClockView {
     /// to it from now on.
     pub fn set_storage(&mut self, storage: StorageHandle) {
         self.storage = Some(storage);
+    }
+
+    /// The host shows this window small, parked beside the work (`on`), or
+    /// at full size again. Compact is the digital tile face as one row; the host
+    /// gives the window the form's size (`compact_forms`, answered in `main.rs`).
+    pub fn set_compact(&mut self, cx: &mut Cx, on: bool) {
+        if self.compact == on {
+            return;
+        }
+        self.compact = on;
+        // Size the faces again whatever size the window ends up at.
+        self.last_size = Vec2d::default();
+        self.refresh_tile(cx);
+        self.view.redraw(cx);
     }
 
     /// The face the host asked for (`HostedViewMode`, read off the
@@ -927,13 +952,16 @@ impl ClockView {
     fn refresh_tile(&mut self, cx: &mut Cx) {
         let act = activity(self.alarm.ringing(), self.countdown_alert, self.countdown.running() || (self.countdown.active() && !self.countdown.finished()), self.stopwatch.running());
         let (analog, digital, activity_face) = match act {
-            Activity::Clock => (self.tile_face == TileFace::Analog, self.tile_face == TileFace::Digital, false),
+            Activity::Clock => (self.tile_face == TileFace::Analog && !self.compact, self.tile_face == TileFace::Digital || self.compact, false),
             Activity::StopwatchRunning | Activity::AlarmRinging => (false, true, false),
             Activity::TimerDone | Activity::TimerRunning => (false, false, true),
         };
         self.view.widget(cx, ids!(analog)).set_visible(cx, analog);
         self.view.widget(cx, ids!(digital)).set_visible(cx, digital);
         self.view.widget(cx, ids!(activity)).set_visible(cx, activity_face);
+        // The compact row keeps the time and the date; the captions go.
+        self.view.widget(cx, ids!(place)).set_visible(cx, !self.compact);
+        self.view.widget(cx, ids!(extra_tile)).set_visible(cx, !self.compact);
         match act {
             Activity::StopwatchRunning => {
                 self.view.label(cx, ids!(place)).set_text(cx, "Stopwatch");
@@ -1152,9 +1180,11 @@ impl ClockView {
         let small = if tile_landscape { (size.y - 20.0).clamp(40.0, 104.0) } else if size.x >= 176.0 && size.y >= 176.0 { 162.0 } else { (size.y - 24.0).clamp(52.0, 154.0) };
         let mut tile = self.view.widget(cx, ids!(face_tile));
         script_apply_eval!(cx, tile, { width: #(small) height: #(small) });
-        let pad = if tile_landscape { 10.0 } else { 16.0 };
+        let pad = if tile_landscape { 10.0 } else if self.compact { 6.0 } else { 16.0 };
+        let row = self.compact && tile_landscape;
         if let Some(mut d) = self.view.view(cx, ids!(digital)).borrow_mut() {
             d.layout.padding = Inset { left: pad, right: pad, top: pad, bottom: pad };
+            d.layout.align = Align { x: 0.0, y: if row || self.compact { 0.5 } else { 0.0 } };
         }
         let time_size = if tile_landscape { 21.0 } else if size.x < 150.0 { 27.0 } else { 34.5 };
         let mut time_tile = self.view.widget(cx, ids!(time_tile));

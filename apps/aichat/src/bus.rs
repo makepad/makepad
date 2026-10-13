@@ -26,9 +26,16 @@ use std::collections::HashMap;
 #[derive(Default)]
 pub struct ServiceBus {
     hosts: HashMap<EndpointId, ServiceLinkHost>,
+    #[cfg(not(target_arch = "wasm32"))]
+    parent: Option<makepad_widgets::makepad_platform::os::hal::HalParentSender>,
 }
 
 impl ServiceBus {
+    pub fn set_context(&mut self, _cx: &Cx) {
+        #[cfg(not(target_arch = "wasm32"))]
+        { self.parent = _cx.hal_parent_sender(); }
+    }
+
     /// An up-frame from the WM. `None` for frames that are not the bus's.
     pub fn on_custom(&mut self, registry: &ServiceRegistry, json: &str) -> bool {
         let Some(frame) = HostedUp::parse(json) else { return false };
@@ -53,6 +60,11 @@ impl ServiceBus {
     /// Links whose registry side is gone are dropped.
     pub fn relay_down(&mut self, registry: &ServiceRegistry) {
         for frame in self.drain_down(registry) {
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some(parent) = &self.parent {
+                parent.send(&frame.to_json());
+                continue;
+            }
             Cx::send_studio_message(AppToStudio::Custom(frame.to_json()));
         }
     }

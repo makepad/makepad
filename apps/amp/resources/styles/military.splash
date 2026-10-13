@@ -1,0 +1,253 @@
+// Military — hardened field equipment: an olive-drab powder-coated front with
+// rubber bumpers at the corners, gunmetal plates, recessed guarded keys,
+// hazard-striped edges on the control wings, night-vision green lights and a
+// green segment-style readout on the displays.
+use mod.prelude.widgets_internal.*
+
+// ---- palette: phosphor-green lists and bars ----
+mod.widgets.hw_palette.screen_bg = #x0a0e0a
+mod.widgets.hw_palette.screen_text = #xb8f5a8
+mod.widgets.hw_palette.screen_muted = #x5f8f58
+mod.widgets.hw_palette.accent = #x5dff4a
+// The device's floor is dark: display type sits on it bare.
+mod.widgets.hw_palette.dark_floor = 1.0
+
+// ---- the front: olive-drab powder coat, rubber bumpers at the corners ----
+mod.widgets.HwChassis.draw_bg.ground = #x4a4f33
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(0.86, 0.88, 0.74, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.06, 0.07, 0.04, 1.0)
+mod.widgets.HwChassis.draw_bg.pattern = vec4(4.0, 1.2, 0.20, 0.0)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(0.36, 1.0, 0.29, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(1.4, 0.6)
+mod.widgets.HwChassis.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    var col = self.surface(p, self.ground.xyz)
+    col = col * (1.0 + (self.hw_hash(floor(self.world.xy * 1.3)) - 0.5) * 0.06)
+    let v = length((self.pos - vec2(0.5, 0.35)) * vec2(0.9, 1.3))
+    col = col * (1.06 - 0.26 * v * v)
+    // Rubber bumpers: a moulded black block over each corner.
+    let s = self.rect_size
+    let cq = min(p, s - p)
+    // A moulded rubber block over each corner.
+    let bq = cq - vec2(40.0, 40.0)
+    let bd = length(max(bq, vec2(0.0, 0.0))) + min(max(bq.x, bq.y), 0.0) - 8.0
+    let bump = 1.0 - smoothstep(-0.8, 0.8, bd)
+    let rn = clamp(-bd / 8.0, 0.0, 1.0)
+    let ridge = smoothstep(0.35, 0.65, 0.5 + 0.5 * sin((cq.x + cq.y) * 0.7))
+    var rub = vec3(0.055, 0.056, 0.052) * (0.7 + 0.5 * rn) * (0.8 + 0.35 * ridge)
+    rub = rub + vec3(0.30, 0.31, 0.28) * (1.0 - smoothstep(0.0, 1.8, abs(bd + 1.8))) * 0.55
+    // A bolt through the corner block.
+    let bolt = length(cq - vec2(17.0, 17.0))
+    rub = mix(rub, vec3(0.42, 0.43, 0.40) * (1.25 - bolt * 0.09), 1.0 - smoothstep(4.0, 5.0, bolt))
+    let lip = (1.0 - smoothstep(0.0, 10.0, bd)) * (1.0 - bump) * 0.65
+    col = col * (1.0 - lip)
+    col = mix(col, rub, bump)
+    col = col * (1.0 - self.env_ao(0.0)) + self.env_spill(vec3(0.0, 0.0, 1.0))
+    return vec4(col + self.dither(), 1.0)
+}
+mod.widgets.Window.pass.clear_color = #x3c402a
+
+// Raised plates: gunmetal, bolted, a hazard band round the edge.
+mod.widgets.HwPlate.draw_bg.ground = #x3a3d3c
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(0.80, 0.83, 0.80, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.02, 0.02, 0.02, 1.0)
+mod.widgets.HwPlate.draw_bg.pattern = vec4(7.0, 1.0, 0.0, 0.0)
+mod.widgets.HwPlate.draw_bg.pattern_ink = vec4(0.95, 0.74, 0.08, 1.0)
+mod.widgets.HwPlate.draw_bg.pattern_seam = vec4(18.0, 7.0, 1.0, 2.5)
+mod.widgets.HwPlate.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    let w = self.world.xy
+    // Powder-coated gunmetal: soft cells and fine speckle.
+    let n = self.hw_noise(w * 0.3) * 0.6 + self.hw_noise(w * 0.8) * 0.4
+    var col = base * (1.0 + (n - 0.5) * 0.18)
+    col = col * (1.0 + (self.hw_hash(floor(w * 1.6)) - 0.5) * 0.08)
+    // Hazard band: yellow and black diagonals in the edge band.
+    let band = self.pattern_seam.y
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y)) - self.inset
+    let inb = 1.0 - smoothstep(band - 0.6, band + 0.6, e)
+    let t = fract((w.x + w.y) / max(self.pattern_seam.x, 2.0))
+    let st = smoothstep(0.47, 0.53, t) * (1.0 - smoothstep(0.97, 1.0, t)) + (1.0 - smoothstep(0.0, 0.03, t))
+    let chip = step(0.86, self.hw_noise(w * 0.25))
+    let stripe = mix(vec3(0.06, 0.06, 0.05), self.pattern_ink.xyz, st) * (0.9 + 0.2 * self.hw_hash(floor(w * 2.0)))
+    col = mix(col, stripe, inb * (1.0 - chip * 0.7))
+    // A screw head inside each corner of the band.
+    let cq = min(p, self.rect_size - p) - vec2(self.inset, self.inset)
+    let sd = length(cq - vec2(band + 7.0, band + 7.0))
+    let screw = 1.0 - smoothstep(3.2, 4.2, sd)
+    let slot = (1.0 - smoothstep(0.4, 1.0, abs((cq.x - cq.y) * 0.707))) * screw
+    col = mix(col, vec3(0.50, 0.52, 0.50) * (1.2 - sd * 0.12), screw)
+    col = mix(col, vec3(0.08, 0.08, 0.08), slot)
+    return col
+}
+mod.widgets.HwPlate.draw_bg.relief = vec4(1.8, 0.7, 2.0, 0.25)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.6, 0.35, 0.12, 0.8)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.65, 9.0, 1.0, 0.6)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(0.36, 1.0, 0.29, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(1.6, 0.6)
+
+// Recessed panels: a darker olive well.
+mod.widgets.HwPanel.draw_bg.ground = #x2c3020
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.72, 0.76, 0.60, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.01, 0.01, 0.0, 1.0)
+mod.widgets.HwPanel.draw_bg.pattern = vec4(4.0, 1.2, 0.16, 0.0)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.85, 9.0, 0.0, 0.55)
+mod.widgets.HwPanel.draw_bg.finish = vec4(0.7, 0.3, 0.05, 0.9)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(0.36, 1.0, 0.29, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.5, 0.6)
+
+// The screen's surround: blackened steel, very deep.
+mod.widgets.HwBezel.draw_bg.ground = #x141614
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.55, 0.58, 0.52, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.pattern = vec4(4.0, 0.8, 0.14, 0.0)
+mod.widgets.HwBezel.draw_bg.inner = vec4(1.0, 14.0, 0.0, 0.6)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.0, 0.5)
+
+// The glass: a faint green scan and a heavy rim.
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.10, 0.05, 0.55, 0.06)
+mod.widgets.HwGlass.draw_bg.tint = vec4(0.6, 1.0, 0.55, 0.0)
+
+// ---- keys: recessed, guarded gunmetal caps with stencil glyphs ----
+mod.widgets.HwKey.depth = 1.6
+mod.widgets.HwKey.press = -2.6
+mod.widgets.HwKey.radius = 4
+mod.widgets.HwKey.draw_bg.ground = #x2d302e
+mod.widgets.HwKey.draw_bg.light_ink = vec4(0.78, 0.80, 0.74, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKey.draw_bg.pattern = vec4(4.0, 0.7, 0.16, 0.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(2.4, 0.4, 1.6, 0.20)
+mod.widgets.HwKey.draw_bg.finish = vec4(0.7, 0.3, 0.08, 0.9)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.75, 5.0, 1.0, 0.75)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(0.36, 1.0, 0.29, 1.0)
+mod.widgets.HwKey.draw_bg.spill = vec2(2.0, 0.6)
+// The guard: a gunmetal frame standing round each cap.
+mod.widgets.HwKey.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    var o = self.layer(self.key_face(p, self.ground.xyz))
+    if self.mech.x > 0.5 {
+        o = self.mech_key()
+    }
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let d = self.sd(p)
+    let c = self.rect_size * 0.5
+    let e = min(min(p.x, p.y), min(self.rect_size.x - p.x, self.rect_size.y - p.y))
+    let g = smoothstep(2.4 - px, 2.4 + px, d) * (1.0 - smoothstep(-px, px, 1.2 - e))
+    let lt = normalize(self.light.xy + vec2(0.000001, 0.000001))
+    let side = dot(normalize(p - c + vec2(0.0001, 0.0001)), -lt)
+    let gcol = vec3(0.20, 0.215, 0.20) * (0.8 + 0.45 * side) + self.env_spill(vec3(0.0, 0.0, 1.0)) * 0.5
+    let groove = 1.0 - smoothstep(0.0, 1.4, abs(d - 3.2))
+    let gc = gcol * (1.0 - groove * 0.5)
+    o = vec4(gc * g, g) + o * (1.0 - g)
+    o = self.key_marks(o, p)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+mod.widgets.HwKeyButton.draw_text.color = #xd9dcc4
+mod.widgets.HwKeyButton.draw_text.color_hover = #x9dff8a
+mod.widgets.HwKeyButton.draw_text.color_down = #x5dff4a
+mod.widgets.HwKeyText.draw_text.color = #xd9dcc4
+mod.widgets.HwKeyText.draw_text.color_hover = #x9dff8a
+mod.widgets.HwKeyText.draw_text.color_down = #x5dff4a
+
+// ---- lights: night-vision green ----
+mod.widgets.HwDash.emissive = vec4(0.30, 1.0, 0.22, 8.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(0.36, 1.0, 0.28, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x0e120c
+mod.widgets.HwLed.emissive = vec4(0.30, 1.0, 0.22, 3.5)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(0.36, 1.0, 0.28, 1.0)
+
+// ---- knob: a black knurled skirt, a stepped olive cap ----
+mod.widgets.HwKnobFace.draw_bg.ground = #x1c1e1c
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(0.80, 0.82, 0.76, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.pattern = vec4(5.0, 0.8, 0.12, 0.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(1.0, 0.62, 36.0, 0.65)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.30, 0.32, 0.22, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(0.98, 0.78, 0.10, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(13.0, 1.30, 2.3, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.07, 0.10, 0.06, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(0.36, 1.0, 0.28, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.85, 10.0, 1.0, 0.8)
+mod.widgets.HwKnobFace.emissive = vec4(0.30, 1.0, 0.22, 0.7)
+
+// ---- meter: green LED ladder, amber at the top ----
+mod.widgets.HwMeterFace.draw_bg.ground = #x070907
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 20.0, 0.9, 0.8)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.36, 1.0, 0.28, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(1.0, 0.72, 0.08, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.05, 0.08, 0.04, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(0.30, 1.0, 0.22, 0.5)
+
+// ---- type: stencil-white on the drab, green on the displays ----
+mod.widgets.HwCaption.draw_text.color = #xc9cca8
+mod.widgets.HwTitle.draw_text.color = #xe4e6cc
+mod.widgets.HwText.draw_text.color = #xb3b793
+mod.widgets.HwPanelTitle.draw_text.color = #xdfe2c6
+mod.widgets.HwPanelText.draw_text.color = #x9da283
+mod.widgets.HwNavButton.draw_text.color = #xcfd3b3
+mod.widgets.HwNavButton.draw_text.color_hover = #x9dff8a
+mod.widgets.HwNavButton.draw_bg.color = vec4(0.13, 0.145, 0.10, 1.0)
+mod.widgets.HwNavButton.draw_bg.color_hover = vec4(0.17, 0.20, 0.12, 1.0)
+mod.widgets.HwNavButton.draw_bg.color_down = vec4(0.08, 0.10, 0.06, 1.0)
+mod.widgets.HwNavButton.draw_bg.color_focus = vec4(0.13, 0.145, 0.10, 1.0)
+mod.widgets.HwNavButton.draw_bg.border_color = vec4(0.0, 0.0, 0.0, 0.5)
+mod.widgets.HwNavButton.draw_bg.border_color_hover = vec4(0.36, 1.0, 0.28, 0.35)
+mod.widgets.HwDisplayText.draw_text.color = #x7dff66
+mod.widgets.HwDisplayText.draw_text.text_style = theme.font_code{font_size: 10.0}
+mod.widgets.HwDisplay.draw_bg.ground = #x060906
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.55, 0.58, 0.52, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.surface = fn(p: vec2, base: vec3) -> vec3 {
+    // A segment readout's glass: a faint phosphor-green cell grid.
+    let f = fract(p / vec2(3.0, 3.0))
+    let cell = step(0.25, f.x) * step(0.25, f.y)
+    return base + vec3(0.010, 0.030, 0.008) * cell
+}
+mod.widgets.HwDisplay.draw_bg.inner = vec4(1.0, 10.0, 0.0, 0.6)
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.03, 0.05, 0.03, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(0.36, 1.0, 0.28, 0.22)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(0.45, 1.0, 0.36, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #x9df58a
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.03, 0.05, 0.03, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(0.36, 1.0, 0.28, 0.22)
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.45)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(0.8, 0.85, 0.6, 0.18)
+
+// ---- the picture lights the front ----
+mod.widgets.HwMilk.light = 1.9
+mod.widgets.HwMilk.light_knee = 1.0
+mod.widgets.HwSpectrum.light = 3.2
+// Critical keys (play, presets) carry a hazard band.
+mod.widgets.HwKey.draw_bg.critical_ink = vec4(0.93, 0.74, 0.10, 1.0)
+mod.widgets.HwKey.draw_bg.critical_band = vec4(1.0, 4.0, 7.0, 0.0)
+// ---- transport: guarded keys that drop inside their guards and latch ----
+mod.widgets.HwTransportKey.latch = 1.0
+mod.widgets.HwTransportKey.press_secs = 0.07
+mod.widgets.HwTransportKey.draw_bg.spill = vec2(0.9, 0.45)
+mod.widgets.HwTransportKey.travel = 3.5
+mod.widgets.HwTransportKey.draw_bg.mech = vec4(1.0, 0.66, 0.0, 0.0)
+mod.widgets.HwTransportKey.draw_bg.dimple = vec4(0.0, 3.0, 0.3, 0.1)
+mod.widgets.HwTransportKey.draw_bg.housing_ink = vec4(0.02, 0.022, 0.02, 1.0)
+mod.widgets.HwTransportKey.draw_bg.front_ink = vec4(0.22, 0.235, 0.22, 1.0)
+
+// ---- the picture in this style's colours (THEME COLOURS key; on by default) ----
+mod.widgets.hw_palette.map0 = #x020a02
+mod.widgets.hw_palette.map1 = #x0f4010
+mod.widgets.hw_palette.map2 = #x3fd84a
+mod.widgets.hw_palette.map3 = #xd8ffcc
+mod.widgets.hw_palette.map_strength = 0.85
+mod.widgets.hw_palette.map_default = 1.0
+// The screen filter with the THEME COLOURS key: CRT: a bulging tube, scanlines, an RGB mask, bloom.
+mod.widgets.hw_palette.screen_filter = 1.0
+mod.widgets.hw_palette.screen_filter_strength = 0.85
+mod.widgets.hw_palette.screen_cell = 2.5
+mod.widgets.hw_palette.screen_curve = 0.07
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(2.0, 0.56, 15.0, 4.0)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.26, 0.29, 0.20, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.02, 0.03, 0.02, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(1.0, 1.8, 8.0, 0.06)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(3.0, 0.14, 0.34, 0.0)
+mod.widgets.HwEqGraph.draw_grid.grid_ink = vec4(0.36, 1.0, 0.29, 0.8)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.18, 1.0, 0.0, 0.0)
+true

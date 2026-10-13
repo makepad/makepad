@@ -23,7 +23,7 @@ script_mod! {
     }
     mod.widgets.CalendarStackPage = StackNavigationView{
         show_bg:true draw_bg.color:paper
-        offset:0.0
+        slide:0.0
         header +: {
             height:52 padding:Inset{left:16 right:16 top:4 bottom:4}
             draw_bg.color:paper
@@ -44,8 +44,8 @@ script_mod! {
         }
         body +: {margin:Inset{top:52} padding:0 show_bg:true draw_bg.color:paper}
         animator +: {slide: {default:@hide
-            hide: AnimatorState{ease:Ease.Bezier{cp0:0.2 cp1:0.0 cp2:0.0 cp3:1.0} from:{all:Forward{duration:0.2}} apply:{offset:1.0}}
-            show: AnimatorState{ease:Ease.Bezier{cp0:0.2 cp1:0.0 cp2:0.0 cp3:1.0} from:{all:Forward{duration:0.24}} apply:{offset:0.0}}
+            hide: AnimatorState{ease:Ease.Bezier{cp0:0.2 cp1:0.0 cp2:0.0 cp3:1.0} from:{all:Forward{duration:0.2}} apply:{slide:1.0}}
+            show: AnimatorState{ease:Ease.Bezier{cp0:0.2 cp1:0.0 cp2:0.0 cp3:1.0} from:{all:Forward{duration:0.24}} apply:{slide:0.0}}
         }}
     }
 }

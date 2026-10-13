@@ -201,11 +201,8 @@ impl Widget for AlignTest {
         if method == live_id!(set_enabled) {
             let mut enabled = self.enabled;
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                enabled = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                enabled = vm.heap()
+                    .cast_to_bool(vm.vec_value_trap(args_obj, 0));
             }
             let enabled = vm.with_cx_mut(|cx| self.set_enabled(cx, enabled));
             return ScriptAsyncResult::Return(ScriptValue::from_bool(enabled));

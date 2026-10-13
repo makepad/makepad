@@ -2130,8 +2130,7 @@ impl App {
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         // Load a test image into the Image widget
-        let image_path =
-            Path::new("tools/open_harmony/deveco/AppScope/resources/base/media/app_icon.png");
+        let image_path = Path::new("examples/splash/resources/app_icon.png");
         if let Err(e) = self
             .ui
             .image(cx, ids!(test_image))

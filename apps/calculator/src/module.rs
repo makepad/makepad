@@ -11,9 +11,6 @@ pub struct CalculatorModule;
 /// The one linked instance of the module description: immutable, no state.
 pub static CALCULATOR_MODULE: CalculatorModule = CalculatorModule;
 
-#[cfg(feature = "dynamic-module")]
-makepad_app_module::export_app_module!(CALCULATOR_MODULE);
-
 impl AppModule for CalculatorModule {
     fn id(&self) -> &'static str {
         "calculator"
@@ -119,7 +116,7 @@ mod tests {
             root,
             executor,
             shutdown,
-        } = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        } = cx.with_script_vm_id(vm_id, |vm| {
             CALCULATOR_MODULE.register(vm);
             let parts = CALCULATOR_MODULE.create(vm, open, handles);
             assert!(
@@ -153,7 +150,7 @@ mod tests {
             root: root2,
             executor: executor2,
             shutdown: shutdown2,
-        } = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        } = cx.with_script_vm_id(vm_id, |vm| {
             CALCULATOR_MODULE.create(vm, open2, handles2)
         });
 
@@ -161,6 +158,7 @@ mod tests {
             call_id: "t1".into(),
             tool: "eval".into(),
             args: r#"{"expression":"2+3*4"}"#.into(),
+            caller: None,
         };
         let mut exec = executor;
         let ExecOutcome::Done(result) = exec.execute(&mut cx, &call) else {
@@ -184,8 +182,8 @@ mod tests {
             assert_eq!(b.doc().session.source, "0");
         }
 
-        cx.with_script_vm_id_trusted(vm_id, |vm| shutdown(vm));
-        cx.with_script_vm_id_trusted(vm_id, |vm| shutdown2(vm));
+        cx.with_script_vm_id(vm_id, |vm| shutdown(vm));
+        cx.with_script_vm_id(vm_id, |vm| shutdown2(vm));
         drop(root);
         drop(root2);
         drop(exec);

@@ -1,0 +1,17 @@
+[package]
+name = "makepad-example-app-host-probe"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# Hosts makepad-example-counter with makepad-app-host's HostedApp: waits for a
+# presented frame, reads the widget snapshot, clicks the button at its snapshot
+# rect and waits for the label to change. Run it hidden:
+#   MAKEPAD_HIDE_WINDOWS=1 cargo run --release -p makepad-example-app-host-probe
+# (the counter binary must be built: cargo build --release -p makepad-example-counter).
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false }
+makepad-app-host = { path = "../../libs/app_host" }
+makepad-studio-protocol = { path = "../../platform/studio" }

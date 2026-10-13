@@ -326,7 +326,9 @@ impl Widget for VideoPlayer {
         // Kick off playback via the plugin helper on the first event (once the widget exists).
         if !self.media_started {
             let video = self.video(cx, ids!(video));
-            play_media(cx, &video, VIDEO_URL);
+            // `video_player <file or URL>` plays that instead of the sample stream.
+            let source = std::env::args().nth(1).filter(|arg| !arg.starts_with("--")).unwrap_or_else(|| VIDEO_URL.to_string());
+            play_media(cx, &video, &source);
             self.media_started = true;
             // NOTE: we intentionally do NOT arm the immersive countdown here. Controls stay
             // visible until the first user interaction; once the user touches anything, the 5s

@@ -21,9 +21,6 @@ pub struct ClockModule;
 /// The one linked instance of the module description: immutable, no state.
 pub static CLOCK_MODULE: ClockModule = ClockModule;
 
-#[cfg(feature = "dynamic-module")]
-makepad_app_module::export_app_module!(CLOCK_MODULE);
-
 impl AppModule for ClockModule {
     fn id(&self) -> &'static str {
         "clock"
@@ -132,7 +129,7 @@ mod tests {
             replies,
         };
         let open = CLOCK_MODULE.open_schema().empty_open().unwrap();
-        let InstanceParts { root, executor, shutdown } = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        let InstanceParts { root, executor, shutdown } = cx.with_script_vm_id(vm_id, |vm| {
             CLOCK_MODULE.register(vm);
             let parts = CLOCK_MODULE.create(vm, open, handles);
             assert!(vm.take_errors().is_empty(), "the isolate evaluated the view without errors");
@@ -152,15 +149,15 @@ mod tests {
         }
 
         // The host's order: shutdown in the isolate, the refs, the isolate.
-        cx.with_script_vm_id_trusted(vm_id, |vm| shutdown(vm));
+        cx.with_script_vm_id(vm_id, |vm| shutdown(vm));
         drop(root);
         drop(executor);
         cx.free_splash_vm(vm_id);
     }
 
     /// The window manager's way into an isolate: the appearance's style
-    /// sheet installed, the widgets re-evaluated under it, the WM palette
-    /// applied, then the module registered — and on an appearance change
+    /// sheet installed, the widgets re-evaluated under it, then the module
+    /// registered — and on an appearance change
     /// the same again plus a re-apply of the root from its type default.
     /// The title and the digital time must draw in the sheet's text role
     /// every time: dark ink on the light sheet, light ink on the dark one.
@@ -182,14 +179,13 @@ mod tests {
         };
         let open = CLOCK_MODULE.open_schema().empty_open().unwrap();
         let sheet = |dark: bool| StyleSheet::load(DesktopStyle::Ios.sheet(dark));
-        let InstanceParts { mut root, executor, shutdown } = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        let InstanceParts { mut root, executor, shutdown } = cx.with_script_vm_id(vm_id, |vm| {
             makepad_widgets::makepad_platform::script::res::script_mod(vm);
             desktop_style::install(vm, sheet(false));
             vm.with_reload(|vm| {
                 makepad_widgets::widgets_mod(vm);
                 desktop_style::apply_widgets(vm);
             });
-            makepad_wm_theme::apply(vm);
             CLOCK_MODULE.register(vm);
             let parts = CLOCK_MODULE.create(vm, open, handles);
             assert!(vm.take_errors().is_empty(), "the isolate evaluated the view without errors");
@@ -211,17 +207,16 @@ mod tests {
 
         // An appearance change, the host's way.
         let switch = |cx: &mut Cx, root: &mut WidgetRef, dark: bool| {
-            cx.with_script_vm_id_trusted(vm_id, |vm| {
+            cx.with_script_vm_id(vm_id, |vm| {
                 desktop_style::install(vm, sheet(dark));
                 vm.with_reload(|vm| {
                     makepad_widgets::widgets_mod(vm);
                     desktop_style::apply_widgets(vm);
-                    makepad_wm_theme::apply(vm);
                     CLOCK_MODULE.register(vm);
                 });
                 let source = root
                     .widget_type_id()
-                    .and_then(|ty| vm.bx.heap.type_default_for_id(ty))
+                    .and_then(|ty| vm.heap().type_default_for_id(ty))
                     .unwrap_or_else(|| root.script_source());
                 root.script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), source.into());
                 assert!(vm.take_errors().is_empty(), "the reapply evaluated without errors");
@@ -234,7 +229,7 @@ mod tests {
         let (title, time) = inks(&mut cx, &root);
         assert!(!is_light(title) && !is_light(time), "back to light: dark ink, got {title:?} {time:?}");
 
-        cx.with_script_vm_id_trusted(vm_id, |vm| shutdown(vm));
+        cx.with_script_vm_id(vm_id, |vm| shutdown(vm));
         drop(root);
         drop(executor);
         cx.free_splash_vm(vm_id);

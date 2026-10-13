@@ -9,9 +9,6 @@ pub struct CalendarModule;
 
 pub static CALENDAR_MODULE: CalendarModule = CalendarModule;
 
-#[cfg(feature = "dynamic-module")]
-makepad_app_module::export_app_module!(CALENDAR_MODULE);
-
 impl AppModule for CalendarModule {
     fn id(&self) -> &'static str {
         "calendar"
@@ -113,7 +110,7 @@ mod tests {
             root,
             executor,
             shutdown,
-        } = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        } = cx.with_script_vm_id(vm_id, |vm| {
             CALENDAR_MODULE.register(vm);
             let parts = CALENDAR_MODULE.create(vm, open, handles);
             assert!(
@@ -142,7 +139,7 @@ mod tests {
             root: root2,
             executor: executor2,
             shutdown: shutdown2,
-        } = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        } = cx.with_script_vm_id(vm_id, |vm| {
             let parts = CALENDAR_MODULE.create(vm, open2, handles2);
             assert!(vm.take_errors().is_empty());
             parts
@@ -163,8 +160,8 @@ mod tests {
             };
         }
 
-        cx.with_script_vm_id_trusted(vm_id, |vm| shutdown(vm));
-        cx.with_script_vm_id_trusted(vm_id, |vm| shutdown2(vm));
+        cx.with_script_vm_id(vm_id, |vm| shutdown(vm));
+        cx.with_script_vm_id(vm_id, |vm| shutdown2(vm));
         drop(root);
         drop(root2);
         drop(executor);

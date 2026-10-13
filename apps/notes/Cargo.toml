@@ -19,7 +19,6 @@ path = "src/main.rs"
 required-features = ["standalone"]
 
 [features]
-dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
@@ -30,7 +29,6 @@ standalone = []
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["glass"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-app-module = { path = "../../libs/app_module" }
 makepad-strict-json = { path = "../../libs/strict_json" }

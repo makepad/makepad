@@ -51,9 +51,8 @@ gen = ["dep:makepad-ai-hub"]
 # linking the chat, and no other app has it.
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["rich_text", "ai"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }
-makepad-ai-services = { path = "../../libs/ai/services", default-features = false }
+makepad-ai-services = { path = "../../libs/ai/services", default-features = false, features = ["platform"] }
 makepad-strict-json = { path = "../../libs/strict_json" }
 # The fleet client behind `gen`. Native only.
 makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false, optional = true }

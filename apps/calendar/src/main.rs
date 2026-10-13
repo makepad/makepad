@@ -125,7 +125,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         makepad_app_calendar::script_mod(vm);
         self::script_mod(vm)
     }

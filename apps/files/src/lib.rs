@@ -25,6 +25,7 @@ pub mod theme;
 pub mod thumbs;
 pub mod vfs;
 pub mod view;
+mod vignettes;
 
 pub use module::{FilesModule, FILES_MODULE};
 pub use view::FilesView;
@@ -32,7 +33,7 @@ pub use view::FilesView;
 use makepad_widgets::*;
 
 /// This crate's palette tokens and widget families. Call after host widget
-/// registration and the WM theme; do not register `makepad_widgets` again.
+/// registration and the system stylesheet; do not register `makepad_widgets` again.
 pub fn script_mod(vm: &mut ScriptVm) {
     theme::Palette::for_vm(vm).publish(vm);
     theme::script_mod(vm);

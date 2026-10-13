@@ -62,7 +62,7 @@ script_mod! {
             height: Fill
             flow: Down
             // The gutter the paper floats on.
-            draw_bg +: { color: mod.mpp.bg_dark }
+            draw_bg +: { color: mod.theme.color_bg_container }
 
             pdf := PdfView{
                 width: Fill

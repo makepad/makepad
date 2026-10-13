@@ -13,6 +13,6 @@ default = ["tweaker"]
 tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
 
 [dependencies]
-makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["dock", "cef"] }
+makepad-widgets = { path = "../../widgets", version = "2.0.0", default-features = false, features = ["dock", "browser"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", version = "2.0.0", optional = true }
-makepad-cef = { path = "../../libs/cef" }
+makepad-browser-view = { path = "../../libs/browser_view" }

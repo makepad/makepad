@@ -1,5 +1,5 @@
 //! video: a dumb video player. `video <path>` opens one clip
-//! fit-to-window on a dark makepad_wm_theme background and plays it.
+//! fit-to-window on a system theme background and plays it.
 //! `video --preview <path>` sizes the window as a small popup instead —
 //! that is files' Quick Look.
 
@@ -21,7 +21,7 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(1100, 700)
                 window.title: "video"
-                pass +: { clear_color: mod.mpv.bg }
+                pass +: { clear_color: mod.theme.color_bg_app }
                 body +: {
                     root := View{
                         width: Fill
@@ -43,7 +43,7 @@ script_mod! {
                             // The window background, not the transport
                             // bar's fill: the two strips sit next to each
                             // other and must not read as one.
-                            draw_bg +: { color: mod.mpv.bg }
+                            draw_bg +: { color: mod.theme.color_bg_app }
 
                             status := Label{
                                 width: Fill
@@ -51,7 +51,7 @@ script_mod! {
                                 text_overflow: TextOverflow.Ellipsis
                                 text: ""
                                 draw_text +: {
-                                    color: mod.mpv.fg
+                                    color: mod.theme.color_text
                                     text_style: theme.font_regular{font_size: 9}
                                 }
                             }
@@ -98,12 +98,8 @@ impl MatchEvent for App {
             makepad_app_video::player::mix_into(output, info.sample_rate);
         });
 
-        // makepad_wm_theme::apply already retinted theme.color_bg_app and
-        // mod.widgets.Window.pass.clear_color from a theme.splash when one
-        // is exported; patch the pass clear color explicitly too so the
-        // letterbox around the picture is right either way.
-        {
-            let color = Palette::for_cx(cx).bg_vec4();
+        // Keep the pass clear colour in sync with the installed system theme.
+        if let Some(color) = cx.with_vm(|vm| theme_tokens::color(vm, "color_bg_app")) {
             let mut window = self.ui.window(cx, ids!(main_window));
             script_apply_eval!(cx, window, {
                 pass +: { clear_color: #(color) }
@@ -231,7 +227,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         Palette::for_vm(vm).publish(vm);
         makepad_app_video::widget::script_mod(vm);
         self::script_mod(vm)

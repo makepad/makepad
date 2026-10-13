@@ -1,7 +1,7 @@
 # video — a dumb video player, part of the Makepad app family (terminal, wm,
 # files, image, task, sheets, route, mixer...).
 #
-# `video <path>` opens one clip fit-to-window on a dark makepad_wm_theme
+# `video <path>` opens one clip fit-to-window on a system theme
 # background and plays it, sound and all. Space pauses, Left/Right seek
 # ±5s (Shift ±30s), Up/Down set the volume, M mutes, double-click hides
 # the chrome, Escape/Q quits. `--preview <path>` sizes the window as a
@@ -41,5 +41,4 @@ tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widge
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-wm-api = { path = "../../libs/wm_api" }

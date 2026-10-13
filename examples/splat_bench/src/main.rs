@@ -141,6 +141,8 @@ pub struct App {
     /// Frame whose render is pending capture on the next NextFrame.
     #[rust]
     pending_capture: Option<u64>,
+    #[rust]
+    capture_reads: Vec<(ReadbackTicket, u64, String)>,
     #[rust(false)]
     done: bool,
     /// Window paints seen when the last camera step was issued; the next
@@ -199,14 +201,31 @@ impl App {
             };
             scene.color_texture().clone()
         };
-        let Some((width, height, bgra)) = cx.debug_read_render_texture(&texture) else {
-            log!("splat-bench: capture of frame {frame} failed (no readback)");
-            return;
-        };
         let path = format!("{}/frame_{:04}.png", config.out_dir, frame);
-        match Self::write_png(&path, width, height, &bgra) {
-            Ok(()) => log!("splat-bench: captured {path} ({width}x{height})"),
-            Err(err) => log!("splat-bench: {err}"),
+        match texture.read_back(cx, ReadbackRequest::default()) {
+            Ok(ticket) => self.capture_reads.push((ticket, frame, path)),
+            Err(error) => log!("splat-bench: capture of frame {frame} failed: {error}"),
+        }
+    }
+
+    fn poll_captures(&mut self, cx: &mut Cx) {
+        let tickets: Vec<_> = self.capture_reads.iter().map(|r| r.0).collect();
+        for result in cx.try_take_texture_readbacks_for(&tickets) {
+            let at = self.capture_reads.iter().position(|r| r.0 == result.ticket).unwrap();
+            let (_, frame, path) = self.capture_reads.remove(at);
+            let (width, height) = (result.width, result.height);
+            let bgra = match result.data {
+                Ok(bytes) => {
+                    let mut bytes = bytes.to_vec();
+                    for px in bytes.chunks_exact_mut(4) { px.swap(0, 2); }
+                    bytes
+                }
+                Err(error) => { log!("splat-bench: capture of frame {frame} failed: {error}"); continue; }
+            };
+            match Self::write_png(&path, width, height, &bgra) {
+                Ok(()) => log!("splat-bench: captured {path} ({width}x{height})"),
+                Err(error) => log!("splat-bench: {error}"),
+            }
         }
     }
 
@@ -399,10 +418,13 @@ impl MatchEvent for App {
         if self.done || !e.set.contains(&self.next_frame) {
             return;
         }
+        self.poll_captures(cx);
+        if !self.capture_reads.is_empty() { self.next_frame = cx.new_next_frame(); return; }
         let mut captured_now = false;
         if let Some(frame) = self.pending_capture.take() {
             self.capture(cx, frame);
             captured_now = true;
+            if !self.capture_reads.is_empty() { self.next_frame = cx.new_next_frame(); return; }
         }
         let Some(config) = self.config.as_ref() else {
             return;

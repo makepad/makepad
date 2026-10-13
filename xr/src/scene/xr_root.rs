@@ -1381,11 +1381,9 @@ impl Widget for XrRoot {
         if method == live_id!(set_depth) || method == live_id!(set_depth_mesh) {
             let mut visible = self.depth_mesh_visible();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
+                let trap = vm.trap();
                 visible = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                    .bx.heap_ref().cast_to_bool(vm.bx.heap_ref().vec_value(args_obj, 0, trap));
             }
             vm.with_cx_mut(|cx| {
                 visible = self.set_depth_mesh_visible(cx, visible);
@@ -1405,11 +1403,9 @@ impl Widget for XrRoot {
         if method == live_id!(set_depth_mesh_focus_cube) {
             let mut enabled = self.depth_mesh_focus_cube_enabled();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
+                let trap = vm.trap();
                 enabled = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                    .bx.heap_ref().cast_to_bool(vm.bx.heap_ref().vec_value(args_obj, 0, trap));
             }
             vm.with_cx_mut(|cx| {
                 enabled = self.set_depth_mesh_focus_cube_enabled(cx, enabled);
@@ -1431,11 +1427,9 @@ impl Widget for XrRoot {
         if method == live_id!(set_depth_query_hits) {
             let mut visible = self.depth_query_hits_visible();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
+                let trap = vm.trap();
                 visible = vm
-                    .bx
-                    .heap
-                    .cast_to_bool(vm.bx.heap.vec_value(args_obj, 0, trap));
+                    .bx.heap_ref().cast_to_bool(vm.bx.heap_ref().vec_value(args_obj, 0, trap));
             }
             vm.with_cx_mut(|cx| {
                 visible = self.set_depth_query_hits_visible(cx, visible);
@@ -1457,8 +1451,8 @@ impl Widget for XrRoot {
         if method == live_id!(set_depth_voxel_size) || method == live_id!(set_depth_resolution) {
             let mut voxel_size_meters = vm.cx().xr_tsdf().voxel_size_meters();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                let trap = vm.trap();
+                if let Some(value) = vm.bx.heap_ref().vec_value(args_obj, 0, trap).as_f64() {
                     voxel_size_meters = value as f32;
                 }
             }
@@ -1475,8 +1469,8 @@ impl Widget for XrRoot {
         if method == live_id!(set_render_scale) || method == live_id!(set_xr_render_scale) {
             let mut scale = vm.cx().xr_render_scale().unwrap_or(1.4) as f32;
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                let trap = vm.trap();
+                if let Some(value) = vm.bx.heap_ref().vec_value(args_obj, 0, trap).as_f64() {
                     scale = value as f32;
                 }
             }
@@ -1508,8 +1502,8 @@ impl Widget for XrRoot {
         if method == live_id!(set_physics_time_scale) || method == live_id!(set_sim_time_scale) {
             let mut scale = self.physics_time_scale();
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(value) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                let trap = vm.trap();
+                if let Some(value) = vm.bx.heap_ref().vec_value(args_obj, 0, trap).as_f64() {
                     scale = value as f32;
                 }
             }

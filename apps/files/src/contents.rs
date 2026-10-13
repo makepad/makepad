@@ -69,7 +69,7 @@ script_mod! {
             visible: false
             width: Fill
             height: Fill
-            draw_bg +: {color: mod.mpf.sel}
+            draw_bg +: {color: mod.theme.color_bg_highlight}
         }
         tile_body := View{
             width: Fill
@@ -95,7 +95,7 @@ script_mod! {
                     max_lines: 2
                     text_overflow: TextOverflow.Ellipsis
                     draw_text +: {
-                        color: mod.mpf.fg
+                        color: mod.theme.color_text
                         text_style: theme.font_regular{font_size: 9.5}
                     }
                 }
@@ -120,7 +120,7 @@ script_mod! {
             visible: false
             width: Fill
             height: Fill
-            draw_bg +: {color: mod.mpf.sel}
+            draw_bg +: {color: mod.theme.color_bg_highlight}
         }
         row_body := View{
             width: Fill
@@ -146,7 +146,7 @@ script_mod! {
                     max_lines: 1
                     text_overflow: TextOverflow.Ellipsis
                     draw_text +: {
-                        color: mod.mpf.fg
+                        color: mod.theme.color_text
                         text_style: theme.font_regular{font_size: 9.5}
                     }
                 }
@@ -166,7 +166,7 @@ script_mod! {
                 align: Align{x: 1.0 y: 0.5}
                 row_size := Label{
                     draw_text +: {
-                        color: mod.mpf.fg_dim
+                        color: mod.theme.color_text_disabled
                         text_style: theme.font_regular{font_size: 9.0}
                     }
                 }
@@ -223,26 +223,26 @@ script_mod! {
                 default_row_height: 28.0
                 col_header_height: 30.0
                 cell_pad_x: 12.0
-                color_bg: mod.mpf.bg
-                color_cell: mod.mpf.bg
+                color_bg: mod.theme.color_bg_app
+                color_cell: mod.theme.color_bg_app
                 color_cell_alt: mod.mpf.stripe
-                color_text: mod.mpf.fg
-                color_header: mod.mpf.bg_light
+                color_text: mod.theme.color_text
+                color_header: mod.theme.color_fg_app
                 color_header_active: mod.mpf.hover
-                color_header_text: mod.mpf.fg_dim
+                color_header_text: mod.theme.color_text_disabled
                 color_selection: mod.mpf.sel_soft
-                color_selection_border: mod.mpf.accent
-                color_drag_marker: mod.mpf.accent
-                color_resize_guide: mod.mpf.muted
+                color_selection_border: mod.theme.color_focus
+                color_drag_marker: mod.theme.color_focus
+                color_resize_guide: mod.theme.color_bevel_outset_2
                 draw_cell +: {
-                    border_color: uniform(mod.mpf.bg)
+                    border_color: uniform(mod.theme.color_bg_app)
                 }
                 draw_text +: {
-                    color: mod.mpf.fg
+                    color: mod.theme.color_text
                     text_style: theme.font_regular{font_size: 9.5}
                 }
                 draw_text_bold +: {
-                    color: mod.mpf.fg_dim
+                    color: mod.theme.color_text_disabled
                     text_style: theme.font_bold{font_size: 9.0}
                 }
                 NameCell := View{
@@ -277,7 +277,7 @@ script_mod! {
                                 icon_walk: Walk{width: 7 height: 7}
                                 draw_icon +: {
                                     svg: crate_resource("self://resources/icons/twist-right.svg")
-                                    color: mod.mpf.fg_dim
+                                    color: mod.theme.color_text_disabled
                                 }
                             }
                         }
@@ -290,7 +290,7 @@ script_mod! {
                                 icon_walk: Walk{width: 7 height: 7}
                                 draw_icon +: {
                                     svg: crate_resource("self://resources/icons/twist-down.svg")
-                                    color: mod.mpf.fg
+                                    color: mod.theme.color_text
                                 }
                             }
                         }
@@ -310,7 +310,7 @@ script_mod! {
                             max_lines: 1
                             text_overflow: TextOverflow.Ellipsis
                             draw_text +: {
-                                color: mod.mpf.fg
+                                color: mod.theme.color_text
                                 text_style: theme.font_regular{font_size: 9.5}
                             }
                         }
@@ -342,9 +342,9 @@ script_mod! {
             width: Fill
             height: Fill
             treemap := DiskMap{
-                draw_bg +: {color: mod.mpf.bg}
-                draw_text +: {color: mod.mpf.fg}
-                draw_bold +: {color: mod.mpf.fg_bright}
+                draw_bg +: {color: mod.theme.color_bg_app}
+                draw_text +: {color: mod.theme.color_text}
+                draw_bold +: {color: mod.theme.color_text_hover}
             }
         }
     }
@@ -443,21 +443,11 @@ pub struct ContextHit {
 }
 
 /// The colors the body sets from Rust. Everything else comes straight from
-/// `mod.mpf`; only the fast text-cell path needs a `Vec4f` in hand.
-#[derive(Clone, Copy)]
+/// `mod.theme`; only the fast text-cell path needs a `Vec4f` in hand.
+#[derive(Clone, Copy, Default)]
 pub struct Colors {
     pub dim: Vec4f,
     pub selection: Vec4f,
-}
-
-impl Default for Colors {
-    fn default() -> Self {
-        let palette = Palette::tokyo_night();
-        Self {
-            dim: Palette::vec4(&palette.fg_dim),
-            selection: Palette::vec4(&palette.sel),
-        }
-    }
 }
 
 /// A press the body wants the shell to look at. It carries nothing: its only
@@ -470,7 +460,7 @@ pub enum ContentsPing {
     Ping,
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, Widget)]
 pub struct FileContents {
     #[deref]
     view: View,
@@ -573,6 +563,15 @@ pub struct FileContents {
     /// A secondary press waiting to be reported to the shell.
     #[rust]
     pending_context: Option<ContextHit>,
+}
+
+impl ScriptHook for FileContents {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+        self.colors = Colors {
+            dim: theme_tokens::color(vm, "color_text_disabled").expect("system text role"),
+            selection: theme_tokens::color(vm, "color_bg_highlight").expect("system highlight role"),
+        };
+    }
 }
 
 impl FileContents {

@@ -1,0 +1,315 @@
+// title: Graphite
+// order: 40
+// Graphite — a sleek modern dark mini-player: a soft matte charcoal body
+// with gentle rounded extrusions, recessed near-black display windows with
+// thin light-grey type, a minimal spectrum of hairline white bars, dark
+// softly shaded keys grouped in a pill cluster, and a single orange accent.
+//
+// Assignments only, over the base templates in `src/hw.rs`
+// (see local/agent_state/skeuomorph/music/STYLE_GUIDE.md).
+use mod.prelude.widgets_internal.*
+
+// ---- palette: near-black glass, light-grey type, one orange ----
+mod.widgets.hw_palette.screen_bg = #x0e0f10
+mod.widgets.hw_palette.screen_text = #xd9dadc
+mod.widgets.hw_palette.screen_muted = #x75787d
+mod.widgets.hw_palette.accent = #xff7a1c
+mod.widgets.hw_palette.panel_text = #xd4d6d9
+mod.widgets.hw_palette.panel_muted = #x7d8086
+mod.widgets.hw_palette.menu_bg = #x1a1b1d
+mod.widgets.hw_palette.caption_bg = #x222325
+mod.widgets.hw_palette.caption_text = #xa4a7ac
+mod.widgets.hw_palette.legend_on = #xff7a1c
+mod.widgets.hw_palette.legend_off = #xb4b7bc
+mod.widgets.hw_palette.spill_knee = 1.1
+mod.widgets.hw_palette.spill_dark = 0.55
+
+// ---- the front: soft matte graphite ----
+mod.widgets.HwChassis.draw_bg.ground = #x2a2b2d
+mod.widgets.HwChassis.draw_bg.light_ink = vec4(0.62, 0.63, 0.65, 1.0)
+mod.widgets.HwChassis.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwChassis.draw_bg.pattern = vec4(5.0, 0.8, 0.025, 0.0)
+mod.widgets.HwChassis.draw_bg.vignette = vec4(0.5, 0.25, 0.30, 1.10)
+mod.widgets.HwChassis.draw_bg.glow_ink = vec4(1.0, 0.48, 0.11, 1.0)
+mod.widgets.HwChassis.draw_bg.spill = vec2(1.4, 0.55)
+mod.widgets.Window.pass.clear_color = #x2a2b2d
+
+// Raised plates: the same graphite, a gentle rounded extrusion with a
+// faint light lip along the top and a soft cast shadow.
+mod.widgets.HwPlate.radius = 12
+mod.widgets.HwPlate.depth = 2.0
+mod.widgets.HwPlate.draw_bg.ground = #x313234
+mod.widgets.HwPlate.draw_bg.light_ink = vec4(0.70, 0.71, 0.73, 1.0)
+mod.widgets.HwPlate.draw_bg.shadow_ink = vec4(0.085, 0.088, 0.092, 1.0)
+mod.widgets.HwPlate.draw_bg.relief = vec4(3.0, 0.35, 2.0, 0.12)
+mod.widgets.HwPlate.draw_bg.finish = vec4(0.15, 0.12, 0.05, 0.95)
+mod.widgets.HwPlate.draw_bg.tune = vec4(0.10, 0.35, 1.0, 3.0)
+mod.widgets.HwPlate.draw_bg.shadow = vec4(0.40, 22.0, 1.0, 0.04)
+mod.widgets.HwPlate.draw_bg.pattern = vec4(5.0, 0.8, 0.025, 0.0)
+mod.widgets.HwPlate.draw_bg.glow_ink = vec4(1.0, 0.48, 0.11, 1.0)
+mod.widgets.HwPlate.draw_bg.spill = vec2(1.5, 0.5)
+
+// Recessed panels: a slightly darker milled pocket, soft inner shadow.
+mod.widgets.HwPanel.radius = 10
+mod.widgets.HwPanel.depth = -1.5
+mod.widgets.HwPanel.draw_bg.ground = #x1c1d1f
+mod.widgets.HwPanel.draw_bg.light_ink = vec4(0.52, 0.53, 0.55, 1.0)
+mod.widgets.HwPanel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwPanel.draw_bg.relief = vec4(1.5, 0.5, 1.0, 0.1)
+mod.widgets.HwPanel.draw_bg.inner = vec4(0.75, 7.0, 0.0, 0.40)
+mod.widgets.HwPanel.draw_bg.tune = vec4(0.03, 0.35, 1.0, 3.0)
+mod.widgets.HwPanel.draw_bg.pattern = vec4(5.0, 0.8, 0.02, 0.0)
+mod.widgets.HwPanel.draw_bg.glow_ink = vec4(1.0, 0.48, 0.11, 1.0)
+mod.widgets.HwPanel.draw_bg.spill = vec2(1.4, 0.5)
+
+// The screen's surround: a deep black frame with a hairline lip.
+mod.widgets.HwBezel.radius = 12
+mod.widgets.HwBezel.depth = -2.0
+mod.widgets.HwBezel.draw_bg.ground = #x111213
+mod.widgets.HwBezel.draw_bg.light_ink = vec4(0.50, 0.51, 0.53, 1.0)
+mod.widgets.HwBezel.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwBezel.draw_bg.relief = vec4(1.5, 0.6, 1.0, 0.15)
+mod.widgets.HwBezel.draw_bg.inner = vec4(0.85, 10.0, 0.0, 0.45)
+mod.widgets.HwBezel.draw_bg.spill = vec2(1.0, 0.35)
+
+mod.widgets.HwGlass.draw_bg.glass = vec4(0.0, 0.04, 0.35, 0.0)
+mod.widgets.HwGlass.draw_bg.radius = 8.0
+
+// ---- keys: dark rounded caps, softly shaded ----
+mod.widgets.HwKey.radius = 9
+mod.widgets.HwKey.depth = 2.5
+mod.widgets.HwKey.press = -1.5
+mod.widgets.HwKey.draw_bg.ground = #x2f3032
+mod.widgets.HwKey.draw_bg.light_ink = vec4(0.72, 0.73, 0.75, 1.0)
+mod.widgets.HwKey.draw_bg.shadow_ink = vec4(0.075, 0.078, 0.082, 1.0)
+mod.widgets.HwKey.draw_bg.relief = vec4(4.0, 0.30, 2.0, 0.08)
+mod.widgets.HwKey.draw_bg.finish = vec4(0.15, 0.10, 0.05, 0.95)
+mod.widgets.HwKey.draw_bg.tune = vec4(0.12, 0.35, 1.0, 3.0)
+mod.widgets.HwKey.draw_bg.shadow = vec4(0.45, 10.0, 1.0, 0.06)
+mod.widgets.HwKey.draw_bg.glow_ink = vec4(1.0, 0.48, 0.11, 1.0)
+mod.widgets.HwKey.draw_bg.spill = vec2(1.8, 0.45)
+mod.widgets.HwKey.draw_bg.led_off = vec4(0.17, 0.17, 0.18, 1.0)
+mod.widgets.HwKey.draw_bg.critical_ink = vec4(1.0, 0.48, 0.11, 0.0)
+mod.widgets.HwKey.emissive = vec4(1.0, 0.48, 0.11, 0.22)
+mod.widgets.HwKeyButton.draw_text.color = #xd6d8db
+mod.widgets.HwKeyButton.draw_text.color_hover = #xffffff
+mod.widgets.HwKeyButton.draw_text.color_down = #xff7a1c
+mod.widgets.HwKeyText.draw_text.color = #xc6c8cc
+mod.widgets.HwKeyText.draw_text.color_hover = #xffffff
+mod.widgets.HwKeyText.draw_text.color_down = #xff7a1c
+
+// ---- lights: orange ----
+mod.widgets.HwDash.radius = 1.0
+mod.widgets.HwDash.emissive = vec4(1.0, 0.48, 0.11, 6.0)
+mod.widgets.HwDash.draw_bg.glow_ink = vec4(1.0, 0.50, 0.14, 1.0)
+mod.widgets.HwDash.draw_bg.ground = #x3c3d40
+mod.widgets.HwLed.emissive = vec4(1.0, 0.48, 0.11, 3.0)
+mod.widgets.HwLed.draw_bg.glow_ink = vec4(1.0, 0.50, 0.14, 1.0)
+
+// ---- knob: a matte graphite dome, a thin orange index ----
+mod.widgets.HwKnobFace.depth = 4.0
+mod.widgets.HwKnobFace.draw_bg.ground = #x303133
+mod.widgets.HwKnobFace.draw_bg.light_ink = vec4(0.72, 0.73, 0.75, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwKnobFace.draw_bg.knob = vec4(0.0, 0.74, 60.0, 0.10)
+mod.widgets.HwKnobFace.draw_bg.cap_ink = vec4(0.20, 0.205, 0.215, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ptr_ink = vec4(1.0, 0.48, 0.11, 1.0)
+mod.widgets.HwKnobFace.draw_bg.ring = vec4(31.0, 1.28, 1.1, 2.35619)
+mod.widgets.HwKnobFace.draw_bg.led_off = vec4(0.22, 0.225, 0.235, 1.0)
+mod.widgets.HwKnobFace.draw_bg.glow_ink = vec4(0.80, 0.81, 0.83, 1.0)
+mod.widgets.HwKnobFace.draw_bg.shadow = vec4(0.55, 12.0, 1.0, 0.2)
+mod.widgets.HwKnobFace.draw_bg.spill = vec2(1.0, 0.4)
+mod.widgets.HwKnobFace.emissive = vec4(0.9, 0.9, 0.92, 0.15)
+
+// ---- meter: hairline white ticks on black, orange at the top ----
+mod.widgets.HwMeterFace.radius = 8
+mod.widgets.HwMeterFace.depth = -1.5
+mod.widgets.HwMeterFace.draw_bg.ground = #x0e0f10
+mod.widgets.HwMeterFace.draw_bg.light_ink = vec4(0.5, 0.51, 0.53, 1.0)
+mod.widgets.HwMeterFace.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwMeterFace.draw_bg.inner = vec4(0.85, 7.0, 0.0, 0.0)
+mod.widgets.HwMeterFace.draw_bg.meter = vec4(0.0, 30.0, 1.0, 0.8)
+mod.widgets.HwMeterFace.draw_bg.spill = vec2(0.0, 0.2)
+mod.widgets.HwMeterFace.draw_bg.glow_ink = vec4(0.92, 0.92, 0.93, 1.0)
+mod.widgets.HwMeterFace.draw_bg.hot_ink = vec4(1.0, 0.48, 0.11, 1.0)
+mod.widgets.HwMeterFace.draw_bg.led_off = vec4(0.16, 0.165, 0.175, 1.0)
+mod.widgets.HwMeterFace.emissive = vec4(0.9, 0.9, 0.92, 0.35)
+mod.widgets.HwMeterFace.draw_bg.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    var o = self.layer(self.surface(p, self.ground.xyz))
+    // Two rows of hairline ticks, L over R, like the reference spectrum.
+    let a = vec2(self.inset + 14.0, self.inset + 8.0)
+    let b = self.rect_size - vec2(self.inset + 10.0, self.inset + 8.0)
+    let n = max(self.meter.y, 4.0)
+    let pitch = (b.x - a.x) / n
+    let rowh = (b.y - a.y) * 0.5
+    let col_i = floor((p.x - a.x) / pitch)
+    let lane = clamp(floor((p.y - a.y) / max(rowh, 1.0)), 0.0, 1.0)
+    let cx = a.x + (col_i + 0.5) * pitch
+    let lv = mix(self.level.x, self.level.y, lane)
+    let t = (col_i + 0.5) / n
+    let valid = step(0.0, col_i) * step(col_i, n - 1.0)
+    let on = step(t, lv) * valid
+    let ry0 = a.y + lane * rowh + rowh * 0.18
+    let ry1 = a.y + (lane + 1.0) * rowh - rowh * 0.18
+    let inrow = step(ry0, p.y) * step(p.y, ry1) * step(a.y, p.y) * step(p.y, b.y)
+    let hw = mix(0.35, 0.8, on)
+    let tick = (1.0 - smoothstep(hw - px * 0.5, hw + px * 0.5, abs(p.x - cx))) * inrow * valid
+    var zc = self.glow_ink.xyz
+    zc = mix(zc, self.hot_ink.xyz, step(0.84, t))
+    let tc = mix(self.led_off.xyz, zc, on)
+    o = vec4(mix(o.xyz, tc, tick), o.w)
+    // The held peak: an orange tick.
+    let pk = floor(self.level.z * n)
+    let pkm = step(abs(col_i - pk + 1.0), 0.1) * step(0.02, self.level.z) * valid
+    let ptick = (1.0 - smoothstep(0.8 - px * 0.5, 0.8 + px * 0.5, abs(p.x - cx))) * inrow * pkm
+    o = vec4(mix(o.xyz, self.hot_ink.xyz, ptick), o.w)
+    // L and R: tiny grey dots at the start of each row.
+    let ld = length(p - vec2(self.inset + 7.0, a.y + rowh * 0.5)) - 1.3
+    let rd = length(p - vec2(self.inset + 7.0, a.y + rowh * 1.5)) - 1.3
+    let dm = 1.0 - smoothstep(-px, px, min(ld, rd))
+    o = vec4(mix(o.xyz, vec3(0.45, 0.46, 0.48), dm), o.w)
+    return vec4(o.xyz + self.dither() * step(0.002, o.w), o.w)
+}
+
+// ---- the spectrum: hairline white bars, tiny peak ticks, one orange ----
+// Parts by `self.part` (1 well, 2 rule, 3 slot, 4 bar, 5 peak, 6 midline, 7 fill).
+mod.widgets.HwSpectrum.draw_round.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let s = self.rect_size
+    let px = 1.0 / max(self.draw_pass.dpi_factor, 0.5)
+    let accent = step(abs(self.band - floor(self.bands * 0.40)), 0.1)
+    if self.part > 0.5 && self.part < 1.5 {
+        let sdf = Sdf2d.viewport(p)
+        sdf.box(0.0, 0.0, s.x, s.y, 8.0)
+        let v = p.y / max(s.y, 1.0)
+        sdf.fill(vec4(vec3(0.052, 0.055, 0.058) - vec3(0.012, 0.012, 0.012) * v, 1.0))
+        return sdf.result
+    }
+    if (self.part > 1.5 && self.part < 2.5) || (self.part > 5.5 && self.part < 6.5) {
+        let w = self.rect_pos.x + p.x
+        let dm = step(fract(w / 3.0), 0.34)
+        let a = self.color.w * dm * 1.2
+        return vec4(vec3(0.55, 0.56, 0.58) * a, a)
+    }
+    if self.part > 6.5 {
+        return vec4(self.color.xyz * self.color.w, self.color.w)
+    }
+    // A peak: a small tick over the bar, orange on the accent band.
+    if self.part > 4.5 && self.part < 5.5 {
+        let cx = s.x * 0.5
+        let m = 1.0 - smoothstep(0.9 - px * 0.5, 0.9 + px * 0.5, abs(p.x - cx))
+        let c = mix(vec3(0.80, 0.81, 0.83), vec3(1.0, 0.48, 0.11), accent)
+        let a = m * 0.9
+        return vec4(c * a, a)
+    }
+    let cx = s.x * 0.5
+    if self.part > 2.5 && self.part < 3.5 {
+        // The empty slot: a small base tick, so the scale reads at rest.
+        let fb = s.y - p.y
+        let m = (1.0 - smoothstep(0.4, 0.4 + px, abs(p.x - cx))) * step(fb, 3.0)
+        let a = m * 0.35
+        return vec4(vec3(0.6, 0.61, 0.63) * a, a)
+    }
+    // A bar: a hairline, brighter toward its top.
+    let m = 1.0 - smoothstep(0.85 - px * 0.5, 0.85 + px * 0.5, abs(p.x - cx))
+    let v = 1.0 - p.y / max(s.y, 1.0)
+    var c = vec3(0.93, 0.93, 0.94) * (0.72 + 0.28 * (1.0 - v))
+    c = mix(c, vec3(1.0, 0.48, 0.11), accent)
+    return vec4(c * m, m)
+}
+mod.widgets.HwSpectrum.draw_line.pixel = fn() {
+    let p = self.pos * self.rect_size
+    let a = self.seg_a
+    let b = self.seg_b
+    let pa = p - a
+    let ba = b - a
+    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 0.0001), 0.0, 1.0)
+    let d = length(pa - ba * h)
+    let al = (1.0 - smoothstep(0.35, 1.0, d)) * 0.62
+    return vec4(vec3(0.86, 0.87, 0.89) * al, al)
+}
+mod.widgets.HwSpectrum.light = 2.4
+mod.widgets.HwSpectrum.light_low = vec4(0.55, 0.56, 0.58, 0.6)
+mod.widgets.HwSpectrum.light_high = vec4(1.0, 0.55, 0.20, 1.6)
+mod.widgets.HwSpectrum.wave_thickness = 1.2
+mod.widgets.HwSpectrum.wave_fill = 0.0
+mod.widgets.HwSpectrum.draw_label.text_style = theme.font_regular{font_size: 7.5}
+mod.widgets.HwMilk.light = 2.8
+mod.widgets.HwMilk.light_knee = 0.95
+
+// ---- type: thin light grey ----
+mod.widgets.HwCaption.draw_text.color = #x8a8d92
+mod.widgets.HwCaption.draw_text.text_style = theme.font_regular{font_size: 7.5}
+mod.widgets.HwTitle.draw_text.color = #xe0e2e4
+mod.widgets.HwTitle.draw_text.text_style = theme.font_regular{font_size: 12.5}
+mod.widgets.HwText.draw_text.color = #x8d9095
+mod.widgets.HwPanelTitle.draw_text.color = #xe2e3e5
+mod.widgets.HwPanelTitle.draw_text.text_style = theme.font_regular{font_size: 12.5}
+mod.widgets.HwPanelText.draw_text.color = #x7d8086
+mod.widgets.HwNavButton.draw_text.color = #xc8cace
+mod.widgets.HwDisplayText.draw_text.color = #xd0d2d5
+mod.widgets.HwDisplayText.draw_text.text_style = theme.font_regular{font_size: 9.0}
+mod.widgets.HwReadout.draw_text.color = #xe4e5e7
+mod.widgets.HwReadout.draw_text.text_style = theme.font_regular{font_size: 10.0}
+mod.widgets.HwReadout.glow = vec4(1.0, 1.0, 1.0, 0.06)
+
+// Small dark display windows: the progress strip, the equalizer.
+mod.widgets.HwDisplay.radius = 10
+mod.widgets.HwDisplay.depth = -1.5
+mod.widgets.HwDisplay.draw_bg.ground = #x0f1011
+mod.widgets.HwDisplay.draw_bg.light_ink = vec4(0.48, 0.49, 0.51, 1.0)
+mod.widgets.HwDisplay.draw_bg.shadow_ink = vec4(0.0, 0.0, 0.0, 1.0)
+mod.widgets.HwDisplay.draw_bg.relief = vec4(1.5, 0.6, 1.0, 0.15)
+mod.widgets.HwDisplay.draw_bg.inner = vec4(0.85, 7.0, 0.0, 0.40)
+mod.widgets.HwDisplay.draw_bg.spill = vec2(0.9, 0.3)
+
+// Switches: a black track, a graphite puck.
+mod.widgets.HwSegmented.draw_bg.well = vec4(0.06, 0.063, 0.066, 1.0)
+mod.widgets.HwSegmented.draw_bg.rim = vec4(1.0, 1.0, 1.0, 0.06)
+mod.widgets.HwSegmented.draw_pill.cap = vec4(0.25, 0.255, 0.265, 1.0)
+mod.widgets.HwSegmented.draw_pill.glow = vec4(1.0, 0.48, 0.11, 1.0)
+mod.widgets.HwSegmented.draw_text.color = #x7d8086
+mod.widgets.HwSegmented.draw_text_selected.color = #xeeeff0
+
+mod.widgets.HwDropDown.draw_bg.well = vec4(0.055, 0.058, 0.062, 1.0)
+mod.widgets.HwDropDown.draw_bg.rim = vec4(1.0, 1.0, 1.0, 0.05)
+mod.widgets.HwDropDown.draw_bg.arrow = vec4(1.0, 0.48, 0.11, 1.0)
+mod.widgets.HwDropDown.draw_text.color = #xd0d2d5
+mod.widgets.HwTextInput.draw_bg.well = vec4(0.055, 0.058, 0.062, 1.0)
+mod.widgets.HwTextInput.draw_bg.rim = vec4(1.0, 1.0, 1.0, 0.05)
+
+mod.widgets.HwMenuLayer.draw_bg.color = #x1a1b1d
+mod.widgets.HwMenuLayer.draw_bg.border_color = #x323336
+
+mod.widgets.HwArtBlank.draw_bg.label_ink = vec4(1.0, 0.48, 0.11, 1.0)
+
+mod.widgets.HwSplitter.draw_bg.groove = vec4(0.0, 0.0, 0.0, 0.5)
+mod.widgets.HwSplitter.draw_bg.glint = vec4(1.0, 1.0, 1.0, 0.08)
+
+// ---- transport: rounded dark keys in a pill cluster ----
+mod.widgets.HwTransportKey.latch = 1.0
+mod.widgets.HwTransportKey.press_secs = 0.07
+mod.widgets.HwTransportKey.travel = 2.5
+mod.widgets.HwTransportKey.inset = 4.0
+mod.widgets.HwTransportKey.radius = 10
+mod.widgets.HwTransportKey.draw_bg.spill = vec2(1.4, 0.45)
+mod.widgets.HwTransportKey.draw_bg.mech = vec4(0.0, 0.80, 0.0, 0.0)
+mod.widgets.HwTransportKey.draw_bg.dimple = vec4(0.0, 3.0, 0.3, 0.1)
+mod.widgets.HwTransportKey.draw_bg.housing_ink = vec4(0.07, 0.072, 0.076, 1.0)
+mod.widgets.HwTransportKey.draw_bg.front_ink = vec4(0.14, 0.145, 0.15, 1.0)
+mod.widgets.HwTransportLegend.draw_text.color = #xe6e7e9
+mod.widgets.HwTransportLegend.draw_text.color_hover = #xffffff
+mod.widgets.HwTransportLegend.draw_text.color_down = #xff7a1c
+mod.widgets.HwPlayLegend.draw_text.color = #xe6e7e9
+true
+
+// ---- EQ (HwEqGraph: the graphic equalizer's era look, STYLE_GUIDE "Graphic EQ") ----
+mod.widgets.HwEqGraph.draw_fader.fader = vec4(0.0, 0.58, 15.0, 3.5)
+mod.widgets.HwEqGraph.draw_fader.cap_ink = vec4(0.36, 0.37, 0.39, 1.0)
+mod.widgets.HwEqGraph.draw_fader.track_ink = vec4(0.02, 0.02, 0.025, 1.0)
+mod.widgets.HwEqGraph.draw_curve.curve = vec4(0.0, 1.5, 6.0, 0.08)
+mod.widgets.HwEqGraph.draw_grid.grid = vec4(0.0, 0.07, 0.24, 0.0)
+mod.widgets.HwEqGraph.draw_spectrum.spectrum = vec4(0.16, 0.0, 0.3, 0.0)
+true

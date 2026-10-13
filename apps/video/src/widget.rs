@@ -72,7 +72,7 @@ script_mod! {
             icon_walk: Walk{width: 15 height: 15}
             draw_icon +: {
                 svg: crate_resource("self:resources/icons/play.svg")
-                color: mod.mpv.fg
+                color: mod.theme.color_text
             }
         }
         pause_icon: Icon{
@@ -82,7 +82,7 @@ script_mod! {
             icon_walk: Walk{width: 15 height: 15}
             draw_icon +: {
                 svg: crate_resource("self:resources/icons/pause.svg")
-                color: mod.mpv.fg
+                color: mod.theme.color_text
             }
         }
         time_label: Label{
@@ -92,7 +92,7 @@ script_mod! {
             align: Align{x: 0.0 y: 0.5}
             text: "0:00 / 0:00"
             draw_text +: {
-                color: mod.mpv.fg
+                color: mod.theme.color_text
                 text_style: theme.font_code{font_size: 9.0}
             }
         }

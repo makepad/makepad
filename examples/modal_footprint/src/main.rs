@@ -24,7 +24,7 @@
 //! chart, a dock's dragged tab, an engraved score). A 2D pass has one depth
 //! buffer shared by every draw list, so painting the modal later buys it only
 //! a `zbias_step` of z — the band would win the depth test and punch straight
-//! through the dialog. `DrawList2d::begin_overlay_inner` gives every overlay a
+//! through the dialog. `DrawList2d::begin_overlay_reuse / begin_popup_overlay` gives every overlay a
 //! depth floor above that band; `tests/ui.rs` is what holds it to it.
 
 pub use makepad_widgets;

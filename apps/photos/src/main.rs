@@ -104,7 +104,6 @@ impl AppMain for App {
         makepad_widgets::script_mod(vm);
         // Retint the stock widgets from the WM palette so the wall's chrome
         // matches the desk it sits in.
-        makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
         makepad_app_aichat::script_mod(vm);

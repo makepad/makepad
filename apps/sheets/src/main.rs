@@ -31,10 +31,8 @@ script_mod! {
             main_window := Window{
                 window.inner_size: vec2(1320, 840)
                 window.title: "sheets"
-                // The stock window clears to `theme.color_bg_app` as captured
-                // when the widgets module was evaluated — before this app
-                // retinted it — so state the sheet's own ground explicitly.
-                pass +: { clear_color: mod.sheets.bg }
+                // The pass and the sheet share the system theme ground.
+                pass +: { clear_color: mod.theme.color_bg_app }
                 body +: {
                     padding: 0.
                     margin: 0.
@@ -132,9 +130,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         makepad_widgets::script_mod(vm);
-        // Retint the stock widgets from the WM palette, then publish the same
-        // palette as `mod.sheets` for this app's own splash.
-        makepad_wm_theme::apply(vm);
         // The assistant's panel and overlay root, so the window's F10 slot
         // finds `mod.widgets.AiChatOverlay` by name.
         makepad_app_aichat::script_mod(vm);

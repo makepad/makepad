@@ -1,8 +1,8 @@
-//! Pins gpusim render-to-texture: the `CachedView` in this example renders
-//! its children into a child `DrawPass` and composites the resulting texture
-//! back with a quad. When the gpusim rasterizer skips child passes, the
-//! composite samples an empty texture and the whole window comes out one flat
-//! colour — which is exactly what this test refuses to accept.
+//! Pins render-to-texture on the GPU backend: the `CachedView` in this example
+//! renders its children into a child `DrawPass` and composites the resulting
+//! texture back with a quad. When a child pass is skipped, the composite
+//! samples an empty texture and the whole window comes out one flat colour —
+//! which is exactly what this test refuses to accept.
 
 use makepad_test::{makepad_test, Selector, TestApp};
 use makepad_zune_png::makepad_zune_core::bytestream::ZCursor;

@@ -23,7 +23,6 @@ name = "makepad_app_sheets"
 path = "src/lib.rs"
 
 [features]
-dynamic-module = []
 default = ["tweaker", "standalone"]
 # The design overlay (Shift+F10 with the dev overlays on). On for development
 # builds; the Builder's releases build without it (--no-default-features).
@@ -40,7 +39,6 @@ localai = ["makepad-app-aichat?/localai"]
 [dependencies]
 makepad-widgets = { path = "../../widgets", default-features = false, features = ["data"] }
 makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 # The assistant: the F10 overlay in this window, and the bounded sheet tools
 # exposed to it (src/ai.rs).
 makepad-app-aichat = { path = "../aichat", default-features = false, features = ["engine"], optional = true }

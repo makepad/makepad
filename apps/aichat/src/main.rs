@@ -60,7 +60,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         makepad_app_aichat::script_mod(vm);
         self::script_mod(vm)
     }

@@ -1,6 +1,6 @@
 //! image: a dumb picture viewer. `image <path>` opens fit-to-window (a
 //! second `image <path>` shows the picture in the running viewer),
-//! centered on a dark makepad_wm_theme background. `image --preview <path>` sizes
+//! centered on a system theme background. `image --preview <path>` sizes
 //! the window as a small popup instead.
 
 pub use makepad_widgets;
@@ -73,17 +73,12 @@ impl MatchEvent for App {
         // The picture itself arrives as the launch's `Event::AppOpen`.
         let preview = is_preview_launch();
 
-        // A theme.splash background (makepad_wm_theme::apply already retinted
-        // theme.color_bg_app from it, if MAKEPAD_WM_THEME_SPLASH is set); patch the
-        // pass clear color explicitly too so the dark letterbox is right even
-        // if the stock theme default ever drifts.
-        if let Some(bg_hex) = cx.with_vm(makepad_wm_theme::current_for_vm).map(|p| p.hex("background", "#1a1b26")) {
-            if let Some(color) = parse_hex_color(&bg_hex) {
-                let mut window = self.ui.window(cx, ids!(main_window));
-                script_apply_eval!(cx, window, {
-                    pass +: { clear_color: #(color) }
-                });
-            }
+        // The pass uses the same system theme ground as the viewer.
+        if let Some(color) = cx.with_vm(|vm| theme_tokens::color(vm, "color_bg_app")) {
+            let mut window = self.ui.window(cx, ids!(main_window));
+            script_apply_eval!(cx, window, {
+                pass +: { clear_color: #(color) }
+            });
         }
 
         self.preview = PreviewState::new(preview, None);
@@ -175,7 +170,6 @@ impl AppMain for App {
         #[cfg(feature = "tweaker")]
         makepad_widgets_tweaker::link(vm);
         crate::makepad_widgets::script_mod(vm);
-        makepad_wm_theme::apply(vm);
         makepad_app_image::widget::script_mod(vm);
         self::script_mod(vm)
     }
@@ -203,24 +197,4 @@ impl AppMain for App {
 /// `image --preview <path>`: a Quick Look viewer, sized as a popup.
 fn is_preview_launch() -> bool {
     std::env::args().skip(1).any(|arg| arg == "--preview")
-}
-
-/// Parses a `#rrggbb` (or `#rgb`) hex string into a `Vec4f`, alpha 1.0.
-fn parse_hex_color(value: &str) -> Option<Vec4f> {
-    let digits = value.strip_prefix('#').unwrap_or(value);
-    let rgba = match digits.len() {
-        3 => {
-            let mut expanded = String::with_capacity(8);
-            for c in digits.chars() {
-                expanded.push(c);
-                expanded.push(c);
-            }
-            expanded.push_str("ff");
-            u32::from_str_radix(&expanded, 16).ok()?
-        }
-        6 => u32::from_str_radix(digits, 16).ok()?.checked_shl(8)? | 0xff,
-        8 => u32::from_str_radix(digits, 16).ok()?,
-        _ => return None,
-    };
-    Some(Vec4f::from_u32(rgba))
 }

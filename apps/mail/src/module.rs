@@ -9,9 +9,6 @@ pub struct MailModule;
 
 pub static MAIL_MODULE: MailModule = MailModule;
 
-#[cfg(feature = "dynamic-module")]
-makepad_app_module::export_app_module!(MAIL_MODULE);
-
 impl AppModule for MailModule {
     fn id(&self) -> &'static str {
         "mail"
@@ -100,7 +97,7 @@ mod tests {
         let (replies_b, _up_b) = ReplySink::pair();
         let open = MAIL_MODULE.open_schema().empty_open().unwrap();
         let InstanceParts { root: root_a, executor: exec_a, shutdown: shut_a } =
-            cx.with_script_vm_id_trusted(vm_id, |vm| {
+            cx.with_script_vm_id(vm_id, |vm| {
                 MAIL_MODULE.register(vm);
                 let parts = MAIL_MODULE.create(
                     vm,
@@ -117,7 +114,7 @@ mod tests {
             });
         let open_b = MAIL_MODULE.open_schema().empty_open().unwrap();
         let InstanceParts { root: root_b, executor: exec_b, shutdown: shut_b } =
-            cx.with_script_vm_id_trusted(vm_id, |vm| {
+            cx.with_script_vm_id(vm_id, |vm| {
                 MAIL_MODULE.create(
                     vm,
                     open_b,
@@ -141,7 +138,7 @@ mod tests {
             "",
             "independent roots do not share data"
         );
-        cx.with_script_vm_id_trusted(vm_id, |vm| {
+        cx.with_script_vm_id(vm_id, |vm| {
             shut_a(vm);
             shut_b(vm);
         });
