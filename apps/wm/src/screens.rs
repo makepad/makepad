@@ -212,6 +212,10 @@ pub struct ScreenSet {
     /// multi-screen desktop), else 0: the bar then sits in a strip above
     /// the desk and takes nothing from it. See `reserved_top_for`.
     pub bar_top: f64,
+    /// The connector of a stereo headset screen (see `crate::stereo`): a
+    /// screen of the desktop for windows, but no bar sits on it and shell
+    /// surfaces open on the main screen instead.
+    pub headset: Option<String>,
 }
 
 fn contains_rect(outer: LRect, inner: LRect) -> bool {
@@ -248,6 +252,7 @@ fn two_mut<T>(v: &mut [T], a: usize, b: usize) -> (&mut T, &mut T) {
 /// `adopt` shifts its float and desktop-style rects by the screen offset and
 /// fits them inside `area`.
 fn place(src_rect: LRect, dst: &mut ScreenLayout, ws: usize, d: Detached, area: LRect, gap: f64) {
+    dst.layout.ensure_desktop_slot(ws);
     let off = carry_offset(src_rect, dst.rect);
     dst.layout.adopt(ws, d, off, area, gap);
 }
@@ -264,7 +269,13 @@ impl ScreenSet {
             pointer: None,
             spans: Vec::new(),
             bar_top: 0.0,
+            headset: None,
         }
+    }
+
+    /// Live screen `i` is the stereo headset's.
+    pub fn is_headset(&self, i: usize) -> bool {
+        i < self.live_count() && self.headset.as_deref().is_some_and(|h| self.screens[i].name == h)
     }
 
     pub fn active_layout(&self) -> &WmLayout {
@@ -327,6 +338,8 @@ impl ScreenSet {
             return None;
         }
         let i = if i < live { i } else { self.active };
+        // Nothing flat opens on a headset: the main screen takes it.
+        let i = if self.is_headset(i) { self.main } else { i };
         // Below the screen's bar segment, as on one screen.
         self.screens.get(i).map(|s| screen_area_top(s.rect, self.reserved_top_for(i), 0.0, 0.0))
     }
@@ -392,7 +405,7 @@ impl ScreenSet {
     /// the top of every screen), except on a screen a shown span covers,
     /// whose bar segment is hidden under the span's window.
     pub fn reserved_top_for(&self, i: usize) -> f64 {
-        if self.spanned(i).is_some() {
+        if self.spanned(i).is_some() || self.is_headset(i) {
             0.0
         } else {
             self.bar_top
@@ -479,12 +492,12 @@ impl ScreenSet {
         (w.fullscreen == Some(c) && w.fullscreen_mode == FullscreenMode::Fullscreen).then_some((i, ws))
     }
 
-    /// Leave `c`'s true `Fullscreen` (if it holds one).
-    fn drop_fullscreen(&mut self, c: ClientId) {
-        if let Some((i, ws)) = self.fullscreen_at(c) {
-            let w = &mut self.screens[i].layout.workspaces[ws];
-            w.fullscreen = None;
-            w.fullscreen_mode = FullscreenMode::None;
+    /// Leave `c`'s fullscreen space (if it has one): the window goes back
+    /// to its desktop, as it was.
+    fn drop_fullscreen(&mut self, c: ClientId, gap: f64, reserved_bottom: f64, gaps_out: f64) {
+        if let Some((i, _)) = self.fullscreen_at(c) {
+            let area = screen_area_top(self.screens[i].rect, self.bar_top, self.reserved_for(i, reserved_bottom), gaps_out);
+            self.screens[i].layout.leave_fullscreen_space(c, area, gap);
         }
     }
 
@@ -548,19 +561,13 @@ impl ScreenSet {
         self.spans.retain(|s| !displaced.contains(&s.client));
         for other in displaced {
             if other != c {
-                self.drop_fullscreen(other);
+                self.drop_fullscreen(other, gap, reserved_bottom, gaps_out);
             }
         }
         let area = screen_area_top(self.screens[home].rect, self.bar_top, self.reserved_for(home, reserved_bottom), gaps_out);
-        let layout = &mut self.screens[home].layout;
-        if layout.is_float(c) && !layout.desktop.enabled {
-            layout.toggle_float(c, area, gap);
+        if self.screens[home].layout.enter_fullscreen_space(c, area, gap).is_none() {
+            return Err(SpanError::Empty);
         }
-        let Some(ws) = layout.workspace_of(c) else { return Err(SpanError::Empty) };
-        let w = &mut layout.workspaces[ws];
-        w.fullscreen = Some(c);
-        w.fullscreen_mode = FullscreenMode::Fullscreen;
-        w.focus = Some(c);
         self.active = home;
         if self.live_count() >= 2 {
             let names = live[range].iter().map(|s| s.name.clone()).collect();
@@ -569,14 +576,20 @@ impl ScreenSet {
         Ok(())
     }
 
-    /// `c` leaves its span and its true `Fullscreen` (on a single screen
+    /// `c` leaves its span and its fullscreen space (on a single screen
     /// too). True when it had either.
-    pub fn clear_span(&mut self, c: ClientId) -> bool {
+    pub fn clear_span(&mut self, c: ClientId, gap: f64, reserved_bottom: f64, gaps_out: f64) -> bool {
         let had_span = self.spans.iter().any(|s| s.client == c);
         self.spans.retain(|s| s.client != c);
         let had_fullscreen = self.fullscreen_at(c).is_some();
-        self.drop_fullscreen(c);
+        self.drop_fullscreen(c, gap, reserved_bottom, gaps_out);
         had_span || had_fullscreen
+    }
+
+    /// `c` is gone (closed): its span is forgotten. Its fullscreen space went
+    /// with the window (`WmLayout::remove`).
+    pub fn forget_span(&mut self, c: ClientId) {
+        self.spans.retain(|s| s.client != c);
     }
 
     /// `c`'s span, if it has one.
@@ -666,8 +679,8 @@ impl ScreenSet {
     ///   kept as it is (hidden, see `visible`): it continues if the screen
     ///   returns and is dropped when the removal expires;
     /// - a span whose names are no longer all live and adjacent, or whose
-    ///   client is no longer on one of them, is dropped and the client
-    ///   leaves fullscreen (it is a normal window of its layout again);
+    ///   client is no longer on one of them, is dropped; the client keeps
+    ///   its fullscreen space on its own screen;
     /// - with two or more live screens, a true `Fullscreen` without a span
     ///   (one taken on the single desk before a screen appeared) becomes
     ///   a span of its own screen, per workspace like the fullscreen it
@@ -675,7 +688,6 @@ impl ScreenSet {
     /// True when a span was added or removed.
     pub fn normalize_spans(&mut self) -> bool {
         let before = self.spans.clone();
-        let mut dropped = Vec::new();
         let mut kept = Vec::new();
         for mut span in std::mem::take(&mut self.spans) {
             let Some((home, _)) = self.fullscreen_at(span.client) else { continue };
@@ -689,14 +701,9 @@ impl ScreenSet {
             if ok {
                 span.home = home;
                 kept.push(span);
-            } else {
-                dropped.push(span.client);
             }
         }
         self.spans = kept;
-        for c in dropped {
-            self.drop_fullscreen(c);
-        }
         if self.live_count() >= 2 {
             for i in 0..self.live_count() {
                 let layout = &self.screens[i].layout;
@@ -756,6 +763,12 @@ impl ScreenSet {
         let top = self.bar_top;
         let (s, d) = two_mut(&mut self.screens, src, dst);
         let area = screen_area_top(d.rect, top, rb, gaps_out);
+        // A fullscreen space does not travel: its window returns to its
+        // desktop and goes with that.
+        let src_area = screen_area_top(s.rect, top, 0.0, gaps_out);
+        for c in s.layout.spaces.items().iter().filter_map(|sp| sp.fullscreen_client()).collect::<Vec<_>>() {
+            s.layout.leave_fullscreen_space(c, src_area, gap);
+        }
         for ws in 0..=SCRATCHPAD {
             let taken = s.layout.take_workspace_clients(ws);
             if taken.is_empty() {
@@ -905,7 +918,7 @@ impl ScreenSet {
                 Self::set_rect(&mut s, *rect, self.bar_top, rb, gaps_out);
                 self.screens.push(s);
             } else {
-                let mut layout = WmLayout::new();
+                let mut layout = WmLayout::zoned();
                 layout.set_outer(*rect);
                 self.screens.push(ScreenLayout { name: name.clone(), rect: *rect, layout });
                 added.push(self.screens.len() - 1);
@@ -1017,7 +1030,7 @@ impl ScreenSet {
         if to >= live || from >= live || from == to {
             return false;
         }
-        self.clear_span(c);
+        self.clear_span(c, gap, reserved_bottom, gaps_out);
         let rb = self.reserved_for(to, reserved_bottom);
         let top = self.bar_top;
         let (s, d) = two_mut(&mut self.screens, from, to);
@@ -1054,7 +1067,7 @@ impl ScreenSet {
             return None;
         }
         // A spanned window leaves its span (and fullscreen) to move.
-        self.clear_span(c);
+        self.clear_span(c, gap, reserved_bottom, gaps_out);
         let rb = self.reserved_for(to, reserved_bottom);
         let top = self.bar_top;
         let (s, d) = two_mut(&mut self.screens, from, to);
@@ -1082,6 +1095,13 @@ pub fn screens_event_for(tile: LRect, live: &[WmScreen], span: Option<Vec<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layout::go;
+
+    /// Show the space that holds `c`.
+    fn show_space_of(l: &mut WmLayout, c: ClientId) {
+        let i = l.space_of(c).unwrap();
+        l.goto_space(i);
+    }
 
     fn n(s: &str) -> String {
         s.to_string()
@@ -2074,7 +2094,8 @@ mod tests {
         let span = set.span_of(10).unwrap();
         assert_eq!((span.names.clone(), span.home), (names(&["A", "B"]), 1));
         assert!(holds(&set, 10));
-        assert_eq!(set.screens[1].layout.workspaces[0].focus, Some(10));
+        let slot = set.screens[1].layout.workspace_of(10).unwrap();
+        assert_eq!(set.screens[1].layout.workspaces[slot].focus, Some(10));
         assert_eq!(set.active, 1);
         assert_eq!((set.spanned(0), set.spanned(1), set.spanned(2)), (Some(10), Some(10), None));
         assert_eq!(set.span_rects(), vec![(10, LRect::new(0.0, 0.0, 3840.0, 1080.0))]);
@@ -2082,13 +2103,13 @@ mod tests {
         // The client never left its layout.
         assert_eq!(set.screen_of(10), Some(1));
 
-        assert!(set.clear_span(10));
+        assert!(set.clear_span(10, GAP, RB, GO));
         assert_eq!(set.span_of(10), None);
         assert!(!holds(&set, 10));
         assert_eq!((set.spanned(0), set.spanned(1)), (None, None));
         assert_eq!(set.fullscreen_span_of(10), None);
         assert!(set.span_rects().is_empty());
-        assert!(!set.clear_span(10));
+        assert!(!set.clear_span(10, GAP, RB, GO));
     }
 
     #[test]
@@ -2160,17 +2181,17 @@ mod tests {
         assert!(!set.main_fullscreen());
         set.set_span(1, &ScreenSpan::Current, GAP, RB, GO).unwrap();
         assert!(set.main_fullscreen());
-        assert!(set.clear_span(1));
+        assert!(set.clear_span(1, GAP, RB, GO));
         assert!(!set.main_fullscreen());
         // A span from B reaching A.
         set.set_span(10, &ScreenSpan::Screens(names(&["A", "B"])), GAP, RB, GO).unwrap();
         assert!(set.main_fullscreen());
         // Its workspace switched away: not shown, the dock returns.
-        set.screens[1].layout.active = 3;
+        go(&mut set.screens[1].layout, 3);
         assert!(!set.main_fullscreen());
-        set.screens[1].layout.active = 0;
+        show_space_of(&mut set.screens[1].layout, 10);
         assert!(set.main_fullscreen());
-        assert!(set.clear_span(10));
+        assert!(set.clear_span(10, GAP, RB, GO));
         // Maximized on the main screen is not fullscreen.
         let w = set.screens[0].layout.workspace_of(1).unwrap();
         set.screens[0].layout.workspaces[w].fullscreen = Some(1);
@@ -2219,10 +2240,10 @@ mod tests {
     }
 
     #[test]
-    fn a_float_becomes_a_tile_to_span() {
+    fn a_float_keeps_being_a_float_in_its_fullscreen_space() {
         let mut set = two_screens();
         set.set_span(13, &ScreenSpan::All, GAP, RB, GO).unwrap();
-        assert!(!set.screens[1].layout.is_float(13));
+        assert!(set.screens[1].layout.is_float(13));
         assert!(holds(&set, 13));
         assert_eq!(set.spanned(0), Some(13));
     }
@@ -2231,11 +2252,11 @@ mod tests {
     fn spanned_only_while_its_workspace_is_shown() {
         let mut set = three_screens();
         set.set_span(10, &ScreenSpan::Screens(names(&["A", "B"])), GAP, RB, GO).unwrap();
-        set.screens[1].layout.active = 3;
+        go(&mut set.screens[1].layout, 3);
         assert!(set.span_of(10).is_some());
         assert_eq!((set.spanned(0), set.spanned(1)), (None, None));
         assert!(set.span_rects().is_empty());
-        set.screens[1].layout.active = 0;
+        show_space_of(&mut set.screens[1].layout, 10);
         assert_eq!(set.spanned(0), Some(10));
     }
 
@@ -2250,10 +2271,11 @@ mod tests {
         assert_eq!(set.span_of(10), None);
         // ... or maximizing it instead.
         set.set_span(11, &ScreenSpan::Current, GAP, RB, GO).unwrap();
-        set.screens[1].layout.workspaces[0].fullscreen_mode = FullscreenMode::Maximized;
+        let ws = set.screens[1].layout.workspace_of(11).unwrap();
+        set.screens[1].layout.workspaces[ws].fullscreen_mode = FullscreenMode::Maximized;
         assert!(set.normalize_spans());
         assert_eq!(set.span_of(11), None);
-        assert_eq!(set.screens[1].layout.workspaces[0].fullscreen_mode, FullscreenMode::Maximized);
+        assert_eq!(set.screens[1].layout.workspaces[ws].fullscreen_mode, FullscreenMode::Maximized);
     }
 
     #[test]
@@ -2270,12 +2292,13 @@ mod tests {
         // Drawn as B's plain Fullscreen while A is pending: report B only,
         // not the hidden [A, B] span.
         assert_eq!(set.fullscreen_span_of(10), Some(names(&["B"])));
-        // The removal expires: dropped, 10 is a normal tile of B again.
+        // The removal expires: the span is dropped, 10 keeps its fullscreen
+        // space on B alone.
         set.reconcile(&[(n("B"), RB_), (n("C"), RC)], Some("B"), 1.0 + REMOVAL_DEBOUNCE, GAP, RB, GO);
-        assert_eq!(set.span_of(10), None);
-        assert!(!holds(&set, 10));
+        assert_eq!(set.span_of(10).map(|s| s.names.clone()), Some(names(&["B"])));
+        assert!(holds(&set, 10));
         assert_eq!(set.screen_of(10), Some(0));
-        assert_eq!(set.fullscreen_span_of(10), None);
+        assert_eq!(set.fullscreen_span_of(10), Some(names(&["B"])));
         // Its own (home) screen going: kept while pending, dropped on expiry.
         let mut set = three_screens();
         set.set_span(10, &ScreenSpan::Screens(names(&["B", "C"])), GAP, RB, GO).unwrap();
@@ -2326,8 +2349,9 @@ mod tests {
         let rc3 = LRect::new(1920.0, 0.0, 1920.0, 1080.0);
         let ra3 = LRect::new(3840.0, 0.0, 1920.0, 1080.0);
         set.reconcile(&[(n("B"), rb3), (n("C"), rc3), (n("A"), ra3)], Some("A"), 1.0, GAP, RB, GO);
-        assert_eq!(set.span_of(10), None);
-        assert!(!holds(&set, 10));
+        // Only its own screen is left of the span; the fullscreen space stays.
+        assert_eq!(set.span_of(10).map(|s| s.names.len()), Some(1));
+        assert!(holds(&set, 10));
     }
 
     #[test]
@@ -2390,14 +2414,14 @@ mod tests {
         set.set_span(1, &ScreenSpan::Current, GAP, RB, GO).unwrap();
         // A switches to workspace 2 and SUPER+F's a window there: the
         // hidden span keeps its fullscreen.
-        set.screens[0].layout.switch_workspace(2);
+        go(&mut set.screens[0].layout, 2);
         set.screens[0].layout.insert_on(2, 5, aa, GAP);
         assert_eq!(set.spanned(0), None);
         set.set_span(5, &ScreenSpan::Current, GAP, RB, GO).unwrap();
         assert_eq!(set.spanned(0), Some(5));
         assert!(set.span_of(1).is_some() && holds(&set, 1));
-        // Back to workspace 0: the first span shows again.
-        set.screens[0].layout.switch_workspace(0);
+        // Back to its space: the first span shows again.
+        show_space_of(&mut set.screens[0].layout, 1);
         assert_eq!(set.spanned(0), Some(1));
         assert!(holds(&set, 5));
         assert!(!set.normalize_spans());
@@ -2407,24 +2431,24 @@ mod tests {
     fn a_newer_shown_span_wins_an_overlap() {
         let mut set = three_screens();
         let aa = screen_area(RA, RB, GO);
+        go(&mut set.screens[0].layout, 2);
         set.screens[0].layout.insert_on(2, 5, aa, GAP);
-        set.screens[0].layout.switch_workspace(2);
-        // 5 spans A and B from A's workspace 2, then A goes back to 0.
+        // 5 spans A and B from A's third desktop, then A goes back to 0.
         set.set_span(5, &ScreenSpan::Screens(names(&["A", "B"])), GAP, RB, GO).unwrap();
-        set.screens[0].layout.switch_workspace(0);
+        go(&mut set.screens[0].layout, 0);
         // B's own window spans B: 5's span is hidden, so it is kept.
         set.set_span(10, &ScreenSpan::Current, GAP, RB, GO).unwrap();
         assert!(set.span_of(5).is_some() && holds(&set, 5));
-        // A shows workspace 2 again: both are visible on B, the newer wins
+        // A shows 5's space again: both are visible on B, the newer wins
         // and 5 is only its home layout's plain fullscreen on A.
-        set.screens[0].layout.switch_workspace(2);
+        show_space_of(&mut set.screens[0].layout, 5);
         assert_eq!((set.spanned(0), set.spanned(1)), (None, Some(10)));
         assert_eq!(set.span_rects(), vec![(10, RB_)]);
         // 5 is drawn as A's plain Fullscreen, not its hidden [A, B] span:
         // report A only, matching the framebuffer.
         assert_eq!(set.fullscreen_span_of(5), Some(names(&["A"])));
         // The newer span ends: 5 spans both screens again.
-        set.clear_span(10);
+        set.clear_span(10, GAP, RB, GO);
         assert_eq!((set.spanned(0), set.spanned(1)), (Some(5), Some(5)));
     }
 
@@ -2437,7 +2461,7 @@ mod tests {
         assert_eq!(set.span_at(2500.0, 100.0), Some((1, 0)));
         assert_eq!(set.span_at(4000.0, 100.0), None);
         assert_eq!((set.span_home(1), set.span_home(2)), (Some(0), None));
-        set.screens[0].layout.switch_workspace(3);
+        go(&mut set.screens[0].layout, 3);
         assert_eq!(set.span_at(2500.0, 100.0), None);
     }
 
@@ -2501,11 +2525,11 @@ mod tests {
         assert_eq!(set.surface_rect(1), Some(RB_));
         // The span still covers its screens' whole rects.
         assert_eq!(set.span_rects(), vec![(10, LRect::new(0.0, 0.0, 3840.0, 1080.0))]);
-        // Its workspace switched away: B's own layout and bar are back.
-        set.screens[1].layout.switch_workspace(3);
+        // Its space switched away: B's own layout and bar are back.
+        go(&mut set.screens[1].layout, 3);
         assert_eq!((set.reserved_top_for(0), set.reserved_top_for(1)), (26.0, 26.0));
-        set.screens[1].layout.switch_workspace(0);
-        assert!(set.clear_span(10));
+        show_space_of(&mut set.screens[1].layout, 10);
+        assert!(set.clear_span(10, GAP, RB, GO));
         assert_eq!(set.reserved_top_for(0), 26.0);
     }
 }

@@ -18,7 +18,7 @@
 //!    except the hyprland border gradient a theme may name.
 
 use makepad_widgets::*;
-#[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#[cfg(target_os = "linux")]
 use super::system_slider::DrawSystemSlider;
 
 use super::{
@@ -314,11 +314,14 @@ script_mod! {
             globe +: {svg: crate_resource("self:resources/icons/globe.svg")}
             play +: {svg: crate_resource("self:resources/icons/play.svg")}
             shirt +: {svg: crate_resource("self:resources/icons/shirt.svg")}
+            palette +: {svg: crate_resource("self:resources/icons/palette.svg")}
+            chip +: {svg: crate_resource("self:resources/icons/chip.svg")}
             pulse +: {svg: crate_resource("self:resources/icons/pulse.svg")}
             photo +: {svg: crate_resource("self:resources/icons/photo.svg")}
             window_min +: {svg: crate_resource("self:resources/icons/window-min.svg")}
             window_max +: {svg: crate_resource("self:resources/icons/window-max.svg")}
             window_restore +: {svg: crate_resource("self:resources/icons/window-restore.svg")}
+            prompt +: {svg: crate_resource("self:resources/icons/prompt.svg")}
             speaker +: {svg: crate_resource("self:resources/icons/speaker.svg")}
             headphone +: {svg: crate_resource("self:resources/icons/headphone.svg")}
             lock +: {svg: crate_resource("self:resources/icons/lock.svg")}
@@ -423,6 +426,10 @@ pub struct ShellIcons {
     #[live]
     pub shirt: DrawSvg,
     #[live]
+    pub palette: DrawSvg,
+    #[live]
+    pub chip: DrawSvg,
+    #[live]
     pub pulse: DrawSvg,
     #[live]
     pub photo: DrawSvg,
@@ -432,6 +439,8 @@ pub struct ShellIcons {
     pub window_max: DrawSvg,
     #[live]
     pub window_restore: DrawSvg,
+    #[live]
+    pub prompt: DrawSvg,
     #[live]
     pub speaker: DrawSvg,
     #[live]
@@ -452,7 +461,8 @@ pub enum Ico {
     Volume3,
     Mic,
     MicOff,
-    Brightness,
+    /// A sun (the weather launcher entry).
+    Sun,
     Bluetooth,
     BluetoothOff,
     Wifi,
@@ -480,11 +490,17 @@ pub enum Ico {
     Globe,
     Play,
     Shirt,
+    /// The theme button.
+    Palette,
+    /// The AI hub button.
+    Chip,
     Pulse,
     Photo,
     WindowMin,
     WindowMax,
     WindowRestore,
+    /// A command prompt: chevron and block cursor (terminals, coding agents).
+    Prompt,
 }
 
 impl ShellIcons {
@@ -498,7 +514,7 @@ impl ShellIcons {
             Ico::Volume3 => &mut self.volume_3,
             Ico::Mic => &mut self.mic,
             Ico::MicOff => &mut self.mic_off,
-            Ico::Brightness => &mut self.brightness,
+            Ico::Sun => &mut self.brightness,
             Ico::Bluetooth => &mut self.bluetooth,
             Ico::BluetoothOff => &mut self.bluetooth_off,
             Ico::Wifi => &mut self.wifi,
@@ -523,11 +539,14 @@ impl ShellIcons {
             Ico::Globe => &mut self.globe,
             Ico::Play => &mut self.play,
             Ico::Shirt => &mut self.shirt,
+            Ico::Palette => &mut self.palette,
+            Ico::Chip => &mut self.chip,
             Ico::Pulse => &mut self.pulse,
             Ico::Photo => &mut self.photo,
             Ico::WindowMin => &mut self.window_min,
             Ico::WindowMax => &mut self.window_max,
             Ico::WindowRestore => &mut self.window_restore,
+            Ico::Prompt => &mut self.prompt,
             Ico::Speaker => &mut self.speaker,
             Ico::Headphone => &mut self.headphone,
             Ico::Lock => &mut self.lock,
@@ -546,7 +565,7 @@ pub enum HAlign {
 /// The kit — see the module note. One of these per surface widget.
 #[derive(Script, ScriptHook)]
 pub struct ShellDraw {
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     #[live]
     system_slider: DrawSystemSlider,
     #[live]
@@ -1048,7 +1067,7 @@ impl ShellDraw {
     }
 
     /// The VJ horizontal fader: rounded track, accent fill, inset cap.
-    #[cfg(all(target_os = "linux", not(target_env = "ohos")))]
+    #[cfg(target_os = "linux")]
     pub fn system_slider(&mut self, cx: &mut Cx2d, r: Rect, tok: &ShellTokens, progress: f64, enabled: bool, hot: bool) {
         self.system_slider.track_color = alpha(tok.popups.text, 0.18);
         self.system_slider.fill_color = tok.bar.active;

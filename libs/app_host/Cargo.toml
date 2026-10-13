@@ -1,0 +1,25 @@
+# makepad-app-host -- host one makepad app child that runs with --stdin-loop.
+#
+# The part of the window manager that is not window management: the
+# localhost websocket hub the children connect to, the swapchain / tick /
+# input protocol with one child (HostedApp), the child launch environment
+# and process-group kill, and the widget-snapshot round trip. The WM's tile
+# widget and Stage's app layer are both thin owners of a HostedApp.
+
+[package]
+name = "makepad-app-host"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[lib]
+name = "makepad_app_host"
+path = "src/lib.rs"
+
+[dependencies]
+makepad-platform = { path = "../../platform" }
+makepad-studio-protocol = { path = "../../platform/studio" }
+makepad-network = { path = "../../platform/network" }
+makepad-error-log = { path = "../error_log" }
+makepad-app-registry = { path = "../app_registry" }

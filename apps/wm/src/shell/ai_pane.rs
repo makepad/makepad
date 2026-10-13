@@ -27,8 +27,10 @@
 //! finishes behind a hidden one.
 
 use crate::desk::ease_out_quint;
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 use crate::run_view::MpRunView;
+use crate::domain_view::MpDomainView;
+use crate::tile::TileHost;
 use makepad_widgets::makepad_script::script_eval;
 use makepad_widgets::makepad_script::trap::NoTrap;
 use makepad_widgets::*;
@@ -153,7 +155,7 @@ impl ShellAiPane {
         }
         let overlay = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let ty = vm.bx.heap.value_path(widgets, ids!(AiChatOverlay), NoTrap);
+            let ty = vm.heap().value_path(widgets, ids!(AiChatOverlay), NoTrap);
             if ty.as_object().is_none() {
                 return None;
             }
@@ -174,6 +176,25 @@ impl ShellAiPane {
                 false
             }
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_domain_client(&mut self, cx: &mut Cx, client: ClientId) {
+        let overlay = cx.with_vm(|vm| {
+            let value = script_eval!(vm, { use mod.widgets.* MpDomainView {} });
+            WidgetRef::script_from_value(vm, value)
+        });
+        if let Some(mut view) = overlay.borrow_mut::<MpDomainView>() { view.set_client(client); }
+        cx.widget_tree_insert_child(self.widget_uid(), live_id!(overlay), overlay.clone());
+        self.overlay = Some(overlay);
+        self.client = Some(client);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_domain_view<R>(&mut self, cx: &mut Cx,
+        f: impl FnOnce(&mut Cx, &mut MpDomainView) -> R) -> Option<R> {
+        let mut view = self.overlay.as_ref()?.borrow_mut::<MpDomainView>()?;
+        Some(f(cx, &mut view))
     }
 
     pub fn client(&self) -> Option<ClientId> {
@@ -239,6 +260,7 @@ impl ShellAiPane {
             // reaching the chat behind nothing.
             self.focus_pending = false;
             if self.overlay.is_some() {
+                if let Some(mut view) = self.overlay.as_ref().and_then(|o| o.borrow_mut::<MpDomainView>()) { view.release_keyboard(cx); }
                 cx.set_key_focus(Area::Empty);
             } else {
                 self.with_run_view(cx, |cx, v| v.release_keyboard(cx));
@@ -252,6 +274,9 @@ impl ShellAiPane {
         self.client = None;
         self.with_run_view(cx, |cx, v| v.clear_run_target(cx));
         self.set_open(cx, false);
+        if self.overlay.as_ref().is_some_and(|o| o.borrow_mut::<MpDomainView>().is_some()) {
+            self.overlay = None;
+        }
     }
 
     /// Advance the slide; true while it still moves.
@@ -283,6 +308,9 @@ impl ShellAiPane {
     /// the pane's next draw, when the area is live again.
     pub fn focus_keyboard(&mut self, cx: &mut Cx) {
         let ok = match &self.overlay {
+            Some(overlay) if overlay.borrow_mut::<MpDomainView>().is_some() => {
+                overlay.borrow_mut::<MpDomainView>().unwrap().focus_keyboard(cx)
+            }
             Some(overlay) => {
                 let input = overlay.text_input(cx, ids!(panel.input));
                 let live = input.area().is_valid(cx);

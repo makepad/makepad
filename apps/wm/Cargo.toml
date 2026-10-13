@@ -48,20 +48,24 @@ makepad-studio-protocol = { path = "../../platform/studio" }
 makepad-network = { path = "../../platform/network" }
 makepad-wm-api = { path = "../../libs/wm_api" }
 makepad-app-registry = { path = "../../libs/app_registry" }
+makepad-app-host = { path = "../../libs/app_host" }
 # The AI services wire only: the WM relays frames between the aichat child and the apps.
 makepad-ai-services = { path = "../../libs/ai/services" }
 makepad-strict-json = { path = "../../libs/strict_json" }
+makepad-ai-hub = { path = "../../libs/ai/hub", default-features = false }
 # In-process hosting (aicontrol §3): the module contract and the palette
 # applied into each instance's isolate. Which modules a build links is the
 # binary's say (src/build.rs), never a feature of this crate.
 makepad-app-module = { path = "../../libs/app_module" }
-makepad-wm-theme = { path = "../../libs/wm_theme" }
 makepad-civil-time = { path = "../../libs/civil_time" }
-# The super-app provisions its shipped toolchain, checkout and target/ and
-# rebuilds the host proc-macros under their recorded SVHs (the packer is
-# cargo-makepad's dyn-pack).
-makepad-ondevice-build = { path = "../../libs/ondevice_build" }
+# The headset IMU reader (src/headset_imu.rs) inflates the tracker board's
+# zlib config JSON.
+makepad-fast-inflate = { path = "../../libs/fast_inflate" }
 
-# dlopen for on-demand app dylibs (src/dylib_host.rs): native only.
+# Foreign Wayland windows (src/wayland_host): the WM serves the protocol itself.
+[target.'cfg(target_os = "linux")'.dependencies]
+makepad-wayland-server = { path = "../../libs/wayland_server" }
+makepad-xkb-keymap = { path = "../../libs/xkb_keymap" }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-libloading = { path = "../../libs/vulkan/libloading" }
+makepad-hal = { path = "../../platform/hal" }

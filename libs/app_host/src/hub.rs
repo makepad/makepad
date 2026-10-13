@@ -1,17 +1,24 @@
 //! The in-process client hub: the slice of studio's gateway
-//! (studio/hub/src/gateway.rs) a compositor needs. A localhost websocket
+//! (studio/hub/src/gateway.rs) a host needs. A localhost websocket
 //! accepts `--stdin-loop` Makepad children at `/app?build=<id>` and
-//! forwards their binary `AppToStudio` traffic to the UI thread; the WM
+//! forwards their binary `AppToStudio` traffic to the UI thread; the host
 //! answers over the per-socket sender with `StudioToAppVec` frames.
+//!
+//! A child states the wire it speaks when it connects (`wire=<hex>`, the
+//! fingerprint `makepad_studio_protocol::WIRE` of the sources it was built
+//! from). A child that states another one, or none (built before children
+//! stated it), is not admitted: its socket is closed and the host hears
+//! [`HubEvent::Mismatch`] -- its messages would be decoded as something
+//! else, and it would hang in its first steps.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use makepad_network::http_server::{start_http_server, HttpServer, HttpServerRequest};
-use makepad_studio_protocol::{AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec};
-use makepad_widgets::makepad_micro_serde::{DeBin, SerBin};
-use makepad_widgets::makepad_platform::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
+use makepad_studio_protocol::{AppToStudio, AppToStudioVec, StudioToApp, StudioToAppVec, WIRE};
+use makepad_platform::makepad_micro_serde::{DeBin, SerBin};
+use makepad_platform::thread::{SignalToUI, ThreadOptions, ThreadSpawner};
 
 pub type ClientId = u64;
 
@@ -25,20 +32,26 @@ pub enum HubEvent {
     Disconnected {
         socket: u64,
     },
+    /// A child built from other protocol sources connected (`wire`: what it
+    /// stated, None: nothing). It was not admitted.
+    Mismatch {
+        client: ClientId,
+        wire: Option<u64>,
+    },
     FromApp {
         client: ClientId,
         msgs: Vec<AppToStudio>,
     },
 }
 
-pub struct WmHub {
+pub struct AppHub {
     pub port: u16,
     pub rx: Receiver<HubEvent>,
 }
 
-impl WmHub {
+impl AppHub {
     /// Bind the first free port in a small range and start serving.
-    pub fn start(spawner: ThreadSpawner) -> Option<WmHub> {
+    pub fn start(spawner: ThreadSpawner) -> Option<AppHub> {
         for port in 8765..8785u16 {
             if let Some(hub) = Self::start_on(port, &spawner) {
                 return Some(hub);
@@ -47,10 +60,10 @@ impl WmHub {
         None
     }
 
-    fn start_on(port: u16, spawner: &ThreadSpawner) -> Option<WmHub> {
+    fn start_on(port: u16, spawner: &ThreadSpawner) -> Option<AppHub> {
         let addr: SocketAddr = format!("127.0.0.1:{}", port).parse().ok()?;
         // The http server's bind failure only prints; probe the port first
-        // so a WM instance still holding it (or any other service) makes
+        // so a host instance still holding it (or any other service) makes
         // us move on to the next one instead of hosting nothing.
         match std::net::TcpListener::bind(addr) {
             Ok(probe) => drop(probe),
@@ -72,7 +85,7 @@ impl WmHub {
         let worker = spawner
             .spawn_worker(
                 ThreadOptions {
-                    name: Some("wm-hub".into()),
+                    name: Some("app-hub".into()),
                     ..Default::default()
                 },
                 move || {
@@ -92,10 +105,19 @@ impl WmHub {
                             } else {
                                 headers.path.clone()
                             };
-                            let Some(client) = parse_app_path(&path) else {
-                                // Not a client socket: close it.
-                                let _ = response_sender.send(Vec::new());
-                                continue;
+                            let client = match admit(&path) {
+                                Some(Ok(client)) => client,
+                                Some(Err(mismatch)) => {
+                                    let _ = response_sender.send(Vec::new());
+                                    let _ = event_tx.send(mismatch);
+                                    SignalToUI::set_ui_signal();
+                                    continue;
+                                }
+                                None => {
+                                    // Not a client socket: close it.
+                                    let _ = response_sender.send(Vec::new());
+                                    continue;
+                                }
                             };
                             socket_client.insert(web_socket_id, client);
                             let _ = event_tx.send(HubEvent::Connected {
@@ -140,7 +162,7 @@ impl WmHub {
             .ok()?;
         worker.detach();
 
-        Some(WmHub {
+        Some(AppHub {
             port,
             rx: event_rx,
         })
@@ -155,25 +177,33 @@ pub fn send_to_app(sender: &Sender<Vec<u8>>, msgs: Vec<StudioToApp>) {
     let _ = sender.send(StudioToAppVec(msgs).serialize_bin());
 }
 
-/// `/app/<id>` and `/app?build=<id>[&crate=..]`, like studio's gateway.
-fn parse_app_path(path: &str) -> Option<ClientId> {
-    if let Some(rest) = path.strip_prefix("/app/") {
+/// Whether a socket at `path` is a child this host talks to: its client,
+/// or the [`HubEvent::Mismatch`] of a child built from other protocol
+/// sources; None: not a child's socket.
+fn admit(path: &str) -> Option<Result<ClientId, HubEvent>> {
+    let (client, wire) = parse_app_path(path)?;
+    Some(if wire == Some(WIRE) { Ok(client) } else { Err(HubEvent::Mismatch { client, wire }) })
+}
+
+/// `/app/<id>` and `/app?build=<id>[&crate=..][&wire=<hex>]`, like
+/// studio's gateway: the client, and the wire it states.
+fn parse_app_path(path: &str) -> Option<(ClientId, Option<u64>)> {
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    let value = |name: &str| query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+        (key == name).then(|| value.trim())
+    });
+    let wire = value("wire").and_then(|hex| u64::from_str_radix(hex, 16).ok());
+    if let Some(rest) = route.strip_prefix("/app/") {
         if rest.is_empty() || rest.contains('/') {
             return None;
         }
-        return rest.parse::<u64>().ok();
+        return Some((rest.parse::<u64>().ok()?, wire));
     }
-    let (route, query) = path.split_once('?').unwrap_or((path, ""));
     if route != "/app" {
         return None;
     }
-    for pair in query.split('&') {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if key == "build" {
-            return value.trim().parse::<u64>().ok();
-        }
-    }
-    None
+    Some((value("build")?.parse::<u64>().ok()?, wire))
 }
 
 #[cfg(test)]
@@ -182,10 +212,25 @@ mod tests {
 
     #[test]
     fn app_paths() {
-        assert_eq!(parse_app_path("/app/42"), Some(42));
-        assert_eq!(parse_app_path("/app?build=7&crate=terminal"), Some(7));
+        assert_eq!(parse_app_path("/app/42"), Some((42, None)));
+        assert_eq!(parse_app_path("/app?build=7&crate=terminal"), Some((7, None)));
+        assert_eq!(parse_app_path("/app?build=7&crate=terminal&wire=00000000000000ff"), Some((7, Some(255))));
+        assert_eq!(parse_app_path("/app/42?wire=1f"), Some((42, Some(31))));
+        assert_eq!(parse_app_path("/app?build=7&wire=nothex"), Some((7, None)));
         assert_eq!(parse_app_path("/app?crate=terminal"), None);
         assert_eq!(parse_app_path("/ui"), None);
         assert_eq!(parse_app_path("/app/x"), None);
+    }
+
+    /// Fake children connecting: one built from these sources, one that
+    /// states another wire, one from before children stated it.
+    #[test]
+    fn only_a_child_of_this_wire_is_admitted() {
+        let ours = format!("/app?build=3&crate=makepad-example-calculator&wire={WIRE:016x}");
+        assert!(matches!(admit(&ours), Some(Ok(3))));
+        let other = format!("/app?build=4&crate=makepad-example-calculator&wire={:016x}", WIRE ^ 1);
+        assert!(matches!(admit(&other), Some(Err(HubEvent::Mismatch { client: 4, wire: Some(w) })) if w == WIRE ^ 1));
+        assert!(matches!(admit("/app?build=5&crate=makepad-example-calculator"), Some(Err(HubEvent::Mismatch { client: 5, wire: None }))));
+        assert!(admit("/ui").is_none());
     }
 }

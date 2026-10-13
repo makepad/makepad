@@ -2,14 +2,19 @@
 //! read by the WM (its menu and launch table), Builder and Stage (an app run
 //! names its app by registry id).
 //!
-//! The table is compiled in (build.rs), so `apps()` is a static slice and
-//! the lookups never allocate. The rest of the crate answers the checkout
+//! The table is embedded (`apps.json`, read at first use by table.rs), so
+//! `apps()` is a static slice and the lookups never allocate. The rest of the crate answers the checkout
 //! questions every reader asks, the one way the WM always answered them:
 //! where the sources are (a developer's clone, or the snapshot a Makepad
 //! Builder downloaded), whether an app's release binary is there, and the
 //! command that builds it (in a Builder installation: the Builder's own).
 //!
 //! Notes the JSON cannot carry:
+//! - code is the local coding agent: a chat window over the AI Hub's model
+//!   that reads, searches, edits and runs in a chosen folder, with diffs
+//!   and approvals.
+//! - amp is the music player over the music systems installed on the
+//!   machine (Spotify, local files) with MilkDrop visuals.
 //! - photos is the picture wall over a baked library; finance the ledger
 //!   (accounts, imports, charts over its own database); fabric makes sewing
 //!   patterns from a body measurement (camera, body model, PDF/SVG).
@@ -18,9 +23,9 @@
 //!   they open through Files and previews, not the menu.
 //! - aichat is the assistant the WM seats in its pane slot, never a menu
 //!   row or a tile; splash and counter are the WM's pacing/protocol rigs.
-//! - scope, stage and amp come from the optional private checkout of
+//! - scope and stage come from the optional private checkout of
 //!   makepad/commercial at apps/commercial (Scope at scope/, Stage's app at
-//!   stage/app, Amp at stage/apps/amp, or a Builder's slice of it holding
+//!   stage/app, or a Builder's slice of it holding
 //!   only the licensed app): present, they are members of this workspace and
 //!   build into its target/; absent, `is_available` is false and the WM
 //!   drops the row.
@@ -71,9 +76,15 @@ pub struct AppEntry {
     /// `--no-default-features --features <these>`; `build_argv` builds
     /// with the package's default features).
     pub features: &'static [&'static str],
+    /// Runs on a phone: starts, draws and is usable by touch at phone size (checked on the Pixel).
+    /// The phone WM's home, drawer and app lists offer only these; the desktop ignores it.
+    pub mobile: bool,
 }
 
-include!(concat!(env!("OUT_DIR"), "/apps.rs"));
+mod table;
+mod launch;
+
+pub use launch::{cargo_progress, launch_argv, read_output, AppLaunch, BuildPolicy, LaunchEvent, ProcessOutput};
 
 impl AppEntry {
     /// What the checkout helpers need to know about it.
@@ -93,20 +104,20 @@ pub struct AppTarget<'a> {
     pub manifest: Option<&'a str>,
 }
 
-/// Every app: the menu rows first, in menu order (build.rs enforces it),
+/// Every app: the menu rows first, in menu order (table.rs enforces it),
 /// then the hidden ones.
 pub fn apps() -> &'static [AppEntry] {
-    APPS
+    table::apps()
 }
 
 /// The app with registry id `id`.
 pub fn find(id: &str) -> Option<&'static AppEntry> {
-    APPS.iter().find(|entry| entry.id == id)
+    table::apps().iter().find(|entry| entry.id == id)
 }
 
 /// The app whose binary is `bin` (file associations name binaries).
 pub fn find_by_bin(bin: &str) -> Option<&'static AppEntry> {
-    APPS.iter().find(|entry| entry.bin == bin)
+    table::apps().iter().find(|entry| entry.bin == bin)
 }
 
 // ----------------------------------------------------------------------
@@ -151,7 +162,7 @@ pub struct BuilderInstall {
 impl BuilderInstall {
     /// The Builder's command that builds one app offline.
     pub fn command(&self) -> Option<PathBuf> {
-        let command = if cfg!(windows) { self.home.join("makepad-builder.exe") } else { self.home.join("makepad") };
+        let command = if cfg!(windows) { self.home.join("makepad-builder.exe") } else { self.home.join("makepad-builder.sh") };
         command.is_file().then_some(command)
     }
     /// Where the Builder publishes `bin`.
@@ -203,20 +214,14 @@ pub fn builder_install() -> Option<BuilderInstall> {
     None
 }
 
-/// The nearest directory at or above `start` (four levels at most) that is
-/// a makepad checkout: the workspace `Cargo.toml` with the WM's crate in
-/// it. A developer's clone and the source a Makepad Builder downloaded
-/// (which starts its apps in it, with its compiler environment) both are;
-/// the Builder's has no `local/`.
+/// The nearest directory at or above `start` that is a makepad checkout: the
+/// workspace `Cargo.toml` with the WM's crate in it. Every ancestor is
+/// checked (crates sit as deep as apps/commercial/stage/libs/app_run). A
+/// developer's clone and the source a Makepad Builder downloaded (which
+/// starts its apps in it, with its compiler environment) both are; the
+/// Builder's has no `local/`.
 pub fn checkout_at_or_above(start: &Path) -> Option<PathBuf> {
-    let mut dir = start.to_path_buf();
-    for _ in 0..5 {
-        if dir.join("Cargo.toml").exists() && dir.join("apps/wm/Cargo.toml").exists() {
-            return Some(dir);
-        }
-        dir = dir.parent()?.to_path_buf();
-    }
-    None
+    start.ancestors().find(|dir| dir.join("Cargo.toml").exists() && dir.join("apps/wm/Cargo.toml").exists()).map(Path::to_path_buf)
 }
 
 /// The manifest that holds `app`'s package, relative to the checkout root.
@@ -258,19 +263,20 @@ pub fn installed_binary(bin: &str) -> Option<PathBuf> {
 }
 
 /// The binary that starts `app` without compiling anything: the Builder's
-/// published one in a Builder installation, the checkout's release build
-/// out of a checkout (`root`), else an installed sibling. None: not built.
+/// published one in a Builder installation, else a sibling of the running
+/// executable, else the checkout's release build (`root`). None: not built.
 pub fn built_binary(app: &AppTarget, root: Option<&Path>) -> Option<PathBuf> {
     if let Some(install) = builder_install() {
         return Some(install.published(app.bin)).filter(|path| path.is_file());
     }
-    match root {
-        Some(root) => {
-            let target_dir = std::env::var_os("CARGO_TARGET_DIR");
-            Some(checkout_binary(app, root, target_dir.as_deref())).filter(|path| path.is_file())
-        }
-        None => installed_binary(app.bin),
+    // Beside the running executable first: whatever target directory this
+    // build used, its sibling binaries are right there.
+    if let Some(path) = installed_binary(app.bin) {
+        return Some(path);
     }
+    let root = root?;
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR");
+    Some(checkout_binary(app, root, target_dir.as_deref())).filter(|path| path.is_file())
 }
 
 /// The cargo to launch with: the one running us, else the rustup default
@@ -294,7 +300,7 @@ pub fn cargo_bin() -> PathBuf {
 /// keeps it independent of the cwd. In a Builder installation the Builder
 /// builds it — the same command, flags, features and target as its own
 /// builds, so nothing it compiled compiles again (`makepad-builder build
-/// APP`, Unix `makepad build APP`).
+/// APP`, Unix `makepad-builder.sh build APP`).
 pub fn build_argv(app: &AppTarget, root: &Path) -> (PathBuf, Vec<String>) {
     if let Some(command) = builder_install().and_then(|install| install.command()) {
         return (command, vec!["build".to_string(), app.id.to_string()]);
@@ -433,7 +439,7 @@ mod tests {
             let target = entry.target();
             let manifest = root.join(package_manifest(&target));
             if !manifest.is_file() {
-                // The optional commercial checkout (scope, stage, amp) and absent apps.
+                // The optional commercial checkout (scope, stage) and absent apps.
                 assert!(!has_sources(&target, &root), "{} claims to be available", entry.id);
                 continue;
             }
@@ -469,9 +475,9 @@ mod tests {
         assert!(stage.menu_visible && stage.wm_launchable);
         let amp = find("amp").unwrap();
         assert!(amp.menu_visible && amp.wm_launchable);
-        assert_eq!(find_by_bin("makepad-amp").unwrap().id, "amp");
+        assert_eq!(find_by_bin("makepad-app-amp").unwrap().id, "amp");
         // The commercial repository's apps sit in its checkout inside Makepad.
-        for id in ["scope", "stage", "amp"] {
+        for id in ["scope", "stage"] {
             assert!(find(id).unwrap().target().dir.starts_with("apps/commercial/"), "{id}");
         }
     }
@@ -481,7 +487,6 @@ mod tests {
         let root = std::env::temp_dir().join(format!("app-registry-absent-{}", std::process::id()));
         assert!(!has_sources(&find("stage").unwrap().target(), &root));
         assert!(!has_sources(&find("scope").unwrap().target(), &root));
-        assert!(!has_sources(&find("amp").unwrap().target(), &root));
     }
 
     #[test]

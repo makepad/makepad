@@ -14,6 +14,8 @@
 //! render-on 0000:01:00.0 10de:2b85
 //! screen 0000:00:02.0 HDMI-A-2 mode=3840x2160@30
 //! screen 0000:01:00.0 HDMI-A-1 main
+//! mirror 0000:01:00.0 HDMI-A-1
+//! pace screen 0000:01:00.0 HDMI-A-1
 //! ```
 //!
 //! Lines are whitespace-separated tokens. `#` starts a comment; blank
@@ -27,7 +29,11 @@
 //! `mode_string_is_valid` does (`vulkan_linux.rs`, not public there, so
 //! mirrored below); `render-on` has exactly `validate_gpu_choice`'s shape
 //! (`<pci-address> <vendor>:<device>`). A duplicate screen key keeps its
-//! first occurrence's position and flags.
+//! first occurrence's position and flags. `mirror <pci> <connector>`
+//! (absent: the extended desktop) shows one desktop on every screen, sized
+//! for that screen. Only kept (confirmed) changes are ever written.
+//! `pace slowest|fastest|screen <pci> <connector>` (absent: auto) is
+//! the screen whose refresh paces the desktop's frames.
 //!
 //! `display-layout` supersedes the older `display-source` and
 //! `display-gpu` files; [`DisplayLayout::migrate`] reads them once to
@@ -36,7 +42,7 @@
 //! # Applying the saved layout before start-up
 //!
 //! The renderer reads its environment before `Event::Startup`
-//! (`platform/src/os/linux/vulkan_linux.rs::new_direct`), so the WM
+//! (`platform/hal/src/backend/linux/direct/render.rs`), so the WM
 //! cannot apply this file to its own process in time by calling into
 //! itself. A session script run before the WM binary is exec'd
 //! (`tools/linux/display-layout-env.sh`) turns the file into
@@ -68,9 +74,9 @@
 //! Compiled for Linux only (the inner `cfg` below makes the module empty
 //! elsewhere), so no other platform's behaviour changes.
 
-#![cfg(all(target_os = "linux", not(target_env = "ohos")))]
+#![cfg(target_os = "linux")]
 
-use makepad_widgets::makepad_platform::linux_display::{LinuxDisplayOutput, LinuxDisplaySnapshot};
+use makepad_widgets::makepad_platform::linux_display::{DisplayArrangement, DisplayPacing, LinuxDisplayOutput, LinuxDisplaySnapshot};
 use makepad_widgets::makepad_platform::linux_wide_desktop::parse_mode_overrides;
 
 use super::system_linux::validate_gpu_choice;
@@ -108,6 +114,19 @@ pub struct ScreenEntry {
 pub struct DisplayLayout {
     pub render_on: Option<String>,
     pub screens: Vec<ScreenEntry>,
+    /// Mirror, sized for this screen; `None` is the extended desktop.
+    pub mirror: Option<ScreenKey>,
+    pub pace: SavedPace,
+}
+
+/// The saved Pace by choice.
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
+pub enum SavedPace {
+    #[default]
+    Auto,
+    Slowest,
+    Fastest,
+    Screen(ScreenKey),
 }
 
 impl DisplayLayout {
@@ -119,6 +138,8 @@ impl DisplayLayout {
     /// or `render-on` value is dropped, leaving that field unset.
     pub fn parse(text: &str) -> DisplayLayout {
         let mut render_on = None;
+        let mut mirror = None;
+        let mut pace = None;
         let mut screens: Vec<ScreenEntry> = Vec::new();
         let mut main_seen = false;
         for raw_line in text.lines() {
@@ -139,6 +160,25 @@ impl DisplayLayout {
                     if validate_gpu_choice(&value).is_ok() {
                         render_on = Some(value);
                     }
+                }
+                "mirror" => {
+                    if let (None, Some(pci), Some(connector)) = (&mirror, tokens.next(), tokens.next()) {
+                        mirror = Some(ScreenKey { pci: pci.to_string(), connector: connector.to_string() });
+                    }
+                }
+                "pace" => {
+                    if pace.is_some() {
+                        continue;
+                    }
+                    pace = match (tokens.next(), tokens.next(), tokens.next()) {
+                        (Some("auto"), None, None) => Some(SavedPace::Auto),
+                        (Some("slowest"), None, None) => Some(SavedPace::Slowest),
+                        (Some("fastest"), None, None) => Some(SavedPace::Fastest),
+                        (Some("screen"), Some(pci), Some(connector)) => {
+                            Some(SavedPace::Screen(ScreenKey { pci: pci.to_string(), connector: connector.to_string() }))
+                        }
+                        _ => None,
+                    };
                 }
                 "screen" => {
                     let Some(pci) = tokens.next() else { continue };
@@ -171,7 +211,7 @@ impl DisplayLayout {
                 _ => {}
             }
         }
-        DisplayLayout { render_on, screens }
+        DisplayLayout { render_on, screens, mirror, pace: pace.unwrap_or_default() }
     }
 
     /// Serializes back to the file's text. Round-trips through
@@ -203,6 +243,25 @@ impl DisplayLayout {
             }
             out.push('\n');
         }
+        if let Some(key) = &self.mirror {
+            out.push_str("mirror ");
+            out.push_str(&key.pci);
+            out.push(' ');
+            out.push_str(&key.connector);
+            out.push('\n');
+        }
+        match &self.pace {
+            SavedPace::Auto => {}
+            SavedPace::Slowest => out.push_str("pace slowest\n"),
+            SavedPace::Fastest => out.push_str("pace fastest\n"),
+            SavedPace::Screen(key) => {
+                out.push_str("pace screen ");
+                out.push_str(&key.pci);
+                out.push(' ');
+                out.push_str(&key.connector);
+                out.push('\n');
+            }
+        }
         out
     }
 
@@ -225,7 +284,31 @@ impl DisplayLayout {
                 })
             })
             .collect();
-        DisplayLayout { render_on, screens }
+        DisplayLayout { render_on, screens, mirror: None, pace: SavedPace::Auto }
+    }
+
+    /// The saved arrangement against this boot's snapshot: mirror for the
+    /// saved screen while it is connected, else the extended desktop.
+    pub fn arrangement(&self, snap: &LinuxDisplaySnapshot) -> DisplayArrangement {
+        self.mirror
+            .as_ref()
+            .and_then(|key| snap.outputs.iter().find(|output| screen_key(output).as_ref() == Some(key)))
+            .map_or(DisplayArrangement::Extended, |output| DisplayArrangement::Mirror { optimise_for: output.name.clone() })
+    }
+
+    /// The saved pacing against this boot's snapshot: a saved screen that
+    /// is not connected is Auto.
+    pub fn pacing(&self, snap: &LinuxDisplaySnapshot) -> DisplayPacing {
+        match &self.pace {
+            SavedPace::Auto => DisplayPacing::Auto,
+            SavedPace::Slowest => DisplayPacing::Slowest,
+            SavedPace::Fastest => DisplayPacing::Fastest,
+            SavedPace::Screen(key) => snap
+                .outputs
+                .iter()
+                .find(|output| screen_key(output).as_ref() == Some(key))
+                .map_or(DisplayPacing::Auto, |output| DisplayPacing::Screen(output.name.clone())),
+        }
     }
 
     /// Each saved screen that resolves against this boot's snapshot (its
@@ -344,7 +427,7 @@ impl DisplayLayout {
         }
         let render_on =
             display_gpu.and_then(|gpu| validate_gpu_choice(gpu).ok().map(str::to_string));
-        DisplayLayout { render_on, screens }
+        DisplayLayout { render_on, screens, mirror: None, pace: SavedPace::Auto }
     }
 }
 
@@ -405,6 +488,8 @@ impl DisplayLayout {
             }
         } else {
             self.screens = loaded.screens.clone();
+            self.mirror = loaded.mirror.clone();
+            self.pace = loaded.pace.clone();
         }
         if !render_on_edited {
             self.render_on = loaded.render_on.clone();
@@ -492,7 +577,7 @@ pub fn screens_span_gpus(snap: &LinuxDisplaySnapshot) -> bool {
 
 /// One step of bringing the running desktop in line with the saved
 /// layout: the `Cx::linux_set_display_*` call it stands for.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum RestoreOp {
     /// `linux_set_display_order` with these this-boot names.
     Order(Vec<String>),
@@ -500,6 +585,11 @@ pub enum RestoreOp {
     Mode(String, Option<String>),
     /// `linux_set_display_source(name)`: make it the main screen.
     Main(String),
+    /// `linux_set_display_arrangement`: the saved mirror, or back to the
+    /// extended desktop.
+    Arrangement(DisplayArrangement),
+    /// `linux_set_display_pacing`: the saved Pace by choice.
+    Pacing(DisplayPacing),
 }
 
 /// What the running desktop still needs to match `layout`, as order, then
@@ -528,8 +618,25 @@ pub enum RestoreOp {
 ///   `primary`.
 pub fn restore_plan(layout: &DisplayLayout, snap: &LinuxDisplaySnapshot) -> Vec<RestoreOp> {
     let mut ops = Vec::new();
+    let arrangement = layout.arrangement(snap);
+    if snap.arrangement != arrangement {
+        ops.push(RestoreOp::Arrangement(arrangement.clone()));
+    }
+    let pacing = layout.pacing(snap);
+    if snap.pacing != pacing {
+        ops.push(RestoreOp::Pacing(pacing));
+    }
     let resolved = layout.resolve(snap);
     if resolved.is_empty() {
+        return ops;
+    }
+    if arrangement != DisplayArrangement::Extended {
+        // One desktop on every screen: no order, each screen at its best.
+        if let Some(main) = layout.main_name(snap) {
+            if snap.outputs.iter().any(|output| output.name == main && !output.primary) {
+                ops.push(RestoreOp::Main(main));
+            }
+        }
         return ops;
     }
     let output_named =
@@ -591,7 +698,7 @@ pub fn env_restore_plan(plan: Vec<RestoreOp>, order_env: Option<&str>, modes_env
         .filter(|op| match op {
             RestoreOp::Order(_) => !order_pinned,
             RestoreOp::Mode(name, _) => !mode_pinned.contains(name),
-            RestoreOp::Main(_) => true,
+            RestoreOp::Main(_) | RestoreOp::Arrangement(_) | RestoreOp::Pacing(_) => true,
         })
         .collect()
 }
@@ -683,10 +790,8 @@ fn split_card_prefix(name: &str) -> Option<(&str, &str)> {
 
 /// Whether `mode` is `WxH`, `WxH@Hz` or `WxH-Hz` with digits only — the
 /// forms `MAKEPAD_DRM_MODE`, `MAKEPAD_DRM_MODES` and
-/// `direct_request_display_mode` accept. Mirrors the platform's
-/// `mode_string_is_valid` (`platform/src/os/linux/vulkan_linux.rs`), which
-/// is private and `cfg(linux_direct)`-gated, so it is not reachable from
-/// here.
+/// the HAL direct shell accepts. Mirrors its private `mode_string_is_valid`
+/// (`platform/hal/src/backend/linux/direct/kms.rs`).
 fn mode_string_is_valid(mode: &str) -> bool {
     let digits = |s: &str| !s.is_empty() && s.bytes().all(|byte| byte.is_ascii_digit());
     let resolution = match mode.split_once('@').or_else(|| mode.split_once('-')) {
@@ -721,7 +826,7 @@ mod tests {
     }
 
     fn snapshot(outputs: Vec<LinuxDisplayOutput>) -> LinuxDisplaySnapshot {
-        LinuxDisplaySnapshot { direct: true, outputs }
+        LinuxDisplaySnapshot { direct: true, outputs, ..Default::default() }
     }
 
     #[test]
@@ -740,9 +845,43 @@ mod tests {
                     mode: None,
                 },
             ],
+            mirror: Some(ScreenKey { pci: "0000:01:00.0".to_string(), connector: "HDMI-A-1".to_string() }),
+            pace: SavedPace::Screen(ScreenKey { pci: "0000:00:02.0".to_string(), connector: "HDMI-A-2".to_string() }),
         };
         let text = layout.serialize();
+        assert!(text.contains("\nmirror 0000:01:00.0 HDMI-A-1\n"), "{text}");
         assert_eq!(DisplayLayout::parse(&text), layout);
+        assert!(text.contains("\npace screen 0000:00:02.0 HDMI-A-2\n"), "{text}");
+        let extended = DisplayLayout { mirror: None, pace: SavedPace::Auto, ..layout };
+        assert!(!extended.serialize().contains("mirror") && !extended.serialize().contains("pace"));
+        assert_eq!(DisplayLayout::parse(&extended.serialize()), extended);
+        for (line, pace) in [("pace slowest", SavedPace::Slowest), ("pace fastest", SavedPace::Fastest), ("pace auto", SavedPace::Auto), ("pace bogus", SavedPace::Auto)] {
+            assert_eq!(DisplayLayout::parse(line).pace, pace, "{line}");
+        }
+    }
+
+    #[test]
+    fn saved_mirror_is_restored_and_skips_the_order() {
+        let layout = DisplayLayout::parse(
+            "screen 0000:00:02.0 eDP-1 main\nscreen 0000:01:00.0 HDMI-A-2\nmirror 0000:01:00.0 HDMI-A-2\n",
+        );
+        let edp = LinuxDisplayOutput {
+            name: "card0-eDP-1".into(), pci: Some("0000:00:02.0".into()), desktop_position: Some((2560, 0)),
+            primary: true, active: true, ..Default::default()
+        };
+        let hdmi = LinuxDisplayOutput {
+            name: "card1-HDMI-A-2".into(), pci: Some("0000:01:00.0".into()), desktop_position: Some((0, 0)),
+            active: true, ..Default::default()
+        };
+        let mut snap = snapshot(vec![edp, hdmi]);
+        let mirror = DisplayArrangement::Mirror { optimise_for: "card1-HDMI-A-2".into() };
+        assert_eq!(layout.arrangement(&snap), mirror);
+        assert_eq!(restore_plan(&layout, &snap), vec![RestoreOp::Arrangement(mirror.clone())]);
+        snap.arrangement = mirror;
+        assert!(restore_plan(&layout, &snap).is_empty());
+        // The mirrored screen is not connected: the extended desktop.
+        snap.outputs.pop();
+        assert_eq!(layout.arrangement(&snap), DisplayArrangement::Extended);
     }
 
     #[test]
@@ -1138,7 +1277,7 @@ mod tests {
 
     #[test]
     fn merge_loaded_takes_untouched_parts_from_the_read() {
-        let mut working = DisplayLayout { render_on: Some("0000:01:00.0 10de:2b85".to_string()), screens: vec![] };
+        let mut working = DisplayLayout { render_on: Some("0000:01:00.0 10de:2b85".to_string()), screens: vec![], mirror: None, pace: SavedPace::Auto };
         let loaded = DisplayLayout::parse("render-on 0000:00:02.0 8086:a780\nscreen 0000:00:02.0 HDMI-A-2 main\n");
         working.merge_loaded(&loaded, false, true);
         assert_eq!(working.render_on, Some("0000:01:00.0 10de:2b85".to_string()));

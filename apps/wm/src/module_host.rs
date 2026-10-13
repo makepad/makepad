@@ -3,7 +3,7 @@
 //! processes.
 //!
 //! Creating one: allocate the isolate (the widget universe is installed
-//! by the allocation itself), retint its stock theme from the WM palette,
+//! by the allocation itself), install the WM's system theme sheet,
 //! let the module register its own families, and call `create` — all
 //! inside ONE trusted entry into the isolate, so the module never holds a
 //! second `&mut Cx` beside the VM. The root comes back minted in that
@@ -18,7 +18,7 @@
 //! native layers, HTTP requests the instance opened through the platform
 //! — is the InstanceScope gap the next phase closes.
 
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 use makepad_ai_services::wire::{ServiceCall, ServiceManifest};
 use makepad_app_module::*;
 use makepad_widgets::*;
@@ -79,21 +79,24 @@ impl ModuleHost {
         let storage = cx.storage(&format!("{}.{}", module.id(), instance_no));
         let (replies, upstream) = ReplySink::pair();
         let handles = InstanceHandles { scope, storage, viewport: Viewport { size: viewport }, replies };
-        let vm_id = cx.alloc_splash_vm_with_network(false);
-        let parts = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        // With the WM's system theme sheet the isolate registers its library once, styled, as for
+        // a child process (not the stock library first and the sheet's over it).
+        let vm_id = match self.style.clone() {
+            Some(sheet) => cx.alloc_splash_vm_with_ui(false, Box::new(move |vm: &mut ScriptVm| {
+                desktop_style::install(vm, sheet);
+                makepad_widgets::theme_mod(vm);
+                makepad_widgets::isolate_widgets_mod(vm);
+                desktop_style::apply_widgets(vm);
+            })),
+            None => cx.alloc_splash_vm_with_network(false),
+        };
+        let parts = cx.with_script_vm_id(vm_id, |vm| {
             // The isolate allocation strips `mod.res` — right for an
             // untrusted mini-app, wrong for a trusted native module whose
             // own widget families, and the desktop styles' fonts and icons
             // (`crate_resource("self:...")` in the iOS and Android
             // themes), load through it. Back in before anything evaluates.
             makepad_widgets::makepad_platform::script::res::script_mod(vm);
-            // The isolate came up with the stock theme; the WM's palette
-            // retints it exactly as it retints a child process's.
-            if let Some(sheet)=&self.style {
-                desktop_style::install(vm,sheet.clone());
-                vm.with_reload(|vm| { makepad_widgets::widgets_mod(vm); desktop_style::apply_widgets(vm); });
-            }
-            makepad_wm_theme::apply(vm);
             module.register(vm);
             module.create(vm, open, handles)
         });
@@ -125,15 +128,14 @@ impl ModuleHost {
     pub fn apply_style(&mut self,cx:&mut Cx,sheet:&desktop_style::StyleSheet) {
         self.style=Some(sheet.clone());
         for instance in self.instances.values_mut() {
-            cx.with_script_vm_id_trusted(instance.vm_id,|vm| {
+            cx.with_script_vm_id(instance.vm_id,|vm| {
                 desktop_style::install(vm,sheet.clone());
                 vm.with_reload(|vm| {
                     makepad_widgets::widgets_mod(vm);
                     desktop_style::apply_widgets(vm);
-                    makepad_wm_theme::apply(vm);
                     instance.module.register(vm);
                 });
-                let source=instance.root.widget_type_id().and_then(|ty|vm.bx.heap.type_default_for_id(ty)).unwrap_or_else(||instance.root.script_source());
+                let source=instance.root.widget_type_id().and_then(|ty|vm.heap().type_default_for_id(ty)).unwrap_or_else(||instance.root.script_source());
                 instance.root.script_apply(vm,&Apply::ScriptReapply,&mut Scope::empty(),source.into());
             });
             instance.root.redraw(cx);
@@ -220,7 +222,7 @@ impl ModuleHost {
             // the isolate is freed either way.
             let vm_id = instance.vm_id;
             let ended = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                cx.with_script_vm_id_trusted(vm_id, |vm| shutdown(vm))
+                cx.with_script_vm_id(vm_id, |vm| shutdown(vm))
             }));
             if ended.is_err() {
                 error!("wm: module instance {}.{} panicked in shutdown; freeing its isolate anyway", instance.module.id(), instance.instance_no);
@@ -252,7 +254,7 @@ mod tests {
             makepad_widgets::script_mod(vm);
             crate::shell::ui::script_mod(vm);
         });
-        let main = cx.with_vm(|vm| vm.bx.heap.heap_key());
+        let main = cx.with_vm(|vm| vm.heap_key());
         let wm_icon = "apps/wm/resources/icons/menu.svg".replace('/', std::path::MAIN_SEPARATOR_STR);
         let (path, handle) = {
             let resources = cx.script_data.resources.resources.borrow();
@@ -265,11 +267,11 @@ mod tests {
         // A fresh isolate: the widgets' iOS theme registers the widgets
         // crate's own fonts and icons, none of them under apps/wm.
         let vm_id = cx.alloc_splash_vm_with_network(false);
-        let isolate = cx.with_script_vm_id_trusted(vm_id, |vm| {
+        let isolate = cx.with_script_vm_id(vm_id, |vm| {
             makepad_widgets::makepad_platform::script::res::script_mod(vm);
             desktop_style::install(vm, desktop_style::StyleSheet::load(desktop_style::DesktopStyle::Ios.sheet(false)));
             vm.with_reload(makepad_widgets::widgets_mod);
-            vm.bx.heap.heap_key()
+            vm.heap_key()
         });
         assert_ne!(isolate, main);
         let resources = cx.script_data.resources.resources.borrow();

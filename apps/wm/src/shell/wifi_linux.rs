@@ -68,6 +68,9 @@ use makepad_widgets::makepad_platform::thread::{
 };
 use makepad_widgets::*;
 
+use super::hotspot_linux::{self as hotspot, HotspotView, IwdFacts};
+use super::qr::Qr;
+
 // ======================================================================
 // libc — only what the worker needs, declared here (no libc crate)
 // ======================================================================
@@ -346,6 +349,8 @@ const IFACE_STATION: &CStr = c"net.connman.iwd.Station";
 const IFACE_NETWORK: &CStr = c"net.connman.iwd.Network";
 const IFACE_KNOWN_NETWORK: &CStr = c"net.connman.iwd.KnownNetwork";
 const IFACE_DEVICE: &CStr = c"net.connman.iwd.Device";
+const IFACE_ACCESS_POINT: &CStr = c"net.connman.iwd.AccessPoint";
+const IFACE_ADAPTER: &CStr = c"net.connman.iwd.Adapter";
 const IFACE_AGENT: &str = "net.connman.iwd.Agent";
 /// Our credential agent's object path on our own connection.
 const AGENT_PATH: &CStr = c"/org/makepad/wm/iwd_agent";
@@ -356,6 +361,10 @@ const CONNECT_TIMEOUT_US: u64 = 120_000_000;
 /// iwd emits a burst of `PropertiesChanged` around a scan or a connect;
 /// one refresh per burst.
 const REFRESH_DEBOUNCE_SECS: f64 = 0.15;
+/// How often the hotspot's client list is re-read while it is up.
+const HOTSPOT_CLIENT_SECS: f64 = 3.0;
+/// iwd calls that change the device's mode wait on the driver.
+const HOTSPOT_TIMEOUT_US: u64 = 15_000_000;
 /// DHCP lands after iwd says "connected": re-read the addresses a few
 /// times after a state change instead of polling forever.
 const ADDRESS_FOLLOWUPS_SECS: [f64; 3] = [1.5, 4.0, 10.0];
@@ -420,6 +429,7 @@ enum DbusValue {
     U64(u64),
     U8(u8),
     Paths(Vec<String>),
+    Strs(Vec<String>),
     Other,
 }
 
@@ -428,6 +438,13 @@ type Props = Vec<(String, DbusValue)>;
 fn prop_str(props: &Props, key: &str) -> Option<String> {
     props.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
         DbusValue::Str(s) | DbusValue::Path(s) => Some(s.clone()),
+        _ => None,
+    })
+}
+
+fn prop_strs(props: &Props, key: &str) -> Option<Vec<String>> {
+    props.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+        DbusValue::Strs(s) => Some(s.clone()),
         _ => None,
     })
 }
@@ -617,6 +634,16 @@ impl Msg {
                     self.exit()?;
                 }
                 DbusValue::Paths(paths)
+            }
+            "as" => {
+                let mut strs = Vec::new();
+                if self.enter(b'a', c"s")? {
+                    while !self.at_end()? {
+                        strs.push(self.read_str(b's')?);
+                    }
+                    self.exit()?;
+                }
+                DbusValue::Strs(strs)
             }
             _ => {
                 self.skip()?;
@@ -942,9 +969,47 @@ pub struct WifiSnapshot {
     pub addresses: Vec<IfAddr>,
     /// Our credential agent is registered: password prompts will work.
     pub agent: bool,
+    /// The hotspot section (shell/hotspot_linux.rs).
+    pub hotspot: HotspotView,
 }
 
 impl WifiSnapshot {
+    /// The gallery's fixture (`wm --gallery` shows every surface with fixture
+    /// data, like `PanelData::fixture`): the hotspot running with two
+    /// devices on it. Nothing here talks to iwd.
+    pub fn fixture() -> Self {
+        WifiSnapshot {
+            radio: RadioState::On,
+            device: Some("wlan0".into()),
+            addresses: vec![IfAddr {
+                name: "wlan0".into(),
+                wireless: true,
+                ipv4: hotspot::ADDRESS.into(),
+            }],
+            agent: true,
+            hotspot: HotspotView {
+                capability: hotspot::Capability::Available,
+                ap_mode: true,
+                started: true,
+                ssid: "makepad-arch149".into(),
+                passphrase: Some("harbor-pencil-garden-maple".into()),
+                ip: Some(hotspot::ADDRESS.into()),
+                clients: vec![
+                    hotspot::Client {
+                        ip: "192.168.77.12".into(),
+                        mac: "6a:2f:91:0c:d4:e7".into(),
+                    },
+                    hotspot::Client {
+                        ip: "192.168.77.19".into(),
+                        mac: "f2:5b:08:77:3a:c1".into(),
+                    },
+                ],
+                previous: Some("Home 5G".into()),
+            },
+            ..Default::default()
+        }
+    }
+
     pub fn connected_name(&self) -> Option<&str> {
         let path = self.connected.as_deref()?;
         self.networks
@@ -987,6 +1052,10 @@ pub enum WifiCommand {
     /// Abandon the connect in flight: its passphrase is dropped, iwd is
     /// told to stop, and its later outcome is not reported.
     CancelConnect,
+    /// Hotspot on or off (the panel has already asked the user).
+    HotspotSet(bool),
+    /// A new hotspot passphrase, applied to the running access point.
+    HotspotRegenerate,
 }
 
 /// UI → worker, over the bounded channel.
@@ -1000,6 +1069,8 @@ pub enum WorkerCommand {
     Forget { known: String },
     SetPowered(bool),
     CancelConnect,
+    HotspotSet(bool),
+    HotspotRegenerate,
 }
 
 impl WorkerCommand {
@@ -1446,6 +1517,17 @@ struct Worker {
     /// A connect asked for while another was still in iwd's hands: starts
     /// once that one has been aborted and has answered.
     queued_connect: Option<(String, Option<Secret>)>,
+    /// The hotspot's files; an error when no config directory resolves.
+    hotspot_store: Result<hotspot::Store, String>,
+    /// The stored passphrase, read once.
+    hotspot_passphrase: Option<String>,
+    /// After the hotspot: the network to rejoin and the time to give up.
+    restore: Option<(String, f64)>,
+    /// Next look at the neighbour table while the hotspot is up.
+    clients_due: Option<f64>,
+    /// networkd has a file that addresses the AP interface, and when that
+    /// was last looked at.
+    addressing: Option<(f64, bool)>,
 }
 
 /// Load sd-bus, open the system bus, install the signal matches and the
@@ -1515,6 +1597,11 @@ pub(crate) fn run_worker(rx: Receiver<WorkerCommand>, tx: Sender<WifiEvent>, wak
                 next_async_id: 1,
                 active_connect: None,
                 queued_connect: None,
+                hotspot_store: hotspot::Store::default_dir().map(hotspot::Store::at),
+                hotspot_passphrase: None,
+                restore: None,
+                clients_due: None,
+                addressing: None,
             };
             let result = worker.run();
             worker.shutdown();
@@ -1703,6 +1790,9 @@ impl Worker {
                 self.address_followups.remove(0);
                 self.refresh_addresses();
             }
+            if self.clients_due.is_some_and(|t| now >= t) {
+                self.poll_clients();
+            }
             match self.rx.try_recv() {
                 Ok(cmd) => {
                     if self.shared.stop.load(Ordering::Acquire) { return Ok(()); }
@@ -1747,6 +1837,7 @@ impl Worker {
             .refresh_due
             .into_iter()
             .chain(self.address_followups.first().copied())
+            .chain(self.clients_due)
         {
             let ms = ((deadline - now).max(0.0) * 1000.0).ceil() as c_int;
             timeout_ms = if timeout_ms < 0 { ms } else { timeout_ms.min(ms) };
@@ -1940,6 +2031,12 @@ impl Worker {
             }
         }
         self.snapshot.agent = self.agent_registered;
+        self.clients_due = self
+            .snapshot
+            .hotspot
+            .ap_mode
+            .then(|| now_secs() + HOTSPOT_CLIENT_SECS);
+        self.continue_restore();
         if was_scanning && !self.snapshot.scanning {
             self.send(WifiEvent::ScanDone { error: None });
         }
@@ -1973,6 +2070,7 @@ impl Worker {
         let Some(dev) = device else {
             self.device = None;
             snap.addresses = sample_addresses(None);
+            snap.hotspot = self.hotspot_view(&IwdFacts::default(), None);
             return Ok(snap);
         };
         let dev_props = dev.iface(IFACE_DEVICE).cloned().unwrap_or_default();
@@ -2042,6 +2140,13 @@ impl Worker {
             snap.networks = networks;
         }
         snap.addresses = sample_addresses(snap.device.as_deref());
+        let adapter = prop_str(&dev_props, "Adapter").and_then(|ap| objects.iter().find(|o| o.path == ap));
+        let facts = iwd_facts(dev, adapter);
+        snap.hotspot = self.hotspot_view(&facts, snap.device.as_deref());
+        if snap.hotspot.ap_mode {
+            let device = snap.device.clone().unwrap_or_default();
+            snap.hotspot.ip = snap.addresses.iter().find(|a| a.name == device).map(|a| a.ipv4.clone());
+        }
         Ok(snap)
     }
 
@@ -2057,6 +2162,9 @@ impl Worker {
             WorkerCommand::Forget { known } => self.forget(&known),
             WorkerCommand::SetPowered(on) => self.set_powered(on),
             WorkerCommand::CancelConnect => self.cancel_connect(),
+            WorkerCommand::HotspotSet(true) => self.hotspot_enable(),
+            WorkerCommand::HotspotSet(false) => self.hotspot_disable(),
+            WorkerCommand::HotspotRegenerate => self.hotspot_regenerate(),
         }
     }
 
@@ -2233,6 +2341,292 @@ impl Worker {
     }
 }
 
+// ======================================================================
+// Hotspot (the logic is in hotspot_linux.rs; these are the bus calls)
+// ======================================================================
+
+impl Worker {
+    /// The section's reading for this refresh. Creates the passphrase the
+    /// first time the hotspot could be offered.
+    fn hotspot_view(&mut self, facts: &IwdFacts, device: Option<&str>) -> HotspotView {
+        let now = now_secs();
+        let ready = match self.addressing {
+            Some((at, ready)) if now - at < 5.0 => ready,
+            _ => {
+                let ready = hotspot::read_network_files().iter().any(|t| hotspot::networkd_enables_ap(t));
+                self.addressing = Some((now, ready));
+                ready
+            }
+        };
+        let mut capability = hotspot::decide(&hotspot::CapabilityInput {
+            unavailable: None,
+            device_present: facts.device_present,
+            supported_modes: facts.supported_modes.as_deref(),
+            addressing_ready: ready,
+        });
+        if let (hotspot::Capability::Available, Err(why)) = (&capability, &self.hotspot_store) {
+            capability = hotspot::Capability::Unsupported(why.clone());
+        }
+        let mut view = HotspotView {
+            capability,
+            ap_mode: facts.ap_mode(),
+            started: facts.started(),
+            ssid: hotspot::ssid_for_host(&hotspot::host_name()),
+            ..Default::default()
+        };
+        if view.capability == hotspot::Capability::Available || view.ap_mode {
+            view.passphrase = self.hotspot_passphrase();
+        }
+        if let Ok(store) = &self.hotspot_store {
+            view.previous = store.previous_network();
+        }
+        if view.ap_mode {
+            view.clients = device.map(read_clients).unwrap_or_default();
+        }
+        view
+    }
+
+    /// The stored passphrase, created on first use. A broken store is
+    /// reported once and leaves the section without one.
+    fn hotspot_passphrase(&mut self) -> Option<String> {
+        if self.hotspot_passphrase.is_some() {
+            return self.hotspot_passphrase.clone();
+        }
+        let store = self.hotspot_store.as_ref().ok()?;
+        match store.load_or_create(&mut hotspot::system_random) {
+            Ok(p) => {
+                self.hotspot_passphrase = Some(p.clone());
+                Some(p)
+            }
+            Err(e) => {
+                log!("wm: wifi: {e}");
+                None
+            }
+        }
+    }
+
+    fn poll_clients(&mut self) {
+        self.clients_due = None;
+        if !self.snapshot.hotspot.ap_mode {
+            return;
+        }
+        self.clients_due = Some(now_secs() + HOTSPOT_CLIENT_SECS);
+        let clients = self.snapshot.device.as_deref().map(read_clients).unwrap_or_default();
+        if clients != self.snapshot.hotspot.clients {
+            self.snapshot.hotspot.clients = clients;
+            self.send(WifiEvent::Snapshot(self.snapshot.clone()));
+        }
+    }
+
+    fn set_device_mode(&self, dev: &str, mode: &CStr) -> Result<(), BusErr> {
+        self.iwd_method(dev, IFACE_PROPERTIES, c"Set")
+            .and_then(|m| {
+                m.append_str(b's', IFACE_DEVICE)?;
+                m.append_str(b's', c"Mode")?;
+                m.open(b'v', c"s")?;
+                m.append_str(b's', mode)?;
+                m.close()?;
+                self.call(m, HOTSPOT_TIMEOUT_US)
+            })
+            .map(|_| ())
+    }
+
+    /// `AccessPoint.Start(ssid, psk)`; the interface can take a moment to
+    /// appear after the mode change.
+    fn start_access_point(&self, dev: &str, ssid: &str, psk: &str) -> Result<(), BusErr> {
+        let (ssid, psk) = (cstring(ssid)?, cstring(psk)?);
+        let mut last = None;
+        for _ in 0..8 {
+            let r = self.iwd_method(dev, IFACE_ACCESS_POINT, c"Start").and_then(|m| {
+                m.append_str(b's', &ssid)?;
+                m.append_str(b's', &psk)?;
+                self.call(m, HOTSPOT_TIMEOUT_US)
+            });
+            match r {
+                Ok(_) => return Ok(()),
+                Err(e) if matches!(e.suffix(), "UnknownObject" | "UnknownMethod" | "UnknownInterface" | "NotFound") => {
+                    last = Some(e);
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last.unwrap_or(BusErr::Sys(110)))
+    }
+
+    fn stop_access_point(&self, dev: &str) {
+        let r = self
+            .iwd_method(dev, IFACE_ACCESS_POINT, c"Stop")
+            .and_then(|m| self.call(m, HOTSPOT_TIMEOUT_US));
+        if let Err(e) = r {
+            // Not started, or the interface is already gone: nothing to stop.
+            log!("wm: wifi: AccessPoint.Stop: {e}");
+        }
+    }
+
+    /// Hotspot on: REPLACES the Wi-Fi connection (see hotspot_linux.rs).
+    /// The connected network's name is stored first so turning the hotspot
+    /// off can put it back, even from another session.
+    fn hotspot_enable(&mut self) {
+        let view = self.snapshot.hotspot.clone();
+        if let hotspot::Capability::Unsupported(why) = &view.capability {
+            self.notice(format!("Hotspot unavailable: {why}"), true);
+            return;
+        }
+        let Some(dev) = self.device.clone() else {
+            self.notice("No Wi-Fi device", true);
+            return;
+        };
+        if view.ap_mode {
+            self.schedule_refresh(0.0);
+            return;
+        }
+        let Some(psk) = self.hotspot_passphrase() else {
+            self.notice("The hotspot passphrase could not be read or created (see the log)", true);
+            return;
+        };
+        let previous = self.snapshot.connected_name().map(str::to_string);
+        if let Ok(store) = &self.hotspot_store {
+            if let Err(e) = store.save_previous(previous.as_deref()) {
+                self.notice(e, true);
+                return;
+            }
+        }
+        self.abandon_connect();
+        self.queued_connect = None;
+        self.restore = None;
+        if let Err(e) = self.set_device_mode(&dev, c"ap") {
+            self.notice(format!("Could not switch the Wi-Fi adapter to access-point mode: {e}"), true);
+            self.schedule_refresh(0.0);
+            return;
+        }
+        if let Err(e) = self.start_access_point(&dev, &view.ssid, &psk) {
+            self.notice(format!("Could not start the hotspot: {e}"), true);
+            // Back to a station, and back to the network we left.
+            let _ = self.set_device_mode(&dev, c"station");
+            self.restore = previous.map(|n| (n, now_secs() + hotspot::RESTORE_SECS));
+            self.schedule_refresh(0.5);
+            return;
+        }
+        let now = now_secs();
+        self.address_followups = ADDRESS_FOLLOWUPS_SECS.iter().map(|s| now + s).collect();
+        self.schedule_refresh(0.3);
+    }
+
+    /// Hotspot off: stop the access point, make the device a station
+    /// again, and rejoin the network the hotspot replaced.
+    fn hotspot_disable(&mut self) {
+        let Some(dev) = self.device.clone() else {
+            self.notice("No Wi-Fi device", true);
+            return;
+        };
+        if self.snapshot.hotspot.started {
+            self.stop_access_point(&dev);
+        }
+        if let Err(e) = self.set_device_mode(&dev, c"station") {
+            self.notice(format!("Could not switch the Wi-Fi adapter back to station mode: {e}"), true);
+            self.schedule_refresh(0.0);
+            return;
+        }
+        let previous = self.hotspot_store.as_ref().ok().and_then(|s| s.previous_network());
+        self.restore = previous.map(|n| (n, now_secs() + hotspot::RESTORE_SECS));
+        let now = now_secs();
+        self.address_followups = ADDRESS_FOLLOWUPS_SECS.iter().map(|s| now + s).collect();
+        self.schedule_refresh(0.5);
+    }
+
+    /// A new passphrase: stored first, then (when the access point is up)
+    /// the access point is restarted with it. Devices that were joined are
+    /// dropped by the restart.
+    fn hotspot_regenerate(&mut self) {
+        let new = match &self.hotspot_store {
+            Ok(store) => store.regenerate(&mut hotspot::system_random),
+            Err(e) => Err(e.clone()),
+        };
+        let new = match new {
+            Ok(p) => p,
+            Err(e) => {
+                self.notice(e, true);
+                return;
+            }
+        };
+        self.hotspot_passphrase = Some(new.clone());
+        self.snapshot.hotspot.passphrase = Some(new.clone());
+        if self.snapshot.hotspot.ap_mode {
+            if let Some(dev) = self.device.clone() {
+                self.stop_access_point(&dev);
+                if let Err(e) = self.start_access_point(&dev, &self.snapshot.hotspot.ssid.clone(), &new) {
+                    self.notice(format!("The new password is saved, but the hotspot did not restart: {e}"), true);
+                }
+            }
+        }
+        self.send(WifiEvent::Snapshot(self.snapshot.clone()));
+        self.schedule_refresh(0.3);
+    }
+
+    /// One look at the rejoin after the hotspot, run on every refresh.
+    fn continue_restore(&mut self) {
+        let Some((want, deadline)) = self.restore.clone() else {
+            return;
+        };
+        if self.snapshot.hotspot.ap_mode {
+            return;
+        }
+        let done = |this: &mut Self| {
+            this.restore = None;
+            if let Ok(store) = &this.hotspot_store {
+                let _ = store.clear_previous();
+            }
+        };
+        let nets: Vec<(&str, bool)> = self
+            .snapshot
+            .networks
+            .iter()
+            .map(|n| (n.name.as_str(), n.connected))
+            .collect();
+        let joining = matches!(self.snapshot.state, StationState::Connecting | StationState::Roaming)
+            || self.connect_in_flight();
+        match hotspot::restore_step(&want, &nets, joining) {
+            hotspot::RestoreStep::Done => done(self),
+            hotspot::RestoreStep::Connect(i) => {
+                let path = self.snapshot.networks[i].path.clone();
+                done(self);
+                self.start_connect(path, None);
+            }
+            hotspot::RestoreStep::Wait if now_secs() > deadline => {
+                done(self);
+                self.notice(format!("Could not rejoin {want}; pick it from the list"), true);
+            }
+            hotspot::RestoreStep::Wait => {
+                if self.snapshot.networks.is_empty() && !self.snapshot.scanning && self.snapshot.radio == RadioState::On {
+                    self.scan();
+                }
+                self.schedule_refresh(2.0);
+            }
+        }
+    }
+}
+
+/// The devices on the hotspot interface, from the kernel's neighbour table.
+fn read_clients(device: &str) -> Vec<hotspot::Client> {
+    std::fs::read_to_string("/proc/net/arp")
+        .map(|t| hotspot::parse_arp(&t, device))
+        .unwrap_or_default()
+}
+
+/// What the hotspot needs from the device and adapter objects.
+fn iwd_facts(device: &DbusObject, adapter: Option<&DbusObject>) -> IwdFacts {
+    let dev_props = device.iface(IFACE_DEVICE);
+    IwdFacts {
+        device_present: dev_props.is_some(),
+        mode: dev_props.and_then(|p| prop_str(p, "Mode")),
+        ap_started: device.iface(IFACE_ACCESS_POINT).and_then(|p| prop_bool(p, "Started")),
+        supported_modes: adapter
+            .and_then(|a| a.iface(IFACE_ADAPTER))
+            .and_then(|p| prop_strs(p, "SupportedModes")),
+    }
+}
+
 /// iwd's error names, read as a person would.
 fn friendly_connect_error(e: &BusErr, had_secret: bool) -> (String, bool) {
     let text = match e.suffix() {
@@ -2271,6 +2665,17 @@ pub enum WifiHit {
     Disconnect,
     Forget,
     Dismiss,
+    HotspotToggle,
+    HotspotRegenerate,
+    HotspotConfirm,
+    HotspotCancel,
+}
+
+/// A hotspot action waiting for the user's yes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HotspotAsk {
+    Enable,
+    Regenerate,
 }
 
 /// The password prompt for one network.
@@ -2310,6 +2715,9 @@ pub enum KeyOutcome {
 /// iwd never reports a scan.
 const SCAN_UI_TIMEOUT_SECS: f64 = 12.0;
 
+/// A hotspot switch that never shows in iwd's state stops spinning.
+const HOTSPOT_UI_TIMEOUT_SECS: f64 = 40.0;
+
 #[derive(Default)]
 pub struct WifiUi {
     pub snapshot: WifiSnapshot,
@@ -2321,6 +2729,13 @@ pub struct WifiUi {
     pub scan_requested_at: Option<f64>,
     /// First visible network row.
     pub scroll: usize,
+    /// The question the hotspot section is asking.
+    pub hotspot_ask: Option<HotspotAsk>,
+    /// A hotspot switch in flight: the state it is heading for, and when
+    /// the tick first saw it (it gives up waiting after a while).
+    pub hotspot_wait: Option<(bool, Option<f64>)>,
+    /// The join code for the running hotspot: its payload and the symbol.
+    pub hotspot_qr: Option<(String, Qr)>,
 }
 
 impl WifiUi {
@@ -2333,6 +2748,7 @@ impl WifiUi {
                 if self.snapshot.scanning || (was_scanning && !self.snapshot.scanning) {
                     self.scan_requested_at = None;
                 }
+                self.hotspot_snapshot_changed();
                 let n = self.snapshot.networks.len();
                 if self.scroll >= n {
                     self.scroll = n.saturating_sub(1);
@@ -2395,6 +2811,7 @@ impl WifiUi {
                 }
             }
             WifiEvent::Notice { text, error } => {
+                self.hotspot_wait = None;
                 self.phase = WifiPhase::Notice { text, error };
             }
         }
@@ -2403,6 +2820,16 @@ impl WifiUi {
     /// Once a second: expire a scan reading iwd never confirmed. True when
     /// something to draw changed.
     pub fn tick(&mut self, now: f64) -> bool {
+        if let Some((_, since)) = self.hotspot_wait.as_mut() {
+            match since {
+                None => *since = Some(now),
+                Some(t) if now - *t > HOTSPOT_UI_TIMEOUT_SECS => {
+                    self.hotspot_wait = None;
+                    return true;
+                }
+                Some(_) => {}
+            }
+        }
         if let Some(t) = self.scan_requested_at {
             if now - t > SCAN_UI_TIMEOUT_SECS {
                 self.scan_requested_at = None;
@@ -2520,6 +2947,7 @@ impl WifiUi {
     /// The dropdown closed: nothing typed survives it, and a stale notice
     /// does not greet the next open.
     pub fn on_close(&mut self) {
+        self.hotspot_ask = None;
         self.cancel_entry();
         self.dismiss_notice();
     }
@@ -2573,6 +3001,77 @@ impl WifiUi {
         true
     }
 
+    // ------------------------------------------------------------ hotspot
+
+    /// Keep the join code and the pending switch in step with a snapshot.
+    fn hotspot_snapshot_changed(&mut self) {
+        let h = &self.snapshot.hotspot;
+        if self.hotspot_wait.is_some_and(|(target, _)| target == h.ap_mode) {
+            self.hotspot_wait = None;
+        }
+        let payload = match (&h.passphrase, h.ap_mode) {
+            (Some(p), true) => Some(hotspot::wifi_qr_payload(&h.ssid, p)),
+            _ => None,
+        };
+        match payload {
+            Some(payload) if self.hotspot_qr.as_ref().map(|(p, _)| p) != Some(&payload) => {
+                self.hotspot_qr = Qr::encode(payload.as_bytes()).ok().map(|q| (payload, q));
+            }
+            Some(_) => {}
+            None => self.hotspot_qr = None,
+        }
+        if h.ap_mode && self.hotspot_ask == Some(HotspotAsk::Enable) {
+            self.hotspot_ask = None;
+        }
+    }
+
+    pub fn hotspot_usable(&self) -> bool {
+        self.snapshot.unavailable.is_none()
+            && self.have_snapshot
+            && (self.snapshot.hotspot.capability == hotspot::Capability::Available
+                || self.snapshot.hotspot.ap_mode)
+    }
+
+    /// The switch: turning off acts at once (it only gives the Wi-Fi back);
+    /// turning on asks first, since it takes the Wi-Fi away.
+    pub fn hotspot_toggle(&mut self) -> Option<WifiCommand> {
+        if !self.hotspot_usable() || self.hotspot_wait.is_some() {
+            return None;
+        }
+        self.dismiss_notice();
+        if self.snapshot.hotspot.ap_mode {
+            self.hotspot_ask = None;
+            self.hotspot_wait = Some((false, None));
+            return Some(WifiCommand::HotspotSet(false));
+        }
+        self.hotspot_ask = match self.hotspot_ask {
+            Some(HotspotAsk::Enable) => None,
+            _ => Some(HotspotAsk::Enable),
+        };
+        None
+    }
+
+    pub fn hotspot_regenerate_ask(&mut self) {
+        if self.snapshot.hotspot.ap_mode && self.hotspot_wait.is_none() {
+            self.dismiss_notice();
+            self.hotspot_ask = Some(HotspotAsk::Regenerate);
+        }
+    }
+
+    pub fn hotspot_confirm(&mut self) -> Option<WifiCommand> {
+        match self.hotspot_ask.take()? {
+            HotspotAsk::Enable => {
+                self.hotspot_wait = Some((true, None));
+                Some(WifiCommand::HotspotSet(true))
+            }
+            HotspotAsk::Regenerate => Some(WifiCommand::HotspotRegenerate),
+        }
+    }
+
+    pub fn hotspot_cancel(&mut self) {
+        self.hotspot_ask = None;
+    }
+
     /// The nonsecret reading a remote snapshot (`/snap`) reports for the
     /// open dropdown, so a proof can see the rows, the state and whether
     /// the prompt is up — never what was typed, not even its length.
@@ -2605,6 +3104,22 @@ impl WifiUi {
                 if n.connected { " connected" } else { "" }
             ));
         }
+        let h = &s.hotspot;
+        match &h.capability {
+            hotspot::Capability::Available => out.push_str(&format!(
+                " hotspot={} ssid=\"{}\" clients={}",
+                if h.started { "on" } else if h.ap_mode { "starting" } else { "off" },
+                h.ssid,
+                h.clients.len()
+            )),
+            hotspot::Capability::Unsupported(why) => out.push_str(&format!(" hotspot=unsupported(\"{why}\")")),
+        }
+        if let Some(ip) = &h.ip {
+            out.push_str(&format!(" hotspot_ip={ip}"));
+        }
+        if let Some(ask) = &self.hotspot_ask {
+            out.push_str(&format!(" hotspot_ask={ask:?}"));
+        }
         match &self.phase {
             WifiPhase::Idle => {}
             WifiPhase::Connecting { name, .. } => out.push_str(&format!(" connecting=\"{name}\"")),
@@ -2623,5 +3138,142 @@ impl WifiUi {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod hotspot_tests {
+    use super::*;
+
+    fn object(path: &str, ifaces: Vec<(&str, Props)>) -> DbusObject {
+        DbusObject {
+            path: path.into(),
+            ifaces: ifaces.into_iter().map(|(n, p)| (n.to_string(), p)).collect(),
+        }
+    }
+
+    fn device(mode: &str, access_point: Option<bool>) -> DbusObject {
+        let mut ifaces = vec![(
+            "net.connman.iwd.Device",
+            vec![
+                ("Name".to_string(), DbusValue::Str("wlan0".into())),
+                ("Mode".to_string(), DbusValue::Str(mode.into())),
+            ],
+        )];
+        if let Some(started) = access_point {
+            ifaces.push((
+                "net.connman.iwd.AccessPoint",
+                vec![("Started".to_string(), DbusValue::Bool(started))],
+            ));
+        }
+        object("/net/connman/iwd/0/3", ifaces)
+    }
+
+    fn adapter(modes: &[&str]) -> DbusObject {
+        object(
+            "/net/connman/iwd/0",
+            vec![(
+                "net.connman.iwd.Adapter",
+                vec![(
+                    "SupportedModes".to_string(),
+                    DbusValue::Strs(modes.iter().map(|m| m.to_string()).collect()),
+                )],
+            )],
+        )
+    }
+
+    #[test]
+    fn facts_from_a_station_device() {
+        let f = iwd_facts(&device("station", None), Some(&adapter(&["ad-hoc", "station", "ap"])));
+        assert!(f.device_present && !f.ap_mode() && !f.started());
+        assert_eq!(f.supported_modes.as_deref().map(|m| m.len()), Some(3));
+        assert_eq!(
+            hotspot::decide(&hotspot::CapabilityInput {
+                unavailable: None,
+                device_present: f.device_present,
+                supported_modes: f.supported_modes.as_deref(),
+                addressing_ready: true,
+            }),
+            hotspot::Capability::Available
+        );
+    }
+
+    #[test]
+    fn facts_from_a_running_access_point() {
+        let f = iwd_facts(&device("ap", Some(true)), Some(&adapter(&["station", "ap"])));
+        assert!(f.ap_mode() && f.started());
+        let f = iwd_facts(&device("ap", Some(false)), Some(&adapter(&["station", "ap"])));
+        assert!(f.ap_mode() && !f.started());
+    }
+
+    #[test]
+    fn an_adapter_without_ap_mode_is_reported() {
+        let f = iwd_facts(&device("station", None), Some(&adapter(&["station"])));
+        let cap = hotspot::decide(&hotspot::CapabilityInput {
+            unavailable: None,
+            device_present: true,
+            supported_modes: f.supported_modes.as_deref(),
+            addressing_ready: true,
+        });
+        assert!(matches!(cap, hotspot::Capability::Unsupported(_)));
+        let none = iwd_facts(&device("station", None), None);
+        assert_eq!(none.supported_modes, None);
+    }
+
+    #[test]
+    fn the_fixture_is_a_running_hotspot_with_a_scannable_code() {
+        let mut ui = WifiUi::default();
+        ui.apply(WifiEvent::Snapshot(WifiSnapshot::fixture()));
+        assert!(ui.hotspot_usable());
+        let (payload, qr) = ui.hotspot_qr.as_ref().expect("a join code while the hotspot is on");
+        assert_eq!(payload, "WIFI:T:WPA;S:makepad-arch149;P:harbor-pencil-garden-maple;;");
+        assert!(qr.size >= 21);
+    }
+
+    #[test]
+    fn toggle_asks_before_turning_on_and_not_before_turning_off() {
+        let mut ui = WifiUi::default();
+        let mut snap = WifiSnapshot::fixture();
+        snap.hotspot.ap_mode = false;
+        snap.hotspot.started = false;
+        ui.apply(WifiEvent::Snapshot(snap));
+        assert_eq!(ui.hotspot_toggle(), None);
+        assert_eq!(ui.hotspot_ask, Some(HotspotAsk::Enable));
+        assert_eq!(ui.hotspot_confirm(), Some(WifiCommand::HotspotSet(true)));
+        assert!(ui.hotspot_ask.is_none() && ui.hotspot_wait.is_some());
+        // The snapshot that shows the hotspot on ends the wait.
+        ui.apply(WifiEvent::Snapshot(WifiSnapshot::fixture()));
+        assert!(ui.hotspot_wait.is_none());
+        assert_eq!(ui.hotspot_toggle(), Some(WifiCommand::HotspotSet(false)));
+    }
+
+    #[test]
+    fn regenerate_asks_first_and_the_new_password_replaces_the_code() {
+        let mut ui = WifiUi::default();
+        ui.apply(WifiEvent::Snapshot(WifiSnapshot::fixture()));
+        let before = ui.hotspot_qr.as_ref().unwrap().0.clone();
+        ui.hotspot_regenerate_ask();
+        assert_eq!(ui.hotspot_ask, Some(HotspotAsk::Regenerate));
+        ui.hotspot_cancel();
+        assert!(ui.hotspot_ask.is_none());
+        ui.hotspot_regenerate_ask();
+        assert_eq!(ui.hotspot_confirm(), Some(WifiCommand::HotspotRegenerate));
+        let mut snap = WifiSnapshot::fixture();
+        snap.hotspot.passphrase = Some("amber-violin-orchard-planet".into());
+        ui.apply(WifiEvent::Snapshot(snap));
+        let after = ui.hotspot_qr.as_ref().unwrap().0.clone();
+        assert_ne!(before, after);
+        assert!(after.contains("amber-violin-orchard-planet"));
+    }
+
+    #[test]
+    fn an_unsupported_adapter_cannot_be_toggled() {
+        let mut ui = WifiUi::default();
+        let mut snap = WifiSnapshot::fixture();
+        snap.hotspot.ap_mode = false;
+        snap.hotspot.capability = hotspot::Capability::Unsupported("no".into());
+        ui.apply(WifiEvent::Snapshot(snap));
+        assert_eq!(ui.hotspot_toggle(), None);
+        assert_eq!(ui.hotspot_ask, None);
     }
 }

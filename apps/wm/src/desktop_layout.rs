@@ -9,11 +9,17 @@ pub struct DesktopWindow {
     pub minimized: bool,
     pub maximized: bool,
     pub snap: Option<crate::snap::Zone>,
+    /// Parked by spacewarp: its desk rect keeps the full size and may lie
+    /// outside the screen (only the shown, scaled rect is on it).
+    pub warped: bool,
 }
 #[derive(Clone, Debug, Default)]
 pub struct DesktopWindows {
     pub enabled: bool,
     pub windows: Vec<DesktopWindow>,
+    /// Bottom of the area a maximised window leaves to a floating shelf (the
+    /// macOS dock hovers over the desk, so the area does not reserve it).
+    pub shelf_reserve: f64,
 }
 impl DesktopWindows {
     pub fn ensure(&mut self, client: ClientId, area: LRect) {
@@ -30,6 +36,7 @@ impl DesktopWindows {
             minimized: false,
             maximized: false,
             snap: None,
+            warped: false,
         });
     }
     pub fn get(&self, client: ClientId) -> Option<&DesktopWindow> {
@@ -47,12 +54,14 @@ impl DesktopWindows {
             self.windows.push(w);
         }
     }
-    pub fn rects(&self, clients: &[ClientId], area: LRect) -> Vec<(ClientId, LRect)> {
+    /// The drawn rects. `band` is where maximize and the snap zones apply
+    /// (the display's centre band); every other window stays inside `area`.
+    pub fn rects(&self, clients: &[ClientId], area: LRect, band: LRect) -> Vec<(ClientId, LRect)> {
         self.windows
             .iter()
             .filter(|w| clients.contains(&w.client) && !w.minimized)
             .map(|w| {
-                let r = if w.maximized { area } else if let Some(zone)=w.snap {zone.bounds(area)} else { fit(w.rect, area) };
+                let r = if w.maximized { LRect::new(band.x, band.y, band.w, (band.h - self.shelf_reserve).max(1.0)) } else if let Some(zone)=w.snap {zone.bounds(band)} else if w.warped { w.rect } else { fit(w.rect, area) };
                 (w.client, r)
             })
             .collect()
@@ -82,13 +91,13 @@ mod tests {
         d.ensure(2, area);
         let original = d.get(1).unwrap().rect;
         d.get_mut(1).unwrap().maximized = true;
-        assert_eq!(d.rects(&[1, 2], area)[0].1, area);
+        assert_eq!(d.rects(&[1, 2], area, area)[0].1, area);
         d.get_mut(1).unwrap().minimized = true;
-        assert_eq!(d.rects(&[1, 2], area).len(), 1);
+        assert_eq!(d.rects(&[1, 2], area, area).len(), 1);
         d.get_mut(1).unwrap().minimized = false;
         d.get_mut(1).unwrap().maximized = false;
         d.raise(1);
-        assert_eq!(d.rects(&[1, 2], area).last(), Some(&(1, original)));
+        assert_eq!(d.rects(&[1, 2], area, area).last(), Some(&(1, original)));
     }
     #[test]
     fn shrinking_the_workarea_keeps_windows_reachable() {
@@ -107,11 +116,11 @@ mod tests {
         d.ensure(1,area);
         let restore=d.get(1).unwrap().rect;
         d.get_mut(1).unwrap().snap=Some(crate::snap::Zone::BottomRight);
-        assert_eq!(d.rects(&[1],area)[0].1,LRect::new(700.,439.,690.,397.));
+        assert_eq!(d.rects(&[1],area,area)[0].1,LRect::new(700.,439.,690.,397.));
         let small=LRect::new(10.,42.,800.,600.);
-        assert_eq!(d.rects(&[1],small)[0].1,LRect::new(410.,342.,400.,300.));
+        assert_eq!(d.rects(&[1],small,small)[0].1,LRect::new(410.,342.,400.,300.));
         assert_eq!(d.get(1).unwrap().rect,restore);
         d.get_mut(1).unwrap().snap=None;
-        assert_eq!(d.rects(&[1],area)[0].1,restore);
+        assert_eq!(d.rects(&[1],area,area)[0].1,restore);
     }
 }

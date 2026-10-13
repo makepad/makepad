@@ -1,15 +1,12 @@
 //! What every tile kind offers the window manager, whatever hosts the
 //! window inside it.
 //!
-//! A tile is one of two widgets: `MpRunView` presents a child PROCESS's
-//! shared swapchain and forwards its input over the studio protocol;
-//! `MpModuleView` draws an in-process MODULE instance's root as a subtree
-//! of the desk. The desk, the focus logic and the status plumbing in
-//! `main.rs` never care which: they go through this trait, and the
-//! process-only calls (`set_run_target`, `app_ready`, presented frames)
-//! stay on `MpRunView` where only the hub's messages reach them.
+//! `MpRunView` presents a child process's swapchain, `MpDomainView` samples a HAL child's
+//! lent surface, `MpWaylandView` presents a foreign window, and `MpModuleView` hosts a linked
+//! module. Desk layout, focus and animation use this trait; transport-specific events stay
+//! with the view that owns their protocol.
 
-use crate::hub::ClientId;
+use makepad_app_host::ClientId;
 use makepad_widgets::*;
 
 pub trait TileHost {
@@ -38,4 +35,25 @@ pub trait TileHost {
     fn set_close_crop(&mut self, crop: Option<(Vec2d, Vec2d)>);
     /// The popin fade the desk drives during open/close (1 = solid).
     fn set_fade(&mut self, fade: f32);
+    /// Tell the client whether any of its window shows. False when it
+    /// cannot be told (not a makepad child, or no live window yet).
+    fn set_visible(&mut self, _cx: &mut Cx, _visible: bool) -> bool {
+        false
+    }
+    /// Changes whenever the tile's content does, and None while it cannot
+    /// say (always repaint): a parked window is only re-captured when this
+    /// moved.
+    fn content_serial(&self) -> Option<u64> {
+        None
+    }
+    /// The texture of the frame the app last presented and its size in
+    /// pixels (its window's own image, whatever covers it on the desk).
+    fn presented_image(&self) -> Option<(Texture, [u32; 2])> {
+        None
+    }
+    /// Files dropped on the tile at `abs` (desk coordinates): the app gets
+    /// them as a drop into its window. False when it cannot take any.
+    fn drop_files(&mut self, _cx: &mut Cx, _abs: Vec2d, _paths: Vec<String>) -> bool {
+        false
+    }
 }
