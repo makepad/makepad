@@ -574,7 +574,7 @@ fn tidy_anchors(anchors: &[CurveAnchor]) -> Vec<CurveAnchor> {
 /// up every field (an eval's own keys only, anything else through the
 /// prototypes); `None` when it brings none.
 fn dsl_anchors(vm: &mut ScriptVm, apply: &Apply, value: ScriptValue) -> Option<Vec<ScriptValue>> {
-    let heap = &mut vm.bx.heap;
+    let heap = vm.heap_mut();
     let arr = heap.value_for_apply(value, id!(anchors).into(), apply)?.as_array()?;
     Some((0..heap.array_len(arr)).map(|i| heap.array_index_unchecked(arr, i)).collect())
 }
@@ -582,7 +582,7 @@ fn dsl_anchors(vm: &mut ScriptVm, apply: &Apply, value: ScriptValue) -> Option<V
 /// The DSL's `[x, y, kind]` arrays as anchors. An entry that is not an array
 /// of two or three numbers is skipped; one without a kind is smooth.
 fn read_anchors(vm: &ScriptVm, values: &[ScriptValue]) -> Vec<CurveAnchor> {
-    let heap = &vm.bx.heap;
+    let heap = vm.heap();
     values
         .iter()
         .filter_map(|v| {
@@ -1691,16 +1691,8 @@ mod tests {
     fn apply_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) {
         let code = format!("use mod.prelude.widgets.*\n__script_source__{chunk};");
         let errors = cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
-            let script_mod = crate::makepad_script::ScriptMod {
-                cargo_manifest_path: String::new(),
-                module_path: "curve_editor_test".to_string(),
-                file: "test://chunk".to_string(),
-                line: 2 + chunk.len(),
-                column: 1,
-                code,
-                values: Vec::new(),
-            };
+            vm.capture_errors();
+            let script_mod = crate::makepad_script::ScriptMod::new("", "curve_editor_test", "test://chunk", 2 + chunk.len(), 1, &code, &[]);
             let mut target = widget.clone();
             target.script_apply_eval(vm, script_mod);
             vm.take_errors()
@@ -2307,9 +2299,7 @@ mod tests {
                         mod.shader.test_compile_draw_source(mod.widgets.CurveEditor.draw_knob, "glsl", false)
                     })),
                 ] {
-                    let text = vm
-                        .bx
-                        .heap
+                    let text = vm.heap()
                         .string_with(value, |_heap, text| text.to_string())
                         .expect("the compiler answers with source");
                     assert!(!text.starts_with("ERRORS:"), "{name} did not compile: {text}");

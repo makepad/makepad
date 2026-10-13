@@ -37,6 +37,26 @@ impl From<usize> for ModelTarget {
     }
 }
 
+/// A [`ModelTarget`] as the clock and clip maps key it: the model id hashed,
+/// so a per-frame lookup (every drawn part, every door query) builds its key
+/// without allocating.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum StateTarget {
+    Model(LiveId),
+    Instance(usize),
+    Attachment(usize),
+}
+
+impl From<&ModelTarget> for StateTarget {
+    fn from(target: &ModelTarget) -> Self {
+        match target {
+            ModelTarget::Model(id) => StateTarget::Model(LiveId::from_str(id)),
+            ModelTarget::Instance(i) => StateTarget::Instance(*i),
+            ModelTarget::Attachment(i) => StateTarget::Attachment(*i),
+        }
+    }
+}
+
 /// One triggered part's clock. `time` is where the part IS, `target` where it
 /// is heading; `speed` is clip-seconds per real second, fixed when the
 /// command landed so a mid-move reversal takes the same wall-clock time as
@@ -58,8 +78,9 @@ pub(super) struct AnimPartRuntime {
 pub(super) struct ModelClipPlayback{pub(super) name:Option<String>,pub(super) time:f32,pub(super) looping:bool,pub(super) weight:f32}
 #[derive(Default, Clone)]
 pub(super) struct ModelStates {
-    pub(super) clips:std::collections::BTreeMap<ModelTarget,ModelClipPlayback>,
-    pub(super) map: std::collections::BTreeMap<(ModelTarget, String), AnimPartRuntime>,
+    pub(super) clips:std::collections::BTreeMap<StateTarget,ModelClipPlayback>,
+    /// Keyed by (target, part name hashed).
+    pub(super) map: std::collections::BTreeMap<(StateTarget, LiveId), AnimPartRuntime>,
     /// Engine presentation clock for model-authored `localgen-*` idle clips.
     /// It is independent from level script state: placing the GLB is enough
     /// to make its manifest animation run.
@@ -72,7 +93,7 @@ impl ModelStates {
             if let Some(name)=&playback.name{let mut sampled=morph.sample_playback(Some(name),playback.time,playback.looping);for(i,value)in sampled.iter_mut().enumerate(){*value=morph.defaults[i]+(*value-morph.defaults[i])*playback.weight;}sampled}else{morph.defaults}
         }else{morph.sample(None,self.idle_time)}
     }
-    pub(super) fn clip(&self,target:&ModelTarget,id:&str)->Option<&ModelClipPlayback>{self.clips.get(target).or_else(||self.clips.get(&ModelTarget::Model(id.into())))}
+    pub(super) fn clip(&self,target:&ModelTarget,id:&str)->Option<&ModelClipPlayback>{self.clips.get(&StateTarget::from(target)).or_else(||self.clips.get(&StateTarget::Model(LiveId::from_str(id))))}
     pub(super) fn transform(&self,target:&ModelTarget,id:&str,def:&crate::model::AnimPart)->Mat4f{
         if let (Some(playback),Some(hierarchy))=(self.clip(target,id),def.clip.hierarchy.as_ref()){
             return hierarchy.transform_named_weighted(playback.name.as_deref(),playback.name.as_ref().map(|_|playback.time),playback.looping,playback.weight);
@@ -94,7 +115,7 @@ impl ModelStates {
             return false;
         };
         let goal = def.state_time(index);
-        let key = (target, def.name.clone());
+        let key = (StateTarget::from(&target), LiveId::from_str(&def.name));
         let now = self
             .map
             .get(&key)
@@ -136,11 +157,12 @@ impl ModelStates {
     /// Drop every clock addressed at `id`, plus the listed placed slots —
     /// what a model going away means for its doors.
     pub(super) fn forget_model(&mut self, id: &str, slots: &[usize]) {
-        self.clips.retain(|target,_|match target{ModelTarget::Model(model)=>model!=id,ModelTarget::Instance(i)=>!slots.contains(i),ModelTarget::Attachment(_)=>false});
+        let id = LiveId::from_str(id);
+        self.clips.retain(|target,_|match target{StateTarget::Model(model)=>*model!=id,StateTarget::Instance(i)=>!slots.contains(i),StateTarget::Attachment(_)=>false});
         self.map.retain(|(target, _), _| match target {
-            ModelTarget::Model(m) => m != id,
-            ModelTarget::Instance(i) => !slots.contains(i),
-            ModelTarget::Attachment(_) => false,
+            StateTarget::Model(m) => *m != id,
+            StateTarget::Instance(i) => !slots.contains(i),
+            StateTarget::Attachment(_) => false,
         });
     }
 
@@ -149,9 +171,9 @@ impl ModelStates {
     /// commands with it; per-MODEL commands (how an imported level addresses
     /// its own doors) survive.
     pub(super) fn forget_slots(&mut self) {
-        self.clips.retain(|target,_|matches!(target,ModelTarget::Model(_)));
+        self.clips.retain(|target,_|matches!(target,StateTarget::Model(_)));
         self.map
-            .retain(|(target, _), _| matches!(target, ModelTarget::Model(_)));
+            .retain(|(target, _), _| matches!(target, StateTarget::Model(_)));
     }
 
     /// (state index, clip time, target time) for one part. A per-slot command
@@ -163,13 +185,11 @@ impl ModelStates {
         model_id: &str,
         def: &crate::model::AnimPart,
     ) -> (usize, f32, f32) {
+        let part = LiveId::from_str(&def.name);
         let by_slot = matches!(target, ModelTarget::Instance(_)|ModelTarget::Attachment(_))
-            .then(|| self.map.get(&(target.clone(), def.name.clone())))
+            .then(|| self.map.get(&(StateTarget::from(target), part)))
             .flatten();
-        let run = by_slot.or_else(|| {
-            self.map
-                .get(&(ModelTarget::Model(model_id.to_string()), def.name.clone()))
-        });
+        let run = by_slot.or_else(|| self.map.get(&(StateTarget::Model(LiveId::from_str(model_id)), part)));
         match run {
             Some(r) => (r.state, r.time, r.target),
             None => {
@@ -187,13 +207,13 @@ impl ModelStates {
 }
 
 /// A part's current state, as reported by [`Renderer::model_states`].
-#[derive(Clone, Debug, PartialEq)]
-pub struct ModelPartState {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelPartState<'a> {
     /// The glTF node name — the handle `set_model_state` takes.
-    pub part: String,
+    pub part: &'a str,
     /// Index into the part's `states`, and its name.
     pub state: usize,
-    pub state_name: String,
+    pub state_name: &'a str,
     /// Where the part is on its clip, and where it is heading.
     pub time: f32,
     pub target_time: f32,
@@ -313,8 +333,8 @@ impl Clone for ModelPartPose {
 /// are in authored model space; callers apply the same uniform scale and
 /// model-to-body basis they use for the visible instance.
 #[derive(Clone, Debug)]
-pub struct DrivenPartInfo {
-    pub connection: String,
+pub struct DrivenPartInfo<'a> {
+    pub connection: &'a str,
     pub pivot: Vec3f,
     pub anchor: Vec3f,
     pub radius: f32,

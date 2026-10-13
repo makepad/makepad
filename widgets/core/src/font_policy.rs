@@ -12,100 +12,81 @@ fn family_value(
     family_proto: ScriptValue,
     member_proto: ScriptValue,
 ) -> ScriptValue {
-    let family = vm.bx.heap.new_with_proto(family_proto);
-    vm.bx.heap.set_value(
+    let family = vm.new_with_proto(family_proto);
+    vm.set_value(
         family,
-        id!(_font_role).into(),
+        id!(_font_role),
         LiveId::from_str_with_lut(chain.role.as_str())
-            .unwrap_or_else(|_| LiveId::from_str(chain.role.as_str()))
-            .into(),
-        NoTrap,
+            .unwrap_or_else(|_| LiveId::from_str(chain.role.as_str())),
     );
-    vm.bx.heap.set_value(
+    vm.set_value(
         family,
-        id!(_font_set).into(),
+        id!(_font_set),
         LiveId::from_str_with_lut(set.as_str())
-            .unwrap_or_else(|_| LiveId::from_str(set.as_str()))
-            .into(),
-        NoTrap,
+            .unwrap_or_else(|_| LiveId::from_str(set.as_str())),
     );
 
     for asset in chain.members {
-        let member = vm.bx.heap.new_with_proto(member_proto);
+        let member = vm.new_with_proto(member_proto);
         let resource = crate::makepad_platform::script::res::register_crate_resource_path(
             vm,
             asset.resource_path,
         );
-        vm.bx
-            .heap
-            .set_value(member, id!(res).into(), resource, NoTrap);
-        vm.bx.heap.set_value(
+        vm.set_value(member, id!(res), resource);
+        vm.set_value(
             member,
-            id!(asc).into(),
-            (asset.ascender as f64).into(),
-            NoTrap,
+            id!(asc),
+            asset.ascender as f64,
         );
-        vm.bx.heap.set_value(
+        vm.set_value(
             member,
-            id!(desc).into(),
-            (asset.descender as f64).into(),
-            NoTrap,
+            id!(desc),
+            asset.descender as f64,
         );
-        vm.bx.heap.set_value(
+        vm.set_value(
             member,
-            id!(weight).into(),
-            (asset.weight as f64).into(),
-            NoTrap,
+            id!(weight),
+            asset.weight as f64,
         );
         let member_id = LiveId::from_str_with_lut(asset.id)
             .unwrap_or_else(|_| LiveId::from_str(asset.id));
-        vm.bx
-            .heap
-            .vec_push(family, member_id.into(), member.into(), NoTrap);
+        vm.vec_push(family, member_id, member);
     }
     for lazy in set.policy().lazy_chain(chain.role) {
         let asset = lazy.asset;
-        let member = vm.bx.heap.new_with_proto(member_proto);
+        let member = vm.new_with_proto(member_proto);
         let resource = crate::makepad_platform::script::res::register_crate_resource_path(
             vm,
             asset.resource_path,
         );
-        vm.bx
-            .heap
-            .set_value(member, id!(res).into(), resource, NoTrap);
-        vm.bx.heap.set_value(
+        vm.set_value(member, id!(res), resource);
+        vm.set_value(
             member,
-            id!(asc).into(),
-            (asset.ascender as f64).into(),
-            NoTrap,
+            id!(asc),
+            asset.ascender as f64,
         );
-        vm.bx.heap.set_value(
+        vm.set_value(
             member,
-            id!(desc).into(),
-            (asset.descender as f64).into(),
-            NoTrap,
+            id!(desc),
+            asset.descender as f64,
         );
-        vm.bx.heap.set_value(
+        vm.set_value(
             member,
-            id!(weight).into(),
-            (asset.weight as f64).into(),
-            NoTrap,
+            id!(weight),
+            asset.weight as f64,
         );
         let lazy_family = match lazy.family {
             LazyFontFamily::Cjk => 1.0,
             LazyFontFamily::Emoji => 2.0,
         };
-        vm.bx.heap.set_value(
+        vm.set_value(
             member,
-            id!(lazy).into(),
-            lazy_family.into(),
-            NoTrap,
+            id!(lazy),
+            lazy_family,
         );
         let member_id = LiveId::from_str_with_lut(asset.id)
             .unwrap_or_else(|_| LiveId::from_str(asset.id));
-        vm.bx
-            .heap
-            .vec_push(family, member_id.into(), member.into(), NoTrap);
+        vm.vec_push(family, member_id, member);
     }
     family.into()
 }
@@ -119,17 +100,17 @@ pub(crate) fn append_style_fallbacks(vm: &mut ScriptVm) {
     let member_proto = crate::script_eval!(vm, {mod.text.FontMember});
     let theme = vm.module(id!(theme));
     for (role, chain) in [(id!(font_regular), policy.regular), (id!(font_label), policy.regular), (id!(font_bold), policy.bold)] {
-        let text_style = vm.bx.heap.value(theme, role.into(), NoTrap);
+        let text_style = vm.value(theme, role);
         let Some(text_style) = text_style.as_object() else { continue; };
-        let family = vm.bx.heap.value(text_style, id!(font_family).into(), NoTrap);
+        let family = vm.value(text_style, id!(font_family));
         let Some(family) = family.as_object() else { continue; };
         let fallback = family_value(vm, chain, set, family_proto, member_proto).as_object().unwrap();
-        let existing: Vec<_> = (0..vm.bx.heap.vec_len(family))
-            .map(|i| vm.bx.heap.vec_key_value(family, i, NoTrap).key).collect();
-        for i in 0..vm.bx.heap.vec_len(fallback) {
-            let kv = vm.bx.heap.vec_key_value(fallback, i, NoTrap);
+        let existing: Vec<_> = (0..vm.heap().vec_len(family))
+            .map(|i| vm.heap().vec_key_value(family, i, NoTrap).key).collect();
+        for i in 0..vm.heap().vec_len(fallback) {
+            let kv = vm.heap().vec_key_value(fallback, i, NoTrap);
             if !existing.contains(&kv.key) {
-                vm.bx.heap.vec_push(family, kv.key, kv.value, NoTrap);
+                vm.vec_push(family, kv.key, kv.value);
             }
         }
     }

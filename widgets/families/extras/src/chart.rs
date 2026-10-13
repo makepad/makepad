@@ -549,6 +549,7 @@ impl Widget for ChartView {
             Hit::FingerDown(fe) if press_starts_pan(fe.is_primary_hit(), held_outside) => {
                 self.drag_start_abs = Some(fe.abs);
                 self.drag_start_viewport = self.viewport.clone();
+                cx.claim_finger_drag(fe.digit_id);
                 cx.set_cursor(MouseCursor::Grabbing);
             }
             Hit::FingerMove(fe) => {
@@ -2474,7 +2475,7 @@ mod tests {
         cx.with_vm(crate::script_mod);
         let chart = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let value = vm.bx.heap.value(widgets, LiveId::from_str("TrendChart").into(), NoTrap);
+            let value = vm.value(widgets, LiveId::from_str("TrendChart"));
             WidgetRef::script_from_value(vm, value)
         });
         assert!(!chart.is_empty(), "TrendChart built no widget");
@@ -2485,7 +2486,7 @@ mod tests {
     fn declared_as(cx: &mut Cx, name: &str) -> WidgetRef {
         let widget = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+            let value = vm.value(widgets, LiveId::from_str(name));
             WidgetRef::script_from_value(vm, value)
         });
         assert!(!widget.is_empty(), "{name} built no widget");

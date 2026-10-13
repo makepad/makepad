@@ -270,6 +270,16 @@ pub struct Markdown {
     /// paths, `file://` and `data:` images always load.
     #[live(false)]
     load_http_images: bool,
+    /// Draw `[text](url)` links as text in the flow, in `link_color`, the
+    /// hovered one (`set_hovered_link`) underlined, instead of link widgets.
+    /// The host hit-tests them through the selection API (the flow takes no
+    /// presses for them), so a drag over a link still selects.
+    #[live(false)]
+    inline_links: bool,
+    #[live]
+    link_color: Vec4f,
+    #[rust]
+    hovered_link: Option<String>,
     /// Each inline image widget's source and the image-cache key its load
     /// completes under (`None` when it loaded synchronously or not at all),
     /// so a redraw does not request the same source again.
@@ -346,6 +356,8 @@ impl Markdown {
         let mut image_depth: usize = 0;
         let mut image_drawn = false;
         let load_images = !cx.script_data.std.host_io_only();
+        // What the open inline link pushed: (a colour, an underline).
+        let mut inline_link: Option<bool> = None;
 
         let parser = Parser::new_ext(
             self.body.as_ref(),
@@ -444,6 +456,20 @@ impl Markdown {
                 }
                 MdEvent::End(TagEnd::Strikethrough) => {
                     tf.strikethrough.pop();
+                }
+                MdEvent::Start(Tag::Link { dest_url, .. }) if self.inline_links => {
+                    tf.font_colors.push(self.link_color);
+                    let hovered = self.hovered_link.as_deref() == Some(dest_url.as_ref());
+                    if hovered {
+                        tf.underline.push();
+                    }
+                    inline_link = Some(hovered);
+                }
+                MdEvent::End(TagEnd::Link) if inline_link.is_some() => {
+                    tf.font_colors.pop();
+                    if inline_link.take() == Some(true) {
+                        tf.underline.pop();
+                    }
                 }
                 MdEvent::Start(Tag::Link { dest_url, .. }) => {
                     self.auto_id += 1;
@@ -913,6 +939,17 @@ impl Widget for MarkdownLink {
 
     fn set_text(&mut self, cx: &mut Cx, v: &str) {
         self.link.set_text(cx, v);
+    }
+}
+
+impl MarkdownRef {
+    /// Underline the inline link (`inline_links`) whose url is `url`.
+    pub fn set_hovered_link(&self, cx: &mut Cx, url: Option<&str>) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        if inner.hovered_link.as_deref() != url {
+            inner.hovered_link = url.map(str::to_string);
+            inner.redraw(cx);
+        }
     }
 }
 

@@ -2895,7 +2895,6 @@ impl RadialMenuRef {
 mod tests {
     use super::*;
     use crate::makepad_platform::event::{ScrollEvent, ScrollPhase};
-    use crate::makepad_script::trap::NoTrap;
 
     const DEG: f64 = PI / 180.0;
 
@@ -3317,15 +3316,13 @@ mod tests {
     /// restate it.
     fn theme_ease(vm: &mut ScriptVm, token: &str) -> Ease {
         let theme = vm.module(id!(theme));
-        let value = vm.bx.heap.value(theme, LiveId::from_str(token).into(), NoTrap);
+        let value = vm.value(theme, LiveId::from_str(token));
         Ease::script_from_value(vm, value)
     }
 
     fn theme_number(vm: &mut ScriptVm, token: &str) -> f64 {
         let theme = vm.module(id!(theme));
-        vm.bx
-            .heap
-            .value(theme, LiveId::from_str(token).into(), NoTrap)
+        vm.value(theme, LiveId::from_str(token))
             .as_f64()
             .unwrap_or_else(|| panic!("the theme has no number {token}"))
     }
@@ -3466,9 +3463,7 @@ mod tests {
             let value = crate::script_eval!(vm, {
                 mod.shader.test_compile_draw_source(mod.widgets.RadialMenu.draw_wedge, "glsl", false)
             });
-            let text = vm
-                .bx
-                .heap
+            let text = vm.heap()
                 .string_with(value, |_heap, text| text.to_string())
                 .expect("the compiler answers with source");
             assert!(!text.starts_with("ERRORS:"), "the wedge did not compile: {text}");
@@ -3659,13 +3654,10 @@ mod tests {
 
     fn theme_color(vm: &mut ScriptVm, theme: &str, token: &str) -> [f64; 3] {
         let themes = vm.module(id!(themes));
-        let table = vm
-            .bx
-            .heap
-            .value(themes, LiveId::from_str(theme).into(), NoTrap)
+        let table = vm.value(themes, LiveId::from_str(theme))
             .as_object()
             .unwrap_or_else(|| panic!("no theme {theme}"));
-        let value = vm.bx.heap.value(table, LiveId::from_str(token).into(), NoTrap);
+        let value = vm.value(table, LiveId::from_str(token));
         assert!(value.as_color().is_some() || value.as_pod().is_some(), "{theme} has no colour {token}");
         rgb_of(Vec4f::script_from_value(vm, value))
     }
@@ -3696,7 +3688,7 @@ mod tests {
             let value = crate::script_eval!(vm, {
                 mod.shader.test_compile_draw_source(mod.widgets.RadialMenu.draw_wedge, "glsl", false)
             });
-            let text = vm.bx.heap.string_with(value, |_heap, text| text.to_string()).expect("source");
+            let text = vm.heap().string_with(value, |_heap, text| text.to_string()).expect("source");
             assert!(text.contains("uni_color_wedge_open_rim"), "the wedge draws no band");
         });
         });

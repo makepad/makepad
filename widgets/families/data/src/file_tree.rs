@@ -492,6 +492,8 @@ pub struct FileTree {
     #[rust]
     scroll_to_pending: Option<LiveId>,
     #[rust]
+    scroll_to_rect: Option<Rect>,
+    #[rust]
     reveal_node: Option<LiveId>,
     #[rust]
     reveal_y: Option<f64>,
@@ -777,6 +779,11 @@ impl FileTree {
         self.draw_scroll_shadow.draw(cx, dvec2(0., 0.));
         self.scroll_bars.end(cx);
 
+        // The viewport is only measured by end, especially on the first draw.
+        if let Some(rect) = self.scroll_to_rect.take() {
+            self.scroll_bars.scroll_into_view(cx, rect);
+        }
+
         let selected_node_id = self.selected_node_id;
         self.tree_nodes
             .retain_visible_and(|node_id, _| Some(*node_id) == selected_node_id);
@@ -802,6 +809,19 @@ impl FileTree {
         }
     }
 
+    fn measure_selection(&mut self, cx: &Cx2d, node_id: LiveId, scale: f64) {
+        if self.scroll_to_pending == Some(node_id) && scale > 0.01 {
+            self.scroll_to_pending = None;
+            // Measure even culled rows. The turtle's scrolled origin and
+            // cursor share coordinates, so their difference is content-local.
+            self.scroll_to_rect = Some(Rect {
+                pos: dvec2(self.scroll_bars.get_scroll_pos().x,
+                    cx.turtle().pos().y - cx.turtle().origin().y),
+                size: dvec2(0.0, self.node_height * scale),
+            });
+        }
+    }
+
     pub fn begin_folder_with_status(
         &mut self,
         cx: &mut Cx2d,
@@ -820,6 +840,8 @@ impl FileTree {
         }
 
         let is_open = self.open_nodes.contains(&node_id);
+
+        self.measure_selection(cx, node_id, scale);
 
         if self.should_node_draw(cx) {
             let tree_node = self.get_or_create_node(cx, node_id, true, is_open);
@@ -876,6 +898,7 @@ impl FileTree {
             self.reveal_y = Some(cx.turtle().pos().y);
         }
         let scale = self.stack.last().cloned().unwrap_or(1.0);
+        self.measure_selection(cx, node_id, scale);
 
         if scale > 0.2 {
             self.count += 1;
@@ -894,24 +917,6 @@ impl FileTree {
                 });
             }
             tree_node.draw_all(cx, &mut Scope::empty());
-            if self.scroll_to_pending == Some(node_id) {
-                self.scroll_to_pending = None;
-                // The row's rect is on screen, already shifted by the
-                // scroll; the scroll-into-view wants content coordinates,
-                // so put the row back where it sits in the content. A screen
-                // rect handed over as content made a scrolled tree jump
-                // back to wherever the row happened to be drawn.
-                let rect = tree_node.area().rect(cx);
-                if rect.size.y > 0.0 {
-                    let view = self.scroll_bars.area().rect(cx);
-                    let scroll = self.scroll_bars.get_scroll_pos();
-                    let content = Rect {
-                        pos: rect.pos - view.pos + scroll,
-                        size: rect.size,
-                    };
-                    self.scroll_bars.scroll_into_view(cx, content);
-                }
-            }
         }
     }
 

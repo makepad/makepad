@@ -1467,7 +1467,7 @@ mod tests {
         cx.with_vm(|vm| {
             // Registering the library is every other widget's business too.
             let _ = vm.take_errors();
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             let _ = crate::script_eval!(vm, {
                 use mod.prelude.widgets.*
                 use mod.widgets.*

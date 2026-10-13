@@ -5,7 +5,9 @@
 //!
 //! A pass names its attachments too, so a texture a host lets go of stays
 //! alive while a pass still has it attached. [`RenderTarget::release`]
-//! drops both, which is what makes an idle target's memory come back.
+//! drops both, which is what makes an idle target's memory come back. The textures are
+//! transient (`Texture::set_transient`): every use renders them again, so the platform also
+//! gives their storage back after a few idle seconds, however few frames the owner draws.
 
 use crate::{cx_2d::Cx2d, draw_list_2d::{DrawList2d, DrawListExt}, makepad_platform::*, turtle::Layout};
 
@@ -66,6 +68,7 @@ impl RenderTarget {
             RenderTargetFormat::Bgra8 => TextureFormat::RenderBGRAu8 { size: fixed, initial: true },
             RenderTargetFormat::Rgba16f => TextureFormat::RenderRGBAf16 { size: fixed, initial: true },
         });
+        self.texture.set_transient(cx, true);
         self.depth = None;
         self.size = size;
         self.format = format;
@@ -78,10 +81,12 @@ impl RenderTarget {
         let (w, h) = self.size;
         self.depth
             .get_or_insert_with(|| {
-                Texture::new_with_format(cx, TextureFormat::DepthD32 {
+                let depth = Texture::new_with_format(cx, TextureFormat::DepthD32 {
                     size: TextureSize::Fixed { width: w.max(1) as usize, height: h.max(1) as usize },
                     initial: true,
-                })
+                });
+                depth.set_transient(cx, true);
+                depth
             })
             .clone()
     }
@@ -199,6 +204,15 @@ impl RenderTargetPool {
         t.idle = 0;
         t.target.ensure(cx, size, format);
         index
+    }
+
+    /// Gives every target's textures back now (its owner stopped drawing for good measure).
+    pub fn release_all(&mut self, cx: &mut Cx) {
+        for t in &mut self.targets {
+            if t.target.size != (0, 0) {
+                t.target.release(cx);
+            }
+        }
     }
 
     /// Every target, used or not.

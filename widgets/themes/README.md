@@ -92,10 +92,11 @@ Embedded `Splash` widgets inherit the stylesheet and reapply their existing
 widget tree in their own isolate.
 
 Applications should inherit the stock component styles and read `theme.*` for
-custom drawing. Apps using the older WM palette adapter can read
-`makepad_wm_theme::current_for_vm` during registration, or from their owning VM
-through `Cx::with_vm`. Avoid process-wide immutable palette caches: appearances
-can change while an app is open. Explicit app overrides still take precedence.
+custom drawing. Rust drawing reads `makepad_widgets::theme_tokens::color(vm, role)`
+during registration or through the owning VM with `Cx::with_vm`. Re-read these
+roles after each style reload: appearances can change while an app is open.
+The WM provides `MAKEPAD_WIDGET_STYLE` at spawn and the `makepad_style` sheet
+event for live changes; apps do not read the WM's desk palette file.
 
 The framebuffer crossfade lives in `apps/wm/src/scene.rs`. It freezes the old
 GPU render target while the live scene renders the new style; it does not take
@@ -111,8 +112,9 @@ focused/unfocused); text and ANSI cell colors remain crisp. Their foreground and
 background follow the active light/dark stylesheet without restarting the PTY.
 `color_terminal_bg` and `color_terminal_text` are separate semantic roles:
 Windows 2000 and Android use opaque black consoles, while NeXTSTEP uses white.
-The palette adapter exports them as `term.background` and `term.foreground`.
-Declare both in each style so a reload resets the previous console palette.
+Rust terminal drawing reads these tokens directly, using `color_bg_app` and
+`color_text` when the terminal-specific roles are absent. Declare both in each
+style so a reload resets the previous console palette.
 The terminal opts into `Window.body.keyboard_resize: true`; this KeyboardView
 mode reflows content above the animated keyboard instead of panning the whole
 terminal out of view. Its grid and PTY resize with the available space.

@@ -29,9 +29,9 @@ pub use crate::{
     draw_list_2d::{DrawList2d, DrawListExt, ManyInstances, Redrawing, RedrawingApi},
     image_cache::{
         decode_image_from_data, evict_image_from_cache, handle_image_cache_network_responses,
-        image_size_by_data,
+        has_enough_pixels, image_size_by_data, is_animated_image, is_decoding_image,
         looks_like_svg, load_image_file_by_path_async, load_image_from_cache,
-        load_image_from_data_async,
+        load_image_from_data_async, load_image_from_data_async_at_size,
         load_image_http_by_url_async, process_async_image_load, AsyncImageLoad, AsyncLoadResult,
         ImageBuffer, ImageCache, ImageCacheImpl, ImageError, JpgDecodeErrors, PngDecodeErrors,
     },
@@ -52,7 +52,8 @@ pub use crate::{
         draw_nv12::DrawNv12, draw_quad::DrawAffineQuad, draw_quad::DrawColor, draw_quad::DrawQuad, draw_rotated_text::DrawRotatedText,
         draw_rotated_text::PathGlyphInstance, draw_rotated_text::PathTextPlacement,
         draw_svg_glyph::DrawSvgGlyph, draw_text::DrawText, draw_text::PreparedTextRun,
-        draw_text::TextStyle, draw_text_3d::DrawText3d, draw_vector::DrawVector,
+        draw_text::TextStyle, draw_text_3d::DrawText3d,
+        draw_vector::{DrawVector, FeatherSide},
     },
     /*
     geometry::{
@@ -77,6 +78,7 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
     crate::shader::draw_quad::script_mod(vm);
     crate::shader::draw_nv12::script_mod(vm);
     crate::shader::draw_cube::script_mod(vm);
+    makepad_script::glyph_coverage::script_mod(vm);
     crate::shader::draw_glyph::script_mod(vm);
     crate::shader::draw_text::script_mod(vm);
     crate::shader::draw_rotated_text::script_mod(vm);

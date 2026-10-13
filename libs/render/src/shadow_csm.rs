@@ -125,6 +125,14 @@ pub struct CsmCascade {
     /// z01 units per world unit along the sun (1 / the z window's depth):
     /// the receiver converts its world-space slope bias with this.
     pub z_per_world: f32,
+    /// The view frustum's footprint in this tile (ndc x, y; convex,
+    /// counter-clockwise): the eye and the far-plane corners projected
+    /// along the sun. Every receiver on screen lies inside it, so a caster
+    /// whose footprint misses it (by more than the receivers' filter
+    /// reach) shadows nothing anyone sees ([`cascade_sees`]). `view_hull_n`
+    /// below 3 (no view: XR rings, a degenerate projection) culls nothing.
+    pub view_hull: [[f32; 2]; 5],
+    pub view_hull_n: u8,
 }
 
 /// The frame's fitted cascade set.
@@ -277,7 +285,114 @@ fn fit_cascade(
         texel_world: texel,
         bias01: bias_world / zr,
         z_per_world: 1.0 / zr,
+        view_hull: [[0.0; 2]; 5],
+        view_hull_n: 0,
     }
+}
+
+/// Record the view frustum's footprint in cascade `c` (see
+/// [`CsmCascade::view_hull`]): the convex hull of the eye and the four
+/// far-plane corners, projected along the sun into the tile's ndc. The
+/// frustum is their convex hull, and an orthographic projection of a convex
+/// hull is the hull of the projected points.
+fn set_view_hull(c: &mut CsmCascade, view: &CsmView) {
+    let mut pts = [[0.0f32; 2]; 5];
+    for (i, p) in std::iter::once(view.cam).chain(view.far_corners).enumerate() {
+        let q = cascade_project(c, p);
+        if !(q.x.is_finite() && q.y.is_finite()) {
+            return;
+        }
+        pts[i] = [q.x, q.y];
+    }
+    // Monotone chain, counter-clockwise, collinear points dropped.
+    pts.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    let cross = |o: [f32; 2], a: [f32; 2], b: [f32; 2]| (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]);
+    let chain = |forward: bool| {
+        let (mut out, mut n) = ([[0.0f32; 2]; 5], 0usize);
+        for k in 0..5 {
+            let p = pts[if forward { k } else { 4 - k }];
+            while n >= 2 && cross(out[n - 2], out[n - 1], p) <= 0.0 {
+                n -= 1;
+            }
+            out[n] = p;
+            n += 1;
+        }
+        (out, n)
+    };
+    let ((lower, nl), (upper, nu)) = (chain(true), chain(false));
+    let (mut hull, mut n) = ([[0.0f32; 2]; 8], 0usize);
+    for p in lower[..nl - 1].iter().chain(&upper[..nu - 1]) {
+        hull[n] = *p;
+        n += 1;
+    }
+    if !(3..=5).contains(&n) {
+        return;
+    }
+    let hull = &hull[..n];
+    for (i, p) in hull.iter().enumerate() {
+        c.view_hull[i] = *p;
+    }
+    c.view_hull_n = hull.len() as u8;
+}
+
+/// Shadow-map texels a receiver's filter can reach from its own position:
+/// the soft kernel's disk (up to 3 texels) and its bilinear footprint, the
+/// normal offset (up to 2.5 texels), with room to spare.
+const VIEW_HULL_MARGIN_TEXELS: f32 = 16.0;
+
+/// Can a caster with this world AABB put depth where a receiver on screen
+/// reads cascade `c`? A shadow falls along the sun, so caster and receiver
+/// share their light-space footprint (ndc x, y); every receiver on screen
+/// lies in the view frustum, whose footprint is `view_hull`. Separating
+/// axes between the caster's footprint rectangle and the hull grown by the
+/// filter margin: false only when one separates them, so the cascade drops
+/// casters behind and beside the camera and keeps every texel a visible
+/// pixel samples exactly as before.
+pub fn cascade_sees(c: &CsmCascade, min: Vec3f, max: Vec3f) -> bool {
+    let n = c.view_hull_n as usize;
+    if n < 3 {
+        return true;
+    }
+    let center = (min + max) * 0.5;
+    let half = (max - min) * 0.5;
+    let span = |r: Vec4f| {
+        let at = r.x * center.x + r.y * center.y + r.z * center.z + r.w;
+        let ext = r.x.abs() * half.x + r.y.abs() * half.y + r.z.abs() * half.z;
+        (at, ext)
+    };
+    let ((cx, ex), (cy, ey)) = (span(c.rx), span(c.ry));
+    // One texel of the tile in ndc (rx's xyz is the light axis / extent).
+    let texel = c.texel_world * (c.rx.x * c.rx.x + c.rx.y * c.rx.y + c.rx.z * c.rx.z).sqrt();
+    let m = VIEW_HULL_MARGIN_TEXELS * texel;
+    if !(m.is_finite() && cx.is_finite() && cy.is_finite() && ex.is_finite() && ey.is_finite()) {
+        return true;
+    }
+    let hull = &c.view_hull[..n];
+    let (mut hx0, mut hx1, mut hy0, mut hy1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+    for p in hull {
+        hx0 = hx0.min(p[0]);
+        hx1 = hx1.max(p[0]);
+        hy0 = hy0.min(p[1]);
+        hy1 = hy1.max(p[1]);
+    }
+    if cx - ex > hx1 + m || cx + ex < hx0 - m || cy - ey > hy1 + m || cy + ey < hy0 - m {
+        return false;
+    }
+    for i in 0..n {
+        let (a, b) = (hull[i], hull[(i + 1) % n]);
+        // Outward normal of a counter-clockwise edge.
+        let (nx, ny) = (b[1] - a[1], a[0] - b[0]);
+        let len = (nx * nx + ny * ny).sqrt();
+        if len <= 0.0 {
+            continue;
+        }
+        let (nx, ny) = (nx / len, ny / len);
+        let rect_min = cx * nx + cy * ny - (ex * nx.abs() + ey * ny.abs());
+        if rect_min > a[0] * nx + a[1] * ny + m {
+            return false;
+        }
+    }
+    true
 }
 
 /// Fit the frame's cascades. `range` is the detail range (the third
@@ -354,6 +469,7 @@ pub fn fit_cascades_reach(
             for (i, (f0, f1)) in windows.iter().enumerate() {
                 let (c, r) = slice_sphere(view, *f0, *f1);
                 frame.cascades[i] = fit_cascade(c, r, sun_dir, scene_min, scene_max, res);
+                set_view_hull(&mut frame.cascades[i], view);
             }
         }
         Some(view) => {
@@ -365,6 +481,7 @@ pub fn fit_cascades_reach(
                 let (a, b) = (corner_scale(view, f0 * reach), corner_scale(view, f1 * reach));
                 let (c, r) = slice_sphere(view, a, b);
                 frame.cascades[i] = fit_cascade(c, r, sun_dir, scene_min, scene_max, res);
+                set_view_hull(&mut frame.cascades[i], view);
                 f0 = *f1;
             }
         }
@@ -475,6 +592,30 @@ mod tests {
 
     fn sun() -> Vec3f {
         v3(0.55, 0.62, 0.56).normalize()
+    }
+
+    /// A caster behind the camera, whose shadow runs away from the view, is
+    /// dropped from every cascade; one in view, and one outside the view
+    /// whose shadow falls into it (toward the sun from a visible point),
+    /// are kept in every cascade that holds them.
+    #[test]
+    fn casters_whose_shadow_no_one_sees_are_dropped() {
+        let view = test_view();
+        let frame = fit_cascades(Some(&view), view.cam, sun(), v3(-400.0, -2.0, -400.0), v3(400.0, 40.0, 400.0), 80.0, 2048.0);
+        let boxed = |p: Vec3f| (p - v3(0.5, 0.5, 0.5), p + v3(0.5, 0.5, 0.5));
+        let behind = boxed(view.cam + v3(0.0, 0.0, -40.0));
+        let visible = view.cam + v3(0.0, -1.2, 20.0);
+        let in_view = boxed(visible);
+        let toward_sun = boxed(visible + sun() * 30.0);
+        for (i, c) in frame.cascades.iter().enumerate() {
+            assert!(c.view_hull_n >= 3, "a view gives every cascade its footprint");
+            assert!(!cascade_sees(c, behind.0, behind.1), "cascade {i}: the caster behind the camera shadows nothing in view");
+            assert!(cascade_sees(c, in_view.0, in_view.1), "cascade {i}: the caster in view must stay");
+            assert!(cascade_sees(c, toward_sun.0, toward_sun.1), "cascade {i}: the caster casting into view must stay");
+        }
+        // No view (XR rings): nothing is dropped.
+        let rings = fit_cascades(None, view.cam, sun(), v3(-400.0, -2.0, -400.0), v3(400.0, 40.0, 400.0), 80.0, 2048.0);
+        assert!(rings.cascades.iter().all(|c| cascade_sees(c, behind.0, behind.1)));
     }
 
     /// The fitted z interval is expressed in absolute light-space world

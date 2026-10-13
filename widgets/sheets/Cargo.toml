@@ -1,0 +1,21 @@
+# Extra widget style sheets for any Makepad app: eleven themes drawn with the
+# widget library alone (the material sheets and the sheets built on the fader
+# cap engine), and that engine, `mod.sdf.Cap`. `register()` adds them to the
+# widget library's sheet catalogue; an app that offers them calls it at
+# startup, before the first style load.
+[package]
+name = "makepad-widgets-sheets"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Makepad widget style sheets: Cyberpunk, Aluminium, Ferrofluid, Segment display, Lacquer red, Safety yellow, Field radio, Steampunk brass, Futuristic metal, Concrete and Handheld"
+
+[dependencies]
+makepad-widgets-core = { workspace = true }
+
+[dev-dependencies]
+# The whole library, every family, so a sheet's lines for a family are held
+# to it where the family is registered; and the checks every catalogue sheet
+# is held to.
+makepad-widgets = { path = ".." }
+makepad-widgets-core = { workspace = true, features = ["sheet-checks"] }

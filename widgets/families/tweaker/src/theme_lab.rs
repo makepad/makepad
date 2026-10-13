@@ -946,7 +946,7 @@ impl ThemeLab {
 #[cfg(test)]
 mod theme_lab_tests {
     use super::*;
-    use crate::makepad_platform::{Cx, LiveId, NoTrap, ScriptMod};
+    use crate::makepad_platform::{Cx, LiveId, ScriptMod};
     use crate::theme_tokens::{
         mix_rgb, theme_module_script, BlendValue, ThemeValues, TokenValue, READABLE,
     };
@@ -1219,7 +1219,7 @@ mod theme_lab_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             desktop_style::uninstall(vm);
             lab.enter(vm);
             let omarchy = lab.index_of(OMARCHY).unwrap();
@@ -1336,15 +1336,7 @@ mod theme_lab_tests {
                     &[("color_bg_app".to_string(), TokenValue::Color(PINNED))],
                 ),
             );
-            vm.eval(ScriptMod {
-                cargo_manifest_path: crate::widgets_dir().into(),
-                module_path: "theme_lab_test_sunset".to_string(),
-                file: "sunset.splash".to_string(),
-                line: 0,
-                column: 0,
-                code: pinned.script().to_string(),
-                values: vec![],
-            });
+            vm.eval(ScriptMod::new(&crate::widgets_dir(), "theme_lab_test_sunset", "sunset.splash", 0, 0, &pinned.script(), &[]));
             assert_eq!(
                 read_theme(vm, "color_bg_app"),
                 Some(PINNED),
@@ -1796,19 +1788,16 @@ mod theme_lab_tests {
 
     fn read_theme(vm: &mut ScriptVm, key: &str) -> Option<u32> {
         let theme = vm.module(LiveId::from_str("theme"));
-        vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
+        vm.value(theme, LiveId::from_str(key)).as_color()
     }
 
     /// The theme object the widget module was handed, which is what every
     /// `theme.color_x` in a template was baked from.
     fn read_widget_theme(vm: &mut ScriptVm, key: &str) -> Option<u32> {
         let prelude = vm.module(LiveId::from_str("prelude"));
-        let internal = vm
-            .bx
-            .heap
-            .value(prelude, LiveId::from_str("widgets_internal").into(), NoTrap)
+        let internal = vm.value(prelude, LiveId::from_str("widgets_internal"))
             .as_object()?;
-        let theme = vm.bx.heap.value(internal, LiveId::from_str("theme").into(), NoTrap).as_object()?;
-        vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
+        let theme = vm.value(internal, LiveId::from_str("theme")).as_object()?;
+        vm.value(theme, LiveId::from_str(key)).as_color()
     }
 }

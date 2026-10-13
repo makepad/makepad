@@ -11,10 +11,11 @@
 
 use makepad_platform::thread::{Lane, TaskPool};
 use makepad_platform::Cx;
-use makepad_script_compute::admission::{JobBudget, Ledger, Origin};
-use makepad_script_compute::kernel::{Kernel, Layout};
+use makepad_script_compute_sched::admission::{JobBudget, Ledger, Origin};
+use makepad_script_compute::boundary::LayoutView;
+use makepad_script_compute::kernel::KernelRef;
 use makepad_script_compute::module::Module;
-use makepad_script_compute::sched::{Executor, FnExecutor, Job, JobError, Priority, Scheduler, SchedulerConfig, ThreadExecutor};
+use makepad_script_compute_sched::sched::{Executor, FnExecutor, Job, JobError, Priority, Scheduler, SchedulerConfig, ThreadExecutor};
 use makepad_script_compute::{Backend, ShaderError};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -140,8 +141,8 @@ pub fn engine() -> &'static KernelEngine {
 /// Compiles a kernel once per process for each (source, layouts, modules):
 /// kernels are immutable and shared, so a generator that runs per tile
 /// compiles its passes on first use only.
-pub fn compile(src: &str, layouts: &[Layout], modules: &[Module<'_>]) -> Result<Arc<Kernel>, Vec<ShaderError>> {
-    static CACHE: OnceLock<Mutex<HashMap<u64, Arc<Kernel>>>> = OnceLock::new();
+pub fn compile(src: &str, layouts: &[LayoutView<'_>], modules: &[Module<'_>]) -> Result<KernelRef, Vec<ShaderError>> {
+    static CACHE: OnceLock<Mutex<HashMap<u64, KernelRef>>> = OnceLock::new();
     let mut h = 0xcbf2_9ce4_8422_2325u64;
     let mut eat = |b: &[u8]| {
         for x in b {
@@ -151,7 +152,15 @@ pub fn compile(src: &str, layouts: &[Layout], modules: &[Module<'_>]) -> Result<
         h = (h ^ 0xff).wrapping_mul(0x0000_0100_0000_01b3);
     };
     eat(src.as_bytes());
-    eat(format!("{:?}", layouts).as_bytes());
+    for l in layouts {
+        eat(l.name.as_bytes());
+        eat(&l.stride.to_le_bytes());
+        for f in l.fields {
+            eat(f.name.as_bytes());
+            eat(&[f.ty as u8]);
+            eat(&f.offset.to_le_bytes());
+        }
+    }
     for m in modules {
         eat(m.path.as_bytes());
         eat(m.source.as_bytes());

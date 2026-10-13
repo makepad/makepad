@@ -812,8 +812,8 @@ impl TreeView {
         } else {
             self.open.iter().copied().filter(|id| model.index_of(*id).is_some()).collect()
         };
-        let ticked = self.ticked.iter().copied().filter(|id| model.index_of(*id).is_some()).collect();
-        let selected =
+        let ticked: HashSet<LiveId> = self.ticked.iter().copied().filter(|id| model.index_of(*id).is_some()).collect();
+        let selected: HashSet<LiveId> =
             self.selected.iter().copied().filter(|id| model.index_of(*id).is_some()).collect();
         self.focus_id = self.focus_id.filter(|id| model.index_of(*id).is_some());
         self.anchor = self.anchor.filter(|id| model.index_of(*id).is_some());

@@ -278,6 +278,14 @@ impl Renderer {
         stats: &mut RenderStats,
         eye:Vec3f,
     ) {
+        // The lane draws through the shader variant for this frame's
+        // features, and parts that cut no pixel through the one without
+        // `clip` (variants.rs): a discarding pipeline costs the tile GPU its
+        // hidden-surface removal for every character it draws.
+        let stock = batch.skinned.draw_vars.draw_shader_id;
+        let (full, opaque) = self.lane_shaders(cx.cx, variants::ModelLane::SkinnedGpu, stock);
+        let opaque = opaque.filter(|id| cx.cx.draw_shader_ready(*id, self.hdr_output));
+        batch.skinned.draw_vars.draw_shader_id = full;
         // The eye, the sun and the fog are uniforms, written once per call:
         // the vertex stage ran out of D3D11 input registers with them on the
         // instance stream, and every character of a call shares them.
@@ -464,11 +472,17 @@ impl Renderer {
                     if batch.skinned.draw_vars.can_instance() {
                         let triangles = cx.cx.geometries[part.geometry.geometry_id()].indices.len() / 3;
                         let shells = crate::material_surface::fur_shell_count(batch.skinned.fur.x, &item.transform, distance, triangles, &mut fur_budget);
+                        // The base layer of an unmasked material never cuts a
+                        // pixel (fur_mask is 1 on layer 0); fur shells and
+                        // masked or blended parts keep the stock pipeline.
+                        let cuts = definition.alpha_mode != 0;
                         for layer in 0..=shells {
                             batch.skinned.fur_layer.x = layer as f32 / shells.max(1) as f32;
+                            batch.skinned.draw_vars.draw_shader_id = if layer == 0 && !cuts { opaque.or(full) } else { full };
                             let area = cx.add_instance(&batch.skinned.draw_vars);
                             batch.skinned.draw_vars.area = cx.update_area_refs(batch.skinned.draw_vars.area, area);
                         }
+                        batch.skinned.draw_vars.draw_shader_id = full;
                         stats.fur_triangles += shells * triangles;
                         batch.skinned.fur_layer.x = 0.0;
                     }
@@ -477,9 +491,12 @@ impl Renderer {
                 batch.skinned.fur = Default::default(); batch.skinned.fur_layer.x = 0.0;
                 batch.skinned.draw_vars.set_uniform(cx.cx,live_id!(surface_on),&[0.0]);batch.skinned.fur_layer.y=0.0;batch.skinned.draw_vars.options.alpha_blend=false;batch.skinned.draw_vars.options.depth_write=true;batch.skinned.draw_vars.options.backface_culling=true;
             if batch.skinned.draw_vars.can_instance() {
+                // No material, no fur: nothing cuts a pixel.
+                batch.skinned.draw_vars.draw_shader_id = opaque.or(full);
                 let new_area = cx.add_instance(&batch.skinned.draw_vars);
                 batch.skinned.draw_vars.area =
                     cx.update_area_refs(batch.skinned.draw_vars.area, new_area);
+                batch.skinned.draw_vars.draw_shader_id = full;
             }
             }
         }

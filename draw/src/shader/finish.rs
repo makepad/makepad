@@ -502,8 +502,7 @@ mod tests {
     ];
 
     fn compiled(vm: &mut ScriptVm, value: ScriptValue) -> String {
-        vm.bx
-            .heap
+        vm.heap()
             .string_with(value, |_heap, text| text.to_string())
             .expect("the compiler answers with source")
     }

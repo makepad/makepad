@@ -55,7 +55,8 @@ impl<'a> DerefMut for CxDraw<'a> {
 
 impl<'a> Drop for CxDraw<'a> {
     fn drop(&mut self) {
-        if !self.fonts.borrow_mut().prepare_textures(self.cx) {
+        let full_draw = self.draw_event.redraw_all;
+        if !self.fonts.borrow_mut().prepare_textures(self.cx, full_draw) {
             self.cx.redraw_all();
         }
         self.pass_stack.clear();
@@ -113,6 +114,17 @@ impl<'a> CxDraw<'a> {
             },
         );
         cx.set_global(Rc::new(RefCell::new(fonts)));
+        // a finished glyph upgrade (MSDF worker) raises the UI signal: redraw so the next draw
+        // applies it, instead of keeping the stand-in glyphs until unrelated input
+        cx.signal_hooks.push(|cx| {
+            let waiting = cx
+                .get_global_ref::<Rc<RefCell<Fonts>>>()
+                .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.msdf_results_waiting()))
+                .unwrap_or(false);
+            if waiting {
+                cx.redraw_all();
+            }
+        });
         cx.register_async_load_probe("glyph", |cx| {
             cx.get_global_ref::<Rc<RefCell<Fonts>>>()
                 .and_then(|fonts| fonts.try_borrow().ok().map(|fonts| fonts.pending_glyph_rasters()))
@@ -243,6 +255,12 @@ impl<'a> CxDraw<'a> {
     pub fn set_pass_scaled_area(&mut self, pass: &Pass, area: Area, scale:f64) {
         self.passes[pass.pass_id()].pass_rect = Some(CxPassRect::ScaledArea(area, scale));
     }   */
+
+    /// The pass being drawn (the parent of any pass a draw declares with
+    /// [`CxDraw::make_child_pass`]).
+    pub fn current_pass_id(&self) -> DrawPassId {
+        self.pass_stack.last().unwrap().pass_id
+    }
 
     pub fn current_pass_size(&self) -> Vec2d {
         self.cx

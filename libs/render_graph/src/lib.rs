@@ -103,7 +103,9 @@ pub fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
 /// The shared Splash stdlib (`mod.shared`) every pass's code has in scope:
 /// registered once per VM, before a pass compiles.
 pub fn pass_stdlib(vm: &mut ScriptVm) -> ScriptValue {
-    makepad_script_compute::module::register_shared_std(vm);
+    if makepad_script_compute::module::register_shared_std(vm) {
+        makepad_tween_script::install_ease(vm);
+    }
     NIL
 }
 
@@ -112,9 +114,9 @@ pub fn pass_stdlib(vm: &mut ScriptVm) -> ScriptValue {
 /// the Sandbox lane's bloom and composite), once per VM however many hosts
 /// ask. Call after `makepad_widgets::script_mod`.
 pub fn script_mod_passes(vm: &mut ScriptVm) {
-    let draw = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("draw").into(), NoTrap).as_object();
+    let draw = vm.value(vm.modules(), LiveId::from_str("draw")).as_object();
     let have = draw.is_some_and(|d| {
-        let v = vm.bx.heap.value(d, LiveId::from_str("DrawGraphPass").into(), NoTrap);
+        let v = vm.value(d, LiveId::from_str("DrawGraphPass"));
         !v.is_nil() && !v.is_err()
     });
     if !have {

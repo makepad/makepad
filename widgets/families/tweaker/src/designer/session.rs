@@ -584,11 +584,9 @@ pub fn palette(cx: &mut Cx) -> Vec<PaletteEntry> {
         .collect();
     let mut rest: Vec<String> = cx.with_vm(|vm| {
         let widgets = vm.module(id!(widgets));
-        let top: Vec<(String, ScriptValue)> = vm.map_mut_with(widgets, |_vm, map| {
-            map.iter()
-                .filter_map(|(k, v)| k.as_id().map(|id| (live_id_token(id), v.value)))
-                .collect()
-        });
+        let top: Vec<(String, ScriptValue)> = vm.heap().map_entries(widgets).into_iter()
+            .filter_map(|e| e.key.as_id().map(|id| (live_id_token(id), e.value)))
+            .collect();
         let mut names = Vec::new();
         for (name, value) in top {
             let Some(obj) = value.as_object() else {
@@ -602,11 +600,11 @@ pub fn palette(cx: &mut Cx) -> Vec<PaletteEntry> {
                 let Some(o) = cur else {
                     break;
                 };
-                if vm.bx.heap.object_type_id(o).is_some() {
+                if vm.heap().object_type_id(o).is_some() {
                     typed = true;
                     break;
                 }
-                cur = vm.bx.heap.proto(o).as_object();
+                cur = vm.heap().proto(o).as_object();
             }
             if typed && !name.ends_with("Base") && !CURATED.iter().any(|(n, _)| *n == name) {
                 names.push(name);

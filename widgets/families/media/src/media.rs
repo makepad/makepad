@@ -863,7 +863,7 @@ mod tests {
 
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut media = cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             crate::script_mod(vm);
             let errors = vm.take_errors();
             assert!(errors.is_empty(), "{errors:#?}");

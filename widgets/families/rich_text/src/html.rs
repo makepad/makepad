@@ -2,9 +2,10 @@ use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     fold_button::{FoldButton, FoldButtonAction},
     makepad_derive_widget::*,
+    makepad_draw::turtle::{Baseline, RowAlign},
     makepad_draw::*,
     makepad_html::*,
     text_flow::TextFlow,
@@ -82,6 +83,7 @@ script_mod! {
 
         heading_margin: Inset{top: 1.0, bottom: 0.1}
         paragraph_margin: Inset{top: 0.33, bottom: 0.33}
+        collapse_block_margins: true
         // Restated from TextFlow rather than inherited. These reach TextFlow
         // through a Rust `#[deref]`, not through the prototype chain, so on a
         // reload -- and a theme switch is a reload -- any of them this block
@@ -518,7 +520,10 @@ impl Html {
             some_id!(code) => {
                 tf.push_size_rel_scale(tf.fixed_font_size_scale);
                 tf.fixed.push();
-                tf.inline_code.push();
+                // A code block already draws its own background, so its `<code>` doesn't get an inline box too.
+                if tf.code_block.value() == 0 {
+                    tf.inline_code.push();
+                }
             }
             some_id!(pre) => {
                 tf.new_line_collapsed(cx);
@@ -727,7 +732,9 @@ impl Html {
                 tf.end_quote(cx);
             }
             some_id!(code) => {
-                tf.inline_code.pop();
+                if tf.code_block.value() == 0 {
+                    tf.inline_code.pop();
+                }
                 tf.font_sizes.pop();
                 tf.fixed.pop();
             }
@@ -925,6 +932,8 @@ impl Widget for Html {
                         ..
                     }) = self.details_stack.last()
                     {
+                        // The fold button doesn't draw through draw_text, so apply the pending block margin first.
+                        self.text_flow.flush_block_margin(cx);
                         let fb_ref = self.text_flow.item_with_scope(
                             cx,
                             &mut Scope::empty(),
@@ -949,11 +958,28 @@ impl Widget for Html {
                             // Walk scaled to the current summary font size so
                             // the triangle tracks headings, `<sub>`, etc. The
                             // right margin is the gap between triangle and
-                            // summary text. The top margin pushes the box
-                            // down so the triangle's center lines up with
-                            // the text's optical middle — `Flow::Right` uses
-                            // `RowAlign::Top`, and a font_size-tall box on
-                            // its own sits above the text baseline.
+                            // summary text.
+                            //
+                            // A font_size-tall box sits high in a top-aligned row, so it's pushed
+                            // down; a centered row seats it on the line box and the bottom margin
+                            // lifts it to the cap band; a baseline row puts the box's center on it.
+                            let row_align = match cx.turtle().flow() {
+                                Flow::Right { row_align, .. } => row_align,
+                                _ => RowAlign::Top,
+                            };
+                            let (top, bottom, baseline) = match row_align {
+                                RowAlign::Center => {
+                                    let ink_offset = self.text_flow.line_probe(cx).ink_center_offset_in_lpxs();
+                                    (0.0, 2.0 * ink_offset as f64, Baseline::Auto)
+                                }
+                                RowAlign::Baseline => {
+                                    let cap = self.text_flow.line_probe(cx).rows.first().map_or(0.0, |row| {
+                                        (row.cap_height_in_lpxs * self.text_flow.draw_text.font_scale) as f64
+                                    });
+                                    (0.0, 0.0, Baseline::At((0.5 * font_size + 0.5 * cap) as f32))
+                                }
+                                RowAlign::Top | RowAlign::Bottom => (font_size * 0.25, 0.0, Baseline::Auto),
+                            };
                             let triangle_walk = Walk {
                                 abs_pos: None,
                                 width: Size::Fixed(font_size),
@@ -961,9 +987,10 @@ impl Widget for Html {
                                 margin: Inset {
                                     left: 0.0,
                                     right: font_size * 0.2,
-                                    top: font_size * 0.25,
-                                    bottom: 0.0,
+                                    top,
+                                    bottom,
                                 },
+                                baseline,
                                 ..Default::default()
                             };
                             // One borrow for all FoldButton mutations: seed
@@ -988,6 +1015,8 @@ impl Widget for Html {
                             if needs_seed {
                                 self.seen_details.insert(details_id);
                             }
+                            // The summary text after the triangle still trims its leading whitespace.
+                            self.text_flow.first_thing_on_a_line = true;
                         }
                     }
                     // Start tracking the glyph rects that get drawn for the
@@ -1171,9 +1200,16 @@ fn handle_custom_widget(
         // for; when it overruns that line it is cut at the edge with an
         // ellipsis. `end_inline_content` also charges the row the widget landed
         // on, which costs a line even when no text run follows to notice it.
+        let block_start_state = tf.block_start_state();
         let hold = tf.begin_inline_content(cx);
+        if tf.is_content_truncated() {
+            return resume;
+        }
+        let start_pos = cx.turtle().pos();
         let mut draw_scope = Scope::with_data(tf);
         item.draw_all(cx, &mut draw_scope);
+        // An element that draws nothing (e.g., an empty <span>) shouldn't use up its container's start.
+        tf.end_inline_widget(cx.turtle().pos() != start_pos, block_start_state);
         tf.end_inline_content(cx, hold);
     }
     resume
@@ -1263,8 +1299,8 @@ impl ScriptHook for HtmlLink {
     fn on_after_new_scoped(&mut self, _vm: &mut ScriptVm, scope: &mut Scope) {
         // After an HtmlLink instance has been instantiated,
         // populate its struct fields from the `<a>` tag's attributes.
-        if let Some(doc) = scope.props.get::<HtmlDoc>() {
-            let mut walker = doc.new_walker_with_index(scope.index + 1);
+        if let Some(doc) = scope.props().get::<HtmlDoc>() {
+            let mut walker = doc.new_walker_with_index(scope.index() + 1);
             while let Some((lc, attr)) = walker.while_attr_lc() {
                 match lc {
                     live_id!(href) => {
@@ -1290,7 +1326,7 @@ impl Widget for HtmlLink {
             self.animator_cut(cx, ids!(hover.off));
         }
         if self.animator_handle_event(cx, event).must_redraw() {
-            if let Some(tf) = scope.data.get_mut::<TextFlow>() {
+            if let Some(tf) = scope.data_mut().get_mut::<TextFlow>() {
                 tf.redraw(cx);
             } else {
                 self.drawn_areas.iter().for_each(|area| area.redraw(cx));
@@ -1353,7 +1389,7 @@ impl Widget for HtmlLink {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
-        let Some(tf) = scope.data.get_mut::<TextFlow>() else {
+        let Some(tf) = scope.data_mut().get_mut::<TextFlow>() else {
             return DrawStep::done();
         };
 

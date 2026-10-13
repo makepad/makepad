@@ -459,6 +459,14 @@ impl ReorderList {
             }
             return false;
         }
+        // Only pointer events can hit a gripper or update its capture/hover state.
+        if !matches!(event,
+            Event::MouseDown(_) | Event::MouseMove(_) | Event::MouseUp(_)
+                | Event::MouseLeave(_) | Event::TouchUpdate(_) | Event::FingerCancel(_)
+                | Event::LongPress(_) | Event::Scroll(_) | Event::Pinch(_) | Event::XrLocal(_)
+        ) {
+            return false;
+        }
         // No drag yet: watch every visible gripper. Runs BEFORE the inner
         // list handles the event, so a press on a gripper is captured here
         // first and the swallowed event never starts a drag-scroll.
@@ -671,6 +679,10 @@ impl ReorderList {
 }
 
 impl Widget for ReorderList {
+    fn clips_content(&self) -> bool {
+        true
+    }
+
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.drag.is_some()
             && (crate::modal::ModalAction::is_dismissal(event)

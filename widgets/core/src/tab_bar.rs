@@ -306,7 +306,7 @@ impl ScriptHook for TabBar {
                         if let Some(id) = kv.key.as_id() {
                             if let Some(template_obj) = kv.value.as_object() {
                                 self.templates
-                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    .insert(id, vm.new_object_ref(template_obj));
                             }
                         }
                     }

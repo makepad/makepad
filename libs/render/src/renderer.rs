@@ -651,6 +651,7 @@ pub use items::{splash_material_name, GeometryData, TransformTint, LAYOUT_TRANSF
 pub use draw_items::*;
 pub use prepared::*;
 pub use model_instance::*;
+pub use realm::ModelTail;
 pub use frame_util::*;
 pub use stream_draw::StreamStats;
 

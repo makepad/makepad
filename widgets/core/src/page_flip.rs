@@ -1,4 +1,5 @@
-use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt};
+use crate::{makepad_derive_widget::*, makepad_draw::*, widget::*, widget_tree::CxWidgetExt, held_events::HeldEvents, view::View};
+use std::collections::HashMap;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -35,6 +36,11 @@ pub struct PageFlip {
     templates: ComponentMap<LiveId, ScriptObjectRef>,
     #[rust]
     pages: ComponentMap<LiveId, WidgetRef>,
+    /// What each page out of sight waits for (see `held_events`): a page
+    /// that is not shown skips frame requests (delivered once it is shown)
+    /// and actions, unless its root view sets `background_events: true`.
+    #[rust]
+    held: HashMap<LiveId, HeldEvents>,
 }
 
 impl ScriptHook for PageFlip {
@@ -67,7 +73,7 @@ impl ScriptHook for PageFlip {
                             if let Some(id) = kv.key.as_id() {
                                 if let Some(template_obj) = kv.value.as_object() {
                                     self.templates
-                                        .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                        .insert(id, vm.new_object_ref(template_obj));
                                 }
 
                                 // If we already have this page instantiated, apply updates to it
@@ -160,14 +166,27 @@ impl Widget for PageFlip {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if !self.visible && event.requires_visibility() { return; }
         let uid = self.widget_uid();
+        let active_page = self.active_page;
+        // The shown page first gets what it waited for while it was hidden.
+        if let (Some(page), Some(held)) = (self.pages.get_mut(&active_page), self.held.get_mut(&active_page)) {
+            if !held.is_empty() {
+                let item_uid = page.widget_uid();
+                for held in held.take() {
+                    cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, &held, scope));
+                }
+            }
+        }
         if event.requires_visibility() {
-            let active_page = self.active_page;
             if let Some(page) = self.pages.get_mut(&active_page) {
                 let item_uid = page.widget_uid();
                 cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
             }
         } else {
-            for (_page_id, page) in self.pages.iter() {
+            for (page_id, page) in self.pages.iter() {
+                if *page_id != active_page && !page.borrow::<View>().is_some_and(|view| view.background_events)
+                    && self.held.entry(*page_id).or_default().hold(event) {
+                    continue;
+                }
                 let item_uid = page.widget_uid();
                 cx.group_widget_actions(uid, item_uid, |cx| page.handle_event(cx, event, scope));
             }
@@ -202,12 +221,51 @@ impl PageFlip {
         if self.active_page != page_id {
             self.active_page = page_id;
             self.redraw(cx);
+            // The page's retained draw lists missed any redraws while it was hidden.
+            page_widget.redraw(cx);
         }
         Some(page_widget)
     }
 }
 
+impl PageFlip {
+    /// Builds the page for `page_id` without making it the active page, so
+    /// an app can prepare a page it is not showing yet. Idempotent: a page
+    /// that already exists is left as it is. Returns whether the page exists
+    /// afterwards (false: no such template).
+    pub fn ensure_page(&mut self, cx: &mut Cx, page_id: LiveId) -> bool {
+        if self.pages.contains_key(&page_id) {
+            return true;
+        }
+        self.page(cx, page_id).is_some()
+    }
+
+    /// Whether the page for `page_id` has been built.
+    pub fn has_page(&self, page_id: LiveId) -> bool {
+        self.pages.contains_key(&page_id)
+    }
+}
+
 impl PageFlipRef {
+    /// See [`PageFlip::ensure_page()`].
+    pub fn ensure_page(&self, cx: &mut Cx, page_id: LiveId) -> bool {
+        match self.borrow_mut() {
+            Some(mut inner) => inner.ensure_page(cx, page_id),
+            None => false,
+        }
+    }
+
+    /// See [`PageFlip::has_page()`].
+    pub fn has_page(&self, page_id: LiveId) -> bool {
+        self.borrow().is_some_and(|inner| inner.has_page(page_id))
+    }
+
+    /// See [`PageFlip::page()`].
+    pub fn page(&self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
+        let mut inner = self.borrow_mut()?;
+        inner.page(cx, page_id)
+    }
+
     /// See [`PageFlip::set_active_page()`].
     pub fn set_active_page(&self, cx: &mut Cx, page_id: LiveId) -> Option<WidgetRef> {
         let mut inner = self.borrow_mut()?;

@@ -18,15 +18,12 @@ makepad-tween = { path = "../../libs/tween" }
 # The app identity artwork of each desktop style (shared with Motion).
 makepad-app-icons = { path = "../../libs/app_icons" }
 
-serde = { version = "1.0", optional = true, features = ["derive"] }
 
 [features]
 # No widget families here: each is a crate of its own (widgets/families),
 # picked by the features of `makepad-widgets`, so this crate compiles once
 # whatever mix an app takes.
 
-## Enables certain public-facing types to derive serde serialization traits.
-serde = ["dep:serde", "makepad-draw/serde", "makepad-derive-widget/serde"]
 
 ## The checks every catalogue sheet is held to (`sheet_checks`), for the
 ## tests of an app that registers sheets of its own.

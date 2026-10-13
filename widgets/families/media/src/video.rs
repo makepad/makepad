@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     image_cache::ImageCacheImpl,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -16,6 +16,7 @@ script_mod! {
     use mod.prelude.widgets_internal.*
 
     mod.widgets.VideoDataSource = #(VideoDataSource::script_api(vm))
+    mod.widgets.VideoFit = #(VideoFit::script_api(vm))
     mod.widgets.VideoBase = #(Video::register_widget(vm))
 
     mod.widgets.Video = set_type_default() do mod.widgets.VideoBase{
@@ -64,8 +65,8 @@ script_mod! {
             image_scale: instance(vec2(1.0, 1.0))
             image_pan: instance(vec2(0.5, 0.5))
 
-            source_size: uniform(vec2(1.0, 1.0))
-            target_size: uniform(vec2(-1.0, -1.0))
+            source_size: uniform(vec2(0.0, 0.0))
+            fit_cover: uniform(0.0)
 
             // Apply SurfaceTexture ST matrix, then sample OES (see oes_st_c* comment).
             sample_oes: fn(coord: vec2) -> vec4 {
@@ -155,60 +156,58 @@ script_mod! {
                 return vec4(clamp(r, 0.0, 1.0), clamp(g, 0.0, 1.0), clamp(b, 0.0, 1.0), 1.0)
             }
 
-            get_color_scale_pan: fn() {
-                // Early return for default scaling and panning,
-                // used when walk size is not specified or non-fixed.
-                if self.target_size.x <= 0.0 || self.target_size.y <= 0.0 {
-                    if self.show_thumbnail > 0.0 {
-                        return self.thumbnail_texture.sample(self.pos).xyzw
-                    } else if self.yuv_enabled > 0.5 {
-                        return self.sample_yuv(self.pos)
-                    } else if self.video_rgba_2d > 0.5 {
-                        return self.video_texture_2d.sample(self.pos)
-                    } else {
-                        return self.sample_oes(self.pos)
-                    }
-                }
-
-                let mut scale = self.image_scale
-                let pan = self.image_pan
-                let source_aspect_ratio = self.source_size.x / self.source_size.y
-                let target_aspect_ratio = self.target_size.x / self.target_size.y
-
-                // Adjust scale based on aspect ratio difference
-                if source_aspect_ratio != target_aspect_ratio {
-                    if source_aspect_ratio > target_aspect_ratio {
-                        scale.x = target_aspect_ratio / source_aspect_ratio
-                        scale.y = 1.0
-                    } else {
-                        scale.x = 1.0
-                        scale.y = source_aspect_ratio / target_aspect_ratio
-                    }
-                }
-
-                // Calculate the range for panning
-                let pan_range_x = max(0.0, 1.0 - scale.x)
-                let pan_range_y = max(0.0, 1.0 - scale.y)
-
-                // Adjust the user pan values to be within the pan range
-                let adjusted_pan_x = pan_range_x * pan.x
-                let adjusted_pan_y = pan_range_y * pan.y
-                let adjusted_pan = vec2(adjusted_pan_x, adjusted_pan_y)
-                let adjusted_pos = self.pos * scale + adjusted_pan
-
+            // The picture at `uv` (0..1 over the picture): the thumbnail until
+            // playback starts, then the video in whichever form it arrives.
+            sample_picture: fn(uv: vec2) -> vec4 {
                 if self.show_thumbnail > 0.5 {
-                    return self.thumbnail_texture.sample(adjusted_pos).xyzw
+                    return self.thumbnail_texture.sample(uv).xyzw
                 } else if self.yuv_enabled > 0.5 {
-                    return self.sample_yuv(adjusted_pos)
+                    return self.sample_yuv(uv)
                 } else if self.video_rgba_2d > 0.5 {
-                    return self.video_texture_2d.sample(adjusted_pos)
+                    return self.video_texture_2d.sample(uv)
                 } else {
-                    return self.sample_oes(adjusted_pos)
+                    return self.sample_oes(uv)
                 }
             }
 
+            // source_size is the picture's display size (pixel aspect and
+            // rotation applied). Contain (fit_cover 0): the whole picture,
+            // centred, with transparent bars on the two free sides. Cover
+            // (fit_cover 1): the picture fills the widget, cropped on one
+            // axis, image_pan picking which part shows.
+            get_color: fn() -> vec4 {
+                let src = self.source_size
+                let dst = self.rect_size
+                if src.x <= 0.0 || src.y <= 0.0 || dst.x <= 0.0 || dst.y <= 0.0 {
+                    return self.sample_picture(self.pos)
+                }
+                let src_aspect = src.x / src.y
+                let dst_aspect = dst.x / dst.y
+                if self.fit_cover > 0.5 {
+                    let mut scale = self.image_scale
+                    if src_aspect > dst_aspect {
+                        scale = vec2(dst_aspect / src_aspect, 1.0)
+                    } else if src_aspect < dst_aspect {
+                        scale = vec2(1.0, src_aspect / dst_aspect)
+                    }
+                    let pan_range = vec2(max(0.0, 1.0 - scale.x), max(0.0, 1.0 - scale.y))
+                    return self.sample_picture(self.pos * scale + pan_range * self.image_pan)
+                }
+                let mut size = vec2(1.0, 1.0)
+                if src_aspect > dst_aspect {
+                    size = vec2(1.0, dst_aspect / src_aspect)
+                } else {
+                    size = vec2(src_aspect / dst_aspect, 1.0)
+                }
+                let uv = (self.pos - (vec2(1.0, 1.0) - size) * 0.5) / size
+                if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 {
+                    return vec4(0.0, 0.0, 0.0, 0.0)
+                }
+                return self.sample_picture(uv)
+            }
+
             pixel: fn() {
-                let color = self.get_color_scale_pan()
+                let color = self.get_color()
                 return Pal.premul(vec4(color.xyz, color.w * self.opacity))
             }
         }
@@ -521,6 +520,10 @@ pub struct Video {
     held_paused: bool,
     #[live(false)]
     autoplay: bool,
+    /// How the picture sits in the widget: whole and centred (Contain), or
+    /// filling it, cropped on one axis (Cover, `image_pan` picks the part).
+    #[live]
+    fit: VideoFit,
     #[live(false)]
     mute: bool,
     #[rust]
@@ -542,6 +545,9 @@ pub struct Video {
     video_width: usize,
     #[rust]
     video_height: usize,
+    /// The planes arrive a quarter turn off (yuv rotation steps 1 or 3).
+    #[rust]
+    quarter_turned: bool,
     #[rust]
     total_duration: u128,
 
@@ -972,6 +978,12 @@ impl Widget for Video {
             }
         }
 
+        // set on every draw: a re-apply of the style (rotation, theme) puts
+        // the uniforms back to their defaults
+        let cover = if self.fit == VideoFit::Cover { 1.0 } else { 0.0 };
+        self.draw_bg.set_uniform(cx, id!(fit_cover), &[cover]);
+        let size = self.picture_size(cx);
+        self.draw_bg.set_uniform(cx, id!(source_size), &size);
         self.draw_bg.begin(cx, walk, self.layout);
         self.draw_bg.end(cx);
 
@@ -1064,6 +1076,7 @@ impl Widget for Video {
                         id!(yuv_rotation_steps),
                         &[event.yuv.rotation_steps],
                     );
+                    self.quarter_turned = (event.yuv.rotation_steps.round() as i32) % 2 != 0;
                     // Keep every samplerExternalOES slot bound to a real OES texture.
                     // An empty video_texture + live tex_*_oes can 花屏 on NVIDIA.
                     if event.yuv.external {
@@ -1116,21 +1129,6 @@ impl Widget for Video {
                             }
                         }
                     }
-                    // Android-only: pull ST matrix from texture OS state (set on
-                    // updateTexImage drain). Not part of VideoTextureUpdatedEvent.
-                    #[cfg(target_os = "android")]
-                    if let Some(texture) = self.video_texture.as_ref() {
-                        let m = cx.textures[texture.texture_id()].os.oes_st_matrix;
-                        self.draw_bg
-                            .set_uniform(cx, id!(oes_st_c0), &[m[0], m[1], m[2], m[3]]);
-                        self.draw_bg
-                            .set_uniform(cx, id!(oes_st_c1), &[m[4], m[5], m[6], m[7]]);
-                        self.draw_bg
-                            .set_uniform(cx, id!(oes_st_c2), &[m[8], m[9], m[10], m[11]]);
-                        self.draw_bg
-                            .set_uniform(cx, id!(oes_st_c3), &[m[12], m[13], m[14], m[15]]);
-                    }
-
                     self.redraw(cx);
                     if self.playback_state == PlaybackState::Prepared && self.autoplay {
                         self.playback_state = PlaybackState::Playing;
@@ -1300,16 +1298,6 @@ impl Video {
         self.id = LiveId::unique();
         self.ensure_primary_texture(cx);
 
-        #[cfg(target_os = "android")]
-        if self.source_mode == VideoSourceMode::ExternalTexture {
-            match cx.os_type() {
-                OsType::Android(params) if params.is_emulator => {
-                    panic!("Video Widget is currently only supported on real devices. (unreliable support for external textures on some emulators hosts)");
-                }
-                _ => {}
-            }
-        }
-
         self.should_prepare_playback = self.autoplay;
         self.maybe_prepare_playback(cx);
     }
@@ -1320,11 +1308,6 @@ impl Video {
         // (via load_png_from_data / load_jpg_from_data) already calls set_texture
         // with a fresh GPU texture containing the decoded image. Allocating a
         // throwaway Texture::new(cx) first was just churning GPU resources.
-
-        let target_w = self.walk.width.to_fixed().unwrap_or(0.0);
-        let target_h = self.walk.height.to_fixed().unwrap_or(0.0);
-        self.draw_bg
-            .set_uniform(cx, id!(target_size), &[target_w as f32, target_h as f32]);
 
         if self.show_idle_thumbnail {
             let loaded = self.load_thumbnail_image(cx);
@@ -1339,14 +1322,6 @@ impl Video {
     fn maybe_prepare_playback(&mut self, cx: &mut Cx) {
         self.ensure_primary_texture(cx);
         if self.playback_state == PlaybackState::Unprepared && self.should_prepare_playback {
-            // On Android, external texture mode waits for GL texture handle.
-            #[cfg(target_os = "android")]
-            if self.source_mode == VideoSourceMode::ExternalTexture
-                && self.video_texture_handle.is_none()
-            {
-                return;
-            }
-
             let source = if self.has_session_source {
                 match self.session_source_id.take() {
                     Some(session_id) => VideoSource::Session(session_id),
@@ -1419,11 +1394,6 @@ impl Video {
         self.video_tracks = event.video_tracks.clone();
         self.audio_tracks = event.audio_tracks.clone();
 
-        self.draw_bg.set_uniform(
-            cx,
-            id!(source_size),
-            &[self.video_width as f32, self.video_height as f32],
-        );
 
         if self.mute && self.audio_state != AudioState::Muted {
             cx.mute_video_playback(self.id);
@@ -1433,6 +1403,20 @@ impl Video {
             cx.begin_video_playback(self.id);
             self.playback_state = PlaybackState::Playing;
             self.draw_bg.set_uniform(cx, id!(show_thumbnail), &[0.0]);
+        }
+    }
+
+    /// The picture's display size for the shader's fit: the decoder's display
+    /// size (turned when the shader turns the planes a quarter), the
+    /// thumbnail's until the video reports one.
+    fn picture_size(&self, cx: &mut Cx) -> [f32; 2] {
+        if self.video_width > 0 && self.video_height > 0 {
+            let (w, h) = (self.video_width as f32, self.video_height as f32);
+            return if self.quarter_turned { [h, w] } else { [w, h] };
+        }
+        match self.thumbnail_texture.as_ref().and_then(|t| t.get_format(cx).vec_width_height()) {
+            Some((w, h)) => [w as f32, h as f32],
+            None => [0.0, 0.0],
         }
     }
 
@@ -1509,6 +1493,7 @@ impl Video {
                 } else if self.controls_interactable() && self.hit_test_progress_bar(cx, fe.abs) {
                     // Start dragging progress bar
                     self.is_dragging_progress = true;
+                    cx.claim_finger_drag(fe.digit_id);
                     self.seek_to_position_from_x(cx, fe.abs.x);
                 } else if self.controls_interactable() && self.hit_test_controls(cx, fe.abs) {
                     // Will be handled on FingerUp
@@ -2183,6 +2168,16 @@ impl Video {
         }
         false
     }
+}
+
+/// How a [`Video`] places its picture (display aspect kept either way).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Script, ScriptHook)]
+pub enum VideoFit {
+    /// The whole picture, centred, transparent bars on the free sides.
+    #[default]
+    Contain,
+    /// The picture fills the widget, cropped on one axis.
+    Cover,
 }
 
 /// The script-facing source of the video data.

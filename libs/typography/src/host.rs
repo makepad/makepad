@@ -30,9 +30,10 @@
 use crate::font::OutlineFont;
 use crate::layout::{layout, TextStyle};
 use crate::outline::outlines;
-use makepad_script_compute::host::{self, HostError, HostFn, HostSlice, SliceSig, Tier};
+use makepad_script_compute::host::{self, ErrorSink, HostCallbacks, HostCallFrame, HostFn, HostSlice, SliceSig, Tier};
 use makepad_script_compute::ir::Ty;
-use makepad_script_compute::kernel::{FieldTy, Layout, LayoutField};
+use makepad_script_compute::boundary::{register_layout, LayoutFieldView, LayoutView};
+use makepad_script_compute::kernel::FieldTy;
 use std::sync::RwLock;
 
 /// Most text scalars one call reads.
@@ -56,8 +57,8 @@ pub fn register_font(font: OutlineFont) -> u32 {
     (w.len() - 1) as u32
 }
 
-fn font(id: u32) -> Result<OutlineFont, HostError> {
-    FONTS.read().unwrap_or_else(|e| e.into_inner()).get(id as usize).cloned().ok_or_else(|| HostError(format!("font {id} is not registered")))
+fn font(id: u32) -> Result<OutlineFont, String> {
+    FONTS.read().unwrap_or_else(|e| e.into_inner()).get(id as usize).cloned().ok_or_else(|| format!("font {id} is not registered"))
 }
 
 /// A text as the slice of scalars the host components read.
@@ -85,11 +86,12 @@ fn f32_arg(args: &[u32], k: usize) -> f32 {
     f32::from_bits(args[k])
 }
 
-fn call_outline(args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError> {
-    let font = font(args[0])?;
+unsafe extern "C-unwind" fn call_outline(_context: *mut (), frame: &mut HostCallFrame, errors: ErrorSink<'_>) -> bool {
+    let (args, s, rets) = frame.parts();
+    let font = match font(args[0]) { Ok(font) => font, Err(error) => return errors.fail(&error) };
     let (size, tol) = (f32_arg(args, 1), f32_arg(args, 2));
     if !(size.is_finite() && size > 0.0 && tol.is_finite() && tol > 0.0) {
-        return Err(HostError("text.outline: size and tolerance must be positive".into()));
+        return errors.fail("text.outline: size and tolerance must be positive");
     }
     // A tolerance under 1/1000 of the size buys nothing but points.
     let tol = tol.max(size * 1e-3);
@@ -100,7 +102,7 @@ fn call_outline(args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
     let out = &s[1];
     if need > out.len() {
         rets[0] = (-1i32) as u32;
-        return Ok(());
+        return true;
     }
     let mut at = 0;
     for c in &contours {
@@ -114,21 +116,22 @@ fn call_outline(args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), H
         }
     }
     rets[0] = at as u32;
-    Ok(())
+    true
 }
 
-fn call_layout(args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), HostError> {
-    let font = font(args[0])?;
+unsafe extern "C-unwind" fn call_layout(_context: *mut (), frame: &mut HostCallFrame, errors: ErrorSink<'_>) -> bool {
+    let (args, s, rets) = frame.parts();
+    let font = match font(args[0]) { Ok(font) => font, Err(error) => return errors.fail(&error) };
     let (size, tracking) = (f32_arg(args, 1), f32_arg(args, 2));
     if !(size.is_finite() && size > 0.0 && tracking.is_finite()) {
-        return Err(HostError("text.layout: size must be positive and tracking finite".into()));
+        return errors.fail("text.layout: size must be positive and tracking finite");
     }
     let text = text_of(&s[0]);
     let l = layout(&font, &text, &TextStyle { size, tracking, ..TextStyle::default() });
     let out = &s[1];
     if l.glyphs.len() * GLYPH_RECORD > out.len() {
         rets[0] = (-1i32) as u32;
-        return Ok(());
+        return true;
     }
     for (i, g) in l.glyphs.iter().enumerate() {
         let r = [g.x, g.y, g.advance, g.ink[0], g.ink[1], g.ink[2], g.ink[3], g.char_index as f32, g.word.map_or(-1.0, |w| w as f32)];
@@ -137,48 +140,67 @@ fn call_layout(args: &[u32], s: &[HostSlice], rets: &mut [u32]) -> Result<(), Ho
         }
     }
     rets[0] = l.glyphs.len() as u32;
-    Ok(())
+    true
+}
+
+unsafe extern "C-unwind" fn outline_cost_callback(_context: *mut (), words: *const u32, len: usize) -> u64 {
+    outline_cost(std::slice::from_raw_parts(words, len))
+}
+
+unsafe extern "C-unwind" fn layout_cost_callback(_context: *mut (), words: *const u32, len: usize) -> u64 {
+    layout_cost(std::slice::from_raw_parts(words, len))
 }
 
 const SLICES: &[SliceSig] = &[SliceSig { max_words: MAX_TEXT, writable: false }, SliceSig { max_words: MAX_OUT, writable: true }];
 
 /// Registers `text.outline` and `text.layout` (idempotent); call at
 /// start-up, before kernels that call them compile.
-pub fn register_host_components() -> Result<(), HostError> {
+pub fn register_host_components() -> Result<(), String> {
     host::register(HostFn {
         name: "text.outline",
         params: &[Ty::I32, Ty::F32, Ty::F32],
         slices: SLICES,
         rets: &[Ty::I32],
-        cost: outline_cost,
+        // SAFETY: process-lived code, immutable font snapshots and no borrowed context.
+        callbacks: unsafe { HostCallbacks::new(std::ptr::null_mut(), outline_cost_callback, call_outline) },
         misses: 64,
         tier: Tier::X,
-        call: call_outline,
         doc: "text.outline(text, off, len, out, off, len, font, size, tolerance) -> words: the glyph outlines of a text (Unicode scalars) as contours [points, glyph, x, y, ...] in size units, y up; -1 when `out` is too small",
-    })?;
+    }).into_result().map_err(|error| error.to_string())?;
     host::register(HostFn {
         name: "text.layout",
         params: &[Ty::I32, Ty::F32, Ty::F32],
         slices: SLICES,
         rets: &[Ty::I32],
-        cost: layout_cost,
+        // SAFETY: process-lived code, immutable font snapshots and no borrowed context.
+        callbacks: unsafe { HostCallbacks::new(std::ptr::null_mut(), layout_cost_callback, call_layout) },
         misses: 32,
         tier: Tier::X,
-        call: call_layout,
         doc: "text.layout(text, off, len, out, off, len, font, size, tracking) -> glyphs: shaped, kerned TextGlyph records (x, y, advance, ink x0 y0 x1 y1, char, word); -1 when `out` is too small",
-    })?;
+    }).into_result().map_err(|error| error.to_string())?;
     Ok(())
 }
 
 /// The `TextGlyph` record layout, for kernels that read `text.layout`'s
 /// output by field.
-pub fn layouts() -> Vec<Layout> {
-    let f = |name: &str, ty, offset| LayoutField { name: name.into(), ty, offset };
-    vec![Layout {
-        name: "TextGlyph".into(),
+/// Registered with the kernel compiler as the `TextGlyph` table: a kernel
+/// compiled with a different `TextGlyph` fails with a mismatch error.
+pub fn layouts() -> &'static [LayoutView<'static>] {
+    const LAYOUTS: [LayoutView<'static>; 1] = [LayoutView {
+        name: "TextGlyph",
         stride: GLYPH_RECORD as u32,
-        fields: vec![f("pos", FieldTy::Vec2, 0), f("advance", FieldTy::F32, 2), f("ink", FieldTy::Vec4, 3), f("char", FieldTy::F32, 7), f("word", FieldTy::F32, 8)],
-    }]
+        fields: &[
+            LayoutFieldView { name: "pos", ty: FieldTy::Vec2, offset: 0 },
+            LayoutFieldView { name: "advance", ty: FieldTy::F32, offset: 2 },
+            LayoutFieldView { name: "ink", ty: FieldTy::Vec4, offset: 3 },
+            LayoutFieldView { name: "char", ty: FieldTy::F32, offset: 7 },
+            LayoutFieldView { name: "word", ty: FieldTy::F32, offset: 8 },
+        ],
+    }];
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    // false: another table holds the name; compiles with this one report the mismatch.
+    REGISTER.call_once(|| { register_layout(&LAYOUTS[0]); });
+    &LAYOUTS
 }
 
 #[cfg(test)]
@@ -186,7 +208,7 @@ mod tests {
     use super::*;
     use crate::font::test_font;
     use makepad_script_compute::kernel::compile_with;
-    use makepad_script_compute::sched::{InlineExecutor, Job};
+    use makepad_script_compute_sched::sched::{InlineExecutor, Job};
     use makepad_script_compute::Backend;
 
     #[test]

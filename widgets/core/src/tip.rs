@@ -443,8 +443,8 @@ impl WidgetNode for Tip {
     fn children(&self, visit: &mut dyn FnMut(LiveId, WidgetRef)) {
         self.view.children(visit)
     }
-    fn skip_widget_tree_search(&self) -> bool {
-        self.view.skip_widget_tree_search()
+    fn search_scope(&self) -> bool {
+        self.view.search_scope()
     }
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
         self.view.find_widgets_from_point(cx, point, found)
@@ -765,7 +765,7 @@ impl Widget for TipLayer {
         };
         // The PROVEN popup idiom (PopupMenu): bubble as turtle content
         // at the overlay root, shifted to its clamped position.
-        draw_list.begin_overlay_reuse(cx);
+        draw_list.begin_popup_overlay(cx);
         let pass = cx.current_pass_size();
         cx.begin_root_turtle(pass, Layout::flow_down());
         let font_size = 9.0f64;

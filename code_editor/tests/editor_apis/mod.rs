@@ -39,7 +39,7 @@ fn editor() -> (Cx, CodeEditor) {
     let editor = cx.with_vm(|vm| {
         makepad_widgets_core::script_mod(vm);
         crate::script_mod(vm);
-        vm.bx.captured_errors = Some(Vec::new());
+        vm.capture_errors();
         let value = script_eval!(vm, { use mod.widgets.* CodeEditor{} });
         let editor = CodeEditor::script_from_value(vm, value);
         assert!(vm.take_errors().is_empty());

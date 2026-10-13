@@ -138,7 +138,7 @@ script_mod! {
 /// Install shader declarations in the owning isolate. Registration grants
 /// no IO or host-widget access.
 pub fn register(vm: &mut ScriptVm) -> ScriptValue {
-    if vm.bx.heap.type_default_for_id(DrawSceneCustom::script_type_id_static()).is_some() {
+    if vm.heap().type_default_for_id(DrawSceneCustom::script_type_id_static()).is_some() {
         builtin::register(vm);
         return NIL;
     }
@@ -146,7 +146,7 @@ pub fn register(vm: &mut ScriptVm) -> ScriptValue {
     // shared stdlib, the shadow sampling this build uses, ...): a second,
     // partial list here made different shaders (and shader-pack keys)
     // depending on which registration ran first.
-    if vm.bx.heap.type_default_for_id(DrawScenePbr::script_type_id_static()).is_none() {
+    if vm.heap().type_default_for_id(DrawScenePbr::script_type_id_static()).is_none() {
         crate::script_mod(vm);
     }
     builtin::register(vm);
@@ -244,7 +244,7 @@ impl CustomMaterial {
             let mut built = None;
             let mut run = |vm: &mut ScriptVm| {
                 // Only against the heap that owns the program.
-                if vm.bx.heap.heap_key() != program.heap_key() { built = Some(None); return; }
+                if vm.heap_key() != program.heap_key() { built = Some(None); return; }
                 let full = build_variant(vm, program.as_object(), stock, features, lit);
                 let no_clip = if opaque { build_variant(vm, program.as_object(), stock, Features { clip: false, ..features }, lit) } else { None };
                 built = Some(full.map(|full| (full, no_clip)));
@@ -317,14 +317,14 @@ impl DrawSceneCustom {
         }
         register(vm);
         let plan = material::plan(desc, hooks)?;
-        let base = vm.bx.heap.type_default_for_id(Self::script_type_id_static())
+        let base = vm.heap().type_default_for_id(Self::script_type_id_static())
             .ok_or_else(|| MaterialError::new("custom material shader registration failed"))?;
         let mut overrides = Vec::new();
         for (name, f) in helpers {
-            let existing = vm.bx.heap.object_method(base, (*name).into(), NoTrap);
+            let existing = vm.object_method(base, *name);
             let taken = !(existing.is_nil() || existing.is_err())
                 || material::HOOKS.iter().any(|h| LiveId::from_str(h.method) == *name);
-            if taken || !vm.bx.heap.is_fn(*f) {
+            if taken || !vm.is_fn(*f) {
                 return Err(MaterialError::new(format!("helper `{name}` would replace a function the lane owns; give it another name")));
             }
             overrides.push((*name, *f));
@@ -371,17 +371,17 @@ impl DrawSceneCustom {
             _ => None,
         };
         let ibl = plan.builtins.contains(&Builtin::Ibl);
-        let program = vm.bx.heap.new_object_ref(obj);
+        let program = vm.new_object_ref(obj);
         Ok(CustomMaterial { ibl, shadow, cutoff, bounds_pad: hooks.bounds_pad, warnings, ..CustomMaterial::new(draw, plan, Some(program)) })
     }
 
     fn build_shadow(vm: &mut ScriptVm, hooks: &HookSet, vertex: bool, mask: bool, helpers: &[(LiveId, ScriptObject)]) -> Result<DrawShaderId, MaterialError> {
-        let base = vm.bx.heap.type_default_for_id(DrawMaterialShadow::script_type_id_static())
+        let base = vm.heap().type_default_for_id(DrawMaterialShadow::script_type_id_static())
             .ok_or_else(|| MaterialError::new("material shadow shader registration failed"))?;
         let mut caster_hooks = HookSet::new();
         // The author's helpers, where the caster has no function of that name.
         let mut overrides: Vec<(LiveId, ScriptObject)> = helpers.iter().copied().filter(|(name, _)| {
-            let v = vm.bx.heap.object_method(base, (*name).into(), NoTrap);
+            let v = vm.object_method(base, *name);
             v.is_nil() || v.is_err()
         }).collect();
         if vertex {
@@ -389,7 +389,7 @@ impl DrawSceneCustom {
         }
         if mask {
             if let Some(f) = hooks.get(material::Hook::Surface) { caster_hooks.set(material::Hook::Surface, f); }
-            if let Some(alpha) = vm.bx.heap.value(base, id!(mat_shadow_alpha_mask).into(), NoTrap).as_object() {
+            if let Some(alpha) = vm.value(base, id!(mat_shadow_alpha_mask)).as_object() {
                 overrides.push((id!(mat_shadow_alpha), alpha));
             }
         }
@@ -415,11 +415,11 @@ impl DrawSceneCustom {
     pub fn error_material(vm: &mut ScriptVm) -> Result<CustomMaterial, MaterialError> {
         register(vm);
         let overrides = builtin::overrides(vm, Builtin::Error);
-        let base = vm.bx.heap.type_default_for_id(Self::script_type_id_static())
+        let base = vm.heap().type_default_for_id(Self::script_type_id_static())
             .ok_or_else(|| MaterialError::new("custom material shader registration failed"))?;
         let obj = material::build_program(vm, &material::ProgramRequest { base, kind: BaseKind::Unlit, hooks: &HookSet::new(), mask: HookMask::NONE, overrides: &overrides })?;
         let draw = instance_custom(vm, obj)?;
-        let program = vm.bx.heap.new_object_ref(obj);
+        let program = vm.new_object_ref(obj);
         Ok(CustomMaterial::new(draw, VariantPlan { builtins: vec![Builtin::Error], can_discard: false, shadow: ShadowVariant::Stock }, Some(program)))
     }
 
@@ -427,7 +427,7 @@ impl DrawSceneCustom {
     /// (a host whose program lives in another VM than the Cx's sets the
     /// material's `host_vm`).
     pub fn from_surface(vm: &mut ScriptVm, surface: ScriptObject, params: Vec4f) -> Result<CustomMaterial, String> {
-        if !vm.bx.heap.is_fn(surface) { return Err("surface is not a shader function".into()); }
+        if !vm.is_fn(surface) { return Err("surface is not a shader function".into()); }
         let hooks = HookSet::new().with(material::Hook::Surface, surface);
         Self::build(vm, &MaterialDesc::default(), &hooks, HookMask::ALBEDO, params)
             .map_err(|e| format!("surface shader failed frontend compilation: {e}"))
@@ -444,11 +444,11 @@ mod tests {
     fn with_vm(f: impl FnOnce(&mut ScriptVm)) {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, { mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw } });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             register(vm);
             f(vm);
         });
@@ -459,7 +459,7 @@ mod tests {
     fn spec(vm: &mut ScriptVm, file: &str, code: &str) -> ScriptObject {
         let code = format!("use mod.prelude.widgets_internal.*\n{{\n{code}\n}}");
         // Hosts evaluate documents with `line: 1`, so rows report 1-based.
-        let value = vm.eval(ScriptMod { file: file.into(), code, line: 1, ..Default::default() });
+        let value = vm.eval(ScriptMod::new("", "", &file, 1, 0, &code, &[]));
         value.as_object().unwrap_or_else(|| panic!("spec did not evaluate: {:?}", vm.take_errors()))
     }
 
@@ -492,7 +492,7 @@ mod tests {
             assert!(m.shadow.is_some(), "displaced, masked caster: {:?}", m.warnings);
             assert_eq!((m.cutoff, m.alpha_mode(vm.cx()), m.bounds_pad), (0.4, 1.0, 0.05));
             // The same program lowers for every backend, not only Metal.
-            let base = vm.bx.heap.type_default_for_id(DrawSceneCustom::script_type_id_static()).unwrap();
+            let base = vm.heap().type_default_for_id(DrawSceneCustom::script_type_id_static()).unwrap();
             let mut overrides = builtin::overrides(vm, Builtin::HookedCompose);
             overrides.extend(builtin::overrides(vm, Builtin::Ibl));
             let prog = material::build_program(vm, &material::ProgramRequest { base, kind: BaseKind::Pbr, hooks: &hooks, mask: HookMask::ALL, overrides: &overrides }).unwrap();

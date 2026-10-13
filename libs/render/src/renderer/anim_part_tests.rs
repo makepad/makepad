@@ -180,7 +180,7 @@ fn a_changed_placed_scene_drops_slot_commands_but_keeps_model_ones() {
         .model_anim_state
         .map
         .keys()
-        .all(|(t, _)| matches!(t, ModelTarget::Model(_))));
+        .all(|(t, _)| matches!(t, StateTarget::Model(_))));
     assert_eq!(renderer.model_anim_state.map.len(), 1);
 }
 

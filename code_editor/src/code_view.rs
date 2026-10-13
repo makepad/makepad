@@ -40,6 +40,25 @@ script_mod! {
             next := ButtonFlatter{width: 22 height: 22 padding: 0 align: Align{x: 0.5 y: 0.5} text: "↓"}
             close := ButtonFlatter{width: 22 height: 22 padding: 0 align: Align{x: 0.5 y: 0.5} text: "×"}
         }
+        // Go to line: Cmd/Ctrl+G (and Ctrl+G) opens this field where the
+        // find bar sits; "line[:col]", Enter jumps and centres, Esc closes.
+        goto_bar: RoundedView{
+            width: 200 height: Fit
+            flow: Right spacing: 2 align: Align{y: 0.5}
+            padding: Inset{left: 4 right: 2 top: 3 bottom: 3}
+            show_bg: true
+            draw_bg +: {
+                color: theme.color_bg_app
+                border_size: 1.0
+                border_radius: 4.0
+                border_color: theme.color_bevel_outset_1
+            }
+            line := TextInput{width: Fill height: Fit empty_text: "Line[:col]"}
+            hint := Label{
+                width: Fit height: Fit padding: Inset{left: 4 right: 4} text: ""
+                draw_text +: {color: theme.color_text_meta text_style: theme.font_regular{font_size: 8}}
+            }
+        }
         find_open: View{
             width: Fit height: Fit
             open := ButtonFlatterIcon{
@@ -58,6 +77,8 @@ script_mod! {
 pub enum CodeViewAction {
     /// The document changed (a keystroke, a paste, an undo).
     Changed,
+    /// A key the code did not use (Cmd/Ctrl+S and the like), for the host.
+    UnhandledKey(KeyEvent),
     #[default]
     None,
 }
@@ -89,6 +110,15 @@ pub struct CodeView {
     find_open: WidgetRef,
     #[rust]
     find: Find,
+    /// The go-to-line field, drawn where the find bar sits.
+    #[live]
+    goto_bar: WidgetRef,
+    #[rust]
+    goto: GotoBar,
+    /// The file the text came from: picks the language it is highlighted as
+    /// (by extension); Rust when unset.
+    #[rust]
+    path: Option<String>,
     /// The bar's own draw list, drawn after the code so it sits on top and
     /// nothing in it batches into the code's draw calls; redrawn with the
     /// view, so a recount after an edit shows at once.
@@ -110,6 +140,26 @@ struct Find {
     /// The query field takes the keyboard once it has been drawn: before its
     /// first draw it has no area to hold the focus.
     focus_pending: bool,
+}
+
+/// What go-to-line is doing in one view.
+#[derive(Default)]
+struct GotoBar {
+    open: bool,
+    focus_pending: bool,
+}
+
+/// A go-to-line query: `line`, `line:col` (1-based; `:` or `,`
+/// separated, spaces ignored). `None` when it is not one.
+pub fn parse_goto(query: &str) -> Option<(usize, Option<usize>)> {
+    let query: String = query.chars().filter(|c| !c.is_whitespace()).collect();
+    let mut parts = query.splitn(2, |c| c == ':' || c == ',');
+    let line = parts.next()?.parse::<usize>().ok()?;
+    let col = match parts.next() {
+        None | Some("") => None,
+        Some(col) => Some(col.parse::<usize>().ok()?),
+    };
+    Some((line.max(1), col.map(|c| c.max(1))))
 }
 
 /// Every non-overlapping match of `query` in `lines`, as (start, end) per
@@ -271,8 +321,10 @@ impl WidgetNode for CodeView {
 impl CodeView {
     pub fn lazy_init_session(&mut self) {
         if self.session.is_none() {
-            let dec = DecorationSet::new();
-            let doc = CodeDocument::new(self.text.as_ref().into(), dec);
+            let doc = match &self.path {
+                Some(path) => CodeDocument::from_prepared(CodeDocument::prepare_for_path(path, self.text.as_ref().into())),
+                None => CodeDocument::new(self.text.as_ref().into(), DecorationSet::new()),
+            };
             self.session = Some(CodeSession::new(doc));
             self.session
                 .as_mut()
@@ -321,6 +373,74 @@ impl CodeView {
 }
 
 impl CodeView {
+    /// Show `text` highlighted as the file at `path` (its extension picks
+    /// the language).
+    pub fn set_text_for_path(&mut self, cx: &mut Cx, path: &str, text: &str) {
+        self.path = Some(path.to_string());
+        self.text.as_mut_empty().push_str(text);
+        self.session = None;
+        self.redraw(cx);
+    }
+
+    /// Show a session prepared elsewhere (a document tokenized on a worker,
+    /// `CodeDocument::from_prepared` + `CodeSession::from_prepared`). The
+    /// session is the truth from then on; scroll stays where it was.
+    pub fn set_session(&mut self, cx: &mut Cx, mut session: CodeSession) {
+        session.set_tab_column_count(self.tab_column_count);
+        session.handle_changes();
+        self.text.as_mut_empty();
+        self.session = Some(session);
+        if self.find.open {
+            self.refresh_find();
+        }
+        self.redraw(cx);
+    }
+
+    pub fn goto_is_open(&self) -> bool {
+        self.goto.open
+    }
+
+    /// Open the go-to-line field (closes find), the keyboard in it.
+    pub fn open_goto(&mut self, cx: &mut Cx) {
+        if self.find.open {
+            self.find.open = false;
+            self.editor.find_matches.clear();
+            self.editor.find_current = None;
+        }
+        self.goto.open = true;
+        self.goto.focus_pending = true;
+        self.goto_bar.text_input(cx, ids!(line)).set_text(cx, "");
+        self.goto_bar.widget(cx, ids!(hint)).set_text(cx, "");
+        self.redraw(cx);
+    }
+
+    /// Close the go-to-line field and hand the keyboard back to the code.
+    pub fn close_goto(&mut self, cx: &mut Cx) {
+        self.goto.open = false;
+        self.editor.set_key_focus(cx);
+        self.redraw(cx);
+    }
+
+    /// Put the caret on `line` at `col` (1-based, clamped) and centre that
+    /// line. Works before the first draw (the scroll waits for one).
+    pub fn goto_line(&mut self, cx: &mut Cx, line: usize, col: Option<usize>) {
+        self.lazy_init_session();
+        let session = self.session.as_mut().unwrap();
+        let position = {
+            let text = session.document().as_text();
+            let lines = text.as_lines();
+            let line_index = line.saturating_sub(1).min(lines.len().saturating_sub(1));
+            let text_line = &lines[line_index];
+            let byte_index = text_line
+                .char_indices()
+                .nth(col.unwrap_or(1).saturating_sub(1))
+                .map(|(i, _)| i)
+                .unwrap_or(text_line.len());
+            Position { line_index, byte_index }
+        };
+        self.editor.set_cursor_and_center(cx, position, session);
+    }
+
     pub fn find_is_open(&self) -> bool {
         self.find.open
     }
@@ -343,6 +463,7 @@ impl CodeView {
             }
         }
         self.find.open = true;
+        self.goto.open = false;
         self.find_bar.text_input(cx, ids!(query)).set_text(cx, &self.find.query);
         self.find.focus_pending = true;
         self.find.current_start = None;
@@ -412,7 +533,38 @@ impl CodeView {
         }
     }
 
+    fn handle_goto_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if !self.goto.open {
+            return;
+        }
+        let actions = cx.capture_actions(|cx| self.goto_bar.handle_event(cx, event, scope));
+        if actions.is_empty() {
+            return;
+        }
+        let input = self.goto_bar.text_input(cx, ids!(line));
+        if let Some(text) = input.changed(&actions) {
+            let hint = match (text.trim().is_empty(), parse_goto(&text)) {
+                (true, _) | (false, Some(_)) => String::new(),
+                (false, None) => "line[:col]".to_string(),
+            };
+            self.goto_bar.widget(cx, ids!(hint)).set_text(cx, &hint);
+            self.redraw(cx);
+        }
+        if input.returned(&actions).is_some() {
+            if let Some((line, col)) = parse_goto(&input.text()) {
+                self.close_goto(cx);
+                self.goto_line(cx, line, col);
+            }
+        }
+        if input.escaped(&actions) {
+            self.close_goto(cx);
+        }
+    }
+
     fn handle_find_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.goto.open {
+            return;
+        }
         if self.find.open {
             let actions = cx.capture_actions(|cx| self.find_bar.handle_event(cx, event, scope));
             if actions.is_empty() {
@@ -462,7 +614,7 @@ impl CodeView {
     /// The bar (or the magnifier) over the top-right corner of the code.
     fn draw_find(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) {
         self.find.show_open = !walk.height.is_fit();
-        if !self.find.open && !self.find.show_open {
+        if !self.find.open && !self.find.show_open && !self.goto.open {
             return;
         }
         let rect = self.editor.area().rect(cx);
@@ -474,7 +626,23 @@ impl CodeView {
         let top = rect.pos.y + 6.0;
         let mut list = self.find_list.take().unwrap_or_else(|| DrawList2d::new(cx));
         list.begin_always(cx);
-        if self.find.open {
+        if self.goto.open {
+            let mut bar_walk = self.goto_bar.walk(cx);
+            let width = match bar_walk.width {
+                Size::Fixed(width) => width,
+                _ => 200.0,
+            }
+            .min((rect.size.x - 24.0).max(120.0));
+            bar_walk.width = Size::Fixed(width);
+            bar_walk.abs_pos = Some(dvec2(right - width, top));
+            cx.widget_tree_insert_child(self.uid, live_id!(goto_bar), self.goto_bar.clone());
+            let _ = self.goto_bar.draw_walk(cx, scope, bar_walk);
+            if std::mem::take(&mut self.goto.focus_pending) {
+                if let Some(mut input) = self.goto_bar.text_input(cx, ids!(line)).borrow_mut() {
+                    input.take_key_focus(cx);
+                }
+            }
+        } else if self.find.open {
             let count = self.find_count_text();
             self.find_bar.widget(cx, ids!(count)).set_text(cx, &count);
             let mut bar_walk = self.find_bar.walk(cx);
@@ -523,10 +691,12 @@ impl Widget for CodeView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.lazy_init_session();
         // The bar sits over the code, so it sees a press first.
+        self.handle_goto_event(cx, event, scope);
         self.handle_find_event(cx, event, scope);
         let uid = self.uid;
         let session = self.session.as_mut().unwrap();
         let mut open_find = false;
+        let mut open_goto = false;
         let mut changed = false;
         for action in self
             .editor
@@ -543,6 +713,12 @@ impl Widget for CodeView {
                     modifiers,
                     ..
                 }) if modifiers.is_primary() && !modifiers.shift && !modifiers.alt => open_find = true,
+                CodeEditorAction::UnhandledKeyDown(KeyEvent {
+                    key_code: KeyCode::KeyG,
+                    modifiers,
+                    ..
+                }) if (modifiers.is_primary() || modifiers.control) && !modifiers.shift && !modifiers.alt => open_goto = true,
+                CodeEditorAction::UnhandledKeyDown(ke) => cx.widget_action(uid, CodeViewAction::UnhandledKey(ke)),
                 _ => {}
             }
         }
@@ -551,6 +727,9 @@ impl Widget for CodeView {
         }
         if open_find {
             self.open_find(cx);
+        }
+        if open_goto && self.find.show_open {
+            self.open_goto(cx);
         }
     }
 
@@ -587,6 +766,18 @@ mod find_tests {
         assert_eq!(starts("glow"), vec![(0, 4), (0, 11), (1, 0), (1, 5), (1, 9)]);
         assert_eq!(starts("Glow"), vec![(0, 4)]);
         assert_eq!(starts(""), vec![]);
+    }
+
+    #[test]
+    fn goto_parses_line_and_column() {
+        assert_eq!(parse_goto("12"), Some((12, None)));
+        assert_eq!(parse_goto(" 12 : 4 "), Some((12, Some(4))));
+        assert_eq!(parse_goto("12,4"), Some((12, Some(4))));
+        assert_eq!(parse_goto("12:"), Some((12, None)));
+        assert_eq!(parse_goto("0"), Some((1, None)));
+        assert_eq!(parse_goto(""), None);
+        assert_eq!(parse_goto("x"), None);
+        assert_eq!(parse_goto("3:y"), None);
     }
 
     #[test]

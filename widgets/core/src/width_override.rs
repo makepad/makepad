@@ -43,35 +43,31 @@ impl WidthOverride {
     /// Read a block into the keys that can move a width, leaving it untouched.
     pub fn parse(vm: &mut ScriptVm, block: ScriptObject) -> Self {
         let mut o = Self::default();
-        let mut read = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
-            for (key, map_value) in map.iter() {
-                let v = map_value.value;
-                let Some(k) = key.as_id() else {
-                    o.opaque = true;
-                    continue;
-                };
-                if k == id!(visible) {
-                    o.visible = v.as_bool();
-                } else if k == id!(text) {
-                    o.text = Some(vm.bx.heap.temp_string_with(|heap, out| {
-                        heap.cast_to_string(v, out);
-                        out.to_string()
-                    }));
-                } else if k == id!(width) {
-                    o.width = Some(<Size as ScriptNew>::script_from_value(vm, v));
-                } else if k == id!(margin) {
-                    o.margin = Some(<Inset as ScriptNew>::script_from_value(vm, v));
-                } else if k == id!(padding) {
-                    o.padding = Some(<Inset as ScriptNew>::script_from_value(vm, v));
-                } else if k == id!(spacing) {
-                    o.spacing = v.as_number();
-                } else {
-                    // Anything else may or may not move a width. Refuse to guess.
-                    o.opaque = true;
-                }
+        for entry in vm.heap().proto_map_entries(block) {
+            let key = entry.key;
+            let map_value = entry;
+            let v = map_value.value;
+            let Some(k) = key.as_id() else {
+                o.opaque = true;
+                continue;
+            };
+            if k == id!(visible) {
+                o.visible = v.as_bool();
+            } else if k == id!(text) {
+                o.text = Some(vm.cast_to_string(v));
+            } else if k == id!(width) {
+                o.width = Some(<Size as ScriptNew>::script_from_value(vm, v));
+            } else if k == id!(margin) {
+                o.margin = Some(<Inset as ScriptNew>::script_from_value(vm, v));
+            } else if k == id!(padding) {
+                o.padding = Some(<Inset as ScriptNew>::script_from_value(vm, v));
+            } else if k == id!(spacing) {
+                o.spacing = v.as_number();
+            } else {
+                // Anything else may or may not move a width. Refuse to guess.
+                o.opaque = true;
             }
-        };
-        vm.proto_map_iter_mut_with(block, &mut read);
+        }
         o
     }
 
@@ -118,16 +114,14 @@ impl WidthOverride {
     /// so that taking a face off again is applying a block like any other.
     pub fn keys(vm: &mut ScriptVm, block: ScriptObject) -> Vec<LiveId> {
         let mut keys = Vec::new();
-        let mut read = |_vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
-            for (key, _) in map.iter() {
-                if let Some(k) = key.as_id() {
-                    if !keys.contains(&k) {
-                        keys.push(k);
-                    }
+        for entry in vm.heap().proto_map_entries(block) {
+            let key = entry.key;
+            if let Some(k) = key.as_id() {
+                if !keys.contains(&k) {
+                    keys.push(k);
                 }
             }
-        };
-        vm.proto_map_iter_mut_with(block, &mut read);
+        }
         keys
     }
 }

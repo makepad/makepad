@@ -1,7 +1,7 @@
 use crate::{
     cx_2d::*,
     makepad_platform::*,
-    shader::draw_vector::DrawVector,
+    shader::draw_vector::{DrawVector, FeatherSide, FeatherTextures},
     svg::{self, SvgDocument},
     turtle::*,
 };
@@ -144,7 +144,10 @@ script_mod! {
 #[derive(Debug)]
 struct SvgMesh {
     scale: f32,
+    /// Feather baked into the mesh, in content units.
+    feather: Option<(f32, FeatherSide)>,
     geometry: Geometry,
+    feather_textures: FeatherTextures,
     /// The `redraw_id` of the last frame that drew it.
     last_drawn: u64,
 }
@@ -157,7 +160,7 @@ enum SvgDraw {
     /// geometry pool, as any `DrawVector` session does.
     Pool,
     /// A kept mesh of this scale: a draw call and an instance, nothing more.
-    Kept(GeometryId),
+    Kept(usize),
     /// A fresh tessellation into a geometry of its own, kept afterwards.
     Keep(Geometry),
     /// A fresh tessellation into a geometry of its own for this draw call
@@ -185,6 +188,9 @@ pub struct DrawSvg {
     /// A turn about the rect's centre, radians, applied by the shader.
     #[rust]
     pub rotation: f32,
+    /// Gaussian sigma in output pixels (draw-rect units), and its side.
+    #[rust]
+    feather: Option<(f32, FeatherSide)>,
     #[rust]
     pub content_size: DVec2,
     /// The document's meshes, one per device scale it has been drawn at,
@@ -250,6 +256,16 @@ impl DrawSvg {
         self.render_to_rect(cx, &rect, 0.0);
     }
 
+    /// Soften every shape's fill and stroke. Sigma is in output pixels,
+    /// in the same coordinate system as the draw rect.
+    pub fn set_feather(&mut self, sigma: f32, side: FeatherSide) {
+        self.feather = (sigma > 0.0).then_some((sigma, side));
+    }
+
+    pub fn clear_feather(&mut self) {
+        self.feather = None;
+    }
+
     pub fn render_to_rect(&mut self, cx: &mut Cx2d, rect: &Rect, time: f32) {
         self.draw_super.rect_pos = rect.pos.into();
         self.draw_super.rect_size = rect.size.into();
@@ -301,6 +317,9 @@ impl DrawSvg {
         let fill_aa = (1.0 / device_scale).clamp(0.2, (content_ref / 6.0).max(4.0));
         // Curve flatten tolerance ~0.05 device px so curves/round caps stay smooth at any icon size.
         let tolerance = (0.05 / device_scale).clamp(0.01, 0.25);
+        // Geometry lives in content coordinates; the GPU maps it to the
+        // draw rect. Keep sigma in those same coordinates in the band data.
+        let feather = self.feather.map(|(sigma, side)| (sigma * dpi / device_scale, side));
 
         let redraw_id = cx.cx.cx.redraw_id;
         if !self.cache_valid {
@@ -314,17 +333,17 @@ impl DrawSvg {
         // noticeably off (the scale moved more than 5%) does not count. The
         // draw call itself is issued after the uniforms below are set.
         let plan = if self.has_animations {
-            self.tessellate(&doc, lw, lh, fill_aa, tolerance, time);
+            self.tessellate(&doc, lw, lh, fill_aa, tolerance, time, feather);
             SvgDraw::Pool
         } else if let Some(index) = self
             .meshes
             .iter()
-            .position(|mesh| (mesh.scale - device_scale).abs() <= device_scale * 0.05)
+            .position(|mesh| mesh.feather == feather && (mesh.scale - device_scale).abs() <= device_scale * 0.05)
         {
             self.meshes[index].last_drawn = redraw_id;
-            SvgDraw::Kept(self.meshes[index].geometry.geometry_id())
+            SvgDraw::Kept(index)
         } else {
-            self.tessellate(&doc, lw, lh, fill_aa, tolerance, time);
+            self.tessellate(&doc, lw, lh, fill_aa, tolerance, time, feather);
             if !self.draw_super.has_geometry() {
                 SvgDraw::Nothing
             } else if self.meshes.len() < Self::MAX_MESHES {
@@ -393,10 +412,20 @@ impl DrawSvg {
 
         match plan {
             SvgDraw::Pool => self.draw_super.end(cx),
-            SvgDraw::Kept(geometry_id) => self.draw_super.submit_geometry(cx, geometry_id),
+            SvgDraw::Kept(index) => {
+                let mesh = &self.meshes[index];
+                self.draw_super.feather_textures = mesh.feather_textures.clone();
+                self.draw_super.submit_geometry(cx, mesh.geometry.geometry_id());
+            }
             SvgDraw::Keep(geometry) => {
                 self.draw_super.end_into(cx, &geometry);
-                self.meshes.push(SvgMesh { scale: device_scale, geometry, last_drawn: redraw_id });
+                self.meshes.push(SvgMesh {
+                    scale: device_scale,
+                    feather,
+                    geometry,
+                    feather_textures: self.draw_super.feather_textures.clone(),
+                    last_drawn: redraw_id,
+                });
             }
             // Dropped here; its slot is freed once no draw call names it.
             SvgDraw::Once(geometry) => self.draw_super.end_into(cx, &geometry),
@@ -415,12 +444,16 @@ impl DrawSvg {
     /// Tessellates the document at the fringe and tolerance of one device
     /// scale into `draw_super`'s accumulators; whoever calls this ends the
     /// session with `end`, `end_into` or not at all.
-    fn tessellate(&mut self, doc: &SvgDocument, lw: f32, lh: f32, fill_aa: f32, tolerance: f32, time: f32) {
+    fn tessellate(&mut self, doc: &SvgDocument, lw: f32, lh: f32, fill_aa: f32, tolerance: f32, time: f32, feather: Option<(f32, FeatherSide)>) {
         self.draw_super.cur_fill_aa = fill_aa;
         self.draw_super.cur_stroke_aa = fill_aa;
         self.draw_super.cur_tolerance = tolerance;
         self.draw_super.begin();
+        if let Some((sigma, side)) = feather {
+            self.draw_super.set_feather(sigma, side);
+        }
         svg::render_svg(&mut self.draw_super, doc, 0.0, 0.0, lw, lh, time);
+        self.draw_super.clear_feather();
     }
 
     fn resolve_walk(&self, walk: Walk) -> Walk {

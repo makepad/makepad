@@ -367,7 +367,7 @@ impl AiChatSlot {
     fn theme_ground(cx: &mut Cx) -> Option<Vec4f> {
         cx.with_vm(|vm| {
             let theme = vm.module(id!(theme));
-            let value = vm.bx.heap.value(theme, id!(color_bg_app).into(), NoTrap);
+            let value = vm.value(theme, id!(color_bg_app));
             value.as_color().map(|c| Vec4f {
                 x: ((c >> 24) & 0xff) as f32 / 255.0,
                 y: ((c >> 16) & 0xff) as f32 / 255.0,
@@ -399,7 +399,7 @@ impl AiChatSlot {
         }
         let overlay = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let ty = vm.bx.heap.value_path(widgets, ids!(AiChatOverlay), NoTrap);
+            let ty = vm.heap().value_path(widgets, ids!(AiChatOverlay), NoTrap);
             if ty.as_object().is_none() {
                 return None;
             }

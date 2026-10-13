@@ -1192,13 +1192,13 @@ mod shader_registration_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, {
                 mod.prelude.widgets_internal = {
                     ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw,
                 }
             });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
@@ -1249,11 +1249,11 @@ mod shader_registration_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, {
                 mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
             });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
@@ -1280,13 +1280,13 @@ mod shader_registration_tests {
     fn water_shader_compiles_on_every_backend() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, {
                 mod.prelude.widgets_internal = { ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw: mod.draw, }
             });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
@@ -1310,7 +1310,7 @@ mod shader_registration_tests {
                 ("grass", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneGrass)})),
                 ("foliage", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawSceneFoliageLit)})),
             ] {
-                let errors = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                let errors = vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap();
                 assert!(errors.is_empty(), "{name}: {errors}");
             }
             for (name,result) in [
@@ -1318,7 +1318,7 @@ mod shader_registration_tests {
                 ("water HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneWater,"hlsl",false)})),
                 ("water Metal",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneWater,"metal",false)})),
             ] {
-                let source=vm.bx.heap.string_with(result,|_heap,value|value.to_string()).unwrap();
+                let source=vm.heap().string_with(result,|_heap,value|value.to_string()).unwrap();
                 assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
                 assert!(source.contains("detail_tex"),"{name}: missing ripple map");
             }
@@ -1333,9 +1333,9 @@ mod shader_registration_tests {
     fn cube_family_script_shaders_compile_without_errors() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, {
                 mod.prelude.widgets_internal = {
                     ..mod.std,
@@ -1346,7 +1346,7 @@ mod shader_registration_tests {
                     draw:mod.draw,
                 }
             });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
@@ -1376,14 +1376,10 @@ mod shader_registration_tests {
             let alpha_errors = script_eval!(vm, {
                 mod.shader.test_compile_draw_errors(mod.draw.DrawSceneAlpha)
             });
-            let cube_errors = vm
-                .bx
-                .heap
+            let cube_errors = vm.heap()
                 .string_with(cube_errors, |_heap, value| value.to_string())
                 .expect("cube compile result should be a string");
-            let alpha_errors = vm
-                .bx
-                .heap
+            let alpha_errors = vm.heap()
                 .string_with(alpha_errors, |_heap, value| value.to_string())
                 .expect("alpha compile result should be a string");
             let setup_errors = vm.take_errors();
@@ -1409,7 +1405,7 @@ mod shader_registration_tests {
                 ("lamp depth", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmLampDepth)})),
                 ("lamp depth inside", script_eval!(vm, {mod.shader.test_compile_draw_errors(mod.draw.DrawLmLampDepthInside)})),
             ] {
-                let errors = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                let errors = vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap();
                 assert!(errors.is_empty(), "{name}: {errors}");
             }
             // Cross-target Rust checks do not compile runtime Splash
@@ -1424,7 +1420,7 @@ mod shader_registration_tests {
                 ("city HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneCity, "hlsl", false)})),
                 ("skin HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "hlsl", false)})),
             ] {
-                let source = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                let source = vm.heap().string_with(result, |_heap, value| value.to_string()).unwrap();
                 assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
                 assert!(source.contains("cluster_lights"), "{name}: missing clustered shader");
             }
@@ -1439,7 +1435,7 @@ mod shader_registration_tests {
                 ("grass GLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneGrass,"glsl",false)})),
                 ("grass HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawSceneGrass,"hlsl",false)})),
             ] {
-                let source=vm.bx.heap.string_with(result,|_heap,value|value.to_string()).unwrap();
+                let source=vm.heap().string_with(result,|_heap,value|value.to_string()).unwrap();
                 assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
                 assert!(source.contains("gi_"),"{name}: missing GI code");
             }
@@ -1449,7 +1445,7 @@ mod shader_registration_tests {
                 ("lamp depth HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawLmLampDepth,"hlsl",false)})),
                 ("local skin depth HLSL",script_eval!(vm,{mod.shader.test_compile_draw_source(mod.draw.DrawLocalShadowSkinned,"hlsl",false)})),
             ] {
-                let source=vm.bx.heap.string_with(result,|_heap,value|value.to_string()).unwrap();
+                let source=vm.heap().string_with(result,|_heap,value|value.to_string()).unwrap();
                 assert!(!source.starts_with("ERRORS:"),"{name}: {source}");
                 assert!(source.contains("morph_map"),"{name}: missing morph deformation");
             }

@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+use makepad_relax_api::relax_api;
 
 use std::{
     collections::HashMap,
@@ -28,7 +29,7 @@ impl LiveIdInterner {
         ONCE.call_once(|| {
             let mut map = LiveIdInterner {
                 //alloc: 0,
-                id_to_string: HashMap::new(),
+                id_to_string: LiveIdMap::default(),
             };
             // pre-seed list for debugging purposes
             let fill = [
@@ -54,10 +55,12 @@ impl LiveIdInterner {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Default, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[repr(transparent)]
 pub struct LiveId(pub u64);
 
+#[relax_api]
 impl LiveId {
     pub const SEED: u64 = 0xd6e8_feb8_6659_fd93;
 
@@ -185,56 +188,97 @@ impl LiveId {
         Self::from_bytes(seed, &num.to_be_bytes(), 0, 8, 0)
     }
 
+    // The name table is one per process: the functions below are non-generic with C-shaped
+    // signatures, so under `makepad run` (this crate provided by the loader, loader-core.md
+    // section 8) every caller reaches the loader's copy.
+
+    /// Records `id_str` as the name of `id`. `replace`: overwrite an existing name; otherwise an
+    /// existing different name is kept and false returned.
+    #[relax_api]
+    pub fn lut_insert(id: LiveId, id_str: &str, replace: bool) -> bool {
+        LiveIdInterner::with(|idmap| {
+            if !replace {
+                if let Some(stored) = idmap.id_to_string.get(&id) {
+                    return stored == id_str;
+                }
+            }
+            idmap.id_to_string.insert(id, id_str.to_string());
+            true
+        })
+    }
+
+    /// The byte length of `id`'s recorded name; usize::MAX when it has none.
+    #[relax_api]
+    pub fn lut_name_len(id: LiveId) -> usize {
+        LiveIdInterner::with(|idmap| idmap.id_to_string.get(&id).map_or(usize::MAX, |s| s.len()))
+    }
+
+    /// Copies `id`'s recorded name into `out` (as much as fits); returns the bytes copied.
+    #[relax_api]
+    pub fn lut_name_copy(id: LiveId, out: &mut [u8]) -> usize {
+        LiveIdInterner::with(|idmap| match idmap.id_to_string.get(&id) {
+            Some(s) => {
+                let n = s.len().min(out.len());
+                out[..n].copy_from_slice(&s.as_bytes()[..n]);
+                n
+            }
+            None => 0,
+        })
+    }
+
     pub fn from_str_with_lut(id_str: &str) -> Result<Self, String> {
         let id = Self::from_str(id_str);
-        LiveIdInterner::with(|idmap| {
-            if let Some(stored) = idmap.id_to_string.get(&id) {
-                if stored != id_str {
-                    return Err(stored.clone());
-                }
-            } else {
-                idmap.id_to_string.insert(id, id_str.to_string());
-            }
+        if Self::lut_insert(id, id_str, false) {
             Ok(id)
-        })
+        } else {
+            Err(id.as_string(|s| s.unwrap_or("").to_string()))
+        }
     }
 
     pub fn from_str_with_intern(id_str: &str, intern: InternLiveId) -> Self {
         let id = Self::from_str(id_str);
         if let InternLiveId::Yes = intern {
-            LiveIdInterner::with(|idmap| idmap.id_to_string.insert(id, id_str.to_string()));
+            Self::lut_insert(id, id_str, true);
         }
         id
     }
 
     pub fn from_str_num_with_lut(id_str: &str, num: u64) -> Result<Self, String> {
         let id = Self::from_str_num(id_str, num);
-        LiveIdInterner::with(|idmap| {
-            idmap.id_to_string.insert(id, format!("{}{}", id_str, num));
-            Ok(id)
-        })
+        Self::lut_insert(id, &format!("{}{}", id_str, num), true);
+        Ok(id)
     }
 
     pub fn as_string<F, R>(&self, f: F) -> R
     where
         F: FnOnce(Option<&str>) -> R,
     {
-        LiveIdInterner::with(|idmap| match idmap.id_to_string.get(self) {
-            Some(v) => f(Some(v)),
-            None => f(None),
-        })
+        let n = Self::lut_name_len(*self);
+        if n == usize::MAX {
+            return f(None);
+        }
+        // A stack buffer for ordinary names: ids are printed per frame
+        // (labels, logs, script keys) and a heap copy per call added up.
+        let mut stack = [0u8; 128];
+        let mut heap;
+        let buf: &mut [u8] = if n <= stack.len() { &mut stack[..n] } else { heap = vec![0u8; n]; &mut heap };
+        let m = Self::lut_name_copy(*self, buf);
+        f(Some(std::str::from_utf8(&buf[..m]).unwrap_or("")))
     }
 
     pub fn not_empty(&self) -> bool {
         self.0 != 0
     }
 
+    #[relax_api]
     pub fn unique() -> Self {
         LiveId(UNIQUE_LIVE_ID.fetch_add(1, Ordering::SeqCst))
     }
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy)]
+#[repr(u8)]
 pub enum InternLiveId {
     Yes,
     No,
@@ -278,7 +322,7 @@ impl fmt::Display for LiveId {
         else {
             self.as_string(|string| {
                 if let Some(id) = string {
-                    write!(f, "{}", id)
+                    f.write_str(id)
                 } else {
                     write!(f, "{:016x}", self.0)
                 }
@@ -295,12 +339,13 @@ impl fmt::LowerHex for LiveId {
 
 pub struct LiveIdInterner {
     //alloc: u64,
-    id_to_string: HashMap<LiveId, String>,
+    id_to_string: LiveIdMap<LiveId, String>,
 }
 
 // ----------------------------------------------------------------------------
 
 // Idea taken from the `nohash_hasher` crate.
+#[relax_api(plain)]
 #[derive(Default)]
 pub struct LiveIdHasher(u64);
 
@@ -350,6 +395,7 @@ impl std::hash::Hasher for LiveIdHasher {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Copy, Clone, Default)]
 pub struct LiveIdHasherBuilder {}
 

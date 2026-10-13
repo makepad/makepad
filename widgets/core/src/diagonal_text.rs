@@ -223,7 +223,7 @@ pub fn draw_diagonal_name(
     if text.is_empty() || !box_.size.x.is_finite() || !box_.size.y.is_finite() {
         return None;
     }
-    let run = draw_text.prepare_single_line_run(cx, text)?;
+    let run = draw_text.prepare_single_line_raster_run(cx, text)?;
     let placed = diagonal_run(
         box_,
         run.width_in_lpxs as f64,
@@ -243,7 +243,7 @@ pub fn draw_diagonal_name(
             glyph_origin: Point::new(ink.x as f32, ink.y as f32),
             rotation_origin: Point::new(pen.x as f32, pen.y as f32),
             font_size_in_lpxs: glyph.font_size_in_lpxs,
-            rasterized: glyph.rasterized,
+            rasterized: glyph.glyph,
             angle: placed.angle as f32,
         });
     }

@@ -1887,7 +1887,7 @@ fn walk_pick(
         return;
     }
     // The inspector's own panel is never a pick, wherever an app has put it.
-    if widget.widget_type_id() == Some(std::any::TypeId::of::<Tweaker>()) {
+    if widget.widget_type_id() == Some(Tweaker::script_type_id_static()) {
         return;
     }
     // Exploded view: the cursor is on ONE plane. A widget nested deeper than
@@ -2115,8 +2115,8 @@ fn type_name_of(cx: &mut Cx, uid: u64) -> Option<String> {
 fn pin_remote_edit(cx: &mut Cx, widget: &WidgetRef, path: &str) -> Option<&'static str> {
     let ty = widget.widget_type_id();
     let uid = widget.widget_uid().0;
-    let inspector_type = Some(std::any::TypeId::of::<Tweaker>());
-    let hosts_inspector = ty == Some(std::any::TypeId::of::<crate::window::Window>())
+    let inspector_type = Some(Tweaker::script_type_id_static());
+    let hosts_inspector = ty == Some(crate::window::Window::script_type_id_static())
         || ty == inspector_type
         || cx.widget_tree().flat_tree(cx).iter().any(|row| {
             cx.widget_tree().widget(WidgetUid(row.uid)).widget_type_id() == inspector_type
@@ -2344,7 +2344,7 @@ pub fn install_tweaker_hooks(cx: &mut Cx) {
         window_intercept,
         panel_owns_pointer,
         tweak_callback,
-        inspector_type: std::any::TypeId::of::<Tweaker>(),
+        inspector_type: Tweaker::script_type_id_static(),
         feedback_snapshot,
         docked_band_width,
     });
@@ -3418,7 +3418,7 @@ fn fmt_scalar(heap: &ScriptHeap, value: ScriptValue) -> Option<String> {
     if let Some(pod) = value.as_pod() {
         let (pod_type, data) = heap.pod_data(pod);
         let name = pod_type
-            .name
+            .name()
             .map(live_id_token)
             .unwrap_or_else(|| "pod".to_string());
         // A unit-range vec4f in UI code is a color; render it the way the
@@ -4105,8 +4105,8 @@ fn container_chunk(typed: &str) -> Option<String> {
 fn parse_vec2_text(text: &str) -> Option<(f64, f64)> {
     let inner = text.split('(').nth(1)?.trim_end_matches(')');
     let mut parts = inner.split([' ', ',']).filter(|p| !p.is_empty());
-    let x = parts.next()?.parse().ok()?;
-    let y = parts.next()?.parse().ok()?;
+    let x: f64 = parts.next()?.parse().ok()?;
+    let y: f64 = parts.next()?.parse().ok()?;
     Some((x, y))
 }
 
@@ -4205,7 +4205,8 @@ fn collect_prop_keys(heap: &ScriptHeap, obj: ScriptObject, keys: &mut Vec<LiveId
     let mut ptr = obj;
     let mut hops = 0;
     loop {
-        heap.map_ref(ptr).iter().for_each(|(key, _map_value)| {
+        heap.map_entries(ptr).into_iter().for_each(|e| {
+            let key = e.key;
             if let Some(id) = key.as_id() {
                 if !keys.contains(&id) {
                     let name = live_id_token(id);
@@ -4247,29 +4248,29 @@ pub fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, boo
         // complaints on fn-ref fields (`on_click` serializes to a value its
         // own type check rejects). Reflection is read-only — capture and
         // drop them instead of spamming the log on every state read.
-        vm.bx.captured_errors = Some(Vec::new());
+        vm.capture_errors();
         let current = widget.current_to_value(vm);
         let _ = vm.take_errors();
         let Some(current_obj) = current.as_object() else {
             return Vec::new();
         };
         let source = widget.script_source();
-        let heap = &vm.bx.heap;
+        let heap = vm.heap();
         let own: Vec<LiveId> = if source == ScriptObject::ZERO {
             Vec::new()
         } else {
-            heap.map_ref(source)
-                .iter()
-                .filter_map(|(key, _)| key.as_id())
+            heap.map_entries(source)
+                .into_iter()
+                .filter_map(|e| e.key.as_id())
                 .collect()
         };
         let mut out = Vec::new();
         // Only the object's OWN map: script_to_value wrote every live field
         // explicitly, the proto behind it is just the type object.
         let keys: Vec<LiveId> = heap
-            .map_ref(current_obj)
-            .iter()
-            .filter_map(|(key, _)| key.as_id())
+            .map_entries(current_obj)
+            .into_iter()
+            .filter_map(|e| e.key.as_id())
             .filter(|id| {
                 let name = live_id_token(*id);
                 !name.starts_with("__") && !skip_key(&name)
@@ -4295,9 +4296,9 @@ pub fn reflect_flat(cx: &mut Cx, widget: &WidgetRef) -> Vec<(String, String, boo
                 // One level of dotted expansion for typed sub-structs
                 // (draw_bg.color, padding.left ...), own map only.
                 let sub_keys: Vec<LiveId> = heap
-                    .map_ref(obj)
-                    .iter()
-                    .filter_map(|(sub_key, _)| sub_key.as_id())
+                    .map_entries(obj)
+                    .into_iter()
+                    .filter_map(|e| e.key.as_id())
                     .filter(|id| {
                         let name = live_id_token(*id);
                         !name.starts_with("__") && !is_shader_plumbing(&name)
@@ -4511,7 +4512,7 @@ fn layer_fn_sources(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<(String
     }
     let layer_id = LiveId::from_str(layer);
     cx.with_vm(|vm| {
-        let value = vm.bx.heap.value(source, layer_id.into(), NoTrap);
+        let value = vm.value(source, layer_id);
         if value.as_object().is_none() {
             return;
         }
@@ -4521,17 +4522,17 @@ fn layer_fn_sources(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<(String
         let chain = vm.construction_chain(value);
         for (name, key) in [("pixel", id!(pixel)), ("vertex", id!(vertex))] {
             for lvl in &chain {
-                if !lvl.own_keys.contains(&key) {
+                if !lvl.own_keys().contains(&key) {
                     continue;
                 }
-                let f = vm.bx.heap.value(lvl.object, key.into(), NoTrap);
+                let f = vm.value(lvl.object(), key);
                 let Some(fobj) = f.as_object() else { break };
-                let Some(makepad_script::ScriptFnPtr::Script(ip)) = vm.bx.heap.as_fn(fobj) else {
+                let Some(ip) = vm.heap().fn_script_ip(fobj) else {
                     break;
                 };
-                if let Some((loc, text)) = vm.bx.code.fn_source_text(ip) {
-                    let base = loc.file.rsplit('/').next().unwrap_or(&loc.file).to_string();
-                    out.push((name.to_string(), format!("{base}:{}", loc.line), text));
+                if let Some((loc, text)) = vm.fn_source_text(ip) {
+                    let base = loc.file().rsplit('/').next().unwrap_or(loc.file()).to_string();
+                    out.push((name.to_string(), format!("{base}:{}", loc.line()), text));
                 }
                 break;
             }
@@ -4628,23 +4629,23 @@ fn play_duration(play: Play) -> f64 {
 fn pose_values(vm: &mut ScriptVm, state: &AnimatorState, layer_id: LiveId) -> Vec<(LiveId, Vec<f32>)> {
     let mut out = Vec::new();
     let Some(apply) = state.apply.as_ref().map(|apply| apply.as_object()) else { return out };
-    let layer_value = vm.bx.heap.value(apply, layer_id.into(), NoTrap);
+    let layer_value = vm.value(apply, layer_id);
     let Some(layer_obj) = layer_value.as_object() else { return out };
     let mut keys: Vec<LiveId> = Vec::new();
     for lvl in vm.construction_chain(layer_value) {
-        for key in &lvl.own_keys {
+        for key in lvl.own_keys() {
             if !keys.contains(key) {
                 keys.push(*key);
             }
         }
     }
     for key in keys {
-        let mut value = vm.bx.heap.value(layer_obj, key.into(), NoTrap);
+        let mut value = vm.value(layer_obj, key);
         // `snap(1.0)` / `instance(x)` wrap the value in an object keyed
         // `value`; the pose is the wrapped scalar.
         if value.as_color().is_none() && value.as_bool().is_none() && value.as_number().is_none() {
             if let Some(obj) = value.as_object() {
-                let inner = vm.bx.heap.value(obj, id!(value).into(), NoTrap);
+                let inner = vm.value(obj, id!(value));
                 if !inner.is_nil() {
                     value = inner;
                 }
@@ -4680,23 +4681,23 @@ fn animator_tracks(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<StateTra
     }
     let layer_id = LiveId::from_str(layer);
     cx.with_vm(|vm| {
-        let anim = vm.bx.heap.value(source, id!(animator).into(), NoTrap);
+        let anim = vm.value(source, id!(animator));
         let Some(anim_obj) = anim.as_object() else { return };
         let mut groups: Vec<LiveId> = Vec::new();
         for lvl in vm.construction_chain(anim) {
-            for key in &lvl.own_keys {
+            for key in lvl.own_keys() {
                 if !groups.contains(key) {
                     groups.push(*key);
                 }
             }
         }
         for group in groups {
-            let group_value = vm.bx.heap.value(anim_obj, group.into(), NoTrap);
+            let group_value = vm.value(anim_obj, group);
             let Some(group_obj) = group_value.as_object() else { continue };
             let mut default = LiveId(0);
             let mut states: Vec<LiveId> = Vec::new();
             for lvl in vm.construction_chain(group_value) {
-                for key in &lvl.own_keys {
+                for key in lvl.own_keys() {
                     if *key == id!(default) {
                         continue;
                     }
@@ -4705,7 +4706,7 @@ fn animator_tracks(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<StateTra
                     }
                 }
             }
-            if let Some(id) = vm.bx.heap.value(group_obj, id!(default).into(), NoTrap).as_id() {
+            if let Some(id) = vm.value(group_obj, id!(default)).as_id() {
                 default = id;
             }
             if states.is_empty() {
@@ -4713,8 +4714,8 @@ fn animator_tracks(cx: &mut Cx, widget: &WidgetRef, layer: &str) -> Vec<StateTra
             }
             let off = if states.contains(&default) { default } else { states[0] };
             let Some(on) = states.iter().copied().find(|s| *s != off) else { continue };
-            let off_state = AnimatorState::script_from_value(vm, vm.bx.heap.value(group_obj, off.into(), NoTrap));
-            let on_state = AnimatorState::script_from_value(vm, vm.bx.heap.value(group_obj, on.into(), NoTrap));
+            let off_state = AnimatorState::script_from_value(vm, vm.value(group_obj, off));
+            let on_state = AnimatorState::script_from_value(vm, vm.value(group_obj, on));
             let off_values = pose_values(vm, &off_state, layer_id);
             let on_values = pose_values(vm, &on_state, layer_id);
             if off_values.is_empty() && on_values.is_empty() {
@@ -5269,12 +5270,10 @@ pub fn theme_values(cx: &mut Cx) -> Vec<(String, LiveId, ThemeVal, String)> {
         let chain = vm.construction_chain(theme.into());
         let mut keys: Vec<(LiveId, String)> = Vec::new();
         for lvl in &chain {
-            let loc = lvl
-                .loc
-                .as_ref()
-                .map(|l| format!("{}:{}", l.file.rsplit('/').next().unwrap_or(&l.file), l.line))
+            let loc = lvl.loc()
+                .map(|l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(l.file()), l.line()))
                 .unwrap_or_default();
-            for key in &lvl.own_keys {
+            for key in lvl.own_keys() {
                 if !keys.iter().any(|(k, _)| k == key) {
                     keys.push((*key, loc.clone()));
                 }
@@ -5282,7 +5281,7 @@ pub fn theme_values(cx: &mut Cx) -> Vec<(String, LiveId, ThemeVal, String)> {
         }
         for (key, loc) in keys {
             let name = live_id_token(key);
-            let value = vm.bx.heap.value(theme, key.into(), NoTrap);
+            let value = vm.value(theme, key);
             if let Some(color) = value.as_color() {
                 out.push((name, key, ThemeVal::Color(color), loc));
             } else if let Some(f) = value.as_f64() {
@@ -5332,12 +5331,19 @@ fn theme_heap_set(cx: &mut Cx, key: LiveId, value: ScriptValue) -> bool {
     let mut hit = false;
     cx.with_vm(|vm| {
         let theme = vm.module(id!(theme));
-        vm.proto_map_iter_mut_with(theme, &mut |_, map| {
-            if let Some(entry) = map.get_mut(&key.into()) {
-                entry.value = value;
+        let mut chain = Vec::new();
+        let mut current = Some(theme);
+        while let Some(obj) = current {
+            chain.push(obj);
+            current = vm.heap().proto(obj).as_object();
+        }
+        for obj in chain.into_iter().rev() {
+            if vm.heap().map_entries(obj).iter().any(|e| e.key == key.into()) {
+                // The own entry exists: update it in place, preserving its definition order.
+                vm.heap_mut().poke_scope_value(obj, key, value);
                 hit = true;
             }
-        });
+        }
     });
     hit
 }
@@ -5725,7 +5731,7 @@ fn sight_target(cx: &Cx, uid: u64, in_frame: bool) -> TargetSighting {
         if ancestor.is_empty() || ancestor.try_widget_uid().is_none() {
             break;
         }
-        if ancestor.widget_type_id() == Some(std::any::TypeId::of::<FoldHeader>()) {
+        if ancestor.widget_type_id() == Some(FoldHeader::script_type_id_static()) {
             let fold = ancestor.as_fold_header();
             if !fold.is_open(cx)
                 && fold.opened() <= 0.0
@@ -5916,9 +5922,9 @@ fn layer_consts(cx: &mut Cx, widget: &WidgetRef, layer: &str, primary: bool) -> 
     for (i, name, doc, initial, value, ip) in raw {
         // ip_to_loc names the literal's exact line (711a490ce fixed the
         // tokenizer's float-column measurement and script_mod!'s row 0).
-        let loc = cx.with_vm(|vm| vm.bx.code.ip_to_loc(ip)).map(|l| {
-            let base = l.file.rsplit('/').next().unwrap_or(&l.file).to_string();
-            format!("{base}:{}", l.line)
+        let loc = cx.with_vm(|vm| vm.ip_to_loc(ip)).map(|l| {
+            let base = l.file().rsplit('/').next().unwrap_or(l.file()).to_string();
+            format!("{base}:{}", l.line())
         });
         out.push((shader, i, name, doc, initial, value, loc.unwrap_or_else(|| "?".to_string())));
     }
@@ -6092,23 +6098,23 @@ pub fn collect_row_docs(cx: &mut Cx, widget: &WidgetRef) -> HashMap<String, Stri
     cx.with_vm(|vm| {
         let chain = vm.construction_chain(source.into());
         for lvl in &chain {
-            for (f, d) in &lvl.field_docs {
+            for (f, d) in &lvl.field_docs() {
                 out.entry(live_id_token(*f)).or_insert_with(|| d.clone());
             }
         }
         for lvl in &chain {
-            for key in &lvl.own_keys {
-                let value = vm.bx.heap.value(lvl.object, (*key).into(), NoTrap);
+            for key in lvl.own_keys() {
+                let value = vm.value(lvl.object(), *key);
                 let Some(obj) = value.as_object() else { continue };
-                if vm.bx.heap.as_fn(obj).is_some() {
+                if vm.heap().as_fn(obj).is_some() {
                     continue;
                 }
                 let name = live_id_token(*key);
                 for sub in vm.construction_chain(value) {
-                    if let Some(doc) = &sub.doc {
-                        out.entry(name.clone()).or_insert_with(|| doc.clone());
+                    if let Some(doc) = sub.doc() {
+                        out.entry(name.clone()).or_insert_with(|| doc.to_owned());
                     }
-                    for (f, d) in &sub.field_docs {
+                    for (f, d) in &sub.field_docs() {
                         out.entry(format!("{name}.{}", live_id_token(*f)))
                             .or_insert_with(|| d.clone());
                     }
@@ -6129,15 +6135,15 @@ fn cascade_levels(cx: &mut Cx, widget: &WidgetRef) -> Vec<CascadeLevel> {
         let mut seen: std::collections::HashSet<String> = Default::default();
         let mut out = Vec::new();
         for lvl in chain {
-            let (loc, file, line) = match &lvl.loc {
+            let (loc, file, line) = match lvl.loc() {
                 Some(l) => {
-                    let base = l.file.rsplit('/').next().unwrap_or(&l.file);
-                    (format!("{base}:{}", l.line), l.file.clone(), l.line)
+                    let base = l.file().rsplit('/').next().unwrap_or(l.file());
+                    (format!("{base}:{}", l.line()), l.file().to_owned(), l.line())
                 }
                 None => ("native".to_string(), String::new(), 0),
             };
             let mut sets: Vec<(String, bool)> = Vec::new();
-            for key in &lvl.own_keys {
+            for key in lvl.own_keys() {
                 let name = live_id_token(*key);
                 if name.starts_with("__") || skip_key(&name) {
                     continue;
@@ -6152,9 +6158,9 @@ fn cascade_levels(cx: &mut Cx, widget: &WidgetRef) -> Vec<CascadeLevel> {
                 loc,
                 file,
                 line,
-                doc: lvl.doc.clone(),
+                doc: lvl.doc().map(str::to_owned),
                 field_docs: lvl
-                    .field_docs
+                    .field_docs()
                     .iter()
                     .map(|(f, d)| (live_id_token(*f), d.clone()))
                     .collect(),
@@ -6685,21 +6691,8 @@ fn eval_chunk(cx: &mut Cx, widget: &WidgetRef, chunk: &str) -> Result<(), String
     let errors = cx.with_vm(|vm| {
         // Install a captured-error sink so parse/apply problems come back to
         // the caller instead of only landing in the log.
-        vm.bx.captured_errors = Some(Vec::new());
-        let script_mod = ScriptMod {
-            cargo_manifest_path: String::new(),
-            module_path: "tweak".to_string(),
-            // The callsite is keyed by the chunk's own text: the draw-shader
-            // cache hashes each fn's ScriptIp, and one fixed callsite reused
-            // its body across applies — same ip, same hash, so the SECOND
-            // `pixel: fn` rewrite on a widget was recorded everywhere and
-            // never recompiled. Identical chunks still dedup to one body.
-            file: "tweak://apply".to_string(),
-            line: callsite as usize,
-            column: 1,
-            code,
-            values: Vec::new(),
-        };
+        vm.capture_errors();
+        let script_mod = ScriptMod::new("", "tweak", "tweak://apply", callsite as usize, 1, &(code), &[]);
         let mut target = widget.clone();
         use crate::makepad_script::traits::ScriptApply;
         target.script_apply_eval(vm, script_mod);
@@ -7539,19 +7532,18 @@ pub fn tweak_callback(
             // and `reach` ops go further when one of them does.
             {
                 let (heap, live, bodies, roots) = cx.with_vm(|vm| {
-                    (vm.bx.heap.objects_len(), vm.bx.heap.gc_live_len(), vm.bx.code.bodies.borrow().len(), vm.bx.heap.root_counts())
+                    (vm.heap().objects_len(), vm.heap().gc_live_len(), vm.body_count(), vm.heap().root_counts())
                 });
                 let (threads, paused, foot) = cx.with_vm(|vm| {
-                    let n = vm.bx.threads.len();
+                    let n = vm.thread_count();
                     let mut foot = [0usize; 5];
                     let mut paused = 0usize;
                     for i in 0..n {
-                        if let Some(t) = vm.bx.threads.get(i) {
-                            let f = t.root_footprint();
+                        if let Some((f, is_paused)) = vm.thread_footprint(i) {
                             for k in 0..5 {
                                 foot[k] += f[k];
                             }
-                            if t.is_paused() {
+                            if is_paused {
                                 paused += 1;
                             }
                         }
@@ -7620,13 +7612,13 @@ pub fn tweak_callback(
             // readings apart in time say which kind of object is piling up.
             let rows = cx.with_vm(|vm| {
                 vm.gc();
-                let ids = vm.bx.heap.alloced_object_ids();
+                let ids = vm.heap().alloced_object_ids();
                 let mut by_site: std::collections::HashMap<String, usize> = Default::default();
                 for obj in ids {
                     let chain = vm.construction_chain(obj.into());
                     let site = chain
                         .iter()
-                        .find_map(|lvl| lvl.loc.as_ref().map(|l| format!("{}:{}", l.file.rsplit('/').next().unwrap_or(&l.file), l.line)))
+                        .find_map(|lvl| lvl.loc.as_ref().map(|l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(l.file()), l.line)))
                         .unwrap_or_else(|| {
                             // No site anywhere up the chain: say what the
                             // object is by its own keys and by what its proto
@@ -7636,14 +7628,14 @@ pub fn tweak_callback(
                                 .first()
                                 .map(|lvl| format!("?{} [{}]", lvl.own_keys.len(), lvl.own_keys.iter().take(3).map(|k| crate::widget_tree::live_id_token(*k)).collect::<Vec<_>>().join(",")))
                                 .unwrap_or_else(|| "?".to_string());
-                            let proto = vm.bx.heap.proto(obj);
+                            let proto = vm.heap().proto(obj);
                             let proto = if let Some(id) = proto.as_id() {
                                 format!("proto=id:{}", crate::widget_tree::live_id_token(id))
                             } else if let Some(pobj) = proto.as_object() {
                                 let pchain = vm.construction_chain(pobj.into());
                                 let psite = pchain
                                     .iter()
-                                    .find_map(|lvl| lvl.loc.as_ref().map(|l| format!("{}:{}", l.file.rsplit('/').next().unwrap_or(&l.file), l.line)));
+                                    .find_map(|lvl| lvl.loc.as_ref().map(|l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(l.file()), l.line)));
                                 let pkeys = pchain.first().map(|lvl| lvl.own_keys.len()).unwrap_or(0);
                                 format!("proto=obj:{}:{pkeys}", psite.unwrap_or_else(|| "?".to_string()))
                             } else if proto.is_nil() {
@@ -7676,18 +7668,18 @@ pub fn tweak_callback(
             // root is walked with the module tree already marked, so what it
             // reports is what it alone keeps alive.
             fn reach(vm: &mut ScriptVm, seeds: &[ScriptObject], visited: &mut std::collections::HashSet<ScriptObject>) -> usize {
-                vm.bx.heap.reach_count(seeds, visited)
+                vm.heap().reach_count(seeds, visited)
             }
             let report = cx.with_vm(|vm| {
                 vm.gc();
-                let modules = vm.bx.heap.modules;
+                let modules = vm.modules();
                 let module_ids: Vec<(String, ScriptObject)> = vm
                     .construction_chain(modules.into())
                     .first()
                     .map(|lvl| {
                         lvl.own_keys
                             .iter()
-                            .filter_map(|k| vm.bx.heap.value(modules, (*k).into(), NoTrap).as_object().map(|o| (crate::widget_tree::live_id_token(*k), o)))
+                            .filter_map(|k| vm.value(modules, *k).as_object().map(|o| (crate::widget_tree::live_id_token(*k), o)))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -7708,21 +7700,9 @@ pub fn tweak_callback(
                     out.push_str(&format!("{}:{n}", json_str(name)));
                 }
                 out.push('}');
-                let (protos, defaults) = vm.bx.heap.type_root_ids();
-                let refs = vm.bx.heap.root_object_ids();
-                let bodies: Vec<ScriptObject> = {
-                    let bodies = vm.bx.code.bodies.borrow();
-                    bodies
-                        .iter()
-                        .flat_map(|b| {
-                            let mut v = vec![b.scope.as_object(), b.me.as_object()];
-                            if let Some(end) = &b.end_scope {
-                                v.push(end.as_object());
-                            }
-                            v
-                        })
-                        .collect()
-                };
+                let (protos, defaults) = vm.heap().type_root_ids();
+                let refs = vm.heap().root_object_ids();
+                let bodies = vm.body_root_ids();
                 for (name, seeds) in [("typeprotos", protos), ("typedefaults", defaults), ("bodies", bodies), ("refs", refs.clone())] {
                     let mut visited = all_modules.clone();
                     let n = reach(vm, &seeds, &mut visited);
@@ -7739,7 +7719,7 @@ pub fn tweak_callback(
                         let chain = vm.construction_chain((*obj).into());
                         let site = chain
                             .iter()
-                            .find_map(|lvl| lvl.loc.as_ref().map(|l| format!("{}:{}", l.file.rsplit('/').next().unwrap_or(&l.file), l.line)))
+                            .find_map(|lvl| lvl.loc.as_ref().map(|l| format!("{}:{}", l.file().rsplit('/').next().unwrap_or(l.file()), l.line)))
                             .unwrap_or_else(|| "?".to_string());
                         let keys: Vec<String> = chain
                             .first()
@@ -8282,14 +8262,14 @@ fn classify_prop(prop: &str, value: &str) -> SectionKind {
     match first {
         "width" | "height" | "abs_pos" | "margin" | "padding" | "spacing" | "line_spacing"
         | "align" | "flow" | "clip_x" | "clip_y" | "scroll" | "wrap_spacing" | "layout"
-        | "metrics" | "distribute" | "container_id" | "min_width" | "max_width"
+        | "metrics" | "baseline" | "distribute" | "container_id" | "min_width" | "max_width"
         | "min_height" | "max_height" | "aspect" | "cell" | "columns" | "rows" | "areas"
         | "column_gap" | "row_gap" | "auto_flow" | "justify_items" | "align_items"
         | "implicit_column_size" | "implicit_row_size" => return SectionKind::Layout,
         "text" | "empty_text" | "label" | "title" | "suffix" => return SectionKind::Text,
         "visible" | "enabled" | "grab_key_focus" | "cursor" | "trigger_on_press"
         | "enable_long_press" | "reset_hover_on_click" | "block_signal_event"
-        | "capture_overload" | "event_order" | "design_mode" | "skip_widget_tree_search"
+        | "capture_overload" | "event_order" | "design_mode" | "search_scope"
         | "grab_focus" | "hover_actions_enabled" | "animator" => return SectionKind::Behavior,
         _ => {}
     }
@@ -10543,7 +10523,7 @@ fn fab_palette_stamp(cx: &mut Cx) -> u64 {
     cx.with_vm(|vm| {
         let fab = vm.module(id!(fab));
         let read = |key: LiveId| -> u64 {
-            vm.bx.heap.value(fab, key.into(), NoTrap).as_color().unwrap_or(0) as u64
+            vm.value(fab, key).as_color().unwrap_or(0) as u64
         };
         // Folded rather than packed: five 32-bit colours do not fit in 64
         // bits side by side, and two palettes that collided would be a
@@ -17173,7 +17153,7 @@ impl Tweaker {
                                     if let Some(doc) = self.row_docs.get(&self.rows[index].prop)
                                     {
                                         let hint = parse_doc_hint(doc);
-                                        input.set_hint(hint.min, hint.max, hint.step);
+                                        input.set_hint(hint.min(), hint.max(), hint.step());
                                     }
                                     if let Ok(v) = self.rows[index].value.parse::<f64>() {
                                         input.set_value(cx, v);
@@ -20157,15 +20137,7 @@ impl Tweaker {
             return;
         };
         cx.with_vm(|vm| {
-            vm.eval(ScriptMod {
-                cargo_manifest_path: crate::widgets_dir().into(),
-                module_path: format!("theme_store_{name}"),
-                file: format!("themes/{name}.{}", crate::theme_store::FILE_EXTENSION),
-                line: 0,
-                column: 0,
-                code,
-                values: vec![],
-            });
+            vm.eval(ScriptMod::new(&crate::widgets_dir(), &format!("theme_store_{name}"), &format!("themes/{name}.{}", crate::theme_store::FILE_EXTENSION), 0, 0, &code, &[]));
         });
         // Re-apply rather than reload: typed text and running animations
         // survive, which is the whole point of the sanctioned override path.
@@ -23808,7 +23780,7 @@ mod tests {
             let widgets = vm.module(LiveId::from_str("widgets"));
             let theme = vm.module(LiveId::from_str("theme"));
             let field = |vm: &mut crate::makepad_platform::ScriptVm, obj, name: &str| {
-                vm.bx.heap.value(obj, LiveId::from_str(name).into(), NoTrap).as_object()
+                vm.value(obj, LiveId::from_str(name)).as_object()
             };
             let chip = field(vm, widgets, "Tweaker")
                 .and_then(|t| field(vm, t, "draw_label"))
@@ -23902,7 +23874,7 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             let value = script_eval!(vm, {
                 use mod.prelude.widgets.*
 
@@ -24338,23 +24310,17 @@ mod tests {
     fn fab_slider_stamp(cx: &mut Cx) -> (Option<u32>, Option<u32>, Option<f64>) {
         cx.with_vm(|vm| {
             let widgets = vm.module(LiveId::from_str("widgets"));
-            let slider = vm
-                .bx
-                .heap
-                .value(widgets, LiveId::from_str("FabSlider").into(), NoTrap)
+            let slider = vm.value(widgets, LiveId::from_str("FabSlider"))
                 .as_object();
             let ink = |vm: &mut crate::makepad_platform::ScriptVm, layer: &str| -> Option<u32> {
-                let layer = vm
-                    .bx
-                    .heap
-                    .value(slider?, LiveId::from_str(layer).into(), NoTrap)
+                let layer = vm.value(slider?, LiveId::from_str(layer))
                     .as_object()?;
-                vm.bx.heap.value(layer, LiveId::from_str("color").into(), NoTrap).as_color()
+                vm.value(layer, LiveId::from_str("color")).as_color()
             };
             let label = ink(vm, "draw_label");
             let value = ink(vm, "draw_value");
             let height = slider.and_then(|slider| {
-                let height = vm.bx.heap.value(slider, LiveId::from_str("height").into(), NoTrap);
+                let height = vm.value(slider, LiveId::from_str("height"));
                 height.as_f64().or_else(|| height.as_f32().map(f64::from))
             });
             (label, value, height)
@@ -24392,7 +24358,7 @@ mod tests {
             assert!(plain.len() > 10_000, "only {} lines were read off the sidebar", plain.len());
             let sheet = everything_sheet(vm, &|_| false);
             install(vm, sheet);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             vm.with_reload(crate::script_mod);
             let sidebar = Tweaker::sidebar_value(vm);
             let errors = vm.take_errors();
@@ -24500,14 +24466,11 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
         });
         let tweaker = cx.with_vm(|vm| {
             let widgets = vm.module(id!(widgets));
-            let value = vm
-                .bx
-                .heap
-                .value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            let value = vm.value(widgets, LiveId::from_str("Tweaker"));
             WidgetRef::script_from_value(vm, value)
         });
         assert!(!tweaker.is_empty(), "the Tweaker built no widget");
@@ -24841,7 +24804,7 @@ mod tests {
             let fixed = Size::Fixed(200.0).script_to_value(vm);
             let rel = Size::Rel { base: Base::Parent, factor: 0.5 }.script_to_value(vm);
             let down = Flow::Down.script_to_value(vm);
-            let heap = &vm.bx.heap;
+            let heap = vm.heap();
             let fill_obj = fill.as_object().expect("a named variant is an object");
             assert_eq!(
                 enum_info(heap, fill_obj).map(|(e, v)| (live_id_token(e), live_id_token(v))),
@@ -25609,7 +25572,7 @@ line two");
         cx.with_vm(|vm| {
             crate::script_mod(vm);
             let widgets = vm.module(id!(widgets));
-            let value = vm.bx.heap.value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            let value = vm.value(widgets, LiveId::from_str("Tweaker"));
             WidgetRef::script_from_value(vm, value)
         })
     }
@@ -25872,7 +25835,7 @@ line two");
     fn theme_color(cx: &mut Cx, key: &str) -> Option<u32> {
         cx.with_vm(|vm| {
             let theme = vm.module(LiveId::from_str("theme"));
-            vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
+            vm.value(theme, LiveId::from_str(key)).as_color()
         })
     }
 
@@ -25880,7 +25843,7 @@ line two");
     fn theme_value(cx: &mut Cx, key: &str) -> Option<f64> {
         cx.with_vm(|vm| {
             let theme = vm.module(LiveId::from_str("theme"));
-            vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_f64()
+            vm.value(theme, LiveId::from_str(key)).as_f64()
         })
     }
 
@@ -25910,7 +25873,7 @@ line two");
         let slider = cx.with_vm(|vm| {
             crate::script_mod(vm);
             let widgets = vm.module(id!(widgets));
-            let value = vm.bx.heap.value(widgets, LiveId::from_str("FabSlider").into(), NoTrap);
+            let value = vm.value(widgets, LiveId::from_str("FabSlider"));
             WidgetRef::script_from_value(vm, value)
         });
         // One draw, so the track has an area a press can land on.
@@ -26385,17 +26348,9 @@ line two");
         fn app_script_mod(vm: &mut ScriptVm) -> ScriptValue {
             crate::script_mod(vm);
             vm.heap_mut().new_module(LiveId::from_str("probe_app"));
-            vm.eval(ScriptMod {
-                cargo_manifest_path: crate::widgets_dir().into(),
-                module_path: "probe_app".to_string(),
-                file: "probe_app.splash".to_string(),
-                line: 0,
-                column: 0,
-                code: "mod.probe_app.AppLabel = mod.widgets.Label{ text: \"x\" }\ntrue\n".to_string(),
-                values: vec![],
-            });
+            vm.eval(ScriptMod::new(&crate::widgets_dir(), "probe_app", "probe_app.splash", 0, 0, "mod.probe_app.AppLabel = mod.widgets.Label{ text: \"x\" }\ntrue\n", &[]));
             let module = vm.module(LiveId::from_str("probe_app"));
-            vm.bx.heap.value(module, LiveId::from_str("AppLabel").into(), NoTrap)
+            vm.value(module, LiveId::from_str("AppLabel"))
         }
         fn drawn(label: &WidgetRef) -> u32 {
             let colour = label.borrow::<Label>().expect("a Label").draw_text.color;
@@ -26443,7 +26398,7 @@ line two");
         let panel_ref = cx.with_vm(|vm| {
             crate::script_mod(vm);
             let widgets = vm.module(id!(widgets));
-            let panel = vm.bx.heap.value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            let panel = vm.value(widgets, LiveId::from_str("Tweaker"));
             WidgetRef::script_from_value(vm, panel)
         });
         let mut panel = panel_ref.borrow_mut::<Tweaker>().expect("a Tweaker");
@@ -26470,18 +26425,10 @@ line two");
         fn app_script_mod(vm: &mut ScriptVm) -> ScriptValue {
             crate::script_mod(vm);
             vm.heap_mut().new_module(LiveId::from_str("probe_app"));
-            vm.eval(ScriptMod {
-                cargo_manifest_path: crate::widgets_dir().into(),
-                module_path: "probe_app".to_string(),
-                file: "probe_app.splash".to_string(),
-                line: 0,
-                column: 0,
-                code: "mod.probe_app.AppLabel = mod.widgets.Label{ text: \"x\" }\ntrue\n"
-                    .to_string(),
-                values: vec![],
-            });
+            vm.eval(ScriptMod::new(&crate::widgets_dir(), "probe_app", "probe_app.splash", 0, 0, "mod.probe_app.AppLabel = mod.widgets.Label{ text: \"x\" }\ntrue\n"
+                    , &[]));
             let module = vm.module(LiveId::from_str("probe_app"));
-            vm.bx.heap.value(module, LiveId::from_str("AppLabel").into(), NoTrap)
+            vm.value(module, LiveId::from_str("AppLabel"))
         }
 
         /// The colour the Label hands its shader, packed the way a theme
@@ -26506,7 +26453,7 @@ line two");
             let label = WidgetRef::script_from_value(vm, value);
             let captured = vm.heap_mut().new_object_ref(object);
             let widgets = vm.module(id!(widgets));
-            let panel = vm.bx.heap.value(widgets, LiveId::from_str("Tweaker").into(), NoTrap);
+            let panel = vm.value(widgets, LiveId::from_str("Tweaker"));
             (label, WidgetRef::script_from_value(vm, panel), captured)
         });
         let entry = drawn(&label);
@@ -28063,8 +28010,8 @@ line two");
             .iter()
             .map(|id| head.child(live_id!(tb_body)).child(live_id!(tb_seed_row)).child(*id).child(live_id!(tb_color)))
             .collect();
-        let lit = (0..4).filter(|w| picks[*w].borrow::<FabColorPick>().unwrap().is_drop_target()).collect();
-        let bars = picks.iter().filter_map(|p| p.borrow::<FabColorPick>().unwrap().insert_bar()).collect();
+        let lit: Vec<usize> = (0..4).filter(|w| picks[*w].borrow::<FabColorPick>().unwrap().is_drop_target()).collect();
+        let bars: Vec<Rect> = picks.iter().filter_map(|p| p.borrow::<FabColorPick>().unwrap().insert_bar()).collect();
         (lit, bars)
     }
 
@@ -33326,7 +33273,7 @@ impl Tweaker {
 
     /// What the Build tab answers, beside the session's own line.
     fn design_say(&mut self, cx: &mut Cx, msg: impl Into<String>) {
-        let msg = msg.into();
+        let msg: String = msg.into();
         log!("DESIGN {msg}");
         self.design_msg = msg;
         self.redraw_sidebar(cx);
@@ -34722,16 +34669,13 @@ mod flat_tree_tests {
 mod panel_ink_tests {
     use crate::desktop_style::{catalogue, install, uninstall, StyleSheet};
     use crate::makepad_draw::*;
-    use crate::makepad_script::trap::NoTrap;
     use crate::theme_tokens::{reads_on, LEGIBLE};
 
     /// One entry of a runtime table, as the VM has it right now.
     fn table_color(cx: &mut Cx, table: LiveId, key: &str) -> u32 {
         cx.with_vm(|vm| {
             let module = vm.module(table);
-            vm.bx
-                .heap
-                .value(module, LiveId::from_str(key).into(), NoTrap)
+            vm.value(module, LiveId::from_str(key))
                 .as_color()
                 .unwrap_or_else(|| panic!("`{key}` is not a colour in this table"))
         })

@@ -48,7 +48,7 @@ impl Renderer {
 
     /// Generic externally-driven connection points declared by this model.
     /// Empty is a valid ordinary model; no source-pack naming is consulted.
-    pub fn model_driven_parts(&self, id: &str) -> Vec<DrivenPartInfo> {
+    pub fn model_driven_parts(&self, id: &str) -> Vec<DrivenPartInfo<'_>> {
         self.static_models
             .iter()
             .find(|(key, _)| key == id)
@@ -57,7 +57,7 @@ impl Renderer {
                     .driven_parts
                     .iter()
                     .map(|part| DrivenPartInfo {
-                        connection: part.def.connection.clone(),
+                        connection: &part.def.connection,
                         pivot: part.def.pivot,
                         anchor: part.def.anchor,
                         radius: part.def.radius,
@@ -233,13 +233,14 @@ impl Renderer {
     pub fn set_model_clip_weighted(&mut self,target:impl Into<ModelTarget>,name:Option<String>,time:f32,looping:bool,weight:f32)->Result<(),String>{
         if !time.is_finite()||time<0.0{return Err("model clip time must be finite and nonnegative".into())}
         if !weight.is_finite()||!(0.0..=1.0).contains(&weight){return Err("model clip weight must be finite and within0..1".into())}
-        let target=target.into();let id=self.target_model_id(&target).ok_or("model clip target is not resident")?;
+        let target=target.into();let id=self.target_model_id(&target).map(str::to_owned).ok_or("model clip target is not resident")?;
         let model=self.static_models.iter().find(|(key,_)|key==&id).map(|(_,m)|m).ok_or("model clip target is not resident")?;
         if let Some(name)=&name{if !model.anim_parts.iter().any(|p|p.def.clip.hierarchy.as_ref().is_some_and(|h|h.has_clip(name)))&&!model.morph.as_ref().is_some_and(|m|m.source.clips.iter().any(|c|&c.name==name)){return Err(format!("model has no imported clip '{name}'"))}}
-        if !self.model_anim_state.clips.contains_key(&target)&&self.model_anim_state.clips.len()>=1024{return Err("model clip bindings exceed1024".into())}
-        self.model_anim_state.clips.insert(target,ModelClipPlayback{name,time,looping,weight});Ok(())
+        let key=StateTarget::from(&target);
+        if !self.model_anim_state.clips.contains_key(&key)&&self.model_anim_state.clips.len()>=1024{return Err("model clip bindings exceed1024".into())}
+        self.model_anim_state.clips.insert(key,ModelClipPlayback{name,time,looping,weight});Ok(())
     }
-    pub fn remove_model_clip(&mut self,target:impl Into<ModelTarget>){self.model_anim_state.clips.remove(&target.into());}
+    pub fn remove_model_clip(&mut self,target:impl Into<ModelTarget>){self.model_anim_state.clips.remove(&StateTarget::from(&target.into()));}
 
     pub fn set_model_state(
         &mut self,
@@ -249,7 +250,7 @@ impl Renderer {
         blend_secs: f32,
     ) -> bool {
         let target = target.into();
-        let Some(model_id) = self.target_model_id(&target) else {
+        let Some(model_id) = self.target_model_id(&target).map(str::to_owned) else {
             return false;
         };
         // Fields, not accessors: the definition borrows `static_models` while
@@ -275,47 +276,50 @@ impl Renderer {
 
     /// What every part of `target` is doing right now. Parts nobody has
     /// triggered report their model's default state.
-    pub fn model_states(&self, target: impl Into<ModelTarget>) -> Vec<ModelPartState> {
+    pub fn model_states(&self, target: impl Into<ModelTarget>) -> Vec<ModelPartState<'_>> {
         let target = target.into();
         let Some(model_id) = self.target_model_id(&target) else {
             return Vec::new();
         };
-        let Some((_, loaded)) = self.static_models.iter().find(|(k, _)| *k == model_id) else {
+        let Some((_, loaded)) = self.static_models.iter().find(|(k, _)| k == model_id) else {
             return Vec::new();
         };
-        loaded
-            .anim_parts
-            .iter()
-            .map(|p| {
-                let (state, time, goal) = self.model_anim_state.clock(&target, &model_id, &p.def);
-                ModelPartState {
-                    part: p.def.name.clone(),
-                    state,
-                    state_name: p.def.states.get(state).cloned().unwrap_or_default(),
-                    time,
-                    target_time: goal,
-                    settled: (time - goal).abs() <= 1.0e-6,
-                }
-            })
-            .collect()
+        loaded.anim_parts.iter().map(|p| self.part_state(&target, model_id, &p.def)).collect()
     }
 
-    /// One part's state, or `None` when the model or part is unknown.
+    /// One part's state, or `None` when the model or part is unknown. Map
+    /// logic asks this per door per tick, so it resolves only that part and
+    /// allocates nothing.
     pub fn model_part_state(
         &self,
         target: impl Into<ModelTarget>,
         part: &str,
-    ) -> Option<ModelPartState> {
+    ) -> Option<ModelPartState<'_>> {
         let target = target.into();
-        self.model_states(target).into_iter().find(|s| s.part == part)
+        let model_id = self.target_model_id(&target)?;
+        let (_, loaded) = self.static_models.iter().find(|(k, _)| k == model_id)?;
+        let p = loaded.anim_parts.iter().find(|p| p.def.name == part)?;
+        Some(self.part_state(&target, model_id, &p.def))
+    }
+
+    fn part_state<'a>(&self, target: &ModelTarget, model_id: &str, def: &'a crate::model::AnimPart) -> ModelPartState<'a> {
+        let (state, time, goal) = self.model_anim_state.clock(target, model_id, def);
+        ModelPartState {
+            part: &def.name,
+            state,
+            state_name: def.states.get(state).map_or("", |s| s.as_str()),
+            time,
+            target_time: goal,
+            settled: (time - goal).abs() <= 1.0e-6,
+        }
     }
 
     /// The model id a target resolves to: itself, or the model in that slot.
-    pub(super) fn target_model_id(&self, target: &ModelTarget) -> Option<String> {
+    pub(super) fn target_model_id<'a>(&'a self, target: &'a ModelTarget) -> Option<&'a str> {
         match target {
-            ModelTarget::Model(id) => Some(id.clone()),
-            ModelTarget::Instance(i) => self.placed_models.get(*i).map(|m| m.model.clone()),
-            ModelTarget::Attachment(i) => self.world_attachments.get(*i).map(|m|m.model.clone()),
+            ModelTarget::Model(id) => Some(id),
+            ModelTarget::Instance(i) => self.placed_models.get(*i).map(|m| m.model.as_str()),
+            ModelTarget::Attachment(i) => self.world_attachments.get(*i).map(|m| m.model.as_str()),
         }
     }
 

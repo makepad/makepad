@@ -1,0 +1,18 @@
+// What a pass's shader is built from (program.rs): the names its fns read
+// (the passes' scope: pod, math, shader, the shared stdlib and draw types)
+// and its parts as values: a read texture, a further output, a uniform of
+// each width, at its first value.
+use mod.pod.*
+use mod.math.*
+use mod.shader.*
+use mod.shared.*
+use mod.draw
+{
+    texture: fn() { return texture_2d(float) }
+    output: fn(i) { return fragment_output(i, vec4f) }
+    uniform_1: fn() { return uniform(0.0) }
+    uniform_2: fn() { return uniform(vec2(0.0, 0.0)) }
+    uniform_3: fn() { return uniform(vec3(0.0, 0.0, 0.0)) }
+    uniform_4: fn() { return uniform(vec4(0.0, 0.0, 0.0, 0.0)) }
+    uniform_16: fn() { return uniform(mat4x4f(1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0)) }
+}

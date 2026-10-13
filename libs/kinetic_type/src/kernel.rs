@@ -14,14 +14,17 @@
 //! `time` is the kernel's own time input. The `kinetic` module
 //! (kinetic.splash) is imported unqualified.
 
+#[cfg(test)]
+use makepad_script_compute_sched::kernel::KernelExt;
 use crate::kit::Kit;
-use crate::records::glyph_layout;
+use crate::records::GLYPH;
 use makepad_draw::*;
-use makepad_script_compute::kernel::{Kernel, Layout, MathMode};
+use makepad_script_compute::boundary::{register_layout, LayoutFieldView, LayoutView};
+use makepad_script_compute::kernel::{FieldTy, KernelRef, MathMode};
 use makepad_script_compute::module::Module;
 use makepad_script_compute::vm_kernel::{self, Decl, Entry, VmKernel};
 use makepad_script_compute::Backend;
-use std::sync::Arc;
+
 
 /// The stock motions module.
 pub const KINETIC_MODULE: &str = include_str!("kinetic.splash");
@@ -63,10 +66,10 @@ pub enum Which {
 
 /// Compile one of a kit's kernels (see [`Which`]) with the glyph draw's
 /// record layout `out`; errors name the kit's file, line and column.
-pub fn compile(vm: &ScriptVm, kit: &Kit, which: Which, out: &Layout) -> Result<Arc<Kernel>, String> {
+pub fn compile(vm: &ScriptVm, kit: &Kit, which: Which, out: &LayoutView<'_>) -> Result<KernelRef, String> {
     let glue = |name: &str| -> Result<ScriptObject, String> {
-        let m = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(crate::kit::KIT_MODULE).into(), NoTrap).as_object().ok_or("the kit module is not registered")?;
-        vm.bx.heap.value(m, LiveId::from_str(name).into(), NoTrap).as_object().ok_or_else(|| format!("kit.splash has no `{name}`"))
+        let m = vm.value(vm.modules(), LiveId::from_str(crate::kit::KIT_MODULE)).as_object().ok_or("the kit module is not registered")?;
+        vm.value(m, LiveId::from_str(name)).as_object().ok_or_else(|| format!("kit.splash has no `{name}`"))
     };
     let io = |name: &str, ty: &str, input: bool| {
         let (name, ty) = (name.to_string(), ty.to_string());
@@ -82,7 +85,7 @@ pub fn compile(vm: &ScriptVm, kit: &Kit, which: Which, out: &Layout) -> Result<A
                 Some(f) => f,
                 None => glue("still")?,
             };
-            (Entry::Instance, glue("glyph_entry")?, ("kit_glyph", f), vec![io("glyphs", "Glyph", true), io("out", &out.name, false)])
+            (Entry::Instance, glue("glyph_entry")?, ("kit_glyph", f), vec![io("glyphs", "Glyph", true), io("out", out.name, false)])
         }
         Which::Camera => {
             let f = kit.fn_field(vm, "camera_fn").ok_or("the kit has no camera_fn")?;
@@ -107,52 +110,66 @@ pub fn compile(vm: &ScriptVm, kit: &Kit, which: Which, out: &Layout) -> Result<A
         decls.push(param(name, *d, 1000.0));
     }
     let k = VmKernel { decls, entry, entry_fn, math: MathMode::Fast, uses: vec!["kinetic".into()], bind: vec![(bind.0.to_string(), bind.1)] };
-    let layouts = [glyph_layout(), out.clone(), camera_layout(), curve_layout()];
+    register_layouts();
+    let layouts = [GLYPH, *out, CAMERA, CURVE_POINT];
     let modules = [Module { path: "kinetic", source: KINETIC_MODULE }];
-    vm_kernel::compile(vm, &k, &layouts, Backend::Native, &modules).map(|(kernel, _)| kernel).map_err(|errors| errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n"))
+    vm_kernel::compile(vm, &k, &layouts, Backend::Native, &modules).map_err(|errors| errors.iter().map(|e| e.message.clone()).collect::<Vec<_>>().join("\n"))
 }
 
 /// The camera record a `camera_fn: fn(c)` writes. `share` is the kit's
 /// own: four values the camera fn works out once a frame (from the dials,
 /// the beat, the sound) that every look and backdrop reads as
 /// `self.k_share`, so the shaders do not repeat the maths.
-pub fn camera_layout() -> Layout {
-    use makepad_script_compute::kernel::{FieldTy, LayoutField};
-    let f = |name: &str, ty, offset| LayoutField { name: name.into(), ty, offset };
-    Layout {
-        name: "Camera".into(),
-        stride: 16,
-        fields: vec![f("eye", FieldTy::Vec3, 0), f("target", FieldTy::Vec3, 3), f("up", FieldTy::Vec3, 6), f("fov", FieldTy::F32, 9), f("roll", FieldTy::F32, 10), f("share", FieldTy::Vec4, 12)],
-    }
-}
+pub const CAMERA: LayoutView<'static> = LayoutView {
+    name: "Camera",
+    stride: 16,
+    fields: &[
+        LayoutFieldView { name: "eye", ty: FieldTy::Vec3, offset: 0 },
+        LayoutFieldView { name: "target", ty: FieldTy::Vec3, offset: 3 },
+        LayoutFieldView { name: "up", ty: FieldTy::Vec3, offset: 6 },
+        LayoutFieldView { name: "fov", ty: FieldTy::F32, offset: 9 },
+        LayoutFieldView { name: "roll", ty: FieldTy::F32, offset: 10 },
+        LayoutFieldView { name: "share", ty: FieldTy::Vec4, offset: 12 },
+    ],
+};
 
 /// The record a `curve_fn: fn(c)` writes: its point at parameter `u`.
-pub fn curve_layout() -> Layout {
-    use makepad_script_compute::kernel::{FieldTy, LayoutField};
-    Layout { name: "CurvePoint".into(), stride: 4, fields: vec![LayoutField { name: "pos".into(), ty: FieldTy::Vec3, offset: 0 }, LayoutField { name: "u".into(), ty: FieldTy::F32, offset: 3 }] }
+pub const CURVE_POINT: LayoutView<'static> = LayoutView {
+    name: "CurvePoint",
+    stride: 4,
+    fields: &[LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 }, LayoutFieldView { name: "u", ty: FieldTy::F32, offset: 3 }],
+};
+
+/// Registers the animator's own records (`Glyph`, `Camera`, `CurvePoint`)
+/// with the kernel compiler, once: a kernel compiled with a different
+/// table under one of these names fails with a mismatch error.
+fn register_layouts() {
+    static REGISTER: std::sync::Once = std::sync::Once::new();
+    REGISTER.call_once(|| {
+        for layout in [&GLYPH, &CAMERA, &CURVE_POINT] {
+            // false: another table holds the name; compiles with this one report the mismatch.
+            register_layout(layout);
+        }
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use makepad_script_compute::kernel::{FieldTy, LayoutField};
 
-    fn out_layout() -> Layout {
-        let f = |name: &str, ty, offset| LayoutField { name: name.into(), ty, offset };
-        Layout {
-            name: "KineticGlyph".into(),
-            stride: 24,
-            fields: vec![
-                f("pos", FieldTy::Vec3, 0),
-                f("rot", FieldTy::Vec4, 3),
-                f("scale", FieldTy::Vec3, 7),
-                f("shear", FieldTy::Vec2, 10),
-                f("color", FieldTy::Vec4, 12),
-                f("attr", FieldTy::Vec4, 16),
-                f("info", FieldTy::Vec4, 20),
-                f("shape", FieldTy::F32, 23),
-            ],
-        }
+    const OUT_FIELDS: &[LayoutFieldView<'static>] = &[
+        LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 },
+        LayoutFieldView { name: "rot", ty: FieldTy::Vec4, offset: 3 },
+        LayoutFieldView { name: "scale", ty: FieldTy::Vec3, offset: 7 },
+        LayoutFieldView { name: "shear", ty: FieldTy::Vec2, offset: 10 },
+        LayoutFieldView { name: "color", ty: FieldTy::Vec4, offset: 12 },
+        LayoutFieldView { name: "attr", ty: FieldTy::Vec4, offset: 16 },
+        LayoutFieldView { name: "info", ty: FieldTy::Vec4, offset: 20 },
+        LayoutFieldView { name: "shape", ty: FieldTy::F32, offset: 23 },
+    ];
+
+    fn out_layout() -> LayoutView<'static> {
+        LayoutView { name: "KineticGlyph", stride: 24, fields: OUT_FIELDS }
     }
 
     fn with_kit<R>(src: &str, f: impl FnOnce(&mut ScriptVm, Result<Kit, String>) -> R) -> R {
@@ -208,9 +225,9 @@ mod tests {
         assert!(with_kit("Nope{}", |_, kit| kit.is_err()));
         // Each of the first four dials has its shader accessor.
         let fns = with_kit("Kinetic{ dials: {a: 0.1 b: 0.2 c: 0.3 d: 0.4} }", |vm, kit| {
-            let m = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str(crate::kit::KIT_MODULE).into(), NoTrap).as_object().unwrap();
+            let m = vm.value(vm.modules(), LiveId::from_str(crate::kit::KIT_MODULE)).as_object().unwrap();
             drop(kit);
-            ["dial_x", "dial_y", "dial_z", "dial_w"].iter().filter(|k| vm.bx.heap.value(m, LiveId::from_str(k).into(), NoTrap).as_object().is_some_and(|f| vm.bx.heap.as_fn(f).is_some())).count()
+            ["dial_x", "dial_y", "dial_z", "dial_w"].iter().filter(|k| vm.value(m, LiveId::from_str(k)).as_object().is_some_and(|f| vm.heap().as_fn(f).is_some())).count()
         });
         assert_eq!(fns, 4);
     }

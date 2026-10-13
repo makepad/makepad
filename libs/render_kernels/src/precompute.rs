@@ -11,9 +11,10 @@
 //! appends every state to the table, and samples it with
 //! `std.anim.history_at` in kernels ([`History::at`] on the host).
 
-use makepad_script_compute::kernel::{Kernel, KernelError};
-use makepad_script_compute::sched::{Executor, Job};
-use std::sync::Arc;
+use makepad_script_compute::kernel::{KernelRef};
+use makepad_script_compute_sched::kernel::{KernelError};
+use makepad_script_compute_sched::sched::{Executor, Job};
+
 
 /// Every step's state: record `i` of step `s` at words
 /// `(s * count + i) * stride ..`. Step 0 is the initial state at `t0`.
@@ -70,7 +71,7 @@ impl From<KernelError> for PrecomputeError {
 /// `steps - 1` steps of `dt` from `t0`; `setup` sets params once. Runs on
 /// up to `threads` workers of `exec` per step (a one-element stepper runs
 /// on the caller).
-pub fn precompute(kernel: Arc<Kernel>, init: Vec<u32>, count: usize, stride: usize, steps: usize, t0: f32, dt: f32, exec: &dyn Executor, threads: usize, setup: impl FnOnce(&mut Job)) -> Result<History, PrecomputeError> {
+pub fn precompute(kernel: KernelRef, init: Vec<u32>, count: usize, stride: usize, steps: usize, t0: f32, dt: f32, exec: &dyn Executor, threads: usize, setup: impl FnOnce(&mut Job)) -> Result<History, PrecomputeError> {
     let steps = steps.max(1);
     let words = count * stride;
     let mut table = Vec::with_capacity(words * steps);
@@ -85,7 +86,7 @@ pub fn precompute(kernel: Arc<Kernel>, init: Vec<u32>, count: usize, stride: usi
         job.input_vec_u32("prev", prev)?;
         job.output_u32("next", next)?;
         job.run(exec, threads)?;
-        if job.stats().overflowed {
+        if job.stats().overflowed() {
             return Err(PrecomputeError::Overflow { step: s });
         }
         next = job.take_buffer_u32("next").unwrap_or_default();

@@ -14,14 +14,13 @@ makepad-platform = { path = "../platform", version = "2.0.0" }
 makepad-math = { path = "../libs/math", version = "1.0.0" }
 makepad-svg = { path = "../libs/svg", version = "1.0.0" }
 makepad-live-id = { path = "../libs/live_id", version = "1.0.0" }
+makepad-font-core = { path = "../libs/font_core", version = "1.0.0" }
 
 rustybuzz = { version = "0.18.0", path = "../libs/rustybuzz" }
 # Multi-axis UI fonts such as Roboto Flex exceed the 32-tuple stack buffer.
 # Enable the parser's heap fallback so valid glyph outlines are not discarded.
 ttf-parser = { version = "0.24.1", path = "../libs/ttf-parser", features = ["gvar-alloc"] }
 unicode-bidi = { version = "0.3", path = "../libs/unicode/unicode-bidi" }
-ab_glyph_rasterizer = { version = "0.1.8", path = "../libs/ab_glyph_rasterizer"}
-sdfer = { path = "../libs/sdfer", version = "0.2.1" }
 fxhash = { version = "0.2.1", path = "../libs/fxhash" }
 unicode-linebreak = { version = "0.1.5", path = "../libs/unicode/unicode-linebreak" }
 unicode-segmentation = { version = "1.12.0", path = "../libs/unicode/unicode-segmentation" }
@@ -32,10 +31,5 @@ makepad-zune-qoi = { version = "0.5.2", path = "../libs/zune/zune-qoi" }
 makepad-webp = { version = "0.2.4", path = "../libs/webp" }
 makepad-gif = { version = "0.1.0", path = "../libs/gif" }
 
-serde = { version = "1.0", optional = true, features = ["derive"] }
-
 [features]
 default = []
-
-## Enables certain public-facing types to derive serde serialization traits.
-serde = ["dep:serde", "makepad-live-id/serde"]

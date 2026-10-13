@@ -831,10 +831,7 @@ mod crate_tint_role_tests {
         for family in 1..=11 {
             for (k, suf) in SUFFIXES.iter().enumerate() {
                 let name = format!("color_map_{family}_{suf}");
-                let color = vm
-                    .bx
-                    .heap
-                    .value(theme, LiveId::from_str(&name).into(), NoTrap)
+                let color = vm.value(theme, LiveId::from_str(&name))
                     .as_color();
                 assert_eq!(
                     color,
@@ -858,10 +855,7 @@ mod crate_tint_role_tests {
     fn assert_design_kind_roles(vm: &mut ScriptVm, label: &str) {
         let theme = vm.module(id!(theme));
         for name in DESIGN_KIND_ROLES {
-            let color = vm
-                .bx
-                .heap
-                .value(theme, LiveId::from_str(name).into(), NoTrap)
+            let color = vm.value(theme, LiveId::from_str(name))
                 .as_color();
             assert!(color.is_some(), "{label} {name} does not resolve");
         }
@@ -881,7 +875,7 @@ mod crate_tint_role_tests {
             assert_design_kind_roles(vm, "light-default");
             for entry in catalogue() {
                 install(vm, StyleSheet::load(entry));
-                vm.bx.captured_errors = Some(Vec::new());
+                vm.capture_errors();
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
                 assert!(errors.is_empty(), "{}: {errors:?}", entry.id);
@@ -917,7 +911,7 @@ mod crate_tint_role_tests {
             crate::script_mod(vm);
             for (entry, expected) in sheets {
                 install(vm, StyleSheet::load(entry));
-                vm.bx.captured_errors = Some(Vec::new());
+                vm.capture_errors();
                 vm.with_reload(crate::script_mod);
                 let errors = vm.take_errors();
                 assert!(errors.is_empty(), "{}: {errors:?}", entry.id);

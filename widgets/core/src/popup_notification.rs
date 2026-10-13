@@ -86,7 +86,7 @@ impl Widget for PopupNotification {
         }
 
         let draw_list = self.draw_list.as_mut().unwrap();
-        draw_list.begin_overlay_reuse(cx);
+        draw_list.begin_popup_overlay(cx);
 
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, self.view.layout);

@@ -57,7 +57,7 @@
 //!   completed-but-uncommitted text reads as a phantom value.
 
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     drop_down::PopupAnchorTransform,
     event::TouchState,
     makepad_derive_widget::*,

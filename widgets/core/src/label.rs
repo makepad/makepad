@@ -1,7 +1,15 @@
 use crate::{
-    makepad_derive_widget::*, makepad_draw::shader::draw_text::TextOverflow, makepad_draw::*,
-    widget::*, widget_async::ScriptAsyncResult,
+    makepad_derive_widget::*,
+    makepad_draw::shader::draw_text::TextOverflow,
+    makepad_draw::text::{
+        layouter::{LaidoutText, SelectionRect},
+        selection::{Cursor, Selection},
+    },
+    makepad_draw::*,
+    widget::*,
+    widget_async::ScriptAsyncResult,
 };
+use std::rc::Rc;
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -51,6 +59,16 @@ script_mod! {
                 line_spacing: theme.font_wdgt_line_spacing
             }
         }
+        /** the wash under selected text (a list or row that selects across its labels sets it) */
+        draw_selection +: {
+            color: theme.color_selection_focus
+        }
+        /** the line under a hovered link span (see `LabelRef::set_links`) */
+        draw_link +: {
+            color: theme.color_label_inner_hover
+        }
+        /** the ink of link spans */
+        link_color: theme.color_label_inner_hover
     }
 
     mod.widgets.Labelbold = mod.widgets.Label{
@@ -271,15 +289,24 @@ pub enum LabelAction {
     None,
 }
 
-#[derive(Script, ScriptHook, Widget)]
+#[derive(Script, ScriptHook, WidgetRef, WidgetSet, WidgetRegister)]
 pub struct Label {
     #[uid]
     uid: WidgetUid,
     #[source]
     source: ScriptObjectRef,
-    #[redraw]
     #[live]
     pub draw_text: DrawText,
+    /// The selection wash, drawn over the text where a host (a selectable
+    /// list, a row) selected part of it.
+    #[live]
+    draw_selection: DrawColor,
+    /// The underline of the hovered link span.
+    #[live]
+    draw_link: DrawColor,
+    /// The ink of link spans.
+    #[live]
+    link_color: Vec4f,
 
     #[walk]
     pub walk: Walk,
@@ -304,7 +331,6 @@ pub struct Label {
     text: ArcStringMut,
 
     #[live(true)]
-    #[visible]
     visible: bool,
 
     /// Report where the pointer is over this label, for a tooltip to hang
@@ -315,9 +341,116 @@ pub struct Label {
     /// owns it. See `handle_event`.
     #[live(false)]
     hover_actions_enabled: bool,
+
+    /// Whether a host may select this label's text (a list selecting across
+    /// rows). Off for marks and icons whose text is not words.
+    #[live(true)]
+    selectable: bool,
+
+    /// Where the text was drawn and how it was laid out, for mapping points
+    /// to text and back.
+    #[rust]
+    laid: Option<(Rect, Rc<LaidoutText>)>,
+    /// Where the label's area was when it was drawn (see `shift`).
+    #[rust]
+    drawn_pos: DVec2,
+    /// Selected byte range of `text`, set by a host.
+    #[rust]
+    selection: Option<(usize, usize)>,
+    /// Byte ranges of `text` drawn as links (in `link_color`), set by a host
+    /// that also does the hit-testing (`selection_point_to_char_index`).
+    #[rust]
+    links: Vec<(usize, usize)>,
+    /// The link span under the pointer: underlined.
+    #[rust]
+    link_hover: Option<usize>,
+}
+
+impl WidgetNode for Label {
+    fn widget_uid(&self) -> WidgetUid {
+        self.uid
+    }
+    fn visible(&self) -> bool {
+        self.visible
+    }
+    fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
+        if self.visible != visible {
+            self.visible = visible;
+            self.redraw(cx);
+        }
+    }
+    fn area(&self) -> Area {
+        self.draw_text.area()
+    }
+    fn walk(&mut self, _cx: &mut Cx) -> Walk {
+        self.walk
+    }
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.draw_text.redraw(cx);
+    }
+
+    // Selection: a label's text is selectable by its host, in bytes of the
+    // text. An empty label (drawn as one space) has none.
+    fn selection_text_len(&self) -> usize {
+        if self.visible && self.selectable && !self.text.as_ref().trim().is_empty() {
+            self.text.as_ref().len()
+        } else {
+            0
+        }
+    }
+    fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
+        if self.selection_text_len() == 0 {
+            return None;
+        }
+        let (rect, laid) = self.laid.as_ref()?;
+        // The text was laid out where the label was drawn; a parent's
+        // alignment (a Fill sibling, a right-aligned row) or a list scrolled
+        // without drawing it again moved it since. Map the point back.
+        let abs = abs - self.shift(cx);
+        if !rect.contains(abs) {
+            return None;
+        }
+        let scale = self.draw_text.font_scale.max(0.0001) as f64;
+        let shift = if self.draw_text.ink_centered { laid.ink_center_offset_in_lpxs() as f64 } else { 0.0 };
+        let local = (abs - rect.pos) / scale - dvec2(0.0, shift);
+        let cursor = laid.point_in_lpxs_to_cursor(makepad_draw::text::geom::Point::new(local.x as f32, local.y as f32));
+        Some(cursor.index.min(self.text.as_ref().len()))
+    }
+    fn selection_set(&mut self, anchor: usize, cursor: usize) {
+        let len = self.selection_text_len();
+        let (a, b) = (anchor.min(cursor).min(len), anchor.max(cursor).min(len));
+        let next = (a < b).then_some((a, b));
+        // The host redraws the item after changing its selection.
+        self.selection = next;
+    }
+    fn selection_clear(&mut self) {
+        self.selection = None;
+    }
+    fn selection_select_all(&mut self) {
+        let len = self.selection_text_len();
+        self.selection_set(0, len);
+    }
+    fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
+        let text = self.text.as_ref();
+        let (a, b) = (start.min(end).min(text.len()), start.max(end).min(text.len()));
+        text.get(a..b).unwrap_or("").to_string()
+    }
+    fn selection_get_full_text(&self) -> String {
+        if self.selection_text_len() == 0 {
+            String::new()
+        } else {
+            self.text.as_ref().to_string()
+        }
+    }
 }
 
 impl Widget for Label {
+    /// A label reports the pointer at most (hover actions); it never takes
+    /// a press, so a host's gestures (selecting, scrolling) pass over it.
+    fn is_interactive(&self) -> bool {
+        self.hover_actions_enabled
+    }
+
     /// Its text, laid out (hidden labels draw nothing).
     fn scan(&mut self, cx: &mut Cx, _scan: &ScanEvent, _scope: &mut Scope) {
         self.draw_text.scan_text(cx, self.text.as_ref());
@@ -366,12 +499,8 @@ impl Widget for Label {
             Some(t) => t,
             None => self.text.as_ref(),
         };
-        // An empty label draws a space: `draw_walk` writes one in before it
-        // draws. Priced as nothing, it is a label a space narrower than it
-        // draws for as long as it stays empty -- which is only until its
-        // first draw, and then again every time somebody sets it empty. An
-        // app does that on every rebuild, so a row on its edge took that
-        // space as room and gave a concession back for exactly one frame.
+        // An empty label draws a space (`draw_walk`), so it is priced as one:
+        // priced as nothing, a row on its edge took that space as room.
         let text = if text.is_empty() { " " } else { text };
         let text_w = crate::badge::advance(&self.draw_text, cx, text);
         Some(pad.width() + text_w + margin.width())
@@ -384,18 +513,14 @@ impl Widget for Label {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(text) {
-            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            let str_val = vm.new_string(self.text.as_ref());
             return ScriptAsyncResult::Return(str_val.into());
         }
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(new_text) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "copying label text")
+                    if let Some(new_text) = vm.cast_to_owned_string(value, "copying label text")
                     {
                         vm.with_cx_mut(|cx| {
                             self.set_text(cx, &new_text);
@@ -424,16 +549,34 @@ impl Widget for Label {
                 ..Default::default()
             },
         );
-        // here we need to check if the text is empty, if so we need to set it to a space
-        // or the text draw will not work(seems like lazy drawtext bug)
-        let _ = self.text.as_ref().is_empty().then(|| {
-            let _ = self.set_text(cx, " ");
-        });
+        // Empty text is drawn as a space (an empty draw lays out nothing,
+        // not even the line height). The text itself stays empty: setting
+        // it here made every host that writes "" again (on each pump) see a
+        // change, redraw, and keep the window repainting forever.
+        let shown: &str = if self.text.as_ref().is_empty() { " " } else { self.text.as_ref() };
         self.draw_text.max_lines = self.max_lines;
         self.draw_text.text_overflow = self.text_overflow;
-        self.draw_text
-            .draw_walk(cx, walk, self.align, self.text.as_ref());
+        let (rect, laid) = if self.links.is_empty() {
+            self.draw_text.draw_walk_keep(cx, walk, self.align, shown)
+        } else {
+            // Every glyph gets its colour (a glyph's own colour sticks for the
+            // ones after it), the links' in the link ink.
+            let base = self.draw_text.color;
+            let (links, ink) = (&self.links, self.link_color);
+            let restyle = move |laid: &LaidoutText| Some(recolor_links(laid, links, base, ink));
+            let out = self.draw_text.draw_walk_restyled(cx, walk, self.align, shown, Some(&restyle));
+            self.draw_text.color = base;
+            out
+        };
+        if let Some((a, b)) = self.selection {
+            self.draw_selection_rects(cx, rect, &laid, a, b);
+        }
+        if let Some(&(a, b)) = self.link_hover.and_then(|i| self.links.get(i)) {
+            self.draw_link_underline(cx, rect, &laid, a, b);
+        }
+        self.laid = Some((rect, laid));
         cx.end_turtle_with_area(&mut self.area);
+        self.drawn_pos = self.area.rect(cx).pos;
         DrawStep::done()
     }
 
@@ -487,7 +630,79 @@ impl Widget for Label {
     }
 }
 
+/// A copy of `laid` with every glyph coloured: `ink` inside the `links`
+/// byte ranges, `base` elsewhere.
+fn recolor_links(laid: &LaidoutText, links: &[(usize, usize)], base: Vec4f, ink: Vec4f) -> LaidoutText {
+    use makepad_draw::text::color::Color;
+    let color = |c: Vec4f| {
+        let b = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        Color::new(b(c.x), b(c.y), b(c.z), b(c.w))
+    };
+    let (base, ink) = (color(base), color(ink));
+    let mut out = laid.clone();
+    let text_start = laid.text.start_in_parent();
+    for row in out.rows.iter_mut() {
+        let row_start = row.text.start_in_parent().saturating_sub(text_start);
+        for glyph in row.glyphs.iter_mut() {
+            let at = row_start + glyph.cluster;
+            let linked = links.iter().any(|&(a, b)| at >= a && at < b);
+            glyph.color = Some(if linked { ink } else { base });
+        }
+    }
+    out
+}
+
 impl Label {
+    /// How far the label moved since it was drawn.
+    fn shift(&self, cx: &Cx) -> DVec2 {
+        if self.area.is_valid(cx) {
+            self.area.rect(cx).pos - self.drawn_pos
+        } else {
+            DVec2::default()
+        }
+    }
+
+    fn draw_link_underline(&mut self, cx: &mut Cx2d, rect: Rect, laid: &LaidoutText, a: usize, b: usize) {
+        let scale = self.draw_text.font_scale as f64;
+        let shift = if self.draw_text.ink_centered { laid.ink_center_offset_in_lpxs() as f64 * scale } else { 0.0 };
+        let selection = Selection {
+            anchor: Cursor { index: a, prefer_next_row: false },
+            cursor: Cursor { index: b, prefer_next_row: false },
+        };
+        for SelectionRect { rect_in_lpxs, ascender_in_lpxs } in laid.selection_rects(selection) {
+            // One point under the baseline.
+            let base_y = rect.pos.y + shift + (rect_in_lpxs.origin.y + ascender_in_lpxs) as f64 * scale + 1.5;
+            self.draw_link.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(rect.pos.x + rect_in_lpxs.origin.x as f64 * scale, base_y),
+                    size: dvec2(rect_in_lpxs.size.width as f64 * scale, 1.0),
+                },
+            );
+        }
+    }
+
+    fn draw_selection_rects(&mut self, cx: &mut Cx2d, rect: Rect, laid: &LaidoutText, a: usize, b: usize) {
+        let scale = self.draw_text.font_scale as f64;
+        let shift = if self.draw_text.ink_centered { laid.ink_center_offset_in_lpxs() as f64 * scale } else { 0.0 };
+        let selection = Selection {
+            anchor: Cursor { index: a, prefer_next_row: false },
+            cursor: Cursor { index: b, prefer_next_row: false },
+        };
+        for SelectionRect { rect_in_lpxs, .. } in laid.selection_rects(selection) {
+            self.draw_selection.draw_abs(
+                cx,
+                Rect {
+                    pos: dvec2(
+                        rect.pos.x + rect_in_lpxs.origin.x as f64 * scale,
+                        rect.pos.y + shift + rect_in_lpxs.origin.y as f64 * scale,
+                    ),
+                    size: dvec2(rect_in_lpxs.size.width as f64 * scale, rect_in_lpxs.size.height as f64 * scale),
+                },
+            );
+        }
+    }
+
     /// Sets the text color.
     ///
     /// Does nothing if the color is unchanged.
@@ -541,6 +756,19 @@ impl LabelRef {
             }
         } else {
             false
+        }
+    }
+
+    /// Draw these byte ranges of the text as links (in `link_color`), the
+    /// `hover` one underlined. The host hit-tests them itself (through
+    /// `selection_point_to_char_index`); the label takes no presses.
+    pub fn set_links(&self, cx: &mut Cx, links: &[(usize, usize)], hover: Option<usize>) {
+        if let Some(mut inner) = self.borrow_mut() {
+            if inner.links != links || inner.link_hover != hover {
+                inner.links = links.to_vec();
+                inner.link_hover = hover;
+                inner.redraw(cx);
+            }
         }
     }
 

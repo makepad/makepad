@@ -265,7 +265,7 @@ impl ScriptHook for Dock {
                         if let Some(id) = kv.key.as_id() {
                             // Check type and parse accordingly
                             if let Some(val_obj) = kv.value.as_object() {
-                                if vm.bx.heap.type_matches_id(
+                                if vm.heap().type_matches_id(
                                     val_obj,
                                     DockItemSplitter::script_type_id_static(),
                                 ) {
@@ -276,9 +276,7 @@ impl ScriptHook for Dock {
                                             DockItemSplitter::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, splitter.to_dock_item());
                                     }
-                                } else if vm
-                                    .bx
-                                    .heap
+                                } else if vm.heap()
                                     .type_matches_id(val_obj, DockItemTabs::script_type_id_static())
                                 {
                                     if collect_layout
@@ -287,9 +285,7 @@ impl ScriptHook for Dock {
                                         let tabs = DockItemTabs::script_from_value(vm, kv.value);
                                         self.dock_items.insert(id, tabs.to_dock_item());
                                     }
-                                } else if vm
-                                    .bx
-                                    .heap
+                                } else if vm.heap()
                                     .type_matches_id(val_obj, DockItemTab::script_type_id_static())
                                 {
                                     if collect_layout
@@ -301,7 +297,7 @@ impl ScriptHook for Dock {
                                 } else {
                                     // Not a dock item, treat as content template - root it
                                     self.templates
-                                        .insert(id, vm.bx.heap.new_object_ref(val_obj));
+                                        .insert(id, vm.new_object_ref(val_obj));
                                 }
                             }
                             // Non-object values can't be rooted, skip them for templates
@@ -469,6 +465,15 @@ struct TabBarWrap {
     contents_rect: Rect,
 }
 
+impl TabBarWrap {
+    /// Redraws this panel's contents and every retained draw list in them, since a hidden tab
+    /// misses any redraws meant for those. The plain redraw is what gets the parents to draw.
+    fn redraw_contents(&self, cx: &mut Cx) {
+        self.contents_draw_list.redraw(cx);
+        self.contents_draw_list.redraw_self_and_children(cx);
+    }
+}
+
 #[derive(Copy, Debug, Clone)]
 enum DrawStackItem {
     Invalid,
@@ -606,7 +611,6 @@ impl DockItemTab {
 }
 
 #[derive(Clone, Debug, SerRon, DeRon)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum DockItem {
     Splitter {
         axis: SplitterAxis,
@@ -618,7 +622,6 @@ pub enum DockItem {
         tabs: Vec<LiveId>,
         selected: usize,
         closable: bool,
-        #[cfg_attr(feature = "serde", serde(default))]
         hide_tab_bar: bool,
     },
     Tab {
@@ -1558,7 +1561,7 @@ impl Dock {
                 *selected = tabs.len() - 1;
             }
             if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
-                tab_bar.contents_draw_list.redraw(cx);
+                tab_bar.redraw_contents(cx);
             }
             true
         } else {
@@ -1595,7 +1598,7 @@ impl Dock {
             return false;
         };
         if let Some(tab_bar) = self.tab_bars.get(&tab_bar_id) {
-            tab_bar.contents_draw_list.redraw(cx);
+            tab_bar.redraw_contents(cx);
         }
         true
     }
@@ -1668,7 +1671,7 @@ impl Dock {
                         self.needs_save = true;
                         *selected = pos;
                         if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
-                            tab_bar.contents_draw_list.redraw(cx);
+                            tab_bar.redraw_contents(cx);
                         }
                         return;
                     }
@@ -1754,7 +1757,7 @@ impl Dock {
                             // contents still changed to a different item, so redraw them
                             // explicitly or the closed tab's pixels stay on screen.
                             if let Some(tab_bar) = self.tab_bars.get(&tabs_id) {
-                                tab_bar.contents_draw_list.redraw(cx);
+                                tab_bar.redraw_contents(cx);
                             }
                             if !keep_item {
                                 self.dock_items.remove(&tab_id);
@@ -2279,7 +2282,6 @@ impl Dock {
             }
         }
         for (panel_id, tab_bar) in self.tab_bars.iter_mut() {
-            let contents_view = &mut tab_bar.contents_draw_list;
             for action in cx.capture_actions(|cx| tab_bar.tab_bar.handle_event(cx, event, scope)) {
                 match action.as_widget_action().cast() {
                     TabBarAction::ShouldTabStartDrag(item) => {
@@ -2312,7 +2314,7 @@ impl Dock {
                         {
                             if let Some(sel) = tabs.iter().position(|v| *v == tab_id) {
                                 *selected = sel;
-                                contents_view.redraw(cx);
+                                tab_bar.redraw_contents(cx);
                                 cx.widget_action(uid, DockAction::TabWasPressed(tab_id))
                             } else {
                                 log!("Cannot find tab {}", tab_id.0);
@@ -2374,6 +2376,21 @@ impl Dock {
                 uniforms_gen,
             );
             self.area.redraw(cx);
+        }
+
+        // A window drag query can reset the cursor on any move, so an in-app tab drag
+        // re-sets it on every drag move; drags from outside the app have no internal id.
+        if let Event::Drag(e) = event {
+            let in_app = e.items.iter().any(|item| {
+                matches!(
+                    item,
+                    DragItem::FilePath { internal_id: Some(_), .. }
+                        | DragItem::String { internal_id: Some(_), .. }
+                )
+            });
+            if in_app && self.dragging_tab.is_some() {
+                cx.set_cursor(MouseCursor::Grabbing);
+            }
         }
 
         match event.drag_hits(cx, self.area) {
@@ -2826,8 +2843,12 @@ impl DockRef {
         }
     }
 
+    /// Starts dragging a tab, showing the grabbing cursor until the drag ends.
+    ///
+    /// On Windows the OLE drag session shows its own drag cursors instead.
     pub fn tab_start_drag(&self, cx: &mut Cx, _tab_id: LiveId, item: DragItem) {
         cx.start_dragging(vec![item]);
+        cx.set_cursor(MouseCursor::Grabbing);
     }
 }
 
@@ -3257,6 +3278,36 @@ mod tests {
             assert!(&current == original, "moving a tab replaced its live body");
             assert!(current.borrow::<crate::label::Label>().is_some());
         }
+    }
+
+    #[test]
+    fn showing_another_tab_redraws_the_window_and_the_tabs_retained_lists() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (dock, _bodies) = dock_with_tabs(&mut cx);
+        // Link the lists the way drawing would: the window, then the panel's contents,
+        // then a retained list (like a `new_batch` view) inside the shown tab.
+        let window = DrawList::new(&mut cx);
+        let retained = DrawList::new(&mut cx);
+        let contents = {
+            let mut dock = dock.borrow_mut().unwrap();
+            let tab_bar = dock.tab_bar.clone();
+            let panel = dock.tab_bars.get_or_insert(&mut cx, id!(root), |cx| {
+                cx.with_vm(|vm| TabBarWrap {
+                    tab_bar: TabBar::script_from_value(vm, tab_bar.as_object().into()),
+                    contents_draw_list: DrawList2d::script_new(vm),
+                    contents_rect: Rect::default(),
+                })
+            });
+            panel.contents_draw_list.id()
+        };
+        cx.draw_lists[contents].codeflow_parent_id = Some(window.id());
+        cx.draw_lists[retained.id()].codeflow_parent_id = Some(contents);
+        let _ = std::mem::take(&mut cx.new_draw_event);
+
+        dock.select_tab(&mut cx, id!(second));
+        let draw_event = std::mem::take(&mut cx.new_draw_event);
+        assert!(draw_event.draw_list_will_redraw(&cx, window.id()));
+        assert!(draw_event.draw_list_will_redraw(&cx, retained.id()));
     }
 
     #[test]

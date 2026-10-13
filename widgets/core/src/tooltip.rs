@@ -152,7 +152,7 @@ impl Widget for Tooltip {
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, _walk: Walk) -> DrawStep {
         // The overlay list has to begin every frame, even while hidden, or the window drops it.
-        self.draw_list.as_mut().unwrap().begin_overlay_reuse(cx);
+        self.draw_list.as_mut().unwrap().begin_popup_overlay(cx);
 
         let pass_size = cx.current_pass_size();
         cx.begin_root_turtle(pass_size, Layout::default());

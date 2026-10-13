@@ -70,7 +70,7 @@ fn sv_to_anim_string(vm: &mut ScriptVm, v: &ScriptValue) -> String {
     }
     if let Some(_s) = v.as_string() {
         let mut out = String::new();
-        vm.bx.heap.string_with(*v, |_, content| {
+        vm.heap().string_with(*v, |_, content| {
             out = content.to_string();
         });
         return out;
@@ -113,7 +113,7 @@ fn resolve_paint(
         return Some(SvgPaint::Color(r, g, b, a));
     }
     if let Some(obj) = value.as_object() {
-        let tid = vm.bx.heap.object_type_id(obj)?;
+        let tid = vm.heap().object_type_id(obj)?;
         let grad = if tid == VectorGradient::script_type_id_static() {
             VectorGradient::script_from_value(vm, *value).to_svg_gradient()
         } else if tid == VectorRadGradient::script_type_id_static() {
@@ -131,8 +131,7 @@ fn resolve_paint(
 
 fn is_tween(vm: &ScriptVm, value: &ScriptValue) -> bool {
     value.as_object().map_or(false, |obj| {
-        vm.bx
-            .heap
+        vm.heap()
             .type_matches_id(obj, VectorTween::script_type_id_static())
     })
 }
@@ -165,9 +164,9 @@ fn resolve_transform(
         return (xf, anims);
     }
     if let Some(arr) = value.as_array() {
-        let len = vm.bx.heap.array_len(arr);
+        let len = vm.heap().array_len(arr);
         for i in 0..len {
-            let item = vm.bx.heap.array_index_unchecked(arr, i);
+            let item = vm.heap().array_index_unchecked(arr, i);
             if let Some(obj) = item.as_object() {
                 resolve_one_transform(vm, obj, item, &mut xf, &mut anims);
             }
@@ -183,7 +182,7 @@ fn resolve_one_transform(
     xf: &mut Transform2d,
     anims: &mut Vec<SvgAnimateTransform>,
 ) {
-    let Some(tid) = vm.bx.heap.object_type_id(obj) else {
+    let Some(tid) = vm.heap().object_type_id(obj) else {
         return;
     };
     let deg_to_rad = std::f32::consts::PI / 180.0;
@@ -228,8 +227,7 @@ fn resolve_one_transform(
 }
 
 fn resolve_linecap(vm: &ScriptVm, v: &ScriptValue) -> LineCap {
-    vm.bx
-        .heap
+    vm.heap()
         .string_with(*v, |_, s| match s {
             "round" => LineCap::Round,
             "square" => LineCap::Square,
@@ -239,8 +237,7 @@ fn resolve_linecap(vm: &ScriptVm, v: &ScriptValue) -> LineCap {
 }
 
 fn resolve_linejoin(vm: &ScriptVm, v: &ScriptValue) -> LineJoin {
-    vm.bx
-        .heap
+    vm.heap()
         .string_with(*v, |_, s| match s {
             "round" => LineJoin::Round,
             "bevel" => LineJoin::Bevel,
@@ -259,9 +256,7 @@ fn resolve_filter(
         return None;
     }
     if let Some(obj) = filter.as_object() {
-        if vm
-            .bx
-            .heap
+        if vm.heap()
             .type_matches_id(obj, VectorFilter::script_type_id_static())
         {
             let f = VectorFilter::script_from_value(vm, *filter);
@@ -275,7 +270,7 @@ fn resolve_filter(
 }
 
 fn is_transform_type(vm: &ScriptVm, obj: ScriptObject) -> bool {
-    let Some(tid) = vm.bx.heap.object_type_id(obj) else {
+    let Some(tid) = vm.heap().object_type_id(obj) else {
         return false;
     };
     tid == VectorTranslate::script_type_id_static()
@@ -414,9 +409,7 @@ impl VectorTween {
         } else {
             None
         };
-        let calc_mode = vm
-            .bx
-            .heap
+        let calc_mode = vm.heap()
             .string_with(self.calc, |_, s| match s {
                 "discrete" => AnimateCalcMode::Discrete,
                 "paced" => AnimateCalcMode::Paced,
@@ -424,9 +417,7 @@ impl VectorTween {
                 _ => AnimateCalcMode::Linear,
             })
             .unwrap_or(AnimateCalcMode::Linear);
-        let fill = vm
-            .bx
-            .heap
+        let fill = vm.heap()
             .string_with(self.fill_mode, |_, s| match s {
                 "freeze" => AnimateFill::Freeze,
                 _ => AnimateFill::Remove,
@@ -747,7 +738,7 @@ impl VectorPathShape {
             }
             anims.push(anim);
         } else {
-            vm.bx.heap.string_with(self.d, |_, s| {
+            vm.heap().string_with(self.d, |_, s| {
                 parse_path_data(s, &mut path);
             });
         }
@@ -1342,9 +1333,7 @@ impl ScriptHook for VectorGradient {
             vm.vec_with(obj, |vm, vec| {
                 for kv in vec {
                     if let Some(val_obj) = kv.value.as_object() {
-                        if vm
-                            .bx
-                            .heap
+                        if vm.heap()
                             .type_matches_id(val_obj, VectorStop::script_type_id_static())
                         {
                             self.stops.push(VectorStop::script_from_value(vm, kv.value));
@@ -1405,9 +1394,7 @@ impl ScriptHook for VectorRadGradient {
             vm.vec_with(obj, |vm, vec| {
                 for kv in vec {
                     if let Some(val_obj) = kv.value.as_object() {
-                        if vm
-                            .bx
-                            .heap
+                        if vm.heap()
                             .type_matches_id(val_obj, VectorStop::script_type_id_static())
                         {
                             self.stops.push(VectorStop::script_from_value(vm, kv.value));
@@ -1453,9 +1440,7 @@ impl ScriptHook for VectorFilter {
             vm.vec_with(obj, |vm, vec| {
                 for kv in vec {
                     if let Some(val_obj) = kv.value.as_object() {
-                        if vm
-                            .bx
-                            .heap
+                        if vm.heap()
                             .type_matches_id(val_obj, VectorDropShadow::script_type_id_static())
                         {
                             self.effects.push(
@@ -1488,7 +1473,7 @@ fn dispatch_shape(
     defs: &mut SvgDefs,
     gc: &mut usize,
 ) -> Option<SvgNode> {
-    let tid = vm.bx.heap.object_type_id(val_obj)?;
+    let tid = vm.heap().object_type_id(val_obj)?;
     macro_rules! shape {
         ($T:ty) => {{
             Some(<$T>::script_from_value(vm, value).to_svg_node(vm, defs, gc))

@@ -119,8 +119,8 @@ pub use makepad_widgets_pdf::{makepad_pdf_parse, pdf_view, pdf_view::*};
 #[cfg(feature = "voice")]
 pub use makepad_widgets_voice::{voice_wave, voice_wave::*};
 
-#[cfg(feature = "cef")]
-pub use makepad_widgets_cef::{browser, browser::*};
+#[cfg(feature = "browser")]
+pub use makepad_widgets_browser::{browser, browser::*};
 
 /// The AI chat slot. The requests global is the core's and is here whether
 /// or not the slot is linked (the window manager and the screen recorder
@@ -186,9 +186,9 @@ fn families(isolate: bool) -> Vec<fn(&mut ScriptVm)> {
     families.push(makepad_widgets_pickers::pickers_mod);
     #[cfg(feature = "catalog")]
     families.push(makepad_widgets_catalog::catalog_mod);
-    #[cfg(feature = "cef")]
+    #[cfg(feature = "browser")]
     if !isolate {
-        families.push(makepad_widgets_cef::cef_mod);
+        families.push(makepad_widgets_browser::browser_mod);
     }
     #[cfg(feature = "glass")]
     families.push(makepad_widgets_extras::glass_mod);
@@ -228,6 +228,11 @@ fn families(isolate: bool) -> Vec<fn(&mut ScriptVm)> {
 pub fn widgets_mod(vm: &mut ScriptVm) {
     let window = window_families(vm);
     makepad_widgets_core::widgets_mod_with(vm, window, &families(false));
+}
+
+/// [`makepad_widgets_core::isolate_widgets_mod_with`] with this build's families.
+pub fn isolate_widgets_mod(vm: &mut ScriptVm) {
+    makepad_widgets_core::isolate_widgets_mod_with(vm, &families(false));
 }
 
 /// The theme, the widgets of the core and of this build's families, and the

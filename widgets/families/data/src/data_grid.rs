@@ -1011,7 +1011,7 @@ impl ScriptHook for DataGrid {
                         if let Some(id) = kv.key.as_id() {
                             if let Some(template_obj) = kv.value.as_object() {
                                 self.templates
-                                    .insert(id, vm.bx.heap.new_object_ref(template_obj));
+                                    .insert(id, vm.new_object_ref(template_obj));
                             }
                         }
                     }
@@ -3441,7 +3441,7 @@ impl WidgetNode for DataGrid {
             visit(LiveId(*item_id), item.widget.clone());
         }
     }
-    fn skip_widget_tree_search(&self) -> bool {
+    fn search_scope(&self) -> bool {
         true
     }
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
@@ -3596,6 +3596,7 @@ impl Widget for DataGrid {
                                 start_size: self.col_sizes.size_of(edge),
                                 start_abs: fe.abs.x,
                             };
+                            cx.claim_finger_drag(fe.digit_id);
                             cx.set_cursor(MouseCursor::ColResize);
                         } else {
                             self.interact = Interact::ColDragPending {
@@ -3603,6 +3604,9 @@ impl Widget for DataGrid {
                                 down_abs: fe.abs,
                                 modifiers: fe.modifiers,
                             };
+                            if self.can_move_col(display_col) {
+                                cx.claim_finger_drag(fe.digit_id);
+                            }
                         }
                     }
                     HitZone::RowHeader { row, resize_edge } => {
@@ -3632,6 +3636,15 @@ impl Widget for DataGrid {
                     }
                     HitZone::Cell { row, display_col } => {
                         self.press_cell(cx, row, display_col, fe.abs, fe.modifiers, fe.tap_count);
+                        // Row picks and a grid whose columns fit move nothing sideways, so they leave a swipe back alone.
+                        let drags_sideways = self.row_drag || if self.drag_scrolling {
+                            self.vp.total_w > self.vp.data_rect.size.x
+                        } else {
+                            self.selection == GridSelectMode::Cells
+                        };
+                        if drags_sideways {
+                            cx.claim_finger_drag(fe.digit_id);
+                        }
                     }
                     HitZone::Corner | HitZone::Outside => (),
                 }

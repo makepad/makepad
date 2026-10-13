@@ -150,7 +150,7 @@ impl DrawText3d {
         label_scale: f32,
         horizontal_align: f32,
     ) -> bool {
-        let Some(run) = self.draw_super.draw_super.prepare_single_line_run(cx, text) else {
+        let Some(run) = self.draw_super.draw_super.prepare_single_line_raster_run(cx, text) else {
             return false;
         };
 
@@ -169,7 +169,7 @@ impl DrawText3d {
                 glyph_origin,
                 rotation_origin,
                 glyph.font_size_in_lpxs,
-                glyph.rasterized,
+                glyph.glyph,
                 rotation,
                 label_scale,
             );

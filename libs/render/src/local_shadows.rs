@@ -53,7 +53,7 @@ pub(crate) fn hardware_shadow_maps() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var("MAKEPAD_LOCAL_SHADOWS").as_deref() != Ok("legacy")
             && std::env::var("MAKEPAD_CLUSTERED").as_deref() != Ok("off")
-            && !std::env::var("MAKEPAD").unwrap_or_default().split(',').any(|v| v == "gpusim")
+            && std::env::var("MAKEPAD_HAL_BACKEND").as_deref() != Ok("headless")
     })
 }
 

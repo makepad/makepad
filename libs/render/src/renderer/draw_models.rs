@@ -35,6 +35,10 @@ pub(super) struct ModelOrder {
     /// Each model slot's pack occlusion atlas (index into `ao_textures`),
     /// resolved on first use this frame.
     ao: Vec<Option<Option<usize>>>,
+    /// Scratch kept across frames: the drawn entries with their layer counts,
+    /// and the later layer passes' entry list.
+    layered: Vec<((usize, usize, f32), usize)>,
+    pass_buf: Vec<(usize, usize, f32)>,
 }
 
 /// The placed list's static copies grouped by place (64 m cells) with
@@ -367,7 +371,7 @@ impl Renderer {
             self.model_orders[which] = built;
         }
         let mut model_order = std::mem::take(&mut self.model_orders[which]);
-        let ModelOrder { slots, distances, order, ao: model_ao, .. } = &mut model_order;
+        let ModelOrder { slots, distances, order, ao: model_ao, layered, pass_buf, .. } = &mut model_order;
         // Layer-major: every copy's first layer, then every copy's second.
         // A multi-layer model (a tree: trunk, then leaves) drawn copy by
         // copy alternates geometry, and the batcher only appends to the
@@ -382,13 +386,15 @@ impl Renderer {
         // The models are read, not cloned, per copy: set aside for the walk
         // (nothing below reads them through `self`) and put back after it.
         let static_models = std::mem::take(&mut self.static_models);
-        let mut layered: Vec<((usize, usize, f32), usize)> = Vec::new();
+        layered.clear();
         for layer_pass in 0..layer_passes {
             let mut last: Option<(usize, usize)> = None;
-            let pass_order: std::borrow::Cow<[(usize, usize, f32)]> = if layer_pass == 0 {
-                std::borrow::Cow::Borrowed(&order[..])
+            let pass_order: &[(usize, usize, f32)] = if layer_pass == 0 {
+                &order[..]
             } else {
-                std::borrow::Cow::Owned(layered.iter().filter(|(_, n)| *n > layer_pass).map(|(e, _)| *e).collect())
+                pass_buf.clear();
+                pass_buf.extend(layered.iter().filter(|(_, n)| *n > layer_pass).map(|(e, _)| *e));
+                &pass_buf[..]
             };
             if pass_order.is_empty() {
                 break;
@@ -468,27 +474,20 @@ impl Renderer {
                         continue;
                     }
                 }
-                let (layer_draws, prelit) = {
-                    let m = loaded;
-                    let mut layers = Vec::with_capacity(1 + m.extra_draws.len());
-                    // A model that is ALL anim parts (a lone door asset) has an
-                    // empty static stream and nothing to draw for layer 0.
-                    if m.triangles > 0 {
-                        layers.push((
-                            m.geometry.geometry_id(),
-                            &m.texture,
-                            &m.detail,
-                            m.detail_scale,
-                            &m.material,
-                        ));
-                    }
-                    for (g, t, d, s, mat) in &m.extra_draws {
-                        layers.push((g.geometry_id(), t, d, *s, mat));
-                    }
-                    (layers, m.prelit)
+                // The model's layers, walked in place (this runs per copy per
+                // frame): a model that is ALL anim parts (a lone door asset)
+                // has an empty static stream and nothing to draw for layer 0.
+                let m = loaded;
+                let layer_draws = || {
+                    (m.triangles > 0)
+                        .then(|| (m.geometry.geometry_id(), &m.texture, &m.detail, m.detail_scale, &m.material))
+                        .into_iter()
+                        .chain(m.extra_draws.iter().map(|(g, t, d, s, mat)| (g.geometry_id(), t, d, *s, mat)))
                 };
-                if layer_pass == 0 && layer_draws.len() > 1 {
-                    layered.push(((i, lod_index, window), layer_draws.len()));
+                let layer_count = (m.triangles > 0) as usize + m.extra_draws.len();
+                let prelit = m.prelit;
+                if layer_pass == 0 && layer_count > 1 {
+                    layered.push(((i, lod_index, window), layer_count));
                 }
                 // Rigid parts ride the PARENT's material: a door is cut from the
                 // level tile it sits in, so its metal/roughness is the model's.
@@ -598,13 +597,13 @@ impl Renderer {
                 } }
                 // A model with a far stand-in (impostor.rs) draws that layer
                 // from its distance on and every other layer before it.
-                let impostor_at = layer_draws.iter().filter_map(|l| l.4.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max);
-                for (geometry_id, texture, detail, dscale, material) in layer_draws.iter().skip(layer_pass).take(1) {
+                let impostor_at = layer_draws().filter_map(|l| l.4.surface.as_ref().map(|s| s.definition.impostor)).fold(0.0f32, f32::max);
+                for (geometry_id, texture, detail, dscale, material) in layer_draws().skip(layer_pass).take(1) {
                     if impostor_at > 0.0 {
                         let stand_in = material.surface.as_ref().is_some_and(|s| s.definition.impostor > 0.0);
                         if stand_in != (distance >= impostor_at) { continue; }
                     }
-                    draw.base().draw_vars.geometry_id = Some(*geometry_id);
+                    draw.base().draw_vars.geometry_id = Some(geometry_id);
                     draw.base().draw_vars.set_texture(0, texture);
                     draw.base().draw_vars.set_texture(5, detail);
                     draw.base().draw_vars.set_uniform(cx.cx, live_id!(detail_st), &[dscale[0], dscale[1]]);

@@ -8,7 +8,6 @@
 #![doc(hidden)]
 
 use crate::{makepad_draw::*, widget::WidgetRef};
-use crate::makepad_script::trap::NoTrap;
 
 /// `badge`'s text measure: the width of one line of `text` in this text
 /// style, plus the slack a drawn run needs.
@@ -34,17 +33,17 @@ pub fn for_each_element(
     f: &mut dyn FnMut(&mut ScriptVm, ScriptValue),
 ) {
     if let Some(array) = value.as_array() {
-        let len = vm.bx.heap.array_len(array);
+        let len = vm.heap().array_len(array);
         for i in 0..len {
-            let item = vm.bx.heap.array_index_unchecked(array, i);
+            let item = vm.heap().array_index_unchecked(array, i);
             f(vm, item);
         }
         return;
     }
     if let Some(object) = value.as_object() {
-        let len = vm.bx.heap.vec_len(object);
+        let len = vm.heap().vec_len(object);
         for i in 0..len {
-            if let Some(item) = vm.bx.heap.vec_value_if_exist(object, i) {
+            if let Some(item) = vm.heap().vec_value_if_exist(object, i) {
                 f(vm, item);
             }
         }
@@ -52,7 +51,7 @@ pub fn for_each_element(
 }
 
 pub fn obj_field(vm: &mut ScriptVm, object: ScriptObject, key: LiveId) -> ScriptValue {
-    let value = vm.bx.heap.value(object, key.into(), NoTrap);
+    let value = vm.value(object, key);
     if value.is_err() {
         ScriptValue::NIL
     } else {
@@ -86,6 +85,20 @@ pub fn release_orphaned_sweep_locks(cx: &mut Cx) {
 /// `modal`: release the scroll blocks a dropped modal left behind.
 pub fn release_orphaned_scroll_blocks(cx: &mut Cx) {
     crate::modal::release_orphaned_scroll_blocks(cx)
+}
+
+/// `progress`, `spinner`: applies a widget's `field` draw to `twin` with its `clock` fn swapped
+/// for `clock_fn` (a second shader of the same draw that keeps every override).
+pub fn apply_draw_twin<T: ScriptApply + ScriptNew>(
+    vm: &mut ScriptVm,
+    apply: &Apply,
+    scope: &mut Scope,
+    value: ScriptValue,
+    field: LiveId,
+    clock_fn: LiveId,
+    twin: &mut T,
+) {
+    crate::widget::apply_draw_twin(vm, apply, scope, value, field, clock_fn, twin)
 }
 
 /// `modal`: whether `event` carries the dismissal a closing host sends

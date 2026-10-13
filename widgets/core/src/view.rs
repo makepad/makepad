@@ -2,6 +2,8 @@ use {
     crate::makepad_draw::event::{DigitId, FingerLongPressEvent},
     crate::{
         animator::*,
+        held_events::HeldEvents,
+        gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_gauss},
         makepad_derive_widget::*,
         makepad_draw::*,
         makepad_script::{ScriptFnRef, ScriptIp},
@@ -78,6 +80,24 @@ pub struct View {
 
     #[live(false)]
     pub show_bg: bool,
+    /// This draw's `show_bg` background draws nothing (`DrawQuad::draws_nothing`:
+    /// the plain quad's transparent pixel): no instance, the area is the turtle's rect.
+    #[rust]
+    bg_invisible: bool,
+
+    /// True with `show_bg`, the view is a pane of glass over what the
+    /// window draws behind it: the view and everything in it are drawn on an
+    /// overlay of their own over the body (inline when it is already drawing
+    /// in one), and the window's blurred scene is bound to `draw_bg` as
+    /// [`bind_gauss_snapshot`] binds it (`has_gauss` 0 until a capture
+    /// exists), so its face can show the window behind it blurred. Being on
+    /// an overlay, the pane covers whatever its parent draws after it in the
+    /// body; it is begun under the plain overlays
+    /// (`DrawList2d::begin_overlay_under`), so a popup, a menu, a tooltip or
+    /// a modal still paints over it, wherever it was opened from. A cached
+    /// view (`optimize`) draws as before. False, the default, binds nothing.
+    #[live(false)]
+    pub backdrop: bool,
 
     #[layout]
     pub layout: Layout,
@@ -105,12 +125,20 @@ pub struct View {
     #[apply_state]
     pub visible: bool,
     #[live(false)]
-    skip_widget_tree_search: bool,
+    search_scope: bool,
 
     #[live(true)]
     grab_key_focus: bool,
     #[live(false)]
     block_signal_event: bool,
+    /// While hidden (`visible: false`) this view's subtree still gets frame
+    /// requests and actions as they happen (see `held_events`); without it
+    /// frame requests wait until it is shown again and actions are skipped.
+    /// Signals and timers reach a hidden subtree either way.
+    #[live(false)]
+    pub background_events: bool,
+    #[rust]
+    held: Option<Box<HeldEvents>>,
     #[live]
     pub cursor: Option<MouseCursor>,
     #[live(false)]
@@ -165,6 +193,12 @@ pub struct View {
     area: Area,
     #[rust]
     draw_list: Option<DrawList2d>,
+    /// The overlay a pane of glass (`backdrop`) draws on, and whether it is
+    /// open across the draw steps of this draw.
+    #[rust]
+    backdrop_list: Option<DrawList2d>,
+    #[rust]
+    backdrop_open: bool,
 
     #[rust]
     texture_cache: Option<ViewTextureCache>,
@@ -269,7 +303,7 @@ impl ScriptHook for View {
                     }
                 });
                 if declared > 0 {
-                    let made_at = vm.bx.heap.object_data(obj).made_at;
+                    let made_at = vm.heap().made_at(obj);
                     self.children_made_at = (!made_at.is_unknown()).then_some(made_at);
                 }
             }
@@ -286,7 +320,7 @@ impl ScriptHook for View {
                 && self.children_made_at.is_some()
                 && value
                     .as_object()
-                    .map(|obj| Some(vm.bx.heap.object_data(obj).made_at) == self.children_made_at)
+                    .map(|obj| Some(vm.heap().made_at(obj)) == self.children_made_at)
                     .unwrap_or(false);
             if !self.live_update_order.is_empty() || self.children.is_empty() || same_declaration {
                 for (idx, id) in self.live_update_order.iter().enumerate() {
@@ -336,6 +370,11 @@ impl ScriptHook for View {
         }
 
         vm.cx_mut().widget_tree_mark_dirty(self.uid);
+        // A pane of glass built or restyled and not drawn yet: the window
+        // captures on the frame it first paints in, as a glass surface's.
+        if self.backdrop && self.show_bg && !apply.is_animate() {
+            arm_gauss_capture(vm.cx_mut());
+        }
         // Dynamic children emitted by on_render have no declaration in this
         // source vec. Re-render them against the new style too, preserving edits.
         if matches!(apply,Apply::ScriptReapply) && !self.applying_style_render && self.on_render.as_object()!=ScriptObject::ZERO {
@@ -358,7 +397,39 @@ pub enum ViewAction {
     KeyUp(KeyEvent),
 }
 
+/// One selectable child of a view and where its text starts in the view's.
+struct SelectionPart {
+    child: WidgetRef,
+    offset: usize,
+    len: usize,
+}
+
 impl View {
+    fn selection_separator(&self) -> &'static str {
+        if matches!(self.layout.flow, Flow::Down) { "\n" } else { " " }
+    }
+
+    fn selection_parts(&self) -> Vec<SelectionPart> {
+        let sep = self.selection_separator().len();
+        let mut parts: Vec<SelectionPart> = Vec::new();
+        let mut at = 0;
+        for (_, child) in &self.children {
+            if !child.visible() {
+                continue;
+            }
+            let len = child.selection_text_len();
+            if len == 0 {
+                continue;
+            }
+            if !parts.is_empty() {
+                at += sep;
+            }
+            parts.push(SelectionPart { child: child.clone(), offset: at, len });
+            at += len;
+        }
+        parts
+    }
+
     /// Build the object `on_render` appends its children to. It is re-applied to this
     /// View with `Apply::Reload`, so whatever isn't reachable on its prototype chain
     /// reverts to the base widget's defaults.
@@ -377,8 +448,7 @@ impl View {
             return NIL;
         }
 
-        vm.bx
-            .heap
+        vm.heap_mut()
             .new_with_proto_no_vec(self.source.as_object().into())
             .into()
     }
@@ -705,6 +775,164 @@ mod contextual_size_tests {
         ));
         assert!(!cx.passes[pass_id].live_with_parent);
         });
+    }
+}
+
+/// A PANE OF GLASS: a view with `backdrop` is drawn, with everything in
+/// it, on an overlay over the body, so the window's capture holds what lies
+/// behind it and its face can read that blurred.
+#[cfg(test)]
+mod backdrop_tests {
+    use super::*;
+    use crate::makepad_draw::cx_draw::CxDraw;
+
+    const SIZE: DVec2 = dvec2(400.0, 300.0);
+
+    /// A window-less pass with the overlay a window keeps.
+    fn draw(cx: &mut Cx, root: &WidgetRef, pass: &DrawPass, body: &mut DrawList2d, overlay: &Overlay) {
+        pass.set_size(cx, SIZE);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(pass, None);
+        body.begin_always(&mut cx2d);
+        overlay.begin(&mut cx2d);
+        cx2d.begin_root_turtle(SIZE, Layout::flow_down());
+        root.draw_all(&mut cx2d, &mut Scope::empty());
+        cx2d.end_pass_sized_turtle();
+        overlay.end(&mut cx2d);
+        body.end(&mut cx2d);
+        cx2d.end_pass(pass);
+    }
+
+    /// The list a view drew in this redraw. A view's area is a rect area
+    /// (its place in the list), not a draw call's instance, so it is read
+    /// as any area: valid this redraw, and its list.
+    fn list_of(cx: &Cx, area: Area) -> DrawListId {
+        assert!(area.is_valid(cx), "drawn this redraw");
+        area.draw_list_id().expect("drawn")
+    }
+
+    #[test]
+    fn a_pane_of_glass_and_what_is_in_it_draw_over_the_body() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    pane := View{
+                        width: 200.
+                        height: 100.
+                        show_bg: true
+                        backdrop: true
+                        inner := View{width: 50. height: 20. show_bg: true}
+                    }
+                    plain := View{width: 200. height: 100. show_bg: true}
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let pass = DrawPass::new(&mut cx);
+        let mut body = DrawList2d::new(&mut cx);
+        let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+        draw(&mut cx, &root, &pass, &mut body, &overlay);
+        draw(&mut cx, &root, &pass, &mut body, &overlay);
+
+        let pane = root.widget(&cx, ids!(pane));
+        let pane = pane.borrow::<View>().unwrap();
+        let inner = root.widget(&cx, ids!(inner));
+        let inner = inner.borrow::<View>().unwrap();
+        let plain = root.widget(&cx, ids!(plain));
+        let plain = plain.borrow::<View>().unwrap();
+        let glass = pane.backdrop_list.as_ref().map(|list| list.id());
+        assert!(glass.is_some(), "the pane opened an overlay of its own");
+        assert_eq!(Some(list_of(&cx, pane.area)), glass, "its face is on it");
+        assert_eq!(Some(list_of(&cx, inner.area)), glass, "and so is what is in it");
+        assert_eq!(list_of(&cx, plain.area), body.id(), "a view that does not ask stays in the body");
+        assert!(plain.backdrop_list.is_none());
+        assert!(!pane.backdrop_open, "the overlay is closed when the pane is done");
+    }
+
+    /// Where each list under the window's overlay paints, first to last.
+    fn paint_order(cx: &Cx, overlay: &Overlay) -> Vec<DrawListId> {
+        let list = &cx.draw_lists[overlay.draw_list.id()];
+        let order: Vec<usize> = match &list.draw_item_reorder {
+            Some(order) => order.clone(),
+            None => (0..list.draw_items.len()).collect(),
+        };
+        order.into_iter().filter_map(|i| list.draw_items[i].sub_list()).collect()
+    }
+
+    /// A popup paints over every pane of glass, whether it was opened from a
+    /// toolbar pane drawn before the pane it falls over or from inside that
+    /// pane itself: the panes are begun under the plain overlays.
+    #[test]
+    fn a_popup_paints_over_every_pane_wherever_it_was_opened() {
+        use crate::drop_down::*;
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.with_vm(crate::script_mod);
+        let root = cx.with_vm(|vm| {
+            let value = crate::script_eval!(vm, {
+                use mod.prelude.widgets.*
+                use mod.widgets.*
+                View{
+                    width: Fill
+                    height: Fill
+                    flow: Down
+                    toolbar := View{
+                        width: Fill
+                        height: Fit
+                        show_bg: true
+                        backdrop: true
+                        top_pick := DropDown{width: 150.}
+                    }
+                    pane := View{
+                        width: Fill
+                        height: 250.
+                        show_bg: true
+                        backdrop: true
+                        inner_pick := DropDown{width: 150.}
+                    }
+                }
+            });
+            WidgetRef::script_from_value(vm, value)
+        });
+        let labels = || vec!["One".to_string(), "Two".to_string(), "Three".to_string()];
+        root.drop_down(&cx, ids!(top_pick)).set_labels(&mut cx, labels());
+        root.drop_down(&cx, ids!(inner_pick)).set_labels(&mut cx, labels());
+        let pass = DrawPass::new(&mut cx);
+        let mut body = DrawList2d::new(&mut cx);
+        let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+        draw(&mut cx, &root, &pass, &mut body, &overlay);
+        let panes: Vec<DrawListId> = [ids!(toolbar), ids!(pane)]
+            .iter()
+            .map(|id| {
+                let view = root.widget(&cx, *id);
+                let view = view.borrow::<View>().unwrap();
+                view.backdrop_list.as_ref().expect("a pane of glass").id()
+            })
+            .collect();
+        let over_the_panes = |cx: &Cx| {
+            let order = paint_order(cx, &overlay);
+            let last_pane = order.iter().rposition(|id| panes.contains(id)).expect("the panes paint");
+            let popups: Vec<usize> = (0..order.len()).filter(|i| !panes.contains(&order[*i])).collect();
+            assert!(!popups.is_empty(), "no popup was drawn, so this test proves nothing");
+            popups.iter().all(|i| *i > last_pane)
+        };
+
+        for pick in [ids!(top_pick), ids!(inner_pick)] {
+            let widget = root.widget(&cx, pick);
+            widget.borrow_mut::<DropDown>().unwrap().set_active(&mut cx);
+            draw(&mut cx, &root, &pass, &mut body, &overlay);
+            assert!(over_the_panes(&cx), "the list opened from {pick:?} paints under a pane");
+            widget.borrow_mut::<DropDown>().unwrap().set_closed(&mut cx);
+            draw(&mut cx, &root, &pass, &mut body, &overlay);
+        }
     }
 }
 
@@ -1169,8 +1397,8 @@ impl WidgetNode for View {
         true
     }
 
-    fn skip_widget_tree_search(&self) -> bool {
-        self.skip_widget_tree_search
+    fn search_scope(&self) -> bool {
+        self.search_scope
     }
 
     fn find_widgets_from_point(&self, cx: &Cx, point: DVec2, found: &mut dyn FnMut(&WidgetRef)) {
@@ -1179,28 +1407,48 @@ impl WidgetNode for View {
         }
     }
 
+    // Selection: a view's text is its visible children's, in order, joined
+    // by one separator (a space across a row, a newline down a column), so
+    // a host selects across a row of labels as one run of text.
     fn selection_text_len(&self) -> usize {
-        for (_, child) in &self.children {
-            let v = child.selection_text_len();
-            if v > 0 {
-                return v;
-            }
-        }
-        0
+        self.selection_parts().last().map_or(0, |p| p.offset + p.len)
     }
 
     fn selection_point_to_char_index(&self, cx: &Cx, abs: DVec2) -> Option<usize> {
-        for (_, child) in &self.children {
-            if let Some(v) = child.selection_point_to_char_index(cx, abs) {
-                return Some(v);
+        let parts = self.selection_parts();
+        for p in &parts {
+            if let Some(v) = p.child.selection_point_to_char_index(cx, abs) {
+                return Some(p.offset + v);
             }
         }
-        None
+        // Inside the view but off the text (a gutter, a gap): the nearest
+        // part on that line, its start when left of it and its end otherwise.
+        if parts.is_empty() || !self.area.rect(cx).contains(abs) {
+            return None;
+        }
+        let mut best: Option<(f64, usize)> = None;
+        for p in &parts {
+            let r = p.child.area().rect(cx);
+            let dy = if abs.y < r.pos.y { r.pos.y - abs.y } else if abs.y > r.pos.y + r.size.y { abs.y - r.pos.y - r.size.y } else { 0.0 };
+            let dx = if abs.x < r.pos.x { r.pos.x - abs.x } else if abs.x > r.pos.x + r.size.x { abs.x - r.pos.x - r.size.x } else { 0.0 };
+            let at = if abs.y > r.pos.y + r.size.y || (dy == 0.0 && abs.x >= r.pos.x + r.size.x) { p.offset + p.len } else { p.offset };
+            let d = dy * 1000.0 + dx;
+            if best.map_or(true, |(bd, _)| d < bd) {
+                best = Some((d, at));
+            }
+        }
+        best.map(|(_, at)| at)
     }
 
     fn selection_set(&mut self, anchor: usize, cursor: usize) {
-        for (_, child) in &self.children {
-            child.selection_set(anchor, cursor);
+        let (a, b) = (anchor.min(cursor), anchor.max(cursor));
+        for p in self.selection_parts() {
+            let (s, e) = (p.offset, p.offset + p.len);
+            if b <= s || a >= e {
+                p.child.selection_clear();
+            } else {
+                p.child.selection_set(a.max(s) - s, b.min(e) - s);
+            }
         }
     }
 
@@ -1211,29 +1459,31 @@ impl WidgetNode for View {
     }
 
     fn selection_select_all(&mut self) {
-        for (_, child) in &self.children {
-            child.selection_select_all();
+        for p in self.selection_parts() {
+            p.child.selection_select_all();
         }
     }
 
     fn selection_get_text_for_range(&self, start: usize, end: usize) -> String {
-        for (_, child) in &self.children {
-            let v = child.selection_get_text_for_range(start, end);
-            if !v.is_empty() {
-                return v;
+        let (a, b) = (start.min(end), start.max(end));
+        let parts = self.selection_parts();
+        let mut out = String::new();
+        for (i, p) in parts.iter().enumerate() {
+            let (s, e) = (p.offset, p.offset + p.len);
+            if b > s && a < e {
+                out.push_str(&p.child.selection_get_text_for_range(a.max(s) - s, b.min(e) - s));
+            }
+            // The separator after this part, when the range covers it.
+            if i + 1 < parts.len() && a <= e && b > e {
+                out.push_str(self.selection_separator());
             }
         }
-        String::new()
+        out
     }
 
     fn selection_get_full_text(&self) -> String {
-        for (_, child) in &self.children {
-            let v = child.selection_get_full_text();
-            if !v.is_empty() {
-                return v;
-            }
-        }
-        String::new()
+        let len = self.selection_text_len();
+        self.selection_get_text_for_range(0, len)
     }
 
     fn set_visible(&mut self, cx: &mut Cx, visible: bool) {
@@ -1257,6 +1507,10 @@ impl WidgetNode for View {
 }
 
 impl Widget for View {
+    fn clips_content(&self) -> bool {
+        self.scroll_bars_obj.is_some()
+    }
+
     fn script_call(
         &mut self,
         vm: &mut ScriptVm,
@@ -1273,7 +1527,7 @@ impl Widget for View {
             // heap's next GC walked the value and indexed out of bounds, in
             // code that did nothing wrong. Includes the case that actually
             // bites — a view whose isolate has since been torn down.
-            if !self.source.is_zero() && self.source.heap_key() != vm.bx.heap.heap_key() {
+            if !self.source.is_zero() && self.source.heap_key() != vm.heap_key() {
                 return ScriptAsyncResult::MethodNotFound;
             }
             let me = self.make_render_me(vm);
@@ -1303,10 +1557,7 @@ impl Widget for View {
                 // and used to do so with ZERO diagnostics — the "on_render
                 // silently renders nothing" family cost days to bisect. Say
                 // what happened.
-                let msg = vm.bx.heap.temp_string_with(|heap, out| {
-                    heap.cast_to_string(result, out);
-                    out.to_string()
-                });
+                let msg = vm.cast_to_string(result);
                 error!("on_render closure failed; discarding its output: {msg}");
                 return;
             }
@@ -1319,7 +1570,7 @@ impl Widget for View {
                     if ret_obj != me_obj {
                         // Unchecked: `me` is this render's own throwaway
                         // object (make_render_me), never frozen.
-                        vm.bx.heap.vec_push_unchecked(me_obj, NIL, result);
+                        vm.heap_mut().vec_push_unchecked(me_obj, NIL, result);
                     }
                 }
                 // `#[source]` is reassigned by any non-eval script apply, so this Reload
@@ -1342,8 +1593,15 @@ impl Widget for View {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if !self.visible && event.requires_visibility() {
-            return;
+        if !self.visible && !self.background_events {
+            if event.requires_visibility() || self.held.get_or_insert_with(Default::default).hold(event) {
+                return;
+            }
+        } else if let Some(held) = self.held.as_mut().filter(|held| !held.is_empty()) {
+            // Shown again: what it waited for while hidden comes first.
+            for held in held.take() {
+                self.handle_event(cx, &held, scope);
+            }
         }
 
         let uid = self.widget_uid();
@@ -1538,6 +1796,19 @@ impl Widget for View {
 
             self.defer_walks.clear();
 
+            // A pane of glass goes on an overlay of its own, so the window's
+            // capture holds what lies behind it and not the pane.
+            if self.backdrop
+                && self.show_bg
+                && matches!(self.optimize, ViewOptimize::None)
+                && !cx.is_drawing_overlay()
+            {
+                self.backdrop_list
+                    .get_or_insert_with(|| DrawList2d::new(cx))
+                    .begin_overlay_under(cx);
+                self.backdrop_open = true;
+            }
+
             match self.optimize {
                 ViewOptimize::Texture => {
                     let walk = self.walk_from_previous_size(cx, walk);
@@ -1639,10 +1910,15 @@ impl Widget for View {
                 walk
             };
 
-            if self.show_bg {
+            self.bg_invisible = self.show_bg && self.draw_bg.draws_nothing(cx);
+            if self.show_bg && !self.bg_invisible {
                 /*if let Some(image_texture) = &self.image_texture {
                     self.draw_bg.draw_vars.set_texture(0, image_texture);
                 }*/
+                if self.backdrop {
+                    let snapshot = request_window_gauss(cx);
+                    bind_gauss_snapshot(&mut self.draw_bg.draw_vars, cx, snapshot);
+                }
                 self.draw_bg
                     .begin(cx, walk, self.layout.with_scroll(scroll)); //.with_scale(2.0 / self.dpi_factor.unwrap_or(2.0)));
             } else {
@@ -1695,7 +1971,7 @@ impl Widget for View {
                     scroll_bars.draw_scroll_bars(cx);
                 };
 
-                if self.show_bg {
+                if self.show_bg && !self.bg_invisible {
                     if self.optimize.is_texture() {
                         panic!("dont use show_bg and texture caching at the same time");
                     }
@@ -1703,6 +1979,11 @@ impl Widget for View {
                     self.area = self.draw_bg.area();
                 } else {
                     cx.end_turtle_with_area(&mut self.area);
+                    if self.bg_invisible {
+                        // Code that hit-tests, focuses or redraws through the
+                        // background's area finds the view's rect there.
+                        self.draw_bg.draw_vars.area = self.area;
+                    }
                 };
 
                 if let Some(scroll_bars) = &mut self.scroll_bars_obj {
@@ -1746,6 +2027,11 @@ impl Widget for View {
                         } else {*/
                         cx.set_pass_area(&texture_cache.pass, area);
                         //}
+                    }
+                }
+                if std::mem::take(&mut self.backdrop_open) {
+                    if let Some(list) = self.backdrop_list.as_mut() {
+                        list.end(cx);
                     }
                 }
                 self.draw_state.end();
@@ -1882,6 +2168,34 @@ impl View {
     pub fn redraw_texture_cache(&mut self) {
         self.force_texture_redraw = true;
         self.view_size = None;
+    }
+
+    /// Record this view's own draw list again, without the views and cached
+    /// textures inside it (which `redraw` records again too).
+    pub fn redraw_self(&self, cx: &mut Cx) {
+        self.area.redraw(cx);
+        if let Some(draw_list) = &self.draw_list {
+            draw_list.redraw(cx);
+        }
+    }
+
+    /// The draw list a `new_batch` (or cached) view records into, once it
+    /// has one: a host can tell from its `redraw_id` whether the view laid
+    /// out again this frame or reused its last recording.
+    pub fn draw_list_id(&self) -> Option<DrawListId> {
+        self.draw_list.as_ref().map(|d| d.id())
+    }
+
+    /// The pass this view's texture cache paints in and the draw list it
+    /// records into, once it has been drawn.
+    pub fn texture_cache_ids(&self) -> Option<(DrawPassId, DrawListId)> {
+        let cache = self.texture_cache.as_ref()?;
+        Some((cache.pass.draw_pass_id(), self.draw_list.as_ref()?.id()))
+    }
+
+    /// Whether the texture cache will paint again before it is next sampled.
+    pub fn texture_cache_pending(&self, cx: &Cx) -> bool {
+        self.texture_cache.as_ref().is_some_and(|cache| cx.passes[cache.pass.draw_pass_id()].paint_dirty)
     }
 
     /// Draw the current texture cache into `rect` without walking the view's children again.

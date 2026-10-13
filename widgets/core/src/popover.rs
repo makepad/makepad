@@ -972,7 +972,7 @@ impl Widget for Popover {
         let Some(mut draw_list) = self.draw_list.take() else {
             return DrawStep::done();
         };
-        draw_list.begin_overlay_reuse(cx);
+        draw_list.begin_popup_overlay(cx);
         let pass = cx.current_pass_size();
         cx.begin_root_turtle(
             pass,

@@ -1976,18 +1976,14 @@ impl Widget for GlassButton {
         args: ScriptValue,
     ) -> ScriptAsyncResult {
         if method == live_id!(text) {
-            let str_val = vm.bx.heap.new_string_from_str(self.text.as_ref());
+            let str_val = vm.new_string(self.text.as_ref());
             return ScriptAsyncResult::Return(str_val.into());
         }
         if method == live_id!(set_text) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap);
+                let value = vm.vec_value_trap(args_obj, 0);
                 if !value.is_err() {
-                    if let Some(new_text) = vm
-                        .bx
-                        .heap
-                        .cast_to_owned_string(value, "copying glass button text")
+                    if let Some(new_text) = vm.cast_to_owned_string(value, "copying glass button text")
                     {
                         vm.with_cx_mut(|cx| {
                             self.set_text(cx, &new_text);
@@ -2166,6 +2162,7 @@ impl Widget for GlassSlider {
             }
             Hit::FingerDown(fe) if fe.is_primary_hit() => {
                 self.dragging = true;
+                cx.claim_finger_drag(fe.digit_id);
                 self.set_key_focus(cx);
                 if self.set_value_from_x(cx, fe.abs.x) {
                     cx.widget_action_with_data(&self.action_data, uid, GlassSliderAction::Changed);

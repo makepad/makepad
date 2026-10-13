@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     overlay_place::span_inboard,
@@ -391,6 +391,8 @@ pub struct PopupMenuItem {
     /// The label the menu hands in before each draw.
     #[rust]
     pub label: String,
+    #[rust]
+    disabled: bool,
 
     #[redraw]
     #[live]
@@ -546,11 +548,16 @@ impl PopupMenuItem {
             self.draw_bg.area().redraw(cx);
         }
 
-        match event.hits_with_options(
+        let hit = event.hits_with_options(
             cx,
             self.draw_bg.area(),
             HitOptions::new().with_sweep_area(sweep_area),
-        ) {
+        );
+        // Consume hits on an unavailable row without selecting or hovering it.
+        if self.disabled {
+            return;
+        }
+        match hit {
             Hit::FingerHoverIn(_) => {
                 self.animator_play(cx, ids!(hover.on));
             }
@@ -576,6 +583,10 @@ impl PopupMenuItem {
 }
 
 impl Widget for PopupMenuItem {
+    fn disabled(&self, _cx: &Cx) -> bool {
+        self.disabled
+    }
+
     fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {
         // Driven by `PopupMenu::handle_event_with`, which needs the menu's
         // sweep area and action sink; nothing to do on the plain seam.
@@ -611,13 +622,48 @@ impl PopupMenu {
     }
 
     pub fn begin(&mut self, cx: &mut Cx2d) {
-        self.draw_list.begin_overlay_reuse(cx);
+        self.draw_list.begin_popup_overlay(cx);
 
         let size = cx.current_pass_size();
         cx.begin_root_turtle(size, Layout::flow_down());
 
         self.draw_bg.begin(cx, self.walk, self.layout);
         self.count = 0;
+    }
+
+    /// Seed a Fit menu's content width before its Fill rows are drawn, so
+    /// every row has the width of the widest label, padding and icon included.
+    /// Fixed-width menus keep their declared size.
+    pub fn fit_width_to_items<'a>(
+        &mut self,
+        cx: &mut Cx2d,
+        items: impl Iterator<Item = (PopupMenuItemId, &'a str, Option<&'a ScriptHandleRef>)>,
+    ) {
+        if !self.walk.width.is_fit() {
+            return;
+        }
+        let mut widest = 0.0_f64;
+        for (item_id, label, icon) in items {
+            let item = self.item(cx, item_id);
+            let Some(mut item) = item.borrow_mut::<PopupMenuItem>() else { continue };
+            let text = item.draw_text.layout(cx, 0.0, 0.0, None, false, Align::default(), label);
+            let mut width = (text.size_in_lpxs.width * item.draw_text.font_scale) as f64;
+            if self.icon_column || icon.is_some() {
+                item.set_icon(icon);
+                let walk = item.icon_walk;
+                let icon_width = item.draw_icon.measure(cx, walk)
+                    .map(|size| size.x)
+                    .unwrap_or_else(|| walk.width.to_fixed().unwrap_or(0.0))
+                    + walk.margin.width();
+                width = match item.layout.flow {
+                    Flow::Right { .. } => width + icon_width + item.layout.spacing,
+                    Flow::Down | Flow::Overlay => width.max(icon_width),
+                };
+            }
+            widest = widest.max(width.ceil() + item.layout.padding.width() + item.walk.margin.width());
+        }
+        let height = cx.turtle().used_height();
+        cx.turtle_mut().set_used(widest + self.layout.padding.left, height);
     }
 
     pub fn end(&mut self, cx: &mut Cx2d, shift_area: Area, shift: Vec2d) {
@@ -653,7 +699,7 @@ impl PopupMenu {
     }
 
     pub fn draw_item(&mut self, cx: &mut Cx2d, item_id: PopupMenuItemId, label: &str) {
-        self.draw_item_full(cx, item_id, label, None, false)
+        self.draw_item_full(cx, item_id, label, None, false, false)
     }
 
     /// As `draw_item`, plus the icon to draw in front of the label.
@@ -664,7 +710,7 @@ impl PopupMenu {
         label: &str,
         icon: Option<&ScriptHandleRef>,
     ) {
-        self.draw_item_full(cx, item_id, label, icon, false)
+        self.draw_item_full(cx, item_id, label, icon, false, false)
     }
 
     /// Draw a selectable item using the disabled palette. This is visual
@@ -676,11 +722,11 @@ impl PopupMenu {
         label: &str,
         dimmed: bool,
     ) {
-        self.draw_item_full(cx, item_id, label, None, dimmed)
+        self.draw_item_full(cx, item_id, label, None, dimmed, false)
     }
 
-    /// Both at once: an icon in front of the label, and the disabled
-    /// palette over the whole row.
+    /// An optional icon, dimmed palette, and an independent input-disabled
+    /// state. Disabled rows always use the disabled palette.
     ///
     /// The three above are kept as their own entry points so no caller had
     /// to change: each names the one thing it cares about and takes the
@@ -692,22 +738,28 @@ impl PopupMenu {
         label: &str,
         icon: Option<&ScriptHandleRef>,
         dimmed: bool,
+        disabled: bool,
     ) {
         self.count += 1;
 
         let item = self.item(cx, item_id);
         if let Some(mut menu_item) = item.borrow_mut::<PopupMenuItem>() {
             menu_item.label = label.to_string();
+            menu_item.disabled = disabled;
             menu_item.set_icon(icon);
             menu_item.reserve_icon = self.icon_column;
             menu_item.animator_cut(
                 cx,
-                if dimmed {
+                if dimmed || disabled {
                     ids!(disabled.on)
                 } else {
                     ids!(disabled.off)
                 },
             );
+            if disabled {
+                menu_item.animator_cut(cx, ids!(active.off));
+                menu_item.animator_cut(cx, ids!(hover.off));
+            }
         }
         // Re-seat on every draw: one menu instance is shared by every dropdown
         // that uses the same template, so the items belong to whichever
@@ -735,7 +787,7 @@ impl PopupMenu {
             let Some(mut item) = item.borrow_mut::<PopupMenuItem>() else {
                 continue;
             };
-            if *id == which_id {
+            if *id == which_id && !item.disabled {
                 item.animator_cut(cx, ids!(active.on));
                 item.animator_cut(cx, ids!(hover.on));
             } else {

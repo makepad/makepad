@@ -423,12 +423,13 @@ impl Renderer {
     /// leading copies are kept as they are (neither refilled nor hashed
     /// again) and only `tail` appends this frame's rest; otherwise `prefix`
     /// fills the list first. A level's placed forest is thousands of copies
-    /// that change only when the level does.
-    pub fn rebuild_models_with_prefix(&mut self, prefix_key: u64, prefix: impl FnOnce(&mut Vec<ModelInstance>), tail: impl FnOnce(&mut Vec<ModelInstance>)) {
+    /// that change only when the level does. The tail is refilled in place
+    /// over last frame's ([`ModelTail::push`]), so a stable tail allocates
+    /// nothing either.
+    pub fn rebuild_models_with_prefix(&mut self, prefix_key: u64, prefix: impl FnOnce(&mut Vec<ModelInstance>), tail: impl FnOnce(&mut ModelTail)) {
         let mut instances = std::mem::take(&mut self.placed_models);
         let (len, signature) = match self.placed_prefix {
             Some((key, len, signature)) if key == prefix_key && instances.len() >= len => {
-                instances.truncate(len);
                 (len, signature)
             }
             _ => {
@@ -438,7 +439,10 @@ impl Renderer {
             }
         };
         self.placed_prefix = Some((prefix_key, len, signature));
-        tail(&mut instances);
+        let mut t = ModelTail { list: &mut instances, start: len, at: len };
+        tail(&mut t);
+        let end = t.at;
+        instances.truncate(end);
         let signature = signature.rotate_left(17) ^ (len as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ placed_scene_signature(&instances[len..]);
         if let Err(error) = self.try_set_models_signed(instances, signature) {
             self.report_asset_light_error(error);
@@ -645,9 +649,11 @@ impl Renderer {
     /// They are always lit as dynamic geometry regardless of the supplied
     /// [`ModelInstance::dynamic`] value; that flag remains meaningful only
     /// in the placed-model lane.
-    pub fn set_world_attachments(&mut self, instances: Vec<ModelInstance>) {
-        self.model_anim_state.clips.retain(|target,_|!matches!(target,ModelTarget::Attachment(_)));
-        self.world_attachments = instances;
+    /// Returns the previous frame's list, so a caller that rebuilds it every
+    /// frame can reuse its buffers.
+    pub fn set_world_attachments(&mut self, instances: Vec<ModelInstance>) -> Vec<ModelInstance> {
+        self.model_anim_state.clips.retain(|target,_|!matches!(target,StateTarget::Attachment(_)));
+        std::mem::replace(&mut self.world_attachments, instances)
     }
 
     /// Hand this view's transient presentation meshes to the renderer.
@@ -682,5 +688,28 @@ impl Renderer {
     /// skinned characters go through this).
     pub fn dynamic_shade(&self, p: Vec3f) -> f32 {
         self.bake.dynamic_shade(p)
+    }
+}
+
+/// The placed list past its kept prefix, refilled in place by
+/// [`Renderer::rebuild_models_with_prefix`]: each push overwrites last
+/// frame's copy at that position (`clone_from`, reusing its strings).
+pub struct ModelTail<'a> {
+    list: &'a mut Vec<ModelInstance>,
+    start: usize,
+    at: usize,
+}
+
+impl ModelTail<'_> {
+    pub fn push(&mut self, m: &ModelInstance) {
+        match self.list.get_mut(self.at) {
+            Some(slot) => slot.clone_from(m),
+            None => self.list.push(m.clone()),
+        }
+        self.at += 1;
+    }
+    /// This frame's tail so far.
+    pub fn pushed(&mut self) -> &mut [ModelInstance] {
+        &mut self.list[self.start..self.at]
     }
 }

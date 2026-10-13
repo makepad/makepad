@@ -4778,7 +4778,7 @@ pub struct MapView {
     // Shaped text runs keyed by (text hash, len, quantized font_scale bits);
     // shaping dominates label placement cost.
     #[rust]
-    shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun>>,
+    shaped_runs: HashMap<(u64, u32, u32), Option<PreparedTextRun<crate::makepad_draw::text::rasterizer::RasterizedGlyph>>>,
     // Finished tile buffers waiting for GPU upload; drained within per-frame
     // count and byte budgets so a rebuild burst cannot monopolize a frame.
     #[rust]
@@ -8686,6 +8686,7 @@ impl MapView {
                 };
                 self.fly = None;
                 self.gesture_panned = false;
+                cx.claim_finger_drag(fe.digit_id);
                 TouchGesture::Pan {
                     uid: *uid,
                     start_abs: abs,
@@ -8744,6 +8745,7 @@ impl MapView {
                 }
 
                 if let Some(remaining) = first_active_touch(event) {
+                    cx.claim_finger_drag(live_id_num!(touch, remaining.uid).into());
                     self.touch_gesture = TouchGesture::Pan {
                         uid: remaining.uid,
                         start_abs: remaining.abs,
@@ -10609,7 +10611,7 @@ impl MapView {
             let shaped = self
                 .draw_label
                 .draw_super
-                .prepare_single_line_run(cx, candidate.text.as_str())
+                .prepare_single_line_raster_run(cx, candidate.text.as_str())
                 .filter(|run| !run.glyphs.is_empty());
             self.shaped_runs.insert(run_key, shaped);
         }

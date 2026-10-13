@@ -2449,6 +2449,7 @@ impl Widget for FabValueInput {
                     shift: fe.modifiers.shift,
                     raw_value: self.value,
                 });
+                cx.claim_finger_drag(fe.digit_id);
                 // The next event may already be Escape; ownership is captured
                 // before dispatch, so the scope must exist before this returns.
                 self.cancel_scope = Some(self.begin_cancel_scope(cx));
@@ -4602,6 +4603,7 @@ impl Widget for FabColorWheel {
                 let zone = wheel_zone(fe.abs - rect.pos, size, self.hsv());
                 if zone != WheelZone::None {
                     self.drag = Some(zone);
+                    cx.claim_finger_drag(fe.digit_id);
                     self.apply_pointer(cx, uid, fe.abs, false);
                 }
             }
@@ -6105,7 +6107,7 @@ impl FabColorPick {
 
     /// The popover's palette strip: named colours in display order.
     pub fn set_palette(&mut self, cx: &mut Cx, entries: Vec<(String, [f32; 4])>) {
-        let colors = entries.iter().map(|(_, c)| *c).collect();
+        let colors: Vec<[f32; 4]> = entries.iter().map(|(_, c)| *c).collect();
         self.palette_names = entries.into_iter().map(|(n, _)| n).collect();
         if let Some(mut strip) = self.popover.child(live_id!(palette)).borrow_mut::<FabPaletteStrip>() {
             strip.set_colors(cx, colors);
@@ -6938,10 +6940,7 @@ mod tests {
         fn built(cx: &mut Cx, name: &str) -> WidgetRef {
             let widget = cx.with_vm(|vm| {
                 let widgets = vm.module(id!(widgets));
-                let value = vm
-                    .bx
-                    .heap
-                    .value(widgets, LiveId::from_str(name).into(), NoTrap);
+                let value = vm.value(widgets, LiveId::from_str(name));
                 WidgetRef::script_from_value(vm, value)
             });
             assert!(!widget.is_empty(), "{name} built no widget");
@@ -7096,7 +7095,7 @@ mod tests {
             let mut out = resolution(vm, fab.into(), "fab");
             let widgets = vm.module(id!(widgets));
             for name in &names {
-                let value = vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap);
+                let value = vm.value(widgets, LiveId::from_str(name));
                 assert!(value.as_object().is_some(), "`{name}` did not resolve");
                 out.extend(resolution(vm, value, name));
             }
@@ -7108,7 +7107,7 @@ mod tests {
             let plain = read(vm);
             let sheet = everything_sheet(vm, &|name| names.contains(&name));
             install(vm, sheet);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             vm.with_reload(crate::script_mod);
             let errors = vm.take_errors();
             assert!(errors.is_empty(), "the sheet does not evaluate: {errors:?}");
@@ -7122,9 +7121,7 @@ mod tests {
     fn table_color(cx: &mut Cx, table: LiveId, key: &str) -> u32 {
         cx.with_vm(|vm| {
             let module = vm.module(table);
-            vm.bx
-                .heap
-                .value(module, LiveId::from_str(key).into(), NoTrap)
+            vm.value(module, LiveId::from_str(key))
                 .as_color()
                 .unwrap_or_else(|| panic!("`{key}` is not a colour in this table"))
         })
@@ -7316,19 +7313,19 @@ mod tests {
             let (inks, own) = cx.with_vm(|vm| {
                 crate::script_mod(vm);
                 let widgets = vm.module(id!(widgets));
-                let search = vm.bx.heap.value(widgets, LiveId::from_str("FabSearch").into(), NoTrap);
-                let input = vm.bx.heap.value(search.as_object().expect("FabSearch"), LiveId::from_str("input").into(), NoTrap);
-                let draw_text = vm.bx.heap.value(input.as_object().expect("input"), LiveId::from_str("draw_text").into(), NoTrap);
+                let search = vm.value(widgets, LiveId::from_str("FabSearch"));
+                let input = vm.value(search.as_object().expect("FabSearch"), LiveId::from_str("input"));
+                let draw_text = vm.value(input.as_object().expect("input"), LiveId::from_str("draw_text"));
                 let dt = draw_text.as_object().expect("draw_text");
                 let keys = ["color", "color_hover", "color_focus", "color_down", "color_disabled", "color_empty", "color_empty_hover", "color_empty_focus"];
                 let inks: Vec<(&str, Option<u32>)> = keys
                     .into_iter()
-                    .map(|k| (k, vm.bx.heap.value(dt, LiveId::from_str(k).into(), NoTrap).as_color()))
+                    .map(|k| (k, vm.value(dt, LiveId::from_str(k)).as_color()))
                     .collect();
                 let fab = vm.module(id!(fab));
                 let own: Vec<u32> = ["color_text", "color_text_active", "color_text_dim", "color_text_muted"]
                     .into_iter()
-                    .filter_map(|k| vm.bx.heap.value(fab, LiveId::from_str(k).into(), NoTrap).as_color())
+                    .filter_map(|k| vm.value(fab, LiveId::from_str(k)).as_color())
                     .collect();
                 (inks, own)
             });
@@ -7435,9 +7432,7 @@ mod tests {
             for (name, want) in NUMBERS {
                 let got = cx.with_vm(|vm| {
                     let fab = vm.module(id!(fab));
-                    vm.bx
-                        .heap
-                        .value(fab, LiveId::from_str(name).into(), NoTrap)
+                    vm.value(fab, LiveId::from_str(name))
                         .as_f64()
                 });
                 assert_eq!(got, Some(*want), "`fab.{name}` moved under `{}`", entry.id);
@@ -8802,7 +8797,7 @@ mod fab_knob_gestures {
                     width: Fill
                     height: Fill
                     flow: Right
-                    cell := FabKnob{value: 50.0}
+                    subject := FabKnob{value: 50.0}
                     other := FabKnob{value: 20.0}
                     small := FabKnob{width: 28. height: 28. show_readout: false}
                     named := FabKnob{label: "mix"}
@@ -8818,7 +8813,7 @@ mod fab_knob_gestures {
         let root = scene(cx);
         let mut target = Target::new(cx);
         target.draw(cx, &root);
-        let cell = root.widget(cx, ids!(cell));
+        let cell = root.widget(cx, ids!(subject));
         assert!(!cell.is_empty(), "the scene has a knob in it");
         (root, cell)
     }

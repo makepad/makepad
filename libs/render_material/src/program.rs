@@ -1,8 +1,6 @@
 //! Building a material program: a base lane's shader object with the
 //! material's hooks installed, checked by the shader front end before any
 //! pipeline exists, with every error mapped back to the author's source.
-#[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
-use makepad_draw::makepad_platform::makepad_script::shader::{ShaderFnCompiler, ShaderMode, ShaderOutput, ShaderType};
 use makepad_draw::makepad_platform::makepad_script::shader_backend::ShaderBackend;
 use makepad_draw::*;
 use makepad_scene::BaseKind;
@@ -137,7 +135,7 @@ impl HookSet {
     /// key, a hook outside `mask` or a non-function hook is refused.
     pub fn from_spec(vm: &mut ScriptVm, spec: ScriptObject, mask: HookMask) -> Result<Self, MaterialError> {
         let mut set = HookSet::new();
-        let entries: Vec<(ScriptValue, ScriptValue)> = vm.bx.heap.map_ref(spec).iter().map(|(k, v)| (*k, v.value)).collect();
+        let entries: Vec<(ScriptValue, ScriptValue)> = vm.heap().map_entries(spec).into_iter().map(|e| (e.key, e.value)).collect();
         for (key, value) in entries {
             let Some(id) = key.as_id() else { continue };
             let name = id.to_string();
@@ -149,7 +147,7 @@ impl HookSet {
                 set.bounds_pad = pad as f32;
                 continue;
             }
-            let is_fn = value.as_object().is_some_and(|o| vm.bx.heap.is_fn(o));
+            let is_fn = value.as_object().is_some_and(|o| vm.is_fn(o));
             match HOOKS.iter().find(|s| LiveId::from_str(s.key) == id).map(|s| s.hook) {
                 Some(hook) => {
                     if !mask.allows(hook) {
@@ -178,10 +176,10 @@ impl HookSet {
             if !mask.allows(hook) {
                 return Err(MaterialError::hook(hook, format!("this host does not accept the `{}` hook", spec.key)));
             }
-            if !vm.bx.heap.is_fn(function) {
+            if !vm.is_fn(function) {
                 return Err(MaterialError::hook(hook, format!("must be a shader function {}", spec.signature)));
             }
-            let declared = vm.bx.heap.vec_ref(function).iter().filter(|v| !v.key.is_nil()).count();
+            let declared = vm.heap().vec_ref(function).iter().filter(|v| !v.key.is_nil()).count();
             if declared != spec.params.len() {
                 return Err(MaterialError::hook(hook, format!("takes {} parameter(s), found {declared}: {}", spec.params.len(), spec.signature)));
             }
@@ -223,12 +221,12 @@ pub fn install_program(vm: &mut ScriptVm, req: &ProgramRequest) -> Result<Script
     if req.kind == BaseKind::Unlit && (req.hooks.has(Hook::Light) || req.hooks.has(Hook::Lighting)) {
         return Err(MaterialError::new("an Unlit material has no lighting to hook: use a Pbr base for `light` or `lighting`"));
     }
-    let obj = vm.bx.heap.new_with_proto_no_vec(req.base.into());
+    let obj = vm.heap_mut().new_with_proto_no_vec(req.base.into());
     let installs = req.hooks.iter().map(|(h, f)| (LiveId::from_str(h.spec().method), f, Some(h)))
         .chain(req.overrides.iter().map(|(id, f)| (*id, *f, None)));
     for (method, function, hook) in installs {
-        let result = vm.bx.heap.set_value(obj, method.into(), function.into(), NoTrap);
-        let installed = vm.bx.heap.object_method(obj, method.into(), NoTrap).as_object() == Some(function);
+        let result = vm.set_value(obj, method, function);
+        let installed = vm.object_method(obj, method).as_object() == Some(function);
         if !result.is_nil() || !installed {
             let message = format!("`{method}` could not be installed on the base shader");
             return Err(match hook {
@@ -268,19 +266,14 @@ pub fn frontend_errors_for(_vm: &mut ScriptVm, _io_self: ScriptObject, _backend:
 /// [`frontend_errors`] lowering for one backend.
 #[cfg(not(all(target_arch = "wasm32", makepad_precompiled_shaders)))]
 pub fn frontend_errors_for(vm: &mut ScriptVm, io_self: ScriptObject, backend: ShaderBackend) -> Vec<String> {
-    let mut output = ShaderOutput::default();
-    output.backend = backend;
-    output.use_vulkan = false;
-    output.pre_collect_rust_instance_io(vm, io_self);
-    output.pre_collect_shader_io(vm, io_self);
-    for (entry, mode) in [(id!(vertex), ShaderMode::Vertex), (id!(fragment), ShaderMode::Fragment)] {
-        let Some(fnobj) = vm.bx.heap.object_method(io_self, entry.into(), NoTrap).as_object() else { continue };
-        output.mode = mode;
-        ShaderFnCompiler::compile_shader_def(vm, &mut output, NoTrap, entry, fnobj, ShaderType::IoSelf(io_self), vec![]);
-    }
-    if output.has_errors {
-        let report = output.error_report();
-        report.lines().map(|l| l.to_string()).filter(|l| !l.trim().is_empty()).collect()
+    // the front end only: the complete compile operation without emitting source
+    use makepad_draw::makepad_platform::makepad_script::shader_compile::{compile_shader, ShaderCompileOptions};
+    let mut opts = ShaderCompileOptions::new(backend, false, false, false, false);
+    opts.emit_source = false;
+    let output = compile_shader(vm, io_self, &opts);
+    let view = output.view();
+    if view.has_errors {
+        view.error_report.lines().map(|l| l.to_string()).filter(|l| !l.trim().is_empty()).collect()
     } else {
         Vec::new()
     }
@@ -290,9 +283,9 @@ pub fn frontend_errors_for(vm: &mut ScriptVm, io_self: ScriptObject, backend: Sh
 /// body spans the error's line in the same file.
 fn attribute_hooks(vm: &ScriptVm, hooks: &HookSet, diagnostics: &mut [Diagnostic]) {
     let spans: Vec<(Hook, String, u32)> = hooks.iter().filter_map(|(hook, function)| {
-        let makepad_draw::makepad_platform::makepad_script::ScriptFnPtr::Script(ip) = vm.bx.heap.as_fn(function)? else { return None };
-        let loc = vm.bx.code.ip_to_loc(ip)?;
-        Some((hook, loc.file, loc.line))
+        let ip = vm.heap().as_fn(function)?.script_ip()?;
+        let loc = vm.ip_to_loc(ip)?;
+        Some((hook, loc.file().to_owned(), loc.line()))
     }).collect();
     for d in diagnostics.iter_mut().filter(|d| d.hook.is_none()) {
         let Some(file) = &d.file else { continue };

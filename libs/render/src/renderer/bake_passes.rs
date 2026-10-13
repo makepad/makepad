@@ -356,38 +356,31 @@ impl Renderer {
                     && !DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed)
                 {
                     if let Some(atlas) = self.lightmap.clone() {
-                        if let Some((w, h, bytes)) = cx.cx.debug_read_render_texture(&atlas) {
+                        let prefix = prefix.clone();
+                        if let Err(error) = cx.cx.read_render_texture(&atlas, move |result| {
+                            let Ok((w, h, bytes)) = result else { log!("gpu lightmap: atlas readback failed"); return };
                             let mut pgm = format!("P5\n{w} {h}\n255\n").into_bytes();
                             pgm.extend(bytes.chunks_exact(4).map(|px| px[3]));
                             let _ = std::fs::write(format!("{prefix}.a.pgm"), pgm);
                             let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
-                            for px in bytes.chunks_exact(4) {
-                                // Metal readback of BGRA8 is BGRA byte order.
-                                ppm.extend([px[2], px[1], px[0]]);
-                            }
+                            for px in bytes.chunks_exact(4) { ppm.extend([px[2], px[1], px[0]]); }
                             let _ = std::fs::write(format!("{prefix}.rgb.ppm"), ppm);
                             log!("gpu lightmap: dumped {w}x{h} atlas to {prefix}.a.pgm/.rgb.ppm");
-                        }
+                        }) { log!("gpu lightmap: {error}"); }
                     }
-                    // Intermediates: coverage (R=lit-frac, G=covered) — the
-                    // gather truth before any distance transform.
+                    // The HAL returns float scratch targets in their native packed layout.
                     for (tex, name) in self.gpu_baker.debug_stage_textures() {
-                        if let Some((w, h, bytes)) = cx.cx.debug_read_render_texture(&tex) {
+                        let prefix = prefix.clone();
+                        if let Err(error) = cx.cx.read_render_texture(&tex, move |result| {
+                            let Ok((w, h, bytes)) = result else { log!("gpu lightmap: {name} readback failed"); return };
                             if name.contains("depth") {
-                                // R32F scratch: raw little-endian floats,
-                                // header-free — `w`/`h` ride in the name.
-                                let _ = std::fs::write(
-                                    format!("{prefix}.{name}.{w}x{h}.f32"),
-                                    &bytes,
-                                );
-                                continue;
+                                let _ = std::fs::write(format!("{prefix}.{name}.{w}x{h}.f32"), &bytes);
+                                return;
                             }
                             let mut ppm = format!("P6\n{w} {h}\n255\n").into_bytes();
-                            for px in bytes.chunks_exact(4) {
-                                ppm.extend([px[2], px[1], px[0]]);
-                            }
+                            for px in bytes.chunks_exact(4) { ppm.extend([px[2], px[1], px[0]]); }
                             let _ = std::fs::write(format!("{prefix}.{name}.ppm"), ppm);
-                        }
+                        }) { log!("gpu lightmap: {error}"); }
                     }
                 }
             }
@@ -424,17 +417,13 @@ impl Renderer {
                 if SETTLED_FRAMES.fetch_add(1, Ordering::Relaxed) == 2 {
                     let k = BAKES.fetch_add(1, Ordering::Relaxed);
                     if let Some(atlas) = self.lightmap.clone() {
-                        if let Some((w, h, bytes)) = cx.cx.debug_read_render_texture(&atlas) {
-                            lm_probe_report(
-                                k,
-                                w,
-                                h,
-                                regions,
-                                lamps,
-                                &bytes,
-                                &self.gpu_baker.debug_region_rects(),
-                            );
-                        }
+                        let rects = self.gpu_baker.debug_region_rects();
+                        if let Err(error) = cx.cx.read_render_texture(&atlas, move |result| {
+                            match result {
+                                Ok((w, h, bytes)) => lm_probe_report(k, w, h, regions, lamps, &bytes, &rects),
+                                Err(error) => log!("lm probe: bake {k} readback: {error}"),
+                            }
+                        }) { log!("lm probe: bake {k}: {error}"); }
                     }
                     if k < n {
                         if std::env::var("MAKEPAD_GPU_LM_REBAKE_MODE").as_deref() == Ok("redirty") {

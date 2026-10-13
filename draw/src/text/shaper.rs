@@ -171,6 +171,23 @@ impl Shaper {
 
     fn shape(&mut self, params: ShapeParams) -> ShapedText {
         let mut glyphs = Vec::new();
+        // Tracking pulls a ligature's letters apart, but a ligature is one glyph with one advance:
+        // the spacing lands after the pair and the ligature draws wrong or not at all. As in CSS,
+        // letter-spacing turns the optional ligatures off, so every letter is its own glyph.
+        let spaced_features: Vec<(u32, u32)>;
+        let features: &[(u32, u32)] = if params.letter_spacing.0 != 0.0 {
+            let mut f = params.features.to_vec();
+            for tag in [*b"liga", *b"clig", *b"dlig", *b"hlig", *b"calt"] {
+                let tag = u32::from_be_bytes(tag);
+                if !f.iter().any(|(t, _)| *t == tag) {
+                    f.push((tag, 0));
+                }
+            }
+            spaced_features = f;
+            &spaced_features
+        } else {
+            &params.features
+        };
         if params.fonts.is_empty() {
             println!("WARNING: encountered empty font family");
         } else {
@@ -185,7 +202,7 @@ impl Shaper {
                     text,
                     &params.fonts[0],
                     &params.fonts,
-                    &params.features,
+                    features,
                     &params.diagnostics,
                     Direction::Ltr,
                     0,
@@ -212,7 +229,7 @@ impl Shaper {
                         text,
                         &params.fonts[0],
                         &params.fonts,
-                        &params.features,
+                        features,
                         &params.diagnostics,
                         Direction::Ltr,
                         0,
@@ -234,7 +251,7 @@ impl Shaper {
                             text,
                             &params.fonts[0],
                             &params.fonts,
-                            &params.features,
+                            features,
                             &params.diagnostics,
                             direction,
                             run.start,
@@ -455,9 +472,7 @@ impl Shaper {
                     )
                 }));
         }
-        let rb_features = &self.cached_rb_features;
-        let glyph_buffer =
-            font.with_rustybuzz_face(|face| rustybuzz::shape(face, rb_features, unicode_buffer));
+        let glyph_buffer = font.shape(&self.cached_rb_features, unicode_buffer);
         let units_per_em = font.units_per_em();
         out_glyphs.extend(
             glyph_buffer
@@ -525,6 +540,41 @@ pub struct ShapedGlyph {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Offline" drew as "Of ine" under letter-spacing: the fl ligature is one glyph, and the
+    /// tracking split what it covers. With spacing every letter is a glyph of its own.
+    #[test]
+    fn letter_spacing_keeps_every_letter_a_glyph() {
+        use crate::text::{font::{Font, FontId}, font_face::FontFace, layouter, loader::FontData, rasterizer::Rasterizer};
+        use std::{cell::RefCell, rc::Rc};
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../widgets/resources/NotoSans-Regular.ttf");
+        let data: FontData = makepad_platform::SharedBytes::from_file_mmap_or_read(path).expect("font bytes");
+        let font = Rc::new(Font::new(
+            FontId::from(0xE0E3_u64),
+            Rc::new(RefCell::new(Rasterizer::new(layouter::Settings::default().loader.rasterizer))),
+            FontFace::from_data_and_index(data, 0).expect("face"),
+            0.0,
+            0.0,
+        ));
+        let mut shaper = Shaper::new(Settings { cache_size: 4 });
+        let shape = |shaper: &mut Shaper, spacing: f32| {
+            shaper.shape(ShapeParams {
+                text: "Offline".into(),
+                fonts: Rc::from(vec![font.clone()]),
+                direction: Direction::Ltr,
+                letter_spacing: Ems(spacing),
+                word_spacing: Ems(0.0),
+                features: Rc::new(Vec::new()),
+                diagnostics: Rc::new(FontDiagnostics { role: String::new(), set: String::new(), tried: Vec::new() }),
+            })
+        };
+        let plain = shape(&mut shaper, 0.0);
+        let spaced = shape(&mut shaper, 0.05);
+        assert_eq!(spaced.glyphs.len(), 7, "one glyph per letter under spacing");
+        assert!(plain.glyphs.len() < 7, "the font ligates fl without spacing (the test's premise)");
+        let clusters: Vec<usize> = spaced.glyphs.iter().map(|g| g.cluster).collect();
+        assert_eq!(clusters, [0, 1, 2, 3, 4, 5, 6]);
+    }
 
     #[test]
     fn missing_glyph_diagnostic_has_frozen_contract_fields() {

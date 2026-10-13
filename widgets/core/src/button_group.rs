@@ -46,7 +46,7 @@
 //! too.
 
 use crate::{
-    animator::{Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animator, AnimatorImpl},
     button::ButtonWidgetRefExt,
     badge::{measure, BadgeIntent, BadgePalette},
     chip::ChipSelection,

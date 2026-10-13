@@ -23,7 +23,7 @@ makepad-widgets-extras = { path = "./families/extras", version = "2.0.0", option
 makepad-widgets-maps = { path = "./families/maps", version = "2.0.0", optional = true }
 makepad-widgets-pdf = { path = "./families/pdf", version = "2.0.0", optional = true }
 makepad-widgets-voice = { path = "./families/voice", version = "2.0.0", optional = true }
-makepad-widgets-cef = { path = "./families/cef", version = "2.0.0", optional = true }
+makepad-widgets-browser = { path = "./families/browser", version = "2.0.0", optional = true }
 makepad-widgets-ai = { path = "./families/ai", version = "2.0.0", optional = true }
 makepad-widgets-fab = { path = "./families/fab", version = "2.0.0", optional = true }
 makepad-widgets-editors = { path = "./families/editors", version = "2.0.0", optional = true }
@@ -121,13 +121,8 @@ catalog = ["dep:makepad-widgets-catalog"]
 voice = ["dep:makepad-widgets-voice"]
 maps = ["dep:makepad-widgets-maps"]
 pdf = ["dep:makepad-widgets-pdf"]
-cef = ["dep:makepad-widgets-cef"]
+browser = ["dep:makepad-widgets-browser"]
 # The AI chat slot (F10) in every Window. Not a default: `makepad-app-aichat`
 # turns it on, so exactly the apps that link the chat get the slot.
 ai = ["dep:makepad-widgets-ai"]
 
-## Enables certain public-facing types to derive serde serialization traits.
-## The one feature that reaches the core (and the dock's layout types): it
-## forwards into makepad-draw, so an app that turns it on builds its own
-## copy of draw and the core.
-serde = ["makepad-widgets-core/serde", "makepad-widgets-data?/serde"]

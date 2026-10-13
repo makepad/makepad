@@ -4,7 +4,7 @@
 
 use makepad_platform::draw_shader_layout::{Layout as ShaderLayout, LayoutField, LayoutKind, LayoutPacking, PodType};
 use makepad_platform::makepad_live_id::LiveId;
-use makepad_render_kernels::compute::sched::{InlineExecutor, Priority};
+use makepad_render_kernels::dispatch::sched::{InlineExecutor, Priority};
 use makepad_render_kernels::pipeline::Count;
 use makepad_render_kernels::{engine, kernel_layout, ManualFences, OutputRing, Pipeline, PipelineError, Topology};
 
@@ -80,7 +80,8 @@ fn emitted_records_land_in_the_draw_shaders_reflected_layout() {
     };
     let seg = kernel_layout("Seg", &shader).unwrap();
     let src = "let s = emit_buffer(Seg, 3)\nfn primitive(i) { for k in 0..3 { if k < i % 4 { let r = Seg{}\n r.a = vec3(float(i), float(k), 0.0)\n r.width = 0.25\n r.birth = float(i) * 0.5\n r.seed = i * 16 + k\n emit(s, r) } } }";
-    let kernel = makepad_render_kernels::compile(src, &[seg], &[]).unwrap();
+    let seg_fields = seg.field_views();
+    let kernel = makepad_render_kernels::compile(src, &[seg.view(&seg_fields)], &[]).unwrap();
     let n = 20_000usize;
     let mut p = Pipeline::new();
     p.pass(kernel.clone(), Count::Fixed(n));
@@ -109,6 +110,7 @@ fn emitted_records_land_in_the_draw_shaders_reflected_layout() {
     let over = "let s = emit_buffer(Seg, 2)\nfn primitive(i) { for k in 0..3 { let r = Seg{}\n r.width = 1.0\n emit(s, r) } }";
     let shader_seg = kernel_layout("Seg", &shader).unwrap();
     let mut p = Pipeline::new();
-    p.pass(makepad_render_kernels::compile(over, &[shader_seg], &[]).unwrap(), Count::Fixed(10));
+    let shader_seg_fields = shader_seg.field_views();
+    p.pass(makepad_render_kernels::compile(over, &[shader_seg.view(&shader_seg_fields)], &[]).unwrap(), Count::Fixed(10));
     assert!(matches!(p.run(&InlineExecutor, 1), Err(PipelineError::Overflow { .. })));
 }

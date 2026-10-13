@@ -9,13 +9,33 @@ use makepad_render_graph::{kits, pass, script, UniformDecl};
 const BACKENDS: [&str; 4] = ["metal", "hlsl", "glsl", "wgsl"];
 
 fn compile_value(vm: &mut ScriptVm, file: &str, code: String) -> Result<String, String> {
-    vm.bx.captured_errors = Some(Vec::new());
-    let v = vm.eval(ScriptMod { file: file.into(), code, ..Default::default() });
+    vm.capture_errors();
+    let v = vm.eval(ScriptMod::new("", "", &file, 0, 0, &code, &[]));
     let errors = vm.take_errors();
     if !errors.is_empty() || v.is_err() {
         return Err(errors.join("; "));
     }
-    let text = vm.bx.heap.string_with(v, |_, s| s.to_string()).ok_or("the compiler gave no source")?;
+    let text = vm.heap().string_with(v, |_, s| s.to_string()).ok_or("the compiler gave no source")?;
+    if text.starts_with("ERRORS") {
+        return Err(text);
+    }
+    Ok(text)
+}
+
+/// The pass's shader (an object built from the decl, its fns moved by their
+/// tokens) compiled for `backend`.
+fn compile_for(vm: &mut ScriptVm, decl: &pass::PassDecl, backend: &str) -> Result<String, String> {
+    let obj = makepad_render_graph::program::pass_object(vm, decl)?;
+    let shader = vm.value(vm.modules(), LiveId::from_str("shader")).as_object().unwrap();
+    let f = vm.value(shader, LiveId::from_str("test_compile_draw_source"));
+    let b = vm.new_string_with(|_, s| s.push_str(backend));
+    vm.capture_errors();
+    let v = vm.call(f, &[obj.into(), b, false.into()]);
+    let errors = vm.take_errors();
+    if !errors.is_empty() || v.is_err() {
+        return Err(errors.join("; "));
+    }
+    let text = vm.heap().string_with(v, |_, s| s.to_string()).ok_or("the compiler gave no source")?;
     if text.starts_with("ERRORS") {
         return Err(text);
     }
@@ -23,13 +43,17 @@ fn compile_value(vm: &mut ScriptVm, file: &str, code: String) -> Result<String, 
 }
 
 fn compile_pass(vm: &mut ScriptVm, decl: &pass::PassDecl) {
-    let src = decl.source();
     for backend in BACKENDS {
-        let code = src.replacen("mod.draw.DrawGraphPass{", "let sh = mod.draw.DrawGraphPass{", 1) + &format!("mod.shader.test_compile_draw_source(sh, \"{backend}\", false)\n");
-        if let Err(e) = compile_value(vm, &format!("kit/{}", decl.label), code) {
-            panic!("{} ({backend}) did not compile: {e}\n{src}", decl.label);
+        if let Err(e) = compile_for(vm, decl, backend) {
+            panic!("{} ({backend}) did not compile: {e}", decl.label);
         }
     }
+}
+
+/// A Splash fn of this VM as a pass's code.
+fn code(vm: &mut ScriptVm, src: &str) -> pass::PassCode {
+    let v = vm.eval(ScriptMod::new("", "", "kits_compile_code", 0, 0, src, &[]));
+    pass::PassCode::Fn(pass::PassFn::new(vm.fn_image(v.as_object().unwrap()).unwrap()))
 }
 
 #[test]
@@ -44,9 +68,9 @@ fn every_kit_builds_passes_that_compile_everywhere() {
         // A host module with the kits' types (the host's own markers).
         let m = vm.new_module(LiveId::from_str("gtest"));
         for k in kits::KITS {
-            let proto = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(proto, LiveId::from_str("__kind").into(), LiveId::from_str(k.kind).into());
-            vm.bx.heap.set_value_def(m, LiveId::from_str(k.name).into(), proto.into());
+            let proto = vm.new_object();
+            vm.set_value_def(proto, LiveId::from_str("__kind"), LiveId::from_str(k.kind));
+            vm.set_value_def(m, LiveId::from_str(k.name), proto);
         }
         let errors = script::install_kits(vm, "mod.gtest", None);
         assert!(errors.is_empty(), "kits did not evaluate: {errors:?}");
@@ -55,20 +79,20 @@ fn every_kit_builds_passes_that_compile_everywhere() {
         // Every kit with its defaults, and the variants a parameter selects.
         let variants: Vec<(&kits::KitDef, Option<(&str, f64)>)> = kits::KITS.iter().map(|k| (k, None)).chain([("vignette", "mode", 1.0), ("frame_post", "mode", 1.0), ("outline", "mode", 1.0)].into_iter().map(|(kind, f, v)| (kits::kit(kind).unwrap(), Some((f, v))))).collect();
         for (k, over) in variants {
-            let module = vm.bx.heap.value(vm.bx.heap.modules, LiveId::from_str("gtest").into(), NoTrap).as_object().unwrap();
-            let template = vm.bx.heap.value(module, LiveId::from_str(&format!("kit_{}", k.kind)).into(), NoTrap);
-            let proto = vm.bx.heap.value(module, LiveId::from_str(k.name).into(), NoTrap);
+            let module = vm.value(vm.modules(), LiveId::from_str("gtest")).as_object().unwrap();
+            let template = vm.value(module, LiveId::from_str(&format!("kit_{}", k.kind)));
+            let proto = vm.value(module, LiveId::from_str(k.name));
             // The author's object: the kit with its defaults.
-            let author = vm.bx.heap.new_with_proto(proto);
+            let author = vm.new_with_proto(proto);
             if let Some((field, value)) = over {
-                vm.bx.heap.set_value_def(author, LiveId::from_str(field).into(), value.into());
+                vm.set_value_def(author, LiveId::from_str(field), value);
             }
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             let built = vm.call(template, &[author.into()]);
             let errors = vm.take_errors();
             assert!(errors.is_empty() && !built.is_err(), "{} did not build: {errors:?}", k.name);
             let items: Vec<ScriptValue> = match built.as_array() {
-                Some(a) => (0..vm.bx.heap.array_len(a)).map(|i| vm.bx.heap.array_index(a, i, NoTrap)).collect(),
+                Some(a) => (0..vm.heap().array_len(a)).map(|i| vm.heap().array_index(a, i, NoTrap)).collect(),
                 None => panic!("{} returned no list", k.name),
             };
             assert!(!items.is_empty());
@@ -81,7 +105,7 @@ fn every_kit_builds_passes_that_compile_everywhere() {
                     let width = if v.as_number().is_some() { 1 } else { 4 };
                     decl.uniforms.push(UniformDecl { name, width });
                 }
-                decl.validate().unwrap_or_else(|e| panic!("{}: {e}\n---\n{}\n---", decl.label, decl.pixel));
+                decl.validate().unwrap_or_else(|e| panic!("{}: {e}", decl.label));
                 decls.push(decl);
             }
             pass::namespace(&mut decls, &format!("k{}_", chain.len()));
@@ -113,8 +137,8 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             size: None,
             format: None,
             uniforms: Vec::new(),
-            pixel: "fn() -> vec4 { self.gbuf = vec4(self.uv(), 0.0, 1.0) self.march_depth = vec4(3.0, 0.0, 0.0, 0.0) return vec4(1.0, 0.5, 0.2, 1.0) }".into(),
-            helpers: String::new(),
+            pixel: code(vm, "fn() -> vec4 { self.gbuf = vec4(self.uv(), 0.0, 1.0) self.march_depth = vec4(3.0, 0.0, 0.0, 0.0) return vec4(1.0, 0.5, 0.2, 1.0) }"),
+            helpers: Vec::new(),
             history: false,
             outputs: vec![
                 pass::OutputDecl { name: "gbuf".into(), slot: "gbuf".into(), format: makepad_render_graph::Format::Rgba16f },
@@ -122,7 +146,6 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             ],
             label: "mrt".into(),
             map: false,
-            origins: Vec::new(),
             live_literals: false,
         };
         mrt.validate().unwrap();
@@ -132,10 +155,9 @@ fn every_kit_builds_passes_that_compile_everywhere() {
         let grad = pass::PassDecl {
             name: None,
             outputs: Vec::new(),
-            pixel: "fn() -> vec4 { let q = fract(self.uv() * 3.0) return self.color.sample_grad(q, dFdx(self.uv() * 3.0), dFdy(self.uv() * 3.0)) }".into(),
+            pixel: code(vm, "fn() -> vec4 { let q = fract(self.uv() * 3.0) return self.color.sample_grad(q, dFdx(self.uv() * 3.0), dFdy(self.uv() * 3.0)) }"),
             label: "grad".into(),
             map: false,
-            origins: Vec::new(),
             live_literals: false,
             ..mrt.clone()
         };
@@ -152,17 +174,15 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             size: None,
             format: None,
             uniforms: Vec::new(),
-            pixel: "fn() -> vec4 { return self.nope.sample(self.uv()) }".into(),
-            helpers: String::new(),
+            pixel: code(vm, "fn() -> vec4 { return self.nope.sample(self.uv()) }"),
+            helpers: Vec::new(),
             history: false,
             outputs: Vec::new(),
             label: "bad".into(),
             map: false,
-            origins: Vec::new(),
             live_literals: false,
         };
-        let code = bad.source().replacen("mod.draw.DrawGraphPass{", "let sh = mod.draw.DrawGraphPass{", 1) + "mod.shader.test_compile_draw_source(sh, \"metal\", false)\n";
-        assert!(compile_value(vm, "bad", code).is_err());
+        assert!(compile_for(vm, &bad, "metal").is_err());
         // Short slot and uniform names (a pass named `g`, a uniform `r`)
         // compile: they do not collide with the shader's own members.
         let short = pass::PassDecl {
@@ -175,13 +195,12 @@ fn every_kit_builds_passes_that_compile_everywhere() {
             size: None,
             format: None,
             uniforms: vec![UniformDecl { name: "r".into(), width: 1 }, UniformDecl { name: "b".into(), width: 4 }],
-            pixel: "fn() -> vec4 { return self.color.sample(self.uv()) + self.g.sample(self.uv()) * self.r + self.b }".into(),
-            helpers: String::new(),
+            pixel: code(vm, "fn() -> vec4 { return self.color.sample(self.uv()) + self.g.sample(self.uv()) * self.r + self.b }"),
+            helpers: Vec::new(),
             history: false,
             outputs: Vec::new(),
             label: "short".into(),
             map: false,
-            origins: Vec::new(),
             live_literals: false,
         };
         short.validate().unwrap();

@@ -9,9 +9,13 @@ homepage = "https://github.com/makepad/makepad/"
 repository = "https://github.com/makepad/makepad/"
 
 [dependencies]
+makepad-script-compute-sched = { path = "../../platform/script/compute_sched" }
 makepad-draw = { path = "../../draw", version = "2.0.0" }
 # Kernels, and the shared Splash stdlib looks call (`vm`).
 makepad-script-compute = { path = "../../platform/script/compute", features = ["vm"] }
+makepad-render-kernels = { path = "../render_kernels" }
+# `ease(@name, u)` in mod.shared.
+makepad-tween-script = { path = "../tween/script" }
 makepad-text-mesh = { path = "../text_mesh" }
 makepad-geom3d = { path = "../geom3d" }
 makepad-typography = { path = "../typography" }

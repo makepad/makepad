@@ -1,5 +1,5 @@
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     makepad_derive_widget::*,
     makepad_draw::*,
     makepad_script::ScriptFnRef,
@@ -1192,7 +1192,11 @@ impl CheckBox {
             self.draw_bg.set_uniform(cx, live_id!(cap_press), &[press]);
             self.draw_bg.set_uniform(cx, live_id!(cap_squash_along), &[sqa]);
             self.draw_bg.set_uniform(cx, live_id!(cap_squash_across), &[sqx]);
-            let follow = if self.cap_motion.moving() || dragging { 1.0 } else { 0.0 };
+            // The knob stays where the motion has it at rest too: handed back
+            // to the animator's `active` the frame the motion stopped, it
+            // jumped by whatever the two still differed (a hair, or more
+            // while the animator still eased), just after it had settled.
+            let follow = 1.0;
             self.draw_bg.set_uniform(cx, live_id!(knob_t), &[drawn as f32]);
             self.draw_bg.set_uniform(cx, live_id!(knob_follow), &[follow]);
         }
@@ -1677,6 +1681,7 @@ impl Widget for CheckBox {
                         pos: 0.0,
                         moved: false,
                     });
+                    cx.claim_finger_drag(fe.digit_id);
                 }
                 self.knob_motion_kick(cx, true);
             }

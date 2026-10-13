@@ -39,7 +39,9 @@ script_mod! {
         color_format: @Rgba16F
         src: texture_2d(float)
         // xy = one SOURCE texel in uv, z = 1 on the first level (Karis
-        // weighting against fireflies), w unused.
+        // weighting against fireflies), w = the first level's threshold
+        // (0 = none): a soft knee on the largest channel, so only what is
+        // brighter than it spills.
         u_src: uniform(vec4(0.001, 0.001, 0.0, 0.0))
         depth_clip: 0.0
 
@@ -50,7 +52,14 @@ script_mod! {
         }
 
         bloom_tap: fn(uv: vec2) -> vec3 {
-            let c = max(self.src.sample(uv).xyz, vec3(0.0, 0.0, 0.0))
+            var c = max(self.src.sample(uv).xyz, vec3(0.0, 0.0, 0.0))
+            if self.u_src.z > 0.5 && self.u_src.w > 0.0 {
+                let knee = self.u_src.w * 0.5
+                let b = max(c.x, max(c.y, c.z))
+                let rq = clamp(b - self.u_src.w + knee, 0.0, 2.0 * knee)
+                let soft = rq * rq / (4.0 * knee + 0.00001)
+                c = c * (max(soft, b - self.u_src.w) / max(b, 0.00001))
+            }
             if self.u_src.z > 0.5 {
                 return c / (1.0 + dot(c, vec3(0.2126, 0.7152, 0.0722)))
             }
@@ -76,7 +85,9 @@ script_mod! {
         color_format: @Rgba16F
         small: texture_2d(float)
         same: texture_2d(float)
-        // xy = one SMALL-level texel in uv
+        // xy = one SMALL-level texel in uv, z = the weight of the smaller
+        // levels (1 = the energy-conserving pyramid; less keeps the glow
+        // tight, see `BloomPass::radius`)
         u_small: uniform(vec4(0.001, 0.001, 0.0, 0.0))
         depth_clip: 0.0
 
@@ -88,7 +99,7 @@ script_mod! {
 
         pixel: fn() -> vec4f {
             let uv = self.pos
-            return vec4(self.same.sample(uv).xyz + self.bloom_tent(uv, self.u_small.xy), 1.0)
+            return vec4(self.same.sample(uv).xyz + self.bloom_tent(uv, self.u_small.xy) * self.u_small.z, 1.0)
         }
     }
 
@@ -201,6 +212,13 @@ pub struct BloomPass {
     draw_adapt: Option<Box<DrawExposureAdapt>>,
     last_time: Option<f64>,
     levels: usize,
+    /// The first level's brightness threshold (0 = none: the whole image
+    /// feeds the pyramid): a soft knee on the largest channel.
+    pub threshold: f32,
+    /// The weight of each smaller level in the upsample, 0..1 (`None` = 1,
+    /// the energy-conserving pyramid; less keeps the glow tight). The
+    /// composite normalises by [`BloomPass::levels`].
+    pub radius: Option<f32>,
     /// Total GPU ms of the chain (a frame or two behind).
     pub gpu_ms: f64,
 }
@@ -334,7 +352,7 @@ impl BloomPass {
             let draw = self.draw_down.as_mut().unwrap();
             let dv = &mut draw.draw_super.draw_vars;
             dv.set_texture(0, &src);
-            dv.set_uniform(cx.cx, live_id!(u_src), &[1.0 / src_px.x as f32, 1.0 / src_px.y as f32, if i == 0 { 1.0 } else { 0.0 }, 0.0]);
+            dv.set_uniform(cx.cx, live_id!(u_src), &[1.0 / src_px.x as f32, 1.0 / src_px.y as f32, if i == 0 { 1.0 } else { 0.0 }, if i == 0 { self.threshold.max(0.0) } else { 0.0 }]);
             record(cx, &mut self.down[i], level_size(i), &dst, &mut |cx, r| draw.draw_abs(cx, r));
         }
         // ---- up --------------------------------------------------------------
@@ -347,7 +365,7 @@ impl BloomPass {
             let dv = &mut draw.draw_super.draw_vars;
             dv.set_texture(0, &small);
             dv.set_texture(1, &same);
-            dv.set_uniform(cx.cx, live_id!(u_small), &[1.0 / small_px.x as f32, 1.0 / small_px.y as f32, 0.0, 0.0]);
+            dv.set_uniform(cx.cx, live_id!(u_small), &[1.0 / small_px.x as f32, 1.0 / small_px.y as f32, self.radius.unwrap_or(1.0), 0.0]);
             record(cx, &mut self.up[i], level_size(i), &dst, &mut |cx, r| draw.draw_abs(cx, r));
         }
         // ---- adapt -------------------------------------------------------------

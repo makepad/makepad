@@ -19,7 +19,7 @@ fn under(register: fn(&mut ScriptVm), entry: &SheetEntry, check: impl FnOnce(&mu
         register(vm);
         let sheet = StyleSheet::load(entry);
         install(vm, sheet.clone());
-        vm.bx.captured_errors = Some(Vec::new());
+        vm.capture_errors();
         vm.with_reload(register);
         let errors = vm.take_errors();
         assert!(errors.is_empty(), "{}: the sheet does not evaluate: {errors:?}", entry.id);
@@ -49,7 +49,7 @@ pub fn theme_number(register: fn(&mut ScriptVm), entry: &SheetEntry, key: &str) 
     let mut out = None;
     under(register, entry, |vm, _| {
         let theme = vm.module(id!(theme));
-        out = vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_f64();
+        out = vm.value(theme, LiveId::from_str(key)).as_f64();
     });
     out
 }
@@ -85,15 +85,12 @@ const FIELD_FRAME: &[&str] = &["ValueInput", "DateField", "TimeField", "DatePick
 /// and the padding above and below the line.
 pub fn field_metrics(vm: &mut ScriptVm, name: &str) -> (Option<f64>, Option<f64>, Option<f64>) {
     let widgets = vm.module(id!(widgets));
-    let widget = vm
-        .bx
-        .heap
-        .value(widgets, LiveId::from_str(name).into(), NoTrap)
+    let widget = vm.value(widgets, LiveId::from_str(name))
         .as_object()
         .unwrap_or_else(|| panic!("the library has no widget named {name}"));
-    let min = vm.bx.heap.value(widget, id!(min_height).into(), NoTrap).as_f64();
-    let pad = vm.bx.heap.value(widget, id!(padding).into(), NoTrap).as_object();
-    let side = |vm: &mut ScriptVm, key: LiveId| pad.and_then(|p| vm.bx.heap.value(p, key.into(), NoTrap).as_f64());
+    let min = vm.value(widget, id!(min_height)).as_f64();
+    let pad = vm.value(widget, id!(padding)).as_object();
+    let side = |vm: &mut ScriptVm, key: LiveId| pad.and_then(|p| vm.value(p, key).as_f64());
     (min, side(vm, id!(top)), side(vm, id!(bottom)))
 }
 
@@ -115,7 +112,7 @@ pub fn field_row(register: fn(&mut ScriptVm), entry: &SheetEntry) {
         }
         let widgets = vm.module(id!(widgets));
         for name in FIELD_FRAME {
-            if vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap).as_object().is_none() {
+            if vm.value(widgets, LiveId::from_str(name)).as_object().is_none() {
                 continue;
             }
             let field = field_metrics(vm, name);
@@ -167,7 +164,7 @@ pub fn font_fallbacks(register: fn(&mut ScriptVm), entry: &SheetEntry) -> usize 
         let mut whole: Vec<Vec<String>> = Vec::new();
         let mut faces: Vec<&str> = Vec::new();
         for face in FACES {
-            let value = vm.bx.heap.value(theme, LiveId::from_str(face).into(), NoTrap);
+            let value = vm.value(theme, LiveId::from_str(face));
             let have = members(vm, value);
             if have.len() > 1 {
                 stock.push(have[1..].to_vec());
@@ -183,7 +180,7 @@ pub fn font_fallbacks(register: fn(&mut ScriptVm), entry: &SheetEntry) -> usize 
         let mut sites: Vec<(String, ScriptValue)> = Vec::new();
         let theme = vm.module(id!(theme));
         for face in &faces {
-            let value = vm.bx.heap.value(theme, LiveId::from_str(face).into(), NoTrap);
+            let value = vm.value(theme, LiveId::from_str(face));
             sites.push((format!("theme.{face}"), value));
         }
         let widgets = vm.module(id!(widgets));
@@ -200,10 +197,10 @@ pub fn font_fallbacks(register: fn(&mut ScriptVm), entry: &SheetEntry) -> usize 
             let ids: Vec<LiveId> = path.split('.').map(LiveId::from_str).collect();
             // A template of a family this registration left out: the sheet's
             // line for it was blanked at install.
-            if vm.bx.heap.value(widgets, ids[0].into(), NoTrap).as_object().is_none() {
+            if vm.value(widgets, ids[0]).as_object().is_none() {
                 continue;
             }
-            let value = vm.bx.heap.value_path(widgets, &ids, NoTrap);
+            let value = vm.heap().value_path(widgets, &ids, NoTrap);
             sites.push((path.to_string(), value));
         }
         for (site, value) in sites {
@@ -230,7 +227,7 @@ pub fn window_ground(register: fn(&mut ScriptVm), entry: &SheetEntry) {
     under(register, entry, |vm, sheet| {
         let window = script_eval!(vm, {mod.widgets.Window{}});
         let obj = window.as_object().expect("a window object");
-        let shows = vm.bx.heap.value(obj, id!(show_bg).into(), NoTrap).as_bool();
+        let shows = vm.value(obj, id!(show_bg)).as_bool();
         let asks = sheet.widgets.contains("mod.widgets.Window.show_bg = true");
         assert_eq!(shows, Some(asks), "{}: the window's ground", entry.id);
     });
@@ -244,7 +241,7 @@ pub fn contrast(register: fn(&mut ScriptVm), entry: &SheetEntry) {
     use crate::theme_tokens::{reads_on, INVERSE, LEGIBLE, MEANING, READABLE, SURFACES, VARIANTS};
     under(register, entry, |vm, _| {
         let theme = vm.module(id!(theme));
-        let val = |key: &str| vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color();
+        let val = |key: &str| vm.value(theme, LiveId::from_str(key)).as_color();
         let mut bad = Vec::new();
         for (pairs, need) in [(MEANING, READABLE), (SURFACES, READABLE), (INVERSE, READABLE), (VARIANTS, LEGIBLE)] {
             for (ground, ink) in pairs {
@@ -336,10 +333,10 @@ pub fn replaced_shaders_compile(register: fn(&mut ScriptVm), entry: &SheetEntry)
             register(vm);
             let widgets = vm.module(id!(widgets));
             for (template, draw, numbers) in draws.iter_mut() {
-                let proto = vm.bx.heap.value(widgets, LiveId::from_str(template).into(), NoTrap);
-                let stock = proto.as_object().map(|proto| vm.bx.heap.value(proto, LiveId::from_str(draw).into(), NoTrap));
+                let proto = vm.value(widgets, LiveId::from_str(template));
+                let stock = proto.as_object().map(|proto| vm.value(proto, LiveId::from_str(draw)));
                 let Some(stock) = stock.and_then(|value| value.as_object()) else { continue };
-                numbers.retain(|field| vm.bx.heap.value(stock, LiveId::from_str(field).into(), NoTrap).as_f64().is_none());
+                numbers.retain(|field| vm.value(stock, LiveId::from_str(field)).as_f64().is_none());
             }
         });
     }
@@ -347,25 +344,25 @@ pub fn replaced_shaders_compile(register: fn(&mut ScriptVm), entry: &SheetEntry)
     under(register, entry, |vm, _| {
         let widgets = vm.module(id!(widgets));
         for (template, draw, numbers) in &draws {
-            let proto = vm.bx.heap.value(widgets, LiveId::from_str(template).into(), NoTrap);
+            let proto = vm.value(widgets, LiveId::from_str(template));
             let Some(proto) = proto.as_object() else { continue };
-            let value = vm.bx.heap.value(proto, LiveId::from_str(draw).into(), NoTrap);
+            let value = vm.value(proto, LiveId::from_str(draw));
             let Some(draw_obj) = value.as_object() else { continue };
             let mut builds = Vec::new();
             if !numbers.is_empty() {
-                let derived = vm.bx.heap.new_with_proto(value);
+                let derived = vm.new_with_proto(value);
                 for field in numbers {
                     let key: ScriptValue = LiveId::from_str(field).into();
-                    let at = vm.bx.heap.value(draw_obj, key, NoTrap).as_f64().unwrap_or(0.0);
+                    let at = vm.value(draw_obj, key).as_f64().unwrap_or(0.0);
                     // A whole number, as `lamp_size: 7` writes it: a uniform takes it
                     // as its float, a bare value keeps it an integer.
-                    vm.bx.heap.set_value_def(derived, key, ScriptValue::from_i32(at.round() as i32 + 1));
+                    vm.set_value_def(derived, key, ScriptValue::from_i32(at.round() as i32 + 1));
                 }
                 builds.push(("an instance setting its numbers", ScriptValue::from(derived)));
             }
             builds.push(("the template", value));
             for (how, build) in builds {
-                vm.bx.captured_errors = Some(Vec::new());
+                vm.capture_errors();
                 let quad = DrawQuad::script_from_value(vm, build);
                 let errors = vm.take_errors();
                 assert!(

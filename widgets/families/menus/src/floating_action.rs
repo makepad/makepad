@@ -4579,7 +4579,7 @@ mod tests {
     /// The theme easing a token names, read from the running theme.
     fn theme_value(vm: &mut ScriptVm, name: &str) -> ScriptValue {
         let theme = vm.module(id!(theme));
-        vm.bx.heap.value(theme, LiveId::from_str(name).into(), NoTrap)
+        vm.value(theme, LiveId::from_str(name))
     }
 
     const THEME_EASES: [&str; 8] = [
@@ -4769,9 +4769,7 @@ mod tests {
                         mod.shader.test_compile_draw_source(mod.widgets.FloatingActionItem.draw_chip, "glsl", false)
                     }),
                 };
-                let text = vm
-                    .bx
-                    .heap
+                let text = vm.heap()
                     .string_with(value, |_heap, text| text.to_string())
                     .expect("the compiler answers with source");
                 assert!(!text.starts_with("ERRORS:"), "{name} did not compile: {text}");

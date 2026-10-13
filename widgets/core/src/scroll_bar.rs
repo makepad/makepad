@@ -1247,7 +1247,10 @@ impl ScrollBar {
                     self.animator_play(cx, ids!(hover.drag));
                     let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
-                        ScrollAxis::Horizontal => rel.x,
+                        ScrollAxis::Horizontal => {
+                            cx.claim_finger_drag(fe.digit_id);
+                            rel.x
+                        }
                         ScrollAxis::Vertical => rel.y,
                     };
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();

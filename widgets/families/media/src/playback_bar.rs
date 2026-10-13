@@ -47,7 +47,7 @@
 //! answer the wheel — a bar inside a scrolling page that seeked on scroll
 //! would throw the playhead across the room every time the page moved.
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     family_api::measure,
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -780,8 +780,7 @@ impl Widget for PlaybackBar {
     ) -> ScriptAsyncResult {
         if method == live_id!(set_position) || method == live_id!(set_duration) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                if let Some(seconds) = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64() {
+                if let Some(seconds) = vm.vec_value_trap(args_obj, 0).as_f64() {
                     if method == live_id!(set_position) {
                         vm.with_cx_mut(|cx| self.set_position(cx, seconds));
                     } else {
@@ -845,6 +844,7 @@ impl Widget for PlaybackBar {
                 // one's first target back.
                 self.gate.rest();
                 self.animator_play(cx, ids!(drag.on));
+                cx.claim_finger_drag(fe.digit_id);
                 cx.widget_action(uid, PlaybackBarAction::Grabbed);
                 let fraction = self.fraction_at_x(fe.abs.x, fe.rect);
                 self.drive(cx, fraction, fe.time, Stroke::Down);

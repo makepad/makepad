@@ -47,6 +47,8 @@ pub(super) enum ModelLane {
     Cube = 4,
     Alpha = 5,
     Terrain = 6,
+    /// GPU-skinned characters (shaders/skinned_gpu.rs).
+    SkinnedGpu = 7,
 }
 
 /// The optional features a lane's shader keeps.
@@ -190,12 +192,12 @@ impl Renderer {
 /// frame has them.
 pub(crate) fn variant_object(vm: &mut ScriptVm, base: ScriptObject, features: Features, lit: bool) -> Option<ScriptObject> {
     // The stubs, registered once per VM.
-    let draw = vm.bx.heap.value(vm.bx.heap.modules, id!(draw).into(), NoTrap).as_object()?;
-    if vm.bx.heap.value(draw, id!(scene_variant).into(), NoTrap).as_object().is_none() {
+    let draw = vm.value(vm.modules(), id!(draw)).as_object()?;
+    if vm.value(draw, id!(scene_variant)).as_object().is_none() {
         script_mod(vm);
     }
-    let stubs = vm.bx.heap.value(draw, id!(scene_variant).into(), NoTrap).as_object()?;
-    let obj = vm.bx.heap.new_with_proto_no_vec(base.into());
+    let stubs = vm.value(draw, id!(scene_variant)).as_object()?;
+    let obj = vm.heap_mut().new_with_proto_no_vec(base.into());
     // (switched off, the function it replaces, the stub it becomes)
     let replace: [(bool, LiveId, LiveId); 13] = [
         (!features.clip, id!(clip), id!(clip)),
@@ -221,17 +223,17 @@ pub(crate) fn variant_object(vm: &mut ScriptVm, base: ScriptObject, features: Fe
         }
         // Only a function the program has (a lane without the feature keeps
         // its own code).
-        let own = vm.bx.heap.object_method(base, method.into(), NoTrap);
-        if !own.as_object().is_some_and(|f| vm.bx.heap.is_fn(f)) {
+        let own = vm.object_method(base, method);
+        if !own.as_object().is_some_and(|f| vm.is_fn(f)) {
             continue;
         }
         // A stub of scene_variant's, or else the program's own.
-        let f = match vm.bx.heap.value(stubs, stub.into(), NoTrap).as_object() {
+        let f = match vm.value(stubs, stub).as_object() {
             Some(f) => Some(f),
-            None => vm.bx.heap.object_method(base, stub.into(), NoTrap).as_object(),
+            None => vm.object_method(base, stub).as_object(),
         };
-        let f = f.filter(|f| vm.bx.heap.is_fn(*f))?;
-        if !vm.bx.heap.set_value(obj, method.into(), f.into(), NoTrap).is_nil() {
+        let f = f.filter(|f| vm.is_fn(*f))?;
+        if !vm.set_value(obj, method, f).is_nil() {
             return None;
         }
         replaced = true;
@@ -268,7 +270,7 @@ fn shader_of<T: ScriptNew + ScriptApply>(vm: &mut ScriptVm, obj: Option<ScriptOb
 
 impl ModelLane {
     fn name(self) -> &'static str {
-        ["diffuse", "PBR", "city", "foliage", "cube", "alpha", "terrain"][self as usize]
+        ["diffuse", "PBR", "city", "foliage", "cube", "alpha", "terrain", "skinned"][self as usize]
     }
 
     fn type_id(self) -> ScriptTypeId {
@@ -280,6 +282,7 @@ impl ModelLane {
             ModelLane::Cube => DrawSceneCube::script_type_id_static(),
             ModelLane::Alpha => DrawSceneAlpha::script_type_id_static(),
             ModelLane::Terrain => DrawSceneTerrain::script_type_id_static(),
+            ModelLane::SkinnedGpu => DrawSceneSkinnedGpu::script_type_id_static(),
         }
     }
 
@@ -293,13 +296,14 @@ impl ModelLane {
             ModelLane::Cube => shader_of::<DrawSceneCube>(vm, obj, |d| &mut d.cube.draw_vars),
             ModelLane::Alpha => shader_of::<DrawSceneAlpha>(vm, obj, |d| &mut d.cube.cube.draw_vars),
             ModelLane::Terrain => shader_of::<DrawSceneTerrain>(vm, obj, |d| &mut d.draw_vars),
+            ModelLane::SkinnedGpu => shader_of::<DrawSceneSkinnedGpu>(vm, obj, |d| &mut d.draw_vars),
         }
     }
 }
 
 /// Build the variant of `lane` with `features`: (stock shader, variant).
 fn build(vm: &mut ScriptVm, lane: ModelLane, features: Features) -> Option<(DrawShaderId, DrawShaderId)> {
-    let base = vm.bx.heap.type_default_for_id(lane.type_id())?;
+    let base = vm.heap().type_default_for_id(lane.type_id())?;
     let stock = lane.shader(vm, None)?;
     // Every feature on and `clip` kept: the stock shader itself.
     let Some(obj) = variant_object(vm, base, features, true) else { return Some((stock, stock)) };
@@ -351,13 +355,13 @@ mod tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             makepad_draw::script_mod(vm);
-            vm.bx.heap.new_module(id!(prelude));
+            vm.heap_mut().new_module(id!(prelude));
             script_eval!(vm, {
                 mod.prelude.widgets_internal = {
                     ..mod.std, ..mod.pod, ..mod.math, ..mod.sdf, ..mod.shader, draw:mod.draw,
                 }
             });
-            vm.bx.heap.new_module(id!(widgets));
+            vm.heap_mut().new_module(id!(widgets));
             makepad_render_graph::pass_stdlib(vm);
             crate::local_shadows::sampling::script_mod(vm);
             crate::clustered::script_mod(vm);
@@ -365,7 +369,7 @@ mod tests {
             crate::shaders::script_mod(vm);
             crate::local_shadows::script_mod(vm);
             script_mod(vm);
-            let draw = vm.bx.heap.value(vm.bx.heap.modules, id!(draw).into(), NoTrap).as_object().unwrap();
+            let draw = vm.value(vm.modules(), id!(draw)).as_object().unwrap();
             // `build` checks the layout against the stock shader itself; the
             // GLSL program must define every function it calls (a stub
             // shared by two names was emitted under one of them only).
@@ -376,15 +380,15 @@ mod tests {
                 Features { csm: true, cluster: true, ..Default::default() },
                 Features { gi: true, gi_debug: true, csm: true, csm_debug: true, cluster: true, local_shadows: true, clip: false },
             ] {
-                for lane in [ModelLane::Diffuse, ModelLane::Pbr, ModelLane::City, ModelLane::Foliage, ModelLane::Cube, ModelLane::Alpha, ModelLane::Terrain] {
+                for lane in [ModelLane::Diffuse, ModelLane::Pbr, ModelLane::City, ModelLane::Foliage, ModelLane::Cube, ModelLane::Alpha, ModelLane::Terrain, ModelLane::SkinnedGpu] {
                     let name = lane.name();
                     assert!(build(vm, lane, features).is_some(), "{name} variant {features:?}");
-                    let base = vm.bx.heap.type_default_for_id(lane.type_id()).unwrap();
+                    let base = vm.heap().type_default_for_id(lane.type_id()).unwrap();
                     for lit in [true, false] {
                         let Some(obj) = variant_object(vm, base, features, lit) else { continue };
-                        vm.bx.heap.set_value(draw, id!(variant_under_test).into(), obj.into(), NoTrap);
+                        vm.set_value(draw, id!(variant_under_test), obj);
                         let source = script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.variant_under_test, "glsl", false) });
-                        let source = vm.bx.heap.string_with(source, |_, s| s.to_string()).unwrap_or_default();
+                        let source = vm.heap().string_with(source, |_, s| s.to_string()).unwrap_or_default();
                         assert!(!source.is_empty(), "{name} variant {features:?} lit {lit}: no GLSL source");
                         // `<type> io_name(..){` at the start of a line.
                         let defined: std::collections::HashSet<&str> = source.lines()

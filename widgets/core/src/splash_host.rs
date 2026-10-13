@@ -29,7 +29,7 @@
 //! host-assigned (`Splash::set_host_tag`), so the host can trust request
 //! identity. The callback is held as a rooted `ScriptFnRef` until the host
 //! answers via [`splash_host_respond`], which re-enters the owning isolate
-//! under the standard entry budget and calls it with `{ok, data, error}`.
+//! and calls it with `{ok, data, error}`.
 //! Dead isolates drop their queued requests and callbacks in the isolate GC.
 
 use std::collections::HashMap;
@@ -161,24 +161,23 @@ pub fn splash_host_respond(
         // values in another and the fault would surface later, in the GC, with
         // nothing left to point at the cause. One compare turns that into an
         // undeliverable answer, which callers already handle.
-        if vm.bx.heap.heap_key() != heap_key {
+        if vm.heap_key() != heap_key {
             delivered = false;
             return;
         }
         let (ok, data, error) = match result {
             Ok(json) => {
                 let mut parser = makepad_script::json::JsonParserThread::default();
-                let data = parser.read_json(json, &mut vm.bx.heap);
+                let data = parser.read_json(json, vm.heap_mut());
                 (true, data, NIL)
             }
             Err(msg) => (false, NIL, vm.new_string_with(|_vm, s| s.push_str(msg))),
         };
-        let obj = vm.bx.heap.new_object();
-        let trap = vm.bx.threads.cur().trap.pass();
+        let obj = vm.new_object();
         // `is_ok`, never `ok`: `ok` is a script keyword and unusable as a field.
-        vm.bx.heap.set_value(obj, id!(is_ok).into(), ok.into(), trap);
-        vm.bx.heap.set_value(obj, id!(data).into(), data, trap);
-        vm.bx.heap.set_value(obj, id!(error).into(), error, trap);
+        vm.set_value_trap(obj, id!(is_ok), ok);
+        vm.set_value_trap(obj, id!(data), data);
+        vm.set_value_trap(obj, id!(error), error);
         vm.with_instruction_limit(WIDGET_SCRIPT_INSTRUCTION_LIMIT, |vm| {
             vm.call(callback.as_object().into(), &[obj.into()]);
         });
@@ -235,17 +234,17 @@ pub fn script_mod(vm: &mut ScriptVm) {
             };
 
             let mut args_json = String::new();
-            vm.bx.heap.to_json_inner(request_args, &mut args_json);
+            vm.heap().to_json_inner(request_args, &mut args_json);
 
             let callback = if let Some(obj) = on_result.as_object() {
-                Some(vm.bx.heap.new_fn_ref(obj))
+                Some(vm.heap_mut().new_fn_ref(obj))
             } else if on_result.is_nil() {
                 None
             } else {
                 return script_err_invalid_args!(vm.trap(), "on_result must be a fn or nil");
             };
 
-            let heap_key = vm.bx.heap.heap_key();
+            let heap_key = vm.heap_key();
             let req_id = BRIDGE.with(|b| {
                 let mut b = b.borrow_mut();
                 b.next_req_id += 1;
@@ -274,17 +273,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
     );
 
     vm.add_method(host, id_lut!(capabilities), script_args_def!(), |vm, _args| {
-        let heap_key = vm.bx.heap.heap_key();
+        let heap_key = vm.heap_key();
         let caps = BRIDGE.with(|b| b.borrow().caps.get(&heap_key).cloned().unwrap_or_default());
-        let array = vm.bx.heap.new_array();
-        vm.bx.heap.array_mut_mut_self_with(array, |heap, storage| {
-            *storage = ScriptArrayStorage::ScriptValue(Default::default());
-            if let ScriptArrayStorage::ScriptValue(vec) = storage {
-                for cap in &caps {
-                    vec.push_back(heap.new_string_from_str(cap));
-                }
-            }
-        });
+        let array = vm.heap_mut().new_array();
+        for cap in &caps {
+            let value = vm.heap_mut().new_string_from_str(cap);
+            vm.heap_mut().array_push_unchecked(array, value);
+        }
         array.into()
     });
 
@@ -295,7 +290,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         let Some(cap) = cap else {
             return script_err_invalid_args!(vm.trap(), "capability must be a string");
         };
-        let heap_key = vm.bx.heap.heap_key();
+        let heap_key = vm.heap_key();
         BRIDGE
             .with(|b| {
                 b.borrow()

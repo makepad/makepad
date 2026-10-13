@@ -13,23 +13,26 @@
 //! slots retire only after their fences; a job begun under the old layout
 //! cannot publish.
 
-use makepad_render_kernels::compute::kernel::{FieldTy, Layout, LayoutField};
-use makepad_render_kernels::compute::sched::{Job, JobHandle, Priority};
-use makepad_render_kernels::compute::admission::{JobBudget, Origin};
+use makepad_render_kernels::compute::boundary::{LayoutFieldView, LayoutView};
+use makepad_render_kernels::compute::kernel::FieldTy;
+use makepad_render_kernels::dispatch::sched::{Job, JobHandle, Priority};
+use makepad_render_kernels::dispatch::admission::{JobBudget, Origin};
 use makepad_render_kernels::{engine, FrameFences, ManualFences, OutputRing, PublishError, SlotState, Topology, WriteLease};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-fn inst_a() -> Layout {
-    Layout { name: "Inst".into(), stride: 4, fields: vec![LayoutField { name: "pos".into(), ty: FieldTy::Vec3, offset: 0 }, LayoutField { name: "tag".into(), ty: FieldTy::I32, offset: 3 }] }
+fn inst_a() -> LayoutView<'static> {
+    LayoutView { name: "Inst", stride: 4, fields: &[LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 }, LayoutFieldView { name: "tag", ty: FieldTy::I32, offset: 3 }] }
 }
 
-fn inst_b() -> Layout {
-    let mut l = inst_a();
-    l.stride = 6;
-    l.fields.push(LayoutField { name: "birth".into(), ty: FieldTy::Vec2, offset: 4 });
-    l
+fn inst_b() -> LayoutView<'static> {
+    const FIELDS: &[LayoutFieldView<'static>] = &[
+        LayoutFieldView { name: "pos", ty: FieldTy::Vec3, offset: 0 },
+        LayoutFieldView { name: "tag", ty: FieldTy::I32, offset: 3 },
+        LayoutFieldView { name: "birth", ty: FieldTy::Vec2, offset: 4 },
+    ];
+    LayoutView { name: "Inst", stride: 6, fields: FIELDS }
 }
 
 const SRC_A: &str = "let out = output(Inst)\nlet frame = param(0)\nfn instance(i) { out[i].pos = vec3(float(i), frame, 0.5)\n out[i].tag = 1 }";

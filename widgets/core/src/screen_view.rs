@@ -20,7 +20,21 @@
 //! window reads on a dark ground and a light one alike: a ring a little
 //! darker than whatever it is set in, a device pixel of dark at its edge,
 //! and a device pixel of light on the ground under its bottom edge.
-use crate::{makepad_derive_widget::*, makepad_draw::*, view::View, widget::*};
+//!
+//! The glass can answer the pointer (`field_reach`): it then carries the
+//! pointer's field and the trail of drops the pointer leaves as it moves
+//! across, as instances of `draw_glass` (see `PointerGlass`), for a glass
+//! that water rings across. With `glass_backdrop` the glass is lifted over
+//! the content while the trail is alive, with the window's scene bound, so
+//! its shader can bend the digits under it. Both are off by default, and a
+//! screen whose pointer is still costs what it always did.
+use crate::{
+    makepad_derive_widget::*,
+    makepad_draw::*,
+    pointer_field::{PointerGlass, PointerGlassSetup},
+    view::View,
+    widget::*,
+};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -45,6 +59,14 @@ script_mod! {
         sheen: 0.03
         /** scan line depth; 0 draws none 0..0.5 step 0.01 */
         scan: 0.0
+        /** how far past the screen's edge the pointer's field and trail reach, in points; 0 keeps them off 0..24 step 0.5 */
+        field_reach: 0.0
+        /** how far the pointer moves between the trail's drops, in points 1..40 step 0.5 */
+        trail_spacing: 6.0
+        /** how long a drop of the trail lives, in seconds 0.2..4 step 0.05 */
+        trail_life: 1.3
+        /** while the trail is alive, the glass reads the content under it from the window's scene */
+        glass_backdrop: false
 
         draw_bg +: {
             bezel: instance(2.0)
@@ -158,6 +180,30 @@ pub struct ScreenView {
     /// Scan line depth; zero draws none.
     #[live]
     pub scan: f64,
+    /// How far past the screen's edge, in points, the pointer is in reach
+    /// of the glass: above zero, `draw_glass` gets the pointer's field and
+    /// the trail of drops the pointer leaves as it moves (`pointer_field`,
+    /// `trail_0` to `trail_7` and `trail_life`, see [`PointerGlass`]).
+    /// Zero, the default, keeps them off.
+    #[live]
+    pub field_reach: f64,
+    /// How far the pointer moves between the trail's drops, in points.
+    #[live(6.0)]
+    pub trail_spacing: f64,
+    /// How long a drop of the trail lives, in seconds: the frames stop when
+    /// the newest drop is this old.
+    #[live(1.3)]
+    pub trail_life: f64,
+    /// While the trail is alive, the glass is drawn over the content on an
+    /// overlay with the window's scene of the frame bound (`has_gauss`,
+    /// slot 0 `scene_texture`, `source_size`, `source_y_flip`), so its
+    /// shader can read what lies under it and bend it. At rest the glass is
+    /// drawn in place with nothing bound, and the window captures nothing
+    /// for it. False, the default, never lifts it.
+    #[live]
+    pub glass_backdrop: bool,
+    #[rust]
+    pointer_glass: PointerGlass,
     #[rust]
     draw_state: DrawStateWrap<ScreenDraw>,
     #[rust]
@@ -204,7 +250,8 @@ impl Widget for ScreenView {
             // Drawn at any sheen: a sheet may have given the glass a pixel
             // function of its own that does not read it.
             let rect = self.view.area().rect(cx);
-            self.draw_glass.draw_abs(cx, rect);
+            let setup = self.glass_setup();
+            self.pointer_glass.draw(cx, &mut self.draw_glass, rect, &setup);
             cx.end_turtle_with_area(&mut self.area);
             self.draw_state.end();
         }
@@ -212,7 +259,24 @@ impl Widget for ScreenView {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.field_reach > 0.0 {
+            let setup = self.glass_setup();
+            if self.pointer_glass.handle_event(cx, event, &mut self.draw_glass, &setup) {
+                self.view.redraw(cx);
+            }
+        }
         self.view.handle_event(cx, event, scope);
+    }
+}
+
+impl ScreenView {
+    fn glass_setup(&self) -> PointerGlassSetup {
+        PointerGlassSetup {
+            reach: self.field_reach.max(0.0),
+            spacing: self.trail_spacing,
+            life: self.trail_life,
+            backdrop: self.glass_backdrop,
+        }
     }
 }
 
@@ -229,8 +293,7 @@ mod tests {
             "glsl" => crate::script_eval!(vm, {mod.shader.test_compile_draw_source(#(draw), "glsl", false)}),
             _ => crate::script_eval!(vm, {mod.shader.test_compile_draw_source(#(draw), "wgsl", false)}),
         };
-        vm.bx
-            .heap
+        vm.heap()
             .string_with(value, |_heap, text| text.to_string())
             .expect("the compiler answers with source")
     }

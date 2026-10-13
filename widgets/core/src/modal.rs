@@ -331,9 +331,18 @@ impl Widget for Modal {
         let draw_list = self.draw_list.as_mut().unwrap();
         // Tab stays inside an open modal.
         CxDraw::set_nav_trap(cx, draw_list.id(), self.is_open);
-        draw_list.begin_overlay_reuse(cx);
+        draw_list.begin_popup_overlay(cx);
         cx.begin_root_turtle_for_pass(self.view.layout);
-        self.draw_bg.begin(cx, Walk::fill(), self.view.layout);
+        // A closed modal draws no content and takes no event, so a background
+        // that draws nothing (the plain quad's transparent pixel) is not drawn
+        // at all: it was a full-pass quad every frame of every closed modal.
+        // Open, it stays the area the scrim's hits and the sweep lock use.
+        let bg = self.is_open || !self.draw_bg.draws_nothing(cx);
+        if bg {
+            self.draw_bg.begin(cx, Walk::fill(), self.view.layout);
+        } else {
+            cx.begin_turtle(Walk::fill(), self.view.layout);
+        }
 
         if self.is_open {
             let bg_view = self.view.widget(cx, ids!(bg_view));
@@ -347,7 +356,11 @@ impl Widget for Modal {
             let _ = content.draw_all(cx, scope);
         }
 
-        self.draw_bg.end(cx);
+        if bg {
+            self.draw_bg.end(cx);
+        } else {
+            cx.end_turtle();
+        }
         cx.end_pass_sized_turtle();
         self.draw_list.as_mut().unwrap().end(cx);
 

@@ -23,10 +23,9 @@ pub fn script_mod(vm: &mut ScriptVm) {
         script_args!(value = NIL),
         move |vm, args| {
             let value = script_value!(vm, args.value);
-            let snap_obj = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(snap_obj, id!(value).into(), value);
-            vm.bx
-                .heap
+            let snap_obj = vm.new_object();
+            vm.set_value_def(snap_obj, id!(value), value);
+            vm.heap_mut()
                 .set_object_apply_transform(snap_obj, snap_transform_id);
             snap_obj.into()
         },
@@ -44,7 +43,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     // Times should be in range 0-1 (representing animation progress)
     vm.add_method(animator, id!(timeline), script_args!(), move |vm, args| {
         // Get positional args from the vec part
-        let len = vm.bx.heap.vec_len(args);
+        let len = vm.heap().vec_len(args);
 
         // Error if not mod 2 (must be pairs of time/value)
         if len % 2 != 0 {
@@ -61,25 +60,20 @@ pub fn script_mod(vm: &mut ScriptVm) {
         }
 
         // Create timeline object
-        let timeline_obj = vm.bx.heap.new_object();
+        let timeline_obj = vm.new_object();
 
         // Create a keyframes array to store the time/value pairs
-        let keyframes = vm.bx.heap.new_object();
+        let keyframes = vm.new_object();
 
         // Copy keyframes from args
         for i in 0..len {
-            let value = vm.bx.heap.vec_value(args, i, NoTrap);
-            vm.bx
-                .heap
-                .vec_push(keyframes, ScriptValue::NIL, value, NoTrap);
+            let value = vm.vec_value(args, i);
+            vm.vec_push(keyframes, ScriptValue::NIL, value);
         }
 
         // Store keyframes on timeline object
-        vm.bx
-            .heap
-            .set_value_def(timeline_obj, id!(keyframes).into(), keyframes.into());
-        vm.bx
-            .heap
+        vm.set_value_def(timeline_obj, id!(keyframes), keyframes);
+        vm.heap_mut()
             .set_object_apply_transform(timeline_obj, timeline_transform_id);
 
         timeline_obj.into()
@@ -97,7 +91,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     script_mod(vm);
 }
 
-pub trait AnimatorImpl {
+pub trait AnimatorImpl: ScriptApply + Sized {
     fn animator_cut(&mut self, cx: &mut Cx, state: &[LiveId; 2]) {
         self.animator_cut_scoped(cx, state, &mut Scope::empty())
     }
@@ -147,22 +141,61 @@ pub trait AnimatorImpl {
         self.animator_handle_event_scoped(cx, event, &mut Scope::empty())
     }
 
-    // implemented by proc macro
-    fn animator_cut_scoped(&mut self, cx: &mut Cx, state: &[LiveId; 2], scope: &mut Scope);
+    // implemented by `#[derive(Animator)]`: the `animator` field
+    fn animator_field(&self) -> &Animator;
+    fn animator_field_mut(&mut self) -> &mut Animator;
+
+    fn animator_cut_scoped(&mut self, cx: &mut Cx, state: &[LiveId; 2], scope: &mut Scope) {
+        // If the VM is already held (we're inside an apply walk's cx.with_vm),
+        // cut() -> cx.with_vm would re-enter and panic; defer instead.
+        if cx.is_script_vm_held() {
+            self.animator_field_mut().defer_cut(cx, state);
+            return;
+        }
+        if let Some(value) = self.animator_field_mut().cut(cx, state) {
+            // The value lives on the animator's heap, which for a widget inside
+            // a Splash is an isolate VM, not the app VM. Apply it there.
+            let vm_id = self.animator_field().vm_id();
+            Animator::apply_value(cx, vm_id, self, scope, value);
+        }
+    }
     fn animator_play_scoped(
         &mut self,
         cx: &mut Cx,
         state: &[LiveId; 2],
         play: Option<Play>,
         scope: &mut Scope,
-    );
-    fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool;
+    ) {
+        if cx.is_script_vm_held() {
+            self.animator_field_mut().defer_play(cx, state, play);
+            return;
+        }
+        if let Some(value) = self.animator_field_mut().play(cx, state, play) {
+            let vm_id = self.animator_field().vm_id();
+            Animator::apply_value(cx, vm_id, self, scope, value);
+        }
+    }
+    fn animator_in_state(&self, cx: &Cx, check_state_pair: &[LiveId; 2]) -> bool {
+        self.animator_field().in_state(cx, check_state_pair)
+    }
     fn animator_handle_event_scoped(
         &mut self,
         cx: &mut Cx,
         event: &Event,
         scope: &mut Scope,
-    ) -> AnimatorAction;
+    ) -> AnimatorAction {
+        let mut act = AnimatorAction::None;
+        // Replay any cut/play deferred while the VM was held (the VM is free
+        // during event handling). A no-op when nothing is queued.
+        let vm_id = self.animator_field().vm_id();
+        for value in self.animator_field_mut().flush_deferred(cx) {
+            Animator::apply_value(cx, vm_id, self, scope, value);
+        }
+        if let Some(value) = self.animator_field_mut().handle_event(cx, event, &mut act) {
+            Animator::apply_value(cx, vm_id, self, scope, value);
+        }
+        act
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -192,8 +225,9 @@ impl ScriptHook for AnimatorGroup {
             return false;
         };
 
-        let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
-            for (key, map_value) in map.iter() {
+        let mut process_map = |vm: &mut ScriptVm, entries: &[ScriptMapEntry]| {
+            for map_value in entries {
+                let key = map_value.key;
                 if let Some(key_id) = key.as_id() {
                     if key_id == id!(default) {
                         if let Some(default_id) = map_value.value.as_id() {
@@ -214,10 +248,12 @@ impl ScriptHook for AnimatorGroup {
 
         if apply.is_eval() {
             // For eval, only process the object's own map (no prototype chain)
-            vm.map_mut_with(obj, &mut process_map);
+            let entries = vm.heap().map_entries(obj);
+            process_map(vm, &entries);
         } else {
             // Walk prototype chain from root to leaf, so child properties override parent
-            vm.proto_map_iter_mut_with(obj, &mut process_map);
+            let entries = vm.heap().proto_map_entries(obj);
+            process_map(vm, &entries);
         }
 
         true
@@ -263,11 +299,11 @@ mod reload_tests {
         cx.with_vm(|vm| {
             script_mod(vm);
             let animator = vm.module(id!(animator));
-            let snap = vm.bx.heap.value(animator, id!(snap).into(), NoTrap);
+            let snap = vm.value(animator, id!(snap));
             let snapped = vm.call(snap, &[1.0.into()]);
-            assert!(vm.bx.heap.has_apply_transform(snapped), "snap() made no snap object");
+            assert!(vm.heap().has_apply_transform(snapped), "snap() made no snap object");
             let mut slots = [0.0f32; 2];
-            DrawVars::write_value_to_f32_slots(&vm.bx.heap, snapped, &mut slots, 1, 1, DrawShaderAttrFormat::Float);
+            DrawVars::write_value_to_f32_slots(vm.heap(), snapped, &mut slots, 1, 1, DrawShaderAttrFormat::Float);
             assert_eq!(slots, [0.0, 1.0]);
         });
     }
@@ -276,19 +312,19 @@ mod reload_tests {
     fn running_animation_survives_collection_of_replaced_stylesheet() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let (group, old_template) = cx.with_vm(|vm| {
-            let off = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(off, id!(opacity).into(), 0.0.into());
-            let on = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(on, id!(opacity).into(), 1.0.into());
-            let template = vm.bx.heap.new_object();
-            vm.bx.heap.set_value_def(template, id!(off).into(), off.into());
-            vm.bx.heap.set_value_def(template, id!(on).into(), on.into());
+            let off = vm.new_object();
+            vm.set_value_def(off, id!(opacity), 0.0);
+            let on = vm.new_object();
+            vm.set_value_def(on, id!(opacity), 1.0);
+            let template = vm.new_object();
+            vm.set_value_def(template, id!(off), off);
+            vm.set_value_def(template, id!(on), on);
             let mut group = AnimatorGroup { default: id!(off), ..Default::default() };
-            let off_ref = vm.bx.heap.new_object_ref(off);
-            let on_ref = vm.bx.heap.new_object_ref(on);
+            let off_ref = vm.new_object_ref(off);
+            let on_ref = vm.new_object_ref(on);
             group.states.insert(id!(off), AnimatorState { apply: Some(off_ref), ..Default::default() });
             group.states.insert(id!(on), AnimatorState { apply: Some(on_ref), ..Default::default() });
-            (group, vm.bx.heap.new_object_ref(template))
+            (group, vm.new_object_ref(template))
         });
         let mut animator = Animator { vm_id: MAIN_SPLASH_VM_ID, ..Default::default() };
         animator.groups.insert(id!(hover), group);
@@ -308,7 +344,7 @@ mod reload_tests {
             });
             let result = animator.handle_event(&mut cx, &event, &mut AnimatorAction::None).unwrap();
             let value = cx.with_vm(|vm| {
-                vm.bx.heap.value(result.as_object().unwrap(), id!(opacity).into(), NoTrap).as_f64()
+                vm.value(result.as_object().unwrap(), id!(opacity)).as_f64()
             });
             assert_eq!(value, Some(expected));
         }
@@ -318,14 +354,14 @@ mod reload_tests {
     /// `{slide: {hide: {apply: {offset}}}}` as a widget stylesheet or a
     /// runtime `script_apply_eval!` would hand it to the animator.
     fn slide_tree(vm: &mut ScriptVm, offset: f64) -> ScriptObject {
-        let apply = vm.bx.heap.new_object();
-        vm.bx.heap.set_value_def(apply, id!(offset).into(), offset.into());
-        let hide = vm.bx.heap.new_object();
-        vm.bx.heap.set_value_def(hide, id!(apply).into(), apply.into());
-        let slide = vm.bx.heap.new_object();
-        vm.bx.heap.set_value_def(slide, id!(hide).into(), hide.into());
-        let tree = vm.bx.heap.new_object();
-        vm.bx.heap.set_value_def(tree, id!(slide).into(), slide.into());
+        let apply = vm.new_object();
+        vm.set_value_def(apply, id!(offset), offset);
+        let hide = vm.new_object();
+        vm.set_value_def(hide, id!(apply), apply);
+        let slide = vm.new_object();
+        vm.set_value_def(slide, id!(hide), hide);
+        let tree = vm.new_object();
+        vm.set_value_def(tree, id!(slide), slide);
         tree
     }
 
@@ -337,7 +373,7 @@ mod reload_tests {
         let stylesheet = cx.with_vm(|vm| {
             let tree = slide_tree(vm, 100.0);
             animator.script_apply(vm, &Apply::New, &mut Scope::empty(), tree.into());
-            vm.bx.heap.new_object_ref(tree)
+            vm.new_object_ref(tree)
         });
         // A runtime re-target (an app resizing its page slide to the live
         // width). The eval tree is temporary: after the apply nothing but the
@@ -362,7 +398,7 @@ mod reload_tests {
             });
             let result = animator.handle_event(&mut cx, &event, &mut AnimatorAction::None).unwrap();
             last = cx.with_vm(|vm| {
-                vm.bx.heap.value(result.as_object().unwrap(), id!(offset).into(), NoTrap).as_f64()
+                vm.value(result.as_object().unwrap(), id!(offset)).as_f64()
             });
         }
         assert_eq!(last, Some(402.0));
@@ -460,7 +496,7 @@ impl ScriptHook for Animator {
         if apply.follows_script_rerun() {
             self.tracks.clear();
         }
-        let obj_ref = vm.bx.heap.new_object_ref(obj);
+        let obj_ref = vm.new_object_ref(obj);
         // Minted from the VM we are running in, so this always resolves; the
         // fallback only exists because the lookup is fallible in general.
         self.vm_id = vm
@@ -488,8 +524,9 @@ impl ScriptHook for Animator {
             }
         }
 
-        let mut process_map = |vm: &mut ScriptVm, map: &mut ScriptObjectMap| {
-            for (key, map_value) in map.iter() {
+        let mut process_map = |vm: &mut ScriptVm, entries: &[ScriptMapEntry]| {
+            for map_value in entries {
+                let key = map_value.key;
                 if let Some(group_id) = key.as_id() {
                     // Reuse existing group if present, otherwise create new
                     if let Some(existing) = self.groups.get_mut(&group_id) {
@@ -504,10 +541,12 @@ impl ScriptHook for Animator {
 
         if apply.is_eval() {
             // For eval, only process the object's own map (no prototype chain)
-            vm.map_mut_with(obj, &mut process_map);
+            let entries = vm.heap().map_entries(obj);
+            process_map(vm, &entries);
         } else {
             // Walk prototype chain from root to leaf, so child properties override parent
-            vm.proto_map_iter_mut_with(obj, &mut process_map);
+            let entries = vm.heap().proto_map_entries(obj);
+            process_map(vm, &entries);
         }
 
         // Only mark as defined if we actually have animator groups
@@ -723,6 +762,13 @@ impl Animator {
             .map(|idx| self.tracks[idx].state_id)
             .unwrap_or(current_state_id);
 
+        // Already animating to this very state: asking again must not restart
+        // the track (a widget that re-asserts its state every frame would
+        // otherwise never reach it and keep the frame loop running forever).
+        if existing_track_idx.is_some_and(|idx| self.tracks[idx].state_id == target_state_id) {
+            return None;
+        }
+
         // If we're already in this state and not animating, do nothing
         if current_state_id == target_state_id && existing_track_idx.is_none() {
             return None;
@@ -757,8 +803,8 @@ impl Animator {
                 let state_obj = if let Some(ref obj_ref) = self.state_object {
                     obj_ref.as_object()
                 } else {
-                    let new_obj = vm.bx.heap.new_object();
-                    let obj_ref = vm.bx.heap.new_object_ref(new_obj);
+                    let new_obj = vm.new_object();
+                    let obj_ref = vm.new_object_ref(new_obj);
                     self.state_object = Some(obj_ref);
                     new_obj
                 };
@@ -780,7 +826,7 @@ impl Animator {
         // We sample from state_object (current animated values) or fall back to static state apply.
         let vm_id = self.vm_id;
         let (from_snapshot, target_apply_ref) = cx.with_script_vm_id(vm_id, |vm| {
-            let snapshot = vm.bx.heap.new_object();
+            let snapshot = vm.new_object();
 
             // Get the default state's apply for fallback values
             let default_state_id = group.default;
@@ -792,46 +838,43 @@ impl Animator {
             // For each key in target_apply (including prototype chain), get the "from" value:
             // 1. First try state_object (current animated values)
             // 2. Fall back to default state's apply if not in state_object
-            vm.proto_map_iter_mut_with(
-                target_apply,
-                &mut |vm: &mut ScriptVm, target_map: &mut ScriptObjectMap| {
-                    for (key, _) in target_map.iter() {
-                        // Try state_object first, fall back to default_apply
-                        let from_val = if let Some(ref state_obj_ref) = self.state_object {
-                            let v = vm.bx.heap.value(state_obj_ref.as_object(), *key, NoTrap);
-                            if !v.is_nil() && !v.is_err() {
-                                v
-                            } else if let Some(default_obj) = default_apply {
-                                vm.bx.heap.value(default_obj, *key, NoTrap)
-                            } else {
-                                ScriptValue::NIL
-                            }
-                        } else if let Some(default_obj) = default_apply {
-                            vm.bx.heap.value(default_obj, *key, NoTrap)
-                        } else {
-                            ScriptValue::NIL
-                        };
+            for entry in vm.heap().proto_map_entries(target_apply) {
+                let key = entry.key;
 
-                        if !from_val.is_nil() && !from_val.is_err() {
-                            // Deep copy if it's an object
-                            if let Some(from_obj) = from_val.as_object() {
-                                let new_obj = vm.bx.heap.new_object();
-                                Self::deep_copy_object(vm, new_obj, from_obj);
-                                vm.bx.heap.set_value_def(snapshot, *key, new_obj.into());
-                            } else {
-                                vm.bx.heap.set_value_def(snapshot, *key, from_val);
-                            }
-                        }
+                // Try state_object first, fall back to default_apply
+                let from_val = if let Some(ref state_obj_ref) = self.state_object {
+                    let v = vm.value(state_obj_ref.as_object(), key);
+                    if !v.is_nil() && !v.is_err() {
+                        v
+                    } else if let Some(default_obj) = default_apply {
+                        vm.value(default_obj, key)
+                    } else {
+                        ScriptValue::NIL
                     }
-                },
-            );
+                } else if let Some(default_obj) = default_apply {
+                    vm.value(default_obj, key)
+                } else {
+                    ScriptValue::NIL
+                };
+
+                if !from_val.is_nil() && !from_val.is_err() {
+                    // Deep copy if it's an object
+                    if let Some(from_obj) = from_val.as_object() {
+                        let new_obj = vm.new_object();
+                        Self::deep_copy_object(vm, new_obj, from_obj);
+                        vm.set_value_def(snapshot, key, new_obj);
+                    } else {
+                        vm.set_value_def(snapshot, key, from_val);
+                    }
+                }
+            }
 
             // Both inputs must outlive the stylesheet that started the track,
             // and any later `script_mod` re-run, so GC cannot free them under
             // the running animation.
             (
-                vm.bx.heap.new_object_ref(snapshot),
-                vm.bx.heap.new_object_ref(target_apply),
+                vm.new_object_ref(snapshot),
+                vm.new_object_ref(target_apply),
             )
         });
 
@@ -891,8 +934,8 @@ impl Animator {
             let state_obj = if let Some(ref obj_ref) = self.state_object {
                 obj_ref.as_object()
             } else {
-                let new_obj = vm.bx.heap.new_object();
-                let obj_ref = vm.bx.heap.new_object_ref(new_obj);
+                let new_obj = vm.new_object();
+                let obj_ref = vm.new_object_ref(new_obj);
                 self.state_object = Some(obj_ref);
                 new_obj
             };
@@ -952,6 +995,11 @@ impl Animator {
     /// Check if the animator is in a specific state
     pub fn in_state(&self, _cx: &Cx, state: &[LiveId; 2]) -> bool {
         self.current_state_matches(state)
+    }
+
+    /// Returns the cursor that `state` sets when it is played, if any.
+    pub fn state_cursor(&self, state: &[LiveId; 2]) -> Option<MouseCursor> {
+        self.groups.get(&state[0])?.states.get(&state[1])?.cursor
     }
 
     /// Inspect the requested state without a draw context. Cancel visibility must
@@ -1086,8 +1134,8 @@ impl Animator {
                 let state_obj = if let Some(ref obj_ref) = self.state_object {
                     obj_ref.as_object()
                 } else {
-                    let new_obj = vm.bx.heap.new_object();
-                    let obj_ref = vm.bx.heap.new_object_ref(new_obj);
+                    let new_obj = vm.new_object();
+                    let obj_ref = vm.new_object_ref(new_obj);
                     self.state_object = Some(obj_ref);
                     new_obj
                 };
@@ -1159,96 +1207,74 @@ impl Animator {
     ) {
         // Iterate over the 'to' object's properties INCLUDING prototype chain
         // This ensures we don't miss inherited properties
-        vm.proto_map_iter_mut_with(
-            to,
-            &mut |vm: &mut ScriptVm, to_map: &mut ScriptObjectMap| {
-                for (key, to_value) in to_map.iter() {
-                    let to_val = to_value.value;
+        for entry in vm.heap().proto_map_entries(to) {
+            let key = entry.key;
+            let to_val = entry.value;
 
-                    // Read from 'from' snapshot (never mutated)
-                    let from_val = vm.bx.heap.value(from, *key, NoTrap);
+            // Read from 'from' snapshot (never mutated)
+            let from_val = vm.value(from, key);
 
-                    // Get existing value at this key in result's OWN map only (not prototype)
-                    // This is critical: we must not reuse objects from prototypes as they
-                    // might be shared with template objects
-                    let existing = vm.map_mut_with(result, |_vm, result_map| {
-                        result_map
-                            .get(key)
-                            .map(|v| v.value)
-                            .unwrap_or(ScriptValue::NIL)
-                    });
+            // Get existing value at this key in result's OWN map only (not prototype)
+            // This is critical: we must not reuse objects from prototypes as they
+            // might be shared with template objects
+            let existing = vm.heap().map_own_value(result, key).unwrap_or(ScriptValue::NIL);
 
-                    // Interpolate values (creates new objects for nested structures to avoid aliasing)
-                    let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
+            // Interpolate values (creates new objects for nested structures to avoid aliasing)
+            let interpolated = Self::interpolate_value(vm, from_val, to_val, mix, existing);
 
-                    // Write to result (state_object)
-                    vm.bx.heap.set_value_def(result, *key, interpolated);
-                }
-            },
-        );
+            // Write to result (state_object)
+            vm.set_value_def(result, key, interpolated);
+        }
     }
 
     /// Merge source object's values into target object (used for snap/cut operations)
     /// IMPORTANT: This deep-copies objects from source to avoid mutating templates
-    /// Uses proto_map_iter_mut_with to include inherited properties from prototypes
+    /// Uses proto_map_entries to include inherited properties from prototypes
     fn merge_object(vm: &mut ScriptVm, target: ScriptObject, source: ScriptObject) {
-        vm.proto_map_iter_mut_with(
-            source,
-            &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
-                for (key, source_value) in source_map.iter() {
-                    let source_val = source_value.value;
+        for entry in vm.heap().proto_map_entries(source) {
+            let key = entry.key;
+            let source_val = entry.value;
 
-                    // Get existing value at this key in target's OWN map only
-                    let existing = vm.map_mut_with(target, |_vm, target_map| {
-                        target_map
-                            .get(key)
-                            .map(|v| v.value)
-                            .unwrap_or(ScriptValue::NIL)
-                    });
+            // Get existing value at this key in target's OWN map only
+            let existing = vm.heap().map_own_value(target, key).unwrap_or(ScriptValue::NIL);
 
-                    if let Some(source_obj) = source_val.as_object() {
-                        // Source is an object - we need to handle it carefully
-                        if let Some(existing_obj) = existing.as_object() {
-                            // Both exist as objects in own map - recursively merge into existing
-                            Self::merge_object(vm, existing_obj, source_obj);
-                        } else {
-                            // Target doesn't have this in own map yet - create a COPY, don't reference
-                            let new_obj = vm.bx.heap.new_object();
-                            Self::deep_copy_object(vm, new_obj, source_obj);
-                            vm.bx.heap.set_value_def(target, *key, new_obj.into());
-                        }
-                    } else {
-                        // Primitive value - just copy it directly (primitives are value types)
-                        vm.bx.heap.set_value_def(target, *key, source_val);
-                    }
+            if let Some(source_obj) = source_val.as_object() {
+                // Source is an object - we need to handle it carefully
+                if let Some(existing_obj) = existing.as_object() {
+                    // Both exist as objects in own map - recursively merge into existing
+                    Self::merge_object(vm, existing_obj, source_obj);
+                } else {
+                    // Target doesn't have this in own map yet - create a COPY, don't reference
+                    let new_obj = vm.new_object();
+                    Self::deep_copy_object(vm, new_obj, source_obj);
+                    vm.set_value_def(target, key, new_obj);
                 }
-            },
-        );
+            } else {
+                // Primitive value - just copy it directly (primitives are value types)
+                vm.set_value_def(target, key, source_val);
+            }
+        }
     }
 
     /// Deep copy all values from source object to dest object
     /// This ensures we never share object references with templates
     /// IMPORTANT: Flattens the prototype chain to avoid shared prototype issues
     fn deep_copy_object(vm: &mut ScriptVm, dest: ScriptObject, source: ScriptObject) {
-        // Use proto_map_iter_mut_with to walk the prototype chain and flatten all values
-        vm.proto_map_iter_mut_with(
-            source,
-            &mut |vm: &mut ScriptVm, source_map: &mut ScriptObjectMap| {
-                for (key, source_value) in source_map.iter() {
-                    let source_val = source_value.value;
+        // Use proto_map_entries to walk the prototype chain and flatten all values
+        for entry in vm.heap().proto_map_entries(source) {
+            let key = entry.key;
+            let source_val = entry.value;
 
-                    if let Some(source_obj) = source_val.as_object() {
-                        // Recursively copy nested objects (also flattening their prototypes)
-                        let new_obj = vm.bx.heap.new_object();
-                        Self::deep_copy_object(vm, new_obj, source_obj);
-                        vm.bx.heap.set_value_def(dest, *key, new_obj.into());
-                    } else {
-                        // Primitive - copy directly
-                        vm.bx.heap.set_value_def(dest, *key, source_val);
-                    }
-                }
-            },
-        );
+            if let Some(source_obj) = source_val.as_object() {
+                // Recursively copy nested objects (also flattening their prototypes)
+                let new_obj = vm.new_object();
+                Self::deep_copy_object(vm, new_obj, source_obj);
+                vm.set_value_def(dest, key, new_obj);
+            } else {
+                // Primitive - copy directly
+                vm.set_value_def(dest, key, source_val);
+            }
+        }
     }
 
     /// Interpolate between two ScriptValues
@@ -1266,17 +1292,17 @@ impl Animator {
             // For objects, we must create a COPY, not return the template directly!
             if let Some(to_obj) = to.as_object() {
                 // Check if it's an apply_transform (snap/timeline) - handle those specially
-                if vm.bx.heap.has_apply_transform(to) {
-                    let keyframes = vm.bx.heap.value(to_obj, id!(keyframes).into(), NoTrap);
+                if vm.heap().has_apply_transform(to) {
+                    let keyframes = vm.value(to_obj, id!(keyframes));
                     if keyframes.as_object().is_some() {
                         // Timeline - just return to value for now (the timeline itself, not interpolated)
                         return to;
                     }
                     // Snap - return the stored value
-                    return vm.bx.heap.value(to_obj, id!(value).into(), NoTrap);
+                    return vm.value(to_obj, id!(value));
                 }
                 // Regular object - create a COPY to avoid aliasing with template
-                let new_obj = vm.bx.heap.new_object();
+                let new_obj = vm.new_object();
                 Self::deep_copy_object(vm, new_obj, to_obj);
                 return new_obj.into();
             }
@@ -1286,14 +1312,14 @@ impl Animator {
 
         // Handle apply_transform objects (snap and timeline)
         if let Some(to_obj) = to.as_object() {
-            if vm.bx.heap.has_apply_transform(to) {
+            if vm.heap().has_apply_transform(to) {
                 // Check if it's a timeline object (has keyframes property)
-                let keyframes = vm.bx.heap.value(to_obj, id!(keyframes).into(), NoTrap);
+                let keyframes = vm.value(to_obj, id!(keyframes));
                 if let Some(kf_obj) = keyframes.as_object() {
                     return Self::interpolate_timeline(vm, from, kf_obj, mix, existing);
                 }
                 // Otherwise it's a snap object - return the stored value
-                return vm.bx.heap.value(to_obj, id!(value).into(), NoTrap);
+                return vm.value(to_obj, id!(value));
             }
 
             // If it's an object, recursively interpolate
@@ -1303,7 +1329,7 @@ impl Animator {
                 // After first frame, we reuse the same object and just update its keys.
                 let result_obj = existing
                     .as_object()
-                    .unwrap_or_else(|| vm.bx.heap.new_object());
+                    .unwrap_or_else(|| vm.new_object());
                 Self::interpolate_object(vm, result_obj, from_obj, to_obj, mix);
                 return result_obj.into();
             } else {
@@ -1384,7 +1410,7 @@ impl Animator {
         mix: f64,
         existing: ScriptValue,
     ) -> ScriptValue {
-        let len = vm.bx.heap.vec_len(keyframes);
+        let len = vm.heap().vec_len(keyframes);
         let num_pairs = len / 2;
 
         if num_pairs == 0 {
@@ -1392,13 +1418,10 @@ impl Animator {
         }
 
         // Get first keyframe
-        let first_time = vm
-            .bx
-            .heap
-            .vec_value(keyframes, 0, NoTrap)
+        let first_time = vm.vec_value(keyframes, 0)
             .as_f64()
             .unwrap_or(0.0);
-        let first_value = vm.bx.heap.vec_value(keyframes, 1, NoTrap);
+        let first_value = vm.vec_value(keyframes, 1);
 
         // If mix is before first keyframe, interpolate from `from` to first keyframe value
         if mix <= first_time {
@@ -1410,16 +1433,10 @@ impl Animator {
         }
 
         // Get last keyframe
-        let last_time = vm
-            .bx
-            .heap
-            .vec_value(keyframes, (num_pairs - 1) * 2, NoTrap)
+        let last_time = vm.vec_value(keyframes, (num_pairs - 1) * 2)
             .as_f64()
             .unwrap_or(1.0);
-        let last_value = vm
-            .bx
-            .heap
-            .vec_value(keyframes, (num_pairs - 1) * 2 + 1, NoTrap);
+        let last_value = vm.vec_value(keyframes, (num_pairs - 1) * 2 + 1);
 
         // If mix is at or after last keyframe, return last value
         if mix >= last_time {
@@ -1431,13 +1448,10 @@ impl Animator {
         let mut v0 = first_value;
 
         for i in 1..num_pairs {
-            let t1 = vm
-                .bx
-                .heap
-                .vec_value(keyframes, i * 2, NoTrap)
+            let t1 = vm.vec_value(keyframes, i * 2)
                 .as_f64()
                 .unwrap_or(1.0);
-            let v1 = vm.bx.heap.vec_value(keyframes, i * 2 + 1, NoTrap);
+            let v1 = vm.vec_value(keyframes, i * 2 + 1);
 
             if mix <= t1 {
                 // Interpolate between t0,v0 and t1,v1
@@ -1638,6 +1652,10 @@ pub enum Ease {
         cp2: f64,
         cp3: f64,
     },
+    /// Material's emphasized easing, i.e., Android's `fast_out_extra_slow_in`,
+    /// which Android uses for its activity transitions.
+    #[live]
+    Emphasized,
 }
 
 impl Ease {
@@ -1701,6 +1719,7 @@ impl From<&Ease> for crate::tween::Easing {
                 x2: cp2,
                 y2: cp3,
             },
+            Ease::Emphasized => E::Emphasized,
         }
     }
 }
@@ -1709,5 +1728,26 @@ impl From<&Ease> for crate::tween::Easing {
 impl From<Ease> for crate::tween::Easing {
     fn from(e: Ease) -> Self {
         Self::from(&e)
+    }
+}
+
+#[cfg(test)]
+mod ease_tests {
+    use super::*;
+
+    #[test]
+    fn emphasized_matches_androids_fast_out_extra_slow_in() {
+        // Sampled from the path data of Android's `fast_out_extra_slow_in` interpolator.
+        let samples = [(0.1, 0.0935), (1.0 / 6.0, 0.4), (0.25, 0.7728), (0.5, 0.9506), (0.75, 0.9914)];
+        for (t, expected) in samples {
+            assert!((Ease::Emphasized.map(t) - expected).abs() < 1e-4, "t = {t}");
+        }
+        let mut prev = 0.0;
+        for i in 0..=1000 {
+            let t = i as f64 / 1000.0;
+            let mix = Ease::Emphasized.map(t);
+            assert!(mix >= prev, "steps backwards at t = {t}");
+            prev = mix;
+        }
     }
 }

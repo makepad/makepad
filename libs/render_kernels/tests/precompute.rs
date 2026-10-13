@@ -1,6 +1,6 @@
 //! AK5: a stepper run ahead of time into a history, sampled by t.
 
-use makepad_render_kernels::compute::sched::{InlineExecutor, Job, Priority};
+use makepad_render_kernels::dispatch::sched::{InlineExecutor, Job, Priority};
 use makepad_render_kernels::precompute::precompute;
 use makepad_render_kernels::{compile, engine};
 use std::time::Instant;

@@ -709,15 +709,13 @@ impl ScriptHook for KanbanBoard {
                         let Some(val_obj) = kv.value.as_object() else {
                             continue;
                         };
-                        if vm
-                            .bx
-                            .heap
+                        if vm.heap()
                             .type_matches_id(val_obj, KanbanColumnSpec::script_type_id_static())
                         {
                             let spec = KanbanColumnSpec::script_from_value(vm, kv.value);
                             declared.push(spec.to_column());
                         } else if id == live_id!(card) {
-                            template = Some(vm.bx.heap.new_object_ref(val_obj));
+                            template = Some(vm.new_object_ref(val_obj));
                         }
                     }
                 });
@@ -1198,6 +1196,7 @@ impl Widget for KanbanBoard {
                 if let Some((column, card)) = self.card_at(e.abs) {
                     self.drag = Some(KanbanDrag::press(column, card, e.abs.x, e.abs.y));
                     self.pointer = Some(e.abs);
+                    cx.claim_finger_drag(e.digit_id);
                 }
             }
             Hit::FingerMove(e) => {

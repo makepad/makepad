@@ -524,6 +524,7 @@ impl Widget for ValueInput {
             },
             Hit::FingerDown(fe) if fe.device.is_primary_hit() => {
                 self.drag = Some((fe.abs.x, self.value, false));
+                cx.claim_finger_drag(fe.digit_id);
                 cx.set_cursor(MouseCursor::EwResize);
             }
             Hit::FingerMove(fe) => {

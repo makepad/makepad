@@ -190,7 +190,7 @@
 //! palette skips all of this and derives straight from the base object.
 
 use crate::desktop_style::{self, StyleSheet};
-use crate::makepad_platform::{LiveId, NoTrap, ScriptMod, ScriptObject, ScriptVm, ScriptVmCx};
+use crate::makepad_platform::{LiveId, ScriptMod, ScriptObject, ScriptVm, ScriptVmCx};
 use crate::theme_combinations::{COMBINATIONS, PAIRS};
 use crate::theme_tokens::{
     base_theme_keys, contrast, family_from_color, held_pairs, hsl_to_rgb, over, reads_on, rgb_to_hsl, roles_for, roles_from_colors,
@@ -2080,7 +2080,7 @@ const WRITTEN: &[Written] = {
         // The quieter line a drop zone, a tree select and a waveform write
         // under or beside their main words.
         Written {
-            widgets: &["dropzone.rs", "tree_select.rs", "waveform.rs"],
+            widgets: &["dropzone.rs", "tree_select.rs", "waveform.rs", "curve_editor.rs"],
             grounds: &["color_inset", "color_inset_hover", "color_inset_focus", "color_inset_drag"],
             ink: "color_text_meta",
             need: LEGIBLE,
@@ -2115,6 +2115,14 @@ const WRITTEN: &[Written] = {
             widgets: &["html.rs", "markdown.rs"],
             grounds: &["color_selection_focus"],
             ink: "color_label_inner",
+            need: READABLE,
+        },
+        // A Label's own wash under selected text (draw_selection), in the
+        // label's body ink.
+        Written {
+            widgets: &["label.rs"],
+            grounds: &["color_selection_focus"],
+            ink: "color_label_outer",
             need: READABLE,
         },
         // The selection inside a slider's value, which is only ever up while
@@ -2945,24 +2953,16 @@ impl BuiltTheme {
     /// theme file, a few milliseconds, and leaves two scratch objects in
     /// `mod.themes` until the next module run sweeps them away.
     pub fn sheet_source(&self, vm: &mut ScriptVm) -> String {
-        vm.eval(ScriptMod {
-            cargo_manifest_path: crate::widgets_dir().into(),
-            module_path: "theme_builder".to_string(),
-            file: format!("{EXPORT_NAME}.splash"),
-            line: 0,
-            column: 0,
-            code: self.script_as(EXPORT_SOURCE_NAME, EXPORT_NAME, false),
-            values: vec![],
-        });
+        vm.eval(ScriptMod::new(&(crate::widgets_dir()), "theme_builder", &(format!("{EXPORT_NAME}.splash")), 0, 0, &(self.script_as(EXPORT_SOURCE_NAME, EXPORT_NAME, false)), &[]));
         let themes = vm.module(LiveId::from_str("themes"));
         let object = |vm: &mut ScriptVm, name: &str| {
-            vm.bx.heap.value(themes, LiveId::from_str(name).into(), NoTrap).as_object()
+            vm.value(themes, LiveId::from_str(name)).as_object()
         };
         let (Some(built), Some(base)) = (object(vm, EXPORT_NAME), object(vm, self.scheme.theme_name())) else {
             return crate::theme_tokens::export_sheet_source(self.scheme, &[]);
         };
         let read = |vm: &mut ScriptVm, theme: ScriptObject, key: &str| {
-            let value = vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap);
+            let value = vm.value(theme, LiveId::from_str(key));
             match (value.as_color(), value.as_number()) {
                 (Some(rgba), _) => Some(TokenValue::Color(rgba)),
                 (_, Some(number)) => Some(TokenValue::Num(number)),
@@ -5709,25 +5709,15 @@ mod theme_builder_tests {
     }
 
     fn evaluate(vm: &mut ScriptVm, name: &str, code: String) {
-        vm.bx.captured_errors = Some(Vec::new());
-        vm.eval(ScriptMod {
-            cargo_manifest_path: crate::widgets_dir().into(),
-            module_path: format!("theme_builder_test_{name}"),
-            file: format!("{name}.splash"),
-            line: 0,
-            column: 0,
-            code,
-            values: vec![],
-        });
+        vm.capture_errors();
+        vm.eval(ScriptMod::new(&crate::widgets_dir(), &format!("theme_builder_test_{name}"), &format!("{name}.splash"), 0, 0, &code, &[]));
         let errors = vm.take_errors();
         assert!(errors.is_empty(), "{name}: {errors:?}");
     }
 
     fn filed(vm: &mut ScriptVm, name: &str) -> ScriptObject {
         let themes = vm.module(LiveId::from_str("themes"));
-        vm.bx
-            .heap
-            .value(themes, LiveId::from_str(name).into(), NoTrap)
+        vm.value(themes, LiveId::from_str(name))
             .as_object()
             .unwrap_or_else(|| panic!("mod.themes.{name} was never built"))
     }
@@ -5737,7 +5727,7 @@ mod theme_builder_tests {
     }
 
     fn token(vm: &mut ScriptVm, theme: ScriptObject, key: &str) -> Option<TokenValue> {
-        let value = vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap);
+        let value = vm.value(theme, LiveId::from_str(key));
         match (value.as_color(), value.as_number()) {
             (Some(rgba), _) => Some(TokenValue::Color(rgba)),
             (_, Some(number)) => Some(TokenValue::Num(number)),
@@ -5746,27 +5736,24 @@ mod theme_builder_tests {
     }
 
     fn color(vm: &mut ScriptVm, theme: ScriptObject, key: &str) -> Option<u32> {
-        vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_color()
+        vm.value(theme, LiveId::from_str(key)).as_color()
     }
 
     /// A number inside a token that is an object: the `font_size` of a
     /// `TextStyle`.
     fn inner(vm: &mut ScriptVm, theme: ScriptObject, key: &str, field: &str) -> Option<f64> {
-        let object = vm.bx.heap.value(theme, LiveId::from_str(key).into(), NoTrap).as_object()?;
-        vm.bx.heap.value(object, LiveId::from_str(field).into(), NoTrap).as_number()
+        let object = vm.value(theme, LiveId::from_str(key)).as_object()?;
+        vm.value(object, LiveId::from_str(field)).as_number()
     }
 
     /// The theme object the widget module was handed, which is what every
     /// `theme.color_x` in a template was baked from.
     fn widget_theme(vm: &mut ScriptVm) -> ScriptObject {
         let prelude = vm.module(LiveId::from_str("prelude"));
-        let internal = vm
-            .bx
-            .heap
-            .value(prelude, LiveId::from_str("widgets_internal").into(), NoTrap)
+        let internal = vm.value(prelude, LiveId::from_str("widgets_internal"))
             .as_object()
             .expect("the widget prelude");
-        vm.bx.heap.value(internal, LiveId::from_str("theme").into(), NoTrap).as_object().expect("its theme")
+        vm.value(internal, LiveId::from_str("theme")).as_object().expect("its theme")
     }
 
     /// A blue nobody would mistake for the house orange.
@@ -7481,7 +7468,7 @@ mod theme_builder_tests {
                 assert_eq!(token(vm, base, "space_factor"), Some(TokenValue::Num(6.0)));
                 for font in CARRIED_FONTS {
                     let at = |vm: &mut ScriptVm, object: ScriptObject| {
-                        vm.bx.heap.value(object, LiveId::from_str(font).into(), NoTrap)
+                        vm.value(object, LiveId::from_str(font))
                     };
                     assert!(at(vm, base).as_object().is_some(), "{font} is not a style in the base theme");
                     assert!(at(vm, theme) == at(vm, base), "{font} was not carried across");
@@ -7573,7 +7560,7 @@ mod theme_builder_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             desktop_style::uninstall(vm);
 
             // Closed, it is inert.
@@ -7651,7 +7638,7 @@ mod theme_builder_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             desktop_style::install(vm, StyleSheet::load(desktop_style::DesktopStyle::Omarchy.sheet(false)));
             crate::set_theme_mix(vm.cx_mut(), Some(standing.clone()));
 
@@ -7751,7 +7738,7 @@ mod theme_builder_tests {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             crate::script_mod(vm);
-            vm.bx.captured_errors = Some(Vec::new());
+            vm.capture_errors();
             desktop_style::uninstall(vm);
             let mut lab = ThemeLab::with_cache(made_up_cache());
             lab.enter(vm);
@@ -7859,7 +7846,7 @@ mod theme_builder_tests {
             let mut cx = Cx::new(Box::new(|_, _| {}));
             cx.with_vm(|vm| {
                 crate::script_mod(vm);
-                vm.bx.captured_errors = Some(Vec::new());
+                vm.capture_errors();
                 desktop_style::uninstall(vm);
                 let on_screen = worn(vm);
                 let before = color(vm, on_screen, "color_primary");

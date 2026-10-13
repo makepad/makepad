@@ -37,7 +37,7 @@
 //! carried by the text faces the library ships. A star, a heart or a square
 //! is a `glyph` and a `glyph_empty` away, in whatever face the app has.
 use crate::{
-    animator::{Animate, Animator, AnimatorAction, AnimatorImpl, Play},
+    animator::{Animate, Animator, AnimatorImpl},
     family_api::{measure, sized},
     makepad_derive_widget::*,
     makepad_draw::*,
@@ -495,8 +495,7 @@ impl Widget for Rating {
     ) -> ScriptAsyncResult {
         if method == live_id!(set_value) {
             if let Some(args_obj) = args.as_object() {
-                let trap = vm.bx.threads.cur().trap.pass();
-                let value = vm.bx.heap.vec_value(args_obj, 0, trap).as_f64();
+                let value = vm.vec_value_trap(args_obj, 0).as_f64();
                 if let Some(value) = value {
                     vm.with_cx_mut(|cx| self.set_value(cx, value));
                 }
@@ -548,6 +547,7 @@ impl Widget for Rating {
                 let m = self.marks();
                 let landed = m.press(self.value, m.value_at(x), self.clearable);
                 self.press_x = Some(x);
+                cx.claim_finger_drag(fe.digit_id);
                 // The preview goes down with the press. A preview still
                 // showing the mark under the finger, on a row the press
                 // has just cleared, would say the press had not worked.

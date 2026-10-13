@@ -131,8 +131,8 @@ pub enum Builtin {
 pub fn register(vm: &mut ScriptVm) {
     let draw = script_eval!(vm, { mod.draw });
     if let Some(draw) = draw.as_object() {
-        let present = vm.bx.heap.value(draw, id!(mat_compose_hooked).into(), NoTrap);
-        if present.as_object().is_some_and(|o| vm.bx.heap.is_fn(o)) {
+        let present = vm.value(draw, id!(mat_compose_hooked));
+        if present.as_object().is_some_and(|o| vm.is_fn(o)) {
             return;
         }
     }
@@ -160,5 +160,5 @@ pub fn overrides(vm: &mut ScriptVm, builtin: Builtin) -> Vec<(LiveId, ScriptObje
             (id!(mat_ambient), f(script_eval!(vm, { mod.draw.mat_ibl_ambient }))),
         ],
     };
-    pairs.into_iter().filter_map(|(id, o)| o.filter(|o| vm.bx.heap.is_fn(*o)).map(|o| (id, o))).collect()
+    pairs.into_iter().filter_map(|(id, o)| o.filter(|o| vm.is_fn(*o)).map(|o| (id, o))).collect()
 }
