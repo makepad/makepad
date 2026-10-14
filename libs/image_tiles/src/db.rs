@@ -7,6 +7,7 @@
 //! (or an AI) at it: add rows with any SQLite writer, run the baker, and the
 //! grid draws whatever reached `status = 1`.
 
+use crate::tape::PageGeometry;
 use makepad_sqlite::{Connection, Database, Value};
 use std::path::Path;
 use std::time::Duration;
@@ -69,7 +70,18 @@ CREATE TABLE IF NOT EXISTS shards(
     count INTEGER NOT NULL,
     sealed INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS meta(
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+);
 ";
+
+/// The library's page layout out of its `meta` rows; `None` when it has none.
+fn geometry_of(conn_rows: &[(String, i64)]) -> Option<PageGeometry> {
+    let get = |key: &str| conn_rows.iter().find(|(k, _)| k == key).map(|(_, v)| *v);
+    let (grid, frame_max) = (get("grid")?, get("frame_max")?);
+    (grid > 0 && grid <= 64 && frame_max > 0).then(|| PageGeometry { grid: grid as u32, frame_max: frame_max as u32 })
+}
 
 /// The baker's handle on the index. Writable when the library is ours to
 /// change; read-only when it lives where nothing may be written (an
@@ -251,6 +263,28 @@ impl TileDb {
         Ok(open.len())
     }
 
+    /// The page layout the library was made with (`None`: a library from before it was kept).
+    pub fn geometry(&mut self) -> Result<Option<PageGeometry>, String> {
+        let result = self.conn.query("SELECT key, value FROM meta", &[]).map_err(|e| format!("meta: {e:?}"))?;
+        let rows: Vec<(String, i64)> =
+            result.rows.iter().filter_map(|r| Some((r[0].as_text()?.to_string(), r[1].as_integer()?))).collect();
+        Ok(geometry_of(&rows))
+    }
+
+    /// Keep the page layout of a new library.
+    pub fn set_geometry(&mut self, geometry: PageGeometry) -> Result<(), String> {
+        self.writable()?;
+        for (key, value) in [("grid", geometry.grid), ("frame_max", geometry.frame_max)] {
+            self.conn
+                .execute(
+                    "INSERT INTO meta(key, value) VALUES(?, ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+                    &[Value::text(key), Value::Integer(value as i64), Value::Integer(value as i64)],
+                )
+                .map_err(|e| format!("meta {key}: {e:?}"))?;
+        }
+        Ok(())
+    }
+
     pub fn next_shard(&mut self) -> Result<i64, String> {
         let result = self.conn.query("SELECT MAX(id) FROM shards", &[]).map_err(|e| format!("next shard: {e:?}"))?;
         Ok(result.scalar().and_then(|v| v.as_integer()).unwrap_or(-1) + 1)
@@ -273,8 +307,8 @@ impl TileDb {
 }
 
 /// What a viewer needs, read without taking the writer's lock: every baked
-/// picture in id order, plus which shards are sealed.
-pub fn read_items(path: &Path) -> Result<(Vec<ItemRow>, Vec<ShardRow>), String> {
+/// picture in id order, which shards are sealed, and the page layout.
+pub fn read_items(path: &Path) -> Result<(Vec<ItemRow>, Vec<ShardRow>, PageGeometry), String> {
     let mut db = Database::open(path).map_err(|e| format!("open {}: {e:?}", path.display()))?;
     let result = db
         .query(
@@ -306,7 +340,17 @@ pub fn read_items(path: &Path) -> Result<(Vec<ItemRow>, Vec<ShardRow>), String> 
         .iter()
         .filter_map(|r| Some(ShardRow { id: r[0].as_integer()?, count: r[1].as_integer()?, sealed: r[2].as_integer()? != 0 }))
         .collect();
-    Ok((items, shards))
+    // A library from before the layout was kept has no `meta` table: a desktop's.
+    let geometry = db
+        .query("SELECT key, value FROM meta", &[])
+        .ok()
+        .and_then(|result| {
+            let rows: Vec<(String, i64)> =
+                result.rows.iter().filter_map(|r| Some((r[0].as_text()?.to_string(), r[1].as_integer()?))).collect();
+            geometry_of(&rows)
+        })
+        .unwrap_or(PageGeometry::DESKTOP);
+    Ok((items, shards, geometry))
 }
 
 #[cfg(test)]
@@ -372,5 +416,28 @@ mod tests {
         set_read_only(&path, false);
         let _ = std::fs::remove_dir_all(&dir);
         outcome.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod geometry_tests {
+    use super::*;
+
+    #[test]
+    fn a_library_keeps_its_page_layout() {
+        let dir = std::env::temp_dir().join(format!("tiles-geometry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("library.sqlite");
+        let mut db = TileDb::open(&path).unwrap();
+        // A library without a kept layout reads as a desktop's.
+        assert_eq!(db.geometry().unwrap(), None);
+        assert_eq!(read_items(&path).unwrap().2, PageGeometry::DESKTOP);
+        let phone = PageGeometry { grid: 16, frame_max: 2176 };
+        db.set_geometry(phone).unwrap();
+        assert_eq!(db.geometry().unwrap(), Some(phone));
+        drop(db);
+        assert_eq!(read_items(&path).unwrap().2, phone);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

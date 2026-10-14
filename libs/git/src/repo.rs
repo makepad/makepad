@@ -37,6 +37,9 @@ pub struct Repository {
 
 struct ReadCache {
     account: crate::memory::MemoryAccount,
+    /// The largest object a pack reader reads (`set_read_cache_budget`).
+    object_budget: usize,
+    /// Decoded objects kept (as much as `object_budget` unless lowered).
     budget: usize,
     used: usize,
     entries: HashMap<ObjectId, (Object, crate::memory::Reservation)>,
@@ -265,16 +268,17 @@ pub(crate) struct ObjectSources {
 
 impl ObjectSources {
     pub(crate) fn read(&self, oid: &ObjectId) -> Result<Object, GitError> {
+        // Packs first (see `Repository::read_object_uncached`).
+        for pack in &self.packs {
+            if let Some(offset) = pack.find_offset(oid) {
+                return read_pack_object(&pack.pack_path, offset, pack);
+            }
+        }
         for dir in &self.loose_dirs {
             match read_loose_object_from_objects_dir(dir, oid) {
                 Ok(obj) => return Ok(obj),
                 Err(GitError::ObjectNotFound(_)) => {}
                 Err(e) => return Err(e),
-            }
-        }
-        for pack in &self.packs {
-            if let Some(offset) = pack.find_offset(oid) {
-                return read_pack_object(&pack.pack_path, offset, pack);
             }
         }
         Err(GitError::ObjectNotFound(oid.to_hex()))
@@ -372,9 +376,21 @@ impl Repository {
     /// Configure a persistent worker reader. Pack reads use bounded windows;
     /// decoded read-cache entries reserve from the same history account.
     pub fn set_read_cache_budget(&mut self, account: crate::memory::MemoryAccount, bytes: usize) -> Result<(), GitError> {
-        self.read_cache = Some(ReadCache { account: account.clone(), budget: bytes, used: 0, entries: HashMap::new(), order: std::collections::VecDeque::new(), hits: 0 });
+        self.read_cache = Some(ReadCache { account: account.clone(), object_budget: bytes, budget: bytes, used: 0, entries: HashMap::new(), order: std::collections::VecDeque::new(), hits: 0 });
         for pack in self.packs.iter_mut().chain(self.alternate_packs.iter_mut()).flatten() { pack.set_read_budget(account.clone(), bytes)?; }
         Ok(())
+    }
+    /// Keep at most `bytes` of decoded objects (after
+    /// `set_read_cache_budget`, whose per-object limit stays): a reader that
+    /// only meets an object again soon after needs a small cache.
+    pub fn set_read_cache_bytes(&mut self, bytes: usize) {
+        if let Some(cache) = &mut self.read_cache {
+            cache.budget = bytes;
+            while cache.used > cache.budget {
+                let Some(old) = cache.order.pop_front() else { break };
+                if let Some((_, lease)) = cache.entries.remove(&old) { cache.used = cache.used.saturating_sub(lease.bytes()); }
+            }
+        }
     }
     pub fn read_stats(&self) -> RepositoryReadStats {
         let mut stats = RepositoryReadStats { blob_reads: self.blob_reads, ..Default::default() };
@@ -407,15 +423,12 @@ impl Repository {
         Ok(object)
     }
     fn read_object_uncached(&mut self, oid: &ObjectId) -> Result<Object, GitError> {
-        // Try loose first
-        match read_loose_object(&self.common_dir, oid) {
-            Ok(obj) => return Ok(obj),
-            Err(GitError::ObjectNotFound(_)) => {}
-            Err(e) => return Err(e),
-        }
-
-        // Try local pack files
-        self.ensure_packs()?;
+        // Packs first, as git reads: in a packed repository nearly every
+        // object is in a pack, and trying the loose file first cost a
+        // failed open (and its path and error strings) per object read --
+        // millions in a history scan. An id names one content, so where
+        // it is found does not change what is read.
+        let packed = self.ensure_packs();
         if let Some(packs) = &self.packs {
             for pack in packs {
                 if let Some(offset) = pack.find_offset(oid) {
@@ -423,6 +436,12 @@ impl Repository {
                 }
             }
         }
+        match read_loose_object(&self.common_dir, oid) {
+            Ok(obj) => return Ok(obj),
+            Err(GitError::ObjectNotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+        packed?;
 
         // Try alternates (loose + packs)
         self.ensure_alternates()?;
@@ -489,17 +508,19 @@ impl Repository {
     /// `<kind> <size>` header (the loose object is inflated to find it).
     /// Pack data is never loaded whole for this.
     pub fn object_size(&mut self, oid: &ObjectId) -> Result<u64, GitError> {
-        match read_loose_object(&self.common_dir, oid) {
-            Ok(obj) => return Ok(obj.data.len() as u64),
-            Err(GitError::ObjectNotFound(_)) => {}
-            Err(e) => return Err(e),
-        }
-        self.ensure_packs()?;
+        // Packs first (see `read_object_uncached`).
+        let packed = self.ensure_packs();
         for pack in self.packs.iter().chain(self.alternate_packs.iter()).flatten() {
             if let Some(offset) = pack.find_offset(oid) {
                 return pack.object_size(offset);
             }
         }
+        match read_loose_object(&self.common_dir, oid) {
+            Ok(obj) => return Ok(obj.data.len() as u64),
+            Err(GitError::ObjectNotFound(_)) => {}
+            Err(e) => return Err(e),
+        }
+        packed?;
         if let Some(alt_dirs) = &self.alternates {
             for alt_dir in alt_dirs {
                 match read_loose_object_from_objects_dir(alt_dir, oid) {
@@ -1571,7 +1592,7 @@ impl Repository {
         if self.packs.is_none() || self.alternates.is_none() {
             let sources = object_sources(&self.common_dir)?;
             let mut packs = sources.packs;
-            if let Some(cache) = &self.read_cache { for pack in &mut packs { pack.set_read_budget(cache.account.clone(), cache.budget)?; } }
+            if let Some(cache) = &self.read_cache { for pack in &mut packs { pack.set_read_budget(cache.account.clone(), cache.object_budget)?; } }
             self.packs = Some(packs);
             self.alternates = Some(sources.alternate_dirs);
             self.alternate_packs = Some(Vec::new());
@@ -1581,6 +1602,14 @@ impl Repository {
 
     fn ensure_packs(&mut self) -> Result<(), GitError> {
         self.ensure_object_sources()
+    }
+
+    /// Read the pack indexes now (otherwise at the first object read). A
+    /// repository kept open shares them with every other reader of the
+    /// same packs opened meanwhile, so a job that opens the repository in
+    /// several steps parses them once.
+    pub fn open_packs(&mut self) -> Result<(), GitError> {
+        self.ensure_packs()
     }
 
     fn ensure_alternates(&mut self) -> Result<(), GitError> {
@@ -1640,17 +1669,18 @@ pub(crate) fn read_object_standalone(
     packs: &Option<Vec<PackIndex>>,
     alternates: &Option<Vec<PathBuf>>,
 ) -> Result<Object, GitError> {
-    match read_loose_object(git_dir, oid) {
-        Ok(obj) => return Ok(obj),
-        Err(GitError::ObjectNotFound(_)) => {}
-        Err(e) => return Err(e),
-    }
+    // Packs first (see `Repository::read_object_uncached`).
     if let Some(packs) = packs {
         for pack in packs {
             if let Some(offset) = pack.find_offset(oid) {
                 return read_pack_object(&pack.pack_path, offset, pack);
             }
         }
+    }
+    match read_loose_object(git_dir, oid) {
+        Ok(obj) => return Ok(obj),
+        Err(GitError::ObjectNotFound(_)) => {}
+        Err(e) => return Err(e),
     }
     if let Some(alt_dirs) = alternates {
         for alt_dir in alt_dirs {

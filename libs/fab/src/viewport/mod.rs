@@ -1252,6 +1252,12 @@ impl WidgetNode for FabViewport {
 impl Widget for FabViewport {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         match event {
+            // GI, baked lightmaps and the path tracer's accumulation were GPU-only
+            Event::GpuReset => {
+                self.renderer.gpu_reset();
+                if let Some(t) = self.rendered.tracer_mut() { t.restart(); }
+                self.area.redraw(cx);
+            }
             Event::WindowLostFocus(_) => self.rendered.set_focused(false),
             Event::WindowGotFocus(_) => {
                 self.rendered.set_focused(true);

@@ -378,7 +378,7 @@ pub fn target_checks(
         result.push(TargetCheck {
             label: t.into(),
             ty, platform, args,
-            env: vec![("MAKEPAD".into(), makepad.into())],
+            env: vec![("MAKEPAD_BUILD".into(), makepad.into())],
             toolchain, skip,
         });
     }

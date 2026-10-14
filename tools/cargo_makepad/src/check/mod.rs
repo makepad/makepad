@@ -212,7 +212,7 @@ fn check(
     let target_dir = format!("--target-dir=target/check_all/check{}", par);
     args_out.push(&target_dir);
     let run = |makepad: &str, args_out: &[&str]| {
-        let mut envs = vec![("MAKEPAD", makepad)];
+        let mut envs = vec![("MAKEPAD_BUILD", makepad)];
         if let Some(icon) = icon_env.as_ref() {
             for (var, value) in APP_ICON_ENV_VARS.iter().zip(icon.iter()) {
                 envs.push((var, value.as_str()));

@@ -74,18 +74,6 @@ DRYRUN=${1:---dry-run}
 #echo "---- PUBLISHING makepad-zune-png----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-zune-png
 
-#echo "---- PUBLISHING makepad-fonts-emoji ----" 
-#cargo publish $DRYRUN --allow-dirty -p makepad-fonts-emoji
-
-#echo "---- PUBLISHING makepad-fonts-emoji ----" 
-#cargo publish $DRYRUN --allow-dirty -p makepad-fonts-chinese-regular
-#echo "---- PUBLISHING makepad-fonts-emoji ----" 
-#cargo publish $DRYRUN --allow-dirty -p makepad-fonts-chinese-regular-2
-#echo "---- PUBLISHING makepad-fonts-emoji ----" 
-#cargo publish $DRYRUN --allow-dirty -p makepad-fonts-chinese-bold
-#echo "---- PUBLISHING makepad-fonts-emoji ----" 
-#cargo publish $DRYRUN --allow-dirty -p makepad-fonts-chinese-bold-2
-
 #echo "---- PUBLISHING makepad-widgets ----" 
 #cargo publish $DRYRUN --allow-dirty -p makepad-widgets
 

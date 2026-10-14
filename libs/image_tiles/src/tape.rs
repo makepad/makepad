@@ -19,18 +19,66 @@
 //! kept only as hardware-decodable HEVC.
 
 use makepad_video::{encode_intra_frame_mp4, nv12, VideoFileCodec, VideoFileEncoderOptions};
-use makepad_video::VideoFileDecoder;
+use makepad_video::decode_first_frame_from_file;
 use makepad_widgets_core::ImageBuffer;
 use std::path::Path;
 
 /// Atlas slot side in pixels at level 0.
 pub const SLOT: u32 = 128;
-/// Slots per shard side: a shard is a GRID x GRID block of slots.
-pub const GRID: u32 = 32;
-/// Items per shard.
-pub const SHARD_CAP: u32 = GRID * GRID;
 /// Pyramid levels per shard: 128, 64, 32, 16, 8 px per slot.
 pub const LEVELS: usize = 5;
+
+/// A library's page layout, kept in its index (`TileDb::geometry`): `grid` x `grid` slots per
+/// shard (a level-0 page is `grid * SLOT` px square) and the longest side a picture's own frame
+/// is kept at. Chosen when the library is made, for the encoder that bakes it
+/// ([`PageGeometry::for_encoder`]): a desktop's 32 x 32 (4096 px pages, frames up to 8192); a
+/// phone's HEVC encoder takes less (the Pixel's 3840x2176), so its libraries have 2048 px pages.
+/// Every reader takes either.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageGeometry {
+    pub grid: u32,
+    pub frame_max: u32,
+}
+
+impl Default for PageGeometry {
+    fn default() -> Self {
+        Self::DESKTOP
+    }
+}
+
+impl PageGeometry {
+    /// The desktops' layout, and every library's from before the layout was kept.
+    pub const DESKTOP: PageGeometry = PageGeometry { grid: 32, frame_max: 8192 };
+
+    /// The layout for an encoder that takes frames up to `max` (width, height); `None` = no
+    /// cap known. The largest power-of-two grid whose page fits both sides, and frames whose
+    /// long side fits the short one (a picture may stand either way).
+    pub fn for_encoder(max: Option<(u32, u32)>) -> PageGeometry {
+        let Some((w, h)) = max else { return Self::DESKTOP };
+        let side = w.min(h);
+        let mut grid = Self::DESKTOP.grid;
+        while grid > 1 && grid * SLOT > side {
+            grid /= 2;
+        }
+        PageGeometry { grid, frame_max: Self::DESKTOP.frame_max.min(side & !1).max(SLOT) }
+    }
+
+    /// Items per shard.
+    pub fn shard_cap(&self) -> u32 {
+        self.grid * self.grid
+    }
+
+    /// A page's side at `level`.
+    pub fn page_size(&self, level: usize) -> u32 {
+        (self.grid * SLOT) >> level
+    }
+
+    /// Where slot `slot` starts on a page at `level`.
+    pub fn slot_origin(&self, slot: u32, level: usize) -> (u32, u32) {
+        let s = slot_size(level);
+        ((slot % self.grid) * s, (slot / self.grid) * s)
+    }
+}
 
 /// HEVC intra quality for atlas pages / full pictures, bits per pixel per
 /// frame. Shared so every writer fills byte-compatible tapes.
@@ -41,20 +89,8 @@ pub const FULL_BPP: f64 = 1.6;
 /// Below the smallest of these the atlas tapes already carry the picture.
 pub const PYRAMID_LEVELS: [u32; 4] = [4096, 2048, 1024, 512];
 
-/// The largest full-resolution frame kept on disk.
-pub const FULL_MAX_PX: u32 = 8192;
-
-pub fn page_size(level: usize) -> u32 {
-    (GRID * SLOT) >> level
-}
-
 pub fn slot_size(level: usize) -> u32 {
     SLOT >> level
-}
-
-pub fn slot_origin(slot: u32, level: usize) -> (u32, u32) {
-    let s = slot_size(level);
-    ((slot % GRID) * s, (slot / GRID) * s)
 }
 
 /// NV12 planes: `y` is width*height, `uv` is interleaved CbCr at half
@@ -268,11 +304,7 @@ pub fn write_frame(path: &Path, planes: &Planes, bpp: f64) -> Result<(), String>
 /// The first frame of a container, hardware decoded.
 pub fn read_frame(path: &Path) -> Result<Planes, String> {
     let text = path.to_string_lossy().to_string();
-    let mut dec = VideoFileDecoder::open(&text).map_err(|e| format!("open {text}: {e:?}"))?;
-    let frame = dec
-        .next_frame()
-        .map_err(|e| format!("decode {text}: {e:?}"))?
-        .ok_or_else(|| format!("no frame in {text}"))?;
+    let frame = decode_first_frame_from_file(&text).map_err(|e| format!("decode {text}: {e:?}"))?;
     Planes::from_nv12(frame.width, frame.height, &frame.nv12)
 }
 
@@ -331,13 +363,31 @@ mod tests {
 
     #[test]
     fn geometry() {
-        assert_eq!(page_size(0), 4096);
-        assert_eq!(page_size(4), 256);
+        let desk = PageGeometry::DESKTOP;
+        assert_eq!(desk.page_size(0), 4096);
+        assert_eq!(desk.page_size(4), 256);
         assert_eq!(slot_size(4), 8);
-        assert_eq!(slot_origin(0, 0), (0, 0));
-        assert_eq!(slot_origin(33, 0), (128, 128));
-        assert_eq!(slot_origin(33, 2), (32, 32));
-        assert_eq!(slot_origin(1023, 4), (31 * 8, 31 * 8));
+        assert_eq!(desk.slot_origin(0, 0), (0, 0));
+        assert_eq!(desk.slot_origin(33, 0), (128, 128));
+        assert_eq!(desk.slot_origin(33, 2), (32, 32));
+        assert_eq!(desk.slot_origin(1023, 4), (31 * 8, 31 * 8));
+        assert_eq!(desk.shard_cap(), 1024);
+        // A phone's: 16 x 16 slots on 2048 px pages.
+        let phone = PageGeometry { grid: 16, frame_max: 2176 };
+        assert_eq!(phone.page_size(0), 2048);
+        assert_eq!(phone.slot_origin(17, 0), (128, 128));
+        assert_eq!(phone.slot_origin(255, 4), (15 * 8, 15 * 8));
+        assert_eq!(phone.shard_cap(), 256);
+    }
+
+    #[test]
+    fn the_layout_fits_the_encoder() {
+        assert_eq!(PageGeometry::for_encoder(None), PageGeometry::DESKTOP);
+        // The Pixel's hardware HEVC encoder.
+        assert_eq!(PageGeometry::for_encoder(Some((3840, 2176))), PageGeometry { grid: 16, frame_max: 2176 });
+        assert_eq!(PageGeometry::for_encoder(Some((8192, 8192))), PageGeometry::DESKTOP);
+        assert_eq!(PageGeometry::for_encoder(Some((1920, 1088))), PageGeometry { grid: 8, frame_max: 1088 });
+        assert_eq!(PageGeometry::for_encoder(Some((512, 512))).grid, 4);
     }
 
     #[test]

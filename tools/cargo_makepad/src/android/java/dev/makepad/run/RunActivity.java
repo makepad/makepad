@@ -33,6 +33,17 @@ public class RunActivity extends Activity {
     /** Also called when Android restores MakepadApp directly in a new process. */
     public static void ensureBoot(Activity activity) {
         current = activity;
+        // an app's own files (app_data_dir: Amp's library, ...) live in the app's external files
+        // folder: kept across restarts and JIT cache clears, and a developer can adb push into it
+        java.io.File external = activity.getExternalFilesDir(null);
+        if (external != null) {
+            try { android.system.Os.setenv("XDG_DATA_HOME", external.getAbsolutePath(), true); }
+            catch (android.system.ErrnoException e) { android.util.Log.e("makepad-host", "XDG_DATA_HOME: " + e); }
+            // the shared makepad home (AI hub credential and known nodes, weights) is the
+            // `makepad` folder there, as for every app; an Android process has no HOME
+            try { android.system.Os.setenv("MAKEPAD_HOME", new java.io.File(external, "makepad").getAbsolutePath(), false); }
+            catch (android.system.ErrnoException e) { android.util.Log.e("makepad-host", "MAKEPAD_HOME: " + e); }
+        }
         boot(activity.getPackageCodePath(), activity.getFilesDir().getAbsolutePath(),
             activity.getCacheDir().getAbsolutePath(), activity.getApplicationInfo().nativeLibraryDir,
             activity.getAssets(), activity.getIntent().hasExtra("app")

@@ -139,7 +139,7 @@ def main():
             continue
         if not wanted(path, owner(path)):
             continue
-        if "/tests/" in path or path.endswith(".wast") or re.match(r"widgets/fonts/[^/]+\.ttf$", path):
+        if "/tests/" in path or path.endswith(".wast"):
             continue
         if args.worktree and not (repo / path).is_file():
             continue

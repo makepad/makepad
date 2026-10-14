@@ -98,6 +98,10 @@ const FIT_MARGIN: f64 = 32.0;
 const MIN_NODE_WIDTH: f64 = 160.0;
 const MIN_TEXT_LINE_H: f64 = 18.0;
 const RESIZE_GRIP: f64 = 18.0;
+/// One wrapped line of a node's error text.
+const ERROR_LINE_H: f64 = 12.0;
+/// A longer error is cut; the run's header and status line carry it whole.
+const ERROR_MAX_LINES: usize = 5;
 const FLIP_SECONDS: f64 = 0.2;
 const AUTO_FLIP_RATIO: f64 = 0.8;
 const AUTO_FLIP_SETTLE_SECONDS: f64 = 0.25;
@@ -3237,6 +3241,33 @@ impl FlowCanvas {
         route
     }
 
+    /// A node's error as the card shows it: word-wrapped to `width`, at most
+    /// [`ERROR_MAX_LINES`] lines, the last one ending in `…` when cut.
+    fn error_lines(&self, cx: &mut Cx2d, error: &str, width: f64) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
+        for paragraph in error.lines() {
+            let mut line = String::new();
+            for word in paragraph.split_whitespace() {
+                let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
+                if !line.is_empty() && self.text_width(cx, &self.draw_error, &candidate) > width {
+                    lines.push(std::mem::replace(&mut line, word.to_string()));
+                } else {
+                    line = candidate;
+                }
+            }
+            if !line.is_empty() {
+                lines.push(line);
+            }
+        }
+        if lines.len() > ERROR_MAX_LINES {
+            lines.truncate(ERROR_MAX_LINES);
+            if let Some(last) = lines.last_mut() {
+                last.push_str(" …");
+            }
+        }
+        lines
+    }
+
     fn text_width(&self, cx: &mut Cx2d, draw: &DrawText, text: &str) -> f64 {
         draw.layout(cx, 0.0, 0.0, None, false, Align::default(), text)
             .size_in_lpxs
@@ -3825,13 +3856,14 @@ impl FlowCanvas {
                         .get(&node.id)
                         .and_then(|status| status.error.as_deref())
                 });
-            if let Some(error) = error {
-                let line = error.lines().next().unwrap_or(error);
-                self.draw_error.draw_abs(
-                    cx,
-                    dvec2(r.pos.x + CARD_PAD, r.pos.y + r.size.y - 18.0),
-                    line,
-                );
+            if let Some(error) = error.map(str::to_string) {
+                // Wrapped to the card, bottom-aligned in the rows draw_faces reserved.
+                let lines = self.error_lines(cx, &error, r.size.x - 2.0 * CARD_PAD);
+                let mut y = r.pos.y + r.size.y - 18.0 - ERROR_LINE_H * (lines.len().max(1) - 1) as f64;
+                for line in &lines {
+                    self.draw_error.draw_abs(cx, dvec2(r.pos.x + CARD_PAD, y), line);
+                    y += ERROR_LINE_H;
+                }
             }
         }
     }
@@ -3857,11 +3889,12 @@ impl FlowCanvas {
             let r = self.card_rect(graph, index);
             let full_bleed = Self::full_bleed(node);
             let content = card_content_rect(r, full_bleed, Self::port_rows(node));
-            let has_error = self.face_errors.contains_key(&node.id)
-                || self
-                    .statuses
-                    .get(&node.id)
-                    .is_some_and(|status| status.error.is_some());
+            let error = self
+                .face_errors
+                .get(&node.id)
+                .cloned()
+                .or_else(|| self.statuses.get(&node.id).and_then(|status| status.error.clone()));
+            let error_rows = error.map_or(0, |error| self.error_lines(cx, &error, r.size.x - 2.0 * CARD_PAD).len().max(1));
             let is_resizing = matches!(
                 self.drag.as_ref(),
                 Some(Drag::Resize {
@@ -3926,8 +3959,8 @@ impl FlowCanvas {
             }
             cx.pop_clip_rect();
             let mut height = rect.size.y + content.pad_top + content.pad_bottom;
-            if has_error {
-                height += 20.0;
+            if error_rows > 0 {
+                height += 20.0 + ERROR_LINE_H * (error_rows - 1) as f64;
             }
             let height = height.max(min_card_height(full_bleed, Self::port_rows(node)));
             let pending_face = scope.data_mut().get_mut::<NodeFacesScope>()

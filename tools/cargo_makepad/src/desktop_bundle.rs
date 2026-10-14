@@ -116,7 +116,7 @@ pub fn handle_desktop_bundle(args: &[String]) -> Result<(), String> {
         .env("MAKEPAD_PACKAGE_DIR", "resources")
         .env("MAKEPAD_BUNDLE_NAME", &meta.name)
         .env("MAKEPAD_BUNDLE_IDENTIFIER", &meta.identifier)
-        .env_remove("MAKEPAD")
+        .env_remove("MAKEPAD_BUILD")
         .env_remove("CARGO_BUILD_TARGET")
         .status()
         .map_err(|e| format!("failed to run cargo build: {e}"))?;

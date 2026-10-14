@@ -158,21 +158,27 @@ def main():
     print(f'Model paths and sizes match; all {links} model links resolve inside the USB.', flush=True)
     # Install and enable the same units that first-boot provisioning uses.
     # Conditions keep them inactive until package setup has completed.
-    for unit in ('makepad-wm.service', 'makepad-aihub.service'):
+    for unit in ('makepad-wm.service',):
         target = destination/'etc/systemd/system'/unit
         shutil.copyfile(seed/unit, target)
         target.chmod(0o644)
         run('systemctl', '--root='+str(destination), 'enable', unit)
         run('systemctl', '--root='+str(destination), 'is-enabled', unit)
-    for name in ('wm-session.sh', 'aihub-session.sh'):
+    for name in ('wm-session.sh',):
         target = destination/'usr/local/bin'/('makepad-'+name.removesuffix('.sh'))
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(seed/name, target)
         target.chmod(0o755)
     config = destination/'etc/makepad'
     config.mkdir(parents=True, exist_ok=True)
-    for name in ('wm.env', 'aihub.env'):
-        shutil.copyfile(seed/name, config/name)
+    shutil.copyfile(seed/'wm.env', config/'wm.env')
+    # The AI hub is the WM's own child: its settings, no unit.
+    hub_conf = destination/'home/arch/.makepad/wm/ai-hub.conf'
+    if not hub_conf.exists():
+        hub_conf.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(seed/'ai-hub.conf', hub_conf)
+        for path in (hub_conf.parent.parent, hub_conf.parent, hub_conf):
+            os.chown(path, owner.st_uid, owner.st_gid)
     run('btrfs', 'subvolume', 'delete', received)
     receive_directory.rmdir()
     run('btrfs', 'filesystem', 'sync', destination)

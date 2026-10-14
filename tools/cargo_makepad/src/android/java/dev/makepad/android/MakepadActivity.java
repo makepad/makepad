@@ -3318,6 +3318,36 @@ public class MakepadActivity
         };
     }
 
+    /// The largest frame the HEVC encoder that MediaCodec.createEncoderByType("video/hevc") picks
+    /// (the first one in the regular list) takes: its width (which == 0) or height (which == 1),
+    /// 0 when there is none. The image tile libraries size their pages to fit it.
+    public int hevcEncoderMaxSize(int which) {
+        try {
+            MediaCodecList list = new MediaCodecList(MediaCodecList.REGULAR_CODECS);
+            for (MediaCodecInfo info : list.getCodecInfos()) {
+                if (!info.isEncoder()) continue;
+                for (String t : info.getSupportedTypes()) {
+                    if (!"video/hevc".equalsIgnoreCase(t)) continue;
+                    MediaCodecInfo.VideoCapabilities vc = info.getCapabilitiesForType(t).getVideoCapabilities();
+                    if (vc == null) return 0;
+                    int w = vc.getSupportedWidths().getUpper().intValue();
+                    int h = vc.getSupportedHeights().getUpper().intValue();
+                    // The widest frame the encoder takes at its tallest height, and the other way:
+                    // the upper bounds alone may not be a supported pair (3840 wide and 3840 tall,
+                    // but not 3840x3840).
+                    int align = Math.max(2, vc.getHeightAlignment());
+                    if (which == 0) {
+                        while (h > align && !vc.isSizeSupported(w, h)) h -= align;
+                        return w;
+                    }
+                    while (h > align && !vc.isSizeSupported(w, h)) h -= align;
+                    return h;
+                }
+            }
+        } catch (Throwable ignored) {}
+        return 0;
+    }
+
     public void prepareVideoPlayback(long videoId, Object source, int externalTextureHandle, boolean autoplay, boolean shouldLoop) {
         VideoPlayer VideoPlayer = new VideoPlayer(this, videoId);
         VideoPlayer.setSource(source);

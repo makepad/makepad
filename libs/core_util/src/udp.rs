@@ -105,3 +105,39 @@ pub fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
 pub fn bind_reuse_udp(port: u16) -> std::io::Result<UdpSocket> {
     UdpSocket::bind(("0.0.0.0", port))
 }
+
+/// Waits, without a timeout, until `a` or `b` has a datagram to read: (a readable, b readable).
+/// What makes a blocking listener stoppable: `b` is a private loopback socket its stopper sends
+/// one datagram to.
+#[cfg(unix)]
+pub fn wait_readable(a: &UdpSocket, b: &UdpSocket) -> std::io::Result<(bool, bool)> {
+    use std::os::unix::io::AsRawFd;
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    type NFds = std::ffi::c_uint;
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    type NFds = std::ffi::c_ulong;
+    extern "C" {
+        fn poll(fds: *mut PollFd, n: NFds, timeout: i32) -> i32;
+    }
+    const POLLIN: i16 = 1;
+    let mut fds = [
+        PollFd { fd: a.as_raw_fd(), events: POLLIN, revents: 0 },
+        PollFd { fd: b.as_raw_fd(), events: POLLIN, revents: 0 },
+    ];
+    loop {
+        let r = unsafe { poll(fds.as_mut_ptr(), 2, -1) };
+        if r >= 0 {
+            return Ok((fds[0].revents != 0, fds[1].revents != 0));
+        }
+        let e = std::io::Error::last_os_error();
+        if e.kind() != std::io::ErrorKind::Interrupted {
+            return Err(e);
+        }
+    }
+}

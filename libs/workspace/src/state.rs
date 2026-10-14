@@ -191,6 +191,9 @@ pub struct RecentFolder {
     pub path: String,
     /// `makepad_platform::folder_access` bookmark bytes as lowercase hex.
     pub bookmark: Option<String>,
+    /// When it was last opened, in seconds since the Unix epoch (`None`:
+    /// an entry written before the time was kept).
+    pub opened: Option<u64>,
 }
 
 impl RecentFolder {
@@ -296,9 +299,19 @@ impl Settings {
             Some(bytes) => Some(bytes.iter().map(|byte| format!("{byte:02x}")).collect()),
             None => previous.and_then(|entry| entry.bookmark),
         };
-        entries.insert(0, RecentFolder { path, bookmark });
+        let opened = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|since| since.as_secs());
+        entries.insert(0, RecentFolder { path, bookmark, opened });
         entries.truncate(RECENT_FOLDERS);
         self.recent_folders = Some(entries);
+    }
+    /// Take `path` off the recent list (a folder that is gone).
+    pub fn forget_folder(&mut self, path: &str) {
+        let mut entries = self.recent_folders.take().unwrap_or_default();
+        entries.retain(|entry| entry.path != path);
+        self.recent_folders = (!entries.is_empty()).then_some(entries);
     }
     pub fn load(dir: &Path) -> Self {
         std::fs::read_to_string(dir.join(SETTINGS_FILE))

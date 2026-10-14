@@ -195,7 +195,7 @@ pub fn checks(
     let shared = run.cargo_cache.clone();
     let mut cache = shared.lock().map_err(|e| e.to_string())?;
     // User-supplied environment changes must not reuse a canonical warm verdict.
-    let memoize = opts.env.iter().all(|(key, _)| key == "MAKEPAD" || key == "CARGO_TARGET_DIR");
+    let memoize = opts.env.iter().all(|(key, _)| key == "MAKEPAD_BUILD" || key == "CARGO_TARGET_DIR");
     if !workspace && memoize && packages.iter().all(|p| cache.checks.contains_key(&(p.clone(), check.label.clone()))) {
         return Ok(packages.iter().map(|p| (p.clone(), cache.checks[&(p.clone(), check.label.clone())].clone())).collect());
     }

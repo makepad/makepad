@@ -13,7 +13,7 @@ printf '\nServices:\n'
 printf 'sshd.service active=%s enabled=%s\n' "$(systemctl is-active sshd.service || true)" "$(systemctl is-enabled sshd.service || true)"
 printf 'SSH: sudo makepad-ssh show | enable | disable | reset-password\n'
 printf 'makepad-wm.service active=%s enabled=%s\n' "$(systemctl is-active makepad-wm.service || true)" "$(systemctl is-enabled makepad-wm.service || true)"
-printf 'makepad-aihub.service active=%s enabled=%s\n' "$(systemctl is-active makepad-aihub.service || true)" "$(systemctl is-enabled makepad-aihub.service || true)"
+printf 'AI hub (the WM starts it): %s\n' "$(pgrep -f release/makepad-app-ai-hub >/dev/null && echo running || echo 'not running')"
 printf 'iwd.service active=%s enabled=%s\n' "$(systemctl is-active iwd.service || true)" "$(systemctl is-enabled iwd.service || true)"
 printf 'Wi-Fi: use iwctl after package setup completes.\n'
 printf '\nSetup log: sudo journalctl -u makepad-provision -f\n'

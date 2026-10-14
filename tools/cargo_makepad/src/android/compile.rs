@@ -712,7 +712,7 @@ fn android_cargo_env(
         prefer_dynamic,
     );
 
-    let makepad_env = std::env::var("MAKEPAD").ok().filter(|value| !value.is_empty());
+    let makepad_env = std::env::var("MAKEPAD_BUILD").ok().filter(|value| !value.is_empty());
 
     let android_sdk_version = urls.sdk_version.to_string();
     let java_home = sdk_dir.join("openjdk").to_string_lossy().to_string();
@@ -772,7 +772,7 @@ fn android_cargo_env(
         ("RUSTFLAGS".to_string(), rustflags),
     ];
     if let Some(makepad_env) = makepad_env {
-        env.push(("MAKEPAD".to_string(), makepad_env));
+        env.push(("MAKEPAD_BUILD".to_string(), makepad_env));
     }
     Ok(env)
 }

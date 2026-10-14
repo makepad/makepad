@@ -13,6 +13,7 @@ workspace.members = [
     "apps/finance",
     "apps/sheets",
     "apps/photos",
+    "apps/camera",
     "apps/clock",
     "apps/weather",
     "apps/translator",
@@ -98,6 +99,7 @@ workspace.members = [
     # zero-dependency shared primitives (SHA-256, reuse-address UDP bind)
     "libs/core_util",
     "libs/strict_json",
+    "libs/cell_width",
     "libs/source_slice",
     "libs/loader_bundle",
     "libs/change_report",
@@ -115,6 +117,7 @@ workspace.members = [
     "examples/automate",
     "examples/map",
     "examples/splash",
+    "examples/splash_live",
     "examples/slides",
     "examples/isolate",
     "examples/uizoo",

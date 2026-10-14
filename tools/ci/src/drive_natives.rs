@@ -364,7 +364,7 @@ fn check_targets(vm: &mut ScriptVm, v: ScriptValue, warm: bool) -> Result<()> {
         if packages.is_empty() && !workspace { continue; }
         let mut check_opts = opts.clone();
         check_opts.toolchain = check.toolchain.clone();
-        check_opts.env.retain(|(key, _)| key != "MAKEPAD");
+        check_opts.env.retain(|(key, _)| key != "MAKEPAD_BUILD");
         check_opts.env.extend(check.env.clone());
         let args = cargo::command_args(&check.args, &check_opts, &host.target)?;
         if rt(vm).dry() { continue; }

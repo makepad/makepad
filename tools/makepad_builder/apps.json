@@ -108,6 +108,15 @@
     "menu": "other"
   },
   {
+    "id": "camera",
+    "title": "Camera",
+    "package": "makepad-app-camera",
+    "binary": "makepad-app-camera",
+    "workspace": "makepad/apps/camera",
+    "features": [],
+    "menu": "other"
+  },
+  {
     "id": "clock",
     "title": "Clock",
     "package": "makepad-app-clock",
