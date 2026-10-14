@@ -1,14 +1,10 @@
-//! Reading text out of a picture: the one interface the camera screen calls.
-//!
-//! The reader is the ON-DEVICE vision model (the Vulkan lane ports it; the
-//! phone runs it, nothing about the picture leaves the phone). Until it lands
-//! the app runs against [`FixtureReader`], which returns a fixed Chinese menu
-//! whatever the picture. The translation of what the reader found goes
-//! through the same hub chat path as typed text ([`crate::engine`]), in one
-//! numbered job ([`numbered_prompt`] / [`parse_numbered`]).
+//! Reading text out of a picture: a vision model reads the photo (the hub's
+//! chat model with its vision tower, or the phone's own one offline), one line
+//! per line of text ([`parse_read_lines`]); the lines then go through the same
+//! chat path as typed text in one numbered job ([`numbered_prompt`] /
+//! [`parse_numbered`]).
 
 /// A picture handed to a reader: RGBA8, row-major, `width * height * 4` bytes.
-/// Empty pixels mean "the frame was not read back" (the fixture ignores them).
 #[derive(Clone, Debug, Default)]
 pub struct Frame {
     pub width: u32,
@@ -31,46 +27,6 @@ pub struct TextBox {
     pub y: f32,
     pub w: f32,
     pub h: f32,
-}
-
-pub trait TextReader: Send + Sync {
-    /// A short name for the status line: `on-device`, `fixture`.
-    fn name(&self) -> &'static str;
-    /// Blocking; called off the UI thread. Boxes in reading order.
-    fn read(&self, frame: &Frame) -> Result<Vec<TextBox>, String>;
-}
-
-/// A fixed Chinese menu, standing in for the on-device model.
-pub struct FixtureReader;
-
-impl TextReader for FixtureReader {
-    fn name(&self) -> &'static str {
-        "fixture"
-    }
-
-    fn read(&self, frame: &Frame) -> Result<Vec<TextBox>, String> {
-        // The stub still answers with the menu; it does insist on getting a picture.
-        if frame.rgba.len() != frame.width as usize * frame.height as usize * 4 || frame.width == 0 {
-            return Err("no picture".to_string());
-        }
-        let rows = [
-            ("今日菜单", 0.26, 0.10, 0.48, 0.08),
-            ("宫保鸡丁  38元", 0.12, 0.26, 0.76, 0.07),
-            ("麻婆豆腐  26元", 0.12, 0.38, 0.76, 0.07),
-            ("红烧肉  58元", 0.12, 0.50, 0.76, 0.07),
-            ("酸辣汤  18元", 0.12, 0.62, 0.76, 0.07),
-            ("米饭 免费", 0.12, 0.74, 0.76, 0.07),
-        ];
-        Ok(rows
-            .iter()
-            .map(|(t, x, y, w, h)| TextBox { text: t.to_string(), x: *x, y: *y, w: *w, h: *h })
-            .collect())
-    }
-}
-
-/// The reader the app uses.
-pub fn default_reader() -> Box<dyn TextReader> {
-    Box::new(FixtureReader)
 }
 
 /// One line per box, `n|text`, for a single translation job.
@@ -123,6 +79,22 @@ pub fn numbered_system(to: crate::lang::Lang, style: &crate::prompt::Style) -> S
 /// The side of the square picture the on-device model sees: every photo is
 /// fitted into it, so the vision tower compiles one graph for all of them.
 pub const ON_DEVICE_SIDE: u32 = 512;
+/// The side a photo goes to the hub at: its vision tower takes up to 1024 px,
+/// and small print needs the pixels.
+pub const HUB_SIDE: u32 = 1024;
+
+/// A frame as PNG (the hub's chat turns carry pictures as PNG).
+pub fn png(frame: &Frame) -> Result<Vec<u8>, String> {
+    use makepad_zune_core::{bit_depth::BitDepth, colorspace::ColorSpace, options::EncoderOptions};
+    let (w, h) = (frame.width as usize, frame.height as usize);
+    if w == 0 || h == 0 || frame.rgba.len() < w * h * 4 {
+        return Err("no picture".to_string());
+    }
+    let options = EncoderOptions::default().set_width(w).set_height(h).set_depth(BitDepth::Eight).set_colorspace(ColorSpace::RGBA);
+    let mut out = Vec::new();
+    makepad_zune_png::PngEncoder::new(&frame.rgba[..w * h * 4], options).encode(&mut out).map_err(|e| format!("png: {e:?}"))?;
+    Ok(out)
+}
 
 pub const ON_DEVICE_PROMPT: &str = "Read the text in this photo.";
 
@@ -193,10 +165,6 @@ pub fn fit_square(frame: &Frame, side: u32) -> Frame {
 mod tests {
     use super::*;
 
-    fn test_frame() -> Frame {
-        Frame { width: 2, height: 2, rgba: vec![0; 16] }
-    }
-
     #[test]
     fn pairs_parse_and_pictures_fit() {
         let boxes = parse_read_lines("今日菜单\n\n`绿茶 18元`\n");
@@ -216,7 +184,7 @@ mod tests {
 
     #[test]
     fn numbered_jobs_round_trip() {
-        let boxes = FixtureReader.read(&test_frame()).unwrap();
+        let boxes = parse_read_lines("今日菜单\n宫保鸡丁  38元\n麻婆豆腐  26元\n红烧肉  58元");
         let prompt = numbered_prompt(&boxes);
         assert!(prompt.starts_with("1|今日菜单\n2|宫保鸡丁"));
         let reply = "1|Today's menu\n2| Kung Pao chicken  38 yuan\nnoise\n9|out of range\n4|Red-braised pork 58 yuan";
@@ -228,9 +196,12 @@ mod tests {
     }
 
     #[test]
-    fn the_fixture_boxes_sit_inside_the_picture() {
-        for b in FixtureReader.read(&test_frame()).unwrap() {
-            assert!(b.x >= 0.0 && b.y >= 0.0 && b.x + b.w <= 1.0 && b.y + b.h <= 1.0);
-        }
+    fn a_frame_becomes_a_png() {
+        let frame = Frame { width: 3, height: 2, rgba: vec![200; 24] };
+        let png = png(&frame).unwrap();
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(u32::from_be_bytes(png[16..20].try_into().unwrap()), 3);
+        assert!(super::png(&Frame::default()).is_err());
     }
+
 }

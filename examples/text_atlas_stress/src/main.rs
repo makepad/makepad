@@ -25,6 +25,13 @@
 //! and the still row must not change (2026-10-13, Stage's code pane beside an
 //! animated slide: the pane's glyphs were released as idle, their slots given
 //! to new glyphs, and its words went blank for a frame or more).
+//!
+//! `kept_list` records its words into its own draw list ONCE and never again,
+//! not even on a full redraw (as a render target painted again from its kept
+//! instances does). Its glyphs must survive the churn's fresh glyphs in four
+//! faces filling a small curve store (2026-10-13, 149: the Relax deck title
+//! read "Re ax" after a few minutes, its "l" released as unused and its curves
+//! given to another glyph).
 use makepad_widgets::*;
 
 app_main!(App);
@@ -64,6 +71,28 @@ script_mod! {
         draw_text +: {
             color: #fff
             text_style: theme.font_regular{ font_size: 12 }
+        }
+        draw_text_b +: {
+            color: #fff
+            text_style: theme.font_bold{ font_size: 12 }
+        }
+        draw_text_c +: {
+            color: #fff
+            text_style: theme.font_code{ font_size: 12 }
+        }
+        draw_text_d +: {
+            color: #fff
+            text_style: theme.font_bold_italic{ font_size: 12 }
+        }
+    }
+
+    mod.widgets.KeptListBase = #(KeptList::register_widget(vm))
+    mod.widgets.KeptList = set_type_default() do mod.widgets.KeptListBase {
+        width: Fill
+        height: 60
+        draw_text +: {
+            color: #fff
+            text_style: theme.font_italic{ font_size: 20 }
         }
     }
 
@@ -123,6 +152,7 @@ script_mod! {
                         new_batch: true
                         churn_row := mod.widgets.Churn {}
                     }
+                    kept_list := mod.widgets.KeptList {}
                     burst := mod.widgets.TexBurst {}
                     stress := Button { text: "stress" }
                     status := Label { text: "phase 0 frame 0" draw_text +: { color: #fff } }
@@ -309,6 +339,9 @@ pub struct Churn {
     #[uid] widget_uid: WidgetUid,
     #[walk] walk: Walk,
     #[redraw] #[live] draw_text: DrawText,
+    #[live] draw_text_b: DrawText,
+    #[live] draw_text_c: DrawText,
+    #[live] draw_text_d: DrawText,
     #[rust] area: Area,
     #[rust] frame: u64,
     #[rust] active: bool,
@@ -333,11 +366,21 @@ impl Widget for Churn {
                     (self.frame - QUIET_FRAMES) as usize * CHURN_CELLS + k
                 };
                 let wraps = if self.frame <= QUIET_FRAMES { 0 } else { 1 + i / 230 };
-                self.draw_text.text_style.font_size = 12.0 + (wraps % 24) as f32 * 1.5;
+                // after the quiet frames the faces take turns: three times the glyphs
+                let draw = match if self.frame <= QUIET_FRAMES { 0 } else { (i / 230) % 4 } {
+                    0 => &mut self.draw_text,
+                    1 => &mut self.draw_text_b,
+                    2 => &mut self.draw_text_c,
+                    _ => &mut self.draw_text_d,
+                };
+                draw.text_style.font_size = 12.0 + (wraps % 24) as f32 * 1.5;
                 let text = churn_char(i).encode_utf8(&mut buf);
-                self.draw_text.draw_abs(cx, dvec2(rect.pos.x + 8.0 + k as f64 * CHURN_CELL, rect.pos.y + 4.0), text);
+                draw.draw_abs(cx, dvec2(rect.pos.x + 8.0 + k as f64 * CHURN_CELL, rect.pos.y + 4.0), text);
             }
             self.draw_text.text_style.font_size = base_size;
+            self.draw_text_b.text_style.font_size = base_size;
+            self.draw_text_c.text_style.font_size = base_size;
+            self.draw_text_d.text_style.font_size = base_size;
             if self.active && self.frame == QUIET_FRAMES {
                 // everything draws again (a window resize, a theme change): the still row's
                 // glyphs, unused for QUIET_FRAMES, must still be there
@@ -361,6 +404,39 @@ impl Widget for Churn {
             self.area.redraw(cx);
         }
     }
+}
+
+/// Words recorded into their own draw list once and never again, even on a full redraw: the
+/// list is painted from its kept instances (as a render target's passes are).
+#[derive(Script, ScriptHook, Widget)]
+pub struct KeptList {
+    #[source] source: ScriptObjectRef,
+    #[uid] widget_uid: WidgetUid,
+    #[walk] walk: Walk,
+    #[redraw] #[live] draw_text: DrawText,
+    #[rust] area: Area,
+    #[rust] list: Option<DrawList2d>,
+    #[rust] recorded: bool,
+}
+
+impl Widget for KeptList {
+    fn draw_walk(&mut self, cx: &mut Cx2d, _scope: &mut Scope, walk: Walk) -> DrawStep {
+        let rect = cx.walk_turtle(walk);
+        let list = self.list.get_or_insert_with(|| DrawList2d::new(cx));
+        if list.begin_maybe(cx, !self.recorded).is_redrawing() {
+            self.draw_text.draw_abs(cx, dvec2(rect.pos.x + 8.0, rect.pos.y + 8.0), "KEPT LIST 0123456789 abcdefghijklmnop");
+            list.end(cx);
+            // kept once complete (as Motion keeps a frame once nothing it shows is pending)
+            self.recorded = !cx.pending_async_loads().iter().any(|(kind, n)| *kind == "glyph" && *n > 0);
+            if !self.recorded {
+                cx.redraw_all();
+            }
+        }
+        self.area = Area::Empty;
+        DrawStep::done()
+    }
+
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _scope: &mut Scope) {}
 }
 
 #[derive(Script, ScriptHook)]

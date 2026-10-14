@@ -74,7 +74,7 @@ pub fn specs(sub: bool, read_only: bool) -> Vec<ToolSpec> {
     // Sub-agents cannot spawn further agents; the running apps are the main agent's (remote.rs).
     let all: Vec<ToolSpec> = if sub { all.into_iter().filter(|s| s.name != "spawn_agent").collect() } else { all.into_iter().chain(super::remote::specs()).chain(super::remote::attached_specs()).collect() };
     if read_only {
-        all.into_iter().filter(|s| !matches!(s.name.as_str(), "edit_file" | "write_file" | "run_command" | "run_stop" | "build_app" | "run_app" | "stop_app")).collect()
+        all.into_iter().filter(|s| !matches!(s.name.as_str(), "edit_file" | "write_file" | "run_command" | "run_stop" | "start_app" | "build_app" | "run_app" | "stop_app")).collect()
     } else {
         all
     }
@@ -1016,6 +1016,7 @@ fn title_of(name: &str, args: &[(String, String)]) -> String {
         "todo" => "plan".into(),
         "spawn_agent" => format!("agent: {}", arg(args, &["task"]).unwrap_or("").chars().take(60).collect::<String>()),
         "ask_user" => "ask".into(),
+        "start_app" => format!("start {}", arg(args, &["app"]).unwrap_or("")),
         "build_app" => format!("build {}", arg(args, &["app"]).unwrap_or("")),
         "run_app" => format!("run {} {}", arg(args, &["app"]).unwrap_or(""), arg(args, &["mode"]).unwrap_or("native")),
         "stop_app" => format!("stop {}", arg(args, &["app"]).unwrap_or("")),

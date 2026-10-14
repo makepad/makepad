@@ -1,6 +1,5 @@
 //! video: a dumb video player for Makepad. See Cargo.toml for scope.
 
-pub mod player;
 pub mod preview;
 pub mod theme;
 pub mod widget;

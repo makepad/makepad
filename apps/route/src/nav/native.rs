@@ -23,8 +23,8 @@ use std::path::{Path, PathBuf};
 
 /// The test map's nav basename under the maps root: the layout
 /// `makepad_map_build::testmap::TestMapPaths::in_dir(root, "amsterdam")`
-/// bakes, spelled out here so reading it needs no baker. It is the one-city
-/// fallback, used only when the maps root holds no regional nav pair.
+/// bakes, spelled out here so reading it needs no baker. It is one more
+/// city, loaded after every regional nav pair.
 const TEST_MAP_BASENAME: &str = "amsterdam";
 #[cfg(not(target_arch = "wasm32"))]
 const EUROPE_PLACES_PATH: &str = "europe-places.search";
@@ -80,9 +80,10 @@ pub fn load_regions(basenames: &[String]) -> Result<Vec<NavRegion>, String> {
 }
 
 /// The nav artifacts to load: every `<name>.search` that has a
-/// `<name>.graph` beside it in the maps root (sorted by name), else the
-/// baked test map. Empty means this machine has neither and the caller
-/// should offer to bake one.
+/// `<name>.graph` beside it in the maps root, regional pairs sorted by
+/// name and the baked test map last (a regional graph that also covers
+/// Amsterdam answers first; searches merge and dedupe across all). Empty
+/// means this machine has none and the caller should offer to bake one.
 pub fn nav_basenames(maps_root: &Path) -> Vec<String> {
     let has_pair = |basename: &str| {
         Path::new(&format!("{basename}.search")).is_file()
@@ -101,7 +102,7 @@ pub fn nav_basenames(maps_root: &Path) -> Vec<String> {
         })
         .collect::<Vec<_>>();
     found.sort();
-    if found.is_empty() && has_pair(&test_map) {
+    if has_pair(&test_map) {
         found.push(test_map);
     }
     found
@@ -318,13 +319,16 @@ fn build_hires_now(
 /// (numeric weather_now sampling) and reprojected display frames to the UI.
 /// Also syncs the raw volumes of both radars and composites them into the
 /// hi-res "now" image. Files land under `cache_dir`. The worker ends when
-/// the instance that started it is gone (its receiver dropped).
+/// the instance that started it is gone (its receiver dropped). While
+/// `network` is false (offline) it fetches nothing and shows what the cache
+/// already holds.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn start_radar_worker(
     spawner: ThreadSpawner,
     pool: TaskPool,
     sender: ToUISender<RadarData>,
     cache_dir: PathBuf,
+    network: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     let spawned = spawner.spawn_worker(
         ThreadOptions {
@@ -349,9 +353,10 @@ pub fn start_radar_worker(
         let mut current: Option<RadarData> = None;
         let pacing = CancellationToken::new();
         loop {
-            let state = match sync.sync() {
-                Ok(state) => state,
-                Err(_) => sync.state(),
+            let online = network.load(std::sync::atomic::Ordering::Relaxed);
+            let state = match online.then(|| sync.sync()) {
+                Some(Ok(state)) => state,
+                _ => sync.state(),
             };
             let mut changed = false;
             if let Some(frame) = state.frames.last() {
@@ -391,8 +396,10 @@ pub fn start_radar_worker(
             }
             // Volumes: sync both radars, composite when a new common
             // timestamp appears.
-            let _ = volume_syncs.0.sync();
-            let _ = volume_syncs.1.sync();
+            if online {
+                let _ = volume_syncs.0.sync();
+                let _ = volume_syncs.1.sync();
+            }
             if let Some((stamp, herwijnen_path, den_helder_path)) =
                 newest_volume_pair(&volume_syncs.0, &volume_syncs.1)
             {

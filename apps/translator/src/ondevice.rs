@@ -13,6 +13,8 @@ use std::path::{Path, PathBuf};
 
 /// The model id that selects the phone's own models in the settings.
 pub const MODEL: &str = "on-device";
+/// What the settings call the phone's translation model.
+pub const LABEL: &str = "Qwen3.5-4B";
 
 /// The translation model's file: our converted Qwen3.5-4B first, the earlier
 /// Q5_K_M (sideloaded) as the fallback.
@@ -82,13 +84,27 @@ fn find_and_set() -> Result<PathBuf, String> {
     // engines read the environment, and again only when the weights arrive.
     unsafe {
         std::env::set_var("MAKEPAD_HOME", &home);
-        // Whisper and Kokoro may load into this process on a phone.
-        std::env::set_var("MAKEPAD", "whisper+kokoro");
         if let Some(whisper) = first_file(&home.join("weights/stt"), &[WHISPER_FILE]) {
             std::env::set_var("MAKEPAD_VOICE_MODEL", whisper);
         }
     }
     Ok(home)
+}
+
+/// Where speech runs: on the phone (Whisper and Kokoro load into this
+/// process) or, `false`, on the hub (Hub mode: the phone's copies stay out of
+/// the way, or the speech sessions would pick them first). Call before a
+/// speech session starts; a session keeps the engine it found.
+pub fn speech_in_process(on: bool) {
+    // SAFETY: set from the UI thread just before a speech session starts; the
+    // speech crate reads it when that session picks its engine.
+    unsafe {
+        if on {
+            std::env::set_var("MAKEPAD", "whisper+kokoro");
+        } else {
+            std::env::remove_var("MAKEPAD");
+        }
+    }
 }
 
 /// The Makepad home holding the on-device weights, if any.

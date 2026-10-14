@@ -406,9 +406,10 @@ impl BuildOutput {
                 (title, goal_name(j.goal).to_string(), j.status_line(), state_ink(&j.state), bar_fill(j), bar_ink(&j.state), !j.state.is_done())
             }
             (None, Some(r)) => {
-                let status = match &r.exited {
-                    None => format!("pid {}  up {}", r.pid, uptime(r.uptime)),
-                    Some(how) => format!("pid {}  {how}", r.pid),
+                let status = match (&r.exited, &r.building) {
+                    (None, Some(stage)) => format!("pid {}  {stage}", r.pid),
+                    (None, None) => format!("pid {}  up {}", r.pid, uptime(r.uptime)),
+                    (Some(how), _) => format!("pid {}  {how}", r.pid),
                 };
                 let ink = if r.exited.is_none() { vec(palette().ok, 1.0) } else { vec(palette().meta, 1.0) };
                 (r.app.id.to_string(), format!("{} output", r.mode.name()), status, ink, 0.0, vec(palette().primary, 0.0), false)

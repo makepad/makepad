@@ -215,7 +215,7 @@ impl App {
     /// opens one by hand: the playlist from 300 pt, the equalizer between
     /// them from 560. In a band the EQ sits flat: no plate, frame or keys of
     /// its own (the band's title strip does that).
-    fn apply_small_sections(&mut self, cx: &mut Cx) {
+    pub(crate) fn apply_small_sections(&mut self, cx: &mut Cx) {
         // The playlist band from where it holds a few rows (not a sliver).
         const LEVELS: [f64; 2] = [380.0, 600.0];
         const SLACK: f64 = 20.0;
@@ -250,9 +250,24 @@ impl App {
             s.small_eq = level >= 2;
         }
         let (eq, pl) = (s.small_eq, s.small_pl);
+        // The visualizer band (VIS) shares the room under the main window
+        // with the playlist; a tap on its picture shows it alone.
+        // A wide, low window (a phone on its side) has room for one of the
+        // picture and the playlist under the main window: the picture, while
+        // VIS is on.
+        let vis = self.milk.settings.on;
+        let full = vis && self.milk.fullscreen;
+        let size = self.window_size(cx);
+        let pl = pl && !(vis && size.x > size.y);
+        let eq = eq && !full;
+        self.set_visible(cx, ids!(main_band), !full);
+        self.set_visible(cx, ids!(vis_band), vis);
+        self.set_visible(cx, ids!(vis_strip), !full);
         self.set_visible(cx, ids!(eq_band), eq);
-        self.set_visible(cx, ids!(pl_band), pl);
-        // The equalizer band is the EQ panel, open.
+        self.set_visible(cx, ids!(pl_band), pl && !full);
+        self.ui.relief_view(cx, ids!(tog_vis_cap)).set_lit(cx, if vis { 1.0 } else { 0.0 });
+        // The equalizer band is the EQ panel, open (closed under the
+        // fullscreen picture: its panel draws wherever it is open).
         if eq != self.model.eq.open {
             self.toggle_eq();
         }
@@ -341,6 +356,11 @@ impl App {
         let eq_fold = self.ui.button(cx, ids!(eq_fold)).clicked(actions);
         let pl_key = self.ui.button(cx, ids!(tog_pl)).clicked(actions);
         let pl_fold = self.ui.button(cx, ids!(pl_fold)).clicked(actions);
+        // VIS: the visualizer band on or off (the picture's mode, kept).
+        if self.ui.button(cx, ids!(tog_vis)).clicked(actions) || self.ui.button(cx, ids!(vis_fold)).clicked(actions) {
+            let on = !self.milk.settings.on;
+            self.set_visualizer(cx, on);
+        }
         let (eq_was, pl_was) = {
             let s = state(cx);
             (s.small_eq, s.small_pl)
@@ -355,6 +375,12 @@ impl App {
         }
         if pl_key {
             pl_now = !pl_was;
+            // On its side the playlist and the picture take turns.
+            let size = self.window_size(cx);
+            if size.x > size.y && self.milk.settings.on {
+                self.set_visualizer(cx, false);
+                pl_now = true;
+            }
         }
         if pl_fold {
             pl_now = false;

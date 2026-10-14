@@ -35,6 +35,8 @@ use std::sync::Arc;
 struct Args {
     device: Option<String>,
     loopback: bool,
+    /// The microphone is opened only when asked for (--mic, --device or --loopback).
+    mic: bool,
     vol: f32,
     channel: u8,
     listen: Option<Vec<u8>>,
@@ -51,6 +53,7 @@ impl Args {
         let mut args = Self {
             device: None,
             loopback: false,
+            mic: false,
             vol: 1.0,
             channel: 0,
             listen: None,
@@ -64,6 +67,8 @@ impl Args {
         for arg in std::env::args().skip(1) {
             if let Some(v) = arg.strip_prefix("--device=") {
                 args.device = Some(v.to_string());
+            } else if arg == "--mic" {
+                args.mic = true;
             } else if arg == "--loopback" {
                 args.loopback = true;
             } else if let Some(v) = arg.strip_prefix("--vol=") {
@@ -147,7 +152,10 @@ impl MatchEvent for App {
         for desc in &devices.descs {
             println!("{}", desc)
         }
-        let inputs = if args.loopback {
+        // No capture unless the user asked for one: the microphone is off by default.
+        let inputs = if !(args.mic || args.loopback || args.device.is_some()) {
+            Vec::new()
+        } else if args.loopback {
             devices.match_inputs(&["System Audio"])
         } else if let Some(ref name) = args.device {
             let matched = devices.match_inputs(&[name.as_str()]);

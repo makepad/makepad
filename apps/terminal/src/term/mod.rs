@@ -14,7 +14,7 @@
 //!   modes     DEC/ANSI mode registry with save/restore + DECRQM reports
 //!   charsets  G0..G3 slots, DEC Special Graphics
 //!   tabstops  tab stop bitmap
-//!   unicode   codepoint width + grapheme break (mode 2027)
+//!   (codepoint width + grapheme break, mode 2027: the makepad-cell-width crate)
 //!   page      cell/row storage with scrollback
 //!   screen    cursor + page view (primary/alternate), selection
 //!   terminal  the control functions (CSI/ESC/OSC semantics)
@@ -39,7 +39,6 @@ pub mod stream;
 pub mod style;
 pub mod tabstops;
 pub mod terminal;
-pub mod unicode;
 pub mod utf8;
 
 pub use color::{Palette, Rgb};

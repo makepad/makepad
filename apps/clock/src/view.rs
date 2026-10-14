@@ -520,6 +520,13 @@ pub struct ClockView {
     alarm_changed: bool,
     #[rust]
     alarm_signal: Arc<AtomicBool>,
+    /// The default output, and whether it is open: only while the alarm
+    /// sound plays (an open output runs its callback, and keeps the sound
+    /// hardware awake, even for silence).
+    #[rust]
+    output_devices: Vec<AudioDeviceId>,
+    #[rust]
+    output_open: bool,
     #[rust]
     countdown_alert: bool,
     #[rust]
@@ -826,11 +833,20 @@ impl ClockView {
         self.refresh_tile(cx);
     }
 
+    /// Open the default output while the alarm sound plays, close it after.
+    fn set_output(&mut self, cx: &mut Cx, open: bool) {
+        if open != self.output_open {
+            self.output_open = open;
+            cx.use_audio_outputs(if open { &self.output_devices } else { &[] });
+        }
+    }
+
     /// The centred panel for a ringing alarm or a finished timer.
     fn refresh_modal(&mut self, cx: &mut Cx) {
         let ringing = self.alarm.ringing();
         let done = self.countdown_alert;
         self.alarm_signal.store(ringing || done, Ordering::Relaxed);
+        self.set_output(cx, ringing || done);
         self.view.widget(cx, ids!(modal)).set_visible(cx, ringing || done);
         if ringing {
             let now = LocalTime::now();
@@ -1342,7 +1358,11 @@ impl Widget for ClockView {
             self.on_storage(cx, responses);
         }
         if let Event::AudioDevices(devices) = event {
-            cx.use_audio_outputs(&devices.default_output());
+            self.output_devices = devices.default_output();
+            // An open output follows the default device when it changes.
+            if self.output_open {
+                cx.use_audio_outputs(&self.output_devices);
+            }
         }
         if matches!(event, Event::LiveEdit) {
             self.select_mode(cx, self.mode, false);

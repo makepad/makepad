@@ -1593,15 +1593,16 @@ impl Widget for NotesView {
             return;
         }
         // A swipe or back gesture's pop gets this Back instead, since the system's back gesture ends with one.
+        // Back is taken only when Notes has somewhere to go back to: at the folder list it stays
+        // unhandled, so the host (the phone WM, Android) goes home.
         if matches!(event, Event::BackPressed { .. })
             && !self.view.stack_navigation(cx, ids!(compact)).has_pending_interactive_pop()
-            && event.back_pressed()
         {
-            if self.overlay != OverlayKind::None {
+            if self.overlay != OverlayKind::None && event.back_pressed() {
                 self.dismiss_overlay(cx);
                 return;
             }
-            if self.layout.is_compact() && engine::current_screen(&self.ui) != Screen::Folders {
+            if self.layout.is_compact() && engine::current_screen(&self.ui) != Screen::Folders && event.back_pressed() {
                 self.go_back(cx);
                 self.apply_pending_nav(cx);
                 return;

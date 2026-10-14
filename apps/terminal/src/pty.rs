@@ -299,13 +299,10 @@ impl Pty {
         cmd.env_remove("NO_COLOR");
         cmd.env("TERM_PROGRAM", "terminal");
         cmd.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        // A terminal spawned inside makepad-app-wm inherits the compositor's
-        // studio vars; the shell's children must not think they are hosted
-        // makepad clients.
-        cmd.env_remove("STUDIO_HOST");
-        cmd.env_remove("STUDIO_BUILD");
-        cmd.env_remove("STUDIO_CRATE");
-        cmd.env_remove("MAKEPAD_STDIN_LOOP");
+        // A terminal the WM hosts carries its own hosted identity and the
+        // WM's direct-display request; the shell's children get neither (an
+        // app started here finds the WM itself through MAKEPAD_WM_SOCKET).
+        makepad_app_registry::child_env::scrub(&mut cmd);
         for (k, v) in env {
             cmd.env(k, v);
         }

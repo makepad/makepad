@@ -25,7 +25,11 @@ use makepad_code_editor::document::PreparedDocument;
 use makepad_code_editor::history::NewGroup;
 use makepad_code_editor::selection::Affinity;
 use makepad_code_editor::session::{PreparedView, SelectionMode};
+use makepad_code_editor::decoration::{Decoration, DecorationType};
+use makepad_code_editor::inlays::InlineInlay;
+use makepad_code_editor::text::Position;
 use makepad_code_editor::{CodeDocument, CodeSession};
+use makepad_code_agent::runs::{Diagnostic, Level, RunManager};
 use makepad_widgets::*;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
@@ -530,6 +534,12 @@ pub struct FileEditor {
     poll: Timer,
     #[rust(true)]
     window_active: bool,
+    /// The build and run errors marked in the text (underlined, the message
+    /// after the line), and the run manager's generation they were read at.
+    #[rust]
+    marked: Vec<Diagnostic>,
+    #[rust]
+    marks_seen: u64,
 }
 
 impl FileEditor {
@@ -747,6 +757,8 @@ impl FileEditor {
                 if let Some((line, col)) = self.pending_goto.take() {
                     self.goto(cx, line, col);
                 }
+                self.marked.clear();
+                self.mark_diagnostics(cx, true);
                 let washes = std::mem::take(&mut self.pending_washes);
                 if !washes.is_empty() {
                     self.light(cx, washes);
@@ -756,6 +768,39 @@ impl FileEditor {
         }
         self.reloading = false;
         self.view.redraw(cx);
+    }
+
+    /// Mark the errors the run manager has for this file (the newest build of
+    /// each app, the code of each `makepad run` as last saved): each place
+    /// underlined, its message written after its line. `force`: the document
+    /// is new (a load), mark even when the errors did not change.
+    fn mark_diagnostics(&mut self, cx: &mut Cx, force: bool) {
+        static HOOKED: std::sync::Once = std::sync::Once::new();
+        HOOKED.call_once(|| RunManager::global().on_change(std::sync::Arc::new(|| SignalToUI::set_ui_signal())));
+        let m = RunManager::global();
+        let generation = m.generation();
+        if !self.ready || (!force && generation == self.marks_seen) {
+            return;
+        }
+        self.marks_seen = generation;
+        let Some(path) = self.path.clone() else { return };
+        let diags = m.diagnostics_for(&path);
+        if !force && diags == self.marked {
+            return;
+        }
+        let code = self.code(cx);
+        let Some(mut code_view) = code.borrow_mut::<CodeView>() else { return };
+        let Some(session) = code_view.session.as_ref() else { return };
+        let lines: Vec<String> = session.document().as_text().as_lines().to_vec();
+        let (decorations, inlays) = diagnostic_marks(&lines, &diags);
+        let mut document = session.document().clone();
+        if document.replace_prepared_decorations(decorations).is_err() {
+            return;
+        }
+        document.set_inline_inlays(inlays);
+        session.relayout_inline();
+        code_view.redraw(cx);
+        self.marked = diags;
     }
 
     /// Wash these lines, fading; bring the first into view if it is off.
@@ -944,7 +989,10 @@ fn drop_text(items: &[DragItem]) -> String {
 impl Widget for FileEditor {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         match event {
-            Event::Signal => self.poll_load(cx),
+            Event::Signal => {
+                self.poll_load(cx);
+                self.mark_diagnostics(cx, false);
+            }
             Event::WindowLostFocus(_) => self.window_active = false,
             Event::WindowGotFocus(_) => {
                 self.window_active = true;
@@ -1005,9 +1053,76 @@ impl Widget for FileEditor {
     }
 }
 
+/// The editor marks of `diags` in a text of `lines`: an underline from each
+/// place over the identifier there (one character otherwise; the whole line
+/// when the column is past its end), sorted and never overlapping, and one
+/// text after each line naming its errors ("✗ message", warnings "⚠").
+/// Places outside the text are left out.
+pub fn diagnostic_marks(lines: &[String], diags: &[Diagnostic]) -> (Vec<Decoration>, Vec<(usize, usize, InlineInlay)>) {
+    let mut spans: Vec<(Position, Position, DecorationType)> = Vec::new();
+    let mut notes: Vec<(usize, String)> = Vec::new();
+    for d in diags {
+        let Some(index) = (d.line as usize).checked_sub(1) else { continue };
+        let Some(text) = lines.get(index) else { continue };
+        let ty = if d.level == Level::Error { DecorationType::Error } else { DecorationType::Warning };
+        let col = (d.col as usize).saturating_sub(1);
+        let (start, end) = match text.char_indices().nth(col) {
+            Some((start, c)) => {
+                let word = |c: char| c.is_alphanumeric() || c == '_';
+                let end = if word(c) {
+                    text[start..].char_indices().find(|&(_, c)| !word(c)).map_or(text.len(), |(i, _)| start + i)
+                } else {
+                    start + c.len_utf8()
+                };
+                (start, end)
+            }
+            None => (text.len() - text.trim_start().len(), text.len()),
+        };
+        if end > start {
+            spans.push((Position { line_index: index, byte_index: start }, Position { line_index: index, byte_index: end }, ty));
+        }
+        let mark = if d.level == Level::Error { "✗" } else { "⚠" };
+        match notes.iter_mut().find(|(line, _)| *line == index) {
+            Some((_, note)) => note.push_str(&format!("  ·  {mark} {}", d.message)),
+            None => notes.push((index, format!("    {mark} {}", d.message))),
+        }
+    }
+    spans.sort_by_key(|(start, _, _)| *start);
+    let mut decorations: Vec<Decoration> = Vec::new();
+    for (start, end, ty) in spans {
+        if decorations.last().is_some_and(|last| last.end() > start) {
+            continue;
+        }
+        decorations.push(Decoration::new(decorations.len(), start, end, ty));
+    }
+    let inlays = notes.into_iter().map(|(line, note)| (line, lines[line].len(), InlineInlay::Text(note))).collect();
+    (decorations, inlays)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A run's error marks its place in the editor: the identifier at the
+    /// column underlined, the message after the line; a column past the end
+    /// underlines the line; places outside the file are left out.
+    #[test]
+    fn a_run_error_is_marked_at_its_line() {
+        let lines: Vec<String> = ["fn main() {", "    let bad: u32 = \"a\";", "}"].iter().map(|l| l.to_string()).collect();
+        let at = |line, col, level, message: &str| Diagnostic { level, message: message.into(), path: Some("src/main.rs".into()), line, col };
+        let diags = [
+            at(2, 20, Level::Error, "E0308: mismatched types"),
+            at(2, 9, Level::Warning, "unused variable"),
+            at(3, 9, Level::Error, "past the end"),
+            at(9, 1, Level::Error, "outside"),
+        ];
+        let (decorations, inlays) = diagnostic_marks(&lines, &diags);
+        let spans: Vec<_> = decorations.iter().map(|d| (d.start().line_index, d.start().byte_index, d.end().byte_index, d.ty)).collect();
+        assert_eq!(spans, [(1, 8, 11, DecorationType::Warning), (1, 19, 20, DecorationType::Error), (2, 0, 1, DecorationType::Error)]);
+        assert_eq!(inlays.len(), 2);
+        assert_eq!(inlays[0], (1, lines[1].len(), InlineInlay::Text("    ✗ E0308: mismatched types  ·  ⚠ unused variable".into())));
+        assert_eq!(inlays[1].0, 2);
+    }
 
     #[test]
     fn crlf_and_bom_round_trip() {

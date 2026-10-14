@@ -33,8 +33,6 @@ use std::time::{Duration, Instant};
 /// output never boosts more than +6 dB.
 pub const GAIN_MIN_DB: f32 = -24.0;
 pub const GAIN_MAX_DB: f32 = 6.0;
-/// The range our volume slider spans, from its first step up to full.
-const VOLUME_RANGE_DB: f32 = 60.0;
 /// How long the safety limiter keeps running after the knobs stop
 /// boosting, seconds: the bands glide back over about 0.1 s.
 const LIMITER_HOLD_SECS: f64 = 0.5;
@@ -244,10 +242,11 @@ impl Knobs {
     }
 }
 
-/// A slider position as our volume's gain: an even step in loudness per
-/// step of the slider over [`VOLUME_RANGE_DB`], and silence at the bottom.
+/// A slider position as our volume's gain: cubic, so loudness follows the
+/// slider as heard (half way is -18 dB, a quarter -36 dB) and the bottom is
+/// silent.
 pub fn volume_to_linear(volume: f32) -> f32 {
-    if volume <= 0.0 { 0.0 } else { 10f32.powf((volume.min(1.0) - 1.0) * VOLUME_RANGE_DB / 20.0) }
+    volume.clamp(0.0, 1.0).powi(3)
 }
 
 pub fn db_to_linear(db: f32) -> f32 {
@@ -455,15 +454,18 @@ mod tests {
         assert_eq!(db_to_linear(20.0), db_to_linear(GAIN_MAX_DB));
     }
 
-    /// Our volume: full is unity, the bottom silent, and every step in
-    /// between the same number of decibels.
+    /// Our volume: full is unity, the bottom silent, cubic in between (a
+    /// quarter of the slider is still heard: -36 dB, not near silence).
     #[test]
-    fn our_volume_is_even_in_loudness() {
+    fn our_volume_is_cubic() {
         assert_eq!(volume_to_linear(1.0), 1.0);
         assert_eq!(volume_to_linear(0.0), 0.0);
+        assert_eq!(volume_to_linear(-0.5), 0.0);
+        assert_eq!(volume_to_linear(1.5), 1.0);
         let db = |v: f32| 20.0 * volume_to_linear(v).log10();
-        assert!((db(0.5) + 30.0).abs() < 0.01);
-        assert!(((db(0.75) - db(0.5)) - (db(0.5) - db(0.25))).abs() < 0.01);
+        assert!((db(0.5) + 18.06).abs() < 0.01);
+        assert!((db(0.25) + 36.12).abs() < 0.01);
+        assert!(db(0.24) > -38.0);
     }
 
     /// With the equalizer off the bands and the output level sit flat (local

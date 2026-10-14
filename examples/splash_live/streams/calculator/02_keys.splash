@@ -1,0 +1,51 @@
+// A calculator, written in Splash
+let Key = ButtonFlat{
+    width: Fill height: 88
+}
+let FnKey = Key{
+}
+let OpKey = Key{
+}
+let EqKey = Key{
+}
+View{width: Fill height: Fit align: Align{x: 0.5}
+    calc := RoundedView{width: 560 height: Fit flow: Down spacing: 16 padding: 28
+        show_bg: true new_batch: true
+        draw_bg.color: #x14161b
+        display := View{width: Fill height: 190 flow: Down spacing: 6 align: Align{x: 1.0 y: 1.0}
+            expr := Label{text: ""}
+            value := Label{text: "0"}
+        }
+        keys := View{width: Fill height: Fit flow: Down spacing: 14
+            View{width: Fill height: Fit flow: Right spacing: 14
+                FnKey{text: "C"}
+                FnKey{text: "±"}
+                FnKey{text: "%"}
+                OpKey{text: "÷"}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "7"}
+                Key{text: "8"}
+                Key{text: "9"}
+                OpKey{text: "×"}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "4"}
+                Key{text: "5"}
+                Key{text: "6"}
+                OpKey{text: "−"}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "1"}
+                Key{text: "2"}
+                Key{text: "3"}
+                OpKey{text: "+"}
+            }
+            View{width: Fill height: Fit flow: Right spacing: 14
+                Key{text: "0"}
+                Key{text: "00"}
+                EqKey{text: "="}
+            }
+        }
+    }
+}

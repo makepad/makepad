@@ -30,9 +30,9 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-pub const NAMES: [&str; 13] = [
+pub const NAMES: [&str; 14] = [
     "apps", "app_tools", "app_call", "ui", "launch", "attach", "detach",
-    "list_apps", "build_app", "run_app", "stop_app", "app_status", "app_logs",
+    "list_apps", "start_app", "build_app", "run_app", "stop_app", "app_status", "app_logs",
 ];
 
 /// Services attached at once: each adds its tools to the model's table.
@@ -121,11 +121,13 @@ pub fn specs() -> Vec<ToolSpec> {
           r#"{"type":"object","properties":{"target":{"type":"string","description":"app name, pid, or host:app"},"service":{"type":"string","description":"the service id from apps"},"instance":{"type":"string","description":"which instance when several run"}},"required":["target","service"]}"#),
         t("detach", "Remove an attached service's tools.",
           r#"{"type":"object","properties":{"service":{"type":"string"}},"required":["service"]}"#),
-        t("list_apps", "List the makepad apps of this workspace (the app registry): id, label, package, whether it is built and running.",
+        t("list_apps", "Every makepad app on this machine (the app registry): id, label, package, whether it is built and running; and what the window manager runs, when one runs. Use it for \"what apps are there\".",
           r#"{"type":"object","properties":{}}"#),
+        t("start_app", "Start an app by its name (\"Stage\", \"Scope\", \"calculator\") the way the dock does: inside this machine's window manager when one runs (it builds it first when needed), else built from the checkout and started with --remote. Waits until it runs and returns its pid (drive it with ui / app_tools target=<pid>) and the errors it logged at startup.",
+          r#"{"type":"object","properties":{"app":{"type":"string","description":"the app's name or id, e.g. Stage"},"timeout_secs":{"type":"integer","description":"how long to wait for it to come up, default 600"}},"required":["app"]}"#),
         t("build_app", "Build one app of this workspace (cargo build --release of its package, queued, one build at a time) and wait for the result: progress, then errors and warnings as file:line.",
           r#"{"type":"object","properties":{"app":{"type":"string","description":"app id from list_apps, e.g. calculator"},"timeout_secs":{"type":"integer","description":"how long to wait, default 1200"}},"required":["app"]}"#),
-        t("run_app", "Build and start one app of this workspace and wait until it runs. mode native: the release binary with --remote; makepad_run: from source under `makepad run` (relaunches warm when its files are saved). The result names the pid: drive it with ui / app_tools / app_call target=<pid>.",
+        t("run_app", "Build and start one app of this workspace from source and wait until it runs (to just open an app, use start_app). mode native: the release binary with --remote; makepad_run: from source under `makepad run` (relaunches warm when its files are saved). The result names the pid (drive it with ui / app_tools / app_call target=<pid>) and lists the errors the app logged at startup: Splash mistakes compile fine and only show there.",
           r#"{"type":"object","properties":{"app":{"type":"string","description":"app id from list_apps"},"mode":{"type":"string","enum":["native","makepad_run"],"description":"default native"},"timeout_secs":{"type":"integer","description":"how long to wait for the build, default 1200"}},"required":["app"]}"#),
         t("stop_app", "Stop an app started with run_app (by app id or pid), or cancel its build.",
           r#"{"type":"object","properties":{"app":{"type":"string","description":"app id or pid"}},"required":["app"]}"#),
@@ -146,6 +148,8 @@ const ANSWER_TIMEOUT: Duration = Duration::from_secs(120);
 struct Reach {
     hub: Option<Client>,
     manifests: HashMap<String, Vec<ServiceManifest>>,
+    /// The pid start_app saw each app come up as, by registry id.
+    started: HashMap<String, u32>,
 }
 
 fn reach() -> &'static Mutex<Reach> {
@@ -527,6 +531,77 @@ fn launch(host: Option<&str>, app: &str, wm: Option<&str>) -> Outcome {
     }
 }
 
+/// This machine's window manager, when one runs: the pid of the WM process whose `app` service
+/// offers `os` (its launcher: `os.list`, `os.launch`).
+fn local_wm() -> Option<String> {
+    let me = std::process::id();
+    discovery::apps()
+        .into_iter()
+        .filter(|a| a.pid != me && a.serves("app") && a.app.contains("wm"))
+        .map(|a| a.pid.to_string())
+        .find(|t| client(t).and_then(|c| app_request(&c, &AppRequest::List, &mut |_| {})).is_ok_and(|l| manifests_of(&l).iter().any(|m| m.id == "os")))
+}
+
+/// The pid of the app `app_id` as a client of the window manager `wm` (its hosted instance),
+/// once it has connected.
+fn wm_client_pid(wm: &str, app_id: &str) -> Option<u32> {
+    let lines = client(wm).and_then(|c| app_request(&c, &AppRequest::List, &mut |_| {})).ok()?;
+    lines.iter().find_map(|l| match l {
+        AppLine::Instance { meta, .. } if meta.app_id == app_id && meta.pid != 0 => Some(meta.pid),
+        _ => None,
+    })
+}
+
+/// The running processes of `entry` (by the crate name their endpoint announces).
+fn pids_of(entry: &makepad_app_registry::AppEntry) -> Vec<u32> {
+    let norm = |s: &str| s.to_ascii_lowercase().replace('_', "-");
+    discovery::apps().into_iter().filter(|a| [entry.bin, entry.package].iter().any(|n| norm(n) == norm(&a.app))).map(|a| a.pid).collect()
+}
+
+/// The lines an app logged as errors (`[E]`, panics) so far, read from its log pool over its
+/// endpoint; at most 12, repeats folded.
+fn logged_errors(pid: u32) -> Option<Vec<String>> {
+    let c = client(&pid.to_string()).ok()?;
+    let mut text = String::new();
+    makepad_remote::app::run_line(&c, "log n=400", &mut |l| {
+        text.push_str(l);
+        text.push('\n');
+        true
+    })
+    .ok()?;
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let Ok(json::Value::Obj(fields)) = json::parse(line.as_bytes()) else { continue };
+        for (k, v) in fields {
+            if let ("l", json::Value::Arr(items)) = (k.as_str(), v) {
+                for l in items.iter().filter_map(|i| i.as_str()) {
+                    let err = l.starts_with("[E]") || l.contains("panicked at");
+                    if err && !out.iter().any(|o| o == l) {
+                        out.push(l.to_string());
+                    }
+                }
+            }
+        }
+    }
+    out.truncate(12);
+    Some(out)
+}
+
+/// Let a fresh app run its startup, then add the errors it logged (or that it logged none).
+fn add_startup_errors(text: &mut String, pid: u32, fallback: impl FnOnce() -> Vec<String>) {
+    std::thread::sleep(Duration::from_secs(3));
+    let errors = logged_errors(pid).unwrap_or_else(|| fallback().into_iter().filter(|l| l.contains("[E]") || l.contains("panicked at")).take(12).collect());
+    if errors.is_empty() {
+        text.push_str("\nno errors logged at startup\n");
+    } else {
+        text.push_str("\nERRORS it logged at startup (Splash mistakes compile fine and only show here):\n");
+        for e in errors {
+            text.push_str(&cut(&e, 400));
+            text.push('\n');
+        }
+    }
+}
+
 fn attach(target: &str, service: &str, instance: Option<&str>) -> Outcome {
     let lines = match client(target).and_then(|c| app_request(&c, &AppRequest::List, &mut |_| {})) {
         Ok(l) => l,
@@ -632,14 +707,74 @@ impl Engine {
     fn runs_tool(&mut self, id: ToolId, name: &str, args: &[(String, String)]) -> Outcome {
         use super::runs::{Goal, JobState, Mode, RunManager, Started};
         let m = RunManager::global();
-        if !m.set_root(self.root()) {
-            return err("the project is not a makepad checkout: there are no apps to build here");
+        let wm = if matches!(name, "list_apps" | "start_app") { local_wm() } else { None };
+        if !m.set_root(self.root()) && wm.is_none() {
+            return err("no makepad checkout here or on this machine, and no window manager runs: there are no apps to build or start");
         }
         let wait = Duration::from_secs(arg(args, "timeout_secs").and_then(|t| t.parse().ok()).unwrap_or(1200));
         let app_name = arg(args, "app");
         if name == "list_apps" {
-            let text = m.apps_text();
-            return Outcome { ok: true, summary: format!("{} apps", text.lines().count()), text, diff: None };
+            let mut text = m.apps_text();
+            let n = text.lines().count();
+            if let Some(wm) = &wm {
+                let listed = call(wm, "os", "list", None, "{}".into(), &mut |_| {});
+                text.push_str(&format!("\nThe window manager (pid {wm}) lists:\n{}\nStart any of them with start_app.\n", listed.text));
+            }
+            return Outcome { ok: true, summary: format!("{n} apps"), text, diff: None };
+        }
+        if name == "start_app" {
+            let Some(app_name) = app_name else { return err("missing 'app' (see list_apps)") };
+            let all: Vec<&'static makepad_app_registry::AppEntry> = makepad_app_registry::apps().iter().collect();
+            let Some(entry) = super::runs::find_entry(&all, app_name) else {
+                let known: Vec<&str> = all.iter().filter(|a| a.menu_visible).map(|a| a.label).collect();
+                return err(format!("no app `{app_name}`; the apps are: {}", known.join(", ")));
+            };
+            let Some(wm) = wm else {
+                // no window manager: build it from the checkout and start it, as run_app does
+                let args = vec![("app".to_string(), entry.id.to_string())];
+                return self.runs_tool(id, "run_app", &args);
+            };
+            if let Verdict::No = self.verdict(id, format!("start {}", entry.label), format!("runs:start_app:{}", entry.id), false) {
+                return err("the user denied this");
+            }
+            let before = pids_of(entry);
+            let launched = call(&wm, "os", "launch", None, json::obj(vec![("app", json::s(entry.id))]).to_json(), &mut |_| {});
+            if !launched.ok {
+                return launched;
+            }
+            let mut text = format!("{} ({}) launched by the window manager (pid {wm}): {}\n", entry.label, entry.id, launched.text.trim());
+            if launched.text.contains("already running") {
+                // it was up before: the WM brought it to the front
+                let mine = reach().lock().unwrap().started.get(entry.id).copied().filter(|p| before.contains(p));
+                match wm_client_pid(&wm, entry.id).or(mine).map(|p| vec![p]).unwrap_or(before) {
+                    pids if pids.len() == 1 => text.push_str(&format!("reach it with ui / app_tools target={}\n", pids[0])),
+                    pids if pids.is_empty() => text.push_str("`apps` shows its pid\n"),
+                    pids => text.push_str(&format!("processes of it on this machine: {}; `apps` shows which is which\n", pids.iter().map(u32::to_string).collect::<Vec<_>>().join(", "))),
+                }
+                return Outcome { ok: true, summary: format!("{} already running", entry.label), text, diff: None };
+            }
+            let wait = Duration::from_secs(arg(args, "timeout_secs").and_then(|t| t.parse().ok()).unwrap_or(600));
+            let started = std::time::Instant::now();
+            // Its pid: the WM's own client of it, else a process of it that was not there before
+            // (other copies of the app may run on this machine outside this WM).
+            let pid = loop {
+                if let Some(pid) = wm_client_pid(&wm, entry.id).or_else(|| pids_of(entry).into_iter().find(|p| !before.contains(p))) {
+                    break Some(pid);
+                }
+                if started.elapsed() > wait || self.interrupted {
+                    break None;
+                }
+                self.pump_commands();
+                std::thread::sleep(Duration::from_millis(500));
+            };
+            let Some(pid) = pid else {
+                text.push_str(&format!("it is not up after {} s (a first start builds it); `apps` shows it once it runs\n", started.elapsed().as_secs()));
+                return Outcome { ok: true, summary: format!("{} starting", entry.label), text, diff: None };
+            };
+            reach().lock().unwrap().started.insert(entry.id.to_string(), pid);
+            text.push_str(&format!("{} runs as pid {pid}: reach it with ui / app_tools target={pid}\n", entry.label));
+            add_startup_errors(&mut text, pid, Vec::new);
+            return Outcome { ok: true, summary: format!("{} pid {pid}", entry.label), text, diff: None };
         }
         if name == "app_status" {
             let app = app_name.and_then(|n| m.find_app(n));
@@ -708,8 +843,21 @@ impl Engine {
                 let job = match started {
                     Ok(Started::Job(job)) => job,
                     Ok(Started::Running(rid)) => {
-                        let r = m.snapshot().running.into_iter().find(|r| r.id == rid);
-                        let text = r.as_ref().map(RunManager::running_text).unwrap_or_default();
+                        // under `makepad run` cargo first builds the tool: wait for it like a build
+                        let started = std::time::Instant::now();
+                        let r = loop {
+                            let r = m.snapshot().running.into_iter().find(|r| r.id == rid);
+                            let busy = r.as_ref().is_some_and(|r| r.exited.is_none() && r.building.is_some());
+                            if !busy || started.elapsed() > wait || self.interrupted {
+                                break r;
+                            }
+                            self.pump_commands();
+                            std::thread::sleep(Duration::from_millis(500));
+                        };
+                        let mut text = r.as_ref().map(RunManager::running_text).unwrap_or_default();
+                        if let Some(r) = r.as_ref().filter(|r| r.exited.is_none() && r.building.is_none()) {
+                            add_startup_errors(&mut text, r.pid, || m.run_log(r.id, 200));
+                        }
                         return Outcome { ok: true, summary: cut(&text, 100), text, diff: None };
                     }
                     Err(e) => return err(e),
@@ -727,7 +875,10 @@ impl Engine {
                 if ok && matches!(view.goal, Goal::Run(_)) {
                     // the app was started right after its build
                     match m.running_of(app) {
-                        Some(r) => text.push_str(&RunManager::running_text(&r)),
+                        Some(r) => {
+                            text.push_str(&RunManager::running_text(&r));
+                            add_startup_errors(&mut text, r.pid, || m.run_log(r.id, 200));
+                        }
                         None => {
                             text.push_str("but it did not start:\n");
                             text.push_str(&m.job_log(job, 5).join("\n"));

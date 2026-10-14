@@ -118,15 +118,15 @@ script_mod! {
                 flow: Down
                 spacing: 10
                 align: Align{x: 0.5}
-                missing_title := Label{width: Fill align: Align{x: 0.5} text: "No MilkDrop presets yet." draw_text +: {text_style: theme.font_regular{font_size: 13}}}
-                missing_about := Label{width: Fill align: Align{x: 0.5} text: "projectM's \"cream of the crop\" pack: 9,795 presets, about 160 MB." draw_text +: {text_style: theme.font_regular{font_size: 10}}}
+                missing_title := Label{width: Fill align: Align{x: 0.5} text: "No presets yet." draw_text +: {text_style: theme.font_regular{font_size: 13}}}
+                missing_about := Label{width: Fill align: Align{x: 0.5} text: "The \"cream of the crop\" pack from projectM: 9,795 presets, about 160 MB." draw_text +: {text_style: theme.font_regular{font_size: 10}}}
                 missing_keys := View{
                     width: Fill
                     height: Fit
                     flow: Flow.Right{wrap: true}
                     spacing: 8
                     align: Align{x: 0.5}
-                    download_key := View{width: Fit height: Fit download := Button{text: "Download projectM MilkDrop presets"}}
+                    download_key := View{width: Fit height: Fit download := Button{text: "Download the preset pack"}}
                     cancel_key := View{visible: false width: Fit height: Fit cancel := Button{text: "Cancel"}}
                 }
                 progress := Label{width: Fill align: Align{x: 0.5} text: ""}

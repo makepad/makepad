@@ -292,6 +292,10 @@ fn row_selection(row: usize) -> GridSelection {
 
 // ---- MusicBar ----
 
+/// How far (pt) a finger moves along a drag-only bar before it counts as a
+/// drag: a tap that wobbles a little changes nothing.
+const DRAG_START: f64 = 4.0;
+
 /// A slider without numbers: the song position, the volume and the
 /// equalizer. Dragging shows the new value at once and reports it when let
 /// go (the music system is slow to answer, so it is told once, not on every
@@ -312,11 +316,23 @@ pub struct MusicBar {
     /// (an equalizer band's boost or cut).
     #[live(false)]
     centered: bool,
+    /// Only a drag changes the value, by how far it moves along the bar; a
+    /// press or a tap leaves it (a volume must never jump under a touch).
+    #[live(false)]
+    relative: bool,
     #[rust]
     value: f64,
     /// While dragging, the value under the pointer.
     #[rust]
     dragging: Option<f64>,
+    /// A relative drag: where it started and the value then.
+    #[rust]
+    drag_from: Option<(f64, f64)>,
+    /// Where presses are taken when bigger than the bar (a host's room
+    /// around a thin bar, for a finger-sized target); the bar's own rect
+    /// when empty.
+    #[rust]
+    touch: Area,
     #[rust]
     hover: bool,
     #[rust]
@@ -351,6 +367,61 @@ impl MusicBar {
         }
     }
 
+    /// A drag-only bar: the value follows how far the finger moves along the
+    /// bar from where it went down; a press, a tap or a click sets nothing.
+    /// A wheel or trackpad scroll steps it.
+    fn handle_relative(&mut self, cx: &mut Cx, event: &Event, touch: Area) {
+        let width = self.area.rect(cx).size.x.max(1.0);
+        match event.hits(cx, touch) {
+            Hit::FingerHoverIn(_) => {
+                self.hover = true;
+                cx.set_cursor(MouseCursor::Hand);
+                self.draw_round.redraw(cx);
+            }
+            Hit::FingerHoverOut(_) => {
+                self.hover = false;
+                self.draw_round.redraw(cx);
+            }
+            Hit::FingerDown(e) => {
+                self.drag_from = Some((e.abs.x, self.value));
+            }
+            Hit::FingerMove(e) => {
+                if let Some((x, from)) = self.drag_from {
+                    let value = (from + (e.abs.x - x) / width).clamp(0.0, 1.0);
+                    if self.dragging.is_some() || (e.abs.x - x).abs() >= DRAG_START {
+                        self.dragging = Some(value);
+                        self.draw_round.redraw(cx);
+                        cx.widget_action(self.uid, MusicBarAction::Moved(value));
+                    }
+                }
+            }
+            Hit::FingerUp(e) => {
+                self.hover = e.is_over;
+                self.drag_from = None;
+                if let Some(value) = self.dragging.take() {
+                    // A drag something else took away keeps the old value.
+                    if !e.cancelled {
+                        self.value = value;
+                        cx.widget_action(self.uid, MusicBarAction::Set(value));
+                    } else {
+                        cx.widget_action(self.uid, MusicBarAction::Moved(self.value));
+                    }
+                }
+                self.draw_round.redraw(cx);
+            }
+            Hit::FingerScroll(e) => {
+                let step = if e.scroll.x.abs() > e.scroll.y.abs() { e.scroll.x } else { -e.scroll.y };
+                let value = (self.value + step / 600.0).clamp(0.0, 1.0);
+                if (value - self.value).abs() > 1e-6 {
+                    self.value = value;
+                    self.draw_round.redraw(cx);
+                    cx.widget_action(self.uid, MusicBarAction::Set(value));
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// The value at `abs` along the bar, from the hit's `rect`: that rect is
     /// in window coordinates like `abs`, where the rect the bar was drawn
     /// in can be local to a view that draws on its own (the now-playing bar).
@@ -360,6 +431,14 @@ impl MusicBar {
 }
 
 impl MusicBarRef {
+    /// Take presses in `area` (drawn around the bar by the host) instead of
+    /// the bar's own rect.
+    pub fn set_touch_area(&self, area: Area) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.touch = area;
+        }
+    }
+
     pub fn set(&self, cx: &mut Cx, value: Option<f64>, theme: Theme) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set(cx, value, theme);
@@ -387,7 +466,11 @@ impl Widget for MusicBar {
         if !self.enabled {
             return;
         }
-        match event.hits(cx, self.area) {
+        let touch = if self.touch.is_valid(cx) { self.touch } else { self.area };
+        if self.relative {
+            return self.handle_relative(cx, event, touch);
+        }
+        match event.hits(cx, touch) {
             Hit::FingerHoverIn(_) => {
                 self.hover = true;
                 cx.set_cursor(MouseCursor::Hand);
@@ -442,7 +525,8 @@ impl Widget for MusicBar {
             if self.centered {
                 round(&mut self.draw_round, cx, Rect { pos: dvec2(track.pos.x + track.size.x * 0.5 - 1.0, mid - 5.0), size: dvec2(2.0, 10.0) }, with_alpha(theme.foreground, 0.35), 1.0);
             }
-            if self.hover || self.dragging.is_some() {
+            // A drag-only bar always shows its handle: the thing to drag.
+            if self.relative || self.hover || self.dragging.is_some() {
                 let x = rect.pos.x + rect.size.x * value;
                 round(&mut self.draw_round, cx, Rect { pos: dvec2(x - 6.0, mid - 6.0), size: dvec2(12.0, 12.0) }, theme.foreground, 6.0);
             }

@@ -17,7 +17,8 @@
 //! pop-out draws its own, following the same sound.
 //!
 //! The window is an independent `Window` drawn and fed by the app (no second
-//! root); the caption-less drag and double-click are handled here.
+//! root); it drags from anywhere by its Window's `drag: WindowDrag.Window`, and a double click
+//! makes it fullscreen on its screen and back (`double_click: WindowDoubleClick.Fullscreen`).
 
 use crate::layout::HwStageWidgetRefExt;
 use crate::App;
@@ -38,9 +39,6 @@ script_mod! {
     }
 }
 
-/// Two clicks this close in time (s) and place (pt) are a double-click.
-const DOUBLE_CLICK_S: f64 = 0.4;
-const DOUBLE_CLICK_PT: f64 = 12.0;
 /// The size a first pop-out opens at, in points.
 const FIRST_SIZE: DVec2 = dvec2(1280.0, 720.0);
 
@@ -90,8 +88,6 @@ pub struct Popout {
     /// Its pixels (inner size times its pixel density).
     pixels: Option<DVec2>,
     place: Option<Place>,
-    /// The last mouse down: when and where, for the double-click.
-    last_down: Option<(f64, DVec2)>,
     source: Option<Source>,
     /// The render size handed to the screen's picture.
     render: Option<(Source, DVec2)>,
@@ -138,6 +134,12 @@ impl App {
                     // No caption bar: the picture and nothing else. The whole
                     // window drags (WindowDragQuery answers Caption).
                     show_caption_bar: false
+                    // Chromeless in every state, under a window manager too; it drags
+                    // from anywhere, and a double click makes it fullscreen on its screen
+                    // (over bars and dock) and again restores it (the Window's own).
+                    chrome: WindowChrome.None
+                    drag: WindowDrag.Window
+                    double_click: WindowDoubleClick.Fullscreen
                     pass +: {clear_color: #x000000}
                     body +: {
                         width: Fill
@@ -168,7 +170,6 @@ impl App {
         self.popout.drawn = false;
         self.popout.pixels = None;
         self.popout.source = None;
-        self.popout.last_down = None;
         self.popout_sync(cx);
         self.popout_key_light(cx);
         log!("amp: visuals pop-out opened");
@@ -324,21 +325,8 @@ impl App {
             }
             Event::WindowGotFocus(focus) => self.popout.focused = Some(*focus) == id,
             Event::WindowLostFocus(focus) if Some(*focus) == id => self.popout.focused = false,
-            Event::WindowDragQuery(query) if Some(query.window_id) == id => {
-                query.response.set(WindowDragQueryResponse::Caption);
-            }
             // A click says which window the keys go to as well.
-            Event::MouseDown(down) if Some(down.window_id) != id => self.popout.focused = false,
-            Event::MouseDown(down) => {
-                self.popout.focused = true;
-                let double = self.popout.last_down.is_some_and(|(at, pos)| down.time - at < DOUBLE_CLICK_S && (pos - down.abs).length() < DOUBLE_CLICK_PT);
-                if double {
-                    self.popout.last_down = None;
-                    popout_fullscreen(cx, &window.as_window(), None);
-                } else {
-                    self.popout.last_down = Some((down.time, down.abs));
-                }
-            }
+            Event::MouseDown(down) => self.popout.focused = Some(down.window_id) == id,
             _ => {}
         }
         if self.popout.window.is_none() {

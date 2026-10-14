@@ -4,7 +4,7 @@
 //! through the methods here, which bump `version`, and leave what only
 //! `App` can do (a command for the worker) in `requests`.
 
-use crate::audio::{AudioState, EqSettings};
+use crate::audio::{volume_to_linear, AudioState, EqSettings};
 use crate::columns::{self, Column, Key};
 use crate::index::{Hits, Index, Snapshot, LOCAL_FILE};
 use crate::local::LOCAL_FOLDER;
@@ -292,6 +292,9 @@ pub struct Model {
     pub theme: Theme,
     pub index: Arc<Index>,
     library: Snapshot,
+    /// The cached songs were opened for the person once, with the music
+    /// system away (`select_index`): not again over their own choice.
+    offline_opened: bool,
     pub page: Page,
     pub rows: Vec<Row>,
     pub query: String,
@@ -358,6 +361,7 @@ impl Model {
             theme,
             index: Arc::new(Index::default()),
             library: Snapshot::default(),
+            offline_opened: false,
             page: Page::Search,
             rows: Vec::new(),
             query: String::new(),
@@ -509,6 +513,14 @@ impl Model {
         self.devices.iter().find(|device| device.this_machine)
     }
 
+    /// What our volume does to [`Model::sound`] on its way out: the tap
+    /// sits before our volume (the visualizers show the music, whatever the
+    /// volume), while a level meter shows what is heard. A routed player's
+    /// own volume is already in its sound.
+    pub fn level_gain(&self) -> f32 {
+        if self.own_volume() { volume_to_linear(self.eq.volume) } else { 1.0 }
+    }
+
     pub fn sound(&self) -> Option<&AnalyzerHandle> {
         if self.engine == Engine::Local {
             self.local_sound.as_ref()
@@ -571,6 +583,15 @@ impl Model {
                 Some(at) => Page::Playlist(at),
                 None => Page::Search,
             };
+        }
+        // No music system (a phone, Spotify not running): Amp opens on the
+        // cached songs, once, instead of an empty search page.
+        let away = !self.system_ready() || crate::worker::local_only();
+        if away && !self.offline_opened && self.page == Page::Search && self.query.trim().is_empty() {
+            if let Some(at) = self.index.entry(crate::cache::LIBRARY_URI) {
+                self.offline_opened = true;
+                self.page = Page::Playlist(at);
+            }
         }
         if !self.query.is_empty() {
             self.run_search();
@@ -1116,6 +1137,25 @@ impl Model {
         } else {
             self.start(Some(current));
         }
+        true
+    }
+
+    /// Play with nothing queued and no music system to resume: the open
+    /// list plays from its first track, or the cached songs do. `false`
+    /// when there is nothing to play.
+    pub fn play_offline(&mut self) -> bool {
+        if self.system_ready() && !crate::worker::local_only() {
+            return false;
+        }
+        if self.queue.current.is_some() || self.queue.upcoming_len() > 0 {
+            return false;
+        }
+        if self.shown_tracks().is_empty() {
+            let Some(at) = self.index.entry(crate::cache::LIBRARY_URI) else { return false };
+            self.open(Page::Playlist(at));
+        }
+        let Some((row, _)) = self.shown_tracks().into_iter().next() else { return false };
+        self.run(Activate::PlayFrom(row));
         true
     }
 
@@ -1787,6 +1827,28 @@ mod tests {
         assert!(player_plays(&mut model).is_empty());
         assert!(model.requests.transport.is_empty(), "nothing goes to a system that is away");
         assert!(model.handed_over().is_none());
+    }
+
+    /// No music system (a phone): Amp opens on the cached songs, once, and
+    /// Play with nothing queued plays them from the top.
+    #[test]
+    fn away_amp_opens_on_the_cached_songs_and_play_plays_them() {
+        use crate::source::SourceId;
+        let song = |uri: &str, title: &str| crate::cache::Song { uri: uri.into(), title: title.into(), artist: "A".into(), audio: format!("songs/{title}.ogg"), duration_ms: 1000, ..Default::default() };
+        let cached = crate::cache::Library { root: "/off".into(), songs: vec![song("c:1", "one"), song("c:2", "two")] };
+        let index = Index::merged(&Index::new(SourceId::Spotify), &Index::new(SourceId::Local)).with_cache(&cached);
+        let mut model = Model::new(Theme::default());
+        model.set_index(index.into());
+        assert_eq!(model.page, Page::Search, "the system may still come: no jump yet");
+        model.set_availability(Availability::Away("Spotify isn't installed".into()));
+        let Page::Playlist(at) = model.page else { panic!("not on a list: {:?}", model.page) };
+        assert_eq!(model.index.entries[at].uri, crate::cache::LIBRARY_URI);
+        assert!(model.play_offline());
+        assert_eq!(player_plays(&mut model), ["/off/songs/one.ogg"]);
+        // Only once: back on the search page, a new snapshot leaves it there.
+        model.open(Page::Search);
+        model.set_index(Index::merged(&Index::new(SourceId::Spotify), &Index::new(SourceId::Local)).with_cache(&cached).into());
+        assert_eq!(model.page, Page::Search);
     }
 
     /// A queue mixing the system's tracks and local files: the system holds

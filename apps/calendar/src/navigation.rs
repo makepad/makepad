@@ -137,6 +137,10 @@ impl CalendarBodyDeck {
 }
 impl Widget for CalendarBodyDeck {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // the frozen frames of a transition were GPU-only: the transition ends
+        if let Event::GpuReset = event {
+            self.frozen.clear();
+        }
         if let Some(e) = self.next.is_event(event) {
             if self.last != 0.0 {
                 self.progress =

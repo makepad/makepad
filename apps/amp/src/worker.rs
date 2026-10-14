@@ -360,7 +360,9 @@ fn own_dir() -> Option<PathBuf> {
             }
         }
         // The running binary's checkout first; the working directory covers
-        // a binary built into a target dir outside it.
+        // a binary built into a target dir outside it. Not on Android: there
+        // the checkout is the APK's read-only source pack.
+        #[cfg(not(target_os = "android"))]
         for start in [std::env::current_exe().ok(), std::env::current_dir().ok()].into_iter().flatten() {
             for root in start.ancestors() {
                 if root.join("makepad.splash").is_file() && root.join("apps/amp/Cargo.toml").is_file() {

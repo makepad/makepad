@@ -20,9 +20,6 @@ mod line;
 mod render;
 mod term;
 mod text;
-#[path = "../../../terminal/src/term/unicode.rs"]
-#[allow(dead_code)]
-mod unicode;
 
 use makepad_code_agent::event::{AgentConfig, ApprovalMode};
 use std::path::PathBuf;

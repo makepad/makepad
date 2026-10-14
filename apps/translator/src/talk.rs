@@ -1,5 +1,5 @@
 //! The Talk screen: a conversation between two people, or live captions of
-//! the room, and hold-to-talk dictation for the main screen.
+//! the room, and tap-to-toggle dictation for the main screen.
 //!
 //! Everything arrives through [`Ears`] and leaves through [`Mouth`], so the
 //! hub's Whisper and Kokoro can be swapped for the phone's own models without
@@ -19,6 +19,22 @@ const MAX_UTTERANCE_SECS: f32 = 12.0;
 /// A partial that stood still this long gets a provisional translation (live mode).
 const PROVISIONAL_AFTER: f64 = 0.9;
 const TICK_SECS: f64 = 0.05;
+/// An open microphone stream that delivered nothing for this long is reported.
+const MIC_SILENT_SECS: f64 = 3.0;
+
+/// The microphone's state: closed until a record press, asked for once.
+#[derive(Default, Debug)]
+pub(super) struct MicState {
+    pub open: bool,
+    asked: bool,
+}
+
+impl MicState {
+    /// True the first time only: the permission prompt belongs to the first record press.
+    pub fn request_permission(&mut self) -> bool {
+        !std::mem::replace(&mut self.asked, true)
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum TalkMode {
@@ -59,7 +75,7 @@ pub(super) struct Talk {
     mic_lit: Option<bool>,
     pub mode: TalkMode,
     pub listening: bool,
-    /// Hold-to-talk dictation into the source pane (main screen).
+    /// Dictation (tap the mic to start, tap again to stop) into the source pane (main screen).
     pub dictating: bool,
     pub auto_speak: bool,
     /// A speak press whose audio is not all played yet.
@@ -71,8 +87,22 @@ pub(super) struct Talk {
     seg: Segmenter,
     tick: Option<Timer>,
     audio_installed: bool,
+    pub mic: MicState,
     mic_permission: Option<PermissionStatus>,
+    /// The microphone to record from: the system's default input, as the last
+    /// device list named it (None until a list arrived, or when it has none).
     input_device: Option<AudioDeviceId>,
+    input_name: String,
+    /// The device list said the default input failed to open.
+    input_failed: bool,
+    /// A device list has arrived (before it, no input is not an error yet).
+    devices_known: bool,
+    /// The device the open stream was asked for, when, and whether audio came since.
+    mic_device: Option<AudioDeviceId>,
+    mic_opened_at: f64,
+    mic_heard: bool,
+    /// Why the microphone gives nothing, shown where the recording was started.
+    mic_error: Option<String>,
     ears_note: String,
     mouth_note: String,
     /// The voices the mouth offers, once it said so.
@@ -194,8 +224,16 @@ impl Default for Talk {
             seg: Segmenter::new(PAUSE_SECS, MAX_UTTERANCE_SECS),
             tick: None,
             audio_installed: false,
+            mic: MicState::default(),
             mic_permission: None,
             input_device: None,
+            input_name: String::new(),
+            input_failed: false,
+            devices_known: false,
+            mic_device: None,
+            mic_opened_at: 0.0,
+            mic_heard: false,
+            mic_error: None,
             ears_note: String::new(),
             mouth_note: String::new(),
             voices: Vec::new(),
@@ -222,6 +260,23 @@ impl Default for Talk {
             dictation_preroll: Vec::new(),
             status: String::new(),
         }
+    }
+}
+
+/// Why a wanted microphone gives nothing, if it does: no input device at all,
+/// the default one failed to open, or an open stream silent for too long.
+fn mic_problem(talk: &Talk, now: f64) -> Option<String> {
+    let wanted = (talk.listening || talk.dictating) && talk.inject.script.is_empty();
+    if !wanted || !talk.devices_known || talk.mic_heard {
+        None
+    } else if talk.input_device.is_none() {
+        Some("No microphone found: connect one, or choose one in the system's sound settings.".to_string())
+    } else if talk.input_failed {
+        Some("The microphone could not be opened: check the system's sound settings.".to_string())
+    } else if talk.mic.open && now - talk.mic_opened_at > MIC_SILENT_SECS {
+        Some("No sound from the microphone: it could not be opened. Check the system's sound settings.".to_string())
+    } else {
+        None
     }
 }
 
@@ -277,6 +332,7 @@ impl TranslatorView {
             self.ensure_ears();
         }
         if self.talk.mouth.is_none() {
+            crate::ondevice::speech_in_process(self.on_device());
             self.talk.mouth = Some(Box::new(HubMouth::start(Self::voice_wake(), self.chosen_voices())));
         }
         if self.talk.engine.is_none() {
@@ -302,24 +358,122 @@ impl TranslatorView {
                     }
                 }
             });
-            cx.request_permission(Permission::AudioInput);
         }
         if self.talk.tick.is_none() {
             self.talk.tick = Some(cx.start_interval(TICK_SECS));
         }
     }
 
+    /// Open the microphone stream. Only ever called from a user's record press
+    /// (the dictation mic, the Talk mic, Live); the permission is asked here, not at start.
     fn mic_on(&mut self, cx: &mut Cx) {
         if self.talk.inject.script.is_empty() {
+            if self.talk.mic.request_permission() {
+                cx.request_permission(Permission::AudioInput);
+            }
             if let Some(device) = self.talk.input_device {
                 cx.use_audio_inputs(&[device]);
+                self.talk.mic.open = true;
+                if self.talk.mic_device != Some(device) {
+                    self.talk.mic_device = Some(device);
+                    self.talk.mic_opened_at = Cx::time_now();
+                    self.talk.mic_heard = false;
+                    log!("translator: microphone opening: {}", self.talk.input_name);
+                }
             }
+        }
+        self.check_mic(cx);
+    }
+
+    /// Close the microphone stream completely (not just stop processing).
+    fn mic_off(&mut self, cx: &mut Cx) {
+        cx.use_audio_inputs(&[]);
+        self.talk.mic.open = false;
+        self.talk.mic_device = None;
+        self.talk.capture.take();
+        self.check_mic(cx);
+    }
+
+    fn listening_status(&self) -> String {
+        if self.talk.mode == TalkMode::Conversation {
+            "Listening. Take turns; each turn is translated and spoken.".to_string()
+        } else {
+            "Listening. Captions appear as people talk.".to_string()
         }
     }
 
-    fn mic_off(&mut self, cx: &mut Cx) {
-        cx.use_audio_inputs(&[]);
-        self.talk.capture.take();
+    /// Says so, where the recording was started, when the microphone gives
+    /// nothing: no input device at all, the default one failed to open, or a
+    /// stream that opened but has not delivered any audio for a few seconds.
+    /// The error goes away as soon as audio arrives.
+    fn check_mic(&mut self, cx: &mut Cx) {
+        let error = mic_problem(&self.talk, Cx::time_now());
+        if error == self.talk.mic_error {
+            return;
+        }
+        let old = std::mem::replace(&mut self.talk.mic_error, error.clone());
+        match &error {
+            Some(why) => {
+                log!("translator: microphone: {why} (device: {})", self.talk.input_name);
+                if self.talk.dictating {
+                    self.set_status(cx, why, true);
+                } else {
+                    self.talk.status = why.clone();
+                }
+            }
+            None => {
+                if self.talk.dictating {
+                    self.set_status(cx, "Recording… tap the microphone to translate.", false);
+                } else if old.is_some_and(|old| old == self.talk.status) {
+                    self.talk.status = if self.talk.listening { self.listening_status() } else { String::new() };
+                }
+            }
+        }
+        self.refresh_talk(cx);
+        self.sync_activity(cx);
+    }
+
+    /// The microphone stream is open right now (the recording indicator).
+    pub fn mic_open(&self) -> bool {
+        self.talk.mic.open
+    }
+
+    /// The microphone is wanted but gives nothing (the reason is on screen).
+    pub(super) fn mic_failed(&self) -> bool {
+        self.talk.mic_error.is_some()
+    }
+
+    /// Hub / On-device switched: the listening and speaking sessions end and
+    /// start again where the models now run (the next use, or now while listening).
+    pub(super) fn drop_speech_sessions(&mut self) {
+        if let Some(e) = self.talk.ears.take() {
+            e.cancel();
+        }
+        if let Some(m) = self.talk.mouth.take() {
+            m.cancel();
+        }
+        self.talk.in_utterance = false;
+        self.talk.partial.clear();
+        self.talk.ears_note.clear();
+        if self.talk.listening || self.talk.dictating {
+            self.ensure_ears();
+        }
+        if self.talk.audio_installed {
+            crate::ondevice::speech_in_process(self.on_device());
+            self.talk.mouth = Some(Box::new(HubMouth::start(Self::voice_wake(), self.chosen_voices())));
+        }
+    }
+
+    /// Background, pause or shutdown: every way of recording ends and the mic closes.
+    pub(super) fn stop_all_recording(&mut self, cx: &mut Cx) {
+        if self.talk.listening {
+            self.set_listening(cx, false);
+        }
+        if self.talk.dictating {
+            self.end_dictation(cx);
+        }
+        self.mic_off(cx);
+        self.sync_chrome(cx);
     }
 
     fn on_device(&self) -> bool {
@@ -331,6 +485,7 @@ impl TranslatorView {
         if self.talk.ears.is_none() {
             self.talk.ears_note = if self.on_device() { "Loading the listening model…" } else { "Connecting to the hub's Whisper…" }.to_string();
             log!("translator: listening session started ({})", if self.on_device() { "on this phone" } else { "hub" });
+            crate::ondevice::speech_in_process(self.on_device());
             self.talk.ears = Some(Box::new(HubEars::start(Self::voice_wake(), self.listening_for_mode())));
         }
     }
@@ -363,6 +518,7 @@ impl TranslatorView {
             if let Some(old) = self.talk.ears.take() {
                 old.cancel();
             }
+            crate::ondevice::speech_in_process(self.on_device());
             self.talk.ears = Some(Box::new(HubEars::start(Self::voice_wake(), self.listening_for_mode())));
             self.talk.ears_note = "Connecting to the hub's Whisper…".to_string();
             self.talk.in_utterance = false;
@@ -419,8 +575,9 @@ impl TranslatorView {
             self.restart_ears();
         }
         self.talk.player.stop();
+        // Opening the Listen screen never records: the mic opens on the record tap.
         self.open_talk(cx);
-        self.set_listening(cx, true);
+        self.talk.status = "Tap the microphone to start listening.".to_string();
     }
 
     pub(super) fn open_talk(&mut self, cx: &mut Cx) {
@@ -429,7 +586,7 @@ impl TranslatorView {
         self.close_camera_if_open(cx);
         self.talk.open = true;
         self.talk.listening = false;
-        self.talk.status = "Press the microphone, then talk. Each turn is translated and spoken.".to_string();
+        self.talk.status = "Tap the microphone, then talk. Each turn is translated and spoken.".to_string();
         self.ensure_voice(cx);
         self.sync_chrome(cx);
         self.refresh_talk(cx);
@@ -465,11 +622,7 @@ impl TranslatorView {
         if on {
             self.ensure_voice(cx);
             self.ensure_ears();
-            self.talk.status = if self.talk.mode == TalkMode::Conversation {
-                "Listening. Take turns; each turn is translated and spoken.".to_string()
-            } else {
-                "Listening. Captions appear as people talk.".to_string()
-            };
+            self.talk.status = self.listening_status();
             self.mic_on(cx);
             self.start_injection(cx);
         } else {
@@ -533,7 +686,14 @@ impl TranslatorView {
         } else {
             cx.use_audio_outputs(&[]);
         }
-        self.talk.input_device = devices.default_input().into_iter().next();
+        // The default input, followed as it changes: the next list names the new one
+        // and the stream moves to it (on Linux the "default" pcm follows the sound server).
+        let input = devices.default_input().into_iter().next();
+        let desc = input.and_then(|id| devices.descs.iter().find(|d| d.device_id == id));
+        self.talk.input_device = input;
+        self.talk.input_name = desc.map(|d| d.name.clone()).unwrap_or_default();
+        self.talk.input_failed = desc.is_some_and(|d| d.has_failed);
+        self.talk.devices_known = true;
         if self.talk.listening || self.talk.dictating {
             self.mic_on(cx);
         }
@@ -569,6 +729,11 @@ impl TranslatorView {
         // Audio in.
         let speaking_back = self.talk.player.is_playing();
         let mut audio = self.talk.capture.take();
+        if !audio.is_empty() && !self.talk.mic_heard && self.talk.mic.open {
+            self.talk.mic_heard = true;
+            log!("translator: microphone delivers audio after {:.0} ms ({})", (Cx::time_now() - self.talk.mic_opened_at) * 1000.0, self.talk.input_name);
+            self.check_mic(cx);
+        }
         self.feed_injection(&mut audio);
         if !audio.is_empty() {
             self.talk.heard_at = Cx::time_now();
@@ -671,6 +836,7 @@ impl TranslatorView {
         if changed && self.talk.open {
             self.refresh_talk(cx);
         }
+        self.check_mic(cx);
         self.sync_mics(cx);
     }
 
@@ -751,6 +917,11 @@ impl TranslatorView {
                 self.talk.ears_note = String::new();
                 self.talk.status = format!("Speech recognition is not available: {why}");
                 log!("translator: ears failed: {}", why);
+                if !self.talk.open {
+                    self.set_status(cx, &self.talk.status.clone(), true);
+                }
+                // The next listen tries again.
+                self.talk.ears = None;
             }
             EarEvent::Error(why) => {
                 self.talk.finals_pending = self.talk.finals_pending.saturating_sub(1);
@@ -820,11 +991,20 @@ impl TranslatorView {
                 self.talk.mouth_note = String::new();
                 self.talk.status = format!("Speech is not available: {why}");
                 log!("translator: mouth failed: {}", why);
+                // Said where it was asked for (the Translate screen too), and the
+                // next press tries again (a hub found since, a network back).
+                if !self.talk.open {
+                    self.set_status(cx, &self.talk.status.clone(), true);
+                }
+                self.talk.mouth = None;
             }
             MouthEvent::Error { id, message } => {
                 self.talk.say.remove(&id);
                 self.talk.speak_requested = false;
                 self.talk.status = format!("Could not speak that: {message}");
+                if !self.talk.open {
+                    self.set_status(cx, &self.talk.status.clone(), true);
+                }
             }
             MouthEvent::Chunk { id, samples, rate } => {
                 if let Some(SayFor::Play(bubble)) = self.talk.say.get(&id).copied() {
@@ -913,6 +1093,10 @@ impl TranslatorView {
     }
 
     fn on_talk_update(&mut self, cx: &mut Cx, update: Update) {
+        if let Update::HubMoved { addr } = update {
+            self.hub_moved(cx, addr);
+            return;
+        }
         let Some((job_id, kind)) = self.talk.job else { return };
         match update {
             Update::Done { id, text } if id == job_id => {
@@ -994,6 +1178,11 @@ impl TranslatorView {
     }
 
     fn speak_for(&mut self, text: &str, lang: Lang, bubble: Option<usize>) {
+        // A voice that failed is set up again (the hub may be reachable now).
+        if self.talk.mouth.is_none() && self.talk.audio_installed {
+            crate::ondevice::speech_in_process(self.on_device());
+            self.talk.mouth = Some(Box::new(HubMouth::start(Self::voice_wake(), self.chosen_voices())));
+        }
         if let Some(m) = &self.talk.mouth {
             let id = m.say(text, lang, true);
             self.talk.say.insert(id, SayFor::Play(bubble));
@@ -1065,7 +1254,7 @@ impl TranslatorView {
 
     // ------------------------------------------------------------- dictation
 
-    /// The big mic held down on the main screen: talk, release, translate.
+    /// A box's mic tapped on the main screen: talk, tap again, translate.
     pub(super) fn begin_dictation(&mut self, cx: &mut Cx) {
         self.ensure_voice(cx);
         self.ensure_ears();
@@ -1076,7 +1265,7 @@ impl TranslatorView {
         self.talk.partial.clear();
         self.talk.seg.reset();
         self.mic_on(cx);
-        self.set_status(cx, "Listening… release to translate.", false);
+        self.set_status(cx, "Recording… tap the microphone to translate.", false);
         if !self.talk.inject.script.is_empty() {
             self.talk.listening = true;
             self.start_injection(cx);
@@ -1096,7 +1285,7 @@ impl TranslatorView {
                 e.cancel();
             }
             self.talk.partial.clear();
-            self.set_status(cx, "Hold the microphone while you talk.", false);
+            self.set_status(cx, "Tap the microphone, then talk.", false);
             return;
         }
         if let Some(e) = &self.talk.ears {
@@ -1125,7 +1314,7 @@ impl TranslatorView {
         }
         let newest = lines.pop().unwrap_or_default();
         self.view.label(cx, ids!(talk.live_scroll.live_old)).set_text(cx, &lines.join("\n\n"));
-        let shown = if newest.is_empty() && self.talk.listening { "Listening…".to_string() } else { newest };
+        let shown = if newest.is_empty() && self.talk.listening && self.talk.mic_error.is_none() { "Listening…".to_string() } else { newest };
         self.view.label(cx, ids!(talk.live_scroll.live_new)).set_text(cx, &shown);
         self.view.redraw(cx);
     }
@@ -1145,7 +1334,7 @@ impl TranslatorView {
         self.view.label(cx, ids!(talk.talk_status)).set_text(cx, &line);
         // Hints stay off; the line speaks only for a problem or a confirmation.
         let low = self.talk.status.to_lowercase();
-        let speaks = ["permission", "not available", "fail", "error", "unreachable", "copied", "could not"].iter().any(|w| low.contains(w));
+        let speaks = ["permission", "not available", "fail", "error", "unreachable", "copied", "could not", "no microphone", "no sound"].iter().any(|w| low.contains(w));
         self.view.label(cx, ids!(talk.talk_status)).set_visible(cx, speaks);
 
         // Mic state.
@@ -1156,13 +1345,16 @@ impl TranslatorView {
         // button is in (focus after a click) draws the theme's grey.
         // Its colour follows the capture state (sync_mics).
         let _ = &mut mic_w;
-        self.view.label(cx, ids!(talk.talk_ctrl.mic_hint)).set_text(cx, if self.talk.listening { "Listening — tap to pause" } else { "Tap to listen" });
+        self.view.label(cx, ids!(talk.talk_ctrl.mic_hint)).set_text(cx, if self.talk.listening && self.talk.mic_error.is_some() { "Tap to stop" } else if self.talk.listening { "Listening — tap to pause" } else { "Tap to listen" });
         // Level meter.
         // Room noise sits near 0.005, speech near 0.05..0.2.
         let width = (self.talk.level * 10.0).clamp(0.0, 1.0) as f64 * 82.0 + 6.0;
         let mut meter = self.view.widget(cx, ids!(talk.talk_ctrl.level_box.level));
         script_apply_eval!(cx, meter, { width: #(width) });
-        self.view.label(cx, ids!(talk.talk_bar.listen_title)).set_text(cx, if self.talk.listening { "Listening" } else { "Paused" });
+        let listening = self.talk.mic.open && self.talk.mic_error.is_none();
+        self.view.label(cx, ids!(talk.talk_bar.listen_title)).set_text(cx, if listening { "Listening" } else if self.talk.mic_error.is_some() { "Microphone unavailable" } else { "Not listening" });
+        // The recording dot shows only while the microphone stream is open and working.
+        self.view.widget(cx, ids!(talk.talk_bar.listen_dot)).set_visible(cx, listening);
         self.refresh_live_main(cx);
         self.view.redraw(cx);
     }
@@ -1198,15 +1390,16 @@ impl TranslatorView {
                 }
             }
         }
-        // Either box's mic: hold to speak. The language is detected from the speech,
-        // the direction follows it, and the translation is read aloud.
+        // Either box's mic is a switch: tap to record (the mic opens; the language is detected
+        // from the speech, the direction follows it, the translation is read aloud), tap again
+        // to stop (the mic closes).
         for path in [ids!(source_card.head.dictate), ids!(target_card.head.dictate_other)] {
-            if self.view.button(cx, path).pressed(actions) {
-                self.begin_dictation(cx);
-            }
-            // Lifting over the button is a click, lifting off it a release: both end the turn.
-            if self.view.button(cx, path).released(actions) || self.view.button(cx, path).clicked(actions) {
-                self.end_dictation(cx);
+            if self.view.button(cx, path).clicked(actions) {
+                if self.talk.dictating {
+                    self.end_dictation(cx);
+                } else {
+                    self.begin_dictation(cx);
+                }
             }
         }
         // The output card's big play button: speak the translation, or stop it.
@@ -1275,6 +1468,45 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn the_microphone_starts_closed_and_asks_permission_once() {
+        let mut mic = MicState::default();
+        assert!(!mic.open);
+        assert!(mic.request_permission());
+        assert!(!mic.request_permission());
+    }
+
+    #[test]
+    fn nothing_opens_the_microphone_before_a_record_press() {
+        let talk = Talk::default();
+        assert!(!talk.mic.open && !talk.listening && !talk.dictating);
+    }
+
+    /// Listening with a microphone that gives nothing says why, and only then.
+    #[test]
+    fn a_microphone_that_gives_nothing_says_why() {
+        let mut talk = Talk::default();
+        talk.inject.script.clear();
+        talk.listening = true;
+        // No device list yet: not an error (it is on its way).
+        assert_eq!(mic_problem(&talk, 0.0), None);
+        talk.devices_known = true;
+        assert!(mic_problem(&talk, 0.0).unwrap().starts_with("No microphone found"));
+        talk.input_device = Some(AudioDeviceId::default());
+        talk.input_failed = true;
+        assert!(mic_problem(&talk, 0.0).unwrap().contains("could not be opened"));
+        talk.input_failed = false;
+        talk.mic.open = true;
+        talk.mic_opened_at = 10.0;
+        assert_eq!(mic_problem(&talk, 10.0 + MIC_SILENT_SECS - 0.5), None);
+        assert!(mic_problem(&talk, 10.0 + MIC_SILENT_SECS + 0.5).unwrap().starts_with("No sound"));
+        talk.mic_heard = true;
+        assert_eq!(mic_problem(&talk, 100.0), None);
+        talk.mic_heard = false;
+        talk.listening = false;
+        assert_eq!(mic_problem(&talk, 100.0), None);
+    }
 
     #[test]
     fn clauses_end_at_marks_but_not_in_numbers_or_after_a_word() {

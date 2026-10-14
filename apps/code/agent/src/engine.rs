@@ -43,6 +43,9 @@ pub(super) struct Lane {
     pub items: Vec<Item>,
     pub system_chars: usize,
     pub notes_chars: usize,
+    /// What the session holds beyond `items`' own text: the full tool-call arguments (an item
+    /// keeps a 240-char brief of them, the model's reply carried them whole).
+    pub call_chars: usize,
     /// The session lost its history (a failed route re-elects with an empty
     /// one): the next request starts a fresh session seeded from `items`.
     pub needs_reseed: bool,
@@ -100,6 +103,9 @@ pub(super) struct Engine {
     /// Runs whose end the model has already seen (run_output, run_stop).
     pub ended_seen: HashSet<u64>,
     last_background_pump: Instant,
+    /// Real tokens per estimated token, from the node's count in a context-overflow refusal
+    /// (1.0 until one happens; code and numbers tokenize denser than prose).
+    token_scale: f32,
 }
 
 /// A command still running after its tool call returned: its output goes
@@ -125,7 +131,7 @@ pub(super) fn run(
     hub: Box<dyn ContextHub>,
 ) {
     let mut eng = Engine::build(cfg, cmd_rx, evt_tx, wake, hub);
-    eng.notes = prompt::load_project_notes(&eng.cfg.root);
+    eng.notes = prompt::machine_notes() + &prompt::load_project_notes(&eng.cfg.root);
     eng.load_repo_allow();
     eng.reopen_log();
     let mut main = eng.new_lane(0, false, "");
@@ -178,6 +184,7 @@ impl Engine {
         read_marks: HashMap::new(),
         ended_seen: HashSet::new(),
         last_background_pump: Instant::now(),
+            token_scale: 1.0,
         }
     }
 
@@ -313,6 +320,7 @@ impl Engine {
             // The seed is counted through the lane's items, not here.
             system_chars: base.chars().count() + tools_chars,
             notes_chars: self.notes.chars().count(),
+            call_chars: 0,
             needs_reseed: false,
         }
     }
@@ -508,7 +516,7 @@ impl Engine {
             return;
         }
         self.emit(AgentEvent::Usage(Usage {
-            context_used: context::total_tokens(lane.system_chars, &lane.items),
+            context_used: self.used_tokens(lane),
             context_max: self.cfg.context_tokens,
             tokens_per_sec: self.tokens_per_sec,
             total_generated: self.total_generated,
@@ -516,8 +524,15 @@ impl Engine {
         }));
     }
 
+    /// The lane's context as the node counts it, estimated: our chars/3.5 estimate times what
+    /// the node's own count showed the estimate to miss (`token_scale`, learnt from an overflow).
+    fn used_tokens(&self, lane: &Lane) -> u32 {
+        let est = context::total_tokens(lane.system_chars + lane.call_chars, &lane.items);
+        (est as f32 * self.token_scale).ceil() as u32
+    }
+
     fn over_budget(&self, lane: &Lane) -> bool {
-        over_budget_at(context::total_tokens(lane.system_chars, &lane.items), self.cfg.context_tokens)
+        over_budget_at(self.used_tokens(lane), self.cfg.context_tokens)
     }
 
     /// Where the lane's chat runs; `None` while the election is pending or
@@ -667,7 +682,7 @@ impl Engine {
         if cut == 0 {
             return false;
         }
-        let before = context::total_tokens(lane.system_chars, &lane.items);
+        let before = self.used_tokens(lane);
         let asked = if ask_model && !lane.needs_reseed { self.ask_summary(lane) } else { None };
         let summary = asked.unwrap_or_else(|| context::mechanical_summary(&lane.items[..cut], 2000));
         let mut items = vec![Item::Summary(summary)];
@@ -679,7 +694,7 @@ impl Engine {
         }
         items.extend(lane.items[cut..].iter().cloned());
         self.restart(lane, items);
-        let after = context::total_tokens(lane.system_chars, &lane.items);
+        let after = self.used_tokens(lane);
         if lane.id == 0 {
             self.emit(AgentEvent::Summarised { upto: cut, tokens_saved: before.saturating_sub(after) });
         }
@@ -698,6 +713,7 @@ impl Engine {
         lane.session.cancel();
         lane.session = fresh.session;
         lane.system_chars = fresh.system_chars;
+        lane.call_chars = 0;
         lane.items = items;
         lane.needs_reseed = false;
     }
@@ -837,11 +853,13 @@ impl Engine {
     pub fn turn(&mut self, lane: &mut Lane, text: String) -> End {
         lane.session.send_user_turn(text);
         let mut nudged = false;
+        let mut refolded = false;
         let mut rounds = 0usize;
         let mut seen: HashMap<String, u32> = HashMap::new();
         loop {
             let mut calls: Vec<(String, Vec<(String, String)>)> = Vec::new();
             let mut answer = String::new();
+            let mut overflowed = false;
             // Wait for this model turn to finish.
             loop {
                 self.pump_commands();
@@ -885,16 +903,32 @@ impl Engine {
                             self.status_event(lane, &other)
                         }
                         ChatEvent::Failed(why) => {
-                            self.status_event(lane, &ChatEvent::Failed(why));
                             // The route re-elects with an empty history.
                             lane.needs_reseed = true;
+                            // The node counted more than we estimated: learn its ratio, fold the
+                            // old turns (mechanically: the session is gone) and go on, once.
+                            if let (false, Some(real)) = (refolded, overflow_tokens(&why)) {
+                                let est = context::total_tokens(lane.system_chars + lane.call_chars, &lane.items).max(1);
+                                self.token_scale = (real as f32 / est as f32).clamp(self.token_scale, 4.0);
+                                if self.compact(lane, false) {
+                                    refolded = true;
+                                    self.emit(AgentEvent::Notice("The conversation outgrew the model's context: older turns were folded into a summary.".into()));
+                                    lane.session.send_user_turn("Continue the task. The latest tool results are in the recent turns above.".to_string());
+                                    overflowed = true;
+                                    break;
+                                }
+                            }
+                            self.status_event(lane, &ChatEvent::Failed(why));
                             return End::Failed;
                         }
                     }
                 }
-                if finished {
+                if finished || overflowed {
                     break;
                 }
+            }
+            if overflowed {
+                continue;
             }
             if !answer.trim().is_empty() {
                 lane.items.push(Item::Assistant(answer.clone()));
@@ -925,7 +959,10 @@ impl Engine {
                 if *n >= 3 && !is_error {
                     result.push_str(&format!("\n[you have made this exact call {n} times in this task and the result does not change; do something different]"));
                 }
-                lane.items.push(Item::Tool { name, args: args_brief(&args), result: result.clone(), ok: !is_error });
+                let brief = args_brief(&args);
+                let full: usize = args.iter().map(|(k, v)| k.len() + v.chars().count() + 4).sum();
+                lane.call_chars += full.saturating_sub(brief.chars().count());
+                lane.items.push(Item::Tool { name, args: brief, result: result.clone(), ok: !is_error });
                 results.push((result, is_error));
                 if self.interrupted {
                     break;
@@ -958,6 +995,13 @@ impl Engine {
             }
         }
     }
+}
+
+/// The prompt size in a node's context-overflow refusal ("the prompt is 49172 tokens and ...").
+fn overflow_tokens(why: &str) -> Option<u32> {
+    let rest = &why[why.find("context overflow")?..];
+    let after = &rest[rest.find("the prompt is ")? + "the prompt is ".len()..];
+    after.split_whitespace().next()?.parse().ok()
 }
 
 /// Most tool rounds one request may take before it stops and asks.
@@ -1126,5 +1170,12 @@ mod tests {
         assert!(!announces_work("Done. I renamed it in 3 files and the build passes."));
         assert!(!announces_work(""));
         assert!(!announces_work(&"x".repeat(400)));
+    }
+
+    #[test]
+    fn a_context_overflow_names_the_nodes_count() {
+        let why = "qwen3.8-27b on 127.0.0.1: bad request: context overflow: the prompt is 49172 tokens and the answer needs 128 more, but this node's context is 49152 tokens";
+        assert_eq!(overflow_tokens(why), Some(49172));
+        assert_eq!(overflow_tokens("model unavailable: not enough GPU memory"), None);
     }
 }

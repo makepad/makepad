@@ -13,7 +13,7 @@
 //! equalizer off or another page freeze the last frame. The next worker
 //! message (a playback poll, a local file starting) looks again.
 
-use crate::layout::HwStageWidgetRefExt;
+use crate::layout::{self, HwStageWidgetRefExt};
 use crate::model::Page;
 use crate::worker::Setting;
 use crate::App;
@@ -34,6 +34,30 @@ pub const AUTO_CHOICES: [u32; 5] = [0, 15, 30, 60, 120];
 /// The picture always renders at full resolution (a saved smaller scale
 /// from an older run is ignored).
 pub const SCALE_CHOICES: [f64; 1] = [1.0];
+
+/// The presets Amp ships, its own: the picture works before (and without)
+/// a preset pack. Plain MilkDrop 1 presets (no shaders, so no blur
+/// passes): a warp and a composite pass at the render size, cheap enough
+/// for a phone.
+pub const BUILTIN: [(&str, &str); 6] = [
+    ("Ember Tunnel", include_str!("../resources/visualizer/ember_tunnel.milk")),
+    ("Aurora", include_str!("../resources/visualizer/aurora.milk")),
+    ("Orbit Lines", include_str!("../resources/visualizer/orbit_lines.milk")),
+    ("Ripple Pool", include_str!("../resources/visualizer/ripple_pool.milk")),
+    ("Prism Bloom", include_str!("../resources/visualizer/prism_bloom.milk")),
+    ("Starfield", include_str!("../resources/visualizer/starfield.milk")),
+];
+
+/// The most pixels the picture renders at on a phone (it is scaled up to
+/// the view): a feedback picture is soft anyway, and the GPU work stays a
+/// fraction of a frame. On a Pixel (PowerVR) Amp holds 60 fps with the
+/// picture fullscreen at this size (and also at the screen's full
+/// 1080x2404, which costs ~11x the fill for a slightly crisper line).
+pub const PHONE_PIXELS: f64 = 480.0 * 480.0;
+
+/// A finger that moves this far sideways on the picture is a swipe (next
+/// or previous preset), less is a tap (fullscreen).
+const SWIPE: f64 = 48.0;
 
 /// What the page keeps between runs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -119,6 +143,10 @@ pub struct Milk {
     playing: bool,
     /// A preset has been handed to the view.
     loaded: bool,
+    /// The built-in preset showing, while no pack is installed.
+    builtin: Option<usize>,
+    /// Where a finger went down on the picture.
+    press: Option<DVec2>,
 }
 
 impl App {
@@ -168,21 +196,58 @@ impl App {
         if secs == 0 || self.milk.settings.locked || !self.milk.loaded || now - self.milk.loaded_at < secs as f64 {
             return;
         }
+        self.visual_random(cx);
+    }
+
+    /// No pack on disk: the built-in presets are the list.
+    fn milk_builtin(&self, cx: &mut Cx) -> bool {
+        self.ui.milkdrop_browser(cx, ids!(milk_browser)).needs_pack()
+    }
+
+    /// The next (`1`) or previous (`-1`) preset. The wing's and the deck's
+    /// keys, a swipe on the picture, and the arrows in a fullscreen view.
+    pub(crate) fn visual_step(&mut self, cx: &mut Cx, delta: isize) {
+        if self.milk_builtin(cx) {
+            let n = BUILTIN.len() as isize;
+            let at = match self.milk.builtin {
+                Some(at) => (at as isize + delta).rem_euclid(n) as usize,
+                None => 0,
+            };
+            self.milk_load_builtin(cx, at);
+            return;
+        }
+        let pick = self.ui.milkdrop_browser(cx, ids!(milk_browser)).step(cx, delta);
+        self.milk_load(cx, pick);
+    }
+
+    /// A random preset (another one than showing).
+    fn visual_random(&mut self, cx: &mut Cx) {
+        if self.milk_builtin(cx) {
+            let n = BUILTIN.len();
+            let skip = 1 + (cx.seconds_since_app_start() * 1000.0) as usize % (n - 1);
+            self.milk_load_builtin(cx, self.milk.builtin.map_or(0, |at| (at + skip) % n));
+            return;
+        }
         let pick = self.ui.milkdrop_browser(cx, ids!(milk_browser)).random(cx);
         self.milk_load(cx, pick);
     }
 
-    /// The next (`1`) or previous (`-1`) MilkDrop preset. The wing's and
-    /// the deck's keys, and the arrows in a fullscreen view.
-    pub(crate) fn visual_step(&mut self, cx: &mut Cx, delta: isize) {
-        let pick = self.ui.milkdrop_browser(cx, ids!(milk_browser)).step(cx, delta);
-        self.milk_load(cx, pick);
+    /// Show the built-in preset `at`.
+    fn milk_load_builtin(&mut self, cx: &mut Cx, at: usize) {
+        let Some((name, source)) = BUILTIN.get(at) else { return };
+        self.milk.builtin = Some(at);
+        self.milk.loaded = true;
+        self.milk.loaded_at = cx.seconds_since_app_start();
+        self.ui.milkdrop_view(cx, ids!(milk)).load_preset_source(cx, name, source);
+        self.set_label(cx, live_id!(milk_now), ids!(milk_now), name);
+        self.update_milk(cx);
     }
 
     /// Load `pick` into the view (read and parsed off the UI thread, then
     /// faded to).
     fn milk_load(&mut self, cx: &mut Cx, pick: Option<PresetPick>) {
         let Some(pick) = pick else { return };
+        self.milk.builtin = None;
         self.milk.loaded = true;
         self.milk.loaded_at = cx.seconds_since_app_start();
         self.ui.milkdrop_view(cx, ids!(milk)).load_preset(cx, &pick.path);
@@ -195,15 +260,16 @@ impl App {
         let settings = self.milk.settings;
         self.set_visible(cx, ids!(visual), !settings.on);
         self.set_visible(cx, ids!(milk_stage), settings.on);
-        // Without a pack the browser is where the download is offered.
-        let needs_pack = self.ui.milkdrop_browser(cx, ids!(milk_browser)).needs_pack();
+        // Without a pack the built-in presets play; the presets drawer
+        // (where the pack download is offered) opens only when asked for.
+        if settings.on && !self.milk.loaded && self.milk_builtin(cx) {
+            self.milk_load_builtin(cx, 0);
+            return;
+        }
         // The presets open in a drawer beside the screen, over the right of
         // the device: the screen neither moves nor changes size.
-        let drawer = settings.on && (settings.browser || needs_pack);
+        let drawer = settings.on && settings.browser;
         self.set_visible(cx, ids!(milk_drawer), drawer && !self.milk.fullscreen);
-        if needs_pack {
-            self.set_label(cx, live_id!(milk_now), ids!(milk_now), "Download the MilkDrop presets below to start");
-        }
         // Fullscreen: the screen alone, the rest of the device folded away.
         let full = self.milk.fullscreen;
         if self.milk_full_applied != Some(full) {
@@ -245,8 +311,23 @@ impl App {
         self.ui.drop_down(cx, ids!(milk_auto)).set_selected_item(cx, settings.auto);
         let every = AUTO_CHOICES[settings.auto];
         self.set_label(cx, live_id!(deck_auto), ids!(deck_auto), &format!("CHANGE: {}", auto_words(every).to_uppercase()));
-        self.ui.milkdrop_view(cx, ids!(milk)).set_resolution_scale(cx, SCALE_CHOICES.get(settings.scale).copied().unwrap_or(1.0));
+        let view = self.ui.milkdrop_view(cx, ids!(milk));
+        view.set_resolution_scale(cx, SCALE_CHOICES.get(settings.scale).copied().unwrap_or(1.0));
+        view.set_max_pixels(cx, Self::milk_max_pixels(cx));
+        if layout::active_class(cx) == layout::SizeClass::Small {
+            self.apply_small_sections(cx);
+        }
         self.drive_milk(cx);
+    }
+
+    /// On a phone the picture renders at no more than [`PHONE_PIXELS`]
+    /// (the view keeps that budget at any size: rotation, fullscreen).
+    fn milk_max_pixels(cx: &Cx) -> f64 {
+        if matches!(cx.os_type(), OsType::Android(_)) {
+            PHONE_PIXELS
+        } else {
+            0.0
+        }
     }
 
     fn save_milk(&mut self) {
@@ -307,8 +388,7 @@ impl App {
             self.visual_step(cx, -1);
         }
         if random {
-            let pick = browser.random(cx);
-            self.milk_load(cx, pick);
+            self.visual_random(cx);
         }
         if self.ui.button(cx, ids!(milk_fav)).clicked(actions) {
             browser.toggle_favourite(cx);
@@ -360,8 +440,7 @@ impl App {
         }
         if let Some(id) = menu_picked(actions, live_id!(deck_more_menu)) {
             if id == live_id!(deck_m_random) {
-                let pick = browser.random(cx);
-                self.milk_load(cx, pick);
+                self.visual_random(cx);
             } else if id == live_id!(deck_m_presets) {
                 self.milk.settings.browser = !self.milk.settings.browser;
                 changed = true;
@@ -396,6 +475,18 @@ impl App {
         }
     }
 
+    /// The picture on (the visualizer) or off (the spectrum), kept for
+    /// the next run.
+    pub(crate) fn set_visualizer(&mut self, cx: &mut Cx, on: bool) {
+        self.milk.settings.on = on;
+        if !on {
+            self.milk.fullscreen = false;
+        }
+        self.save_milk();
+        self.update_milk(cx);
+        self.ui.redraw(cx);
+    }
+
     pub(crate) fn set_milk_fullscreen(&mut self, cx: &mut Cx, full: bool) {
         if self.milk.fullscreen == full {
             return;
@@ -405,10 +496,31 @@ impl App {
         self.ui.redraw(cx);
     }
 
-    /// Frames of the feed, and the page changing under it.
+    /// Frames of the feed, and the page changing under it. On the picture
+    /// a tap toggles fullscreen and a sideways swipe changes the preset.
     pub(crate) fn milk_event(&mut self, cx: &mut Cx, event: &Event) {
         if self.milk.frame.is_event(event).is_some() {
             self.drive_milk(cx);
+        }
+        if !self.milk.settings.on {
+            return;
+        }
+        let area = self.ui.widget(cx, ids!(milk_frame)).area();
+        match event.hits(cx, area) {
+            Hit::FingerDown(e) => {
+                self.milk.press = Some(e.abs);
+            }
+            Hit::FingerUp(e) => {
+                let Some(start) = self.milk.press.take() else { return };
+                let moved = e.abs - start;
+                if moved.x.abs() >= SWIPE && moved.x.abs() > moved.y.abs() {
+                    self.visual_step(cx, if moved.x < 0.0 { 1 } else { -1 });
+                } else if e.is_over && moved.length() < SWIPE {
+                    let full = !self.milk.fullscreen;
+                    self.set_milk_fullscreen(cx, full);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -425,6 +537,33 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_milkdrop::expr::{Context, Program};
+    use makepad_milkdrop::Preset;
+
+    #[test]
+    fn built_in_presets_parse_and_every_equation_compiles() {
+        for (name, source) in BUILTIN {
+            let preset = Preset::parse(source.as_bytes());
+            assert!(preset.unknown.is_empty(), "{name}: unknown lines {:?}", preset.unknown);
+            assert!(!preset.per_frame.trim().is_empty(), "{name}: no per-frame code");
+            let mut blocks = vec![&preset.per_frame_init, &preset.per_frame, &preset.per_pixel];
+            for wave in &preset.waves {
+                blocks.extend([&wave.init, &wave.per_frame, &wave.per_point]);
+            }
+            for shape in &preset.shapes {
+                blocks.extend([&shape.init, &shape.per_frame]);
+            }
+            for block in blocks {
+                if block.trim().is_empty() {
+                    continue;
+                }
+                let mut context = Context::new(1);
+                if let Err(e) = Program::compile(block, &mut context) {
+                    panic!("{name}: {} in {block}", e.message);
+                }
+            }
+        }
+    }
 
     #[test]
     fn settings_read_back_and_junk_keeps_defaults() {

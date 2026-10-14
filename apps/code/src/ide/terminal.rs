@@ -76,13 +76,16 @@ script_mod! {
     }
 }
 
-/// Which terminal holds the keyboard, if any (a `Cx` global).
-struct TerminalFocus(Option<WidgetUid>);
+/// The terminal that last took the keyboard (a `Cx` global): its focus area.
+struct TerminalFocus(Option<Area>);
 
-/// Whether a terminal holds the keyboard: the window leaves the shell's own
-/// Ctrl keys (Ctrl+P) to it on Linux and Windows.
+/// Whether a terminal holds the keyboard now: the window leaves the shell's
+/// own Ctrl keys (Ctrl+P) to it on Linux and Windows. Asked of the key focus
+/// itself, not of a flag the panel keeps: a folded terminal panel gets no
+/// events, so a flag it set while focused stayed set after the focus moved on
+/// (Ctrl+P never opened quick-open on Linux once the start terminal had it).
 pub fn terminal_has_focus(cx: &Cx) -> bool {
-    cx.get_global_ref::<TerminalFocus>().is_some_and(|f| f.0.is_some())
+    cx.get_global_ref::<TerminalFocus>().and_then(|f| f.0).is_some_and(|area| cx.has_key_focus(area))
 }
 
 /// A window key the terminal must not hand to the shell.
@@ -147,11 +150,11 @@ impl TerminalPanel {
             return;
         }
         self.had_focus = focus;
-        let uid = self.widget_uid();
+        let Some(area) = self.view.widget(cx, ids!(term)).borrow::<MpTerm>().map(|t| t.focus_area()) else { return };
         let current = cx.get_global_ref::<TerminalFocus>().and_then(|f| f.0);
         if focus {
-            cx.set_global(TerminalFocus(Some(uid)));
-        } else if current == Some(uid) {
+            cx.set_global(TerminalFocus(Some(area)));
+        } else if current == Some(area) {
             cx.set_global(TerminalFocus(None));
         }
     }

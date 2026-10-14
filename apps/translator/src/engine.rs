@@ -7,7 +7,7 @@
 //! other provider exists in this app.
 
 use makepad_ai_hub::chat_wire::{ChatMessage, ChatRole, ProviderAvailability};
-use makepad_ai_hub::providers::provider::{ChatProvider, ProviderEvent, TurnInput};
+use makepad_ai_hub::providers::provider::{ChatProvider, ProviderEvent, ToolImage, TurnInput};
 use makepad_ai_hub::providers::qwen::{FleetPickCache, FleetQwenChatProvider, HttpFleetTransport};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -51,9 +51,8 @@ pub struct Job {
     pub settings: HubSettings,
     /// Cap on the reply; `None` is the generous default of a text translation.
     pub max_tokens: Option<u32>,
-    /// A picture the text asks about (on-device model only, so unread
-    /// where the phone's models do not exist).
-    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
+    /// A picture the text asks about (a photo to read): the phone's model
+    /// takes it as is, the hub as a PNG with the chat turn.
     pub image: Option<crate::reader::Frame>,
 }
 
@@ -65,6 +64,9 @@ pub enum Update {
     Partial { id: u64, text: String },
     Done { id: u64, text: String },
     Failed { id: u64, error: String },
+    /// The remembered hub answered at another address (same certificate):
+    /// remember this `host:port` instead.
+    HubMoved { addr: String },
 }
 
 pub struct Engine {
@@ -104,6 +106,9 @@ impl Engine {
 
 fn worker(jobs: Receiver<Job>, updates: Sender<Update>, latest: Arc<AtomicU64>, wake: Arc<dyn Fn() + Send + Sync>) {
     let picks = Arc::new(FleetPickCache::new());
+    // The phone's addresses at the last job: when they change (another
+    // Wi-Fi, a hotspot) the hubs found unreachable before are tried again.
+    let mut network = makepad_ai_hub::discovery::network_addresses();
     let send = |u: Update| {
         let _ = updates.send(u);
         wake();
@@ -125,13 +130,59 @@ fn worker(jobs: Receiver<Job>, updates: Sender<Update>, latest: Arc<AtomicU64>, 
             send(Update::Failed { id: job.id, error: "the on-device models run on the phone app only".into() });
             continue;
         }
+        let now = makepad_ai_hub::discovery::network_addresses();
+        if now != network {
+            picks.forget_dead();
+            network = now;
+        }
         run(&job, &picks, &latest, &send);
     }
 }
 
-fn bases(settings: &HubSettings) -> Vec<String> {
-    if let Some(base) = hub_base(&settings.hub) {
-        return vec![base];
+/// What the person reads when no hub serves the job, from the probe's
+/// reasons (`<base>: <why>; ...`): a hub that cannot be reached, one that
+/// refuses this phone's credential, or one that answers without the model.
+fn unavailable_message(reason: &str, model: &str) -> String {
+    let parts: Vec<&str> = reason.split("; ").filter(|p| !p.is_empty()).collect();
+    if parts.iter().any(|p| p.contains("probe failed (http 401") || p.contains("probe failed (http 403")) {
+        return "The hub refused this phone: pair it (Settings → Invite)".to_string();
+    }
+    // `probe failed (http 404: ...)` is an answer; `probe failed (http error: ...)`
+    // or any other failure is a hub not reached.
+    let answered = |p: &str| p.split_once("probe failed (http ").is_some_and(|(_, rest)| rest.starts_with(|c: char| c.is_ascii_digit()));
+    let unreachable = |p: &str| p.contains("recently unreachable") || (p.contains("probe failed (") && !answered(p));
+    if let Some(first) = parts.first().filter(|_| parts.iter().all(|p| unreachable(p))) {
+        let (base, why) = first.split_once(": ").unwrap_or((first, ""));
+        let why = if why.contains("recently unreachable") {
+            "it did not answer a moment ago".to_string()
+        } else {
+            why.trim_start_matches("probe failed (").trim_end_matches(')').to_string()
+        };
+        return format!("Can't reach the hub at {}: {why}", host_of(base));
+    }
+    format!("the hub doesn't serve {model}")
+}
+
+/// How long a remembered hub address gets to answer before the beacons and
+/// the gateway probe are asked: it is only a hint (a phone moves between a
+/// LAN and a laptop's hotspot, where the same hub has another address).
+const HINT_TIMEOUT: Duration = Duration::from_millis(1000);
+/// How long beacons are listened for before the gateways are probed.
+const BEACON_WAIT: Duration = Duration::from_millis(1000);
+
+/// Where the hub may be. The remembered address when it answers within
+/// [`HINT_TIMEOUT`]; else (or with none) the nodes heard by beacon, and,
+/// when none was heard after [`BEACON_WAIT`], a hub on a gateway (at the
+/// remembered port, else the default); and this machine's own nodes.
+/// `hint_dead` carries the hint's failure across the retries of one job.
+fn bases(settings: &HubSettings, started: Instant, hint_dead: &mut bool) -> Vec<String> {
+    let hint = hub_base(&settings.hub);
+    if let Some(hint) = hint.as_ref().filter(|_| !*hint_dead) {
+        if !hint.starts_with("https://") || makepad_ai_hub::discovery::answers(host_of(hint), HINT_TIMEOUT) {
+            return vec![hint.clone()];
+        }
+        makepad_widgets::log!("translator: remembered hub {} does not answer; looking for it", host_of(hint));
+        *hint_dead = true;
     }
     let discovery = makepad_ai_hub::discovery::start_listener();
     let mut bases: Vec<String> = discovery
@@ -140,6 +191,14 @@ fn bases(settings: &HubSettings) -> Vec<String> {
         .filter(|n| makepad_ai_hub::fleet::role_allows(&n.base_url, "chat"))
         .map(|n| n.base_url)
         .collect();
+    if bases.is_empty() && started.elapsed() >= BEACON_WAIT {
+        let port = hint
+            .as_deref()
+            .and_then(|h| host_of(h).rsplit_once(':'))
+            .and_then(|(_, p)| p.parse().ok())
+            .unwrap_or(makepad_ai_hub::discovery::DEFAULT_TLS_PORT);
+        bases.extend(makepad_ai_hub::discovery::gateway_nodes(port, Duration::from_millis(800)));
+    }
     bases.extend(
         makepad_ai_hub::machine::read_node_entries()
             .into_iter()
@@ -148,6 +207,16 @@ fn bases(settings: &HubSettings) -> Vec<String> {
     bases.sort();
     bases.dedup();
     bases
+}
+
+/// The hub chat runs on is where speech runs too (`MAKEPAD_AI_HUB`, the speech
+/// sessions' pinned hub; their beacon listener alone missed a paired hub).
+pub fn pin_speech_hub(host_port: &str) {
+    if std::env::var("MAKEPAD_AI_HUB").ok().as_deref() != Some(host_port) {
+        makepad_widgets::log!("translator: speech goes to the chat hub {host_port}");
+        // SAFETY: read by the speech crate when a session picks its node.
+        unsafe { std::env::set_var("MAKEPAD_AI_HUB", host_port) };
+    }
 }
 
 fn host_of(base: &str) -> &str {
@@ -162,9 +231,10 @@ fn run(job: &Job, picks: &Arc<FleetPickCache>, latest: &AtomicU64, send: &impl F
     // With no explicit hub the fleet beacons take up to a few seconds to be
     // heard on first use: wait for them, honestly, instead of failing early.
     let started = Instant::now();
-    let patience = if hub_base(&job.settings.hub).is_some() { Duration::ZERO } else { Duration::from_secs(6) };
+    let patience = Duration::from_secs(6);
+    let mut hint_dead = false;
     let (mut provider, route) = loop {
-        let bases = bases(&job.settings);
+        let bases = bases(&job.settings, started, &mut hint_dead);
         let reason = if bases.is_empty() {
             "no AI hub found on the network. Set the hub address in settings.".to_string()
         } else {
@@ -174,10 +244,25 @@ fn run(job: &Job, picks: &Arc<FleetPickCache>, latest: &AtomicU64, send: &impl F
                 .with_max_tokens(Some(job.max_tokens.unwrap_or(4096)));
             match provider.availability() {
                 ProviderAvailability::Available { model, detail } => {
+                    // The remembered hub found elsewhere: the same node (its
+                    // certificate) is remembered at its new address.
+                    if let Some(hint) = hub_base(&job.settings.hub).filter(|_| hint_dead) {
+                        let (old, new) = (host_of(&hint), host_of(&detail));
+                        if old != new && makepad_ai_hub::fleet_auth::same_node(old, new) {
+                            makepad_widgets::log!("translator: hub {old} is now at {new}");
+                            send(Update::HubMoved { addr: new.to_string() });
+                        }
+                    }
+                    // Speech (Whisper, Kokoro) goes to the same hub as chat: pin it for
+                    // the speech sessions, which otherwise know only beacons and pins.
+                    if detail.starts_with("https://") {
+                        pin_speech_hub(host_of(&detail));
+                    }
                     break (provider, format!("{model} on {}", host_of(&detail)));
                 }
                 ProviderAvailability::Unavailable { reason } => {
-                    format!("the hub does not serve {}: {reason}", job.settings.model)
+                    makepad_widgets::log!("translator: no hub for {}: {reason}", job.settings.model);
+                    unavailable_message(&reason, &job.settings.model)
                 }
             }
         };
@@ -203,6 +288,14 @@ fn run(job: &Job, picks: &Arc<FleetPickCache>, latest: &AtomicU64, send: &impl F
         tools_enabled: false,
         dynamic_context: String::new(),
     };
+    // A photo goes with the turn: the hub's chat model reads it with its vision tower.
+    if let Some(frame) = &job.image {
+        let attached = crate::reader::png(frame).and_then(|png| provider.attach_tool_images(vec![ToolImage { label: "photo".into(), png: png.into() }]));
+        if let Err(error) = attached {
+            send(Update::Failed { id, error: format!("the photo could not go to the hub: {error}") });
+            return;
+        }
+    }
     if let Err(error) = provider.begin_turn(&input) {
         send(Update::Failed { id, error });
         return;
@@ -360,6 +453,27 @@ mod local {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unavailable_hubs_say_why() {
+        assert_eq!(
+            unavailable_message("https://192.168.77.1:8123: skipped (recently unreachable)", "qwen3.8-27b"),
+            "Can't reach the hub at 192.168.77.1:8123: it did not answer a moment ago"
+        );
+        assert_eq!(
+            unavailable_message("https://10.0.0.149:8123: probe failed (connection timed out)", "qwen3.8-27b"),
+            "Can't reach the hub at 10.0.0.149:8123: connection timed out"
+        );
+        assert_eq!(
+            unavailable_message("https://10.0.0.149:8123: probe failed (http 401: credential refused)", "qwen3.8-27b"),
+            "The hub refused this phone: pair it (Settings → Invite)"
+        );
+        assert_eq!(unavailable_message("https://10.0.0.149:8123: no chat model", "qwen3.8-27b"), "the hub doesn't serve qwen3.8-27b");
+        assert_eq!(
+            unavailable_message("https://192.168.77.1:8123: probe failed (http error: fleet tls 192.168.77.1:8123: handshake closed)", "qwen3.8-27b"),
+            "Can't reach the hub at 192.168.77.1:8123: http error: fleet tls 192.168.77.1:8123: handshake closed"
+        );
+    }
 
     #[test]
     fn hub_addresses_become_urls() {

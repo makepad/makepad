@@ -933,6 +933,8 @@ impl Engine {
 }
 
 /// MilkDrop's aspect factors: 1 on the longer axis, short/long on the other.
+/// MilkDrop only knew wide screens and shrinks x by `ay`; a tall picture
+/// (a phone upright) shrinks y by `ax` the same way, so a circle stays round.
 pub fn aspect(width: f32, height: f32) -> (f32, f32) {
     let (w, h) = (width.max(1.0), height.max(1.0));
     if w >= h {
@@ -1043,7 +1045,7 @@ fn basic_wave(e: &Engine, a: &AudioFrame, input: &FrameInput, p: &mut FrameParam
                 let k = i % n;
                 let ang = k as f32 / n as f32 * std::f32::consts::TAU + time * 0.2;
                 let rad = 0.5 * (0.5 + 0.4 * r[k] + mystery);
-                push(cx + rad * ang.cos() * ay, cy + rad * ang.sin(), color);
+                push(cx + rad * ang.cos() * ay, cy + rad * ang.sin() * ax, color);
             }
         }
         1 => {
@@ -1051,14 +1053,14 @@ fn basic_wave(e: &Engine, a: &AudioFrame, input: &FrameInput, p: &mut FrameParam
             for i in 0..n {
                 let rad = 0.53 + 0.43 * r[i] + mystery;
                 let ang = l[i] * 1.57 + time * 2.3;
-                push(cx + rad * 0.5 * ang.cos() * ay, cy + rad * 0.5 * ang.sin(), color);
+                push(cx + rad * 0.5 * ang.cos() * ay, cy + rad * 0.5 * ang.sin() * ax, color);
             }
         }
         2 | 3 => {
             // Centred spiro: left drives x, right drives y.
             let c = if mode == 3 { [color[0], color[1], color[2], (color[3] * a.treb * a.treb).min(1.0)] } else { color };
             for i in 0..n {
-                push(cx + r[i] * 0.5 * ay, cy + l[i] * 0.5, c);
+                push(cx + r[i] * 0.5 * ay, cy + l[i] * 0.5 * ax, c);
             }
         }
         4 => {
@@ -1074,7 +1076,7 @@ fn basic_wave(e: &Engine, a: &AudioFrame, input: &FrameInput, p: &mut FrameParam
             let (s, c) = ((time * 0.35).sin(), (time * 0.35).cos());
             for i in 0..n {
                 let (x0, y0) = (r[i] * l[i] + mystery, r[i] * r[i] - l[i] * l[i]);
-                push(cx + (x0 * c - y0 * s) * 0.5 * ay, cy + (x0 * s + y0 * c) * 0.5, color);
+                push(cx + (x0 * c - y0 * s) * 0.5 * ay, cy + (x0 * s + y0 * c) * 0.5 * ax, color);
             }
         }
         6 | 7 => {
@@ -1086,7 +1088,7 @@ fn basic_wave(e: &Engine, a: &AudioFrame, input: &FrameInput, p: &mut FrameParam
                 for i in 0..n {
                     let t = i as f32 / (n - 1) as f32 - 0.5;
                     let o = offset + chan[i] * 0.25;
-                    push(cx + t * dx - o * dy * ay, cy + t * dy + o * dx, color);
+                    push(cx + t * dx - o * dy * ay, cy + t * dy + o * dx * ax, color);
                 }
                 if mode == 7 && *offset < 0.0 {
                     // Break the polyline between the two lines.
@@ -1096,7 +1098,6 @@ fn basic_wave(e: &Engine, a: &AudioFrame, input: &FrameInput, p: &mut FrameParam
         }
         _ => {}
     }
-    let _ = ax;
     p.lines.push(batch);
 }
 

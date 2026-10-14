@@ -2,8 +2,9 @@
 
 - MilkDrop visuals (`libs/milkdrop`): the `.milk` preset format, its equation language and shader dialect are
   Ryan Geiss's MilkDrop (Nullsoft / Winamp). The renderer here is an independent implementation; it contains no
-  projectM source and bundles no presets.
-- Presets are never shipped with Amp. On request, the preset browser downloads the "cream of the crop" collection
+  projectM source and bundles no third-party presets.
+- Amp's built-in visualizer presets (`resources/visualizer`) are original to Makepad and under Amp's licence.
+  Other presets are never shipped with Amp. On request, the preset browser downloads the "cream of the crop" collection
   curated by the projectM project (https://github.com/projectM-visualizer/presets-cream-of-the-crop) into the
   app's data folder. The presets are the work of their individual authors (the original MilkDrop community: Geiss,
   Rovastar, Flexi, Martin, and many others); each remains under its author's terms. Amp only reads the downloaded

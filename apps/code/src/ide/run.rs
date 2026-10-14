@@ -223,7 +223,8 @@ fn manager() -> &'static RunManager {
 }
 
 /// A file was saved (`rel` relative to the project root): running
-/// `makepad run` apps whose package or path dependencies hold it relaunch.
+/// `makepad run` apps whose package or path dependencies hold it learn of it
+/// (their own watcher applies it).
 /// A free function because the apps may have been started by the agent
 /// while the RUN section was never opened; the shell calls it on
 /// `FileEditorAction::Saved`.
@@ -517,9 +518,10 @@ impl RunPanel {
             let on_screen = matches!(shown, Shown::Logs(id, _) if id == r.id);
             let tint = if on_screen { vec(palette().primary, 0.12) } else { vec(0, 0.0) };
             script_apply_eval!(cx, row, { draw_bg +: { color: #(tint) } });
-            let (name_ink, info) = match &r.exited {
-                None => (vec(palette().ok, 1.0), format!("{} {}", mode_short(r.mode), uptime(r.uptime))),
-                Some(how) => (vec(palette().meta, 1.0), format!("{} {how}", mode_short(r.mode))),
+            let (name_ink, info) = match (&r.exited, &r.building) {
+                (None, Some(stage)) => (vec(palette().meta, 1.0), format!("{} {stage}", mode_short(r.mode))),
+                (None, None) => (vec(palette().ok, 1.0), format!("{} {}", mode_short(r.mode), uptime(r.uptime))),
+                (Some(how), _) => (vec(palette().meta, 1.0), format!("{} {how}", mode_short(r.mode))),
             };
             let mut name = row.label(cx, ids!(run_name));
             name.set_text(cx, r.app.label);

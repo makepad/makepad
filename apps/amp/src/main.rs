@@ -101,6 +101,9 @@ script_mod! {
         ui: Root{
             main_window := Window{
                 window.title: "Makepad Amp"
+                // Every skin draws its own chrome: the rail is the caption, with the
+                // skin's own window buttons (`set_drag_region`).
+                chrome: WindowChrome.Custom
                 window.inner_size: vec2(1360 900)
                 // The macOS View menu reaches the same controls (the keys'
                 // shortcuts stay the app's own: these items have none).
@@ -202,7 +205,18 @@ script_mod! {
                                             flow: Down
                                             spacing: 2
                                             align: Align{y: 0.5}
-                                            volume_bar := MusicBar{width: Fill height: 14}
+                                            // The slider in a screen well, as the
+                                            // position line: its track reads on
+                                            // every style's front. Drag-only, and
+                                            // the whole slot takes the finger.
+                                            volume_well := mod.widgets.HwDisplay{
+                                                draw_bg +: {plate_id: 9.0}
+                                                width: Fill
+                                                height: 22
+                                                align: Align{y: 0.5}
+                                                padding: Inset{left: 10 right: 10}
+                                                volume_bar := MusicBar{width: Fill height: 14 relative: true}
+                                            }
                                             // The level under it, where there is room.
                                             meter_slim := mod.widgets.HwMeter{height: 18 face +: {draw_bg +: {inner: vec4(0.72, 4.0, 0.0, 0.0)}}}
                                         }
@@ -340,7 +354,7 @@ script_mod! {
                                             segment_padding: 5
                                             draw_text +: {text_style +: {font_size: 8.5}}
                                             draw_text_selected +: {text_style +: {font_size: 8.5}}
-                                            options: ["Spectrum" "MilkDrop"]
+                                            options: ["Spectrum" "Visualizer"]
                                         }
                                         milk_bar := View{
                                             width: Fill
@@ -382,7 +396,7 @@ script_mod! {
                                                 flow: Down
                                                 align: Align{x: 0.5 y: 0.5}
                                                 padding: Inset{left: 10 right: 10 top: 9 bottom: 9}
-                                                milk_now := mod.widgets.HwDisplayText{width: Fill align: Align{x: 0.5} max_lines: 3 text_overflow: TextOverflow.Ellipsis text: "MilkDrop" draw_text +: {text_style: theme.font_regular{font_size: 10.5}}}
+                                                milk_now := mod.widgets.HwDisplayText{width: Fill align: Align{x: 0.5} max_lines: 3 text_overflow: TextOverflow.Ellipsis text: "Visualizer" draw_text +: {text_style: theme.font_regular{font_size: 10.5}}}
                                             }
                                             ornament := mod.widgets.HwOrnament{}
                                         }
@@ -661,6 +675,7 @@ script_mod! {
                                     align: Align{y: 0.5}
                                     tog_eq_cap := mod.widgets.HwKey{width: Fill height: 30 inset: 3 draw_bg +: {has_led: 1.0 role: 18.0} tog_eq := mod.widgets.HwKeyText{text: "EQ" draw_text +: {text_style: theme.font_bold{font_size: 9.5}}}}
                                     tog_pl_cap := mod.widgets.HwKey{width: Fill height: 30 inset: 3 draw_bg +: {has_led: 1.0 role: 26.0} tog_pl := mod.widgets.HwKeyText{text: "PL" draw_text +: {text_style: theme.font_bold{font_size: 9.5}}}}
+                                    tog_vis_cap := mod.widgets.HwKey{width: Fill height: 30 inset: 3 draw_bg +: {has_led: 1.0 role: 13.0} tog_vis := mod.widgets.HwKeyText{text: "VIS" draw_text +: {text_style: theme.font_bold{font_size: 9.5}}}}
                                 }
                                 // The theatre's deck (milk.rs): the picture's mode, its
                                 // name in a label window, and the keys that open the
@@ -676,7 +691,7 @@ script_mod! {
                                         segment_padding: 5
                                         draw_text +: {text_style +: {font_size: 9.0}}
                                         draw_text_selected +: {text_style +: {font_size: 9.0}}
-                                        options: ["Spectrum" "MilkDrop"]
+                                        options: ["Spectrum" "Visualizer"]
                                     }
                                     // The previous, a random and the next preset (or effect).
                                     deck_prev_cap := mod.widgets.HwKey{width: 42 height: 34 inset: 3 draw_bg +: {role: 10.0} deck_prev := mod.widgets.HwKeyButton{text: "\u{f048}"}}
@@ -1609,9 +1624,9 @@ impl App {
         }
         let mut mode = self.ui.widget(cx, ids!(deck_mode));
         if tier.mode_words {
-            script_apply_eval!(cx, mode, {options: ["Spectrum" "MilkDrop"]});
+            script_apply_eval!(cx, mode, {options: ["Spectrum" "Visualizer"]});
         } else {
-            script_apply_eval!(cx, mode, {options: ["Spec" "Milk"]});
+            script_apply_eval!(cx, mode, {options: ["Spec" "Vis"]});
         }
         let screen_pad = if fit("screen") == Micro { 4.0 } else { 14.0 };
         let mut screen = self.ui.widget(cx, ids!(screen));
@@ -1637,7 +1652,8 @@ impl App {
         self.set_visible(cx, ids!(left_wing), volume != Micro);
         self.set_visible(cx, ids!(volume_slim), volume == Micro);
         let slim_h = self.ui.hw_stage(cx, ids!(stage)).shown("volume").map(|r| r.size.y).unwrap_or(0.0);
-        self.set_visible(cx, ids!(meter_slim), slim_h >= 36.0);
+        // The well (22) and the meter (18) under it.
+        self.set_visible(cx, ids!(meter_slim), slim_h >= 44.0);
         for id in [ids!(meter), ids!(brand), ids!(brand_sub)] {
             self.set_visible(cx, id, volume == Full);
         }
@@ -2033,7 +2049,8 @@ impl App {
 
     /// Do what local playback was asked: the decoder worker plays and seeks,
     /// the shared state pauses, the output device opens while a local file
-    /// plays and closes when the system's player takes over.
+    /// plays and closes when it pauses, stops or the system's player takes
+    /// over.
     fn run_player(&mut self, cx: &mut Cx, request: PlayerRequest) {
         let now = Self::now(cx);
         let Some(workers) = &self.workers else { return };
@@ -2052,6 +2069,9 @@ impl App {
             PlayerRequest::Pause => {
                 workers.shared.set_paused(true);
                 self.model.playback.set_playing(false, now);
+                // Paused, nothing plays: an open output would run its
+                // callback for silence and keep the sound hardware awake.
+                self.set_output(cx, false);
             }
             PlayerRequest::Resume => {
                 workers.shared.set_paused(false);
@@ -2469,7 +2489,7 @@ impl App {
     }
 
     fn toggle_play(&mut self) {
-        if !self.model.playback.is_playing() && self.model.resume_parked() {
+        if !self.model.playback.is_playing() && (self.model.resume_parked() || self.model.play_offline()) {
             return;
         }
         let command = if self.model.playback.is_playing() { Transport::Pause } else { Transport::Resume };
@@ -2641,7 +2661,7 @@ mod deck_tests {
 const SILENCE_NOTE: &str = "Amp hears only silence from Spotify: press SPOTIFY in the top bar to allow it";
 
 /// Keys with an LED at the face's top-left (their word legends keep clear).
-const LED_KEYS: [LiveId; 7] = [
+const LED_KEYS: [LiveId; 8] = [
     live_id!(map_cap),
     live_id!(eq_page_cap),
     live_id!(milk_list_cap),
@@ -2649,6 +2669,7 @@ const LED_KEYS: [LiveId; 7] = [
     live_id!(eq_auto_cap),
     live_id!(tog_eq_cap),
     live_id!(tog_pl_cap),
+    live_id!(tog_vis_cap),
 ];
 
 /// Labels a style's `caps` shows in capitals: titles and headings.
@@ -2661,7 +2682,7 @@ const CAPS: [LiveId; 4] = [
 
 /// The keys whose legends follow their face: (cap, button, legend is a
 /// word, transport key).
-const LEGENDS: [(LiveId, LiveId, bool, bool); 26] = [
+const LEGENDS: [(LiveId, LiveId, bool, bool); 27] = [
     (live_id!(shuffle_cap), live_id!(shuffle), false, true),
     (live_id!(previous_cap), live_id!(previous), false, true),
     (live_id!(play_cap), live_id!(play_pause), false, true),
@@ -2678,6 +2699,7 @@ const LEGENDS: [(LiveId, LiveId, bool, bool); 26] = [
     (live_id!(up_next_cap), live_id!(up_next_toggle), false, false),
         (live_id!(tog_eq_cap), live_id!(tog_eq), true, false),
     (live_id!(tog_pl_cap), live_id!(tog_pl), true, false),
+    (live_id!(tog_vis_cap), live_id!(tog_vis), true, false),
     (live_id!(eq_page_cap), live_id!(eq_page_key), true, false),
     (live_id!(map_cap), live_id!(map_key), true, false),
     (live_id!(eq_power_key), live_id!(eq_power), true, false),
@@ -3245,6 +3267,12 @@ impl AppMain for App {
         }
         if !player_key {
             self.ui.handle_event(cx, event, &mut Scope::with_data(&mut self.model));
+        }
+        if draw {
+            // The pocket volume slider takes the finger anywhere in its slot
+            // (the bar alone is too thin a target).
+            let slot = self.ui.view(cx, ids!(volume_slim)).area();
+            self.ui.music_bar(cx, ids!(volume_bar)).set_touch_area(slot);
         }
         if draw {
             // The components found new fits in this draw (a layout switch):

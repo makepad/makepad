@@ -144,6 +144,11 @@ pub struct MilkdropView {
     /// Render size relative to the view's pixels.
     #[live(1.0)]
     resolution_scale: f64,
+    /// The most pixels a frame renders at (0: no limit): a larger view
+    /// renders smaller, its shape kept, and shows the picture scaled up.
+    /// A phone GPU's budget, whatever the view's size.
+    #[live(0.0)]
+    max_pixels: f64,
     /// Warp mesh cells; per-vertex code on the GPU makes a dense grid free.
     #[live(96)]
     mesh_x: usize,
@@ -283,6 +288,10 @@ impl Widget for MilkdropView {
             Some((x, y)) => (x as f64, y as f64),
             None => (rect.size.x * dpi, rect.size.y * dpi),
         };
+        let mut scale = scale;
+        if self.max_pixels > 0.0 && want_x * want_y * scale * scale > self.max_pixels {
+            scale = (self.max_pixels / (want_x * want_y)).sqrt();
+        }
         let size = (((want_x * scale).round() as usize).clamp(16, 8192), ((want_y * scale).round() as usize).clamp(16, 8192));
         self.render_size = size;
         let fade = self.fade_start.map(|t0| ((self.time - t0) / self.transition_seconds.max(0.01)).clamp(0.0, 1.0));
@@ -495,6 +504,13 @@ impl MilkdropView {
     /// GPU time on large views.
     pub fn set_resolution_scale(&mut self, cx: &mut Cx, scale: f64) {
         self.resolution_scale = scale;
+        self.area.redraw(cx);
+    }
+
+    /// Render no more than `pixels` per frame (0: no limit); see
+    /// `max_pixels`.
+    pub fn set_max_pixels(&mut self, cx: &mut Cx, pixels: f64) {
+        self.max_pixels = pixels.max(0.0);
         self.area.redraw(cx);
     }
 
@@ -1078,6 +1094,12 @@ impl MilkdropViewRef {
     pub fn set_resolution_scale(&self, cx: &mut Cx, scale: f64) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.set_resolution_scale(cx, scale);
+        }
+    }
+
+    pub fn set_max_pixels(&self, cx: &mut Cx, pixels: f64) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.set_max_pixels(cx, pixels);
         }
     }
 

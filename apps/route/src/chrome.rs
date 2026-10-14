@@ -423,6 +423,9 @@ script_mod! {
                 Hr{
                     height: 16
                 }
+                // Cache-only: no network at all (network.rs); also on by
+                // itself when the machine has no network.
+                net_offline := LayerCheck{text: "Offline (cached maps only)"}
                 layer_rain := LayerCheck{text: "Rain radar"}
                 layer_wind := LayerCheck{text: "Wind"}
                 layer_terrain := LayerCheck{text: "Terrain"}

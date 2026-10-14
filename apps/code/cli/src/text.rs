@@ -5,7 +5,7 @@
 /// Cells one character takes: 0 for controls and combining marks, 2 for
 /// wide ones.
 pub fn char_width(c: char) -> usize {
-    crate::unicode::char_width(c as u32) as usize
+    makepad_cell_width::char_width(c as u32) as usize
 }
 
 /// Cells a string takes (no escape sequences in it).

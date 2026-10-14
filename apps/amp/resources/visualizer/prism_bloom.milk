@@ -1,0 +1,75 @@
+MILKDROP_PRESET_VERSION=201
+PSVERSION=0
+[preset00]
+fVideoEchoAlpha=0
+bTexWrap=0
+bBrighten=0
+bDarken=0
+bSolarize=0
+bInvert=0
+bRedBlueStereo=0
+bMaximizeWaveColor=0
+fWarpAnimSpeed=1
+fWarpScale=1
+cx=0.5
+cy=0.5
+dx=0
+dy=0
+sx=1
+sy=1
+nMotionVectorsX=0
+nMotionVectorsY=0
+mv_a=0
+ib_size=0
+fGammaAdj=1
+fDecay=0.95
+zoom=1.035
+rot=0.04
+warp=0
+nWaveMode=0
+bAdditiveWaves=0
+bWaveDots=0
+bWaveThick=0
+bModWaveAlphaByVolume=0
+fWaveAlpha=0
+fWaveScale=0.5
+fWaveSmoothing=0.5
+wave_r=1
+wave_g=1
+wave_b=1
+wave_x=0.5
+wave_y=0.5
+bDarkenCenter=0
+ob_size=0
+per_frame_1=rot = 0.07 + 0.04*(bass_att - 1);
+per_frame_2=zoom = 1.03 + 0.02*mid_att;
+per_frame_3=q1 = time*0.6;
+shapecode_0_enabled=1
+shapecode_0_sides=6
+shapecode_0_additive=0
+shapecode_0_thickOutline=1
+shapecode_0_textured=0
+shapecode_0_num_inst=1
+shapecode_0_x=0.5
+shapecode_0_y=0.5
+shapecode_0_rad=0.15
+shapecode_0_ang=0
+shapecode_0_r=1
+shapecode_0_g=0.2
+shapecode_0_b=0.6
+shapecode_0_a=0.35
+shapecode_0_r2=0.2
+shapecode_0_g2=0.4
+shapecode_0_b2=1
+shapecode_0_a2=0.1
+shapecode_0_border_r=1
+shapecode_0_border_g=1
+shapecode_0_border_b=1
+shapecode_0_border_a=0.9
+shape_0_per_frame1=rad = 0.08 + 0.08*bass_att;
+shape_0_per_frame2=ang = q1; x = 0.5 + 0.18*cos(q1*0.7); y = 0.5 + 0.18*sin(q1*0.7);
+shape_0_per_frame3=r = 0.6 + 0.4*sin(time*0.9);
+shape_0_per_frame4=g = 0.3 + 0.3*sin(time*0.7 + 2);
+shape_0_per_frame5=b = 0.6 + 0.4*sin(time*0.5 + 4);
+shape_0_per_frame6=r2 = b; g2 = r; b2 = g;
+shape_0_per_frame7=border_r = g; border_g = b; border_b = r;

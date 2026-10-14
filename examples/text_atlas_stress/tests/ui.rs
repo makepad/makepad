@@ -240,3 +240,75 @@ fn no_frame_shows_a_blank_glyph_and_a_retained_list_keeps_its_words() {
     })
     .unwrap();
 }
+
+/// A draw list recorded once and painted from its kept instances ever after (never redrawn,
+/// not even on a full redraw, as a render target's passes are) keeps its words while the churn
+/// fills a small curve store with fresh glyphs in three faces: its glyphs stay in use and are
+/// touched at every sweep, so the store takes back unused glyphs first. Before (149, the Relax
+/// deck title): they were let go as unused, their curves given to another glyph ("Re ax").
+#[test]
+fn a_kept_draw_list_keeps_its_words() {
+    let mut config = TestConfig::current_package(
+        env!("CARGO_MANIFEST_DIR"),
+        env!("CARGO_PKG_NAME"),
+        "ui::a_kept_draw_list_keeps_its_words",
+    )
+    .unwrap();
+    config.env.insert("MAKEPAD_GPUSIM_DPI".to_string(), "1".to_string());
+    // a 24-row curve store (and a 384 atlas): the churn's glyphs overflow it
+    let atlas = std::env::var("KEPT_LIST_ATLAS").unwrap_or_else(|_| "384".into());
+    config.env.insert("MAKEPAD_TEXT_ATLAS_SIZE".to_string(), atlas);
+    run_with_config(config, |app: TestApp| -> Result<(), TestError> {
+        app.locator(Selector::id("still")).wait_visible();
+        wait_status(&app, 0, 3);
+        // rows 0-3, kept (120), still (60), churn (70), then the kept list (60)
+        let list_y = 4 * ROW_H + 120 + 60 + 70;
+        let rows = |png: &Path| -> Vec<u8> {
+            let bytes = std::fs::read(png).expect("screenshot bytes");
+            let mut decoder = PngDecoder::new(ZCursor::new(&bytes));
+            let pixels = match decoder.decode().expect("png decode") {
+                DecodingResult::U8(p) => p,
+                _ => panic!("8-bit png"),
+            };
+            let (width, height) = decoder.dimensions().expect("png dimensions");
+            let channels = pixels.len() / (width * height);
+            pixels[list_y * WIDTH * channels..(list_y + 60) * WIDTH * channels].to_vec()
+        };
+        let reference = app.screenshot();
+        let before = rows(&reference);
+        let list_ink = ink(&reference, (0, list_y, WIDTH, 60));
+        assert!(list_ink > 200, "the kept list drew no text ({list_ink}) {reference:?}");
+        app.locator(Selector::id("churn")).wait_visible().click();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);
+        let (mut sampled, mut changed) = (0, 0);
+        loop {
+            assert!(std::time::Instant::now() < deadline, "the churn did not finish");
+            let status = app
+                .widget_snapshot()
+                .into_iter()
+                .find(|w| w.id == "churn_status")
+                .and_then(|w| w.text)
+                .unwrap_or_default();
+            if status == "churn fresh" || status.starts_with("churn done") {
+                let shot = app.screenshot();
+                sampled += 1;
+                let now = rows(&shot);
+                let diff = now.iter().zip(&before).filter(|(a, b)| a.abs_diff(**b) > 48).count();
+                if diff > 8 {
+                    changed += 1;
+                    println!("KEPT LIST CHANGED at {status}: {diff} values, ink {} vs {list_ink} {shot:?}", ink(&shot, (0, list_y, WIDTH, 60)));
+                }
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if status.starts_with("churn done") {
+                break;
+            }
+        }
+        println!("sampled {sampled} frames: the kept list changed in {changed}");
+        assert!(sampled >= 5, "too few frames sampled ({sampled})");
+        assert_eq!(changed, 0, "the kept draw list lost or changed its words");
+        Ok(())
+    })
+    .unwrap();
+}

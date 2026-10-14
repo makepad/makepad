@@ -155,6 +155,12 @@ pub fn where_a_library_goes(collection: Option<&str>) -> String {
     format!("Put a baked library in photos/image-tiles/{name} under the makepad home.")
 }
 
+/// The status line of an empty wall: the camera's shots land here, and
+/// where a baked library would go.
+pub fn nothing_yet() -> String {
+    format!("No pictures yet. Shots you take with Camera show up here. {}", how_to_bake())
+}
+
 /// The one line the status shows when nothing is baked.
 pub fn how_to_bake() -> String {
     format!(

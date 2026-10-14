@@ -2,14 +2,14 @@
 # machine (README.md). Each system is a `MusicSource` (src/source): Spotify is
 # driven through the CLI Spotify.app ships (or its desktop player's own
 # protocol) and plays in Spotify.app itself; local files play in Amp. The
-# screen shows a spectrum or a MilkDrop preset (libs/milkdrop).
+# screen shows a spectrum or the visualizer (libs/milkdrop).
 
 [package]
 name = "makepad-app-amp"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Makepad Amp: a music player for Spotify and local files, with an equalizer and MilkDrop visuals"
+description = "Makepad Amp: a music player for Spotify and local files, with an equalizer and a visualizer"
 default-run = "makepad-app-amp"
 
 [[bin]]

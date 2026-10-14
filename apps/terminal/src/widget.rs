@@ -440,7 +440,7 @@ pub struct MpTerm {
     #[rust]
     glyph_cache: HashMap<(char, bool, u8), Option<CachedGlyph>>,
     #[rust]
-    glyph_cache_key: (u64, u64, u64, u64),
+    glyph_cache_key: (u64, u64, u64, u64, u64),
     /// Lines scrolled back from the bottom (0 = live).
     #[rust]
     view_offset: usize,
@@ -623,6 +623,11 @@ impl MpTerm {
         cx.has_key_focus(self.area)
     }
 
+    /// The area that holds the keyboard when this terminal has it.
+    pub fn focus_area(&self) -> Area {
+        self.area
+    }
+
     /// Rows currently painted in the widget, or the last `lines` rows of
     /// scrollback plus the active grid. Used by the terminal's AI service;
     /// row text comes from the same cell content the renderer uses.
@@ -782,12 +787,16 @@ impl MpTerm {
         self.draw_text.text_style.font_size = font_size as f32;
         // The atlas epoch moves when glyph slots are evicted or the atlas
         // starts over: cached slots are void then.
+        // So does a font family taking a face it lacked (a lazy CJK or emoji
+        // face arriving): the missing-glyph boxes cached before are stale.
         let epoch = cx.fonts.borrow().rasterizer().borrow().epoch();
+        let families = cx.fonts.borrow().family_generation();
         let key = (
             font_size.to_bits(),
             cx.current_dpi_factor().to_bits(),
             self.raster_scale().to_bits(),
             epoch,
+            families,
         );
         if key != self.glyph_cache_key {
             self.glyph_cache.clear();

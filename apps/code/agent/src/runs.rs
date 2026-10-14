@@ -12,9 +12,18 @@
 //!   overlap other heavy builds that take the same lock.
 //! - Native runs build first, then start the release binary with `--remote`
 //!   (the agent's `ui`/`app_call` tools reach it by pid). `makepad run` runs
-//!   start `makepad run <package>` in the workspace (building the `makepad`
-//!   tool once when it is missing); a save in the package's folder warm
-//!   relaunches them (`session relaunch`: the window and GPU device stay).
+//!   start `cargo run --release -p makepad-run --bin makepad -- run <package>`
+//!   in the checkout: cargo rebuilds the `makepad` tool when its sources (the
+//!   provided crates it carries) changed, so it never refuses a checkout newer
+//!   than a prebuilt binary; cargo's progress shows on the run, then cargo
+//!   becomes the tool (same pid). A Builder installation starts its published
+//!   `makepad`. A save reaches the run through the tool's own file watcher,
+//!   which patches the running code, relaunches the app domain when it must,
+//!   or refuses an edit with errors and keeps the app running (the errors
+//!   are read from its output and marked in the editor); Code adds nothing to
+//!   that (a relaunch of its own threw the patched state away). A save the
+//!   running tool cannot take (a provided crate: "rebuild makepad") restarts
+//!   it through cargo.
 //! - The agent's shell commands (run_command) run here too, as `Shell`s:
 //!   their output is kept line by line (run_output reads it from a line
 //!   number on), a command that outlives the tool call keeps running in the
@@ -31,12 +40,24 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
+/// An app by registry id, package, binary or label, in any case and spacing ("Stage", "stage",
+/// "makepad-stage", "Task Manager").
+pub fn find_entry(apps: &[&'static AppEntry], name: &str) -> Option<&'static AppEntry> {
+    let name = name.trim();
+    let norm = |s: &str| s.to_ascii_lowercase().chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>();
+    let want = norm(name);
+    apps.iter()
+        .find(|a| a.id == name || a.package == name || a.bin == name)
+        .or_else(|| apps.iter().find(|a| [a.id, a.label, a.package, a.bin].iter().any(|n| norm(n) == want)))
+        .or_else(|| apps.iter().find(|a| [a.package, a.bin].iter().any(|n| norm(n) == format!("makepadapp{want}") || norm(n) == format!("makepad{want}"))))
+        .copied()
+}
+
 /// The agent's tools over the manager (declared and dispatched in remote.rs).
-pub const NAMES: [&str; 6] = ["list_apps", "build_app", "run_app", "stop_app", "app_status", "app_logs"];
+pub const NAMES: [&str; 7] = ["list_apps", "start_app", "build_app", "run_app", "stop_app", "app_status", "app_logs"];
 
 /// The `makepad` tool that runs apps from source (tools/run).
-pub const MAKEPAD_RUN: AppTarget<'static> =
-    AppTarget { id: "makepad-run", package: "makepad-run", dir: "tools/run", bin: "makepad", manifest: None };
+pub const MAKEPAD_RUN: AppTarget<'static> = registry::MAKEPAD_RUN;
 
 /// Lines kept per build and per running app.
 const LOG_LINES: usize = 4000;
@@ -249,6 +270,125 @@ fn header(t: &str) -> Option<(Level, String)> {
 }
 
 /// `src/main.rs:10:9` as (path, line, col); the path may hold colons.
+/// A `makepad run`'s output read line by line for the errors of its code:
+/// what the editor marks inline. Three shapes carry a place:
+/// - an edit refused with errors: `makepad live: <files>: NOT applied (errors
+///   below); ...` then `makepad live:   <path>:<line>:<col>: <message>` lines;
+/// - a compile error at start or after a relaunch: `... compile error in
+///   <fn>: <path>:<line>:<col>: <code>: <message>`;
+/// - a refused live edit's borrow check: `borrow check failed: <fn> at
+///   <path>:<line>:<col>: <message> (live edit refused)`.
+/// The next edit outcome (`patched`, `NOT applied`, a relaunch or restart)
+/// replaces them: they are the errors of the code as last saved.
+#[derive(Default)]
+pub struct LiveParser {
+    root: PathBuf,
+    /// Inside a `NOT applied (errors below)` block.
+    errors_below: bool,
+    /// A compiler-style `error[E0502]: message` in the block, waiting for
+    /// its `--> path:line:col` line.
+    pending: Option<(Level, String)>,
+    pub diags: Vec<Diagnostic>,
+}
+
+impl LiveParser {
+    pub fn new(root: &Path) -> Self {
+        LiveParser { root: root.to_path_buf(), ..Default::default() }
+    }
+
+    /// Feed one output line; true when the errors changed.
+    pub fn feed(&mut self, line: &str) -> bool {
+        let t = line.trim_end();
+        // the place of a compiler-style error in a refused edit's block (the borrow checker's)
+        if let Some(loc) = t.trim_start().strip_prefix("--> ") {
+            let Some((level, message)) = self.pending.take() else { return false };
+            return match self.located(level, &format!("{}: {message}", loc.trim()), "") {
+                Some(d) => self.push(d),
+                None => false,
+            };
+        }
+        // the app domain failed to load (a relaunch): `makepad-run domain: <app>: <place>: <message>`
+        if let Some(rest) = t.strip_prefix("makepad-run domain: ") {
+            let Some((_, place)) = rest.split_once(": ") else { return false };
+            return match self.located(Level::Error, place, "") {
+                Some(d) => self.push(d),
+                None => false,
+            };
+        }
+        if let Some(rest) = t.strip_prefix("makepad live:") {
+            if let Some(item) = rest.strip_prefix("   ") {
+                if !self.errors_below {
+                    return false;
+                }
+                if let Some((level, message)) = header(item.trim()) {
+                    self.pending = Some((level, message));
+                    return false;
+                }
+                return match self.located(Level::Error, item.trim(), "") {
+                    Some(d) => self.push(d),
+                    None => false,
+                };
+            }
+            // an edit outcome: what it says replaces the errors so far
+            let outcome = [": patched", "NOT applied", "relaunching the app domain", "needs a restart", "restarting with state"];
+            if outcome.iter().any(|o| rest.contains(o)) {
+                self.errors_below = rest.contains("NOT applied");
+                self.pending = None;
+                let had = !self.diags.is_empty();
+                self.diags.clear();
+                return had;
+            }
+            return false;
+        }
+        if let Some((_, rest)) = t.split_once("compile error in ") {
+            // `<fn>: <path>:<line>:<col>: <code>: <message>`: the fn path holds `::`, the place
+            // follows the first ": "
+            let Some((_, place)) = rest.split_once(": ") else { return false };
+            return match self.located(Level::Error, place, "") {
+                Some(d) => self.push(d),
+                None => false,
+            };
+        }
+        if let Some(rest) = t.strip_prefix("borrow check failed: ") {
+            let Some((_, place)) = rest.split_once(" at ") else { return false };
+            let place = place.strip_suffix(" (live edit refused)").unwrap_or(place);
+            return match self.located(Level::Error, place, "borrow check: ") {
+                Some(d) => self.push(d),
+                None => false,
+            };
+        }
+        false
+    }
+
+    /// `<path>:<line>:<col>: <message>` (the path may hold `:` on Windows).
+    fn located(&self, level: Level, text: &str, prefix: &str) -> Option<Diagnostic> {
+        let mut parts = text.splitn(2, ": ");
+        let mut loc = parts.next()?;
+        let mut message = parts.next().unwrap_or("").to_string();
+        // a drive letter: `C:\x.rs:3:4: msg` splits at the first ": " only after the column
+        if split_location(loc).is_none() {
+            let (l, m) = text.rsplit_once(": ")?;
+            loc = l;
+            message = m.to_string();
+        }
+        let (path, line, col) = split_location(loc)?;
+        if line == 0 {
+            return None;
+        }
+        let p = Path::new(&path);
+        let rel = if p.is_absolute() { p.strip_prefix(&self.root).ok()?.to_path_buf() } else { p.to_path_buf() };
+        Some(Diagnostic { level, message: format!("{prefix}{}", message.trim()), path: Some(rel.to_string_lossy().replace('\\', "/")), line, col })
+    }
+
+    fn push(&mut self, d: Diagnostic) -> bool {
+        if self.diags.contains(&d) {
+            return false;
+        }
+        self.diags.push(d);
+        true
+    }
+}
+
 fn split_location(loc: &str) -> Option<(String, u32, u32)> {
     let mut parts = loc.rsplitn(3, ':');
     let col = parts.next()?.trim().parse().ok()?;
@@ -322,6 +462,14 @@ struct Running {
     stopping: bool,
     /// Build and launch again once it has exited (a native Restart).
     restart: bool,
+    /// Cargo's stage while `cargo run` compiles the `makepad` tool, until it
+    /// runs it: "compiling 12/40 crates…", "waiting for another build…".
+    building: Option<String>,
+    /// A save relaunched it: a "rebuild makepad" refusal after that restarts it
+    /// through cargo (never for a refusal at its own start: no restart loop).
+    saved: bool,
+    /// The errors of its code as last saved, from its output (marked inline).
+    live: LiveParser,
     log: Ring,
 }
 
@@ -439,6 +587,10 @@ pub struct RunningView {
     pub pid: u32,
     pub uptime: Duration,
     pub exited: Option<String>,
+    /// Cargo's stage while `cargo run` still compiles the `makepad` tool.
+    pub building: Option<String>,
+    /// The errors of its code as last saved (paths relative to the root).
+    pub diags: Vec<Diagnostic>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -543,8 +695,12 @@ impl RunManager {
 
     /// The makepad checkout at or above the project folder; false when the
     /// project is not in one (there is nothing to build then).
+    /// The checkout the apps come from: the project's, else this machine's (`registry::repo_root`:
+    /// `MAKEPAD_WM_ROOT`, the Builder's sources, the checkout this program was built in), so a
+    /// project folder outside any checkout still builds and starts the machine's apps.
     pub fn set_root(&self, project: &Path) -> bool {
-        let root = registry::checkout_at_or_above(project);
+        let root = registry::checkout_at_or_above(project)
+            .or_else(|| registry::repo_root().filter(|r| r.join("Cargo.toml").is_file()));
         let found = root.is_some();
         let mut st = self.lock();
         if st.root.is_none() {
@@ -565,12 +721,7 @@ impl RunManager {
 
     /// An app by registry id, package, binary or label (any case).
     pub fn find_app(&self, name: &str) -> Option<&'static AppEntry> {
-        let name = name.trim();
-        let apps = self.apps();
-        apps.iter()
-            .find(|a| a.id == name || a.package == name || a.bin == name)
-            .or_else(|| apps.iter().find(|a| a.label.eq_ignore_ascii_case(name) || a.id.eq_ignore_ascii_case(name)))
-            .copied()
+        find_entry(&self.apps(), name)
     }
 
     pub fn is_built(&self, app: &AppEntry) -> bool {
@@ -614,7 +765,16 @@ impl RunManager {
             running: st
                 .running
                 .iter()
-                .map(|r| RunningView { id: r.id, app: r.app, mode: r.mode, pid: r.pid, uptime: now.duration_since(r.started), exited: r.exited.clone() })
+                .map(|r| RunningView {
+                    id: r.id,
+                    app: r.app,
+                    mode: r.mode,
+                    pid: r.pid,
+                    uptime: now.duration_since(r.started),
+                    exited: r.exited.clone(),
+                    building: r.building.clone(),
+                    diags: r.live.diags.clone(),
+                })
                 .collect(),
             shells: st.shells.iter().map(|s| shell_view(s, now)).collect(),
         }
@@ -634,6 +794,26 @@ impl RunManager {
         self.lock().running.iter().find(|r| r.id == id).map(|r| r.log.tail(n)).unwrap_or_default()
     }
 
+    /// The errors and warnings in the file `rel` (relative to the root): of
+    /// each app's newest build and of its runs' code as last saved. What the
+    /// editor marks inline.
+    pub fn diagnostics_for(&self, rel: &str) -> Vec<Diagnostic> {
+        let st = self.lock();
+        let mut newest: HashMap<&str, &Job> = HashMap::new();
+        for j in &st.jobs {
+            newest.insert(j.app.id, j);
+        }
+        let builds = newest.values().flat_map(|j| j.parser.diags.iter());
+        let runs = st.running.iter().flat_map(|r| r.live.diags.iter());
+        let mut out: Vec<Diagnostic> = Vec::new();
+        for d in builds.chain(runs) {
+            if d.path.as_deref() == Some(rel) && !out.contains(d) {
+                out.push(d.clone());
+            }
+        }
+        out
+    }
+
     // ---- builds -----------------------------------------------------------
 
     /// Queue a build of `app` (one build runs at a time).
@@ -642,14 +822,15 @@ impl RunManager {
     }
 
     /// Build and start `app`: natively (release build, then the binary with
-    /// `--remote`) or under `makepad run` (the `makepad` tool is built first
-    /// when it is missing).
+    /// `--remote`) or under `makepad run` (from a checkout `cargo run` of the
+    /// `makepad` tool; a Builder installation's tool is built first when it
+    /// is missing).
     pub fn run(&'static self, app: &'static AppEntry, mode: Mode) -> Result<Started, String> {
         match mode {
             Mode::Native => self.queue(app, app.target(), Goal::Run(mode)).map(Started::Job),
             Mode::MakepadRun => {
                 let root = self.root().ok_or("not a makepad checkout")?;
-                if registry::built_binary(&MAKEPAD_RUN, Some(&root)).is_some() {
+                if registry::builder_install().is_none() || registry::built_binary(&MAKEPAD_RUN, Some(&root)).is_some() {
                     self.launch(app, mode).map(Started::Running)
                 } else {
                     self.queue(app, MAKEPAD_RUN, Goal::Run(mode)).map(Started::Job)
@@ -725,12 +906,9 @@ impl RunManager {
         let (program, args) = registry::build_argv(target, root);
         let argv = build_argv_with_lock(&program.to_string_lossy(), &args, build_lock().as_deref());
         let mut command = Command::new(&argv[0]);
-        command
-            .args(&argv[1..])
-            .current_dir(root)
-            .env("CARGO_TERM_COLOR", "never")
-            .env("CARGO_TERM_PROGRESS_WHEN", "always")
-            .env("CARGO_TERM_PROGRESS_WIDTH", "100");
+        command.args(&argv[1..]).current_dir(root);
+        // the same cargo options as every other launcher: no rebuilds between them
+        registry::cargo_env(&mut command);
         let child = spawn_group(command).map_err(|e| format!("cannot start {}: {e}", argv[0]))?;
         if let Some(job) = self.lock().job(id) {
             job.pid = Some(child.id());
@@ -834,25 +1012,34 @@ impl RunManager {
                 args.push("--remote".into());
                 (program, args)
             }
-            Mode::MakepadRun => {
-                let program = registry::built_binary(&MAKEPAD_RUN, Some(&root)).ok_or("the makepad tool is not built yet")?;
-                let mut args = vec!["run".to_string(), app.package.to_string()];
-                if !app.args.is_empty() {
-                    args.push("--".into());
-                    args.extend(app.args.iter().map(|a| a.to_string()));
-                }
-                (program, args)
-            }
+            Mode::MakepadRun => makepad_run_argv(app, &root, registry::builder_install().is_some())?,
         };
+        let cargo = mode == Mode::MakepadRun && registry::builder_install().is_none();
         let mut command = Command::new(&program);
         command.args(&args).current_dir(&root);
+        if cargo {
+            registry::cargo_env(&mut command);
+        }
         let child = spawn_group(command).map_err(|e| format!("cannot start {}: {e}", program.display()))?;
         let id = {
             let mut st = self.lock();
             let id = st.fresh_id();
             let mut log = Ring::default();
             log.push(format!("$ {} {}", program.display(), args.join(" ")));
-            st.running.push(Running { id, app, mode, pid: child.id(), started: Instant::now(), exited: None, stopping: false, restart: false, log });
+            st.running.push(Running {
+                id,
+                app,
+                mode,
+                pid: child.id(),
+                started: Instant::now(),
+                exited: None,
+                stopping: false,
+                restart: false,
+                building: cargo.then(|| "starting cargo…".to_string()),
+                saved: false,
+                live: LiveParser::new(&root),
+                log,
+            });
             id
         };
         self.watch(child, move |m, out| m.run_output(id, out), move |m, status| m.run_exited(id, status));
@@ -863,10 +1050,29 @@ impl RunManager {
         Ok(id)
     }
 
-    fn run_output(&self, id: u64, out: ProcessOutput) {
+    fn run_output(&'static self, id: u64, out: ProcessOutput) {
         if let ProcessOutput::Line(line) = out {
+            let mut rebuild = false;
             if let Some(r) = self.lock().run(id) {
+                if r.building.is_some() {
+                    r.building = cargo_stage(&line, r.building.take());
+                    if line.starts_with("Building [") {
+                        self.changed();
+                        return;
+                    }
+                }
+                // The tool refuses sources newer than itself (a provided crate
+                // saved while it runs): cargo rebuilds it on a restart.
+                rebuild = r.mode == Mode::MakepadRun && r.saved && !r.restart && !r.stopping && line.contains("rebuild makepad");
+                r.live.feed(&line);
                 r.log.push(line);
+                if rebuild {
+                    r.restart = true;
+                    r.log.push("[the saved sources need a newer makepad: restarting through cargo, which rebuilds it]".into());
+                }
+            }
+            if rebuild {
+                let _ = self.stop(id);
             }
             self.changed();
         }
@@ -978,8 +1184,11 @@ impl RunManager {
         Ok(())
     }
 
-    /// A file was saved (`rel` relative to the checkout root): running
-    /// `makepad run` apps whose package holds it relaunch warm. Returns them.
+    /// A file was saved (`rel` relative to the checkout root): the running
+    /// `makepad run` apps whose package or path dependencies hold it. Their
+    /// own watcher applies the save; here they only learn that a save came
+    /// (a "rebuild makepad" refusal after it restarts them through cargo).
+    /// Returns them.
     pub fn on_saved(&'static self, rel: &str) -> Vec<u64> {
         let manifest = rel == "Cargo.toml" || rel.ends_with("/Cargo.toml");
         let ids: Vec<u64> = {
@@ -1004,8 +1213,11 @@ impl RunManager {
                 self.load_deps(app);
             }
         }
+        let mut st = self.lock();
         for id in &ids {
-            let _ = self.relaunch(*id);
+            if let Some(r) = st.run(*id) {
+                r.saved = true;
+            }
         }
         ids
     }
@@ -1328,9 +1540,10 @@ impl RunManager {
     }
 
     pub fn running_text(r: &RunningView) -> String {
-        match &r.exited {
-            None => format!("{} pid {} ({}) up {}s: reach it with ui/app_tools target={}", r.app.id, r.pid, r.mode.name(), r.uptime.as_secs(), r.pid),
-            Some(how) => format!("{} pid {} ({}) exited: {how}", r.app.id, r.pid, r.mode.name()),
+        match (&r.exited, &r.building) {
+            (None, Some(stage)) => format!("{} pid {} ({}) cargo: {stage} (it starts when cargo is done; app_logs shows cargo's output)", r.app.id, r.pid, r.mode.name()),
+            (None, None) => format!("{} pid {} ({}) up {}s: reach it with ui/app_tools target={}", r.app.id, r.pid, r.mode.name(), r.uptime.as_secs(), r.pid),
+            (Some(how), _) => format!("{} pid {} ({}) exited: {how}", r.app.id, r.pid, r.mode.name()),
         }
     }
 
@@ -1517,6 +1730,9 @@ fn clean_line(bytes: &[u8]) -> String {
 
 /// Spawn with piped output, no stdin, as the leader of a new process group.
 fn spawn_group(mut command: Command) -> std::io::Result<Child> {
+    // Code runs hosted in the WM: an app it starts is not Code's client and never takes the
+    // direct display; it finds the WM itself (MAKEPAD_WM_SOCKET) and becomes its own window.
+    registry::child_env::scrub(&mut command);
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(unix)]
     {
@@ -1547,6 +1763,34 @@ fn signal_group(pid: u32, _hard: bool) {
 }
 
 /// `session relaunch` on a `makepad run` process's endpoint.
+/// How a `makepad run` of `app` starts. From a checkout: `cargo run --release
+/// -p makepad-run --bin makepad -- run <package> [-- <app args>]`, so cargo
+/// rebuilds the tool whenever its sources changed (never a prebuilt `makepad`
+/// older than the checkout's provided crates). A Builder installation
+/// (`builder`) starts its published `makepad` with the same arguments.
+fn makepad_run_argv(app: &AppEntry, root: &Path, builder: bool) -> Result<(PathBuf, Vec<String>), String> {
+    let mut args = vec!["run".to_string(), app.package.to_string()];
+    if !app.args.is_empty() {
+        args.push("--".into());
+        args.extend(app.args.iter().map(|a| a.to_string()));
+    }
+    if builder {
+        let program = registry::built_binary(&MAKEPAD_RUN, Some(root)).ok_or("the makepad tool is not built yet")?;
+        return Ok((program, args));
+    }
+    Ok(registry::run_argv(&MAKEPAD_RUN, root, &args))
+}
+
+/// The stage of a `cargo run` after `line`: cargo's progress wording
+/// ("waiting for another build…" while another cargo holds the build lock),
+/// None once cargo runs the tool.
+fn cargo_stage(line: &str, stage: Option<String>) -> Option<String> {
+    if line.trim_start().starts_with("Running ") {
+        return None;
+    }
+    registry::cargo_progress(line).map(|(text, _)| text).or(stage)
+}
+
 fn session_relaunch(pid: u32) -> Result<String, String> {
     let client = makepad_remote::Client::connect(&pid.to_string()).map_err(|e| e.to_string())?;
     client.set_timeout(Some(Duration::from_secs(10)));
@@ -1561,6 +1805,18 @@ fn session_relaunch(pid: u32) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn apps_are_found_by_any_name_a_person_says() {
+        let all: Vec<&'static AppEntry> = registry::apps().iter().collect();
+        assert_eq!(super::find_entry(&all, "Stage").map(|a| a.id), Some("stage"));
+        assert_eq!(super::find_entry(&all, "stage").map(|a| a.id), Some("stage"));
+        assert_eq!(super::find_entry(&all, "makepad-stage").map(|a| a.id), Some("stage"));
+        assert_eq!(super::find_entry(&all, "Calculator").map(|a| a.id), Some("calculator"));
+        assert_eq!(super::find_entry(&all, "makepad-app-calculator").map(|a| a.id), Some("calculator"));
+        assert_eq!(super::find_entry(&all, "task manager").map(|a| a.id), Some("task"));
+        assert!(super::find_entry(&all, "no such thing").is_none());
+    }
+
     use super::*;
 
     /// Captured from `cargo build --release` of a package with one warning
@@ -1693,7 +1949,7 @@ warning: unused variable: `x`
         let id = {
             let mut st = m.lock();
             let id = st.fresh_id();
-            st.running.push(Running { id, app, mode: Mode::MakepadRun, pid: 0, started: Instant::now(), exited: None, stopping: false, restart: false, log: Ring::default() });
+            st.running.push(Running { id, app, mode: Mode::MakepadRun, pid: 0, started: Instant::now(), exited: None, stopping: false, restart: false, building: None, saved: false, live: LiveParser::default(), log: Ring::default() });
             id
         };
         // other tests share the manager: count what this one added
@@ -1745,7 +2001,7 @@ warning: unused variable: `x`
         let id = {
             let mut st = m.lock();
             let id = st.fresh_id();
-            st.running.push(Running { id, app, mode: Mode::Native, pid: child.id(), started: Instant::now(), exited: None, stopping: false, restart: false, log: Ring::default() });
+            st.running.push(Running { id, app, mode: Mode::Native, pid: child.id(), started: Instant::now(), exited: None, stopping: false, restart: false, building: None, saved: false, live: LiveParser::default(), log: Ring::default() });
             id
         };
         m.watch(child, move |m, out| m.run_output(id, out), move |m, status| m.run_exited(id, status));
@@ -1765,5 +2021,84 @@ warning: unused variable: `x`
         // A second stop of an exited run removes it.
         m.stop(id).unwrap();
         assert!(m.snapshot().running.iter().all(|r| r.id != id));
+    }
+    /// From a checkout `makepad run` is a release `cargo run` of the tool with
+    /// the app's package and arguments: cargo rebuilds a `makepad` older than
+    /// the checkout (its provided crates), which a prebuilt binary refused
+    /// ("provided crate .. differs from the library built into makepad").
+    #[test]
+    fn a_makepad_run_from_a_checkout_is_a_release_cargo_run_of_the_tool() {
+        let root = Path::new("/checkout");
+        let app = registry::apps().iter().find(|a| !a.args.is_empty()).or_else(|| registry::find("calculator")).unwrap();
+        let (program, args) = makepad_run_argv(app, root, false).unwrap();
+        assert_eq!(program, registry::cargo_bin());
+        let manifest = root.join("Cargo.toml");
+        let mut want: Vec<String> = ["run", "--release", "--manifest-path", &manifest.to_string_lossy(), "-p", "makepad-run", "--bin", "makepad", "--", "run", app.package]
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
+        if !app.args.is_empty() {
+            want.push("--".into());
+            want.extend(app.args.iter().map(|a| a.to_string()));
+        }
+        assert_eq!(args, want);
+        // the stage cargo is in shows on the run until cargo runs the tool
+        let mut stage = Some("starting cargo…".to_string());
+        for (line, want) in [
+            ("Blocking waiting for file lock on build directory", Some("waiting for another build…")),
+            ("Compiling makepad-hal v1.0.0 (/checkout/platform/hal)", Some("compiling makepad-hal v1.0.0…")),
+            ("warning: unused variable: `x`", Some("compiling makepad-hal v1.0.0…")),
+            ("Finished `release` profile [optimized] target(s) in 41.20s", Some("launching…")),
+            ("Running `/checkout/target/release/makepad run makepad-example-counter`", None),
+        ] {
+            stage = cargo_stage(line, stage);
+            assert_eq!(stage.as_deref(), want, "{line}");
+        }
+    }
+    /// What `makepad run` prints for errors in the code becomes the run's
+    /// diagnostics, relative to the root; the next edit outcome replaces them.
+    #[test]
+    fn a_runs_errors_are_read_from_its_output() {
+        let mut p = LiveParser::new(Path::new("/ws"));
+        let feed = |p: &mut LiveParser, lines: &[&str]| for l in lines { p.feed(l); };
+        feed(&mut p, &[
+            "makepad live: main.rs: NOT applied (errors below); the app runs the previous code",
+            "makepad live:   /ws/examples/counter/src/main.rs:51:24: E0308: mismatched types: expected `u32`, found `&str`",
+        ]);
+        assert_eq!(p.diags, [Diagnostic { level: Level::Error, message: "E0308: mismatched types: expected `u32`, found `&str`".into(), path: Some("examples/counter/src/main.rs".into()), line: 51, col: 24 }]);
+        // fixed: the patch clears them
+        feed(&mut p, &["makepad live: main.rs: patched (1 item(s) changed, 1 fn(s) installed) in 54.1 ms"]);
+        assert!(p.diags.is_empty());
+        // a restart's reasons are not errors
+        feed(&mut p, &[
+            "makepad live: main.rs: relaunching the app domain (window kept)",
+            "makepad live:   /ws/examples/counter/src/main.rs:1:1: impl `` removed -- removing this kind of item is not applied live yet: restart the app",
+        ]);
+        assert!(p.diags.is_empty());
+        // the borrow checker's refusal: compiler-style, the place on the `-->` line
+        feed(&mut p, &[
+            "borrow check failed: app::App::tick at /ws/examples/counter/src/main.rs:51:42: cannot borrow `v` as mutable (live edit refused)",
+            "makepad live: /ws/examples/counter/src/main.rs: NOT applied (errors below); the app runs the previous code",
+            "makepad live:   refused by the borrow checker (1 error(s))",
+            "makepad live:   error[E0502]: cannot borrow `v` as mutable because it is also borrowed as immutable",
+            "  --> /ws/examples/counter/src/main.rs:51:42",
+            "   |",
+        ]);
+        assert_eq!(p.diags.iter().map(|d| (d.line, d.col, d.message.as_str())).collect::<Vec<_>>(), [(51, 42, "cannot borrow `v` as mutable because it is also borrowed as immutable [E0502]")]);
+        // a domain that failed to load
+        feed(&mut p, &["makepad live: main.rs: relaunching the app domain (window kept)"]);
+        feed(&mut p, &["makepad-run domain: makepad-example-counter: /ws/examples/counter/src/main.rs:51:5: expected item (found KwLet `let`)"]);
+        assert_eq!(p.diags.iter().map(|d| (d.line, d.col, d.message.as_str())).collect::<Vec<_>>(), [(51, 5, "expected item (found KwLet `let`)")]);
+        feed(&mut p, &["makepad live: main.rs: patched (1 item(s) changed, 1 fn(s) installed) in 54.1 ms"]);
+        // a compile error at start or after a relaunch, and a refused borrow check
+        feed(&mut p, &[
+            "makepad-run: [t=170471 ms] compile error in makepad_example_counter::::handle_actions: /ws/examples/counter/src/main.rs:51:24: E0308: mismatched types",
+            "borrow check failed: app::App::tick at /ws/apps/x/src/app.rs:7:13: cannot borrow `v` as mutable more than once at a time (live edit refused)",
+        ]);
+        let places: Vec<_> = p.diags.iter().map(|d| (d.path.clone().unwrap(), d.line, d.col, d.message.clone())).collect();
+        assert_eq!(places, [
+            ("examples/counter/src/main.rs".to_string(), 51, 24, "E0308: mismatched types".to_string()),
+            ("apps/x/src/app.rs".to_string(), 7, 13, "borrow check: cannot borrow `v` as mutable more than once at a time".to_string()),
+        ]);
     }
 }

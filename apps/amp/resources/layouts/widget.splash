@@ -24,9 +24,10 @@ mod.widgets.HwLayout = View{
         mod.widgets.HwSlot{component: "clock" width: 118 height: Fill}
         mod.widgets.HwSlot{component: "marquee" width: Fill height: Fill}
     }
+    // 44: the volume slider's slot is a finger's target.
     View{
         width: Fill
-        height: 38
+        height: 44
         flow: Right
         spacing: 8
         align: Align{y: 0.5}

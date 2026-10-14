@@ -15,3 +15,4 @@ path = "src/main.rs"
 
 [dependencies]
 makepad-code-agent = { path = "../agent" }
+makepad-cell-width = { path = "../../../libs/cell_width" }

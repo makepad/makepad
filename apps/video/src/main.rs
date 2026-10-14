@@ -92,12 +92,6 @@ impl MatchEvent for App {
             }
         }
 
-        // Speakers: the clip's soundtrack, mixed from the decode queue.
-        cx.audio_output(0, move |info, output| {
-            output.zero();
-            makepad_app_video::player::mix_into(output, info.sample_rate);
-        });
-
         // Keep the pass clear colour in sync with the installed system theme.
         if let Some(color) = cx.with_vm(|vm| theme_tokens::color(vm, "color_bg_app")) {
             let mut window = self.ui.window(cx, ids!(main_window));
@@ -109,7 +103,7 @@ impl MatchEvent for App {
         self.preview = PreviewState::new(preview, path.as_deref());
 
         if let Some(mut player) = self.ui.widget(cx, ids!(player)).borrow_mut::<MpVideoView>() {
-            player.set_muted(muted);
+            player.set_muted(cx, muted);
             player.set_preview(preview);
             if let Some(path) = &path {
                 player.open(cx, path);
@@ -126,10 +120,6 @@ impl MatchEvent for App {
         }
     }
 
-    fn handle_audio_devices(&mut self, cx: &mut Cx, devices: &AudioDevicesEvent) {
-        cx.use_audio_outputs(&devices.default_output());
-    }
-
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         for action in actions {
             // A raw downcast never matches a widget action: unwrap the
@@ -141,7 +131,6 @@ impl MatchEvent for App {
                 name,
                 width,
                 height,
-                fps,
                 position_secs,
                 duration_secs,
                 playing,
@@ -173,13 +162,13 @@ impl MatchEvent for App {
                         format!("vol {volume_pct}%")
                     };
                     format!(
-                        "{name}    {width}\u{00d7}{height}    {fps:.0} fps    {state}    {} / {}    {sound}",
+                        "{name}    {width}\u{00d7}{height}    {state}    {} / {}    {sound}",
                         format_time(position_secs),
                         format_time(duration_secs),
                     )
                 };
                 self.ui.label(cx, ids!(status)).set_text(cx, &text);
-                // Double-clicked into bare mode: the picture is the whole
+                // F switched to bare mode: the picture is the whole
                 // window, status line included.
                 self.ui.widget(cx, ids!(status_row)).set_visible(cx, !bare);
             }

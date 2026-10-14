@@ -404,7 +404,7 @@ impl ThemeAi {
                 // The preset shows: MilkDrop on the screen, the automatic
                 // change off while the AI works on one.
                 let seg = ui.segmented_control(cx, ids!(eq_view));
-                if !seg.selected_text().starts_with("Milk") {
+                if !seg.selected_text().starts_with("Vis") {
                     seg.set_selected(cx, 1);
                     cx.widget_action(seg.widget_uid(), SegmentedControlAction::Selected(1));
                 }
@@ -1364,7 +1364,7 @@ impl crate::App {
     fn ai_context(&mut self, cx: &mut Cx) {
         let style = hw::current(cx);
         let display = self.ui.segmented_control(cx, ids!(eq_view)).selected_text();
-        let playing = if display.starts_with("Milk") {
+        let playing = if display.starts_with("Vis") {
             format!("MilkDrop preset `{}`", self.ui.milkdrop_view(cx, ids!(milk)).status().map(|s| s.name).unwrap_or_default())
         } else {
             "the spectrum".to_string()

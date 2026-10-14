@@ -1,0 +1,39 @@
+# camera — the phone's camera as a Makepad app: a live viewfinder, a shutter,
+# a front/back switch and the last shot, which opens in Photos.
+#
+# Shots are JPEGs (the in-tree jpeg-encoder) named by their capture time in
+# the camera roll, `<makepad home>/photos/camera`. Photos reads that folder
+# and puts every new shot on its wall while it runs (apps/photos, the
+# camera-roll import), so a shot shows up there without a restart.
+
+[package]
+name = "makepad-app-camera"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+default-run = "makepad-app-camera"
+
+[[bin]]
+name = "makepad-app-camera"
+path = "src/main.rs"
+
+[lib]
+name = "makepad_app_camera"
+path = "src/lib.rs"
+
+[features]
+default = ["tweaker"]
+# The design overlay (Shift+F10 with the dev overlays on). On for development
+# builds; the Builder's releases build without it (--no-default-features).
+tweaker = ["dep:makepad-widgets-tweaker", "makepad-widgets/data", "makepad-widgets/dock", "makepad-widgets/fab"]
+
+[dependencies]
+makepad-widgets = { path = "../../widgets", default-features = false, features = ["media"] }
+makepad-widgets-tweaker = { path = "../../widgets/families/tweaker", optional = true }
+# The window manager's vocabulary: the bar's title, the polite close, and
+# "open this shot in Photos".
+makepad-wm-api = { path = "../../libs/wm_api" }
+# The capture time in the shot's name, on the local wall clock.
+makepad-civil-time = { path = "../../libs/civil_time" }
+# The shots' JPEG encoder (in-tree).
+jpeg-encoder = { path = "../../libs/jpeg-encoder" }

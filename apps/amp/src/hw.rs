@@ -1137,7 +1137,7 @@ script_mod! {
         // No pack yet: the display's text, the style's keys.
         missing +: {
             missing_group +: {
-                missing_title := mod.widgets.HwDisplayText{width: Fill align: Align{x: 0.5} text: "No MilkDrop presets yet." draw_text +: {text_style: theme.font_bold{font_size: 12}}}
+                missing_title := mod.widgets.HwDisplayText{width: Fill align: Align{x: 0.5} text: "No visualizer presets yet." draw_text +: {text_style: theme.font_bold{font_size: 12}}}
                 missing_about := mod.widgets.HwDisplayText{width: Fill align: Align{x: 0.5} text: "projectM's \"cream of the crop\" pack: 9,795 presets, about 160 MB." draw_text +: {text_style: theme.font_regular{font_size: 9.5}}}
                 missing_keys +: {
                     download_key := mod.widgets.HwKey{width: Fit height: 32 inset: 3 draw_bg +: {role: 43.0} download := mod.widgets.HwKeyText{text: "DOWNLOAD PRESETS" width: Fit padding: Inset{left: 16 right: 16}}}
@@ -1965,7 +1965,10 @@ impl Widget for HwMeter {
         let dt = (now - self.drawn_at).clamp(0.0, 0.1) as f32;
         self.drawn_at = now;
         let mut target = [0.0f32; 2];
-        if let Some(analyzer) = scope.data_mut().get::<Model>().and_then(|model| model.sound()) {
+        let model: Option<&Model> = scope.data_mut().get::<Model>().map(|model| &*model);
+        // The level heard: after our volume.
+        let gain = model.map(Model::level_gain).unwrap_or(1.0);
+        if let Some(analyzer) = model.and_then(|model| model.sound()) {
             let written = analyzer.written();
             if written != self.written {
                 self.written = written;
@@ -1979,7 +1982,7 @@ impl Widget for HwMeter {
             }
             // Two halves of the newest block stand in for two channels.
             for (lane, half) in self.samples.chunks(512).take(2).enumerate() {
-                let rms = (half.iter().map(|s| s * s).sum::<f32>() / half.len().max(1) as f32).sqrt();
+                let rms = gain * (half.iter().map(|s| s * s).sum::<f32>() / half.len().max(1) as f32).sqrt();
                 let db = 20.0 * rms.max(1.0e-6).log10();
                 target[lane] = ((db + 48.0) / 48.0).clamp(0.0, 1.0);
             }

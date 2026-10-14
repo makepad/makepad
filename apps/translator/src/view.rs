@@ -30,6 +30,8 @@ const COMPACT_WIDTH: f64 = 760.0;
 const DEBOUNCE_SECS: f64 = 0.55;
 /// How often the hub status is refreshed.
 const PROBE_SECS: f64 = 15.0;
+/// How often a hub that is down is looked for again.
+const PROBE_DOWN_SECS: f64 = 3.0;
 const SAVE_KEY: &str = "translator.json";
 
 script_mod! {
@@ -308,7 +310,6 @@ script_mod! {
                     to_lang := Label{padding: 0 draw_text +: {color: mod.translator.ink text_style: Semi{font_size: 18}}}
                 }
             }
-            retry := PrimaryBtn{visible: false height: 32 padding: Inset{left: 12 right: 12} text: "Retry" draw_text +: {text_style: Semi{font_size: 12}}}
             settings_btn := IconBtn{icon_walk: Walk{width: 18 height: 18} draw_icon +: {svg: crate_resource("self:resources/icons/settings.svg") color: mod.translator.ink_faint}}
         }
         route := Label{flow: Right{wrap: true} visible: false width: Fill height: Fit padding: Inset{left: 4} max_lines: 2 text_overflow: Ellipsis draw_text +: {color: mod.translator.ink_dim text_style: Reg{font_size: 12}}}
@@ -348,16 +349,22 @@ script_mod! {
                 m2 := ModelRow{}
                 m3 := ModelRow{}
             }
+            // Where the models run, Hub or On-device, each side with its state:
+            // switching is instant, and the hub is found again on its own.
             run_on := RoundedView{
-                visible: false
-                width: Fill height: Fit flow: Right align: Align{y: 0.5} padding: Inset{left: 18 right: 8 top: 8 bottom: 8}
+                width: Fill height: Fit flow: Down padding: Inset{left: 18 right: 8 top: 8 bottom: 12} spacing: 6
                 draw_bg +: {color: mod.translator.surface border_radius: 20 border_size: 0.0}
-                Label{padding: 0 text: "Runs on" draw_text +: {color: mod.translator.ink text_style: Semi{font_size: 15}}}
-                View{width: Fill}
-                SegmentTrack{
-                    run_phone := Segment{text: "This phone"}
-                    run_hub := Segment{text: "Hub"}
+                View{
+                    width: Fill height: Fit flow: Right align: Align{y: 0.5}
+                    Label{padding: 0 text: "Runs on" draw_text +: {color: mod.translator.ink text_style: Semi{font_size: 15}}}
+                    View{width: Fill}
+                    SegmentTrack{
+                        run_hub := Segment{text: "Hub"}
+                        run_phone := Segment{text: "On-device"}
+                    }
                 }
+                hub_state := Label{flow: Right{wrap: true} width: Fill height: Fit padding: Inset{right: 10} draw_text +: {color: mod.translator.ink_dim text_style: Reg{font_size: 12}}}
+                phone_state := Label{flow: Right{wrap: true} width: Fill height: Fit padding: Inset{right: 10} draw_text +: {color: mod.translator.ink_dim text_style: Reg{font_size: 12}}}
             }
             options := RoundedView{
                 width: Fill height: Fit flow: Right spacing: 20 align: Align{y: 0.5} padding: Inset{left: 18 right: 18 top: 14 bottom: 14}
@@ -611,11 +618,7 @@ script_mod! {
             // the model is still reading) and, once there is a result, the list.
             shutter_row := View{
                 width: Fill height: 72 flow: Right align: Align{x: 0.5 y: 0.5}
-                View{
-                    width: Fill height: Fit align: Align{x: 0.5 y: 0.5}
-                    // The test picture, for testing only (MAKEPAD_TRANSLATOR_TEST_PICTURE=1).
-                    test_chip := SoftBtn{visible: false height: 44 text: "Test picture" draw_text +: {text_style: Reg{font_size: 13}}}
-                }
+                View{width: Fill height: Fit}
                 shutter := ButtonFlat{
                     width: 66 height: 66 margin: 0 padding: 0 text: ""
                     icon_walk: Walk{width: 26 height: 26}
@@ -756,6 +759,9 @@ pub struct TranslatorView {
     probe_id: u64,
     #[rust]
     probe_timer: Option<Timer>,
+    /// The hub's last status line (`model on host`, or why it is not reachable).
+    #[rust]
+    hub_line: String,
     #[rust]
     hub_ok: Option<bool>,
     #[rust]
@@ -772,9 +778,6 @@ pub struct TranslatorView {
     /// When the running translation started, for its rate.
     #[rust]
     job_started: f64,
-    /// Opening the settings' "Hub…" section also turns the camera's test picture on (developer path).
-    #[rust]
-    dev_pictures: bool,
     #[rust]
     cam: CameraState,
     #[rust]
@@ -814,7 +817,8 @@ struct CameraState {
     translated_lines: usize,
     picture_dims: (usize, usize),
     frozen: bool,
-    reading: Option<std::sync::mpsc::Receiver<Result<Vec<TextBox>, String>>>,
+    /// The shot, kept while the hub reads it: read again on this phone if the hub cannot.
+    read_frame: Option<Frame>,
     /// The text detector's boxes for the shot (on-device), and their channel.
     detecting: Option<std::sync::mpsc::Receiver<Vec<(f32, f32, f32, f32)>>>,
     detected: Option<Vec<(f32, f32, f32, f32)>>,
@@ -884,12 +888,22 @@ impl TranslatorView {
         if !self.saved.credential.is_empty() {
             std::env::set_var("MAKEPAD_AI_HUB_CREDENTIAL", &self.saved.credential);
         }
+        // The paired hub serves speech too, before chat has found it.
+        if let Some(base) = crate::engine::hub_base(&self.saved.hub).filter(|b| b.starts_with("https://")) {
+            crate::engine::pin_speech_hub(base.trim_start_matches("https://"));
+        }
     }
 
     fn set_hub_status(&mut self, cx: &mut Cx, ok: bool, text: &str) {
+        // A hub that is down is looked for again soon (a network change
+        // makes the engine forget what was unreachable); a live one rarely.
+        if self.hub_ok != Some(ok) {
+            self.probe_timer = Some(cx.start_interval(if ok { PROBE_SECS } else { PROBE_DOWN_SECS }));
+        }
         self.hub_ok = Some(ok);
+        self.hub_line = text.to_string();
         self.view.label(cx, ids!(route)).set_text(cx, text);
-        self.view.button(cx, ids!(bar.retry)).set_visible(cx, !ok);
+        self.sync_run_on(cx);
         self.view.redraw(cx);
     }
 
@@ -946,6 +960,17 @@ impl TranslatorView {
 
     // ---------------------------------------------------------- the settings
 
+    /// The remembered hub answered at another address with its own
+    /// certificate: remember that address.
+    pub(super) fn hub_moved(&mut self, cx: &mut Cx, addr: String) {
+        if self.saved.hub.trim() == addr {
+            return;
+        }
+        self.saved.hub = addr;
+        self.view.text_input(cx, ids!(settings.hub)).set_text(cx, &self.saved.hub);
+        self.persist(cx);
+    }
+
     fn hub_settings(&self) -> HubSettings {
         let model = self.saved.model.trim();
         HubSettings {
@@ -970,9 +995,22 @@ impl TranslatorView {
 
     /// Where the models run: this phone (when its weights are on it) or a hub.
     fn sync_run_on(&mut self, cx: &mut Cx) {
-        self.view.view(cx, ids!(settings.run_on)).set_visible(cx, crate::ondevice::available());
         // The chosen segment is a raised face on the track.
         let on_phone = self.saved.model == crate::ondevice::MODEL;
+        let hub = match self.hub_ok {
+            Some(true) => format!("Hub: {}", self.hub_line),
+            Some(false) if !on_phone => format!("Hub: {}", self.hub_line),
+            Some(false) => "Hub: not reachable".to_string(),
+            None if on_phone => "Hub: not in use".to_string(),
+            None => "Hub: connecting…".to_string(),
+        };
+        let phone = if crate::ondevice::available() {
+            format!("On-device: {} on this phone", crate::ondevice::LABEL)
+        } else {
+            format!("On-device: {} is not on this phone (Offline models above)", crate::ondevice::LABEL)
+        };
+        self.view.label(cx, ids!(settings.run_on.hub_state)).set_text(cx, &hub);
+        self.view.label(cx, ids!(settings.run_on.phone_state)).set_text(cx, &phone);
         for (path, chosen) in [(ids!(settings.run_on.run_phone), on_phone), (ids!(settings.run_on.run_hub), !on_phone)] {
             let mut segment = self.view.widget(cx, path);
             if chosen {
@@ -988,10 +1026,17 @@ impl TranslatorView {
         if (self.saved.model == crate::ondevice::MODEL) == phone {
             return;
         }
+        // On-device needs the models on the phone: the state line says so.
+        if phone && !crate::ondevice::available() {
+            self.sync_run_on(cx);
+            return;
+        }
         let hub_model = "qwen3.8-27b";
         self.saved.model = if phone { crate::ondevice::MODEL.to_string() } else { hub_model.to_string() };
         self.view.text_input(cx, ids!(settings.model)).set_text(cx, &self.saved.model);
         self.persist(cx);
+        // Speech follows: the sessions start again on the hub or on the phone.
+        self.drop_speech_sessions();
         self.hub_ok = None;
         self.probe_id = 0;
         self.probe(cx);
@@ -1124,12 +1169,10 @@ impl TranslatorView {
         let frozen = self.cam.frozen;
         // No hints: the stage bar says what is happening; the line below it only
         // speaks for a finished shot with nothing found or an error.
-        let cam_busy = self.cam.job != 0 && self.cam.lines.is_empty() || self.cam.reading.is_some();
+        let cam_busy = self.cam.job != 0 && self.cam.lines.is_empty();
         self.view.widget(cx, ids!(camera.cam_status)).set_visible(cx, cam && frozen && !cam_busy && self.cam.lines.is_empty());
         self.view.widget(cx, ids!(camera.shutter_row.shutter)).set_visible(cx, !frozen);
         self.view.widget(cx, ids!(camera.shutter_row.retake)).set_visible(cx, frozen);
-        let test = self.dev_pictures || std::env::var("MAKEPAD_TRANSLATOR_TEST_PICTURE").is_ok_and(|v| v == "1");
-        self.view.widget(cx, ids!(camera.shutter_row.test_chip)).set_visible(cx, test && !frozen);
         if cam {
             self.fit_picture(cx);
             if !self.cam.lines.is_empty() {
@@ -1150,7 +1193,7 @@ impl TranslatorView {
             translating: self.current.as_ref().is_some_and(|c| c.id != 0 && c.target.is_empty())
                 || self.pinyin_id != 0
                 || (self.cam.job != 0 && !self.cam.boxes.is_empty() && self.cam.lines.is_empty()),
-            listening: (self.talk.open && self.talk.listening) || self.talk.dictating,
+            listening: self.mic_open() && !self.mic_failed() && ((self.talk.open && self.talk.listening) || self.talk.dictating),
             speaking: self.talk_speaking(),
         })
     }
@@ -1203,7 +1246,7 @@ impl TranslatorView {
         animate |= self.draw_progress(cx, ids!(target_card.play_row.play_track), ids!(target_card.play_row.play_track.play_bar), translating || speaking, share);
         // The photo.
         let cam = &self.cam;
-        let cam_busy = cam.open && cam.frozen && (cam.reading.is_some() || (cam.job != 0 && cam.lines.is_empty()));
+        let cam_busy = cam.open && cam.frozen && cam.job != 0 && cam.lines.is_empty();
         let cam_share = if cam.boxes.is_empty() {
             None
         } else {
@@ -1305,7 +1348,7 @@ impl TranslatorView {
             None if cam.detecting.is_some() => " · detecting text regions…".to_string(),
             None => String::new(),
         };
-        if cam.reading.is_some() || (cam.job != 0 && cam.boxes.is_empty()) {
+        if cam.job != 0 && cam.boxes.is_empty() {
             return Some(if cam.read_lines == 0 {
                 format!("Reading the picture ({}, vision){}", self.model_name(), regions)
             } else {
@@ -1322,7 +1365,7 @@ impl TranslatorView {
     /// Listening and speaking (dictation into the boxes, and the Listen screen).
     fn talk_activity(&self) -> Option<String> {
         let t = &self.talk;
-        if t.dictating && t.listening {
+        if t.dictating && t.listening && !self.mic_failed() {
             return Some("Listening… speak now".to_string());
         }
         if t.finals_pending > 0 {
@@ -1335,7 +1378,7 @@ impl TranslatorView {
             let (played, queued) = self.speech_progress();
             return Some(if queued < 0.05 { "Generating speech (Kokoro)…".to_string() } else { format!("Speaking {played:.1} of {queued:.1} s") });
         }
-        if t.open && t.listening {
+        if t.open && t.listening && !self.mic_failed() {
             return Some(if t.in_utterance { "Hearing speech…".to_string() } else { "Listening for speech…".to_string() });
         }
         None
@@ -1379,10 +1422,10 @@ impl TranslatorView {
         if compact == self.compact && self.last_size.x > 0.0 {
             return;
         }
-        self.compact = compact;
         let mut panes = self.view.widget(cx, ids!(main.panes));
         let mut main = self.view.widget(cx, ids!(main));
         let mut history = self.view.widget(cx, ids!(main.history_panel));
+        self.compact = compact;
         if compact {
             script_apply_eval!(cx, panes, { flow: mod.turtle.Down });
             script_apply_eval!(cx, main, { flow: mod.turtle.Down });
@@ -1475,6 +1518,10 @@ impl TranslatorView {
     }
 
     fn on_update(&mut self, cx: &mut Cx, update: Update) {
+        if let Update::HubMoved { addr } = update {
+            self.hub_moved(cx, addr);
+            return;
+        }
         if self.on_camera_update(cx, &update) {
             self.sync_chrome(cx);
             return;
@@ -1488,7 +1535,12 @@ impl TranslatorView {
             Update::Route { id, label } => {
                 self.route_seen = id;
                 if self.probe_id == id || self.current.as_ref().is_some_and(|c| c.id == id) || self.pinyin_id == id {
-                    self.set_hub_status(cx, true, &label);
+                    if self.hub_settings().model == crate::ondevice::MODEL {
+                        // the phone's own model: the route line says so, the hub's state stays the hub's
+                        self.view.label(cx, ids!(route)).set_text(cx, &label);
+                    } else {
+                        self.set_hub_status(cx, true, &label);
+                    }
                 }
             }
             Update::Done { id, .. } if id == self.probe_id => {
@@ -1498,7 +1550,7 @@ impl TranslatorView {
                 self.probe_id = 0;
                 log!("translator: hub probe failed: {}", error);
                 let was_down = self.hub_ok == Some(false);
-                self.set_hub_status(cx, false, &format!("Hub unreachable: {error}"));
+                self.set_hub_status(cx, false, &error);
                 let _ = was_down;
             }
             Update::Partial { id, text } => {
@@ -1562,6 +1614,7 @@ impl TranslatorView {
                     self.set_hub_status(cx, false, "Hub unreachable");
                 }
             }
+            Update::HubMoved { addr } => self.hub_moved(cx, addr),
         }
     }
 
@@ -1646,7 +1699,7 @@ impl TranslatorView {
         self.cancel_camera_jobs();
         self.cam.open = false;
         self.cam.frozen = false;
-        self.cam.reading = None;
+        self.cam.read_frame = None;
         self.cam.job = 0;
         self.cam.boxes.clear();
         self.cam.lines.clear();
@@ -1802,6 +1855,7 @@ impl TranslatorView {
                     self.refresh_models(cx);
                 }
             }
+            Event::Pause | Event::Background | Event::Shutdown => self.stop_all_recording(cx),
             Event::VideoInputs(ev) => self.on_video_inputs(cx, ev),
             Event::PermissionResult(r) if r.permission == Permission::Camera => {
                 self.cam.permission = Some(r.status);
@@ -1838,16 +1892,6 @@ impl TranslatorView {
             }
             self.cam.detected = Some(found);
         }
-        // A finished read: translate what was found.
-        let done = self.cam.reading.as_ref().and_then(|rx| rx.try_recv().ok());
-        if let Some(result) = done {
-            self.cam.reading = None;
-            match result {
-                Ok(boxes) if boxes.is_empty() => self.cam_status(cx, "No text found. Press the shutter to try again."),
-                Ok(boxes) => self.translate_boxes(cx, boxes),
-                Err(why) => self.cam_status(cx, &format!("Could not read the picture: {why}")),
-            }
-        }
     }
 
     /// Read the picture: the frame goes to the reader as RGBA.
@@ -1856,20 +1900,8 @@ impl TranslatorView {
         self.cam.translated_lines = 0;
         self.set_picture(cx, &rgba);
         self.cam.frozen = true;
-        if self.hub_settings().model == crate::ondevice::MODEL {
-            self.read_and_translate_on_device(cx, rgba.into());
-            return;
-        }
-        let who = reader::default_reader().name();
-        self.cam_status(cx, &format!("Reading the text ({who})…"));
-        let frame: Frame = rgba.into();
-        let (tx, rx) = std::sync::mpsc::channel();
-        self.cam.reading = Some(rx);
-        std::thread::spawn(move || {
-            let result = reader::default_reader().read(&frame);
-            let _ = tx.send(result);
-            SignalToUI::set_ui_signal();
-        });
+        let on_device = self.hub_settings().model == crate::ondevice::MODEL;
+        self.read_and_translate(cx, rgba.into(), on_device);
     }
 
     /// Drop the camera's running read/translate work: the worker sees a newer
@@ -1892,12 +1924,11 @@ impl TranslatorView {
     fn shutter(&mut self, cx: &mut Cx) {
         let busy = self.cam.job != 0 && self.cam.lines.is_empty();
         self.cancel_camera_jobs();
-        self.cam.reading = None;
+        self.cam.read_frame = None;
         if self.cam.frozen && !busy {
             // Back to the live view.
             self.cam.frozen = false;
             self.cam.job = 0;
-            self.cam.reading = None;
             self.cam.boxes.clear();
             self.cam.lines.clear();
             self.cam.shown_seq = 0;
@@ -1909,14 +1940,7 @@ impl TranslatorView {
         self.cam.latest.refresh();
         match self.cam.latest.rgba(1, self.upright_turns()) {
             Some(rgba) => self.read_picture(cx, rgba),
-            None => self.cam_status(cx, "No camera frame yet. Try the test picture."),
-        }
-    }
-
-    fn use_test_picture(&mut self, cx: &mut Cx) {
-        match camera::decode_png_rgba(camera::TEST_PICTURE) {
-            Ok(rgba) => self.read_picture(cx, rgba),
-            Err(why) => self.cam_status(cx, &format!("Test picture: {why}")),
+            None => self.cam_status(cx, "No camera frame yet."),
         }
     }
 
@@ -1939,10 +1963,11 @@ impl TranslatorView {
         }
     }
 
-    /// The phone's own model reads and translates in one turn: the picture
-    /// (downscaled to one fixed size, so one vision graph serves every photo)
-    /// goes in, the translated lines come out.
-    fn read_and_translate_on_device(&mut self, cx: &mut Cx, frame: Frame) {
+    /// A vision model reads the photo's lines: the hub's (its chat model's
+    /// vision tower) or, `on_device`, the phone's own (the picture downscaled to
+    /// one fixed size, so one vision graph serves every photo). The lines then
+    /// go through one numbered translation job.
+    fn read_and_translate(&mut self, cx: &mut Cx, frame: Frame, on_device: bool) {
         // Where the lines are: the detector runs beside the vision model's read
         // (a fraction of a second) and its boxes place the translations.
         self.cam.detected = None;
@@ -1957,15 +1982,24 @@ impl TranslatorView {
         self.cam.job = id;
         self.cam.boxes.clear();
         self.cam.lines.clear();
+        let (settings, image, status) = if on_device {
+            let mut settings = self.hub_settings();
+            settings.model = crate::ondevice::MODEL.to_string();
+            (settings, reader::fit_square(&frame, reader::ON_DEVICE_SIDE), "Reading the text on this phone…")
+        } else {
+            (self.hub_settings(), reader::fit_square(&frame, reader::HUB_SIDE), "Reading the text on the hub…")
+        };
+        // Kept for one fallback: the hub cannot read it -> the phone's own model.
+        self.cam.read_frame = (!on_device && crate::ondevice::available()).then_some(frame);
         let job = Job {
             id,
             system: reader::on_device_read_system(),
             text: reader::ON_DEVICE_PROMPT.to_string(),
-            settings: self.hub_settings(),
+            settings,
             max_tokens: Some(400),
-            image: Some(reader::fit_square(&frame, reader::ON_DEVICE_SIDE)),
+            image: Some(image),
         };
-        self.cam_status(cx, "Reading the text on this phone…");
+        self.cam_status(cx, status);
         if let Some(engine) = &self.engine {
             engine.submit(job);
         }
@@ -1993,7 +2027,17 @@ impl TranslatorView {
                 true
             }
             Update::Failed { id, error } if *id == self.cam.job => {
-                self.cam_status(cx, error);
+                // The hub could not read the photo: the phone's own model reads it.
+                if self.cam.boxes.is_empty() {
+                    if let Some(frame) = self.cam.read_frame.take() {
+                        log!("translator: camera: the hub could not read the photo ({error}); reading on this phone");
+                        self.read_and_translate(cx, frame, true);
+                        return true;
+                    }
+                    self.cam_status(cx, &format!("Could not read the picture: {error}"));
+                } else {
+                    self.cam_status(cx, error);
+                }
                 true
             }
             Update::Partial { id, text } if *id == self.cam.job => {
@@ -2144,7 +2188,7 @@ impl TranslatorView {
             self.history_page = false;
             self.sync_chrome(cx);
         }
-        // Listen: continuous, listening at once; leaving it stops listening.
+        // Listen: opens idle; the record tap starts listening, leaving stops it.
         if self.view.button(cx, ids!(nav.tab_listen)).clicked(actions) && !self.talk.open {
             self.close_camera_if_open(cx);
             self.history_page = false;
@@ -2160,10 +2204,6 @@ impl TranslatorView {
         if self.view.button(cx, ids!(camera.cam_bar.cam_device)).clicked(actions) {
             self.next_device(cx);
         }
-        if self.view.button(cx, ids!(camera.shutter_row.test_chip)).clicked(actions) {
-            self.use_test_picture(cx);
-            self.sync_chrome(cx);
-        }
         if self.view.button(cx, ids!(camera.shutter_row.shutter)).clicked(actions) {
             self.shutter(cx);
             self.sync_chrome(cx);
@@ -2172,13 +2212,6 @@ impl TranslatorView {
         if self.view.button(cx, ids!(camera.shutter_row.retake)).clicked(actions) && self.cam.frozen {
             self.shutter(cx);
             self.sync_chrome(cx);
-        }
-        if self.view.button(cx, ids!(bar.retry)).clicked(actions) {
-            self.probe_id = 0;
-            self.probe(cx);
-            if self.current.as_ref().is_some_and(|c| c.target.is_empty()) {
-                self.start_translate(cx);
-            }
         }
         if self.view.button(cx, ids!(settings.pair_row.invite_btn)).clicked(actions) {
             self.show_invite(cx);
@@ -2213,7 +2246,6 @@ impl TranslatorView {
         if self.view.button(cx, ids!(settings.hub_link)).clicked(actions) {
             let open = self.view.view(cx, ids!(settings.hub_section)).visible();
             self.view.view(cx, ids!(settings.hub_section)).set_visible(cx, !open);
-            self.dev_pictures = !open;
             self.view.redraw(cx);
         }
         if self.view.button(cx, ids!(settings.run_on.run_phone)).clicked(actions) {
@@ -2305,6 +2337,15 @@ impl TranslatorView {
 impl Widget for TranslatorView {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         self.ensure_started(cx);
+        // A style reload (LiveEdit: the safe-area insets arriving at start, a
+        // new system sheet) re-applies the DSL, which puts the panes and the
+        // camera back to their written layout: lay them out again for the real
+        // size (a portrait start kept the side-by-side boxes until a turn).
+        if matches!(event, Event::LiveEdit) {
+            self.last_size = Vec2d::default();
+            self.cam_landscape = None;
+            self.view.redraw(cx);
+        }
         // A touch outside every text field closes the keyboard.
         if let Event::TouchUpdate(te) = event {
             if self.keyboard_up {
