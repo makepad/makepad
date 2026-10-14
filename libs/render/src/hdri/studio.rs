@@ -21,7 +21,7 @@
 use makepad_draw::*;
 use super::{az_el_from_dir, dir_from_az_el, Blend, EnvSun, LightParams, LightShape, StudioParams, KELVIN_RANGE};
 use crate::sky::{luminance, xyz_to_linear_rgb};
-use super::shaped::{stroke_box, ShapedLight};
+use super::shaped::{half_extents, stroke_box, ShapedLight};
 use super::shape::ArcPath;
 use super::noise::hash01;
 use super::gels::gel_stack;
@@ -94,25 +94,41 @@ pub fn tint_rgb(tint: f32) -> Vec3f {
 ///   moves a blackbody by its mireds. So a Kelvin light keeps its colour and
 ///   level when switched to RGB, and a strong CTB is not stopped at the
 ///   Kelvin colours' 20000 K end (D10, L:86).
+///
+/// The light is read as clamp() holds it (`LightParams::clamped`, D17): its
+/// level, its RGB, its Kelvin, tint and source.
 pub fn light_color(light: &LightParams) -> Vec3f {
+    held_light_color(&light.clamped())
+}
+
+/// `light_color` of a light clamp() has held already, read as it is: the
+/// builders that hold a light once colour it through this (`Studio`'s
+/// prepared light, a stroke's Kelvin ramp and each tap's recoloured copy).
+pub(super) fn held_light_color(light: &LightParams) -> Vec3f {
     let gels = gel_stack(light.gels.as_deref().unwrap_or(&[]));
-    let base = if let Some(rgb) = light.rgb {
-        vec3f(rgb[0].max(0.0), rgb[1].max(0.0), rgb[2].max(0.0))
-    } else {
-        light_white(light)
+    let base = match light.rgb {
+        Some(rgb) => vec3f(rgb[0], rgb[1], rgb[2]),
+        None => held_light_white(light),
     };
-    base * gels.conversion * gels.filter * 2.0f32.powf(sane(light.intensity_ev, -10.0, 20.0))
+    base * gels.conversion * gels.filter * 2.0f32.powf(light.intensity_ev)
 }
 
 /// The colour a light without an explicit `rgb` has before its gels and its
-/// level: its named source's spectrum (the knob LED's built at its Kelvin) or
-/// its Kelvin (`LightParams::held_kelvin`), times its tint, at luminance 1.
-/// `light_color` starts from it, and so does the panel's switch to RGB, so
-/// the switch keeps the light's colour exactly (D17, L:305).
+/// level: its named source's spectrum (the knob LED's built at its Kelvin and
+/// quality) or its Kelvin, times its tint, at luminance 1, of the light as
+/// clamp() holds it (`LightParams::clamped`), as the CRI readout reads it
+/// (`cri::light_spectrum`). `light_color` starts from it, and so does the
+/// panel's switch to RGB, so the switch keeps the light's colour exactly
+/// (D17, L:305).
 pub fn light_white(light: &LightParams) -> Vec3f {
+    held_light_white(&light.clamped())
+}
+
+/// `light_white` of a light clamp() has held already, read as it is.
+fn held_light_white(light: &LightParams) -> Vec3f {
     // A named source's spectrum gives the colour in place of the Kelvin's,
     // tinted the same way (the knob LED's Kelvin is part of its spectrum).
-    let white = light_source_rgb(light).unwrap_or_else(|| kelvin_to_rgb(light.held_kelvin()));
+    let white = light_source_rgb(light).unwrap_or_else(|| kelvin_to_rgb(light.kelvin));
     let c = white * tint_rgb(light.tint);
     // Back to luminance 1: a tint on a coloured light (a sodium lamp, 3200 K)
     // moves the product's luminance off 1.
@@ -330,7 +346,10 @@ impl Studio {
     /// window filled with sky hides what is behind its frame and bars
     /// (`LightFx::against_sky`, D12).
     pub(super) fn new_with(studio: &StudioParams, lights: &[LightParams], images: &ImageSet, against_sky: bool) -> Studio {
-        let rgb = |c: [f32; 3]| vec3f(c[0].max(0.0), c[1].max(0.0), c[2].max(0.0));
+        // The backdrop as clamp() holds it (D17); each light holds its own
+        // (`PreparedLight::new`, `LightFx::new`).
+        let studio = &studio.clamped();
+        let rgb = |c: [f32; 3]| vec3f(c[0], c[1], c[2]);
         let enabled: Vec<&LightParams> = lights.iter().filter(|l| l.enabled).collect();
         let prepared: Vec<PreparedLight> = enabled.iter().map(|l| PreparedLight::new(l, images)).collect();
         let key_index = enabled
@@ -346,7 +365,7 @@ impl Studio {
             top: rgb(studio.top),
             horizon: rgb(studio.horizon),
             floor: rgb(studio.floor),
-            soft_deg: sane(studio.horizon_softness, 0.01, 1.0) * 90.0,
+            soft_deg: studio.horizon_softness * 90.0,
             lights: prepared,
             key_index,
             fx,
@@ -873,8 +892,9 @@ struct PreparedLight {
 
 impl PreparedLight {
     fn new(l: &LightParams, images: &ImageSet) -> PreparedLight {
-        let width = sane(l.width_deg, 0.1, 170.0);
-        let height = sane(l.height_deg, 0.1, 170.0);
+        // The light as clamp() holds it (D17): its box, inner radius,
+        // softness, corner and hotspot are read as they are.
+        let l = &l.clamped();
         // A stroke's points place it, not its frame: its picture is laid in
         // the box round the stroke itself (D3, L:119), as its gobo, aim and
         // wear are (`light_fx::face_axes`). Nothing else of a stroke reads its
@@ -882,10 +902,13 @@ impl PreparedLight {
         // round its own cones.
         let (frame, half) = match stroke_box(l) {
             Some(stroke) => stroke,
-            None => (light_frame(l.azimuth_deg, l.elevation_deg, l.roll_deg), vec2f((0.5 * width).to_radians().tan(), (0.5 * height).to_radians().tan())),
+            None => {
+                let (hx, hy) = half_extents(l);
+                (light_frame(l.azimuth_deg, l.elevation_deg, l.roll_deg), vec2f(hx, hy))
+            }
         };
         let short = half.x.min(half.y);
-        let inner = sane(l.inner, 0.0, 0.95);
+        let inner = l.inner;
         let ring_half = 0.5 * (1.0 - inner);
         let shape = l.shape();
         // The deepest point inside the shape. Softness 1 ramps the edge right to it,
@@ -898,20 +921,20 @@ impl PreparedLight {
             // edge (B2, B5). A stroke never reads it: its points place it.
             LightShape::Rect | LightShape::Disc | LightShape::Polygon | LightShape::Stroke | LightShape::Scrim => short,
         };
-        let band = (sane(l.softness, 0.0, 1.0) * inradius).max(MIN_EDGE);
+        let band = (l.softness * inradius).max(MIN_EDGE);
         PreparedLight {
             frame,
             shape,
             blend: l.blend(),
             half,
-            corner: sane(l.corner, 0.0, 1.0) * short,
+            corner: l.corner * short,
             ring_mid: 0.5 * (1.0 + inner),
             ring_half,
             band,
             reach: vec2f(half.x + band, half.y + band),
-            hotspot: HOTSPOT_FALLOFF * sane(l.hotspot, 0.0, 1.0),
-            key_cos: (0.5 * sane(l.width_deg.max(l.height_deg), 0.1, 170.0)).to_radians().cos(),
-            color: light_color(l),
+            hotspot: HOTSPOT_FALLOFF * l.hotspot,
+            key_cos: (0.5 * l.width_deg.max(l.height_deg)).to_radians().cos(),
+            color: held_light_color(l),
             shaped: ShapedLight::new(l),
             image: l.image.as_ref().and_then(|image| LightImage::new(image, images)),
         }

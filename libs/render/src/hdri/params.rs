@@ -53,7 +53,8 @@ const LIGHT_NAME_LIMIT: usize = 64;
 /// The colour temperatures a light takes, kelvin: its `kelvin` and a stroke's
 /// `end_kelvin`, the range `studio::kelvin_to_rgb`'s fit of the blackbody
 /// colours holds over. clamp() holds both to it, and the colour and the CRI
-/// readout read a light's Kelvin through `LightParams::held_kelvin`.
+/// readout both read the light as clamp() holds it (`LightParams::clamped`),
+/// so they read one Kelvin for any settings (L:104).
 pub const KELVIN_RANGE: (f32, f32) = (1000.0, 20_000.0);
 /// A light's Kelvin by default, and where clamp() puts a NaN one.
 pub const KELVIN_DEFAULT: f32 = 6500.0;
@@ -73,12 +74,29 @@ fn hold(value: f32, (lo, hi): (f32, f32), fallback: f32) -> f32 {
     }
 }
 
-/// `clamped()` on the blocks the map's layers read. Each layer reads its
-/// block through it, never re-holding a field on its own, so a block's
-/// ranges, its defaults and its rule for NaN are written once, in its
-/// `clamp_fields` (D17). `Env` clamps its copy of the settings first, so in a
-/// map the copy is the block as it was; the panel, the assistant and a host
-/// that call a layer's reader directly get clamp()'s reading too.
+/// `clamped()` on every settings block that has a range: the sky's sun,
+/// atmosphere, sun disc, deck, night, volume and weather, the studio's
+/// backdrop, a base image, and each light with its polygon, stroke, scrim,
+/// gobo, aim and wear. A block's ranges, its defaults and its rule for NaN
+/// are written once, in its `clamp_fields` (D17): no layer holds a field on
+/// its own. Each layer's reader takes its block through `clamped()`: the
+/// atmosphere, the sun's direction, the deck, the night, the volume, the
+/// weather, the base image, the studio's backdrop, and a light once where
+/// its drawing is built (`Studio`'s prepared light, `LightFx::new`,
+/// `ShapedLight::new`), its colour and its CRI readout (`light_color`,
+/// `light_white`, `cri::light_spectrum`), its gobo, aim and wear
+/// (`Gobo::new`, `Aim::new`, `Imperfections::new`). What they hand a held
+/// light or number to reads it as it is (`studio::held_light_color`, the
+/// shape helpers `half_extents`, `unit_to_dir`, `dir_to_unit`, `stroke_box`,
+/// `light_fx::face_axes`, which the panel calls with its held lights).
+/// `Env` clamps its copy of the settings first, so in a map the copy is the
+/// block as it was; the panel, the assistant and a host that call a reader
+/// directly get clamp()'s reading too. What keeps a guard of its own is a
+/// function handed a number rather than a block (`kelvin_to_rgb`,
+/// `tint_rgb`, `planck`, `led`, `gobo::penumbra`, `Foliage::leaves`,
+/// `StrokeParams::around`, the edge softness `Aim::new` and the latitude and
+/// solar hour `NightSky::new` are given, sky.rs's `noaa_solar_position`): it
+/// holds its own domain, whoever calls it.
 macro_rules! clamped_copy {
     ($($block:ty),* $(,)?) => {
         $(impl $block {
@@ -92,7 +110,24 @@ macro_rules! clamped_copy {
     };
 }
 
-clamped_copy!(BaseImageParams, VolumetricParams, WeatherParams, CloudParams, PolygonParams, GoboParams, StrokeParams, ScrimParams);
+clamped_copy!(
+    SunParams,
+    AtmosphereParams,
+    SunDiscParams,
+    CloudParams,
+    NightParams,
+    VolumetricParams,
+    WeatherParams,
+    StudioParams,
+    LightParams,
+    PolygonParams,
+    StrokeParams,
+    ScrimParams,
+    GoboParams,
+    AimParams,
+    ImperfectionParams,
+    BaseImageParams,
+);
 
 /// Everything that defines one environment map.
 #[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
@@ -1437,13 +1472,6 @@ impl LightParams {
         } else {
             Blend::Add
         }
-    }
-
-    /// The light's Kelvin as clamp() holds it: what its colour
-    /// (`studio::light_color`) and its CRI readout (`cri::light_spectrum`)
-    /// read, so the two agree for any settings (L:104).
-    pub fn held_kelvin(&self) -> f32 {
-        hold(self.kelvin, KELVIN_RANGE, KELVIN_DEFAULT)
     }
 
     fn clamp_fields(&mut self, prefix: &str, f: &mut Fixes) {
@@ -2944,12 +2972,17 @@ mod weather_param_tests {
 #[cfg(test)]
 mod reader_tests {
     use super::*;
+    use super::super::aim::Aim;
+    use super::super::atmosphere::{sun_direction, Atmosphere};
     use super::super::clouds::CloudLayer;
     use super::super::composite::BaseImage;
     use super::super::cri::light_spectrum;
     use super::super::gobo::Gobo;
+    use super::super::imperfections::Imperfections;
+    use super::super::light_fx::{face_axes, LightFx};
+    use super::super::night::NightSky;
     use super::super::shaped::{polygon_unit_points, stroke_of, ShapedLight};
-    use super::super::studio::light_color;
+    use super::super::studio::{light_color, light_white, Studio};
     use super::super::weather::effects;
     use super::super::{dir_from_az_el, ImageSet};
     use makepad_draw::*;
@@ -3056,6 +3089,246 @@ mod reader_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// `a` and `b` are the same three numbers, bit for bit (NaN equals NaN).
+    #[track_caller]
+    fn same(a: Vec3f, b: Vec3f, what: std::fmt::Arguments) {
+        let bits = |c: Vec3f| [c.x, c.y, c.z].map(f32::to_bits);
+        assert!(bits(a) == bits(b), "{what}: {a:?} against {b:?}");
+    }
+
+    /// A light of every kind with its own numbers out of range or NaN, each
+    /// where clamp() reads it otherwise than a reader holding it by hand
+    /// did: a NaN width, softness, corner, inner radius, level or tint is the
+    /// default, an infinite height or hotspot the top of the range, a
+    /// polygon or a scrim at most SHAPED_SPAN_MAX_DEG wide, an RGB 0..1 with
+    /// NaN as 1, a knob LED's NaN Kelvin 6500 K and its infinite quality 1.
+    fn wild_lights() -> Vec<LightParams> {
+        let wild = LightParams {
+            key: true,
+            width_deg: f32::NAN,
+            height_deg: f32::INFINITY,
+            softness: f32::NAN,
+            corner: f32::NAN,
+            hotspot: f32::INFINITY,
+            inner: f32::NAN,
+            intensity_ev: f32::NAN,
+            tint: f32::NAN,
+            ..LightParams::default()
+        };
+        let boxed = |shape: &str| LightParams { shape: shape.to_string(), width_deg: 150.0, height_deg: 130.0, ..wild.clone() };
+        vec![
+            wild.clone(),
+            LightParams { shape: "disc".to_string(), ..wild.clone() },
+            LightParams { shape: "ring".to_string(), width_deg: 60.0, ..wild.clone() },
+            LightParams { rgb: Some([f32::NAN, 2.0, -1.0]), intensity_ev: f32::NEG_INFINITY, width_deg: 40.0, ..wild.clone() },
+            LightParams { polygon: Some(PolygonParams::default()), ..boxed("polygon") },
+            LightParams { scrim: Some(ScrimParams::default()), ..boxed("scrim") },
+            LightParams {
+                shape: "stroke".to_string(),
+                stroke: Some(StrokeParams { points: vec![[10.0, 5.0], [40.0, 25.0], [70.0, 5.0]], end_kelvin: Some(9000.0), ..StrokeParams::default() }),
+                ..wild.clone()
+            },
+            LightParams { source: Some("led".to_string()), kelvin: f32::NAN, source_quality: Some(f32::INFINITY), width_deg: 40.0, ..wild.clone() },
+            LightParams { source: Some("sodium_high_pressure".to_string()), width_deg: 40.0, ..wild.clone() },
+        ]
+    }
+
+    /// D17 (H8's fix round 1): a light's own numbers, its box, softness,
+    /// corner, hotspot, inner radius, level, tint, RGB and source, are read
+    /// as clamp() holds them by its colour, its CRI readout, the studio's
+    /// drawing, what hangs in front of it and the shape core's drawing, where
+    /// each of them held them by hand before.
+    #[test]
+    fn a_lights_own_numbers_read_as_clamp_holds_them() {
+        let images = ImageSet::default();
+        for (i, raw) in wild_lights().iter().enumerate() {
+            let clamped = held(raw);
+            let shape = &raw.shape;
+            same(light_color(raw), light_color(&clamped), format_args!("light {i} ({shape}): its colour"));
+            same(light_white(raw), light_white(&clamped), format_args!("light {i} ({shape}): its white"));
+            assert_eq!(light_spectrum(raw).map(|s| s.map(f32::to_bits)), light_spectrum(&clamped).map(|s| s.map(f32::to_bits)), "light {i} ({shape}): its CRI readout's spectrum");
+            let (sa, sb) = (Studio::new(&StudioParams::default(), std::slice::from_ref(raw)), Studio::new(&StudioParams::default(), std::slice::from_ref(&clamped)));
+            let (fa, fb) = (LightFx::new(raw, &images), LightFx::new(&clamped, &images));
+            let (a, b) = (ShapedLight::new(raw), ShapedLight::new(&clamped));
+            assert_eq!(a.is_some(), b.is_some(), "light {i} ({shape}) builds as its clamped copy does");
+            for d in directions() {
+                let (pa, pb) = (sa.apply_lights(d, Vec3f::all(0.25)), sb.apply_lights(d, Vec3f::all(0.25)));
+                same(pa, pb, format_args!("light {i} ({shape}): the studio's drawing at {d:?}"));
+                let (xa, xb) = (fa.apply(d, Vec3f::all(0.25), vec3f(2.0, 1.5, 1.0)), fb.apply(d, Vec3f::all(0.25), vec3f(2.0, 1.5, 1.0)));
+                same(xa, xb, format_args!("light {i} ({shape}): what passes in front of it at {d:?}"));
+                if let (Some(a), Some(b)) = (&a, &b) {
+                    let (ma, mb) = (a.sample(d), b.sample(d));
+                    assert_eq!((ma.mask.to_bits(), ma.emit.to_bits()), (mb.mask.to_bits(), mb.emit.to_bits()), "light {i} ({shape}): the shape at {d:?}, {ma:?} against {mb:?}");
+                }
+            }
+        }
+    }
+
+    /// D17 (H8's fix round 1): what hangs on a light reads the light, its aim
+    /// and its wear as clamp() holds them: the softness of the doors'
+    /// shadows, the level a window filled with sky shows the sky at, the
+    /// face's yaw, pitch, grid and doors, and the wear's three amounts.
+    /// `Aim::new` and `Imperfections::new` held the aim's and the wear's
+    /// fields by hand with clamp()'s own ranges and NaN rule, so for these
+    /// two blocks raw and held read alike either way (the tie is
+    /// `the_aim_and_the_wear_take_every_value_clamp_keeps`); the light's own
+    /// softness and level did not.
+    #[test]
+    fn a_lights_aim_and_wear_read_as_clamp_holds_them() {
+        let wide = AimParams { yaw_deg: 130.0, pitch_deg: f32::NEG_INFINITY, grid: 3.0, barn_doors: [-5.0, 200.0, f32::NAN, 40.0] };
+        let mild = AimParams { yaw_deg: 9.0, pitch_deg: f32::NAN, grid: 0.2, barn_doors: [25.0, f32::NAN, -10.0, 140.0] };
+        let worn = ImperfectionParams { wrinkle: 3.0, dust: f32::NAN, weave: 1.5, seed: 4 };
+        let window = GoboParams { kind: "window".to_string(), fill_sky: true, ..GoboParams::default() };
+        let base = LightParams { width_deg: 40.0, height_deg: 30.0, softness: f32::NAN, intensity_ev: f32::NAN, ..LightParams::default() };
+        let lights = [
+            LightParams { aim: Some(mild.clone()), imperfections: Some(worn.clone()), ..base.clone() },
+            LightParams { aim: Some(wide.clone()), ..base.clone() },
+            LightParams { gobo: Some(window), aim: Some(mild.clone()), ..base.clone() },
+            LightParams { shape: "scrim".to_string(), width_deg: 150.0, aim: Some(mild.clone()), imperfections: Some(worn.clone()), ..base.clone() },
+        ];
+        let images = ImageSet::default();
+        for (i, raw) in lights.iter().enumerate() {
+            let clamped = held(raw);
+            let (a, b) = (LightFx::new(raw, &images), LightFx::new(&clamped, &images));
+            let (before, after, sky) = (Vec3f::all(0.25), vec3f(2.0, 1.5, 1.0), vec3f(0.3, 0.5, 0.9));
+            for d in directions() {
+                same(a.apply(d, before, after), b.apply(d, before, after), format_args!("light {i}: what passes its extras at {d:?}"));
+                same(a.window(d, 0.5, before, sky), b.window(d, 0.5, before, sky), format_args!("light {i}: its window at {d:?}"));
+            }
+        }
+        // The two blocks' own readers, handed the face as `LightFx` hands it.
+        let (frame, sx, half) = face_axes(&held(&base));
+        for (j, raw) in [wide, mild].iter().enumerate() {
+            let clamped = held(&LightParams { aim: Some(raw.clone()), ..base.clone() }).aim.unwrap();
+            let make = |a: &AimParams| Aim::new(a, frame.center, frame.right * sx, frame.up, half, 0.2);
+            let (a, b) = (make(raw), make(&clamped));
+            assert_eq!(format!("{a:?}"), format!("{b:?}"), "aim {j}");
+            let (Some(a), Some(b)) = (a, b) else { continue };
+            for d in directions() {
+                for q in [vec2f(0.0, 0.0), vec2f(0.3, -0.2), vec2f(-0.35, 0.25)] {
+                    assert_eq!(a.transmission(d, q).to_bits(), b.transmission(d, q).to_bits(), "aim {j} at {d:?}, {q:?}");
+                }
+            }
+        }
+        let clamped = held(&LightParams { imperfections: Some(worn.clone()), ..base.clone() }).imperfections.unwrap();
+        let (a, b) = (Imperfections::new(&worn, half).unwrap(), Imperfections::new(&clamped, half).unwrap());
+        assert_eq!(format!("{a:?}"), format!("{b:?}"), "the wear");
+        for u in 0..21 {
+            for v in 0..21 {
+                let q = vec2f(-half.x + 0.1 * half.x * u as f32, -half.y + 0.1 * half.y * v as f32);
+                assert_eq!(a.factor(q).to_bits(), b.factor(q).to_bits(), "the wear at {q:?}");
+            }
+        }
+    }
+
+    /// D17 (H8's fix round 1, the review's spec issue): the aim's and the
+    /// wear's readers take every value clamp() keeps. At each end of each
+    /// field's range, as clamp() is probed to hold it (what it keeps of -1e9
+    /// and 1e9), a step inside reads otherwise than the end. A reader that
+    /// held a field inside a range of its own, as `Aim::new` and
+    /// `Imperfections::new` did with clamp()'s ranges written again, reads
+    /// the end and the step alike once `clamp_fields` alone is widened, so
+    /// this ties the two to it the way `ranges.rs` ties the panel's sliders.
+    #[test]
+    fn the_aim_and_the_wear_take_every_value_clamp_keeps() {
+        let base = LightParams { width_deg: 40.0, height_deg: 30.0, ..LightParams::default() };
+        let (frame, sx, half) = face_axes(&held(&base));
+        // clamp()'s range of a field of `light`, written through `field`.
+        let range_of = |field: &dyn Fn(&mut LightParams) -> &mut f32| {
+            let mut light = LightParams { aim: Some(AimParams::default()), imperfections: Some(ImperfectionParams::default()), ..base.clone() };
+            let mut ends = [-1.0e9f32, 1.0e9].map(|v| {
+                *field(&mut light) = v;
+                *field(&mut held(&light))
+            });
+            ends.sort_by(f32::total_cmp);
+            ends
+        };
+        let ends_and_steps = |[lo, hi]: [f32; 2]| {
+            let step = 1.0e-3 * (hi - lo);
+            [(lo, lo + step), (hi, hi - step)]
+        };
+        type AimField = fn(&mut AimParams) -> &mut f32;
+        let aim_fields: [(&str, AimField); 7] = [
+            ("yaw_deg", |a| &mut a.yaw_deg),
+            ("pitch_deg", |a| &mut a.pitch_deg),
+            ("grid", |a| &mut a.grid),
+            ("barn_doors[0]", |a| &mut a.barn_doors[0]),
+            ("barn_doors[1]", |a| &mut a.barn_doors[1]),
+            ("barn_doors[2]", |a| &mut a.barn_doors[2]),
+            ("barn_doors[3]", |a| &mut a.barn_doors[3]),
+        ];
+        let mid = AimParams { yaw_deg: 10.0, pitch_deg: 5.0, grid: 0.3, barn_doors: [20.0; 4] };
+        for (name, field) in aim_fields {
+            let range = range_of(&|l: &mut LightParams| field(l.aim.as_mut().unwrap()));
+            let aim = |v: f32| {
+                let mut a = mid.clone();
+                *field(&mut a) = v;
+                format!("{:?}", Aim::new(&a, frame.center, frame.right * sx, frame.up, half, 0.2))
+            };
+            for (end, step) in ends_and_steps(range) {
+                assert_ne!(aim(end), aim(step), "Aim::new reads {name} {end} as {step}: it holds the field inside clamp()'s {range:?}");
+            }
+        }
+        type WearField = fn(&mut ImperfectionParams) -> &mut f32;
+        let wear_fields: [(&str, WearField); 3] = [("wrinkle", |p| &mut p.wrinkle), ("dust", |p| &mut p.dust), ("weave", |p| &mut p.weave)];
+        let mid = ImperfectionParams { wrinkle: 0.4, dust: 0.3, weave: 0.2, seed: 5 };
+        for (name, field) in wear_fields {
+            let range = range_of(&|l: &mut LightParams| field(l.imperfections.as_mut().unwrap()));
+            let wear = |v: f32| {
+                let mut p = mid.clone();
+                *field(&mut p) = v;
+                format!("{:?}", Imperfections::new(&p, half))
+            };
+            for (end, step) in ends_and_steps(range) {
+                assert_ne!(wear(end), wear(step), "Imperfections::new reads {name} {end} as {step}: it holds the field inside clamp()'s {range:?}");
+            }
+        }
+    }
+
+    /// D17 (H8's fix round 1): plan 1a's sky layers read their blocks as
+    /// clamp() holds them: the atmosphere and the sun disc, the sun's date,
+    /// the night sky and the studio's backdrop. The night takes the
+    /// latitude and the solar hour as numbers, held (`Env` passes them so).
+    #[test]
+    fn the_sky_layers_and_the_backdrop_read_as_clamp_holds_them() {
+        let mut raw = HdriParams::default();
+        raw.sky.atmosphere = AtmosphereParams { haze: f32::INFINITY, air: f32::NAN, ozone: -1.0, ground_color: [f32::NAN, 2.0, -1.0] };
+        raw.sky.sun_disc = SunDiscParams { size_deg: f32::INFINITY, softness: f32::NEG_INFINITY, ..SunDiscParams::default() };
+        raw.sky.sun.month = 2;
+        raw.sky.sun.day = 31;
+        raw.sky.sun.hour = f32::NAN;
+        raw.sky.night = NightParams {
+            stars: f32::INFINITY,
+            star_brightness: f32::NAN,
+            moon: true,
+            moon_elevation_deg: f32::NAN,
+            moon_azimuth_deg: 200.0,
+            moon_size_deg: f32::INFINITY,
+            moon_brightness: f32::NAN,
+            glow_color: [f32::NAN, 0.5, -1.0],
+            glow_strength: f32::INFINITY,
+        };
+        raw.studio = StudioParams { top: [f32::NAN, 20.0, -1.0], horizon: [0.5, f32::INFINITY, 0.2], floor: [0.1; 3], horizon_softness: f32::NAN };
+        let mut clamped = raw.clone();
+        clamped.clamp();
+        let (sa, sb) = (sun_direction(&raw.sky.sun), sun_direction(&clamped.sky.sun));
+        same(sa, sb, format_args!("the sun of February 31 at hour {}", raw.sky.sun.hour));
+        let sun = dir_from_az_el(150.0, 25.0);
+        let atmosphere = |p: &HdriParams| Atmosphere::new(sun, &p.sky.atmosphere, &p.sky.sun_disc);
+        let (aa, ab) = (atmosphere(&raw), atmosphere(&clamped));
+        let night = |p: &HdriParams| NightSky::new(&p.sky.night, 7, dir_from_az_el(200.0, -30.0), 22.0, clamped.sky.sun.latitude);
+        let (na, nb) = (night(&raw), night(&clamped));
+        let (ba, bb) = (Studio::new(&raw.studio, &[]), Studio::new(&clamped.studio, &[]));
+        for d in directions() {
+            same(aa.sky(d), ab.sky(d), format_args!("the sky at {d:?}"));
+            same(aa.sun_disc(d), ab.sun_disc(d), format_args!("the sun's disc at {d:?}"));
+            for (what, a, b) in [("stars", na.stars(d), nb.stars(d)), ("moon", na.moon(d), nb.moon(d)), ("glow", na.glow(d), nb.glow(d))] {
+                same(a, b, format_args!("the night's {what} at {d:?}"));
+            }
+            same(ba.backdrop(d), bb.backdrop(d), format_args!("the backdrop at {d:?}"));
         }
     }
 

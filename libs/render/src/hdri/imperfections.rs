@@ -70,11 +70,12 @@ impl Imperfections {
     /// The wear of a light with tangent half extents `half`. None when
     /// nothing is set, so a clean light pays nothing. The normaliser is kept
     /// for the wear and the face (`kept_norm`), so the same face built again
-    /// (a held drag's next map) does not sample it again.
+    /// (a held drag's next map) does not sample it again. The wear is read as
+    /// clamp() holds it (`ImperfectionParams::clamped`, D17), so its ranges
+    /// and its NaN rule are `ImperfectionParams::clamp_fields`' alone.
     pub fn new(p: &ImperfectionParams, half: Vec2f) -> Option<Imperfections> {
-        // Every default is 0, so NaN reads as 0.
-        let fix = |x: f32| if x.is_nan() { 0.0 } else { x.max(0.0).min(1.0) };
-        let (wrinkle, dust, weave) = (fix(p.wrinkle), fix(p.dust), fix(p.weave));
+        let p = &p.clamped();
+        let (wrinkle, dust, weave) = (p.wrinkle, p.dust, p.weave);
         if wrinkle == 0.0 && dust == 0.0 && weave == 0.0 {
             return None;
         }

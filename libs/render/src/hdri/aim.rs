@@ -66,14 +66,13 @@ impl Aim {
     /// The aim of a light whose face looks back along `center` (the unit
     /// direction to the light), with `right` the viewer's right and `up`
     /// spanning the face, tangent half extents `half`, and edge `softness`
-    /// 0..=1. None when the aim is neutral, so a plain light pays nothing.
+    /// 0..=1 (`LightFx::new` passes the light's as clamp() holds it; a NaN
+    /// reads as 0). None when the aim is neutral, so a plain light pays
+    /// nothing. The aim is read as clamp() holds it (`AimParams::clamped`,
+    /// D17), so its ranges and its NaN rule are `AimParams::clamp_fields`' alone.
     pub fn new(a: &AimParams, center: Vec3f, right: Vec3f, up: Vec3f, half: Vec2f, softness: f32) -> Option<Aim> {
-        // Every default is 0, so NaN reads as 0.
-        let fix = |x: f32, lo: f32, hi: f32| if x.is_nan() { 0.0 } else { x.max(lo).min(hi) };
-        let yaw = fix(a.yaw_deg, -90.0, 90.0).to_radians();
-        let pitch = fix(a.pitch_deg, -90.0, 90.0).to_radians();
-        let grid = fix(a.grid, 0.0, 1.0);
-        let doors = a.barn_doors.map(|d| fix(d, 0.0, 90.0));
+        let a = a.clamped();
+        let (yaw, pitch, grid, doors) = (a.yaw_deg.to_radians(), a.pitch_deg.to_radians(), a.grid, a.barn_doors);
         if yaw == 0.0 && pitch == 0.0 && grid == 0.0 && doors.iter().all(|d| *d == 0.0) {
             return None;
         }
@@ -85,7 +84,8 @@ impl Aim {
         let n = n1 * pitch.cos() + up * pitch.sin();
         let u = up * pitch.cos() - n1 * pitch.sin();
         let half = vec2f(half.x.max(1.0e-4), half.y.max(1.0e-4));
-        let edge = 0.01 + 0.05 * fix(softness, 0.0, 1.0);
+        // A number handed in, held to its own 0..=1 (max/min: a NaN reads as 0).
+        let edge = 0.01 + 0.05 * softness.max(0.0).min(1.0);
         Some(Aim {
             n,
             r,

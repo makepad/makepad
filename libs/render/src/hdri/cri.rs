@@ -226,16 +226,19 @@ pub fn cri(s: &Spectrum) -> Option<Cri> {
 
 /// The spectrum a light's colour comes from: its named source (the
 /// parametric LED at the light's Kelvin and quality knob), else a blackbody
-/// at its Kelvin, read as its colour reads it (`LightParams::held_kelvin`).
-/// None for a light with an explicit `rgb`: an RGB colour has no spectrum.
-/// Tint and gels are RGB corrections on top and are not part of the reading.
+/// at its Kelvin, of the light as clamp() holds it (`LightParams::clamped`),
+/// as its colour reads it (`studio::light_white`), so the two read one
+/// Kelvin and one knob (L:104). None for a light with an explicit `rgb`: an
+/// RGB colour has no spectrum. Tint and gels are RGB corrections on top and
+/// are not part of the reading.
 pub fn light_spectrum(light: &LightParams) -> Option<Spectrum> {
     if light.rgb.is_some() {
         return None;
     }
+    let light = &light.clamped();
     match light_source_spectrum(light) {
         Some(spectrum) => Some(spectrum),
-        None => Some(planck(light.held_kelvin())),
+        None => Some(planck(light.kelvin)),
     }
 }
 

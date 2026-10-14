@@ -36,7 +36,7 @@
 
 use super::*;
 use super::shape::*;
-use super::studio::{light_color, light_frame, project, LightFrame};
+use super::studio::{held_light_color, light_frame, project, LightFrame};
 use super::spectrum::fixed_source;
 
 /// The narrowest soft edge, in tangent units or radians (about 0.006°). It
@@ -78,11 +78,15 @@ enum ShapedKind {
 impl ShapedLight {
     /// The evaluator for `light`, or None for a disabled light, for a shape
     /// studio.rs draws itself (rect, disc, ring), or for an outline that
-    /// cannot be built (a stroke with fewer than two usable points).
+    /// cannot be built (a stroke with fewer than two usable points). The
+    /// light is read as clamp() holds it (`LightParams::clamped`, D17): the
+    /// builders below read its box, softness, corner, hotspot, colour and
+    /// blocks as they are.
     pub fn new(light: &LightParams) -> Option<ShapedLight> {
-        if !light.enabled {
+        if !light.enabled || !matches!(light.shape(), LightShape::Polygon | LightShape::Stroke | LightShape::Scrim) {
             return None;
         }
+        let light = &light.clamped();
         let (kind, cull) = match light.shape() {
             LightShape::Polygon => {
                 let fill = FillLight::polygon(light)?;
@@ -228,6 +232,7 @@ struct FillLight {
 }
 
 impl FillLight {
+    /// `light` is held by clamp() (`ShapedLight::new`).
     fn polygon(light: &LightParams) -> Option<FillLight> {
         let poly = light.polygon.clone().unwrap_or_default();
         let unit = polygon_unit_points(&poly);
@@ -240,11 +245,11 @@ impl FillLight {
         // the frame's `right`, so the outline is mirrored by the frame's sign.
         // The corners lie in the box already (`polygon_unit_points`).
         let pts: Vec<Vec2f> = unit.iter().map(|p| vec2f(sx * p[0] * hx, p[1] * hy)).collect();
-        let outline: Contours = vec![round_corners(&pts, clamp01(light.corner))];
+        let outline: Contours = vec![round_corners(&pts, light.corner)];
         // Softness 1 ramps the edge right to the deepest point, as studio.rs
         // does: the band is softness × how deep the centre sits inside.
         let depth = inside_depth(&FillShape::new(&outline, EDGE_MIN), &pts, hx.min(hy));
-        let edge = 0.5 * (clamp01(light.softness) * depth).max(EDGE_MIN);
+        let edge = 0.5 * (light.softness * depth).max(EDGE_MIN);
         Some(FillLight {
             frame: light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg),
             // Past half the band every distance gives the same coverage, so
@@ -252,7 +257,7 @@ impl FillLight {
             shape: FillShape::new(&outline, edge),
             half: vec2f(hx, hy),
             edge,
-            hotspot: HOTSPOT_FALLOFF * clamp01(light.hotspot),
+            hotspot: HOTSPOT_FALLOFF * light.hotspot,
         })
     }
 
@@ -329,16 +334,17 @@ struct StrokeLine {
 }
 
 impl StrokeLine {
-    /// None with fewer than two usable points. `stroke` is the light's
-    /// stroke as `stroke_of` gives it, held to its ranges by clamp()'s rule:
-    /// its width, curviness and profile are read as they are.
+    /// None with fewer than two usable points. `light` is held by clamp()
+    /// (its softness is read as it is), and `stroke` is the light's stroke as
+    /// `stroke_of` gives it, held to its ranges by clamp()'s rule: its width,
+    /// curviness and profile are read as they are.
     fn new(light: &LightParams, stroke: &StrokeParams) -> Option<StrokeLine> {
         let line = stroke_centre_line(stroke);
         if line.len() < 2 {
             return None;
         }
         let half_width = (0.5 * stroke.width_deg).to_radians();
-        let softness = clamp01(light.softness);
+        let softness = light.softness;
         let profile = stroke.profile.clone();
         let widest = if profile.is_empty() { 1.0 } else { profile.iter().fold(0.0f32, |m, v| m.max(*v)) };
         let widest_half = half_width * widest;
@@ -384,7 +390,9 @@ fn arc_between(a: Vec3f, b: Vec3f) -> f32 {
 /// A stroke that reaches further than the tangent plane does (about 87
 /// degrees from its middle) gets the plane's widest square; past it the face
 /// is held at the plane's limit (`studio::project_held`). None for any other
-/// light, and for a stroke that cannot be built, which draws nothing.
+/// light, and for a stroke that cannot be built, which draws nothing. Of a
+/// light as clamp() holds it, read as it is (`half_extents`), as
+/// `ShapedLight::new` draws it.
 pub fn stroke_box(light: &LightParams) -> Option<(LightFrame, Vec2f)> {
     if light.shape() != LightShape::Stroke {
         return None;
@@ -397,6 +405,7 @@ pub fn stroke_box(light: &LightParams) -> Option<(LightFrame, Vec2f)> {
 }
 
 impl StrokeLight {
+    /// `light` is held by clamp() (`ShapedLight::new`).
     fn new(light: &LightParams) -> Option<StrokeLight> {
         let stroke = stroke_of(light);
         let geometry = StrokeLine::new(light, &stroke)?;
@@ -409,7 +418,7 @@ impl StrokeLight {
         // lapping over itself in a tight bend, the flags after it and what
         // hangs in front of it all included.
         let (axis, key_cos, key_cos_cover) = geometry.cones();
-        let hotspot = HOTSPOT_FALLOFF * clamp01(light.hotspot);
+        let hotspot = HOTSPOT_FALLOFF * light.hotspot;
         let ramp = stroke_ramp(light, &stroke);
         // D2: how far out round the axis the line lies, by arc length (its
         // pieces are only roughly even): a ring at elevation 10 gives 0.17,
@@ -510,10 +519,13 @@ fn ramp_at(ramp: &[Vec3f], t: f32) -> Vec3f {
 /// Kelvin end is a blackbody's there, as on a Kelvin light (D10, L:99); the
 /// knob LED is built at it. Everything else that shapes a light's colour and
 /// level (tint, intensity, gels) stays the light's own, so a ramp is filtered
-/// like the light itself.
+/// like the light itself. `light` is held by clamp(), and so is a ramp's end
+/// (`stroke_of`); a tap's Kelvin, between two held ones, is in range but for
+/// a rounding step, which `kelvin_to_rgb` and `led` hold to their own
+/// domains, so the copy is coloured as it is.
 fn recolored(light: &LightParams, kelvin: f32, rgb: Option<[f32; 3]>) -> Vec3f {
     let source = if fixed_source(light).is_some() { None } else { light.source.clone() };
-    light_color(&LightParams { kelvin, rgb, source, ..light.clone() })
+    held_light_color(&LightParams { kelvin, rgb, source, ..light.clone() })
 }
 
 /// The colour along a stroke at RAMP_TAPS even taps, or None for one colour.
@@ -524,8 +536,12 @@ fn recolored(light: &LightParams, kelvin: f32, rgb: Option<[f32; 3]>) -> Vec3f {
 ///   holds along the whole ramp. A light with an explicit `rgb`, or a named
 ///   lamp with its own colour temperature, has no temperature to slide from,
 ///   so it blends from its colour to the end temperature's.
+///
+/// `light` is held by clamp() (`ShapedLight::new`), and so are the stroke's
+/// ends (`stroke_of`), so the light and each tap's recoloured copy are
+/// coloured as they are (`held_light_color`, `recolored`).
 fn stroke_ramp(light: &LightParams, stroke: &StrokeParams) -> Option<Vec<Vec3f>> {
-    let start = light_color(light);
+    let start = held_light_color(light);
     let at = |i: usize| i as f32 / (RAMP_TAPS - 1) as f32;
     let blend_to = |end: Vec3f| (0..RAMP_TAPS).map(|i| start + (end - start) * at(i)).collect::<Vec<Vec3f>>();
     if let Some(end) = stroke.end_rgb {
@@ -536,8 +552,8 @@ fn stroke_ramp(light: &LightParams, stroke: &StrokeParams) -> Option<Vec<Vec3f>>
     if light.rgb.is_some() || fixed_source(light).is_some() {
         return Some(blend_to(recolored(light, end_kelvin, None)));
     }
-    // The Kelvin light_color reads.
-    let start_kelvin = light.held_kelvin();
+    // The held Kelvin, the one light_color reads.
+    let start_kelvin = light.kelvin;
     let (m0, m1) = (1.0e6 / start_kelvin, 1.0e6 / end_kelvin);
     Some((0..RAMP_TAPS).map(|i| recolored(light, 1.0e6 / (m0 + (m1 - m0) * at(i)), None)).collect())
 }
@@ -624,16 +640,17 @@ struct ScrimLight {
 }
 
 impl ScrimLight {
+    /// `light` is held by clamp() (`ShapedLight::new`), its scrim block too,
+    /// so its ranges and defaults are written once (L:71).
     fn new(light: &LightParams) -> ScrimLight {
-        // As clamp() holds it, so its ranges and defaults are written once (L:71).
-        let scrim = light.scrim.as_ref().map(ScrimParams::clamped).unwrap_or_default();
+        let scrim = light.scrim.clone().unwrap_or_default();
         let (hx, hy) = half_extents(light);
         let short = hx.min(hy);
         let sigma = scrim.source_size;
         let frame_w = scrim.frame * short;
         let inv_two_sigma2 = 1.0 / (2.0 * sigma * sigma);
         // A rect's inside depth is its shorter half extent, as in studio.rs.
-        let edge = 0.5 * (clamp01(light.softness) * short).max(EDGE_MIN);
+        let edge = 0.5 * (light.softness * short).max(EDGE_MIN);
         // D9 (L:70): the cloth meets a rigid frame, so the frame's inner edge
         // is a quarter of its width, never softer than the outline: a frame
         // thinner than the outline's soft band (0.1 of the shorter half size
@@ -646,7 +663,7 @@ impl ScrimLight {
         ScrimLight {
             frame: light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg),
             half: vec2f(hx, hy),
-            round: clamp01(light.corner) * short,
+            round: light.corner * short,
             edge,
             frame_w,
             inner_edge,
@@ -681,12 +698,6 @@ impl ScrimLight {
     }
 }
 
-/// 0..1, with NaN as 0.
-fn clamp01(x: f32) -> f32 {
-    x.max(0.0).min(1.0)
-}
-
-
 /// The sign that turns the frame's `right` into the box's +x, which points to
 /// increasing azimuth: the viewer's right on the panorama. A3 builds its frame
 /// like ibl's softbox (`right = cross(+Y, center)`), and that vector points
@@ -706,13 +717,19 @@ pub fn box_x_sign() -> f32 {
 }
 
 /// The light's half extents in its tangent plane: tan(width/2), tan(height/2).
+/// Of a light as clamp() holds it, read as it is (D17): the builders that
+/// hold a light once (`ShapedLight::new`, `LightFx::new`, `Studio`'s
+/// prepared light) and the panel, whose lights clamp() holds after every
+/// edit, pass it so; this, `unit_to_dir`, `dir_to_unit`, `stroke_box` and
+/// `light_fx::face_axes` hold nothing of their own.
 pub fn half_extents(light: &LightParams) -> (f32, f32) {
-    let half = |deg: f32| (0.5 * deg.max(0.1).min(170.0)).to_radians().tan();
+    let half = |deg: f32| (0.5 * deg).to_radians().tan();
     (half(light.width_deg), half(light.height_deg))
 }
 
 /// A point of the light's unit box (-1..1, y up, x toward increasing
-/// azimuth) as a direction on the sky.
+/// azimuth) as a direction on the sky, of a light as clamp() holds it
+/// (`half_extents`).
 pub fn unit_to_dir(light: &LightParams, unit: [f32; 2]) -> Vec3f {
     let f = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
     let (hx, hy) = half_extents(light);
@@ -722,7 +739,7 @@ pub fn unit_to_dir(light: &LightParams, unit: [f32; 2]) -> Vec3f {
 /// The inverse of `unit_to_dir`, held inside the light's box: a direction off
 /// the box comes back on the edge nearest to it. Behind the light's tangent
 /// plane there is no gnomonic point, so such a direction is first pushed far
-/// out along its bearing.
+/// out along its bearing. Of a light as clamp() holds it (`half_extents`).
 pub fn dir_to_unit(light: &LightParams, dir: Vec3f) -> [f32; 2] {
     let f = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
     let (hx, hy) = half_extents(light);

@@ -421,7 +421,11 @@ pub fn source_rgb(name: &str) -> Option<Vec3f> {
 /// The spectrum of a light's named source, at the light's Kelvin and
 /// quality knob (the knob LED reads them; the other sources ignore them).
 /// None when the light names no source or an unknown one. An explicit `rgb`
-/// is the caller's business: this only looks at the source.
+/// is the caller's business: this only looks at the source. The light is
+/// read as it is given: its readers, the colour (`studio::light_white`) and
+/// the CRI readout (`cri::light_spectrum`), hand it the light as clamp()
+/// holds it (D17), and the knob LED holds the numbers it is built at to its
+/// own domain (`led`).
 pub fn light_source_spectrum(light: &LightParams) -> Option<Spectrum> {
     let row = source(light.source.as_deref()?)?;
     Some(row.spectrum_at(light.kelvin, light.source_quality.unwrap_or(LED_QUALITY_DEFAULT)))

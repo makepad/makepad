@@ -134,7 +134,11 @@ pub struct Atmosphere {
 }
 
 impl Atmosphere {
+    /// The sky for the sun at `sun_dir`. Both blocks are read as clamp() holds
+    /// them (`clamped()`, D17), so their ranges, defaults and NaN rule are
+    /// their `clamp_fields`' alone.
     pub fn new(sun_dir: Vec3f, atmo: &AtmosphereParams, disc: &SunDiscParams) -> Atmosphere {
+        let (atmo, disc) = (&atmo.clamped(), &disc.clamped());
         let sun = sun_dir.normalize();
         let sun = if sun.is_finite() && sun.length() > 0.5 { sun } else { vec3f(0.0, 1.0, 0.0) };
         let horizontal = (sun.x * sun.x + sun.z * sun.z).sqrt();
@@ -150,18 +154,13 @@ impl Atmosphere {
         let lut = build_sky_lut(&medium, &table, sun_sin as f64, multi);
         let (ambient, sky_irradiance) = hemisphere_integrals(&lut);
         let sun_irradiance = exact_transmittance(&medium, sun) * SUN_IRRADIANCE;
-        let ground_color = vec3f(
-            sanitize(atmo.ground_color[0], 0.0, 1.0, 0.18),
-            sanitize(atmo.ground_color[1], 0.0, 1.0, 0.17),
-            sanitize(atmo.ground_color[2], 0.0, 1.0, 0.15),
-        );
+        let ground_color = vec3f(atmo.ground_color[0], atmo.ground_color[1], atmo.ground_color[2]);
         // A Lambertian ground under the sky dome and the sun: albedo x E / pi.
         let ground = ground_color
             * (sky_irradiance + sun_irradiance * sun.y.max(0.0))
             * (1.0 / std::f32::consts::PI);
-        let size_deg = sanitize(disc.size_deg, 0.05, 20.0, 0.53);
-        let disc_radius = (0.5 * size_deg).to_radians();
-        let disc_softness = sanitize(disc.softness, 0.0, 1.0, 0.2);
+        let disc_radius = (0.5 * disc.size_deg).to_radians();
+        let disc_softness = disc.softness;
         let outer = disc_radius * (1.0 + 0.5 * disc_softness);
         // Dividing by the profile's own solid angle is what keeps the disc's
         // energy equal to the sun's irradiance at every size and softness.
@@ -273,15 +272,14 @@ impl Atmosphere {
 /// Sun direction (map frame) for the sun parameters: the NOAA position in
 /// time mode through `crate::sky::noaa_solar_position`, the manual angles
 /// otherwise. NOAA's azimuth is clockwise from north, `dir_from_az_el`'s
-/// sense, so no conversion sits between them.
+/// sense, so no conversion sits between them. The sun is read as clamp()
+/// holds it (`SunParams::clamped`, D17): its month is 1..=12 and its day
+/// within that month, so both fit the date's bytes.
 pub fn sun_direction(sun: &SunParams) -> Vec3f {
+    let sun = &sun.clamped();
     match sun.mode() {
         SunMode::Time => {
-            let date = SkyDate {
-                year: sun.year,
-                month: sun.month.clamp(1, 12) as u8,
-                day: sun.day.clamp(1, 31) as u8,
-            };
+            let date = SkyDate { year: sun.year, month: sun.month as u8, day: sun.day as u8 };
             let (elevation, azimuth) =
                 noaa_solar_position(date, sun.hour, sun.tz_offset, sun.latitude, sun.longitude);
             dir_from_az_el(azimuth, elevation)
@@ -301,10 +299,9 @@ struct Medium {
 }
 
 impl Medium {
+    /// `p` is held by clamp() (`Atmosphere::new`).
     fn new(p: &AtmosphereParams) -> Medium {
-        let air = sanitize(p.air, 0.0, 10.0, 1.0) as f64;
-        let haze = sanitize(p.haze, 0.0, 10.0, 1.0) as f64;
-        let ozone = sanitize(p.ozone, 0.0, 10.0, 1.0) as f64;
+        let (air, haze, ozone) = (p.air as f64, p.haze as f64, p.ozone as f64);
         Medium {
             rayleigh: RAYLEIGH_SCATTERING.map(|b| b * air),
             mie_scattering: MIE_SCATTERING * haze,
@@ -614,11 +611,6 @@ fn disc_solid_angle(radius: f32, softness: f32) -> f64 {
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-/// NaN and infinity fall back to `fallback`; finite values are clamped.
-fn sanitize(x: f32, lo: f32, hi: f32, fallback: f32) -> f32 {
-    if x.is_finite() { x.clamp(lo, hi) } else { fallback }
 }
 
 #[cfg(test)]

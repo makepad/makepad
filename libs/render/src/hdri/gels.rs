@@ -391,7 +391,12 @@ mod tests {
             let light = LightParams { kelvin, tint, intensity_ev: 1.0, ..LightParams::default() };
             let c = kelvin_to_rgb(kelvin) * tint_rgb(tint);
             let c = c / luminance(c);
-            let switched = LightParams { rgb: Some([c.x, c.y, c.z]), ..light.clone() };
+            // As the panel's switch stores it (`switch_light_color_mode`): an
+            // explicit colour is 0..=1 per channel (clamp(), which
+            // `light_color` reads it through, D17), so the peak of a
+            // luminance-1 colour above 1 (6500 K's blue) moves into the level.
+            let peak = c.max_elem().max(1.0);
+            let switched = LightParams { rgb: Some([c.x / peak, c.y / peak, c.z / peak]), intensity_ev: light.intensity_ev + peak.log2(), ..light.clone() };
             let (as_kelvin, as_rgb) = (with_gels(&light, gels), with_gels(&switched, gels));
             assert!((as_kelvin - as_rgb).abs().max_elem() < 1.0e-5 * as_rgb.max_elem(), "{kelvin} K, tint {tint}, {gels:?}: {as_kelvin:?} as Kelvin, {as_rgb:?} as RGB");
         }

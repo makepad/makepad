@@ -232,8 +232,12 @@ struct Moon {
 
 impl NightSky {
     /// `sun_dir` and the moon placement are in the map's own frame.
-    /// `star_hours` is the local solar hour that spins the dome (see [`star_hours`]).
+    /// `star_hours` is the local solar hour that spins the dome (see [`star_hours`])
+    /// and `latitude` the sun's: two numbers, each held to its own domain here.
+    /// The night is read as clamp() holds it (`NightParams::clamped`, D17), so
+    /// its ranges, defaults and NaN rule are `NightParams::clamp_fields`' alone.
     pub fn new(p: &NightParams, seed: u32, sun_dir: Vec3f, star_hours: f32, latitude: f32) -> NightSky {
+        let p = &p.clamped();
         let sun_dir = if sun_dir.is_finite() && sun_dir.length() > 1.0e-6 {
             sun_dir.normalize()
         } else {
@@ -258,9 +262,9 @@ impl NightSky {
         let g = vec3f(g.x, g.y, g.z);
         let gal_pole = vec3f(rows[0].dot(g), rows[1].dot(g), rows[2].dot(g)).normalize();
 
-        let star_keep = sane(p.stars, 0.0, 1.0) * STAR_KEEP_MAX;
+        let star_keep = p.stars * STAR_KEEP_MAX;
         let star_e0 = SUN_IRRADIANCE * 10.0f32.powf(0.4 * SUN_MAGNITUDE);
-        let star_gain = star_e0 * 10.0f32.powf(-0.4 * STAR_MAG_LIMIT) * sane(p.star_brightness, 0.0, 10.0) * lift;
+        let star_gain = star_e0 * 10.0f32.powf(-0.4 * STAR_MAG_LIMIT) * p.star_brightness * lift;
         let mut star_colors = [Vec3f::default(); STAR_COLORS];
         for (i, color) in star_colors.iter_mut().enumerate() {
             // Log-uniform from 3000 K (orange giants) to 12000 K (blue-white).
@@ -271,17 +275,16 @@ impl NightSky {
         }
 
         let glow = p.glow_color;
-        let glow_rgb = vec3f(glow[0].max(0.0), glow[1].max(0.0), glow[2].max(0.0))
-            * (sane(p.glow_strength, 0.0, 10.0) * GLOW_SCALE * lift);
+        let glow_rgb = vec3f(glow[0], glow[1], glow[2]) * (p.glow_strength * GLOW_SCALE * lift);
 
         let moon = if p.moon {
-            let frame = light_frame(p.moon_azimuth_deg, sane(p.moon_elevation_deg, -90.0, 90.0), 0.0);
-            let radius = (0.5 * sane(p.moon_size_deg, 0.1, 10.0)).to_radians();
+            let frame = light_frame(p.moon_azimuth_deg, p.moon_elevation_deg, 0.0);
+            let radius = (0.5 * p.moon_size_deg).to_radians();
             let dir = frame.center;
             // Extinction through the air, with the same curve the engine's sun gets.
             let extinction = sun_transmittance(dir.y);
             let tint = MOON_TINT / luminance(MOON_TINT);
-            let lit = tint * extinction * (MOON_ALBEDO * SUN_IRRADIANCE / PI * sane(p.moon_brightness, 0.0, 10.0) * lift);
+            let lit = tint * extinction * (MOON_ALBEDO * SUN_IRRADIANCE / PI * p.moon_brightness * lift);
             // Seen from the moon the Earth is full when the moon is new (next to the sun).
             let earth_phase = 0.5 * (1.0 + dir.dot(sun_dir));
             let mut moon = Moon {

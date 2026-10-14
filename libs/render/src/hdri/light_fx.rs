@@ -54,6 +54,9 @@ const KEY_SCAN: i32 = 48;
 ///   cone in the tangent plane of its own middle (`shaped::stroke_box`), so
 ///   its gobo, aim, doors and wear follow where it is drawn and hold all of
 ///   it, never the light's unused azimuth, elevation, width and height.
+///
+/// Of a light as clamp() holds it, read as it is (`shaped::half_extents`):
+/// `LightFx::new` holds its light first.
 pub fn face_axes(light: &LightParams) -> (LightFrame, f32, Vec2f) {
     let (frame, half) = stroke_box(light).unwrap_or_else(|| {
         let (hx, hy) = half_extents(light);
@@ -88,15 +91,19 @@ pub struct LightFx {
 
 impl LightFx {
     /// The extras of `light`. `images` resolves image gobos (B8); a name the
-    /// app has not loaded is simply no gobo, so this never reads a file.
+    /// app has not loaded is simply no gobo, so this never reads a file. The
+    /// light is read as clamp() holds it (`LightParams::clamped`, D17): its
+    /// level and softness as they are, its gobo, aim and wear through their
+    /// readers, which read them held too.
     pub fn new(light: &LightParams, images: &ImageSet) -> LightFx {
+        let light = &light.clamped();
         let (frame, sx, half) = face_axes(light);
         let gobo = light.gobo.as_ref();
         LightFx {
             frame,
             sx,
             blend: light.blend(),
-            gain: 2.0f32.powf(light.intensity_ev.max(-10.0).min(20.0)),
+            gain: 2.0f32.powf(light.intensity_ev),
             fill_sky: gobo.is_some_and(|g| g.fill_sky),
             frame_hides: false,
             gobo: gobo.and_then(|g| Gobo::new(g, half, images)),
