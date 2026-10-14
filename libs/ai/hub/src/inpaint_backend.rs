@@ -253,6 +253,9 @@ impl ContentBackend for InpaintBackend {
             )));
         }
         ctx.ensure_files()?;
+        // The T5 tokenizer table, downloaded with the model (not in git).
+        makepad_ai_flux::t5::load_tokenizer_from(ctx.cache_dir)
+            .map_err(|e| AssetAiError::Backend(format!("model {}: {e}", ctx.spec.id)))?;
         self.ready = Some(ReadyFiles {
             diffusion_model_path: role_path(ctx.spec, ctx.cache_dir, ROLE_DIFFUSION_MODEL)?,
             vae_path: role_path(ctx.spec, ctx.cache_dir, ROLE_VAE)?,
@@ -767,6 +770,7 @@ mod tests {
             text: String::new(),
             voice: String::new(),
             language: String::new(),
+            request_domain: String::new(),
             speed: 1.0,
             emotion: None,
             seconds: None,

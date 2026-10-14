@@ -525,6 +525,77 @@
      "revision": "44ea96fbcead75dfa908449883350ada44601791",
      "size": 17236328572,
      "sha256": "ead426278b49030e9da5df862994f25ce94ab2ee4df38b556ddddb3db093bf72"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
+    }
+   ]
+  },
+  {
+   "id": "flux1-schnell-q4",
+   "domain": "image",
+   "backend": "flux",
+   "available": true,
+   "gated": false,
+   "license": {
+    "name": "Apache License 2.0",
+    "url": "https://huggingface.co/black-forest-labs/FLUX.1-schnell",
+    "summary": "FLUX.1-schnell weights are Apache-2.0 (quantization by city96, same licence). Permissive use, including commercial, subject to the Apache-2.0 conditions (attribution, NOTICE retention). This stack does not host the weights.",
+    "restriction": "none"
+   },
+   "vram_gb": 18.0,
+   "note": "FLUX.1-schnell for 24 GB cards: the 4-step distilled DiT as city96's GGUF Q4_K_S (ComfyUI-GGUF reference conversion, 6.8 GB; canonical double_blocks.* names, loaded by libs/ai/models/flux flux_gguf) in a SPLIT bundle with the shared FLUX VAE (Kijai flux-vae-bf16) and the ComfyUI text encoders (clip_l + t5xxl fp8) that flux1-fill-dev already pins - same cache_as, so the blobs are shared. Measured on node 165 (RTX PRO 6000, 2026-10-13, 4 steps): 512px cold 9.4 s incl. all loads, warm 2.2 s, peak 13.6 GB; 1024px warm 7.8 s, peak 17.7 GB (CUDA pool included); vram_gb 18 is that 1024 peak, so it admits on a 24 GB card next to the UI reserve once the chat model yields. Default 4 steps. Request: prompt (+ width/height/steps/seed).",
+   "files": [
+    {
+     "role": "diffusion_model",
+     "repo": "city96/FLUX.1-schnell-gguf",
+     "path": "flux1-schnell-Q4_K_S.gguf",
+     "cache_as": "unet/flux1-schnell-Q4_K_S.gguf",
+     "revision": "f495746ed9c5efcf4661f53ef05401dceadc17d2",
+     "size": 6783943712,
+     "sha256": "4fd16477b3a5296d0cf722c4b92a9fd7f30d09ac7495826e4465d8de9c9fd973"
+    },
+    {
+     "role": "vae",
+     "repo": "Kijai/flux-fp8",
+     "path": "flux-vae-bf16.safetensors",
+     "cache_as": "vae/flux-ae-bf16.safetensors",
+     "revision": "2ef6f85f9f4b94634f995ba0bfa84fd3ab865c1d",
+     "size": 167664710,
+     "sha256": "0c0c8ac49850d6bd174107d4001685f4f6c876768a1c84dde751f2aed69f46ce"
+    },
+    {
+     "role": "clip_l",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "clip_l.safetensors",
+     "cache_as": "text_encoders/clip_l.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 246144152,
+     "sha256": "660c6f5b1abae9dc498ac2d21e1347d2abdb0cf6c0c0c8576cd796491d9a6cdd"
+    },
+    {
+     "role": "t5xxl",
+     "repo": "comfyanonymous/flux_text_encoders",
+     "path": "t5xxl_fp8_e4m3fn.safetensors",
+     "cache_as": "text_encoders/t5xxl_fp8_e4m3fn.safetensors",
+     "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
+     "size": 4893934904,
+     "sha256": "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -550,6 +621,15 @@
      "revision": "7ec07cd0cd2cb88298a80c905ad38250e1389880",
      "size": 17246524772,
      "sha256": "8e91b68084b53a7fc44ed2a3756d821e355ac1a7b6fe29be760c1db532f3d88a"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -604,6 +684,15 @@
      "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
      "size": 9787841024,
      "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -658,6 +747,15 @@
      "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
      "size": 9787841024,
      "sha256": "6e480b09fae049a72d2a8c5fbccb8d3e92febeb233bbe9dfe7256958a9167635"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -711,6 +809,15 @@
      "revision": "6af2a98e3f615bdfa612fbd85da93d1ed5f69ef5",
      "size": 4893934904,
      "sha256": "7d330da4816157540d6bb7838bf63a0f02f573fc48ca4d8de34bb0cbfd514f09"
+    },
+    {
+     "role": "t5-tokenizer",
+     "repo": "makepad/flux-tokenizer",
+     "path": "https://makepad.nl/models/flux/t5_tokenizer.json",
+     "cache_as": "tokenizers/t5_tokenizer.json",
+     "size": 2424064,
+     "sha256": "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a",
+     "local": false
     }
    ]
   },
@@ -1522,6 +1629,33 @@
      "sha256": null,
      "local": false,
      "converts_to": "tts/bm_lewis.mkvoice"
+    },
+    {
+     "role": "g2p-us-lexicon",
+     "repo": "makepad/kokoro-g2p",
+     "path": "https://makepad.nl/models/speech/kokoro-g2p/us_lexicon.bin",
+     "cache_as": "tts/us_lexicon.bin",
+     "size": 2917518,
+     "sha256": "294682efc873a8201106f4dddfcb8e1b16c5d47c0fb8ddaf00c351d62212245c",
+     "local": false
+    },
+    {
+     "role": "g2p-zh-pinyin",
+     "repo": "makepad/kokoro-g2p",
+     "path": "https://makepad.nl/models/speech/kokoro-g2p/zh_pinyin.bin",
+     "cache_as": "tts/zh_pinyin.bin",
+     "size": 1393676,
+     "sha256": "4d266969277671e6f3238cde2211ab5c6956fc86e08e71e3d9a5f5fdfa3e0471",
+     "local": false
+    },
+    {
+     "role": "g2p-zh-words",
+     "repo": "makepad/kokoro-g2p",
+     "path": "https://makepad.nl/models/speech/kokoro-g2p/zh_words.bin",
+     "cache_as": "tts/zh_words.bin",
+     "size": 1838159,
+     "sha256": "ab066b416e8952f97791e09c3770e417ba111df80c13336eb76d4fac0c008169",
+     "local": false
     }
    ]
   },

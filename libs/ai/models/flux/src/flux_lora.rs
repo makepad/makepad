@@ -7,10 +7,10 @@
 //! arena — the compiled ggml graph (`build_flux_transformer_graph`), the
 //! host "lazy" rows path (`LazyFluxTransformer::execute_internal`) and the
 //! device path (`execute_device_core`, plus its captured CUDA step graph) —
-//! and the device path silently FALLS BACK to the host path on any error.
-//! A runtime `y += scale * B(A x)` adapter would have to be implemented in
-//! all three (and inside the captured graph) or a fallback would quietly
-//! render the pristine model. All three read their weight bytes out of the
+//! and the host path serves machines without a device. A runtime
+//! `y += scale * B(A x)` adapter would have to be implemented in all three
+//! (and inside the captured graph) or one engine would quietly render the
+//! pristine model. All three read their weight bytes out of the
 //! same `Context` tensors, so patching those bytes once at load time reaches
 //! every engine, needs no new kernels, and costs zero per-step time.
 //!

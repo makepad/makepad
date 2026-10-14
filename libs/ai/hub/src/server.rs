@@ -992,6 +992,52 @@ fn chat_model_id(shared: &Arc<ServiceShared>) -> Option<String> {
         })
 }
 
+/// The quantised variant a generation of `spec` runs on instead (`gpu_yield::use_variant`),
+/// with why: `spec` cannot run on this card, or does not fit in the free memory plus
+/// what idle residents give back, next to the UI's reserve. Only a variant whose files
+/// are on disk (no surprise download), and never when `spec` is resident already.
+fn fitting_variant(shared: &Arc<ServiceShared>, spec: &ModelSpec, gpu: &crate::gpu::GpuInfo) -> Option<(ModelSpec, String)> {
+    let reserve_mb = crate::gpu_yield::admission_reserve_mb(shared.residency.reserve_mb);
+    let variant = crate::gpu_yield::variant_ids(&spec.id).into_iter().find_map(|id| {
+        shared.registry.find(&id).filter(|v| {
+            v.files_present(&shared.cache_dir) && model_availability(v, gpu, shared.residency.reserve_mb).is_ok()
+        }).cloned()
+    })?;
+    let variant_mb = residency::estimated_peak_mb(&variant);
+    if let Err(reason) = model_availability(spec, gpu, shared.residency.reserve_mb) {
+        return Some((variant, format!("{} cannot run here ({reason})", spec.id)));
+    }
+    let asked_mb = residency::estimated_peak_mb(spec);
+    if asked_mb == 0 {
+        return None;
+    }
+    let busy = shared.jobs.with(|store| store.running_models());
+    let (resident, idle_mb) = with_backends(shared, |backends| {
+        let resident = backends.get(&spec.id).is_some_and(|b| b.is_resident());
+        let idle_mb: u64 = backends
+            .iter()
+            .filter(|(id, b)| *id != &spec.id && b.is_resident() && !busy.iter().any(|m| m == *id))
+            .map(|(id, _)| crate::control::model_mb(id).unwrap_or(0))
+            .sum();
+        (resident, idle_mb)
+    });
+    if resident {
+        return None;
+    }
+    let room_mb = residency::fresh_free_mb().map(|free| free + idle_mb);
+    if !crate::gpu_yield::use_variant(Some(asked_mb), variant_mb, room_mb, reserve_mb) {
+        return None;
+    }
+    Some((
+        variant,
+        format!(
+            "{} needs {asked_mb} MB, {} MB can be free and the UI keeps {reserve_mb} MB",
+            spec.id,
+            room_mb.unwrap_or(0)
+        ),
+    ))
+}
+
 /// Queue a control job from the hub itself (a yield's reload).
 fn queue_control(shared: &Arc<ServiceShared>, model: &str, action: crate::backend::ModelControl) -> Result<String, AssetAiError> {
     submit_control(shared, &crate::front::Caller::local(), model, action)
@@ -1081,6 +1127,30 @@ fn control_yield(shared: &Arc<ServiceShared>, caller: &crate::front::Caller, bod
     let Some(model) = model else {
         return error_json(404, "no model to yield from".to_string());
     };
+    if mb == 0 {
+        // Relief: the chat model grows back once the cooldown after the last
+        // yield has passed, unless another yield comes first (a desktop that
+        // is short again). The answer says when.
+        let (at, epoch) = crate::gpu_yield::relief_schedule();
+        let in_s = at.saturating_duration_since(Instant::now()).as_secs();
+        let shared = shared.clone();
+        let caller = caller.clone();
+        let spawned = std::thread::Builder::new().name("gpu-relief".into()).spawn(move || {
+            std::thread::sleep(at.saturating_duration_since(Instant::now()));
+            if !crate::gpu_yield::relief_current(epoch) {
+                eprintln!("[gpu-yield] relief dropped: the UI was short again since");
+                return;
+            }
+            let model = chat_model_id(&shared).unwrap_or(model);
+            if let Err(e) = submit_control(&shared, &caller, &model, crate::backend::ModelControl::Yield { mb: 0, unload: false }) {
+                eprintln!("[gpu-yield] relief not queued: {e}");
+            }
+        });
+        if let Err(e) = spawned {
+            return error_json(500, format!("relief: {e}"));
+        }
+        return ok_json(json::obj(vec![("relief_in_s", Value::Int(in_s as i64))]).to_json());
+    }
     match submit_control(shared, caller, &model, crate::backend::ModelControl::Yield { mb, unload }) {
         Ok(job_id) => ok_json(json::obj(vec![("job_id", json::s(job_id))]).to_json()),
         Err(e @ (AssetAiError::Busy | AssetAiError::QueueFull(_) | AssetAiError::Unavailable(_))) => generate_refused(&e),
@@ -1151,6 +1221,9 @@ fn run_yield(
         })
         .collect();
     let plan = crate::gpu_yield::plan(chat.as_ref(), &residents, mb, allow_unload);
+    if !plan.steps.is_empty() {
+        crate::gpu_yield::note_yield();
+    }
     let mut done = Vec::new();
     let mut reload = None;
     for step in &plan.steps {
@@ -1264,6 +1337,9 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
     });
     let mut active_by_model: HashMap<String, usize> = HashMap::new();
     let mut swapping: Vec<String> = Vec::new();
+    // Models a running job is still loading (weights, a download); a job past that
+    // stage generates on a model that is in memory.
+    let mut loading: Vec<String> = Vec::new();
     for job in &active {
         if job.state == JOB_STATE_RUNNING {
             if let Some(model) = &job.model {
@@ -1271,6 +1347,9 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
                 let stage = job.stage.as_deref().unwrap_or("");
                 if stage.starts_with("evict") || stage.contains("switching models") || stage.starts_with("queued-for-memory") {
                     swapping.push(model.clone());
+                }
+                if crate::control::is_load_stage(stage) {
+                    loading.push(model.clone());
                 }
             }
         }
@@ -1344,8 +1423,13 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
                 }
                 if swapping.contains(&spec.id) {
                     ("swapping", None)
-                } else if busy > 0 {
+                } else if loading.contains(&spec.id) {
                     ("loading", None)
+                } else if busy > 0 {
+                    // A model that loads per job (not kept resident) is in memory
+                    // while its job generates: "loading" here read as stuck loading
+                    // for a whole song.
+                    ("loaded", None)
                 } else {
                     ("unloaded", None)
                 }
@@ -1430,6 +1514,15 @@ fn control_json(shared: &Arc<ServiceShared>) -> String {
             ]),
         ),
         ("llm", llm),
+        (
+            "policy",
+            Value::Arr(
+                crate::gpu_yield::policy_notes()
+                    .into_iter()
+                    .map(|(ago_ms, text)| json::obj(vec![("text", json::s(text)), ("ago_ms", Value::Int(ago_ms as i64))]))
+                    .collect(),
+            ),
+        ),
         (
             "queue",
             json::obj(vec![
@@ -2297,6 +2390,19 @@ fn execute_job(
         .clone();
 
     let gpu = shared.gpu.get();
+    // A generation the model cannot fit next to the UI runs on the same family's
+    // quantised variant when it is on disk; the job then reports that model.
+    let spec = match (params.control.is_none() && !params.pull_only).then(|| fitting_variant(shared, &spec, &gpu)).flatten() {
+        Some((variant, why)) => {
+            crate::gpu_yield::note_policy(format!("ran {} for {}: {why}", variant.id, spec.id));
+            shared.jobs.with(|store| {
+                store.set_model(job_id, &variant.id);
+                store.set_progress(job_id, &format!("using {}: {why}", variant.id), 0.0);
+            });
+            variant
+        }
+        None => spec,
+    };
     model_availability(&spec, &gpu, shared.residency.reserve_mb)
     .map_err(|reason| AssetAiError::Unavailable(format!("model {}: {reason}", spec.id)))?;
     crate::disk_space::check_model(&spec, &shared.cache_dir)?;
@@ -2573,7 +2679,12 @@ fn execute_job(
             // Cancellation can precede load on one concurrent lane while
             // another still owns the resident. Preserve its truthful state
             // until the coordinated retirement sweep actually unloads it.
-            if !matches!(error, AssetAiError::Cancelled) {
+            // A load the GPU budget refused (the UI keeps its reserve) is not
+            // a broken model: it stays on disk, eligible, and loads when there
+            // is room. Marking it `error` made every client wait it out.
+            if crate::gpu_yield::is_ui_priority_refusal(&error) {
+                set_model_state(shared, &spec.id, ModelTrack::Ready);
+            } else if !matches!(error, AssetAiError::Cancelled) {
                 set_model_state(shared, &spec.id, ModelTrack::Error(error.to_string()));
             }
             return Err(error);
@@ -2666,6 +2777,12 @@ fn execute_job(
                 }),
             }
         };
+        // The turn's handle on the model's session thread goes now: an unload
+        // below (a generation error, a cancel) waits for that thread to end,
+        // and a handle still held here kept it alive -- the job worker then
+        // waited on itself, holding the backends, and the hub answered nothing
+        // more (149, a chat during a yield).
+        drop(concurrent);
         match gen_result {
             Ok(artifacts) => {
                 let cancelled = cancel.check();
@@ -3388,12 +3505,16 @@ fn admit_for_load(
     // A model switch always retires ordinary residents, including models
     // whose own estimate is zero. Pins survive this first pass and are only
     // considered below when the byte gate cannot otherwise be met.
+    let chat = chat_model_id(shared);
     for model_id in resident_others_lru(shared, backends, &spec.id)
         .into_iter()
         .filter(|model_id| !shared.residency.pins.contains(model_id))
     {
         cancel.check()?;
         progress(&format!("switching models: evicting {model_id}"));
+        if chat.as_deref() == Some(model_id.as_str()) {
+            crate::gpu_yield::note_policy(format!("unloaded {model_id} for {} (it loads again on the next chat)", spec.id));
+        }
         if let Some(trimmed) = evict_resident(shared, backends, &model_id, &mut progress)? {
             pool_trim = Some(trimmed);
         }
@@ -3401,7 +3522,13 @@ fn admit_for_load(
     if already_resident {
         return Ok(());
     }
-    let est_mb = residency::estimated_peak_mb(spec);
+    // A chat model this hub has loaded before is sized by its own accounting
+    // (its window is fitted to the room at load, down to the floor), not by
+    // the registry's peak for the biggest window.
+    let est_mb = match crate::gpu_yield::llm_memory_of(&spec.id).filter(|_| spec.backend == "llm") {
+        Some(memory) => crate::gpu_yield::smallest_load_mb(&memory),
+        None => residency::estimated_peak_mb(spec),
+    };
     if est_mb == 0 {
         return Ok(());
     }
@@ -3421,6 +3548,9 @@ fn admit_for_load(
         progress(&format!(
             "queued-for-memory: need {need} MB, free {free} MB — evicting pinned {model_id}"
         ));
+        if chat.as_deref() == Some(model_id.as_str()) {
+            crate::gpu_yield::note_policy(format!("unloaded {model_id} for {} (it loads again on the next chat)", spec.id));
+        }
         if let Some(trimmed) = evict_resident(shared, backends, &model_id, &mut progress)? {
             pool_trim = Some(trimmed);
         }

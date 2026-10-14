@@ -5,7 +5,10 @@
     phrase-pinyin-data   https://github.com/mozillazg/phrase-pinyin-data   large_pinyin.txt
     jieba                https://github.com/fxsjy/jieba                    jieba/dict.txt
 
-    python3 build_zh_lexicon.py pinyin.txt large_pinyin.txt dict.txt ../data
+    python3 build_zh_lexicon.py pinyin.txt large_pinyin.txt dict.txt <out_dir>
+
+The outputs are hosted with the Kokoro model (src/g2p/data.rs names their URL,
+size and sha256; update those after a rebuild), not kept in git.
 
 Writes two MKLEX files (the format `build_lexicon.py` documents; `g2p::packed`
 reads them), entries sorted by key bytes:

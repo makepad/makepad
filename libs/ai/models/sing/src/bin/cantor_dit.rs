@@ -88,6 +88,7 @@ fn opts() -> DitOpts {
 }
 
 fn main() {
+    makepad_ai_speech::g2p::data::load_default().unwrap_or_else(|e| panic!("{e}"));
     let cmd = std::env::args().nth(1).unwrap_or_default();
     match cmd.as_str() {
         "convert" => {

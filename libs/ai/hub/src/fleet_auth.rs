@@ -293,6 +293,13 @@ pub fn mark_fleet_endpoint(host_port: &str) {
     tls::mark_fleet_endpoint(host_port);
 }
 
+/// Whether two fleet addresses are the same node: both seen, with the same
+/// TLS certificate (a node is known by its certificate, not its address).
+pub fn same_node(a: &str, b: &str) -> bool {
+    let known = tls::KnownHosts::new(client_dir().join(KNOWN_NODES));
+    matches!((known.get(a), known.get(b)), (Some(x), Some(y)) if x == y)
+}
+
 pub fn is_fleet_endpoint(host_port: &str) -> bool {
     tls::is_fleet_endpoint(host_port)
 }

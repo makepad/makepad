@@ -59,6 +59,9 @@ pub fn start_listener() -> Discovery {
     }
 }
 
+/// Nothing listens here: nothing to stop.
+pub fn stop_listener() {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,3 +79,17 @@ mod tests {
 }
 
 pub fn start_fleet_beacon(_node_id: u64, _tls_port: u16, _fleet: String, _node_key: String) {}
+
+pub const DEFAULT_TLS_PORT: u16 = 8123;
+
+pub fn gateway_nodes(_port: u16, _timeout: std::time::Duration) -> Vec<String> {
+    Vec::new()
+}
+
+pub fn answers(_host_port: &str, _timeout: std::time::Duration) -> bool {
+    false
+}
+
+pub fn network_addresses() -> Vec<std::net::Ipv4Addr> {
+    Vec::new()
+}

@@ -2,10 +2,12 @@
 //!
 //! Kokoro's ONNX graph takes `input_ids`, not text, so this stage is a hard
 //! prerequisite rather than a convenience. Upstream uses `misaki`, which falls
-//! back to espeak-ng — a C dependency with its own licence. Instead we embed
+//! back to espeak-ng — a C dependency with its own licence. Instead we use
 //! misaki's own 90k-entry IPA lexicon (Apache-2.0, already in Kokoro's symbol
-//! set) and hand-write letter-to-sound rules for the rest.
+//! set; downloaded with the model, see [`data`]) and hand-write letter-to-sound
+//! rules for the rest.
 
+pub mod data;
 pub mod lexicon;
 pub mod packed;
 pub mod lts;

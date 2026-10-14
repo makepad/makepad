@@ -28,6 +28,59 @@ use std::sync::Mutex;
 /// small requests does not rebuild the session for every few MB.
 pub const CONTEXT_STEP: u32 = 4096;
 
+/// A yield never cuts the chat model's window under this: a conversation with
+/// a system prompt and a few turns needs it. Short of more, the model goes.
+pub const YIELD_FLOOR: u32 = 8192;
+
+/// Kept free on top of the UI's reserve when the hub sizes or cuts its model,
+/// so the free memory does not sit exactly on the reserve and every small
+/// allocation of the desktop makes it short again.
+pub const HEADROOM_MB: u64 = 512;
+
+/// A load's cost beyond the model's arena is never counted above this (a CUDA
+/// context and cuBLAS workspace are a few hundred MB).
+pub const LOAD_OVERHEAD_MAX_MB: u64 = 1024;
+
+/// After a yield, the chat model does not grow back for this long: a desktop
+/// starting or switching is short for seconds, then relieved; growing back at
+/// once rebuilt the model twice in four seconds on 149.
+pub const RELIEF_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+
+static LAST_YIELD: Mutex<Option<(std::time::Instant, u64)>> = Mutex::new(None);
+
+/// A yield gave something: relief waits [`RELIEF_COOLDOWN`] from now, and a
+/// relief already waiting is superseded.
+pub fn note_yield() {
+    let mut last = LAST_YIELD.lock().unwrap();
+    let epoch = last.map_or(1, |(_, e)| e + 1);
+    *last = Some((std::time::Instant::now(), epoch));
+}
+
+/// When a relief asked for now may run, and the epoch it belongs to (a
+/// later yield changes it: that relief is dropped).
+pub fn relief_schedule() -> (std::time::Instant, u64) {
+    let now = std::time::Instant::now();
+    match *LAST_YIELD.lock().unwrap() {
+        Some((at, epoch)) => ((at + RELIEF_COOLDOWN).max(now), epoch),
+        None => (now, 0),
+    }
+}
+
+pub fn relief_current(epoch: u64) -> bool {
+    LAST_YIELD.lock().unwrap().map_or(0, |(_, e)| e) == epoch
+}
+
+/// A load the GPU budget refused for the UI's sake (`not_enough_message`).
+pub fn is_ui_priority_refusal(error: &crate::error::AssetAiError) -> bool {
+    error.to_string().contains("UI has priority")
+}
+
+/// The least a chat model needs to load at all: its fixed part and the floor
+/// window ([`YIELD_FLOOR`]).
+pub fn smallest_load_mb(memory: &LlmMemory) -> u64 {
+    memory.fixed_mb() + u64::from(YIELD_FLOOR) * memory.kv_bytes_per_token / MB
+}
+
 const MB: u64 = 1 << 20;
 
 /// MB of free GPU memory the UI keeps (0 = none asked for).
@@ -126,9 +179,22 @@ pub struct LlmMemory {
 
 impl LlmMemory {
     /// Everything the load cost that does not scale with the context.
+    /// The model's own arena: weights, KV, state, activations.
+    pub fn arena_mb(&self) -> u64 {
+        self.weights_mb + self.kv_mb + self.state_mb + self.activations_mb
+    }
+
+    /// What the load cost beyond the arena (CUDA context, cuBLAS workspace,
+    /// allocator slack), at most [`LOAD_OVERHEAD_MAX_MB`]: the free-memory
+    /// difference around a load also counts whatever the desktop allocated
+    /// meanwhile (149: 2129 MB 'overhead' at one load, 34 at another).
+    pub fn overhead_mb(&self) -> u64 {
+        self.load_cost_mb.map_or(0, |c| c.saturating_sub(self.arena_mb())).min(LOAD_OVERHEAD_MAX_MB)
+    }
+
+    /// Everything the load costs that does not scale with the context.
     pub fn fixed_mb(&self) -> u64 {
-        let arena = self.weights_mb + self.kv_mb + self.state_mb + self.activations_mb;
-        self.load_cost_mb.unwrap_or(arena).max(arena).saturating_sub(self.kv_mb)
+        self.arena_mb() - self.kv_mb + self.overhead_mb()
     }
 
     pub fn line(&self) -> String {
@@ -149,7 +215,14 @@ impl LlmMemory {
 
 pub fn note_llm_memory(memory: LlmMemory) {
     eprintln!("[gpu-yield] {}", memory.line());
+    let mut memory = memory;
     let mut all = LLM_MEMORY.lock().unwrap();
+    // The overhead is the smallest seen: a larger reading is the desktop
+    // allocating during that load, not the model.
+    if let Some(prev) = all.iter().find(|m| m.model == memory.model) {
+        let overhead = memory.overhead_mb().min(prev.overhead_mb());
+        memory.load_cost_mb = Some(memory.arena_mb() + overhead);
+    }
     all.retain(|m| m.model != memory.model);
     all.push(memory);
     drop(all);
@@ -225,23 +298,16 @@ pub struct Plan {
     pub short_mb: u64,
 }
 
-/// The cheapest steps that free `wanted_mb`: the context first, then idle
-/// side models (largest first), and the chat model itself only when
-/// `allow_unload` and still short.
+/// The cheapest steps that free `wanted_mb`: idle side models first (largest
+/// first; they load again on their next request and the chat model is not
+/// touched), then ONE context cut that frees what is still missing plus
+/// [`HEADROOM_MB`] (so a second cut right after is not needed; never under
+/// [`YIELD_FLOOR`]), and the chat model itself only when `allow_unload` and
+/// still short.
 pub fn plan(chat: Option<&ChatFacts>, residents: &[Resident], wanted_mb: u64, allow_unload: bool) -> Plan {
     let mut out = Plan::default();
     if wanted_mb == 0 {
         return out;
-    }
-    if let Some(chat) = chat.filter(|c| c.kv_bytes_per_token > 0) {
-        let tokens = (wanted_mb * MB).div_ceil(chat.kv_bytes_per_token);
-        let floor = chat.min_context.min(chat.context);
-        let to = (u64::from(chat.context).saturating_sub(tokens) as u32 / CONTEXT_STEP * CONTEXT_STEP).max(floor);
-        if to < chat.context {
-            let frees_mb = u64::from(chat.context - to) * chat.kv_bytes_per_token / MB;
-            out.steps.push(Step::ShrinkContext { model: chat.model.clone(), from: chat.context, to, frees_mb });
-            out.frees_mb += frees_mb;
-        }
     }
     let mut idle: Vec<&Resident> = residents.iter().filter(|r| !r.busy && r.mb > 0).collect();
     idle.sort_by(|a, b| b.mb.cmp(&a.mb).then_with(|| a.model.cmp(&b.model)));
@@ -251,6 +317,19 @@ pub fn plan(chat: Option<&ChatFacts>, residents: &[Resident], wanted_mb: u64, al
         }
         out.steps.push(Step::Unload { model: r.model.clone(), frees_mb: r.mb });
         out.frees_mb += r.mb;
+    }
+    if out.frees_mb < wanted_mb {
+        if let Some(chat) = chat.filter(|c| c.kv_bytes_per_token > 0) {
+            let missing = wanted_mb - out.frees_mb + HEADROOM_MB;
+            let tokens = (missing * MB).div_ceil(chat.kv_bytes_per_token);
+            let floor = chat.min_context.max(YIELD_FLOOR).min(chat.context);
+            let to = (u64::from(chat.context).saturating_sub(tokens) as u32 / CONTEXT_STEP * CONTEXT_STEP).max(floor);
+            if to < chat.context {
+                let frees_mb = u64::from(chat.context - to) * chat.kv_bytes_per_token / MB;
+                out.steps.push(Step::ShrinkContext { model: chat.model.clone(), from: chat.context, to, frees_mb });
+                out.frees_mb += frees_mb;
+            }
+        }
     }
     if out.frees_mb < wanted_mb && allow_unload {
         if let Some(chat) = chat {
@@ -273,6 +352,8 @@ pub fn plan(chat: Option<&ChatFacts>, residents: &[Resident], wanted_mb: u64, al
 /// `min_context` fits: the UI has priority, the model is not loaded.
 pub fn fit_context(memory: &LlmMemory, free_mb: u64, reserve_mb: u64, wanted: u32, min_context: u32) -> Result<u32, String> {
     let fixed = memory.fixed_mb();
+    let reserve_mb = if reserve_mb > 0 { reserve_mb + HEADROOM_MB } else { 0 };
+    let min_context = min_context.max(YIELD_FLOOR.min(wanted));
     let room_mb = free_mb.saturating_sub(reserve_mb).saturating_sub(fixed);
     let fits = if memory.kv_bytes_per_token == 0 {
         u64::from(wanted)
@@ -310,6 +391,46 @@ pub fn admit(model: &str, free_mb: u64, need_mb: u64, reserve_mb: u64) -> Result
     }
 }
 
+/// The registry ids that are `model`'s quantised variant (same family, smaller), in
+/// the order a job tries them: `<model>-q4`, `<model>-q4-24g`.
+pub fn variant_ids(model: &str) -> [String; 2] {
+    [format!("{model}-q4"), format!("{model}-q4-24g")]
+}
+
+/// Whether a job asking for a model needing `asked_mb` runs its quantised variant
+/// (needing `variant_mb`) instead: when `asked` cannot run on this card at all
+/// (`asked_mb` None), or does not fit in `room_mb` (free memory plus what idle
+/// residents give back) next to the UI's `reserve_mb`. Unknown room (no NVML):
+/// the job runs what it asked for.
+pub fn use_variant(asked_mb: Option<u64>, variant_mb: u64, room_mb: Option<u64>, reserve_mb: u64) -> bool {
+    match (asked_mb, room_mb) {
+        (None, _) => true,
+        (Some(_), None) => false,
+        (Some(asked), Some(room)) => asked.saturating_add(reserve_mb) > room && variant_mb < asked,
+    }
+}
+
+/// What the hub's memory policy did lately, for the panel (`GET /control` "policy").
+static POLICY: Mutex<Vec<(std::time::Instant, String)>> = Mutex::new(Vec::new());
+
+/// Say a policy decision: a variant ran for a model that did not fit, or an idle chat
+/// model was unloaded for a job. Kept: the last 4.
+pub fn note_policy(text: String) {
+    eprintln!("[gpu-policy] {text}");
+    let mut notes = POLICY.lock().unwrap();
+    notes.push((std::time::Instant::now(), text));
+    let n = notes.len();
+    if n > 4 {
+        notes.drain(..n - 4);
+    }
+}
+
+/// The policy notes, newest first, with their age in ms.
+pub fn policy_notes() -> Vec<(u64, String)> {
+    let notes = POLICY.lock().unwrap();
+    notes.iter().rev().map(|(at, text)| (at.elapsed().as_millis() as u64, text.clone())).collect()
+}
+
 pub fn not_enough_message(model: &str, free_mb: u64, reserve_mb: u64, need_mb: u64) -> String {
     format!(
         "not enough GPU memory for {model}, UI has priority: it needs {need_mb} MB, {free_mb} MB are free and the UI keeps {reserve_mb} MB"
@@ -331,24 +452,58 @@ mod tests {
     }
 
     #[test]
-    fn a_small_request_shrinks_the_context_and_keeps_the_model() {
-        let p = plan(Some(&qwen()), &[side("whisper", 1700, false)], 500, false);
+    fn a_model_that_does_not_fit_next_to_the_ui_runs_its_q4_variant() {
+        assert_eq!(variant_ids("flux1-schnell"), ["flux1-schnell-q4", "flux1-schnell-q4-24g"]);
+        // 149: flux1-schnell 21504 MB, 21872 MB free, the UI keeps 1536 MB; the q4 needs 18432 MB
+        assert!(use_variant(Some(21_504), 18_432, Some(21_872), 1_536));
+        // a 96 GB card runs what was asked for
+        assert!(!use_variant(Some(21_504), 18_432, Some(90_000), 1_536));
+        // a model this card cannot hold at all
+        assert!(use_variant(None, 18_432, Some(21_872), 1_536));
+        // no NVML: no guessing
+        assert!(!use_variant(Some(21_504), 18_432, None, 1_536));
+    }
+
+    #[test]
+    fn policy_notes_keep_the_last_four_newest_first() {
+        for i in 0..6 {
+            note_policy(format!("note {i}"));
+        }
+        let notes: Vec<String> = policy_notes().into_iter().map(|(_, t)| t).filter(|t| t.starts_with("note ")).collect();
+        assert_eq!(notes, ["note 5", "note 4", "note 3", "note 2"]);
+    }
+
+    #[test]
+    fn idle_side_models_go_before_the_chat_model_is_touched() {
+        // the 149 case: a ~300 MB ask with Whisper idle costs no chat reload at all
+        let p = plan(Some(&qwen()), &[side("whisper", 1700, false)], 300, false);
+        assert_eq!(p.steps, vec![Step::Unload { model: "whisper".into(), frees_mb: 1700 }]);
+    }
+
+    #[test]
+    fn a_small_request_cuts_the_context_once_with_headroom() {
+        let p = plan(Some(&qwen()), &[], 300, false);
         assert_eq!(p.steps.len(), 1, "{p:?}");
         let Step::ShrinkContext { from, to, frees_mb, .. } = &p.steps[0] else { panic!("{p:?}") };
         assert_eq!((*from, *to % CONTEXT_STEP), (49152, 0));
-        assert!(*frees_mb >= 500 && *to >= 32768, "cut only what is asked: {to} frees {frees_mb}");
+        // 300 asked + 512 headroom: one cut big enough that the next small ask is not short
+        assert!(*frees_mb >= 300 + HEADROOM_MB && *to >= 24576, "{to} frees {frees_mb}");
         assert_eq!(p.short_mb, 0);
     }
 
     #[test]
-    fn the_context_never_goes_under_its_minimum_then_idle_models_go() {
+    fn the_context_never_goes_under_the_floor() {
         let p = plan(Some(&qwen()), &[side("kokoro", 400, false), side("whisper", 1700, false), side("flux", 9000, true)], 3000, false);
-        let Step::ShrinkContext { to, .. } = &p.steps[0] else { panic!("{p:?}") };
-        assert_eq!(*to, 2048);
-        // 47104 tokens x 36 KiB = 1661 MB, then the larger idle model, then the next
-        assert_eq!(p.steps[1], Step::Unload { model: "whisper".into(), frees_mb: 1700 });
+        assert_eq!(p.steps[0], Step::Unload { model: "whisper".into(), frees_mb: 1700 });
+        assert_eq!(p.steps[1], Step::Unload { model: "kokoro".into(), frees_mb: 400 });
+        let Step::ShrinkContext { to, .. } = &p.steps[2] else { panic!("{p:?}") };
+        assert_eq!(*to, YIELD_FLOOR, "never under 8192 (149 went to 2048)");
         assert!(!p.steps.iter().any(|s| matches!(s, Step::Unload { model, .. } if model == "flux")), "busy models stay");
-        assert!(p.frees_mb >= 3000 && p.short_mb == 0, "{p:?}");
+        // a cut from 12288 for 307 MB stays at the floor, it does not go to 2048
+        let mut small = qwen();
+        small.context = 12288;
+        let p = plan(Some(&small), &[], 307, false);
+        assert!(matches!(&p.steps[..], [Step::ShrinkContext { to: 8192, .. }]), "{p:?}");
     }
 
     #[test]
@@ -387,14 +542,15 @@ mod tests {
     #[test]
     fn the_context_is_sized_to_what_is_left_after_the_ui_reserve() {
         let m = mem();
-        assert_eq!(m.fixed_mb(), 20_400 - 1_734);
-        // the whole card minus the UI's 3 GB: the configured window fits
+        // arena 18734 + overhead 1666 capped at 1024, minus the KV
+        assert_eq!(m.fixed_mb(), 18_734 - 1_734 + LOAD_OVERHEAD_MAX_MB);
+        // the whole card minus the UI's reserve and headroom: the configured window fits
         assert_eq!(fit_context(&m, 23_000, 1_500, 49152, 2048), Ok(49152));
-        // 600 MB left over the fixed part: ~16.6k tokens, cut to a whole step
-        let c = fit_context(&m, m.fixed_mb() + 1_500 + 600, 1_500, 49152, 2048).unwrap();
+        // 600 MB over the fixed part, the reserve and the headroom: ~16.6k tokens, a whole step
+        let c = fit_context(&m, m.fixed_mb() + 1_500 + HEADROOM_MB + 600, 1_500, 49152, 2048).unwrap();
         assert_eq!(c, 16384);
-        // not even the minimum window: refused, with the UI named
-        let e = fit_context(&m, m.fixed_mb() + 1_000, 1_500, 49152, 2048).unwrap_err();
+        // not even the floor window: refused, with the UI named
+        let e = fit_context(&m, m.fixed_mb() + 1_500 + HEADROOM_MB + 200, 1_500, 49152, 2048).unwrap_err();
         assert!(e.contains("UI has priority"), "{e}");
     }
 
@@ -423,9 +579,9 @@ mod tests {
         assert_eq!(llm_memory().unwrap().model, "qwen3.5-4b");
         assert_eq!(llm_memory_of("qwen3.8-27b").unwrap().weights_mb, 15_700);
         // the 4B next to a 4K desktop with 6 GB free: the whole 80k window fits
-        assert_eq!(fit_context(&small, 6_000 + 1_536, 1_536, 81920, 2048), Ok(81920));
-        // the 27B with 1.3 GB free while it holds 20.4 GB: ~42k fits, in whole steps
-        let f = fit_context(&mem(), 1_300 + 20_400, 1_536, 81920, 2048).unwrap();
+        assert_eq!(fit_context(&small, 6_000 + 1_536 + HEADROOM_MB, 1_536, 81920, 2048), Ok(81920));
+        // the 27B with 1.1 GB free while it holds 20.4 GB: ~40k fits, in whole steps
+        let f = fit_context(&mem(), 1_100 + 20_400, 1_536, 81920, 2048).unwrap();
         assert!(f % CONTEXT_STEP == 0 && (32768..49152).contains(&f), "{f}");
     }
 
@@ -434,13 +590,43 @@ mod tests {
         let m = mem(); // fixed 18666 MB, 36 KiB/token
         // cut to 8192 (holding fixed + 289 MB); the UI let go of 2 GB: back to the configured 49152
         let held = m.fixed_mb() + 289;
-        assert_eq!(grow_target(&m, 4_300, held, 1_536, 49152, 8192, 2048), Some(49152));
-        // only ~1 GB over the reserve: part of the way, in whole steps
-        let to = grow_target(&m, 1_536 + 1_000, held, 1_536, 49152, 8192, 2048).unwrap();
+        assert_eq!(grow_target(&m, 4_800, held, 1_536, 49152, 8192, 2048), Some(49152));
+        // only ~1 GB over the reserve and headroom: part of the way, in whole steps
+        let to = grow_target(&m, 1_536 + HEADROOM_MB + 1_000, held, 1_536, 49152, 8192, 2048).unwrap();
         assert!(to % CONTEXT_STEP == 0 && to > 8192 && to < 49152, "{to}");
         // no room for one more step: stays
         assert_eq!(grow_target(&m, 1_536, held, 1_536, 49152, 8192, 2048), None);
         assert_eq!(grow_target(&m, 30_000, held, 1_536, 49152, 49152, 2048), None, "already configured");
+    }
+
+    #[test]
+    fn relief_waits_out_the_cooldown_and_a_later_yield_supersedes_it() {
+        note_yield();
+        let (at, epoch) = relief_schedule();
+        assert!(at >= std::time::Instant::now() + RELIEF_COOLDOWN - std::time::Duration::from_secs(1));
+        assert!(relief_current(epoch));
+        note_yield();
+        assert!(!relief_current(epoch), "a yield after the relief was asked drops it");
+        let refusal = crate::error::AssetAiError::Unavailable(not_enough_message("q", 1, 2, 3));
+        assert!(is_ui_priority_refusal(&refusal));
+        assert_eq!(smallest_load_mb(&mem()), mem().fixed_mb() + 8192 * 36_992 / MB);
+    }
+
+    #[test]
+    fn the_149_refusal_numbers_fit_now() {
+        // 149, 15:00: the 27B cut to 16384 measured 'whole load 19711 MB' while the
+        // desktop allocated; the hub then wanted 19439 MB for the floor and refused
+        // with 21256 MB free next to a 2048 MB reserve+headroom.
+        let first = LlmMemory { model: "q27".into(), context: 49152, kv: "q8".into(), weights_mb: 15702, kv_mb: 1632,
+            kv_bytes_per_token: 34816, state_mb: 891, activations_mb: 513, load_cost_mb: Some(19178) };
+        let polluted = LlmMemory { context: 16384, kv_mb: 544, state_mb: 823, load_cost_mb: Some(19711), ..first.clone() };
+        note_llm_memory(first);
+        note_llm_memory(polluted);
+        let m = llm_memory_of("q27").unwrap();
+        assert_eq!(m.overhead_mb(), 440, "the smaller overhead seen wins");
+        assert!(smallest_load_mb(&m) < 18_000, "{}", smallest_load_mb(&m));
+        let fit = fit_context(&m, 21_256, 1_536, 49152, 2048).unwrap();
+        assert!(fit >= 32768, "sized to the room, not refused: {fit}");
     }
 
     #[test]

@@ -104,6 +104,9 @@ pub struct GenerateParams {
     pub stream: bool,
     /// Speech language hint (`language` on the wire); "" = model default.
     pub language: String,
+    /// The request's `domain` as given: speech-to-text reads its output mode
+    /// from it (`words`, `force_align`; "" = the plain transcript).
+    pub request_domain: String,
     /// 8-slot emotion vector (indextts), validated to length 8 and clamped
     /// per-slot to [0, 1.2]; `None` = neutral.
     pub emotion: Option<[f32; 8]>,
@@ -432,6 +435,7 @@ impl GenerateParams {
             text: request.text.clone().unwrap_or_default(),
             voice: request.voice.clone().unwrap_or_default(),
             language: request.language.clone().unwrap_or_default(),
+            request_domain: request.domain.clone().unwrap_or_default(),
             stream: request.stream.unwrap_or(false),
             speed: if speed.is_finite() && speed > 0.0 {
                 speed.clamp(0.25, 4.0) as f32

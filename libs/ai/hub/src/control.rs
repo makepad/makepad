@@ -327,3 +327,29 @@ mod tests {
         assert!(WatchSlot::take().is_some());
     }
 }
+
+/// Whether a running job's `stage` is still getting its model ready (a download, a
+/// weight load, making room for it) rather than generating with it.
+pub fn is_load_stage(stage: &str) -> bool {
+    let stage = stage.trim_start();
+    stage.is_empty()
+        || stage.starts_with("load")
+        || stage.starts_with("download")
+        || stage.starts_with("evict")
+        || stage.starts_with("using ")
+        || stage.starts_with("queued-for-memory")
+        || stage.contains("switching models")
+}
+
+#[cfg(test)]
+mod load_stage_tests {
+    #[test]
+    fn load_stages_are_told_from_generation() {
+        for stage in ["", "load t5 0.5/4.6GB", "download", "using flux1-schnell-q4: …", "queued-for-memory: need 1 MB", "switching models: evicting x"] {
+            assert!(super::is_load_stage(stage), "{stage}");
+        }
+        for stage in ["denoise 3/4", "text-encode t5 block 4/24", "decode", "generate 120/400"] {
+            assert!(!super::is_load_stage(stage), "{stage}");
+        }
+    }
+}

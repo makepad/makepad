@@ -1,4 +1,16 @@
-//! Native BS-RoFormer backend: decoded 44.1 kHz stereo PCM in, four stems out.
+//! Native BS-RoFormer backend: a song in, four stems out.
+//!
+//! Input (`input_b64`): any audio file the in-repo decoders read (WAV, MP3,
+//! Ogg Vorbis, FLAC; sniffed from the bytes), so a library sends the track
+//! it already stores instead of a decoded WAV several times its size. Mono
+//! plays to both ears; another rate is resampled to the model's 44.1 kHz.
+//!
+//! Output, by `codec`:
+//! - absent: one [`STEMS_ARTIFACT_CONTENT_TYPE`] bundle, planar stereo f32
+//!   (exact samples, for a pipeline that keeps working on them);
+//! - `"ogg"`: four `audio/ogg` Vorbis artifacts in model order (drums, bass,
+//!   other, vocals) at [`OGG_STEM_QUALITY`], the form a library stores
+//!   (about 4% of the f32 bundle's bytes).
 
 use crate::backend::{
     ArtifactData, BackendCtx, CancelToken, ContentBackend, GenerateParams, ProgressSink,
@@ -11,6 +23,90 @@ use std::sync::mpsc;
 use std::thread;
 
 const MAX_TRACK_FRAMES: usize = SAMPLE_RATE as usize * 60 * 20;
+/// The decode bound before resampling: twenty minutes at 48 kHz.
+const MAX_DECODED_FRAMES: usize = 48_000 * 60 * 20;
+
+/// Vorbis quality of an Ogg stem: transparent on separated material (a
+/// stem is a sum of artifacts of its own, and a lower setting stacks more),
+/// the setting a library's stem side channels are stored at.
+pub const OGG_STEM_QUALITY: f32 = 0.85;
+
+/// What a stems job hands back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StemsOutput {
+    Bundle,
+    Ogg,
+}
+
+impl StemsOutput {
+    fn of(codec: &str) -> Result<StemsOutput, AssetAiError> {
+        match codec.trim().to_ascii_lowercase().as_str() {
+            "" => Ok(StemsOutput::Bundle),
+            "ogg" | "vorbis" => Ok(StemsOutput::Ogg),
+            other => Err(AssetAiError::Params(format!("stems codec {other:?}: the stems are the f32 bundle (no codec) or \"ogg\""))),
+        }
+    }
+}
+
+/// The request's song as the model's 44.1 kHz stereo.
+fn decode_track(bytes: &[u8]) -> Result<StereoBuf, AssetAiError> {
+    use makepad_audio_decode::{decode_audio_limited, sniff, Limits};
+    let format = sniff(bytes)
+        .ok_or_else(|| AssetAiError::Params("stems input is not audio the hub reads (WAV, MP3, Ogg Vorbis or FLAC)".to_string()))?;
+    let audio = decode_audio_limited(bytes, format, Limits::with_max_frames(MAX_DECODED_FRAMES))
+        .map_err(|error| AssetAiError::Params(format!("stems input: {error}")))?;
+    if audio.channels == 0 || audio.rate == 0 || audio.frames() == 0 {
+        return Err(AssetAiError::Params("stems input holds no audio".to_string()));
+    }
+    let left = audio.channel(0);
+    let right = if audio.channels > 1 { audio.channel(1) } else { left.clone() };
+    drop(audio.pcm_interleaved_f32);
+    let (left, right) = if audio.rate == SAMPLE_RATE {
+        (left, right)
+    } else {
+        (
+            crate::resample::resample_channel(&left, audio.rate, SAMPLE_RATE),
+            crate::resample::resample_channel(&right, audio.rate, SAMPLE_RATE),
+        )
+    };
+    if left.len() != right.len() || left.is_empty() || left.len() > MAX_TRACK_FRAMES {
+        return Err(AssetAiError::Params(format!(
+            "stems input frame count {} is outside 1..={MAX_TRACK_FRAMES}",
+            left.len()
+        )));
+    }
+    Ok(StereoBuf { left, right })
+}
+
+/// Four Ogg Vorbis stems in model order, one encoder thread each.
+fn encode_ogg_stems(stems: &StemSet) -> Result<Vec<ArtifactData>, AssetAiError> {
+    let options = makepad_audio_encode::EncodeOptions { quality: OGG_STEM_QUALITY, threads: 1, tags: Vec::new() };
+    let encoded: Vec<Result<Vec<u8>, String>> = thread::scope(|scope| {
+        let handles: Vec<_> = stems
+            .iter()
+            .map(|stem| {
+                let options = options.clone();
+                scope.spawn(move || {
+                    let mut pcm = Vec::with_capacity(stem.left.len() * 2);
+                    for (left, right) in stem.left.iter().zip(&stem.right) {
+                        pcm.push(*left);
+                        pcm.push(*right);
+                    }
+                    makepad_audio_encode::encode_vorbis(SAMPLE_RATE, 2, &pcm, &options).map_err(|error| format!("{error:?}"))
+                })
+            })
+            .collect();
+        handles.into_iter().map(|handle| handle.join().unwrap_or_else(|_| Err("encoder panicked".to_string()))).collect()
+    });
+    encoded
+        .into_iter()
+        .map(|bytes| {
+            bytes
+                .map(|bytes| ArtifactData { content_type: "audio/ogg", ext: "ogg", bytes })
+                .map_err(|error| AssetAiError::Backend(format!("stem encode: {error}")))
+        })
+        .collect()
+}
 
 pub struct StemsBackend {
     model_id: String,
@@ -206,29 +302,19 @@ impl ContentBackend for StemsBackend {
         cancel: &CancelToken,
     ) -> Result<Vec<ArtifactData>, AssetAiError> {
         cancel.check()?;
+        let output = StemsOutput::of(&params.codec)?;
         if params.input_bytes.is_empty() {
             return Err(AssetAiError::Params(
-                "stems requires a 44.1 kHz stereo PCM WAV in input_b64".to_string(),
+                "stems requires the song as audio (WAV, MP3, Ogg Vorbis or FLAC) in input_b64".to_string(),
             ));
         }
-        progress("decode 44.1 kHz stereo PCM", 0.01);
-        let (left, right, rate) = crate::wav::decode_wav_to_stereo_f32(&params.input_bytes)
-            .map_err(|error| AssetAiError::Params(format!("stems WAV: {error}")))?;
-        if rate != SAMPLE_RATE {
-            return Err(AssetAiError::Params(format!(
-                "stems input rate is {rate} Hz; expected {SAMPLE_RATE} Hz"
-            )));
-        }
-        if left.len() != right.len() || left.is_empty() || left.len() > MAX_TRACK_FRAMES {
-            return Err(AssetAiError::Params(format!(
-                "stems input frame count {} is outside 1..={MAX_TRACK_FRAMES}",
-                left.len()
-            )));
-        }
+        progress("decode the song", 0.01);
+        let track = decode_track(&params.input_bytes)?;
+        cancel.check()?;
         let worker = self.worker.as_ref().ok_or_else(|| {
             AssetAiError::Backend("stems generate called before ensure_loaded".to_string())
         })?;
-        let events = worker.separate(StereoBuf { left, right }, cancel)?;
+        let events = worker.separate(track, cancel)?;
         let stems = loop {
             match events.recv() {
                 Ok(WorkerEvent::Progress(done, total)) => {
@@ -250,6 +336,12 @@ impl ContentBackend for StemsBackend {
             }
         };
         cancel.check()?;
+        if output == StemsOutput::Ogg {
+            progress("encode Ogg stems", 0.98);
+            let artifacts = encode_ogg_stems(&stems)?;
+            progress("done", 1.0);
+            return Ok(artifacts);
+        }
         progress("serialize stems", 0.98);
         let [drums, bass, other, vocals] = stems;
         let frames = drums.left.len();
@@ -277,3 +369,43 @@ impl ContentBackend for StemsBackend {
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_codec_names_the_answer() {
+        assert_eq!(StemsOutput::of("").unwrap(), StemsOutput::Bundle);
+        assert_eq!(StemsOutput::of("OGG").unwrap(), StemsOutput::Ogg);
+        assert_eq!(StemsOutput::of("vorbis").unwrap(), StemsOutput::Ogg);
+        assert!(StemsOutput::of("h265").is_err());
+    }
+
+    #[test]
+    fn a_mono_48k_song_arrives_as_44k_stereo() {
+        let mono: Vec<f32> = (0..48_000).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let track = decode_track(&crate::wav::encode_wav_pcm16_mono(&mono, 48_000)).unwrap();
+        assert_eq!(track.left.len(), 44_100);
+        assert_eq!(track.left, track.right);
+        assert!(decode_track(b"not audio at all").is_err());
+    }
+
+    #[test]
+    fn ogg_stems_come_back_in_model_order() {
+        let tone = |level: f32| (0..44_100).map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * level).collect::<Vec<f32>>();
+        let stem = |level: f32| StereoBuf { left: tone(level), right: tone(level) };
+        let stems: StemSet = [stem(0.1), stem(0.2), stem(0.3), stem(0.4)];
+        let artifacts = encode_ogg_stems(&stems).unwrap();
+        assert_eq!(artifacts.len(), 4);
+        for (artifact, level) in artifacts.iter().zip([0.1f32, 0.2, 0.3, 0.4]) {
+            assert_eq!(artifact.content_type, "audio/ogg");
+            let audio = makepad_audio_decode::decode_any(&artifact.bytes).unwrap();
+            assert_eq!((audio.rate, audio.channels), (SAMPLE_RATE, 2));
+            let samples = &audio.pcm_interleaved_f32;
+            let rms = (samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32).sqrt();
+            let want = level / std::f32::consts::SQRT_2;
+            assert!((rms - want).abs() < want * 0.2, "rms {rms} for a tone of {level}");
+        }
+    }
+}

@@ -384,6 +384,9 @@ fn install(home: &Path, entry: &ModelEntry, cancel: &CancelToken, publish: &dyn 
     Ok(())
 }
 
+/// Where the Kokoro G2P lexicon tables are hosted.
+const G2P_BASE_URL: &str = "https://makepad.nl/models/speech/kokoro-g2p";
+
 /// The phone translator's models, all converted by our own tools: translation
 /// (Qwen3.5-4B, mix B incl. its MTP head, 2.84 GB), its vision tower (Q8_0)
 /// with the text-line detector (PP-OCRv5 mobile, 4.7 MB),
@@ -407,6 +410,13 @@ pub fn phone_translator_catalogue(lan_hub: Option<&str>, mirror: &str) -> Vec<Mo
         urls: urls(sha256, name),
     };
     let voice = |name: &'static str, sha256: &'static str| file("tts", name, 522304, sha256);
+    // The G2P lexicon tables (makepad_ai_speech::g2p::data), next to the
+    // models; also on makepad.nl, which hosts them whatever the mirror holds.
+    let g2p = |name: &'static str, size: u64, sha256: &'static str| {
+        let mut f = file("tts", name, size, sha256);
+        f.urls.push(format!("{G2P_BASE_URL}/{name}"));
+        f
+    };
     vec![
         ModelEntry {
             id: "translate",
@@ -449,6 +459,9 @@ pub fn phone_translator_catalogue(lan_hub: Option<&str>, mirror: &str) -> Vec<Mo
                 voice("zf_001.mkvoice", "442ff04974ea92b772ae90f5a05d07ab2d1da0df7113c6832df581e36b389af5"),
                 voice("zf_002.mkvoice", "4eac26a680b278e198414998e34dc826d75ded2298b0177a360f91861809e0a7"),
                 voice("zf_003.mkvoice", "dee3446dfa14706f0ea2310ab08381349b80b626756ac2dee11f9c5070041f02"),
+                g2p("us_lexicon.bin", 2917518, "294682efc873a8201106f4dddfcb8e1b16c5d47c0fb8ddaf00c351d62212245c"),
+                g2p("zh_pinyin.bin", 1393676, "4d266969277671e6f3238cde2211ab5c6956fc86e08e71e3d9a5f5fdfa3e0471"),
+                g2p("zh_words.bin", 1838159, "ab066b416e8952f97791e09c3770e417ba111df80c13336eb76d4fac0c008169"),
             ],
             needs: vec![],
         },
@@ -582,6 +595,18 @@ mod tests {
         assert_eq!(wait_for(&store, "m", |p| matches!(p, Phase::Ready | Phase::Failed(_))), Phase::Ready);
         assert_eq!(std::fs::read(home.join("weights/llm/c.bin")).unwrap(), body);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[cfg(feature = "tts")]
+    #[test]
+    fn the_speak_entry_carries_the_g2p_tables() {
+        let catalogue = phone_translator_catalogue(None, "https://mirror.invalid");
+        let speak = catalogue.iter().find(|m| m.id == "speak").unwrap();
+        for table in makepad_ai_speech::g2p::data::FILES {
+            let file = speak.files.iter().find(|f| f.name == table.name).unwrap();
+            assert_eq!((file.kind, file.size, file.sha256), ("tts", table.size, table.sha256));
+            assert_eq!(file.urls.last(), Some(&table.url()));
+        }
     }
 
     #[test]

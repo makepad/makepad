@@ -269,6 +269,12 @@ impl FleetPickCache {
             .any(|(b, until)| b == base && Instant::now() < *until)
     }
 
+    /// Forget which nodes failed: the network changed (another Wi-Fi, a
+    /// hotspot), so what was unreachable a moment ago may answer now.
+    pub fn forget_dead(&self) {
+        self.lock().dead_until.clear();
+    }
+
     fn mark_dead(&self, base: &str) {
         let until = Instant::now() + DEAD_TTL;
         let mut state = self.lock();

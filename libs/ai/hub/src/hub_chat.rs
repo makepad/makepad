@@ -632,6 +632,8 @@ fn run_proxy<T: FleetTransport>(
             let mut gen_tokens = 0u32;
             let mut pending_visible = String::new();
             let mut has_visible_text = false;
+            let mut last_progress = Instant::now();
+            let mut last_note = String::from("submitted");
             'turn: loop {
             if cancel.load(Ordering::Relaxed) {
                 provider.cancel();
@@ -657,7 +659,25 @@ fn run_proxy<T: FleetTransport>(
                 }
             }
             let mut done = false;
-            for event in provider.poll() {
+            let events = provider.poll();
+            if !events.is_empty() {
+                last_progress = Instant::now();
+            } else if last_progress.elapsed() >= STALL && !last_note.contains("queued") {
+                // Nothing came from the hub for a while: say so (with the last
+                // thing it said) and give the line back, instead of a bar that
+                // never moves. The hub's own job is cancelled; nothing is retried.
+                provider.cancel();
+                send(ChatEvent::Failed(format!(
+                    "{}: no progress from the AI hub for {} s (last: {last_note}); send the message again to retry",
+                    route.label(),
+                    STALL.as_secs()
+                )));
+                return match wait_next_user(msg_rx, images) {
+                    Some(msg) => ProxyExit::Reelect(msg),
+                    None => ProxyExit::Ended,
+                };
+            }
+            for event in events {
                 match event {
                     ProviderEvent::Delta(text) => {
                         let visible = splitter.push(&text);
@@ -674,10 +694,10 @@ fn run_proxy<T: FleetTransport>(
                         }
                     }
                     ProviderEvent::Serving(facts) => gen_tokens = facts.gen_tokens,
-                    ProviderEvent::Status { note, permille } => send(ChatEvent::Loading {
-                        phase: note,
-                        fraction: permille as f64 / 1000.0,
-                    }),
+                    ProviderEvent::Status { note, permille } => {
+                        last_note = note.clone();
+                        send(ChatEvent::Loading { phase: note, fraction: permille as f64 / 1000.0 })
+                    }
                     ProviderEvent::Done { text } => {
                         let cut_call = splitter.unfinished_call();
                         let (visible, bodies) = splitter.finish();
@@ -762,6 +782,13 @@ fn run_proxy<T: FleetTransport>(
         }
     }
 }
+
+/// How long a turn may go without any event from the hub (a status change,
+/// text, the end) before the person is told and can send again. Not a limit
+/// on work: a loading model and a long prefill report progress all along, and
+/// a turn waiting in the hub's queue (behind a long image or music job) is
+/// not stalled.
+const STALL: Duration = Duration::from_secs(60);
 
 /// Tokens kept free for the answer when a conversation is fitted to a node.
 const ANSWER_ROOM: usize = 4096;

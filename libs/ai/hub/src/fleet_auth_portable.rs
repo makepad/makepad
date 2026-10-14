@@ -32,3 +32,7 @@ pub fn mark_fleet_endpoint(_host_port: &str) {}
 pub fn is_fleet_endpoint(_host_port: &str) -> bool {
     false
 }
+
+pub fn same_node(_a: &str, _b: &str) -> bool {
+    false
+}

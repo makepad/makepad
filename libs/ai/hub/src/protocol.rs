@@ -1614,6 +1614,75 @@ pub struct TranscriptJson {
     pub language: Option<String>,
 }
 
+/// `domain: "words"` on an stt job: the transcript with every word timed
+/// from the decoder's cross-attention (DTW over the alignment heads), and
+/// each segment's text tokens, so a client can re-align the same text
+/// against a narrower window ([`ForceAlignRequestJson`]) without the
+/// transcription changing.
+pub const STT_MODE_WORDS: &str = "words";
+/// `domain: "force_align"` on an stt job: teacher-forced alignment of known
+/// token lists over windows of the input audio. The windows ride as the
+/// named input [`FORCE_ALIGN_WINDOWS_INPUT`] (`application/json`,
+/// [`ForceAlignRequestJson`]); the answer is one [`ForceAlignJson`].
+pub const STT_MODE_FORCE_ALIGN: &str = "force_align";
+pub const FORCE_ALIGN_WINDOWS_INPUT: &str = "windows";
+
+/// One word and when it is sung or spoken, in milliseconds.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct WordSpanJson {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    /// Mean attention mass of the word's tokens, 0..1: low means the model
+    /// was not looking at the audio when it placed the word.
+    pub score: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct AlignedSegmentJson {
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub text: String,
+    pub words: Vec<WordSpanJson>,
+    /// The segment's text token ids, in order.
+    pub tokens: Vec<i32>,
+}
+
+/// The artifact of a [`STT_MODE_WORDS`] job.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct AlignedTranscriptJson {
+    pub segments: Vec<AlignedSegmentJson>,
+}
+
+/// One teacher-forced window: input samples (at 16 kHz, after the job's
+/// downmix and resample) `start..end`, after `lead_pad` samples of silence.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ForceWindowJson {
+    pub start: u64,
+    pub end: u64,
+    pub lead_pad: u64,
+    pub tokens: Vec<i32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct ForceAlignRequestJson {
+    pub windows: Vec<ForceWindowJson>,
+}
+
+/// One window's words, times from the window's own start (its pad
+/// included); absent when the alignment failed.
+#[derive(Clone, Debug, PartialEq, SerJson, DeJson)]
+pub struct ForcedWindowJson {
+    pub words: Option<Vec<WordSpanJson>>,
+}
+
+/// The artifact of a [`STT_MODE_FORCE_ALIGN`] job: one entry per window, in
+/// request order.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct ForceAlignJson {
+    pub windows: Vec<ForcedWindowJson>,
+}
+
 // ---------------------------------------------------------------------------
 // Text-to-speech (speech domain) word timings artifact
 // ---------------------------------------------------------------------------

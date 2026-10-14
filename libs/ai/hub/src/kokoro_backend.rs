@@ -297,9 +297,14 @@ mod kokoro_synth {
             let total = spec.files.len();
             for (index, file) in spec.files.iter().enumerate() {
                 let Some(converted) = file.converted_path(cache_dir) else {
-                    // Old-style entry (pre-converted local file, no
-                    // converts_to): nothing to ensure — the resolution below
-                    // errors helpfully if it is missing.
+                    // A file used as downloaded (the G2P lexicon tables):
+                    // fetch and verify it (a no-op when the cache has it).
+                    // An old-style local entry (pre-converted file) has
+                    // nothing to fetch; the resolution below names it.
+                    if !file.local {
+                        ctx.downloader
+                            .ensure_file(file, cache_dir, ctx.download_progress, ctx.cancel)?;
+                    }
                     continue;
                 };
                 let upstream = file.dest_path(cache_dir);
@@ -339,6 +344,9 @@ mod kokoro_synth {
                     ))
                 })?;
             }
+
+            // The G2P tables, downloaded next to the converted weights.
+            makepad_ai_speech::g2p::data::load(&cache_dir.join("tts")).map_err(AssetAiError::Backend)?;
 
             // Resolve the model weights: cache first, then the makepad-tts
             // conventions (env / working dir / exe dir) as the dev fallback.

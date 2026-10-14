@@ -84,7 +84,9 @@ libs/ai/models/flux/assets/clip_merges_utf8.txt
   CLIP BPE merges table. CLIP (OpenAI) is MIT-licensed.
   Copyright (c) 2021 OpenAI.
 
-libs/ai/models/flux/assets/t5_tokenizer.json
+t5_tokenizer.json (downloaded with the FLUX.1 models from
+https://makepad.nl/models/flux/t5_tokenizer.json, see
+libs/ai/models/flux/src/t5.rs; not kept in this repository)
   T5 SentencePiece / HuggingFace tokenizer dump.
   T5 (Google) is Apache License 2.0.
   https://github.com/google-research/text-to-text-transfer-transformer
@@ -104,8 +106,14 @@ libs/ai/models/speech/src/g2p/zh/   Mandarin text-to-phoneme front end
   PaddlePaddle Authors); transcription.py from pinyin-to-ipa (MIT,
   Stefan Taubert).
 
-libs/ai/models/speech/data/zh_pinyin.bin, zh_words.bin
-  Packed by tools/build_zh_lexicon.py from three MIT-licensed sources:
+Kokoro G2P lexicon tables us_lexicon.bin, zh_pinyin.bin, zh_words.bin
+  Downloaded with the Kokoro model (https://makepad.nl/models/speech/kokoro-g2p/,
+  see libs/ai/models/speech/src/g2p/data.rs), not kept in this repository.
+  us_lexicon.bin is packed by libs/ai/models/speech/tools/build_lexicon.py
+  from misaki's us_gold.json (https://github.com/hexgrad/misaki, Apache
+  License 2.0, Hexgrad).
+  zh_pinyin.bin and zh_words.bin are packed by
+  libs/ai/models/speech/tools/build_zh_lexicon.py from three MIT-licensed sources:
   pinyin-data and phrase-pinyin-data (Copyright (c) mozillazg,
   https://github.com/mozillazg/pinyin-data and .../phrase-pinyin-data) and
   the word dictionary of jieba (Copyright (c) 2013 Sun Junyi,

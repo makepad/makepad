@@ -4,7 +4,7 @@
 pub(crate) const MAGIC: &[u8] = b"MKLEX\0\0\0";
 const ENTRY_SIZE: usize = 8;
 
-/// Sorted `key -> value` strings in one embedded byte slice.
+/// Sorted `key -> value` strings in one byte slice (a table [`super::data`] loaded).
 #[derive(Clone, Copy)]
 pub struct Packed(&'static [u8]);
 

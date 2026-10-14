@@ -525,6 +525,14 @@ impl JobStore {
         }
     }
 
+    /// The model the job runs on, when the hub ran another than it asked for (its
+    /// quantised variant): status `model` and eviction's busy list follow it.
+    pub fn set_model(&mut self, id: &str, model: &str) {
+        if let Some(job) = self.jobs.get_mut(id) {
+            job.model = model.to_string();
+        }
+    }
+
     /// The finished answer (see `JobStatusJson::text`). Called once, when the
     /// worker persists a text artifact — never from the streaming path, so a
     /// reader that only trusts `text` never sees a half-written reply.
@@ -997,6 +1005,7 @@ pub(crate) mod tests {
             voice: String::new(),
             stream: false,
             language: String::new(),
+            request_domain: String::new(),
             speed: 1.0,
             emotion: None,
             seconds: None,

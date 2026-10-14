@@ -7,7 +7,7 @@
 
 use crate::device::{Device, Result};
 use crate::kernel::Kernel;
-use makepad_script::shader_ir_compute::compile_compute_kernel;
+use makepad_script::shader_ir_compute::compile_compute_kernel_result;
 use makepad_script::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,7 +36,7 @@ impl Library {
     pub fn new(sources: &[(&str, &str)]) -> Result<Library> {
         let host = Box::leak(Box::new(ScriptVmHost::new(0i32, ())));
         let mut vm = ScriptVm { host: host.host_context(), bx: Box::new(ScriptVmBase::new()) };
-        vm.bx.captured_errors = Some(Vec::new());
+        vm.capture_errors();
         let mut kernels = HashMap::new();
         for (file, text) in sources {
             let code = format!("use mod.pod.*\nuse mod.math.*\nuse mod.shader\n{text}");
@@ -46,7 +46,7 @@ impl Library {
                 return Err(format!("{file}: {errors:?}"));
             }
             let obj = value.as_object().ok_or_else(|| format!("{file} must evaluate to an object of kernels"))?;
-            for entry in vm.bx.heap.map_entries_ordered(obj) {
+            for entry in vm.heap().map_entries_ordered(obj) {
                 if let (Some(name), Some(k)) = (entry.key.as_id(), entry.value.as_object()) {
                     kernels.insert(format!("{}", name), k);
                 }
@@ -71,13 +71,13 @@ impl Library {
     pub fn compile_constants(&mut self, name: &str, constants: &[(&str, u32)]) -> Result<makepad_script::shader_ir_compute::CompiledKernel> {
         let obj = *self.kernels.get(name).ok_or_else(|| format!("no kernel `{name}`"))?;
         let obj = if constants.is_empty() { obj } else {
-            let variant = self.vm.bx.heap.new_with_proto(obj.into());
+            let variant = self.vm.heap_mut().new_with_proto(obj.into());
             for (field, value) in constants {
-                self.vm.bx.heap.set_value(variant, LiveId::from_str(field).into(), (*value as f64).into(), NoTrap);
+                self.vm.heap_mut().set_value(variant, LiveId::from_str(field).into(), (*value as f64).into(), NoTrap);
             }
             variant
         };
-        let r = compile_compute_kernel(&mut self.vm, obj);
+        let r = compile_compute_kernel_result(&mut self.vm, obj).view().to_kernel();
         let errors = self.vm.take_errors();
         let k = r.map_err(|e| format!("kernel {name}: {e}"))?;
         if !errors.is_empty() {

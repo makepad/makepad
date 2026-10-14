@@ -5,9 +5,8 @@
 //! `tools/build_zh_lexicon.py`. A word is read the way pypinyin reads one:
 //! longest known phrase first, then each character's usual reading.
 
-use super::super::packed::Packed;
+use super::super::data;
 
-static PINYIN: Packed = Packed::new(include_bytes!("../../../data/zh_pinyin.bin"));
 const MAX_PHRASE_CHARS: usize = 12;
 
 /// One syllable per character of `word`, as `hang2` (tone digit last, ü as v,
@@ -21,7 +20,7 @@ pub fn syllables(word: &str) -> Vec<Option<&'static str>> {
         let longest = (i + MAX_PHRASE_CHARS).min(chars.len());
         for j in (i + 2..=longest).rev() {
             let phrase: String = chars[i..j].iter().collect();
-            if let Some(reading) = PINYIN.get(&phrase) {
+            if let Some(reading) = data::pinyin().get(&phrase) {
                 let parts: Vec<&'static str> = reading.split(' ').collect();
                 if parts.len() == j - i {
                     out.extend(parts.into_iter().map(Some));
@@ -34,7 +33,7 @@ pub fn syllables(word: &str) -> Vec<Option<&'static str>> {
         if matched {
             continue;
         }
-        out.push(PINYIN.get(&chars[i].to_string()));
+        out.push(data::pinyin().get(&chars[i].to_string()));
         i += 1;
     }
     out

@@ -1,4 +1,3 @@
-use crate::assets::T5_TOKENIZER_JSON;
 use crate::{DiffusionError, Result};
 use makepad_micro_serde::{DeJson, JsonValue};
 use std::collections::HashMap;
@@ -26,9 +25,67 @@ pub struct T5Tokenizer {
     unk_token_id: i32,
 }
 
+/// The T5 tokenizer table (`t5_tokenizer.json`, the HuggingFace dump of T5's
+/// SentencePiece model, Apache-2.0) is downloaded with the FLUX.1 models: the
+/// hub registry lists it at `tokenizers/t5_tokenizer.json` in the model cache,
+/// size- and sha256-pinned. Not kept in this repository.
+pub const T5_TOKENIZER_FILE: &str = "t5_tokenizer.json";
+pub const T5_TOKENIZER_URL: &str = "https://makepad.nl/models/flux/t5_tokenizer.json";
+pub const T5_TOKENIZER_SIZE: u64 = 2_424_064;
+pub const T5_TOKENIZER_SHA256: &str = "fe2ebbbbde2985be723e0ce18217853e4020c5e9d35bd07be2c27ab9d3ead57a";
+
+static T5_TOKENIZER_JSON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Load the downloaded table from a model cache (`<cache>/tokenizers/`).
+/// The first load in a process wins.
+pub fn load_tokenizer_from(cache_dir: &std::path::Path) -> Result<()> {
+    load_tokenizer(&cache_dir.join("tokenizers").join(T5_TOKENIZER_FILE))
+}
+
+pub fn load_tokenizer(path: &std::path::Path) -> Result<()> {
+    if T5_TOKENIZER_JSON.get().is_some() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(path).map_err(|err| {
+        if err.kind() == std::io::ErrorKind::NotFound {
+            DiffusionError::model(format!(
+                "T5 tokenizer not downloaded: {} is missing (an asset of the FLUX.1 models; download the model again)",
+                path.display()
+            ))
+        } else {
+            DiffusionError::model(format!("T5 tokenizer {}: {err}", path.display()))
+        }
+    })?;
+    let _ = T5_TOKENIZER_JSON.set(text);
+    Ok(())
+}
+
+/// Where the table is when nothing loaded it (the command-line tools and
+/// tests): `MAKEPAD_T5_TOKENIZER`, else the shared model cache
+/// `<MAKEPAD_HOME or ~/.makepad>/weights/tokenizers/t5_tokenizer.json`.
+pub fn default_tokenizer_path() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Some(path) = std::env::var_os("MAKEPAD_T5_TOKENIZER").filter(|p| !p.is_empty()) {
+        return PathBuf::from(path);
+    }
+    let home = std::env::var_os("MAKEPAD_HOME").filter(|h| !h.is_empty()).map(PathBuf::from).unwrap_or_else(|| {
+        std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".makepad")
+    });
+    home.join("weights").join("tokenizers").join(T5_TOKENIZER_FILE)
+}
+
 impl T5Tokenizer {
+    /// The downloaded table: what [`load_tokenizer`] loaded, else
+    /// [`default_tokenizer_path`]. Missing is an error, never a fallback.
     pub fn new() -> Result<Self> {
-        Self::from_json(T5_TOKENIZER_JSON)
+        if T5_TOKENIZER_JSON.get().is_none() {
+            load_tokenizer(&default_tokenizer_path())?;
+        }
+        Self::from_json(T5_TOKENIZER_JSON.get().unwrap())
     }
 
     pub fn from_json(text: &str) -> Result<Self> {

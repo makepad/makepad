@@ -53,7 +53,7 @@ pub fn route_allowed(role: Role, edge: bool, method: &str, path: &str) -> bool {
     let path = path.split('?').next().unwrap_or(path);
     let device = matches!(
         (method, path),
-        ("GET", "/health") | ("GET", "/models") | ("POST", "/generate") | ("POST", "/realtime")
+        ("GET", "/health") | ("GET", "/models") | ("GET", "/voices") | ("POST", "/generate") | ("POST", "/realtime")
     ) || (method == "GET" && (path.starts_with("/job/") || path.starts_with("/artifact/") || path.starts_with("/realtime/")))
         || (method == "POST" && path.starts_with("/job/") && (path.ends_with("/cancel") || path.ends_with("/keepalive")))
         || (method == "POST" && path == "/bye");
@@ -484,6 +484,7 @@ mod tests {
         assert!(!route_allowed(Role::Device, true, "GET", "/control"));
         assert!(!route_allowed(Role::Node, false, "GET", "/control"));
         assert!(route_allowed(Role::Device, false, "POST", "/generate"));
+        assert!(route_allowed(Role::Device, false, "GET", "/voices"));
         assert!(route_allowed(Role::Device, false, "GET", "/job/abc"));
         assert!(route_allowed(Role::Device, false, "GET", "/v1/model_blob/00"));
         assert!(!route_allowed(Role::Device, false, "POST", "/v1/model_blob/00"));

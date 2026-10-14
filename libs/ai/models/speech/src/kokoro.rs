@@ -142,6 +142,9 @@ impl KokoroSpeaker {
     }
 
     pub fn load_with_voice(model_path: &str, voice_path: &str) -> Result<Self, TtsError> {
+        // The G2P tables are assets of the model, downloaded next to it.
+        let asset_dir = std::path::Path::new(model_path).parent().unwrap_or(std::path::Path::new("."));
+        g2p::data::load(asset_dir).map_err(TtsError::Backend)?;
         let weights = Weights::load(model_path)?;
         let voice = Self::read_voice(voice_path)?;
 

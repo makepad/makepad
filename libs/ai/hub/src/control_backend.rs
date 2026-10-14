@@ -178,6 +178,9 @@ impl ContentBackend for ControlBackend {
         let mode = ControlMode::from_model_id(&self.model_id)?;
         self.mode = Some(mode);
         ctx.ensure_files()?;
+        // The T5 tokenizer table, downloaded with the model (not in git).
+        makepad_ai_flux::t5::load_tokenizer_from(ctx.cache_dir)
+            .map_err(|e| AssetAiError::Backend(format!("model {}: {e}", ctx.spec.id)))?;
         self.ready = Some(ReadyFiles {
             unet_path: ctx.path_by_role("unet")?,
             vae_path: ctx.path_by_role("vae")?,
@@ -695,6 +698,7 @@ mod tests {
             text: String::new(),
             voice: String::new(),
             language: String::new(),
+            request_domain: String::new(),
             speed: 1.0,
             emotion: None,
             seconds: None,

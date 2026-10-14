@@ -3,13 +3,12 @@
 //! `tools/build_zh_lexicon.py`). What jieba does without its HMM for unknown
 //! words: a character no word covers stands alone.
 
-use super::super::packed::Packed;
+use super::super::data;
 
-static WORDS: Packed = Packed::new(include_bytes!("../../../data/zh_words.bin"));
 const MAX_WORD_CHARS: usize = 12;
 
 fn entry(word: &str) -> Option<(u64, &'static str)> {
-    let value = WORDS.get(word)?;
+    let value = data::words().get(word)?;
     let (freq, pos) = value.split_once(' ')?;
     Some((freq.parse().ok()?, pos))
 }
@@ -25,7 +24,7 @@ pub fn contains(word: &str) -> bool {
 
 fn total_frequency() -> f64 {
     static TOTAL: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
-    *TOTAL.get_or_init(|| WORDS.get("\0total").and_then(|v| v.parse::<f64>().ok()).unwrap_or(6.0e7))
+    *TOTAL.get_or_init(|| data::words().get("\0total").and_then(|v| v.parse::<f64>().ok()).unwrap_or(6.0e7))
 }
 
 fn is_han(c: char) -> bool {

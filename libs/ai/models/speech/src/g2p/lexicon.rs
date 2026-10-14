@@ -1,14 +1,8 @@
-//! Binary search over misaki's packed IPA lexicon.
-//!
-//! The data is embedded rather than loaded: 2.8MB is small next to the 312MB of
-//! weights, and it means a build has no runtime file to lose.
-
-use super::packed::Packed;
-
-static LEXICON: Packed = Packed::new(include_bytes!("../../data/us_lexicon.bin"));
+//! Binary search over misaki's packed IPA lexicon (`us_lexicon.bin`, a
+//! downloaded asset of the Kokoro model: see [`super::data`]).
 
 fn lookup_exact(word: &str) -> Option<&'static str> {
-    LEXICON.get(word)
+    super::data::lexicon().get(word)
 }
 
 /// IPA for `word`, in Kokoro's own symbol set. Tries the word as written, then
