@@ -732,11 +732,12 @@ mod tests {
 
     /// Every kind of key plan 1b brings, each where the map does something
     /// to it that the key must follow (D1): keys behind a window filled with
-    /// sky, strokes under flags, gels and cloth, a wide stroke, pictures,
-    /// what hangs in front of a key, a window filled with sky as the key (a
-    /// storm's bolt in it too, in both modes), and
-    /// the sun and the moon behind lights, under the base image's line,
-    /// behind a rain shaft, in fog and under a cloud volume.
+    /// sky, strokes under flags (a polygon flag's hotspot too), gels and
+    /// cloth, a wide stroke, pictures, what hangs in front of a key, a scrim
+    /// as the key (cut by its gobo, worn, under a flag, against the sky), a
+    /// window filled with sky as the key (a storm's bolt in it too, in both
+    /// modes), and the sun and the moon behind lights, under the base image's
+    /// line, behind a rain shaft, in fog and under a cloud volume.
     fn keys_1b() -> Vec<KeyCase> {
         let images = images_1b();
         let soft_flag = |azimuth_deg: f32, elevation_deg: f32, size_deg: f32, rgb: [f32; 3]| LightParams {
@@ -915,12 +916,58 @@ mod tests {
                 0.02,
             ),
             case(
-                "1b: a hexagon key and a scrim key's cloth over it",
+                "1b: a hexagon key and a scrim's cloth over it",
                 studio_1b(vec![
                     LightParams { key: true, shape: "polygon".to_string(), azimuth_deg: 300.0, elevation_deg: 15.0, width_deg: 40.0, height_deg: 30.0, softness: 0.3, ..LightParams::default() },
                     scrim(310.0, 20.0, 24.0, 0.4),
                 ]),
                 0.002,
+            ),
+            // A scrim as the key (B5): the copy keeps its cloth and loses its
+            // glow, so what the cloth hides stays hidden and the key is the
+            // glow alone. Its window gobo cuts the cloth out where it blocks:
+            // there the softbox behind shows in the map and the copy alike.
+            case(
+                "1b: a scrim key over a softbox, cut by a window gobo",
+                studio_1b(vec![
+                    LightParams { azimuth_deg: 40.0, elevation_deg: 20.0, width_deg: 20.0, height_deg: 16.0, softness: 0.3, ..LightParams::default() },
+                    LightParams { key: true, gobo: Some(GoboParams::default()), scrim: Some(ScrimParams { source_size: 0.5, frame: 0.05 }), ..scrim(40.0, 20.0, 36.0, 0.3) },
+                ]),
+                0.02,
+            ),
+            case(
+                "1b: a worn scrim key half under a soft black flag",
+                studio_1b(vec![
+                    LightParams { key: true, imperfections: Some(ImperfectionParams { wrinkle: 0.7, dust: 0.4, weave: 0.4, seed: 5 }), ..scrim(250.0, 15.0, 30.0, 0.5) },
+                    soft_flag(262.0, 15.0, 20.0, [0.0; 3]),
+                ]),
+                0.02,
+            ),
+            case(
+                // The cloth hides part of the sun, in the map and the copy alike;
+                // the key is the cloth's glow, not the sun.
+                "1b: a scrim key against the sky, the sun in its soft edge (Sky mode)",
+                {
+                    let light = LightParams { key: true, ..scrim(162.0, 35.0, 24.0, 1.0) };
+                    let p = HdriParams { lights: vec![light.clone()], ..sun.clone() };
+                    let env = Env::new(&p);
+                    assert!(matches!(env.key(), Some((KeyTerm::Light, _))), "the scrim is the key");
+                    let sun_dir = env.sun_dir().expect("a manual sun");
+                    let cloth = crate::hdri::shaped::ShapedLight::new(&light).expect("a scrim").sample(sun_dir).mask;
+                    assert!(cloth > 0.05 && cloth < 0.95, "the sun is in the cloth's soft edge: {cloth}");
+                    p
+                },
+                0.02,
+            ),
+            // A polygon flag honours its hotspot (D10, L:26): it dims the key
+            // most at its middle, in the map and in the key alike.
+            case(
+                "1b: a stroke key half under a polygon flag with a hotspot",
+                studio_1b(vec![
+                    arch_key(),
+                    LightParams { shape: "polygon".to_string(), hotspot: 0.5, softness: 0.3, ..soft_flag(108.0, 10.0, 26.0, [0.0; 3]) },
+                ]),
+                0.01,
             ),
             case("1b: a window filled with sky as the key", studio_1b(vec![window.clone()]), 0.02),
             case(
