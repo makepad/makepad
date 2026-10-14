@@ -105,6 +105,7 @@ impl Drop for Gate {
         }
         BG_CV.notify_all();
         owner::resume();
+        end_pause_turn();
     }
 }
 
@@ -128,7 +129,7 @@ fn drained(mine: u32) -> Result<(), String> {
 }
 
 fn quiesce(deadline: Duration) -> Result<Gate, String> {
-    if BG_PAUSE.load(Ordering::SeqCst) || SWAP_DRAIN.load(Ordering::SeqCst) {
+    if !try_pause_turn() {
         return Err("another pause is active".into());
     }
     let t0 = Instant::now();
@@ -418,6 +419,11 @@ fn swap(up: *mut Unit, n: u32) -> Outcome {
     trace("statics taken");
     let fresh = {
         let _c = crate::zone_alloc::compiler();
+        // live edits after the swap expand the program's derives and macro calls as before it
+        if let Err(e) = taken.reinstall_macro_registry(&options) {
+            taken.put_back();
+            return abort(format!("macro registry: {e}"));
+        }
         let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| build(up, &options, mode, &pre, &extra, swap_image.as_ref(), &late, before, &mut tl)));
         match built {
             Ok(Ok(f)) => f,

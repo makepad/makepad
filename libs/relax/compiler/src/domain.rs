@@ -45,7 +45,16 @@ use relax_session::sync::Mutex;
 /// children (and cycles) to one copy.
 pub(crate) fn rehome_const(u: &Unit, addr: u64) -> u64 {
     let mut seen = std::collections::HashMap::new();
-    rehome(u, addr, &mut seen)
+    rehome(u, addr, &mut seen, false)
+}
+
+/// The per-domain copy of constant data object `addr` whatever its words hold (its children
+/// re-homed as `rehome_const` does): what code compiled against such a copy addresses -- a
+/// domain symbol -- when it is linked from the disk cache (cache.rs link_symbol tag 10).
+/// `addr` itself when it cannot be copied (not the start of a read-only object).
+pub(crate) fn const_copy(u: &Unit, addr: u64) -> u64 {
+    let mut seen = std::collections::HashMap::new();
+    rehome(u, addr, &mut seen, true)
 }
 
 /// Gives anonymous mutable block `id` (made by constant evaluation: a promoted temporary) and
@@ -67,7 +76,7 @@ fn capture_rw(u: &Unit, id: u32, seen: &mut HashSet<u32>) {
     materialize(u, sym);
 }
 
-fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>) -> u64 {
+fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>, force: bool) -> u64 {
     if let Some(&a) = seen.get(&addr) {
         return a;
     }
@@ -79,8 +88,18 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>) -
     // a cycle back to this object keeps the shared address until the copy exists (patched below)
     seen.insert(addr, addr);
     let mut bytes = unsafe { std::slice::from_raw_parts(start as *const u8, len as usize).to_vec() };
+    // only the words that are pointers by the object's type: an integer that happens to equal
+    // an address inside the block (a char pair of unicode-segmentation's word_cat_table did, in
+    // some runs) is not a reference to a static, and copying such a constant into a per-domain
+    // block took it off the shared data for nothing (and the disk cache named the copy as a
+    // fresh, zeroed block: the warm run read a length of 0). An object whose kind cannot tell
+    // is scanned word by word, as before.
+    let words: Vec<usize> = match crate::syms::pointer_offsets(u, start) {
+        Some(offs) => offs.into_iter().map(|o| o as usize).filter(|&o| o + 8 <= bytes.len()).collect(),
+        None => (0..bytes.len() / 8).map(|i| i * 8).collect(),
+    };
     let mut reaches = false;
-    for k in (0..bytes.len() / 8).map(|i| i * 8) {
+    for &k in &words {
         let w = u64::from_le_bytes(bytes[k..k + 8].try_into().unwrap());
         if (lo..hi).contains(&w) {
             // a static (materialized when laid out) or an anonymous mutable block: one constant
@@ -95,13 +114,13 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>) -
         if cmut || cs == start {
             continue;
         }
-        let moved = rehome(u, cs, seen);
+        let moved = rehome(u, cs, seen, false);
         if moved != cs {
             bytes[k..k + 8].copy_from_slice(&(moved + (w - cs)).to_le_bytes());
             reaches = true;
         }
     }
-    if !reaches {
+    if !reaches && !force {
         seen.insert(addr, addr);
         return addr;
     }
@@ -110,13 +129,14 @@ fn rehome(u: &Unit, addr: u64, seen: &mut std::collections::HashMap<u64, u64>) -
     let new = u.syms.addr(sym);
     unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), new as *mut u8, bytes.len()) };
     // a word pointing into the object itself (a self-referential constant) points at the copy
-    for k in (0..bytes.len() / 8).map(|i| i * 8) {
+    for &k in &words {
         let w = u64::from_le_bytes(bytes[k..k + 8].try_into().unwrap());
         if (start..start + len).contains(&w) {
             unsafe { *((new + k as u64) as *mut u64) = new + (w - start) };
         }
     }
     seen.insert(addr, new);
+    crate::zone_alloc::kept_with(|| u.syms.const_copies.lock().unwrap_or_else(|e| e.into_inner()).insert(sym.id, start));
     crate::sandbox::capture_initial_data(u, sym);
     materialize(u, sym);
     new
@@ -1262,6 +1282,10 @@ unsafe fn load_graph(up: *mut Unit, g: &crate::unitgraph::Graph, order: &[usize]
 /// later, and what its static block holds.
 pub(crate) fn run_vehicle(up: *mut Unit, packages: Vec<String>) {
     let upn = up as usize;
+    // The vehicle outlives the settle swap: its package names, its thread (name) and what it
+    // prints are kept state, not the compiler generation the caller is in.
+    let _k = crate::zone_alloc::kept();
+    let packages = packages.clone();
     let _ = std::thread::Builder::new().name("run-domains".to_string()).spawn(move || {
         let up = upn as *mut Unit;
         let wait = std::time::Duration::from_secs(180);
@@ -1307,6 +1331,7 @@ mod tests {
     /// image points into its own block, a static laid out after a domain exists is copied into it.
     #[test]
     fn domains_have_their_own_statics() {
+        isolated_test!(domains_have_their_own_statics);
         let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-domains-{}", std::process::id()));
@@ -1385,6 +1410,7 @@ mod tests {
     /// each domain's copy points at its own static; a constant that reaches no static stays shared.
     #[test]
     fn const_pointing_at_static_is_per_domain() {
+        isolated_test!(const_pointing_at_static_is_per_domain);
         let _serial = TEST_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-domains-const-{}", std::process::id()));

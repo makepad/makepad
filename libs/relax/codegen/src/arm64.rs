@@ -839,7 +839,7 @@ impl<'a> Gen<'a> {
         let mut cbuf_fp: Vec<i64> = Vec::new();
         let mut cret_fp = 0i64;
         if let Some(sig) = &self.f.cabi {
-            let plan = cabi::plan(sig, cabi::HOST);
+            let plan = cabi::plan(sig, sig.conv.target());
             for (k, a) in plan.args.iter().enumerate() {
                 match (a, &sig.args[k]) {
                     (ArgPlan::Parts(_), CArg::Agg(ag)) => {
@@ -864,7 +864,7 @@ impl<'a> Gen<'a> {
                 if let Inst::Call(c, a, _) = i {
                     match c {
                         Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig) => {
-                            let plan = cabi::plan(sig, cabi::HOST);
+                            let plan = cabi::plan(sig, sig.conv.target());
                             out = out.max(plan.stack_bytes as i64);
                             let mut n = 0i64;
                             for ap in &plan.args {
@@ -1368,7 +1368,7 @@ impl<'a> Gen<'a> {
 
     /// A call under the C ABI (foreign function, `extern "C"` pointer or body).
     fn c_call(&mut self, c: &Callee, sig: &CSig, args: &[VReg], rets: &[VReg]) {
-        let plan = cabi::plan(sig, cabi::HOST);
+        let plan = cabi::plan(sig, sig.conv.target());
         let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
         for (v, slot) in &saves {
             self.save_restore(*v, *slot, true);

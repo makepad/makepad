@@ -34,7 +34,7 @@ pub struct Mismatch {
 }
 impl std::fmt::Display for Mismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "the proc macros in this tree differ from those built into makepad: rebuild makepad (cargo build --release -p makepad-run) [{}: {}: {}]", self.package, self.file, self.reason)
+        write!(f, "the proc macros in this tree differ from those built into makepad: {} [{}: {}: {}]", crate::srchash::rebuild_hint(), self.package, self.file, self.reason)
     }
 }
 impl std::error::Error for Mismatch {}
@@ -320,7 +320,7 @@ mod tests {
         let before = SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed);
         assert!(graph.find(&entry).err().unwrap().contains("source bytes differ"));
         assert_eq!(SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed), before);
-        assert!(mismatch.to_string().contains("the proc macros in this tree differ from those built into makepad: rebuild makepad (cargo build --release -p makepad-run)"));
+        assert!(mismatch.to_string().contains("the proc macros in this tree differ from those built into makepad: rebuild makepad by starting it through cargo: cargo run --release -p makepad-run --bin makepad --"));
         std::fs::write(&helper, &original).unwrap();
         let before = SOURCE_READS.load(std::sync::atomic::Ordering::Relaxed);
         graph.reload(&[(helper.to_str().unwrap(), None), (helper.to_str().unwrap(), None)]);

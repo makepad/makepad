@@ -1,7 +1,7 @@
 //! Boundary audit: what code compiled by Relax reaches inside a set of crates that would be
 //! built by rustc into the embedder ("provided crates", local/plans/loader-core.md section 8).
 //!
-//! `makepad check --boundary <crate>[,<crate>..] <package>` lowers every non-generic fn of the
+//! `makepad check --boundary <crate>[,<crate>..]|all <package>` lowers every non-generic fn of the
 //! crates that depend on them, then every generic instance those reach (to a fixpoint), and
 //! records, from each body Relax would compile (drop glue included: a Drop impl runs from it):
 //! - calls to non-generic fns of the provided crates (the C shims), with their signatures;
@@ -10,6 +10,13 @@
 //! - statics of the provided crates read or borrowed.
 //! A body is on the provided side when its fn is a non-generic fn of a provided crate (closures
 //! count as their owner fn).
+//!
+//! Every body that does not lower because it reaches into a provided crate the way a run cannot
+//! (a static of the crate read from JIT-compiled code, a non-C-shaped field read or value built,
+//! an opaque enum matched, rustc's ownership operations: lower.rs provided_err) is a `violation`
+//! row; one into an audited crate fails the check (exit 1). It is the error a run reports only
+//! when the code that reaches it first runs (Stage's deck reached `shell::Shared::global`
+//! through the unmarked `makepad_hal::screens`); the gates run the audit over the apps.
 
 use crate::types::AliasTyKind;
 use crate::types::{AliasTy};
@@ -35,14 +42,30 @@ struct Audit {
     /// call key -> (param types, return type) as printed
     sigs: BTreeMap<String, (Vec<TyId>, TyId)>,
     bindings: BTreeMap<String, (bool, String)>,
+    /// (provided crate reached, body, error): lower.rs provided_err
+    violations: BTreeSet<(u32, String, String)>,
 }
 
 static AUDIT: Mutex<Option<Audit>> = Mutex::new(None);
 
-/// Starts an audit of the named crates (before lowering anything).
+/// `--boundary` was given: the provided crates bind to the loader as in a run (run.rs).
+pub(crate) static REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn requested() -> bool {
+    REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Starts an audit of the named crates (before lowering anything); `all`: every provided crate
+/// the loader binds in this program.
 pub fn start(u: &Unit, names: &[String]) -> Result<(), String> {
     let mut crates = Vec::new();
-    for n in names {
+    if names.len() == 1 && names[0] == "all" {
+        crates.extend(u.provided.iter().map(|(k, _)| *k));
+        if crates.is_empty() {
+            return Err("--boundary all: no provided crate binds in this program (is the loader built from this source?)".into());
+        }
+    }
+    for n in names.iter().filter(|n| n.as_str() != "all") {
         let n2 = n.replace('-', "_");
         match u.prog.crates.iter().position(|c| u.prog.syms.str(c.name) == n2) {
             Some(i) => crates.push(i as u32),
@@ -145,6 +168,13 @@ pub fn note_field(u: &Unit, def: DefId, args: &[TyId], t: TyId, fi: u32) {
     }
 }
 
+/// JIT-compiled body `body` reaches into provided crate `krate` the way it cannot (`error`).
+pub fn note_violation(u: &Unit, krate: u32, body: u32, error: &str) {
+    let mut g = AUDIT.lock().unwrap();
+    let Some(a) = g.as_mut() else { return };
+    a.violations.insert((krate, u.fns[body as usize].name.to_string(), error.lines().next().unwrap_or("").to_string()));
+}
+
 /// A static `d` read or borrowed in the body of (`def`, `args`).
 pub fn note_static(u: &Unit, def: DefId, args: &[TyId], d: DefId) {
     if !on() {
@@ -210,8 +240,9 @@ fn c_representable(s: &str) -> bool {
 }
 
 /// Lowers every JIT-side body reachable from the non-generic fns of crates other than the
-/// provided ones and std, to a fixpoint; then prints the report.
-pub fn run(up: *mut Unit) -> String {
+/// provided ones and std, to a fixpoint; then the report and the number of violations (bodies
+/// that reach into a provided crate the way JIT-compiled code cannot).
+pub fn run(up: *mut Unit) -> (String, usize) {
     AUDIT_ON.store(true, std::sync::atomic::Ordering::Relaxed);
     let u = unsafe { &mut *up };
     let std_crates: Vec<u32> = ["core", "alloc", "std"].iter().filter_map(|n| u.prog.crates.iter().position(|c| u.prog.syms.str(c.name) == *n).map(|i| i as u32)).collect();
@@ -290,6 +321,7 @@ pub fn run(up: *mut Unit) -> String {
                     Ok(Ok(())) => String::new(),
                 };
                 fails.push(format!("fail\t{}\t{}", u.fns[id].name, msg.lines().next().unwrap_or("")));
+
             }
         }
         done = n;
@@ -304,6 +336,13 @@ pub fn run(up: *mut Unit) -> String {
     fails.sort();
     for f in &fails {
         let _ = writeln!(out, "{}", f);
+    }
+    // the audited crates' violations fail the check; another provided crate's are listed
+    let crate_name = |k: u32| u.prog.syms.str(u.prog.crates[k as usize].name).to_string();
+    let failing = a.violations.iter().filter(|(k, _, _)| a.crates.contains(k)).count();
+    let _ = writeln!(out, "# provided-crate violations (JIT-compiled code reaching into a provided crate the way it cannot): {} in the audited crates, {} in others", failing, a.violations.len() - failing);
+    for (k, body, e) in &a.violations {
+        let _ = writeln!(out, "violation\t{}\t{}\t{}\t{}", if a.crates.contains(k) { "FAIL" } else { "other" }, crate_name(*k), body, e);
     }
     // every `#[relax_api]` op names a fn of this source with the signature rustc built: an entry
     // whose key no fn has (Relax reads the item's path differently, or the source moved on) or
@@ -407,5 +446,5 @@ pub fn run(up: *mut Unit) -> String {
     for (s, (n, sites)) in &shapes {
         let _ = writeln!(out, "#   {:<40} {:>5} {:>6} {}", s, n, sites, if c_representable(s.trim_start_matches("ret ")) { "" } else { "CLEANUP" });
     }
-    out
+    (out, failing)
 }

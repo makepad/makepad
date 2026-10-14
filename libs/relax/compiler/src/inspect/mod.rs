@@ -72,9 +72,7 @@ pub fn start(app: &str) {
     endpoint.set_hooks(makepad_remote::Hooks { enter: server_thread_enter, exit: server_thread_exit });
     endpoint.register_cmd(dispatch);
     let _ = WATCH.set(endpoint.register_watch_with(events::remote_watcher_opened, events::remote_watcher_closed));
-    for (name, version, open, close, scope) in SERVICES.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-        serve_program_service(&endpoint, name, *version, *open, *close, *scope);
-    }
+    serve_first_services(&endpoint);
     *ENDPOINT.lock().unwrap_or_else(|e| e.into_inner()) = Some(endpoint.clone());
     let sock = match endpoint.listen_unix(&extra) {
         Ok(s) => s,
@@ -119,6 +117,7 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ("pause", "", "stops the program's threads (makepad run's and inspect's keep running); stacks work while paused"),
     ("resume", "", "after pause: the program runs again (`resume P<n> panic` releases a parked panic)"),
     ("gpu", "[top [by=bytes|owner|site|churn] [n=15]|idle [frames=1800] [n=15]|snap <name>|diff <a> <b|now>|path <session>:<kind>:<index>:<generation>]", "HAL GPU memory: totals per session, kind and owner against the device (native apps: MAKEPAD_INSPECT=1 or MAKEPAD_REMOTE=1)"),
+    ("hal", "pump", "HAL pump loop per session: turns and wake causes, totals and per second since the last call (an idle app shows none)"),
     ("vms", "", "every live Splash VM: label, thread, heap objects / strings / arrays and bytes, GC runs and time, errors, evaluations"),
     ("threads", "", "every thread: name, role, state, CPU time, what it waits on"),
     ("stacks", "[thread=<name|tid|main|owner|all>] [depth=12]", "symbolised stacks (identical stacks folded)"),
@@ -624,18 +623,20 @@ pub type ProgramQuery = extern "C" fn(line: *const u8, len: usize, sink: extern 
 
 static PROVIDERS: relax_session::sync::Mutex<Vec<(String, ProgramQuery, crate::domain::Callback)>> = relax_session::sync::Mutex::new(Vec::new());
 
-/// The program registers the command `name` (makepad-platform's remote commands); a
-/// later registration replaces the earlier one.
+/// The program registers the command `name` (makepad-platform's remote commands); a later
+/// registration from the same domain replaces its earlier one. Every domain of the process
+/// registers the same commands: the process answers with its first domain's (the root: the window
+/// manager hosting app domains, or the one app), never with whichever domain started last.
 pub extern "C" fn relax_register_inspect(name: *const u8, len: usize, query: ProgramQuery) {
     let Some(scope) = crate::domain::callback() else { return };
     let name = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned() };
     let mut p = PROVIDERS.lock().unwrap_or_else(|e| e.into_inner());
-    p.retain(|x| x.0 != name);
+    p.retain(|x| !(x.0 == name && x.2.domain() == scope.domain()));
     p.push((name, query, scope));
 }
 
 fn provider(cmd: &str) -> Option<(ProgramQuery, crate::domain::Callback)> {
-    PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|x| x.0 == cmd).map(|x| (x.1, x.2))
+    PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()).iter().filter(|x| x.0 == cmd).min_by_key(|x| x.2.domain()).map(|x| (x.1, x.2))
 }
 
 /// What the sink of [`cmd_provided`] writes into: the reply, cut into lines.
@@ -731,6 +732,10 @@ impl ActiveService {
 pub fn stop_domain(id: u32) {
     PROVIDERS.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x.2.domain() != id);
     SERVICES.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x.4.domain() != id);
+    // a stopped first domain hands its services to the next one
+    if let Some(endpoint) = ENDPOINT.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        serve_first_services(endpoint);
+    }
     let channels: Vec<_> = {
         let mut active = ACTIVE_SERVICES.lock().unwrap_or_else(|e| e.into_inner());
         let channels = active.iter().filter(|c| c.scope.domain() == id).cloned().collect();
@@ -795,11 +800,27 @@ pub extern "C" fn relax_register_remote_service(name: *const u8, len: usize, ver
     let Some(scope) = crate::domain::callback() else { return };
     let name = unsafe { String::from_utf8_lossy(std::slice::from_raw_parts(name, len)).into_owned() };
     let mut services = SERVICES.lock().unwrap_or_else(|e| e.into_inner());
-    services.retain(|x| x.0 != name);
+    services.retain(|x| !(x.0 == name && x.4.domain() == scope.domain()));
     services.push((name.clone(), version, open, close, scope));
+    // like the commands: the first domain's service is the process's; a later domain's waits
+    let first = services.iter().filter(|x| x.0 == name).min_by_key(|x| x.4.domain()).is_some_and(|x| x.4 == scope);
+    drop(services);
     // the endpoint may be up already; otherwise `start` serves what is registered by then
-    if let Some(endpoint) = ENDPOINT.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-        serve_program_service(endpoint, &name, version, open, close, scope);
+    if first {
+        if let Some(endpoint) = ENDPOINT.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+            serve_program_service(endpoint, &name, version, open, close, scope);
+        }
+    }
+}
+
+/// Each service name served by its first remaining domain (after `start`, or a domain stopped).
+fn serve_first_services(endpoint: &makepad_remote::Endpoint) {
+    let services = SERVICES.lock().unwrap_or_else(|e| e.into_inner());
+    for (i, (name, version, open, close, scope)) in services.iter().enumerate() {
+        let first = services.iter().enumerate().filter(|(_, x)| x.0 == *name).min_by_key(|(_, x)| x.4.domain()).map(|(j, _)| j);
+        if first == Some(i) {
+            serve_program_service(endpoint, name, *version, *open, *close, *scope);
+        }
     }
 }
 

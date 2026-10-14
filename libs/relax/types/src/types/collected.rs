@@ -74,7 +74,8 @@ crate::collected_fields!(PlaceholderType, universe, bound);
 crate::collected_enum!(LateParamKind; 0 => Anon(n), 1 => Named(d), 2 => ClosureEnv);
 crate::collected_enum!(Safety; 0 => Safe, 1 => Unsafe);
 crate::collected_enum!(Abi; 0 => Rust, 1 => RustCall, 2 => C, 3 => CUnwind,
-    4 => System, 5 => SystemUnwind, 6 => RelaxIntrinsic);
+    4 => System, 5 => SystemUnwind, 6 => RelaxIntrinsic,
+    7 => SysV64, 8 => SysV64Unwind, 9 => Win64, 10 => Win64Unwind);
 crate::collected_fields!(FnHeader, safety, abi, c_variadic);
 crate::collected_fields!(ClosureArgs, parent_args, closure_kind_ty, closure_sig_as_fn_ptr_ty, tupled_upvars_ty);
 crate::collected_fields!(AliasTy, kind, args, regions);

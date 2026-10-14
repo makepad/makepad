@@ -96,6 +96,11 @@ pub struct Syms {
     /// start address -> symbol of each anonymous mutable block (`Unit::rw_sym`): a constant
     /// re-homed per domain (domain.rs rehome_const) is one, and lowering finds its symbol by address
     pub rw_syms: Mutex<BTreeMap<u64, Sym>>,
+    /// the anonymous mutable blocks that hold a constant's value copied per domain
+    /// (domain.rs rehome_const), by symbol: the start of the constant data object copied. Their
+    /// bytes are the value, not storage code writes before it reads, so a cache entry names
+    /// them as "the copy of that object" (cache.rs enc_sym tag 10), never as a fresh block
+    pub const_copies: Mutex<HashMap<u32, u64>>,
     /// Declared initial bytes of statics and their promoted data, before host execution.
     pub initial_data: Mutex<HashMap<u32, Vec<u8>>>,
     /// the definition behind each Foreign / Missing symbol
@@ -131,7 +136,7 @@ struct DataIndex {
 
 impl Syms {
     pub fn new(vals: u64, dom0: u64) -> Syms {
-        Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
+        Syms { dom0, vals, classes: crate::jit::alloc_rw(SYM_CAP), kinds: crate::conc::AppendVec::new_kept(SYM_CAP), inner: Mutex::new(SymsInner::default()), data: Mutex::new(DataIndex::default()), rw_blocks: Mutex::new(Vec::new()), rw_starts: Mutex::new(BTreeMap::new()), rw_syms: Mutex::new(BTreeMap::new()), const_copies: Mutex::new(HashMap::new()), initial_data: Mutex::new(HashMap::new()), foreign_defs: Mutex::new(HashMap::new()), rt_by_addr: OnceLock::new(), foreign_by_addr: Mutex::new(ForeignIndex::default()) }
     }
 
     /// The kept-state scan (jit/zone_scan.rs): the owned allocations of the symbol table.
@@ -426,14 +431,14 @@ pub fn set_unit(u: *mut Unit) {
     UNIT_PTR.store(u, Ordering::SeqCst);
 }
 
-/// The optimiser's constant-load reader (`opt::RoReader`): `n` bytes at symbol + offset.
-pub fn ro_read(s: Sym, n: u32) -> crate::opt::RoRead {
-    use crate::opt::RoRead;
-    let up = UNIT_PTR.load(Ordering::Acquire);
-    if up.is_null() {
-        return RoRead::No;
-    }
-    let u = unsafe { &*up };
+/// The optimiser's constant-load reader (`opt::RoReader`): `n` bytes at symbol + offset of
+/// the unit `ctx` points to -- the unit the function is built for (Unit::ro_reader), never a
+/// process-wide one: the proc-macro world's unit is made after the program's on a warm start,
+/// and folding the program's loads against its symbol tables (or, once the world is freed,
+/// freed memory) baked another object's bytes into the program's code (a constant slice's
+/// length read as 0; that O2 code went to the disk cache, so every later warm start ran it).
+pub fn ro_read(ctx: usize, s: Sym, n: u32) -> crate::opt::RoRead {
+    let u = unsafe { &*(ctx as *const Unit) };
     read_obj(u, s, n)
 }
 
@@ -555,7 +560,14 @@ fn obj_ptrs(u: &Unit, idx: u32) -> Option<(u64, u64, std::sync::Arc<Vec<(u32, Op
                 if v < 4096 || v >= u64::MAX - 4095 {
                     continue;
                 }
-                let s = provenance(u, v).or_else(|| pointee.and_then(|m| promoted_copy(u, m, v)));
+                // a word into an anonymous writable block names, in constant data, a read-only
+                // copy of the block's bytes (promoted_copy) or nothing: the block's symbol would
+                // be stored as a fresh, zeroed block per link (cache.rs enc_sym tag 8), so the
+                // next run read zeros where the cold run read the initializer's bytes
+                let s = match provenance(u, v) {
+                    Some(s) if matches!(u.syms.kind(s.id), Some(SymKind::Rw(_))) => pointee.and_then(|m| promoted_copy(u, m, v)),
+                    s => s.or_else(|| pointee.and_then(|m| promoted_copy(u, m, v))),
+                };
                 ptrs.push((off, s));
             }
         }
@@ -586,6 +598,12 @@ fn promoted_copy(u: &Unit, mutable: bool, v: u64) -> Option<Sym> {
         (start, size, ty)
     };
     if v >= start + size || !u.in_rw(start, size) || !u.tcx.is_freeze(&u.prog, crate::tcx::TypingEnv::fully_monomorphized(&u.prog), ty) {
+        return None;
+    }
+    // a constant's per-domain copy (domain.rs rehome_const) is per-domain on purpose: its words
+    // reach statics, and a shared read-only copy would hand every domain the compile domain's
+    let block = u.syms.rw_syms.lock().unwrap_or_else(|e| e.into_inner()).get(&start).copied();
+    if block.is_some_and(|b| u.syms.const_copies.lock().unwrap_or_else(|e| e.into_inner()).contains_key(&b.id)) {
         return None;
     }
     let l = u.lay.of(&crate::layout::LayoutCx::new(&u.prog), &u.tcx, ty);
@@ -672,6 +690,7 @@ mod provenance_tests {
 
     #[test]
     fn address_maps_are_lazy_and_extend_for_new_defs() {
+        isolated_test!(address_maps_are_lazy_and_extend_for_new_defs);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-provenance-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
@@ -1042,7 +1061,7 @@ fn stable_fn_name_d(u: &Unit, id: u32, depth: u32) -> String {
     }
 }
 
-/// The unit (for diagnostics that have no `&Unit` at hand).
+/// The program's unit (for diagnostics that have no `&Unit` at hand; run.rs set_unit).
 pub fn unit() -> Option<&'static Unit> {
     let up = UNIT_PTR.load(Ordering::Acquire);
     if up.is_null() {
@@ -1061,6 +1080,29 @@ pub fn stable_ty(u: &Unit, t: TyId) -> String {
 /// The pointer words of data object `idx` with their targets; None when the object cannot be
 /// described (mutable, opaque, a pointer whose target has no symbol): the disk cache then
 /// cannot store code that refers to it.
+/// The offsets of the pointer words of the data object starting at `start`, from what its
+/// bytes are (its type, its relocations, its word table) -- never from what the words happen to
+/// hold: a table of integers can hold a value that is an address in this run. None when the
+/// object is not one, or its kind cannot tell (a union, a word table shorter than the object).
+pub(crate) fn pointer_offsets(u: &Unit, start: u64) -> Option<Vec<u32>> {
+    let (len, kind) = {
+        let d = u.syms.data.lock().unwrap_or_else(|e| e.into_inner());
+        let &i = d.by_start.get(&start)?;
+        let o = &d.objs[i as usize];
+        (o.len, o.kind.clone())
+    };
+    match kind {
+        DataKind::Bytes => Some(Vec::new()),
+        DataKind::Relocs(p) => Some(p.iter().map(|(o, _)| *o).collect()),
+        DataKind::Words(w) => ((w.len() as u64) >= len / 8).then(|| w.iter().enumerate().filter(|(_, x)| x.is_some()).map(|(i, _)| (i * 8) as u32).collect()),
+        DataKind::Typed(t) => {
+            let mut words = Vec::new();
+            walk(u, t, start, 0, &mut words, 0)?;
+            Some(words.into_iter().map(|(o, _)| o).collect())
+        }
+    }
+}
+
 pub fn obj_pointer_words(u: &Unit, idx: u32) -> Option<Vec<(u32, Sym)>> {
     let (_, _, ptrs, opaque) = obj_ptrs(u, idx)?;
     if opaque {

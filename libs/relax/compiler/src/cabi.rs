@@ -1,8 +1,8 @@
 //! C signatures from Rust types (the classification itself is relax-codegen's cabi).
 
 pub use relax_codegen::cabi::*;
-use crate::rir::{CAgg, CArg, CSig, Mem};
-use crate::types::{TyId, TyKind};
+use crate::rir::{CAgg, CArg, CConv, CSig, Mem};
+use crate::types::{Abi, TyId, TyKind};
 
 fn mem_size(m: Mem) -> u32 {
     match m {
@@ -117,7 +117,7 @@ pub fn c_arg(u: &crate::jit::Unit, t: TyId) -> CArg {
 /// C signature of a call or body with Rust parameter types `params` and result `ret`.
 /// `n_fixed`: Some(n) for a variadic call with n fixed parameters (the rest of `params`
 /// are the variadic arguments' types).
-pub fn c_sig(u: &crate::jit::Unit, params: &[TyId], ret: TyId, n_fixed: Option<usize>) -> CSig {
+pub fn c_sig(u: &crate::jit::Unit, params: &[TyId], ret: TyId, n_fixed: Option<usize>, abi: Abi) -> CSig {
     let mut args = Vec::new();
     for p in params {
         let l = u.layout_of(*p);
@@ -142,9 +142,14 @@ pub fn c_sig(u: &crate::jit::Unit, params: &[TyId], ret: TyId, n_fixed: Option<u
             CArg::Agg(a) => Some(a),
         }
     };
-    CSig { args, ret, n_fixed: match n_fixed {
+    let conv = match abi {
+        Abi::SysV64 | Abi::SysV64Unwind => CConv::SysV64,
+        Abi::Win64 | Abi::Win64Unwind => CConv::Win64,
+        _ => CConv::Host,
+    };
+    CSig { conv, args, ret, n_fixed: match n_fixed {
         Some(n) => n as u32,
         None => u32::MAX,
-    }, ret_narrow, unwinds: false }
+    }, ret_narrow, unwinds: abi.unwinds() }
 }
 

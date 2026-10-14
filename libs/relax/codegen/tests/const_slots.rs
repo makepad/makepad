@@ -1,7 +1,7 @@
 use relax_codegen::{opt, rir::*};
 
 const U64: IntTy = IntTy { bits: 64, signed: false };
-fn ro(s: Sym, n: u32) -> opt::RoRead {
+fn ro(_: usize, s: Sym, n: u32) -> opt::RoRead {
     assert_eq!(n, 0);
     if s.id == 7 && s.off >= 0 && s.off <= 128 {
         opt::RoRead::Range(128 - s.off as u64)
@@ -35,7 +35,7 @@ fn table() -> Func {
 }
 fn reject(mut f: Func) {
     let before = f.dump();
-    assert!(!opt::forward_const_slots(&mut f, Some(ro)));
+    assert!(!opt::forward_const_slots(&mut f, Some(opt::RoReader::new(ro, 0))));
     assert_eq!(before, f.dump());
 }
 #[test]
@@ -43,7 +43,7 @@ fn indexed_reads_use_immutable_symbol() {
     let mut f = table();
     // An unrelated call cannot modify the immutable source or the private destination.
     push(&mut f, 0, Inst::Call(Callee::Fn(42), vec![], vec![]));
-    assert!(opt::forward_const_slots(&mut f, Some(ro)));
+    assert!(opt::forward_const_slots(&mut f, Some(opt::RoReader::new(ro, 0))));
     assert!(matches!(f.blocks[0].insts[0], Inst::Addr(VReg(1), Sym { id: 7, off: 0 })));
     assert!(!f.blocks.iter().flat_map(|b| &b.insts).any(|i| matches!(i, Inst::Copy(..))));
     f.verify().unwrap();
@@ -118,6 +118,6 @@ fn loop_reads_and_copy_out_are_safe() {
     f.block();
     f.blocks[2].term = Term::Ret(vec![VReg(4)]);
     push(&mut f, 1, Inst::Copy(VReg(0), VReg(3), 8));
-    assert!(opt::forward_const_slots(&mut f, Some(ro)));
+    assert!(opt::forward_const_slots(&mut f, Some(opt::RoReader::new(ro, 0))));
     f.verify().unwrap();
 }

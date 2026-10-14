@@ -145,7 +145,6 @@ struct PoolState {
 }
 
 pub struct Pool {
-    reads: Mutex<Option<crate::vfs::ReadScope>>,
     pub demand_plan: Option<Arc<DemandPlan>>,
     /// A collected prefix can reuse a completed plan for the entire graph.
     plan_offset: usize,
@@ -189,6 +188,9 @@ impl Pool {
     }
 
     pub fn context(&self, ci: u32) -> Arc<crate::source_context::Context> { self.contexts[ci as usize].clone() }
+    /// The sequential loader's reads go through the pool's snapshot while it loads a crate
+    /// (a scope on the loader's stack, for that load only).
+    pub fn bind_reads(&self) -> Option<crate::vfs::ReadScope> { self.contexts.first().map(|c| c.bind_source_reads()) }
     /// What the scan found for crate `ci` (its definitions, files), helping with the scan while
     /// it is not complete.
     /// Crate `ci`'s dependencies as the preload saw them (the crate image's identity: extern
@@ -278,7 +280,6 @@ impl Pool {
     }
 
     pub fn stop(&self) {
-        self.reads.lock().unwrap().take();
         self.st.lock().unwrap().stopped = true;
         self.cv.notify_all();
     }
@@ -1250,7 +1251,8 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         running: HashSet::default(),
         cancelled: HashSet::default(),
     };
-    let reads = Mutex::new(contexts.first().map(|c| c.bind_source_reads()));
+    // the setup's own reads (the first publication); the loader binds again for each load
+    let _reads = contexts.first().map(|c| c.bind_source_reads());
     for (ci, c) in crates.iter().enumerate() {
         if st.pending_images[ci].is_some() { continue; }
         if st.images[ci].is_some() {
@@ -1263,7 +1265,7 @@ fn start_with_contexts_plan(sess: &std::sync::Arc<crate::Session>, crates: Vec<P
         let seq = st.scan_seq;
         st.scans.insert((ci, seq), k);
     }
-    let pool = Arc::new(Pool { reads, demand_plan, plan_offset, contexts, crates, parse: jobs >= 2, st: Mutex::new(st), cv: Condvar::new() });
+    let pool = Arc::new(Pool { demand_plan, plan_offset, contexts, crates, parse: jobs >= 2, st: Mutex::new(st), cv: Condvar::new() });
     if let Some(plan) = &pool.demand_plan {
         let weak = Arc::downgrade(&pool);
         plan.on_early_publish(move || {

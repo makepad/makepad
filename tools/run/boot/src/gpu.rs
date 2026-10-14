@@ -118,6 +118,8 @@ impl Pipeline {
         let (backend, packing) = match dialect {
             dialect::MSL => (ShaderBackend::Metal, UniformPacking::Metal),
             dialect::SPIRV => (ShaderBackend::Glsl, UniformPacking::Std140),
+            // the packing the app's HAL client compiles D3D11 shaders with
+            dialect::HLSL => (ShaderBackend::Hlsl, UniformPacking::Std140),
             other => return Err(format!("Unsupported HAL boot shader dialect {other}")),
         };
         let mut options =
@@ -337,6 +339,32 @@ impl Pipeline {
                         },
                         compare: sampler.compare,
                         pixel: sampler.coord == SamplerCoord::Pixel,
+                    })
+                    .collect(),
+            }
+            .encode()
+        } else if dialect == dialect::HLSL {
+            // The HAL's HLSL pipeline payload (makepad_hal::hlsl), as the app's HAL client sends
+            // it: the one source plus the texture shapes and sampler states D3D11 binds.
+            makepad_hal::hlsl::HlslPipeline {
+                source: output.combined().to_owned(),
+                textures: vec![0; textures],
+                samplers: desc
+                    .samplers()
+                    .iter()
+                    .map(|sampler| makepad_hal::spirv::SpirvSampler {
+                        filter: match sampler.filter {
+                            SamplerFilter::Nearest => 0,
+                            SamplerFilter::Linear => 1,
+                        },
+                        address: match sampler.address {
+                            SamplerAddress::Repeat => 0,
+                            SamplerAddress::ClampToEdge => 1,
+                            SamplerAddress::ClampToZero => 2,
+                            SamplerAddress::MirroredRepeat => 3,
+                        },
+                        compare: sampler.compare,
+                        pixel: false,
                     })
                     .collect(),
             }

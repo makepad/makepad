@@ -4,6 +4,7 @@
 
 #[test]
 fn amp_parse_medians() {
+    isolated_test!(amp_parse_medians);
     let sess = &std::sync::Arc::new(crate::Session::default());
     let makepad = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../..");
     let path = makepad.join("apps/amp/src/lib.rs");

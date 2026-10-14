@@ -17,6 +17,7 @@ mod quit_signal;
 mod boot_progress;
 mod boot_editor;
 mod boot_input;
+mod boot_probe;
 mod help;
 mod macros;
 pub mod remote;

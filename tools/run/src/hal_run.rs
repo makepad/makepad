@@ -104,6 +104,18 @@ fn post(update: Update) {
     Hal::global().wake_session(HOST);
 }
 
+/// MAKEPAD_RUN_QUIT_TRACE=1: each step of the run's end on stderr (thread, ms since the quit
+/// began): where a quit that never exits stops.
+fn quit_trace(step: &str) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static T0: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("MAKEPAD_RUN_QUIT_TRACE").is_some()) {
+        return;
+    }
+    let ms = T0.get_or_init(Instant::now).elapsed().as_secs_f64() * 1e3;
+    eprintln!("makepad-run quit: {step} (+{ms:.0} ms, thread `{}`)", std::thread::current().name().unwrap_or("?"));
+}
+
 fn panic_changed() {
     PANICS_CHANGED.store(true, Ordering::Release);
     Hal::global().wake_session(HOST);
@@ -178,28 +190,34 @@ pub fn run(mut compile: Box<dyn FnMut() -> i32 + Send>) -> i32 {
         .expect("the compiler thread"));
     // the app is a domain of this host: its platform installs no termination handler, so the
     // host answers SIGINT/SIGTERM/SIGHUP (quit_signal.rs): the cache's quit write, then the run
-    // ends as closing its window ends it
-    crate::quit_signal::install(|| {
+    // ends as closing its window ends it. Its worker thread (handle, name, result packet, closure)
+    // waits for the whole run: it lives in the kept heap, not in the compiler generation the
+    // settle swap destroys (it then faulted on its own packet as the signal woke it)
+    relax_compiler::zone_alloc::kept_with(|| crate::quit_signal::install(|| {
         relax_compiler::run::quit_requested();
         QUIT.store(true, Ordering::Release);
         RETRY.notify_all();
         Hal::global().wake_session(HOST);
-    });
+    }));
     {
         let _kept = relax_compiler::zone_alloc::kept();
         makepad_hal::run_main_loop();
     }
+    quit_trace("the main loop returned");
     QUIT.store(true, Ordering::Release);
     RETRY.notify_all();
     Hal::global().wake_session(HOST);
     if thread.join().is_err() {
+        quit_trace("the compile thread panicked");
         return 101;
     }
     if let Some(pump) = PUMP.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        quit_trace("the compile thread joined");
         if pump.join().is_err() {
             return 101;
         }
     }
+    quit_trace("the run ends");
     EXIT.load(Ordering::Acquire)
 }
 
@@ -295,6 +313,9 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
     let flags = open_flags::RETAIN_WINDOWS
         | open_flags::HIDDEN_UNTIL_PRESENT
         | if remote { open_flags::NO_FOCUS } else { 0 };
+    // Inside a makepad window manager the run is one of its windows: it is named by the app.
+    #[cfg(target_os = "linux")]
+    makepad_hal::wm_socket::set_client_name(package);
     let info = hal.open_host(&OpenReq::from_env(0, flags, 0.0));
     if info.backend == makepad_hal::backend_id::NONE {
         return Err("could not open the host HAL session".into());
@@ -363,6 +384,7 @@ pub fn open(package: &str, package_dir: &str) -> Result<(), String> {
                 struct StopLoop;
                 impl Drop for StopLoop {
                     fn drop(&mut self) {
+                        quit_trace("the window pump ends: stop_main_loop");
                         makepad_hal::stop_main_loop();
                     }
                 }
@@ -652,6 +674,10 @@ fn pump(
     let mut work_pending = VecDeque::new();
     let mut work_full = false;
     let has_window = host.window().is_some();
+    let mut probe = crate::boot_probe::Probe::from_env();
+    if probe.is_some() {
+        host.measure_input();
+    }
     let mut ready = if has_window {
         Some(ready)
     } else {
@@ -691,6 +717,9 @@ fn pump(
                 r.initial_failed,
             )
         };
+        if let Some(probe) = &mut probe {
+            probe.turn(active, &data);
+        }
         if QUIT.load(Ordering::Acquire) {
             break;
         }
@@ -1011,16 +1040,34 @@ fn pump(
                 }
             }
         }
+        if let Some(probe) = &mut probe {
+            if let Some(window) = host.window() {
+                probe.window(window);
+            }
+            probe.parts(host.turn_parts());
+            if draw {
+                probe.frame(&data);
+            }
+            probe.latencies(host.take_latencies(), &data);
+        }
         if !alive {
             QUIT.store(true, Ordering::Release);
             break;
         }
         if draw {
-            next_frame = Instant::now() + Duration::from_nanos(16_666_667);
+            // frames on a fixed 60 Hz schedule: the time a turn takes is not added to every
+            // interval; a turn that fell behind starts the schedule again from now
+            let period = Duration::from_nanos(16_666_667);
+            let now = Instant::now();
+            next_frame += period;
+            if next_frame <= now {
+                next_frame = now + period;
+            }
         }
         if !visible {
             input.cancel(&mut host);
         }
+        let mut close = false;
         for event in host.events() {
             let action = match event {
                 BootEvent::DocumentErrors(errors) => {
@@ -1166,6 +1213,7 @@ fn pump(
                     selected = index;
                     host.choose(selected);
                 }
+                Some(Action::Close) => close = true,
                 Some(Action::Cancel) if return_entry.is_some() => {
                     return_entry = None;
                     host.input(None);
@@ -1204,6 +1252,11 @@ fn pump(
                 _ => {}
             }
         }
+        if close {
+            eprintln!("makepad-run: the boot window ends: its close button");
+            QUIT.store(true, Ordering::Release);
+            break;
+        }
         while let Some(work) = work_pending.pop_front() {
             match send.try_send(work) {
                 Ok(()) => {
@@ -1229,6 +1282,11 @@ fn pump(
             }
         }
     }
+    if let Some(probe) = &mut probe {
+        probe.finish();
+    }
+    quit_trace("the window pump quits");
+    relax_compiler::run::quitting();
     relax_compiler::inspect::events::run_state_available(false);
     RETRY.notify_all();
     if let Some(ready) = ready {
@@ -1245,12 +1303,30 @@ fn pump(
         cmd.window_close(window);
     }
     hal.submit(&cmd.buf());
+    // The HAL runs the app's stop on a thread of its own (Hal::run_host_calls) and nobody waited
+    // for it: the process exited while the app's threads still ran JIT code and drew, its heap
+    // was being torn down and its HAL session freed (crashes at every quit). The run ends after
+    // the stop: the app quit (or was given up as leaked), its threads joined, its heap gone.
+    // Waited for here, while the main loop still serves the window system.
+    if domain != 0 {
+        quit_trace("waiting for the app's stop");
+        if let Err(e) = relax_compiler::domain::stop(domain, relax_compiler::domain::Stop::Quit) {
+            eprintln!("makepad: stopping the app at quit: {e}");
+        }
+    }
     // The UI has stopped: finish pending persistence/actions before ending this run.
     for work in work_pending {
         let _ = send.send(work);
     }
     drop(send);
+    quit_trace("the app stopped; joining the action worker");
+    for compile in makepad_script_compute::boundary::kernels_compiling() {
+        quit_trace(&format!("still compiling at the app's stop: {compile}"));
+    }
     if worker.join().is_err() {
         eprintln!("makepad: run action worker panicked");
     }
+    quit_trace("before_exit");
+    // nothing draws any more: the driver's threads run out before exit() unloads it
+    hal.before_exit();
 }

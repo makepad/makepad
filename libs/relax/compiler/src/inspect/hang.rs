@@ -116,7 +116,16 @@ pub fn why_hung(req: &Req, out: &mut Out) {
     };
     let verdict;
     let detail;
-    if !cycle.is_empty() {
+    // a panic parked waiting for a decision stops its thread for good: that is the answer, whatever
+    // the other threads are doing meanwhile (main idles waiting for the frame the parked thread
+    // never finishes)
+    let parked = super::events::parked_now();
+    if let Some((id, os_id, thread, message, location)) = parked.first() {
+        verdict = "parked panic";
+        let name = caps.iter().find(|c| c.t.os_id == *os_id).map(|c| c.t.name.clone()).filter(|n| !n.is_empty()).unwrap_or_else(|| thread.clone());
+        let more = if parked.len() > 1 { format!(" (+{} more parked)", parked.len() - 1) } else { String::new() };
+        detail = format!("P{} parked on thread {} (T{}): {} at {}{} -- see `panics`, decide with `resume P{} panic`", id, name, os_id, super::short(message, 300), location, more, id);
+    } else if !cycle.is_empty() {
         let names: Vec<String> = cycle.iter().map(|h| thread_label(*h, &list)).collect();
         verdict = "deadlock";
         detail = format!("wait cycle: {} -> {}", names.join(" -> "), names[0]);
@@ -168,7 +177,7 @@ pub fn why_hung(req: &Req, out: &mut Out) {
         }
     }
     for (i, c) in caps.iter().enumerate() {
-        if !involved.contains(&i) && cpu(c) >= 50 {
+        if !involved.contains(&i) && (cpu(c) >= 50 || parked.iter().any(|p| p.1 == c.t.os_id)) {
             involved.push(i);
         }
     }

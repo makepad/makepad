@@ -27,6 +27,12 @@ impl ZoneTaken {
         relax_session::zone_put_back(self.session);
     }
 
+    /// The proc-macro registry of the running program, registered again in the new generation
+    /// (the taken statics stay as they are, for rollback).
+    pub(crate) fn reinstall_macro_registry(&self, sess: &std::sync::Arc<crate::Session>) -> Result<(), String> {
+        self.front.reinstall_macro_registry(sess)
+    }
+
     /// The old values may point into any older generation; never drop them at commit.
     pub(crate) fn forget(self) {
         std::mem::forget(self);

@@ -193,19 +193,29 @@ fn world(sess: &std::sync::Arc<crate::Session>) -> Option<std::sync::Arc<Result<
 /// JIT unit: ~120 MB for makepad's macro crates). Its compiled code is in the disk cache, so a
 /// later need (hot reload, a run-time module) rebuilds it without compiling. Compile jobs are
 /// parked while the unit goes (a speculative worker may still hold the world's unit).
-/// Drops the macro world (the last holder frees it); true when there was one.
+/// free_world drops the macro world when no macro call holds it; true when it went.
 /// Is the proc-macro world alive (an auxiliary unit: the settle swap is refused meanwhile)?
 pub fn world_alive() -> bool {
     WORLD.lock().map(|g| g.is_some()).unwrap_or(true)
 }
 
 pub fn free_world() -> bool {
-    let w = WORLD.lock().unwrap_or_else(|e| e.into_inner()).take();
+    let w = {
+        let mut g = WORLD.lock().unwrap_or_else(|e| e.into_inner());
+        // Only the caller retires the world's unit (retire_unit parks every compile job): a macro
+        // call still in flight keeps it for a later free. Dropped by whichever call finished last,
+        // the retire would run on an arbitrary thread -- a parse worker or script thread whose
+        // loader holds a compile job and waits for it, so the park would wait forever. Nobody
+        // clones it without this lock: a count of 1 here stays 1.
+        match g.as_ref() {
+            Some(w) if std::sync::Arc::strong_count(w) == 1 => g.take(),
+            _ => None,
+        }
+    };
     let Some(w) = w else { return false };
     if crate::preload::trace() {
         eprintln!("boot-trace: macro world freed");
     }
-    // the last holder (a call in flight) drops it, retiring its unit
     drop(w);
     true
 }

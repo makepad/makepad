@@ -625,7 +625,7 @@ impl Plan {
                     items::qualify(&names, file.ci, &mut items);
                     Arc::new(items)
                 });
-                items::FileInput { ci: file.ci, path: &file.path, module: &file.module, surface, items,
+                items::FileInput { ci: file.ci, path: &file.path, module: &file.module, index: file, surface, items,
                     
                     eager_bodies: eager_bodies.get(&(file.ci, file.path.clone(), file.module.clone())), force, root: file.path == crates[file.ci].root || file.ci < eager_prefix }
             }).collect::<Vec<_>>();
@@ -706,7 +706,7 @@ impl Plan {
         plan.probes = probes.into_iter().collect();
         let late_inputs = crate::sip::late_inputs();
         let mut hash = crate::sip::Sip128::new();
-        hash.str("source-demand-v23-compact-parts");
+        hash.str("source-demand-v24-impl-declarations");
         hash.u128(graph);
         for (p, h) in &inputs { hash.str(p); hash.u128(*h); }
         for (p, exists) in &plan.probes { hash.str(p); hash.u8(*exists as u8); }
@@ -1095,7 +1095,7 @@ fn impl_parameters(src: &[u8], toks: &[Tok]) -> BTreeSet<String> {
 
 pub fn recipe_identity(crates: &[PreCrate]) -> u128 {
     let mut hash = crate::sip::Sip128::new();
-    hash.str("source-demand-v23-compact-parts");
+    hash.str("source-demand-v24-impl-declarations");
     hash.u128(crate::macro_reg::outline_identity());
     for c in crates {
         hash.str(&c.name); hash.str(&c.root); hash.u32(c.edition as u32);

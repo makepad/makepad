@@ -403,7 +403,7 @@ impl<'a> Lcx<'a> {
             let krate = self.u.prog.def(*d).krate;
             if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) && !self.relax_only_instance(t) {
                 let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
-                self.err(self.pos, format!("a field of `{}` is read from JIT-compiled code, but `{}` lives in a provided crate (built by rustc into the loader) and its layout is not C-shaped: call a method of the crate instead", ts, ts));
+                self.provided_err(krate, format!("a field of `{}` is read from JIT-compiled code, but `{}` lives in a provided crate (built by rustc into the loader) and its layout is not C-shaped: call a method of the crate instead", ts, ts));
             }
         }
     }
@@ -414,7 +414,7 @@ impl<'a> Lcx<'a> {
         let krate = self.u.prog.def(d).krate;
         if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) {
             let name = self.u.prog.def_path(d);
-            self.err(self.pos, format!("static `{}` is read from JIT-compiled code, but it lives in a provided crate (built by rustc into the loader), where its one copy is: call a fn of the crate instead", name));
+            self.provided_err(krate, format!("static `{}` is read from JIT-compiled code, but it lives in a provided crate (built by rustc into the loader), where its one copy is: call a fn of the crate instead", name));
         }
     }
 
@@ -427,7 +427,7 @@ impl<'a> Lcx<'a> {
             let krate = self.u.prog.def(*d).krate;
             if self.u.provided.iter().any(|(k, _)| *k == krate) && !crate::provided::trusted(&self.u.prog, &self.u.tcx, krate, t, 0) && !self.relax_only_instance(t) {
                 let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
-                self.err(self.pos, format!("`{}` is built in JIT-compiled code, but values of it reach the rustc-built code of its provided crate (a bound fn takes or returns it) and its layout is not C-shaped: build it with a fn of the crate, or keep it out of bound signatures", ts));
+                self.provided_err(krate, format!("`{}` is built in JIT-compiled code, but values of it reach the rustc-built code of its provided crate (a bound fn takes or returns it) and its layout is not C-shaped: build it with a fn of the crate, or keep it out of bound signatures", ts));
             }
         }
     }
@@ -465,7 +465,7 @@ impl<'a> Lcx<'a> {
         let std_owner = path.starts_with("alloc::") || path.starts_with("std::") || path.starts_with("core::");
         if std_owner && RAW.iter().any(|r| path.ends_with(r)) {
             let key = crate::provided::key(&self.u.prog, &self.u.tcx, d);
-            self.err(self.pos, format!("`{}` calls `{}` in JIT-compiled code, but `{}` lives in a provided crate: it works an object rustc allocated with makepad run's std, whose layout differs: mark it #[relax_api] (an op), or make it generic over the type JIT code allocates (an instance of a generic fn is compiled for its caller's type)", key, path, key));
+            self.provided_err(krate, format!("`{}` calls `{}` in JIT-compiled code, but `{}` lives in a provided crate: it works an object rustc allocated with makepad run's std, whose layout differs: mark it #[relax_api] (an op), or make it generic over the type JIT code allocates (an instance of a generic fn is compiled for its caller's type)", key, path, key));
         }
     }
 
@@ -479,7 +479,20 @@ impl<'a> Lcx<'a> {
         if let TyKind::Adt(d, a, _) = self.kind(t) {
             if a.is_empty() && self.u.provided_types.contains_key(&d) {
                 let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
-                self.err(self.pos, format!("`{}` is {} by variant in JIT-compiled code, but it lives in a provided crate (built by rustc into the loader) and its layout is not C-shaped: use a method of the crate (e.g. a fieldless kind)", ts, what));
+                let krate = self.u.prog.def(d).krate;
+                self.provided_err(krate, format!("`{}` is {} by variant in JIT-compiled code, but it lives in a provided crate (built by rustc into the loader) and its layout is not C-shaped: use a method of the crate (e.g. a fieldless kind)", ts, what));
+            }
+        }
+    }
+
+    /// An error of JIT-compiled code reaching into provided crate `krate` the way it cannot
+    /// (check_provided_*): also a violation row of the boundary audit when one runs.
+    fn provided_err(&mut self, krate: u32, msg: String) {
+        let at = self.errors.len();
+        self.err(self.pos, msg);
+        if crate::boundary::on() {
+            if let Some(e) = self.errors.get(at) {
+                crate::boundary::note_violation(self.u, krate, self.cur_fn, e);
             }
         }
     }
@@ -1262,7 +1275,8 @@ impl<'a> Lcx<'a> {
                 // ends here, so this is where it is refused (provided.rs)
                 if self.u.provided_types.contains_key(d) {
                     let ts = crate::typeck::ty_to_string(false, &self.u.prog, &self.u.tcx, t);
-                    self.err(self.pos, format!("a field of `{}` is reached from JIT-compiled code (a field access, a pattern or a trait impl's body), but `{}` lives in a provided crate (built by rustc into the loader) and its layout is rustc's alone: call a fn of the crate, or route the impl to rustc's (jit.rs provided_fmt_hash)", ts, ts));
+                    let krate = self.u.prog.def(*d).krate;
+                    self.provided_err(krate, format!("a field of `{}` is reached from JIT-compiled code (a field access, a pattern or a trait impl's body), but `{}` lives in a provided crate (built by rustc into the loader) and its layout is rustc's alone: call a fn of the crate, or route the impl to rustc's (jit.rs provided_fmt_hash)", ts, ts));
                     // the fn fails with the error above; lowering goes on over a scratch place of
                     // the field's type so nothing after it trips over a shapeless one
                     let ft = self.u.tcx.adts.get(d).and_then(|a| a.variants.get(vi as usize)).and_then(|v| v.fields.get(fi as usize)).map(|_| self.u.tcx.field_ty(&self.u.prog, crate::tcx::TypingEnv::fully_monomorphized(&self.u.prog), *d, vi, fi, self.u.tcx.tys.list(*args))).unwrap_or(self.u.tcx.tys.unit);
@@ -1556,11 +1570,9 @@ impl<'a> Lcx<'a> {
         if fsig.self_param.is_some() {
             li_self = Some(0u32);
         }
-        // `extern "C" fn` bodies follow the C ABI (C code calls them: callbacks, IMPs)
-        let c_abi = match self.u.tcx.fn_sig(&self.u.prog, def) {
-            Some(s) => s.header.abi.is_c_like() && self.u.prog.def(def).kind != DefKind::ForeignFn,
-            None => false,
-        };
+        // C-family bodies follow their declared convention (callbacks, IMPs).
+        let abi = self.u.tcx.fn_sig(&self.u.prog, def).map(|s| s.header.abi).unwrap_or(crate::types::Abi::Rust);
+        let c_abi = abi.is_c_like() && self.u.prog.def(def).kind != DefKind::ForeignFn;
         if c_abi {
             let mut ptys = Vec::new();
             if let Some(li) = li_self {
@@ -1569,7 +1581,7 @@ impl<'a> Lcx<'a> {
             for p in &self.b.param_pats {
                 ptys.push(self.body_pty(*p));
             }
-            let cs = crate::cabi::c_sig(self.u, &ptys, ret, None);
+            let cs = crate::cabi::c_sig(self.u, &ptys, ret, None, abi);
             self.f.cabi = Some(Box::new(cs));
         }
         let c_agg_ret = match &self.f.cabi {
@@ -2199,8 +2211,7 @@ impl<'a> Lcx<'a> {
             let fixed = if header.c_variadic { Some(ps.len()) } else { None };
             let mut params = Vec::new();
             for (_, ty) in args { params.push(*ty); }
-            let mut cs = crate::cabi::c_sig(self.u, &params, ret, fixed);
-            cs.unwinds = header.abi.unwinds();
+            let cs = crate::cabi::c_sig(self.u, &params, ret, fixed, header.abi);
             Callee::CIndirect(f, Box::new(cs))
         } else {
             Callee::Indirect(f)
@@ -8252,7 +8263,23 @@ impl<'a> Lcx<'a> {
     /// moves the field out of the temporary), not by a local / static / pointee place.
     fn rvalue_rooted(&mut self, e: ExprId) -> bool {
         match &self.ast().expr(e).kind {
-            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) | ExprKind::Paren(x) => self.rvalue_rooted(*x),
+            ExprKind::Field(x, _) | ExprKind::TupleField(x, _) => {
+                // a field reached through an autoderef of a reference, raw pointer or overloaded
+                // Deref (`get().desc`, `src(0)?.desc`) lies in the pointee: a place the
+                // expression only borrows (rustc as_place.rs: the base is a temporary of the
+                // pointer type, the field a place behind its Deref projection). Only a Box's
+                // contents are owned by the temporary holding it.
+                let derefs = self.b.field_idx.get(&e.0).map_or(0, |&(d, _)| d);
+                let mut t = self.body_ty(*x);
+                for _ in 0..derefs {
+                    match self.box_inner(t) {
+                        Some(inner) => t = inner,
+                        None => return false,
+                    }
+                }
+                self.rvalue_rooted(*x)
+            }
+            ExprKind::Paren(x) => self.rvalue_rooted(*x),
             // `*tmp` of a temporary Box whose contents need drop is lowered as the owned contents
             // (the allocation freed at once, see lower_expr): a value like any rvalue
             ExprKind::Unary(UnOp::Deref, x) => self.temp_box_deref(*x),
@@ -8922,10 +8949,9 @@ impl<'a> Lcx<'a> {
                         return self.dummy_val(ret);
                     };
                     let fixed = if sig.header.c_variadic { Some(sig.params.len()) } else { None };
-                    Callee::CHost(address, Box::new(crate::cabi::c_sig(self.u, &types, ret, fixed)))
+                    Callee::CHost(address, Box::new(crate::cabi::c_sig(self.u, &types, ret, fixed, sig.header.abi)))
                 } else if sig.header.abi.is_c_like() {
-                    let mut cs = crate::cabi::c_sig(self.u, &types, ret, None);
-                    cs.unwinds = sig.header.abi.unwinds();
+                    let cs = crate::cabi::c_sig(self.u, &types, ret, None, sig.header.abi);
                     Callee::CFn(self.u.instance_fn_id(instance), Box::new(cs))
                 } else { Callee::Fn(self.u.instance_fn_id(instance)) };
                 let result = self.emit_call(callee, vals, ret);
@@ -10965,7 +10991,7 @@ pub fn bridge_func_sig(u: &Unit, ps: &[TyId], ret: TyId, name: String, shim: cra
     }
     let usize_ = u.tcx.tys.usize_;
     let status = f.vreg(Cls::I);
-    let sig = crate::cabi::c_sig(u, &[usize_, usize_], u.tcx.tys.u32_, None);
+    let sig = crate::cabi::c_sig(u, &[usize_, usize_], u.tcx.tys.u32_, None, crate::types::Abi::C);
     push(&mut f, b, Inst::Call(Callee::CHost(shim, Box::new(sig)), vec![arr, ret_addr], vec![status]));
     let ok = f.block();
     let bad = f.block();
@@ -10980,7 +11006,7 @@ pub fn bridge_func_sig(u: &Unit, ps: &[TyId], ret: TyId, name: String, shim: cra
     let out_len = f.vreg(Cls::I);
     push(&mut f, bad, Inst::SlotAddr(out, out_slot));
     push(&mut f, bad, Inst::IBinI(IOp::Add, crate::rir::I64, out_len, out, 8));
-    let lp_sig = crate::cabi::c_sig(u, &[usize_, usize_], u.tcx.tys.unit, None);
+    let lp_sig = crate::cabi::c_sig(u, &[usize_, usize_], u.tcx.tys.unit, None, crate::types::Abi::C);
     push(&mut f, bad, Inst::Call(Callee::CHost(last_panic, Box::new(lp_sig)), vec![out, out_len], Vec::new()));
     let (mp, ml, z, site) = (f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I), f.vreg(Cls::I));
     push(&mut f, bad, Inst::Load(Mem::Int(8, false), mp, out, 0));
@@ -11084,7 +11110,7 @@ pub fn glue_func(u: &mut Unit, kind: u8, t: TyId) -> Func {
                     _ => unreachable!(),
                 };
                 let addr = u.syms.intern(crate::syms::SymKind::Provided(format!("drop:{}", u.prog.def_path(d))), addr);
-                let sig = crate::cabi::c_sig(u, &[u.tcx.tys.usize_], u.tcx.tys.unit, None);
+                let sig = crate::cabi::c_sig(u, &[u.tcx.tys.usize_], u.tcx.tys.unit, None, crate::types::Abi::C);
                 push(&mut f, cur, Inst::Call(Callee::CHost(addr, Box::new(sig)), vec![p], Vec::new()));
             }
             // Like rustc's DropGlue(_, None), even an explicitly requested shim is
@@ -13320,6 +13346,9 @@ mod query_drop_tests {
 
     #[test]
     fn extension_blocks_are_freed_once_for_trivial_values_and_aggregates() {
+        isolated_test!(extension_blocks_are_freed_once_for_trivial_values_and_aggregates);
+        // the std sources of this checkout (a test binary's target dir need not be next to them)
+        std::env::set_var("MAKEPAD_RUN_STD", concat!(env!("CARGO_MANIFEST_DIR"), "/std"));
         struct LiveGuard { live: bool, root: u32 }
         impl Drop for LiveGuard {
             fn drop(&mut self) {
@@ -13383,6 +13412,7 @@ mod query_drop_tests {
     }
     #[test]
     fn queries_during_thread_local_destruction() {
+        isolated_test!(queries_during_thread_local_destruction);
         use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
         struct OnDrop { input: Arc<(crate::program::Program, crate::tcx::Tcx)>, success: Arc<AtomicBool> }
         impl Drop for OnDrop {

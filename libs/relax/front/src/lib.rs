@@ -20,6 +20,14 @@ pub fn zone_take() -> ZoneTaken {
     }
 }
 
+impl ZoneTaken {
+    /// Registers the taken proc-macro graph again in the current (new) generation
+    /// (macro_reg::zone_reinstall).
+    pub fn reinstall_macro_registry(&self, sess: &std::sync::Arc<crate::Session>) -> Result<(), String> {
+        macro_reg::zone_reinstall(sess, &self.macro_reg)
+    }
+}
+
 /// Restores the statics after an aborted swap, forgetting the new generation's values.
 pub fn zone_put_back(taken: ZoneTaken) {
     program::zone_put_back(taken.program);

@@ -3,14 +3,14 @@
 //!
 //! - `list()`: every thread: OS id, pthread handle, name, run state, CPU time.
 //! - `capture(t)`: the thread's pcs, innermost first. macOS suspends it (Mach) and reads its
-//!   registers; Linux interrupts it with a real-time signal whose handler hands its registers over
-//!   and waits until the walk is done. Either way the thread stands still while its stack is
+//!   registers; Linux and Android interrupt it with a real-time signal whose handler hands its
+//!   registers over and waits until the walk is done. Either way the thread stands still while its stack is
 //!   walked, and nothing is allocated or locked meanwhile (it may hold malloc's or the loader's
 //!   lock): pcs go to a fixed array, names are looked up after it runs again.
 //!
 //! The walk: JIT code keeps frame pointers (both targets); host code on macOS arm64 too (the
-//! platform ABI); host code on Linux x86_64 is stepped by its DWARF CFI (cfi.rs). Every memory
-//! read goes through a call that fails instead of faulting.
+//! platform ABI) and on Android arm64 (frame records); host code on Linux x86_64 is stepped by
+//! its DWARF CFI (cfi.rs). Every memory read goes through a call that fails instead of faulting.
 
 /// Most frames kept per stack.
 pub const MAX_FRAMES: usize = 128;
@@ -91,20 +91,22 @@ pub fn release_hold(s: &HoldSlot) {
 /// Up to `len` bytes of this process's memory at `addr`, or None where it is not readable (a
 /// read that fails instead of faulting: process_vm_readv / mach_vm_read_overwrite).
 pub fn read_mem(addr: u64, len: usize) -> Option<Vec<u8>> {
-    #[cfg_attr(any(windows, target_os = "android"), allow(unused_mut))]
+    #[cfg_attr(windows, allow(unused_mut))]
     let mut v = vec![0u8; len];
     if len == 0 {
         return Some(v);
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         extern "C" {
             fn syscall(n: i64, ...) -> i64;
             fn getpid() -> i32;
         }
+        // process_vm_readv
+        const SYS: i64 = if cfg!(target_arch = "aarch64") { 270 } else { 310 };
         let local = [v.as_mut_ptr() as usize, len];
         let remote = [addr as usize, len];
-        let n = unsafe { syscall(310, getpid(), local.as_ptr(), 1u64, remote.as_ptr(), 1u64, 0u64) };
+        let n = unsafe { syscall(SYS, getpid(), local.as_ptr(), 1u64, remote.as_ptr(), 1u64, 0u64) };
         (n == len as i64).then_some(v)
     }
     #[cfg(target_os = "macos")]
@@ -117,7 +119,7 @@ pub fn read_mem(addr: u64, len: usize) -> Option<Vec<u8>> {
         let r = unsafe { mach_vm_read_overwrite(mach_task_self_, addr, len as u64, v.as_mut_ptr() as u64, &mut got) };
         (r == 0 && got == len as u64).then_some(v)
     }
-    #[cfg(any(windows, target_os = "android"))]
+    #[cfg(windows)]
     {
         let _ = addr;
         None
@@ -307,9 +309,11 @@ mod imp {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", all(target_os = "android", target_arch = "aarch64")))]
 mod imp {
-    use super::{Raw, Thread, MAX_FRAMES};
+    use super::{Raw, Thread};
+    #[cfg(target_arch = "x86_64")]
+    use super::MAX_FRAMES;
     use std::sync::atomic::{AtomicI32, AtomicU32, AtomicU64, Ordering::{AcqRel, Acquire, Relaxed, Release}};
 
     extern "C" {
@@ -320,11 +324,25 @@ mod imp {
         fn __libc_current_sigrtmin() -> i32;
         fn __libc_current_sigrtmax() -> i32;
     }
+    #[cfg(target_arch = "x86_64")]
     const SYS_GETTID: i64 = 186;
+    #[cfg(target_arch = "x86_64")]
     const SYS_TGKILL: i64 = 234;
+    #[cfg(target_arch = "x86_64")]
     const SYS_FUTEX: i64 = 202;
+    #[cfg(target_arch = "x86_64")]
     const SYS_PROCESS_VM_READV: i64 = 310;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_GETTID: i64 = 178;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_TGKILL: i64 = 131;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_FUTEX: i64 = 98;
+    #[cfg(target_arch = "aarch64")]
+    const SYS_PROCESS_VM_READV: i64 = 270;
 
+    /// glibc's struct sigaction
+    #[cfg(not(target_os = "android"))]
     #[repr(C)]
     struct SigAction {
         handler: usize,
@@ -333,20 +351,44 @@ mod imp {
         pad: i32,
         restorer: usize,
     }
+    #[cfg(not(target_os = "android"))]
+    fn sig_action(handler: usize, flags: i32) -> SigAction {
+        SigAction { handler, mask: [0; 16], flags, pad: 0, restorer: 0 }
+    }
+
+    /// bionic's struct sigaction (LP64)
+    #[cfg(target_os = "android")]
+    #[repr(C)]
+    struct SigAction {
+        flags: i32,
+        pad: i32,
+        handler: usize,
+        mask: u64,
+        restorer: usize,
+    }
+    #[cfg(target_os = "android")]
+    fn sig_action(handler: usize, flags: i32) -> SigAction {
+        SigAction { flags, pad: 0, handler, mask: 0, restorer: 0 }
+    }
 
     pub fn self_os_id() -> u64 {
         unsafe { syscall(SYS_GETTID) as u64 }
     }
 
-    /// The tid of the thread whose pthread handle is `h`: glibc keeps it in its thread descriptor
-    /// (`struct pthread`, which the handle points to) at a fixed offset, found once by checking the
-    /// calling thread's own descriptor. None when the layout is not the expected one.
+    /// The tid of the thread whose pthread handle is `h`: the C library keeps it in its thread
+    /// descriptor (glibc `struct pthread`, bionic `pthread_internal_t`: next, prev, tid), which the
+    /// handle points to, at a fixed offset, found once by checking the calling thread's own
+    /// descriptor. None when the layout is not the expected one.
     pub fn tid_of_handle(h: u64) -> Option<u64> {
         static OFF: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        #[cfg(not(target_os = "android"))]
+        const OFFSETS: [u64; 4] = [0x2d0, 0x2d0 + 8, 0x2c0, 0x2e0];
+        #[cfg(target_os = "android")]
+        const OFFSETS: [u64; 1] = [16];
         let off = (*OFF.get_or_init(|| {
             let me = unsafe { pthread_self() } as u64;
             let tid = self_os_id();
-            [0x2d0u64, 0x2d0 + 8, 0x2c0, 0x2e0].into_iter().find(|&o| read(me + o).map_or(false, |v| v as u32 as u64 == tid))
+            OFFSETS.into_iter().find(|&o| read(me + o).map_or(false, |v| v as u32 as u64 == tid))
         }))?;
         if h == 0 {
             return None;
@@ -404,7 +446,8 @@ mod imp {
     pub struct Slot {
         state: AtomicU32,
         tid: AtomicI32,
-        /// rip, rsp, rbp, rbx, r12, r13, r14, r15, pthread handle
+        /// x86_64: rip, rsp, rbp, rbx, r12, r13, r14, r15; arm64: pc, sp, fp, lr, -, -, -, -;
+        /// then the pthread handle
         regs: [AtomicU64; 9],
         /// a pause holds it (released by `resume`, not after one walk)
         paused: std::sync::atomic::AtomicBool,
@@ -429,10 +472,22 @@ mod imp {
             let tid = syscall(SYS_GETTID) as i32;
             // the slot asked for this thread (a late signal of a capture that gave up finds none)
             let Some(slot) = HOLDS.iter().find(|h| h.tid.load(Acquire) == tid && h.state.compare_exchange(1, 5, AcqRel, Relaxed).is_ok()) else { return };
-            let gregs = uc.add(40) as *const u64;
-            // REG_RIP 16, REG_RSP 15, REG_RBP 10, REG_RBX 11, REG_R12..R15 4..7
-            for (k, g) in [16usize, 15, 10, 11, 4, 5, 6, 7].iter().enumerate() {
-                slot.regs[k].store(*gregs.add(*g), Relaxed);
+            #[cfg(target_arch = "x86_64")]
+            {
+                let gregs = uc.add(40) as *const u64;
+                // REG_RIP 16, REG_RSP 15, REG_RBP 10, REG_RBX 11, REG_R12..R15 4..7
+                for (k, g) in [16usize, 15, 10, 11, 4, 5, 6, 7].iter().enumerate() {
+                    slot.regs[k].store(*gregs.add(*g), Relaxed);
+                }
+            }
+            #[cfg(target_arch = "aarch64")]
+            {
+                // uc_mcontext at 176 (flags, link, stack, 128-byte sigmask): fault_address,
+                // x0..x30, sp, pc
+                let mc = uc.add(176) as *const u64;
+                for (k, g) in [33usize, 32, 30, 31].iter().enumerate() {
+                    slot.regs[k].store(*mc.add(*g), Relaxed);
+                }
             }
             slot.regs[8].store(pthread_self() as u64, Relaxed);
             slot.state.store(2, Release);
@@ -504,6 +559,7 @@ mod imp {
         HOLDS.iter().find(|h| h.tid.load(Acquire) == tid as i32 && h.state.load(Acquire) == 2)
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn walk_slot(slot: &Slot, raw: &mut Raw) {
         let r = |k: usize| slot.regs[k].load(Relaxed);
         let mut regs = super::super::cfi::Regs { rip: r(0), rsp: r(1), rbp: r(2), rbx: r(3), r12: r(4), r13: r(5), r14: r(6), r15: r(7) };
@@ -522,12 +578,12 @@ mod imp {
         unsafe {
             let (lo, hi) = (__libc_current_sigrtmin(), __libc_current_sigrtmax());
             for sig in (lo + 6)..=hi {
-                let mut old = SigAction { handler: 0, mask: [0; 16], flags: 0, pad: 0, restorer: 0 };
+                let mut old = sig_action(0, 0);
                 if sigaction(sig, std::ptr::null(), &mut old) != 0 || old.handler != 0 {
                     continue;
                 }
                 // SA_SIGINFO | SA_RESTART | SA_ONSTACK: interrupted syscalls resume
-                let act = SigAction { handler: on_capture as *const () as usize, mask: [0; 16], flags: 4 | 0x1000_0000 | 0x0800_0000, pad: 0, restorer: 0 };
+                let act = sig_action(on_capture as *const () as usize, 4 | 0x1000_0000 | 0x0800_0000);
                 if sigaction(sig, &act, std::ptr::null_mut()) == 0 {
                     SIGNAL.store(sig, Relaxed);
                     return sig;
@@ -555,9 +611,7 @@ mod imp {
         // there afterwards
         if t.state != "running" {
             if let Some((nr, a0, sp, pc)) = read_syscall(t.os_id) {
-                let mut regs = super::super::cfi::Regs { rip: pc, rsp: sp, ..Default::default() };
-                raw.sp = sp;
-                walk(raw, &mut regs);
+                walk_blocked(raw, sp, pc);
                 if read_syscall(t.os_id) == Some((nr, a0, sp, pc)) {
                     return Ok(());
                 }
@@ -575,8 +629,42 @@ mod imp {
         Ok(())
     }
 
+    /// A thread blocked in a syscall: walked from the syscall's sp and pc.
+    #[cfg(target_arch = "x86_64")]
+    fn walk_blocked(raw: &mut Raw, sp: u64, pc: u64) {
+        let mut regs = super::super::cfi::Regs { rip: pc, rsp: sp, ..Default::default() };
+        raw.sp = sp;
+        walk(raw, &mut regs);
+    }
+
+    /// A held thread: its pc, then its frame records from fp (lr: the caller of a leaf).
+    #[cfg(target_arch = "aarch64")]
+    fn walk_slot(slot: &Slot, raw: &mut Raw) {
+        let r = |k: usize| slot.regs[k].load(Relaxed);
+        raw.handle = r(8);
+        raw.sp = r(1);
+        raw.lr = r(3) & 0x0000_ffff_ffff_ffff;
+        raw.pcs[0] = r(0);
+        raw.n = 1;
+        let ranges = super::arm64_walk::code_ranges();
+        super::arm64_walk::walk_fp(raw, r(2), &ranges, &read);
+    }
+
+    /// A thread blocked in a syscall: its pc, then the frame records above the syscall's sp.
+    #[cfg(target_arch = "aarch64")]
+    fn walk_blocked(raw: &mut Raw, sp: u64, pc: u64) {
+        raw.sp = sp;
+        raw.pcs[0] = pc;
+        raw.n = 1;
+        let ranges = super::arm64_walk::code_ranges();
+        if let Some(fp) = super::arm64_walk::find_record(sp, &ranges, &read) {
+            super::arm64_walk::walk_fp(raw, fp, &ranges, &read);
+        }
+    }
+
     /// Walks from registers into `out` (pcs, innermost first; a running thread's own stack:
     /// the host heap tracker); returns how many.
+    #[cfg(target_arch = "x86_64")]
     pub fn walk_regs_with(r: &mut super::super::cfi::Regs, out: &mut [u64], read: &dyn Fn(u64) -> Option<u64>) -> usize {
         let mut raw = Raw::new();
         walk_with(&mut raw, r, read);
@@ -587,6 +675,7 @@ mod imp {
 
     /// A frame record at or above `sp`: [a] = a higher record (or 0), [a+8] = code, and the record
     /// it links to looks the same (two links checked: stale data rarely chains twice).
+    #[cfg(target_arch = "x86_64")]
     fn find_record(sp: u64, read: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
         let code = |a: u64| crate::jit::in_jit_code(a) || super::super::cfi::covers(a);
         let ok = |a: u64| -> Option<u64> {
@@ -608,12 +697,14 @@ mod imp {
 
     /// Mixed walk: JIT frames by their frame pointers, host frames by their CFI (frame pointers
     /// where a module has none).
+    #[cfg(target_arch = "x86_64")]
     fn walk(raw: &mut Raw, r: &mut super::super::cfi::Regs) {
         walk_with(raw, r, &read)
     }
 
     /// The highest address of the calling thread's stack (glibc reads /proc/self/maps for the
     /// main thread: called once per thread, outside any capture).
+    #[cfg(target_arch = "x86_64")]
     pub fn stack_hi_of_self() -> u64 {
         extern "C" {
             fn pthread_getattr_np(t: usize, attr: *mut u64) -> i32;
@@ -632,6 +723,7 @@ mod imp {
         }
     }
 
+    #[cfg(target_arch = "x86_64")]
     fn walk_with(raw: &mut Raw, r: &mut super::super::cfi::Regs, read: &dyn Fn(u64) -> Option<u64>) {
         use super::super::cfi;
         let mut top = true;
@@ -686,7 +778,80 @@ mod imp {
     }
 }
 
-#[cfg(any(windows, target_os = "android"))]
+/// Android arm64: JIT code and host code both keep frame records (x29 = fp: [fp] = the caller's
+/// fp, [fp+8] = the return address); a frame is kept while its return address is code.
+#[cfg(all(target_os = "android", target_arch = "aarch64"))]
+mod arm64_walk {
+    use super::{Raw, MAX_FRAMES};
+
+    /// The executable mappings of the process (JIT code included), from /proc/self/maps; read on
+    /// the inspecting thread before a walk, never in the signal handler.
+    pub fn code_ranges() -> Vec<(u64, u64)> {
+        let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
+        let mut out = Vec::new();
+        for line in maps.lines() {
+            let mut w = line.split_whitespace();
+            let (Some(range), Some(perms)) = (w.next(), w.next()) else { continue };
+            if perms.as_bytes().get(2) != Some(&b'x') {
+                continue;
+            }
+            let Some((lo, hi)) = range.split_once('-') else { continue };
+            if let (Ok(lo), Ok(hi)) = (u64::from_str_radix(lo, 16), u64::from_str_radix(hi, 16)) {
+                out.push((lo, hi));
+            }
+        }
+        out
+    }
+
+    fn is_code(ranges: &[(u64, u64)], a: u64) -> bool {
+        ranges.iter().any(|&(lo, hi)| a >= lo && a < hi)
+    }
+
+    /// pointer authentication / tag bits off a saved return address
+    fn strip(a: u64) -> u64 {
+        a & 0x0000_ffff_ffff_ffff
+    }
+
+    /// Appends the frames of the record chain from `fp` (the top pc is already in `raw`).
+    pub fn walk_fp(raw: &mut Raw, mut fp: u64, ranges: &[(u64, u64)], read: &dyn Fn(u64) -> Option<u64>) {
+        while raw.n < MAX_FRAMES && fp != 0 && fp % 8 == 0 {
+            let (Some(next), Some(ra)) = (read(fp), read(fp + 8)) else { break };
+            let ra = strip(ra);
+            if ra == 0 || !is_code(ranges, ra) {
+                break;
+            }
+            raw.pcs[raw.n] = ra;
+            raw.n += 1;
+            if next <= fp {
+                break;
+            }
+            fp = next;
+        }
+    }
+
+    /// A frame record at or above `sp` (a thread stopped in a syscall stub, which keeps no
+    /// record of its own): [a] = a higher record (or 0), [a+8] = code, and the record it links
+    /// to looks the same (two links checked: stale data rarely chains twice).
+    pub fn find_record(sp: u64, ranges: &[(u64, u64)], read: &dyn Fn(u64) -> Option<u64>) -> Option<u64> {
+        let ok = |a: u64| -> Option<u64> {
+            let next = read(a)?;
+            let ra = strip(read(a + 8)?);
+            (is_code(ranges, ra) && (next == 0 || (next > a && next - a < 1 << 20))).then_some(next)
+        };
+        let mut a = sp;
+        while a < sp + (64 << 10) {
+            if let Some(next) = ok(a) {
+                if next == 0 || ok(next).is_some() {
+                    return Some(a);
+                }
+            }
+            a += 8;
+        }
+        None
+    }
+}
+
+#[cfg(any(windows, all(target_os = "android", not(target_arch = "aarch64"))))]
 mod imp {
     use super::{Raw, Thread};
     pub fn self_os_id() -> u64 {

@@ -153,6 +153,7 @@ fn put_csig(w: &mut W, s: &CSig) {
         None => 0,
     });
     w.u(s.unwinds as u64);
+    w.u(s.conv as u64);
 }
 fn get_csig(r: &mut R) -> Option<CSig> {
     let n = r.u()? as usize;
@@ -168,7 +169,13 @@ fn get_csig(r: &mut R) -> Option<CSig> {
     let nw = r.u()?;
     let ret_narrow = if nw & 1 != 0 { Some(IntTy { bits: (nw >> 8) as u8, signed: (nw >> 16) & 1 != 0 }) } else { None };
     let unwinds = r.u()? != 0;
-    Some(CSig { args, ret, n_fixed, ret_narrow, unwinds })
+    let conv = match r.u()? {
+        0 => CConv::Host,
+        1 => CConv::SysV64,
+        2 => CConv::Win64,
+        _ => return None,
+    };
+    Some(CSig { conv, args, ret, n_fixed, ret_narrow, unwinds })
 }
 
 fn vw_code(w: VW) -> u64 {
@@ -481,7 +488,7 @@ fn deserialize(bytes: &[u8]) -> Option<IFunc> {
             bufs.push(r.u()? as u32);
         }
         let retbuf = r.u()? as u32;
-        let plan = cabi::plan(&sig, cabi::HOST);
+        let plan = cabi::plan(&sig, sig.conv.target());
         Some((Box::new(sig), plan, bufs, retbuf))
     } else {
         None
@@ -523,7 +530,7 @@ fn deserialize(bytes: &[u8]) -> Option<IFunc> {
         }
         let csig = if r.u()? != 0 {
             let sig = get_csig(&mut r)?;
-            let plan = cabi::plan(&sig, cabi::HOST);
+            let plan = cabi::plan(&sig, sig.conv.target());
             Some((Box::new(sig), plan))
         } else {
             None

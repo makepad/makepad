@@ -79,7 +79,17 @@ impl Bytes {
             return Some(Bytes { ptr: p, len, mapped: true, owned: Vec::new() });
         }
         #[allow(unreachable_code)]
-        std::fs::read(path).ok().map(Bytes::from_vec)
+        Bytes::read_kept(path)
+    }
+
+    /// The file read into the kept heap: where it is not mapped (Windows), the bytes stand for a
+    /// mapping, which outlives every compiler generation -- what is read in place from them (a
+    /// startup image's pc maps, unwind trailers) is identity state of installed code. Read in
+    /// the caller's phase (a warm start loads in the compiler phase) they were destroyed by the
+    /// settle swap, and the O3 sampler's next pc lookup faulted on run-owner ("use after
+    /// compiler-zone destroy (generation 0)", 0xC0000005, DESKTOP-5).
+    fn read_kept(path: &Path) -> Option<Bytes> {
+        crate::zone_alloc::kept_with(|| std::fs::read(path).ok().map(Bytes::from_vec))
     }
 }
 
@@ -161,6 +171,9 @@ pub fn map_pinned(file: &std::fs::File, off: u64, len: usize) -> Option<&'static
 #[cfg(not(unix))]
 pub fn map_pinned(file: &std::fs::File, off: u64, len: usize) -> Option<&'static [u8]> {
     use std::os::windows::fs::FileExt;
+    // the copy stands for a mapping kept for the rest of the process: the kept heap, never the
+    // compiler generation the settle swap destroys (Bytes::read_kept)
+    let _k = crate::zone_alloc::kept();
     // 8-byte aligned, as a store payload is
     let mut words = vec![0u64; len.div_ceil(8)];
     let buf = unsafe { std::slice::from_raw_parts_mut(words.as_mut_ptr() as *mut u8, len) };
@@ -211,4 +224,29 @@ pub(crate) fn nonce() -> u64 {
 /// user, not writable by group or others. Err(reason) turns the cache off.
 pub fn ensure_private_dir(dir: &Path) -> Result<(), String> {
     crate::os::proc::ensure_private_dir(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A cache file read in place of a mapping, from the compiler phase (a warm start's load):
+    /// its bytes are in the kept heap, not in the compiler generation the settle swap destroys.
+    #[test]
+    fn unmapped_cache_bytes_outlive_the_compiler_generation() {
+        let path = std::env::temp_dir().join(format!("relax-pack-kept-{}", std::process::id()));
+        std::fs::write(&path, vec![7u8; 4096]).unwrap();
+        let _c = crate::zone_alloc::compiler();
+        // the phase routes: a plain read now lands in the compiler arena
+        let plain = std::fs::read(&path).unwrap();
+        assert!(crate::zone_alloc::compiler_owns(plain.as_ptr()), "the compiler phase does not route to the arena here");
+        let read = super::Bytes::read_kept(&path).unwrap();
+        assert_eq!(read.len(), 4096);
+        assert!(!crate::zone_alloc::compiler_owns(read.as_ptr()), "read into the compiler arena");
+        #[cfg(not(unix))]
+        {
+            let file = std::fs::File::open(&path).unwrap();
+            let pinned = super::map_pinned(&file, 8, 1024).unwrap();
+            assert!(!crate::zone_alloc::compiler_owns(pinned.as_ptr()), "pinned copy in the compiler arena");
+        }
+        std::fs::remove_file(&path).unwrap();
+    }
 }

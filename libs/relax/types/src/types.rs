@@ -159,7 +159,7 @@ pub enum Safety { Safe, Unsafe }
 /// ABI identity is independent of the calling convention used by the backend.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 #[repr(u8)]
-pub enum Abi { Rust, RustCall, C, CUnwind, System, SystemUnwind, RelaxIntrinsic }
+pub enum Abi { Rust, RustCall, C, CUnwind, System, SystemUnwind, RelaxIntrinsic, SysV64, SysV64Unwind, Win64, Win64Unwind }
 
 impl Abi {
     pub fn name(self) -> &'static str {
@@ -167,6 +167,8 @@ impl Abi {
             Self::Rust => "Rust", Self::RustCall => "rust-call", Self::C => "C",
             Self::CUnwind => "C-unwind", Self::System => "system",
             Self::SystemUnwind => "system-unwind", Self::RelaxIntrinsic => "relax-intrinsic",
+            Self::SysV64 => "sysv64", Self::SysV64Unwind => "sysv64-unwind",
+            Self::Win64 => "win64", Self::Win64Unwind => "win64-unwind",
         }
     }
 
@@ -175,6 +177,8 @@ impl Abi {
             "Rust" => Some(Self::Rust), "rust-call" => Some(Self::RustCall), "C" => Some(Self::C),
             "C-unwind" => Some(Self::CUnwind), "system" => Some(Self::System),
             "system-unwind" => Some(Self::SystemUnwind), "relax-intrinsic" => Some(Self::RelaxIntrinsic),
+            "sysv64" => Some(Self::SysV64), "sysv64-unwind" => Some(Self::SysV64Unwind),
+            "win64" => Some(Self::Win64), "win64-unwind" => Some(Self::Win64Unwind),
             _ => None,
         }
     }
@@ -183,17 +187,24 @@ impl Abi {
         match byte {
             0 => Some(Self::Rust), 1 => Some(Self::RustCall), 2 => Some(Self::C),
             3 => Some(Self::CUnwind), 4 => Some(Self::System), 5 => Some(Self::SystemUnwind),
-            6 => Some(Self::RelaxIntrinsic), _ => None,
+            6 => Some(Self::RelaxIntrinsic), 7 => Some(Self::SysV64), 8 => Some(Self::SysV64Unwind),
+            9 => Some(Self::Win64), 10 => Some(Self::Win64Unwind), _ => None,
         }
     }
 
     /// rustc FnAbi::can_unwind for the C family: the `-unwind` ABIs let a panic cross the call.
     pub fn unwinds(self) -> bool {
-        matches!(self, Self::CUnwind | Self::SystemUnwind)
+        matches!(self, Self::CUnwind | Self::SystemUnwind | Self::SysV64Unwind | Self::Win64Unwind)
     }
 
     pub fn is_c_like(self) -> bool {
-        matches!(self, Self::C | Self::CUnwind | Self::System | Self::SystemUnwind | Self::RelaxIntrinsic)
+        matches!(self, Self::C | Self::CUnwind | Self::System | Self::SystemUnwind | Self::RelaxIntrinsic
+            | Self::SysV64 | Self::SysV64Unwind | Self::Win64 | Self::Win64Unwind)
+    }
+
+    /// rustc_target::spec::abi_map: explicit x86-64 conventions are independent of the OS.
+    pub fn is_supported_on_arch(self, arch: &str) -> bool {
+        !matches!(self, Self::SysV64 | Self::SysV64Unwind | Self::Win64 | Self::Win64Unwind) || arch == "x86_64"
     }
 }
 

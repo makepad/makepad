@@ -889,7 +889,25 @@ pub enum RoRead {
 
 /// Loads at constant addresses fold through this (None: no load folding).
 /// A query with n = 0 asks for an immutable extent (Range), without reading any bytes.
-pub type RoReader = fn(Sym, u32) -> RoRead;
+/// `ctx` names the embedder state the symbols belong to (the JIT unit the function is built
+/// for): a process can hold more than one unit (the proc-macro world next to the program), and
+/// a symbol id read against another unit's tables names another object.
+#[derive(Clone, Copy, Debug)]
+pub struct RoReader {
+    read: fn(usize, Sym, u32) -> RoRead,
+    ctx: usize,
+}
+
+impl RoReader {
+    pub fn new(read: fn(usize, Sym, u32) -> RoRead, ctx: usize) -> RoReader {
+        RoReader { read, ctx }
+    }
+
+    /// `n` bytes at symbol + offset (n = 0: the immutable extent).
+    pub fn read(&self, s: Sym, n: u32) -> RoRead {
+        (self.read)(self.ctx, s, n)
+    }
+}
 
 /// `IBit` on a constant (the semantics every backend implements).
 pub fn bit_op(o: BitOp, x: u64) -> u64 {
@@ -1914,7 +1932,7 @@ pub fn simplify(options: &relax_session::Options, f: &mut Func, ro: Option<RoRea
                                 Mem::F32 => 4,
                                 Mem::F64 => 8,
                             };
-                            match ro.map_or(RoRead::No, |rd| rd(at, n)) {
+                            match ro.map_or(RoRead::No, |rd| rd.read(at, n)) {
                                 RoRead::Bytes(raw) => {
                                     let k = match m {
                                         Mem::Int(1, s) => K::I(if *s { raw as u8 as i8 as i64 } else { raw as u8 as i64 }),
@@ -8067,7 +8085,7 @@ pub fn forward_const_slots(f: &mut Func, ro: Option<RoReader>) -> bool {
                 }
                 if offset[d.0 as usize] == Some(0) && n == f.slots[si].size {
                     if let Some(src) = sym[src.0 as usize] {
-                        if matches!(ro(src, 0), RoRead::Range(len) if len >= n as u64) {
+                        if matches!(ro.read(src, 0), RoRead::Range(len) if len >= n as u64) {
                             init[si] = Some((bi, ii, src));
                         }
                     }

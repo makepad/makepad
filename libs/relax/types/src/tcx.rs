@@ -569,7 +569,14 @@ impl Tcx {
             None => Abi::Rust,
             Some(None) => Abi::C,
             Some(Some(a)) => match Abi::from_name(prog.files[file as usize].text(a).trim_matches('"')) {
-                Some(abi) => abi,
+                Some(abi) => {
+                    let target = &prog.session.options.target;
+                    let arch = if target.is_empty() { std::env::consts::ARCH } else { target.split('-').next().unwrap() };
+                    if !abi.is_supported_on_arch(arch) {
+                        self.err(cx, prog, file, a.lo, format!("E0570: \"{}\" is not a supported ABI for the current target", abi.name()));
+                    }
+                    abi
+                }
                 None => {
                     self.err(cx, prog, file, a.lo, format!("unsupported function ABI {}", prog.files[file as usize].text(a)));
                     Abi::Rust
@@ -1470,7 +1477,7 @@ impl Tcx {
     }
 
     /// fn_sig(d).header.abi without lowering the signature: lower_fn_header reads it from
-    /// the written header alone (an unsupported ABI is reported by the signature and is Rust
+    /// the written header alone (an unknown ABI is reported by the signature and is Rust
     /// there), so a reader that needs only the ABI (a slot's entry linkage) does not compute
     /// the signature and its owner's bound-variable table. None: no fn signature.
     pub fn fn_abi(&self, prog: &Program, d: DefId) -> Option<Abi> {

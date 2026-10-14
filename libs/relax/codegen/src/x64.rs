@@ -6,9 +6,9 @@
 //! ABI (Relax's own, on every x86-64 OS, and the runtime's host entries): int args rdi rsi rdx
 //! rcx r8 r9, float args xmm0-7, int returns rax rdx, float returns xmm0 xmm1. Callee-saved
 //! rbx rbp r12-r15. Reserved scratch: rax rcx rdx r10 r11, xmm0 xmm1 xmm14 xmm15.
-//! The C boundary (CHost / CIndirect / CFn calls, `extern "C"` bodies) follows the host's C ABI
-//! (`cabi::HOST`): SysV, or Win64 on Windows (rcx rdx r8 r9 / xmm0-3 by position, shadow space;
-//! a C body there also keeps rsi, rdi and xmm6-15, which Relax's own convention clobbers).
+//! C-family boundaries (CHost / CIndirect / CFn calls and bodies) use the signature's convention:
+//! the host's C ABI, explicit SysV, or explicit Win64 (rcx rdx r8 r9 / xmm0-3 by position, shadow
+//! space; a Win64 body also keeps rsi, rdi and xmm6-15, which Relax's own convention clobbers).
 
 use crate::cabi::{self, ArgPlan, PLoc, Plan, RetPlan};
 use crate::regalloc::{self, Alloc, Loc, MLoc, RegConfig, Remat};
@@ -32,11 +32,13 @@ const R14: u8 = 14;
 const R15: u8 = 15;
 
 const INT_ARGS: [u8; 6] = [RDI, RSI, RDX, RCX, R8, R9];
-/// integer argument registers of the host's C ABI (`PLoc::Int(k)` of a cabi plan)
-const C_INT_ARGS: &[u8] = match cabi::HOST {
-    cabi::Target::Win64 => &[RCX, RDX, R8, R9],
-    _ => &INT_ARGS,
-};
+/// Integer argument registers of a signature's C ABI (`PLoc::Int(k)` of a cabi plan).
+fn c_int_args(target: cabi::Target) -> &'static [u8] {
+    match target {
+        cabi::Target::Win64 => &[RCX, RDX, R8, R9],
+        _ => &INT_ARGS,
+    }
+}
 /// Win64 C bodies: rsi, rdi, then xmm6-15 (16 bytes each) saved below the frame's other areas
 const WIN64_SAVES: i32 = 16 + 10 * 16;
 /// the segment register of the thread block the runtime's TLS key indexes (fs: Linux static TLS,
@@ -924,7 +926,7 @@ impl<'a> Gen<'a> {
         off = (off + 7) / 8 * 8;
         // C ABI body: buffers rebuilding aggregate params from registers, the result buffer
         if let Some(sig) = &self.f.cabi {
-            let plan = cabi::plan(sig, cabi::HOST);
+            let plan = cabi::plan(sig, sig.conv.target());
             for (k, a) in plan.args.iter().enumerate() {
                 match (a, &sig.args[k]) {
                     (ArgPlan::Parts(_), CArg::Agg(ag)) => {
@@ -946,7 +948,7 @@ impl<'a> Gen<'a> {
                 _ => {}
             }
             self.cplan = Some(plan);
-            if cabi::HOST == cabi::Target::Win64 {
+            if sig.conv.target() == cabi::Target::Win64 {
                 off += WIN64_SAVES;
                 self.win_saves = -(self.saved + off);
             }
@@ -956,7 +958,7 @@ impl<'a> Gen<'a> {
         for b in &self.f.blocks {
             for i in &b.insts {
                 if let Inst::Call(Callee::CHost(_, sig) | Callee::CIndirect(_, sig) | Callee::CFn(_, sig), _, _) = i {
-                    let plan = cabi::plan(sig, cabi::HOST);
+                    let plan = cabi::plan(sig, sig.conv.target());
                     let mut n = 0i32;
                     for ap in &plan.args {
                         if let ArgPlan::Parts(ps) = ap {
@@ -1292,12 +1294,13 @@ impl<'a> Gen<'a> {
         self.fpool.push((at, bits));
     }
 
-    /// Prologue of an `extern "C"` body (SysV): aggregate params are rebuilt in frame
+    /// Prologue of a C-family body: aggregate params are rebuilt in frame
     /// buffers (their address is the param), memory-class ones are addressed in the
     /// caller's argument area, an indirect result pointer is kept for rax.
     fn c_prologue(&mut self, options: &relax_session::Options) {
         let plan = self.cplan.clone().unwrap();
         let sig = self.f.cabi.clone().unwrap();
+        let int_args = c_int_args(sig.conv.target());
         let params = self.f.params.clone();
         let has_ret = sig.ret.is_some();
         let pargs: Vec<VReg> = if has_ret { params[1..].to_vec() } else { params.clone() };
@@ -1306,7 +1309,7 @@ impl<'a> Gen<'a> {
                 let buf = self.cbuf[k];
                 for pt in parts {
                     match pt.loc {
-                        PLoc::Int(r) => self.a.store64(RBP, buf + pt.off as i32, C_INT_ARGS[r as usize]),
+                        PLoc::Int(r) => self.a.store64(RBP, buf + pt.off as i32, int_args[r as usize]),
                         PLoc::Flt(x) => self.a.storef(true, RBP, buf + pt.off as i32, x),
                         PLoc::Stack(_) => {}
                     }
@@ -1315,9 +1318,9 @@ impl<'a> Gen<'a> {
         }
         let mut moves = Vec::new();
         if let (RetPlan::Indirect, true) = (&plan.ret, has_ret) {
-            self.a.store64(RBP, self.cret_ptr, C_INT_ARGS[0]);
+            self.a.store64(RBP, self.cret_ptr, int_args[0]);
             if let Some(d) = self.mloc(params[0]) {
-                moves.push((d, MLoc::R(C_INT_ARGS[0])));
+                moves.push((d, MLoc::R(int_args[0])));
             }
         }
         for (k, ap) in plan.args.iter().enumerate() {
@@ -1326,7 +1329,7 @@ impl<'a> Gen<'a> {
                 None => continue,
             };
             match ap {
-                ArgPlan::Scalar(PLoc::Int(r), _) | ArgPlan::ByRef(PLoc::Int(r)) => moves.push((d, MLoc::R(C_INT_ARGS[*r as usize]))),
+                ArgPlan::Scalar(PLoc::Int(r), _) | ArgPlan::ByRef(PLoc::Int(r)) => moves.push((d, MLoc::R(int_args[*r as usize]))),
                 ArgPlan::Scalar(PLoc::Flt(x), _) => moves.push((d, MLoc::F(*x))),
                 _ => {}
             }
@@ -1463,9 +1466,11 @@ impl<'a> Gen<'a> {
         }
     }
 
-    /// A call under the C ABI (SysV).
+    /// A call under the signature's C-family convention.
     fn c_call(&mut self, options: &relax_session::Options, c: &Callee, sig: &CSig, args: &[VReg], rets: &[VReg]) {
-        let plan = cabi::plan(sig, cabi::HOST);
+        let target = sig.conv.target();
+        let plan = cabi::plan(sig, target);
+        let int_args = c_int_args(target);
         let saves = self.al.saves.get(&self.cur_pos).cloned().unwrap_or_default();
         for (v, slot) in &saves {
             self.save_restore(*v, *slot, true);
@@ -1492,7 +1497,7 @@ impl<'a> Gen<'a> {
             match ap {
                 ArgPlan::Scalar(PLoc::Int(r), _) | ArgPlan::ByRef(PLoc::Int(r)) => {
                     if let Some(s2) = self.mloc(v) {
-                        moves.push((MLoc::R(C_INT_ARGS[*r as usize]), s2));
+                        moves.push((MLoc::R(int_args[*r as usize]), s2));
                     }
                 }
                 ArgPlan::Scalar(PLoc::Flt(x), _) => {
@@ -1516,7 +1521,7 @@ impl<'a> Gen<'a> {
                         let cd = st + 8 * cell;
                         self.copy_bytes(RBP, cd, ra, pt.off as i32, pt.size);
                         match pt.loc {
-                            PLoc::Int(r) => moves.push((MLoc::R(C_INT_ARGS[r as usize]), MLoc::M(cd))),
+                            PLoc::Int(r) => moves.push((MLoc::R(int_args[r as usize]), MLoc::M(cd))),
                             PLoc::Flt(x) => moves.push((MLoc::F(x), MLoc::M(cd))),
                             PLoc::Stack(_) => {}
                         }
@@ -1530,7 +1535,7 @@ impl<'a> Gen<'a> {
             }
         }
         if let (RetPlan::Indirect, true) = (&plan.ret, has_ret) {
-            moves.push((MLoc::R(C_INT_ARGS[0]), MLoc::M(st)));
+            moves.push((MLoc::R(int_args[0]), MLoc::M(st)));
         }
         for (d, s2) in regalloc::seq_moves(&moves, R10, XS) {
             self.mv(d, s2);
@@ -1542,14 +1547,14 @@ impl<'a> Gen<'a> {
             }
             Callee::CHost(sym, _) => {
                 self.mov_reloc(R11, Reloc::Sym(*sym));
-                if cabi::HOST == cabi::Target::SysV {
+                if target == cabi::Target::SysV {
                     // SysV variadic calls: the number of vector registers used, in al
                     self.a.mov_ri(RAX, plan.n_flt as i64);
                 }
                 self.a.call_r(R11);
             }
             _ => {
-                if cabi::HOST == cabi::Target::SysV {
+                if target == cabi::Target::SysV {
                     self.a.mov_ri(RAX, plan.n_flt as i64);
                 }
                 self.a.call_r(R11);
@@ -1876,7 +1881,7 @@ impl<'a> Gen<'a> {
     /// own convention (the body's code and its callees use them): stored after the prologue,
     /// reloaded before every return.
     fn win64_saves(&mut self, store: bool) {
-        if cabi::HOST != cabi::Target::Win64 || self.cplan.is_none() {
+        if self.win_saves == 0 {
             return;
         }
         let b = self.win_saves;
@@ -4504,13 +4509,12 @@ pub fn lazy_entry(host_compile: u64) -> Vec<u8> {
     let mut a = Asm { b: Vec::new(), sib: None };
     a.push(RBP);
     a.mov_rr(RBP, RSP);
-    // save rdi rsi rdx rcx r8 r9 + xmm0-7: 6*8 + 8*8 = 112, plus 8 to align -> 120? keep 16-aligned
-    // Win64: a stub is also entered from C callers (rustc-built host code calling an `extern "C"`
-    // fn pointer, Windows calling a WndProc / COM method), for which xmm6-15 are callee-saved;
+    // A 128-byte area saves rdi rsi rdx rcx r8 r9 and the low words of xmm0-7, 16-byte aligned.
+    // A stub may be entered under Win64 on any x86-64 OS (`extern "win64"`, or Windows C
+    // callbacks), for which xmm6-15 are callee-saved;
     // `host_compile` is a sysv64 fn and may clobber them, so they are kept here too (rsi / rdi,
     // also callee-saved for Win64, are among the argument registers saved above).
-    let win64 = cabi::HOST == cabi::Target::Win64;
-    let xsave = if win64 { 160 } else { 0 };
+    let xsave = 160;
     a.sub_rsp(128 + xsave as u32);
     let regs = [RDI, RSI, RDX, RCX, R8, R9];
     for (i, r) in regs.iter().enumerate() {

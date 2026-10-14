@@ -660,12 +660,28 @@ pub enum CArg {
     Agg(CAgg),
 }
 
-/// C ABI shape of a call or of an `extern "C"` function body; the backend lowers it.
+/// C-family calling convention, separate from ABI identity and unwinding.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum CConv { Host, SysV64, Win64 }
+
+impl CConv {
+    pub fn target(self) -> crate::cabi::Target {
+        match self {
+            Self::Host => crate::cabi::HOST,
+            Self::SysV64 => crate::cabi::Target::SysV,
+            Self::Win64 => crate::cabi::Target::Win64,
+        }
+    }
+}
+
+/// C-family ABI shape of a call or function body; the backend lowers it.
 /// ABI argument vregs: [result address if `ret` is Some] then one per `args` entry.
 /// With an aggregate return the result is written through that address and the call
 /// has no result vregs; scalar results come back in the call's result vregs as usual.
 #[derive(Clone, PartialEq, Debug)]
 pub struct CSig {
+    pub conv: CConv,
     pub args: Vec<CArg>,
     pub ret: Option<CAgg>,
     /// variadic: the number of fixed arguments in `args`; u32::MAX when not variadic
@@ -673,9 +689,9 @@ pub struct CSig {
     /// a narrow integer result (i8..i32, u8..u32, bool): C leaves the register's upper bits
     /// undefined, so the backend re-extends it after the call
     pub ret_narrow: Option<IntTy>,
-    /// the callee's ABI lets a panic unwind through the call (`extern "C-unwind"` /
-    /// `"system-unwind"`; rustc FnAbi::can_unwind): the call has an unwind edge, as a Rust call
-    /// does. `extern "C"` and `"system"` calls do not (rustc aborts a panic leaving them).
+    /// the callee's `-unwind` ABI lets a panic unwind through the call (rustc FnAbi::can_unwind):
+    /// the call has an unwind edge, as a Rust call does. Other C-family ABIs abort a panic
+    /// leaving their body.
     pub unwinds: bool,
 }
 

@@ -385,6 +385,8 @@ pub struct Cache {
     file_hash: HashMap<u32, u128>,
     /// data entry key -> address in this run
     data_addr: HashMap<u128, u64>,
+    /// data object key -> its per-domain copy this run (link_symbol tag 10)
+    const_copy: HashMap<u128, u64>,
     /// data object index -> its entry key (None: cannot be stored)
     data_key: HashMap<u32, Option<u128>>,
     /// why a data object cannot be stored (memo of data_entry's reason)
@@ -636,6 +638,7 @@ impl Cache {
             file_ids_n: 0,
             file_hash: HashMap::new(),
             data_addr: HashMap::new(),
+            const_copy: HashMap::new(),
             data_key: HashMap::new(),
             data_why: HashMap::new(),
             linked: HashSet::new(),
@@ -1964,6 +1967,24 @@ impl Cache {
                 }
             }
             SymKind::Rw(k) => {
+                // a constant's per-domain copy holds the value, so it is named as the copy of the
+                // constant's data object (tag 10: the link copies the linked object again), never
+                // as a fresh block (tag 8: zeroed, for storage code writes before it reads)
+                let copied = u.syms.const_copies.lock().unwrap_or_else(|x| x.into_inner()).get(&s.id).copied();
+                if let Some(orig) = copied {
+                    let i = match u.syms.data_at(orig).and_then(|d| u.syms.kind(d.id)) {
+                        Some(SymKind::Data(i)) => i,
+                        _ => {
+                            self.why("constant copied per domain");
+                            return None;
+                        }
+                    };
+                    let dk = self.data_entry(u, i)?;
+                    e.u8(10);
+                    e.u128(dk);
+                    e.u64(s.off as u64);
+                    return Some(());
+                }
                 let (sz, al) = u.syms.rw_blocks.lock().unwrap_or_else(|x| x.into_inner()).get(k as usize).copied()?;
                 e.u8(8);
                 e.u64(sz);
@@ -2448,6 +2469,7 @@ impl Cache {
     /// (the swap spilled it).
     pub(crate) fn inherit_run_state(&mut self, old: &Cache) {
         self.data_addr = old.data_addr.clone();
+        self.const_copy = old.const_copy.clone();
         self.data_key = old.data_key.clone();
         self.linked = old.linked.clone();
         self.linked_key = old.linked_key.clone();
@@ -4601,6 +4623,7 @@ mod cold_tests {
 
     #[test]
     fn warm_validation_is_by_stat_and_racy_edits_are_caught() {
+        isolated_test!(warm_validation_is_by_stat_and_racy_edits_are_caught);
         let mut session = crate::Session::default();
         session.options.source_eager = true;
         let sess = &std::sync::Arc::new(session);
@@ -4662,6 +4685,7 @@ mod cold_tests {
 
     #[test]
     fn collected_boot_excludes_runtime_crates_and_later_boot_queries() {
+        isolated_test!(collected_boot_excludes_runtime_crates_and_later_boot_queries);
         let mut session = crate::Session::default();
         session.options.rs_lazy = true;
         let sess = &std::sync::Arc::new(session);
@@ -4770,6 +4794,7 @@ mod cold_tests {
     /// proc-macro and build crates load after the app's).
     #[test]
     fn collected_prefix_keeps_crates_below_the_first_changed_one() {
+        isolated_test!(collected_prefix_keeps_crates_below_the_first_changed_one);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-collected-prefix-{}-{}", std::process::id(), crate::clock::wall_ns()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4843,18 +4868,21 @@ mod cold_tests {
 
     #[test]
     fn cold_forward_dependencies_wait_and_drain() {
+        isolated_test!(cold_forward_dependencies_wait_and_drain);
         let sess = &std::sync::Arc::new(crate::Session::default());
         forward_dependencies(sess, false);
     }
 
     #[test]
     fn cold_forward_dependencies_finish_without_callback() {
+        isolated_test!(cold_forward_dependencies_finish_without_callback);
         let sess = &std::sync::Arc::new(crate::Session::default());
         forward_dependencies(sess, true);
     }
 
     #[test]
     fn cold_self_dependency_finishes_without_blocking_later_crates() {
+        isolated_test!(cold_self_dependency_finishes_without_blocking_later_crates);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-cycle-{}-{}", std::process::id(), crate::clock::wall_ns()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -4892,6 +4920,7 @@ mod cold_tests {
 
     #[test]
     fn cold_self_alias_graph_matches_full_fingerprints_before_finish() {
+        isolated_test!(cold_self_alias_graph_matches_full_fingerprints_before_finish);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-self-alias-{}-{}", std::process::id(), crate::clock::wall_ns()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -5015,6 +5044,7 @@ mod cold_tests {
 
     #[test]
     fn cold_load_maps_at_publication_and_restores_warm() {
+        isolated_test!(cold_load_maps_at_publication_and_restores_warm);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-front-{}-{}", std::process::id(), crate::clock::wall_ns()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -5071,6 +5101,7 @@ mod cold_tests {
 
     #[test]
     fn lazy_part_is_mapped_before_publication_and_restored_warm() {
+        isolated_test!(lazy_part_is_mapped_before_publication_and_restored_warm);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let dir = std::env::temp_dir().join(format!("relax-cold-part-{}-{}", std::process::id(), crate::clock::wall_ns()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -5121,6 +5152,7 @@ mod data_tests {
 
     #[test]
     fn round23_shim_keys_roundtrip() {
+        isolated_test!(round23_shim_keys_roundtrip);
         use relax_types::instance::{ShimKind, ReifyReason};
         let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
         let mut session = crate::Session::default();
@@ -5185,6 +5217,7 @@ mod data_tests {
 
     #[test]
     fn round27_cached_native_const_array_pointer_words() {
+        isolated_test!(round27_cached_native_const_array_pointer_words);
         let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
         let mut session = crate::Session::default();
         session.options.tier1 = false; session.options.tyck_ahead = false;
@@ -5214,6 +5247,7 @@ mod data_tests {
 
     #[test]
     fn round27_bound_regions_cache_roundtrip_and_reuse() {
+        isolated_test!(round27_bound_regions_cache_roundtrip_and_reuse);
         use crate::types::{RegionId, RegionKind, BoundVar, FnHeader, ClosureArgs};
         let _unit = CACHE_UNIT.lock().unwrap_or_else(|e| e.into_inner());
         let mut session = crate::Session::default();
@@ -5302,6 +5336,7 @@ mod data_tests {
 
     #[test]
     fn native_const_cache_roundtrip() {
+        isolated_test!(native_const_cache_roundtrip);
         use relax_types::consts::{Const, ConstKind, ScalarInt, ValTree};
         let mut session = crate::Session::default();
         // These fixtures serialize types without executing code. Unit::drop's
@@ -5352,6 +5387,7 @@ mod data_tests {
 
     #[test]
     fn native_opaque_def_cache_roundtrip() {
+        isolated_test!(native_opaque_def_cache_roundtrip);
         let mut session = crate::Session::default();
         // These fixtures serialize types without executing code. Unit::drop's
         // tier-1 shutdown retains a process-wide lock until process exit.
@@ -5397,13 +5433,14 @@ mod data_tests {
 
     #[test]
     fn fnhdr_cache_roundtrip() {
+        isolated_test!(fnhdr_cache_roundtrip);
         use crate::types::{Abi, FnHeader, Safety};
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-fnhdr-cache-{}", std::process::id()));
         let mut u = Unit::new(crate::program::Program::new(sess), crate::tcx::Tcx::new(), 0);
         let mut cache = open_test_cache(&u, &root);
         let mut encodings = Vec::new();
-        for abi in [Abi::Rust, Abi::RustCall, Abi::C, Abi::CUnwind, Abi::System, Abi::SystemUnwind, Abi::RelaxIntrinsic] {
+        for abi in [Abi::Rust, Abi::RustCall, Abi::C, Abi::CUnwind, Abi::System, Abi::SystemUnwind, Abi::RelaxIntrinsic, Abi::SysV64, Abi::SysV64Unwind, Abi::Win64, Abi::Win64Unwind] {
             for safety in [Safety::Safe, Safety::Unsafe] {
                 for c_variadic in [false, true] {
                     let header = FnHeader { safety, abi, c_variadic };
@@ -5424,6 +5461,7 @@ mod data_tests {
 
     #[test]
     fn dyn_auto_traits_cache_roundtrip() {
+        isolated_test!(dyn_auto_traits_cache_roundtrip);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-dyn-auto-cache-{}", std::process::id()));
         pack::ensure_private_dir(&root).unwrap();
@@ -5454,6 +5492,7 @@ mod data_tests {
 
     #[test]
     fn bound_region_types_cache_roundtrip() {
+        isolated_test!(bound_region_types_cache_roundtrip);
         use crate::types::{BoundVar, FnHeader, RegionArgsId, RegionId, RegionKind};
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-bound-cache-{}", std::process::id()));
@@ -5505,6 +5544,7 @@ mod data_tests {
 
     #[test]
     fn front_record_requires_own_store() {
+        isolated_test!(front_record_requires_own_store);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-front-store-{}", std::process::id()));
         let u = Unit::new(crate::program::Program::new(sess), crate::tcx::Tcx::new(), 0);
@@ -5538,6 +5578,7 @@ mod data_tests {
 
     #[test]
     fn owner_verdict_rejects_body_and_dependency_edits() {
+        isolated_test!(owner_verdict_rejects_body_and_dependency_edits);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let (root, mut prog, _) = front_fixture(sess, "owner-verdict");
         let owner = DefId(prog.defs.iter().position(|d| d.krate == 2 && d.kind == DefKind::Fn).unwrap() as u32);
@@ -5592,21 +5633,26 @@ mod data_tests {
             let path = root.join(format!("{name}.rs")).to_string_lossy().into_owned();
             std::fs::write(&path, "pub fn value() -> u32 { 7 }").unwrap();
             let deps: Vec<(String, String)> = if ci == 0 { vec![] } else { vec![(pre[ci - 1].name.clone(), pre[ci - 1].name.clone())] };
-            let loaded_deps = deps.iter().map(|(alias, _)| (prog.syms.intern(alias), ci as u32 - 1)).collect();
-            prog.load_crate(name, &path, 2021, cfg.clone(), loaded_deps).unwrap();
-            prog.front_dep_names[ci] = deps.clone();
-            prog.crates[ci].proc_macro = ci == 1;
             pre.push(crate::preload::PreCrate {
-                
                 name: name.into(), root: path, edition: 2021, cfg: cfg.clone(), deps: deps.clone(), proc_macro: ci == 1,
                 image_deps: if ci == 0 { vec![] } else { vec![ci - 1] }, image_dep_names: deps,
             });
+        }
+        // recorded as a cold run records: the whole graph preloaded under its demand plan, so a
+        // warm load (which plans the same graph) selects the same parts of each crate
+        prog.preload_images_bounded(pre.clone(), None, true, None);
+        for (ci, c) in pre.iter().enumerate() {
+            let loaded_deps = c.deps.iter().map(|(alias, _)| (prog.syms.intern(alias), ci as u32 - 1)).collect();
+            prog.load_crate(&c.name, &c.root, 2021, cfg.clone(), loaded_deps).unwrap();
+            prog.front_dep_names[ci] = c.deps.clone();
+            prog.crates[ci].proc_macro = c.proc_macro;
         }
         (root, prog, pre)
     }
 
     #[test]
     fn front_record_writes_host_files_into_own_stores() {
+        isolated_test!(front_record_writes_host_files_into_own_stores);
         let options = &crate::options::Options::default();
         let sess = &std::sync::Arc::new(crate::Session::default());
         let (root, mut prog, pre) = front_fixture(sess, "host");
@@ -5657,6 +5703,7 @@ mod data_tests {
     /// they name in the run store's committed index (read from disk, as a new process would).
     #[test]
     fn flushed_references_name_committed_images() {
+        isolated_test!(flushed_references_name_committed_images);
         use crate::parser::ImageSink;
         let sess = &std::sync::Arc::new(crate::Session::default());
         let (root, mut prog, pre) = front_fixture(sess, "flush");
@@ -5698,6 +5745,7 @@ mod data_tests {
 
     #[test]
     fn front_record_rejects_unexplained_files_and_metadata_changes() {
+        isolated_test!(front_record_rejects_unexplained_files_and_metadata_changes);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let (root, mut prog, _) = front_fixture(sess, "invalid");
         let fps = crate::stable::crate_fingerprints(&prog);
@@ -5718,6 +5766,7 @@ mod data_tests {
 
     #[test]
     fn front_record_missing_image_still_restores_dependents() {
+        isolated_test!(front_record_missing_image_still_restores_dependents);
         let options = &crate::options::Options::default();
         let sess = &std::sync::Arc::new(crate::Session::default());
         let (root, prog, pre) = front_fixture(sess, "missing");
@@ -5749,6 +5798,7 @@ mod data_tests {
 
     #[test]
     fn front_sources_have_distinct_keys_and_images() {
+        isolated_test!(front_sources_have_distinct_keys_and_images);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let path = "same.rs";
         let first = b"fn value() -> u32 { 1 }";
@@ -5789,6 +5839,108 @@ mod data_tests {
 
     }
 
+    /// A unit's constant-load reader reads that unit's data, whatever units the process makes
+    /// after it. The proc-macro world's unit, made after the program's on a warm macOS start, took
+    /// over a process-wide reader: the program's O2 builds folded its loads against the world's
+    /// symbol tables, so a constant slice's length (unicode-segmentation's word_cat_table) became
+    /// 0 in code the disk cache then kept -- the warm Stage panicked in its first draw.
+    #[test]
+    fn ro_reader_reads_its_own_unit() {
+        isolated_test!(ro_reader_reads_its_own_unit);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-ro-unit-{}", std::process::id()));
+        pack::ensure_private_dir(&root).unwrap();
+        let source = root.join("fixture.rs");
+        std::fs::write(&source, "fn main() {}\n").unwrap();
+        let unit = || {
+            let mut prog = crate::program::Program::new(sess);
+            prog.load_crate("fixture", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+            let mut tcx = crate::tcx::Tcx::new();
+            tcx.collect(&prog);
+            Unit::new(prog, tcx, 0)
+        };
+        // the program: a constant slice's (pointer, length) words, as const evaluation leaves them
+        let a = unit();
+        let table = a.data(&[7u8; 1085], 1, DataKind::Bytes);
+        let mut words = table.to_le_bytes().to_vec();
+        words.extend_from_slice(&1085u64.to_le_bytes());
+        let fat = a.data(&words, 8, DataKind::Relocs(vec![(0, a.data_sym(table))]));
+        let fat_sym = a.data_sym(fat);
+        let reader = a.ro_reader().unwrap();
+        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        // a second unit (the proc-macro world), whose same symbol ids name zeroed objects
+        let b = unit();
+        for _ in 0..4 {
+            b.data(&[0u8; 16], 8, DataKind::Bytes);
+        }
+        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        assert!(matches!(a.ro_reader().unwrap().read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        drop(b);
+        assert!(matches!(reader.read(Sym { id: fat_sym.id, off: 8 }, 8), crate::opt::RoRead::Bytes(1085)));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A constant moves to a per-domain block only through its pointer words; a copy that does
+    /// move holds the value, so the cache names it as the copy of the constant's data (tag 10),
+    /// never as a fresh block. unicode-segmentation's
+    /// `word_cat_table` (a `&[(char, char, WordCat)]`) has integer words that, in some runs, equal
+    /// an address inside the compile domain's block: the raw word scan copied it into a writable
+    /// block, word_category's cache entry named that block as tag 8 (a fresh zeroed block per
+    /// link), and every warm Stage launch then read the table's length as 0 in its first draw.
+    #[test]
+    fn rehome_follows_pointer_words_and_cached_copies_keep_their_value() {
+        isolated_test!(rehome_follows_pointer_words_and_cached_copies_keep_their_value);
+        let sess = &std::sync::Arc::new(crate::Session::default());
+        let root = std::env::temp_dir().join(format!("relax-rehome-{}", std::process::id()));
+        pack::ensure_private_dir(&root).unwrap();
+        let source = root.join("fixture.rs");
+        std::fs::write(&source, "static S: u64 = 7;\nfn main() {}\n").unwrap();
+        let mut prog = crate::program::Program::new(sess);
+        prog.load_crate("fixture", source.to_str().unwrap(), 2021, crate::cfg::CfgSet::host(sess, &[]), Vec::new()).unwrap();
+        let mut tcx = crate::tcx::Tcx::new();
+        tcx.collect(&prog);
+        let mut u = Unit::new(prog, tcx, 0);
+        let s_def = DefId(u.prog.defs.iter().position(|d| u.prog.syms.str(d.name) == "S").unwrap() as u32);
+        let mut c = open_test_cache(&u, &root);
+        let u64_ty = u.tcx.tys.u64_;
+        let inside = u.syms.dom0() + 64;
+
+        // integers (a [u64; 4] by its type) one of which equals an address inside the block
+        let arr = u.tcx.tys.intern(TyKind::Array(u64_ty, u.tcx.tys.const_usize(4)));
+        let mut words = Vec::new();
+        for w in [1u64, inside, 1085, 3] {
+            words.extend_from_slice(&w.to_le_bytes());
+        }
+        let ints = u.data(&words, 8, DataKind::Typed(arr));
+        assert_eq!(crate::domain::rehome_const(&u, ints), ints, "an integer is not a pointer into the block");
+
+        // a real reference to a static: copied per domain, and that copy is not stored
+        let s = u.static_sym(s_def);
+        let r = u.tcx.tys.intern(TyKind::Ref(false, u64_ty, crate::types::RegionId::ERASED));
+        let refs = u.data(&u.syms.addr(s).to_le_bytes(), 8, DataKind::Typed(r));
+        let copy = crate::domain::rehome_const(&u, refs);
+        assert_ne!(copy, refs);
+        let copy_sym = *u.syms.rw_syms.lock().unwrap().get(&copy).unwrap();
+        assert_eq!(u.syms.const_copies.lock().unwrap().get(&copy_sym.id), Some(&refs));
+        // named as the copy of `refs` (tag 10), and linked as a copy holding the value -- not as
+        // a fresh, zeroed block
+        let holder = u.data(&copy.to_le_bytes(), 8, DataKind::Relocs(vec![(0, copy_sym)]));
+        let key = c.data_entry(&u, index(&u, holder)).unwrap();
+        let entries: Vec<_> = c.pending.drain(..).map(|(_, e)| e).collect();
+        let path = root.join("data.rcs");
+        crate::store::append(&path, entries, true).unwrap();
+        let store = std::sync::Arc::new(Store::open(&path).unwrap());
+        for (i, ix) in store.index.iter().enumerate() {
+            c.index.insert(ix.key, (0, i as u32));
+        }
+        c.stores.push(store);
+        let linked = c.link_data(&mut u, key).unwrap();
+        let word = unsafe { *(linked as *const u64) };
+        assert!(word != 0 && word != refs && word != copy, "a new copy of the constant");
+        assert_eq!(unsafe { *(word as *const u64) }, u.syms.addr(s), "the copy holds the value");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn index(u: &Unit, a: u64) -> u32 {
         match u.syms.kind(u.data_sym(a).id).unwrap() {
             SymKind::Data(i) => i,
@@ -5798,6 +5950,7 @@ mod data_tests {
 
     #[test]
     fn data_relocations_round_trip() {
+        isolated_test!(data_relocations_round_trip);
         let sess = &std::sync::Arc::new(crate::Session::default());
         let root = std::env::temp_dir().join(format!("relax-data-relocs-{}", std::process::id()));
         pack::ensure_private_dir(&root).unwrap();
@@ -5939,6 +6092,7 @@ mod nounwind_tests {
 
     #[test]
     fn entries_keep_false_and_true_answers_before_code() {
+        isolated_test!(entries_keep_false_and_true_answers_before_code);
         let mut e = E::default();
         e.u8(0);
         e.u32(0);
@@ -6102,6 +6256,25 @@ impl Linker {
                     rw.push(u.rw_sym(sz, al, None));
                 }
                 *rw.get(ord)?
+            }
+            // the per-domain copy of constant data object `k` (domain.rs const_copy): one copy
+            // per object this run, as the cold run had one per constant
+            10 => {
+                let k = d.u128()?;
+                let a = self.link_data(u, k)?;
+                let c = match self.cache().const_copy.get(&k) {
+                    Some(&c) => c,
+                    None => {
+                        let c = crate::domain::const_copy(u, a);
+                        if c == a {
+                            return None;
+                        }
+                        self.cache().const_copy.insert(k, c);
+                        c
+                    }
+                };
+                // the code addresses it as a domain symbol, as it did the cold run's copy
+                *u.syms.rw_syms.lock().unwrap_or_else(|x| x.into_inner()).get(&c)?
             }
             9 => {
                 let name = d.str()?;
@@ -6487,6 +6660,7 @@ mod prune_tests {
     /// generation); the shared crates' stores and another app's graph stay.
     #[test]
     fn app_store_files_are_the_apps_own() {
+        isolated_test!(app_store_files_are_the_apps_own);
         let dir = std::env::temp_dir().join(format!("relax-appfiles-{}-{}", std::process::id(), crate::clock::wall_ns()));
         std::fs::create_dir_all(&dir).unwrap();
         let put = |name: &str, kind: u32, payload: Vec<u8>| -> PathBuf {
@@ -6519,6 +6693,7 @@ mod prune_tests {
 
     #[test]
     fn a_runs_stores_survive_a_tiny_cap_and_stale_ones_go_first() {
+        isolated_test!(a_runs_stores_survive_a_tiny_cap_and_stale_ones_go_first);
         let root = std::env::temp_dir().join(format!("relax-prune-{}-{}", std::process::id(), crate::clock::wall_ns()));
         let dir = root.join("cache");
         std::fs::create_dir_all(&dir).unwrap();

@@ -10,7 +10,7 @@
 //! - `interactive()`: the sampler thread asks not to have its timers coalesced.
 //! - `realtime()`: the calling thread runs under a real-time policy (an audio callback thread:
 //!   SCHED_FIFO/RR on Linux, a time-constraint policy on macOS).
-//! - `at_fork(prepare, parent, child)`: fork handlers (pthread_atfork).
+//! - `fork()`: the C library's fork (unix), for the fork the loader hands to programs.
 //! - `exit_now(code)`: ends the process at once (no atexit handlers, no unwinding).
 
 pub use imp::*;
@@ -21,7 +21,8 @@ mod unix {
         pub fn pthread_self() -> usize;
         fn pthread_kill(t: usize, sig: i32) -> i32;
         fn pthread_getname_np(t: usize, name: *mut u8, len: usize) -> i32;
-        fn pthread_atfork(prepare: Option<extern "C" fn()>, parent: Option<extern "C" fn()>, child: Option<extern "C" fn()>) -> i32;
+        #[link_name = "fork"]
+        fn libc_fork() -> i32;
         fn _exit(code: i32) -> !;
     }
 
@@ -43,10 +44,8 @@ mod unix {
         }
     }
 
-    pub fn at_fork(prepare: extern "C" fn(), parent: extern "C" fn(), child: extern "C" fn()) {
-        unsafe {
-            pthread_atfork(Some(prepare), Some(parent), Some(child));
-        }
+    pub fn fork() -> i32 {
+        unsafe { libc_fork() }
     }
 
     pub fn exit_now(code: i32) -> ! {
@@ -56,7 +55,7 @@ mod unix {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
-    pub use super::unix::{at_fork, current, exit_now, kick, name};
+    pub use super::unix::{current, exit_now, fork, kick, name};
     use super::unix::pthread_self;
 
     pub fn stack_lo() -> usize {
@@ -100,7 +99,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    pub use super::unix::{at_fork, current, exit_now, kick, name};
+    pub use super::unix::{current, exit_now, fork, kick, name};
     use super::unix::pthread_self;
 
     extern "C" {
@@ -213,9 +212,6 @@ mod imp {
         const THREAD_PRIORITY_TIME_CRITICAL: i32 = 15;
         unsafe { GetThreadPriority(GetCurrentThread()) >= THREAD_PRIORITY_TIME_CRITICAL }
     }
-
-    /// No fork on Windows.
-    pub fn at_fork(_prepare: extern "C" fn(), _parent: extern "C" fn(), _child: extern "C" fn()) {}
 
     pub fn exit_now(code: i32) -> ! {
         unsafe {

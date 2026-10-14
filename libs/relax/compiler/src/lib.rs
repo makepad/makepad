@@ -7,6 +7,46 @@
 //!   makepad clean [-p <package>]           remove the workspace's <target>/relax (or one app's files)
 //!   makepad run [opts] <package> [cargo flags] [-- args]   boot a cargo package from source (run.rs)
 
+/// First statement of a test that builds, runs or drops a JIT unit: the test runs alone in a
+/// child process of this test binary, and the calling process only checks its verdict. The JIT
+/// runtime's state is process-wide by design (one program per process): the unit a lazy compile
+/// reaches (`jit::UNIT`), the exit latch a dropped unit sets (`preempt::stop_all`: from then on
+/// no cache key is made and preemptible checks unwind), the tier and speculation workers. Tests
+/// sharing a process saw each other's units: a lazily compiled slot of one test was built in
+/// another's unit (the parallel suite aborted: "failed to initiate panic" / "free(): invalid
+/// pointer"), and every test after the first dropped unit found the cache stopped.
+#[cfg(test)]
+macro_rules! isolated_test {
+    ($name:ident) => {
+        if !$crate::test_child::run_alone(module_path!(), stringify!($name)) {
+            return;
+        }
+    };
+}
+
+#[cfg(test)]
+mod test_child {
+    const CHILD: &str = "RELAX_TEST_CHILD";
+
+    /// True in the child (run the test body); in the parent, runs the child and returns false
+    /// once it passed (a failure panics with the child's output).
+    pub fn run_alone(module: &str, name: &str) -> bool {
+        let module = module.split_once("::").map_or("", |(_, rest)| rest);
+        let test = if module.is_empty() { name.to_string() } else { format!("{module}::{name}") };
+        if std::env::var(CHILD).is_ok_and(|t| t == test) {
+            return true;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--include-ignored", "--test-threads=1", "--nocapture"])
+            .env(CHILD, &test)
+            .output()
+            .unwrap();
+        let all = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert!(output.status.success() && all.contains("test result: ok. 1 passed"), "{test} in its own process:\n{all}");
+        false
+    }
+}
+
 pub mod front;
 pub mod live;
 pub mod reload;
@@ -879,6 +919,9 @@ fn cmd_resolve(sess: &std::sync::Arc<crate::Session>, units_path: &str) {
 
 #[cfg(test)]
 mod lazy_reload_tests;
+
+#[cfg(test)]
+mod vfs_bind_tests;
 
 #[cfg(test)]
 #[test]

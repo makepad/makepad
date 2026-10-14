@@ -307,7 +307,7 @@ impl ImageTables {
             1 | 5 | 9 => {
                 d.str()?;
             }
-            2 => {
+            2 | 10 => {
                 d.u128()?;
             }
             3 | 4 => skip_def(d)?,

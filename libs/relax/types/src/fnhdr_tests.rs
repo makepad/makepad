@@ -4,7 +4,13 @@ use crate::tcx::{Tcx, EvalCx, EvalState, TypingEnv};
 use crate::types::{Abi, FnHeader, Safety, TyKind};
 
 fn collect(source: &str) -> (Program, Tcx) {
-    let sess = &std::sync::Arc::new(crate::Session::default());
+    collect_for_target(source, "")
+}
+
+fn collect_for_target(source: &str, target: &str) -> (Program, Tcx) {
+    let mut session = crate::Session::default();
+    session.options.target = target.to_string();
+    let sess = &std::sync::Arc::new(session);
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!("relax-fnhdr-{}-{n}.rs", std::process::id()));
@@ -106,5 +112,60 @@ fn fnhdr_unsupported_abi() {
         let (prog, tcx) = collect(source);
         let errors = tcx.signature_errors(&prog, named(&prog, "probe"));
         assert!(errors.iter().any(|e| e.contains("unsupported function ABI")), "{errors:?}");
+    }
+}
+
+#[test]
+fn fnhdr_x86_64_abis_follow_the_target() {
+    for abi in ["sysv64", "sysv64-unwind", "win64", "win64-unwind"] {
+        for source in [
+            format!("extern \"{abi}\" fn probe() {{}}"),
+            format!("extern \"{abi}\" {{ fn probe(); }}"),
+            format!("fn probe(f: extern \"{abi}\" fn()) {{}}"),
+        ] {
+            for target in ["x86_64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"] {
+                let (prog, tcx) = collect_for_target(&source, target);
+                let probe = named(&prog, "probe");
+                let errors = tcx.signature_errors(&prog, probe);
+                assert!(errors.is_empty(), "{target}: {errors:?}");
+                let sig = tcx.fn_sig(&prog, probe).unwrap();
+                let header = match sig.params.first() {
+                    Some(ty) => match tcx.tys.kind(*ty) { TyKind::FnPtr(_, _, h, _) => *h, _ => panic!() },
+                    None => sig.header,
+                };
+                assert_eq!(header.abi.name(), abi);
+                assert_eq!(header.abi.unwinds(), abi.ends_with("-unwind"));
+                assert!(header.abi.is_c_like());
+                assert!(!header.is_fn_trait_compatible());
+            }
+            for target in ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "i686-pc-windows-msvc", "riscv64gc-unknown-linux-gnu", "wasm32-unknown-unknown"] {
+                let (prog, tcx) = collect_for_target(&source, target);
+                let errors = tcx.signature_errors(&prog, named(&prog, "probe"));
+                let expected = format!("E0570: \"{abi}\" is not a supported ABI for the current target");
+                assert!(errors.iter().any(|e| e.contains(&expected)), "{target}: {errors:?}");
+                assert!(!errors.iter().any(|e| e.contains("unsupported function ABI")), "{errors:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn fnhdr_x86_64_abis_keep_distinct_pointer_types() {
+    let (prog, tcx) = collect_for_target(r#"
+        fn probe(a: extern "C" fn(), b: extern "sysv64" fn(), c: extern "win64" fn(),
+            d: extern "sysv64-unwind" fn(), e: extern "win64-unwind" fn()) {}
+    "#, "x86_64-unknown-linux-gnu");
+    let probe = named(&prog, "probe");
+    assert!(tcx.signature_errors(&prog, probe).is_empty());
+    let ps = &tcx.fn_sig(&prog, probe).unwrap().params;
+    let state = EvalState::new();
+    let cx = EvalCx::new(&prog, &tcx, TypingEnv::fully_monomorphized(&prog), &state);
+    for (i, &a) in ps.iter().enumerate() {
+        for (j, &b) in ps.iter().enumerate() {
+            assert_eq!(a == b, i == j);
+            assert_eq!(crate::stable::type_hash(&prog, &tcx, a) == crate::stable::type_hash(&prog, &tcx, b), i == j);
+            let infcx = crate::infer::InferCtxt::new(&tcx, cx.typing_env.mode, cx.typing_env.limit);
+            assert_eq!(infcx.at(&prog, Default::default()).eq(a, b).is_ok(), i == j);
+        }
     }
 }

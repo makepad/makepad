@@ -60,7 +60,7 @@ fn dladdr_name(pc: u64) -> Option<(String, u64)> {
 #[repr(C)]
 pub(crate) struct PhdrInfo {
     pub addr: u64,
-    pub name: *const i8,
+    pub name: *const std::ffi::c_char,
     pub phdr: *const u8,
     pub phnum: u16,
 }
@@ -70,7 +70,7 @@ extern "C" {
     pub(crate) fn dl_iterate_phdr(cb: extern "C" fn(*const PhdrInfo, usize, *mut u8) -> i32, data: *mut u8) -> i32;
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn enumerate() -> Vec<Image> {
     extern "C" fn cb(info: *const PhdrInfo, _size: usize, data: *mut u8) -> i32 {
         unsafe {
@@ -136,7 +136,7 @@ fn enumerate() -> Vec<Image> {
     v
 }
 
-#[cfg(any(windows, target_os = "android"))]
+#[cfg(windows)]
 fn enumerate() -> Vec<Image> {
     Vec::new()
 }
@@ -258,7 +258,7 @@ pub fn demangle(s: &str) -> String {
         }
     }
     if let Some(r) = s.strip_prefix("_R").or_else(|| s.strip_prefix("R")) {
-        let mut p = V0 { s: r.as_bytes(), i: 0, out: String::new(), depth: 0 };
+        let mut p = V0 { s: r.as_bytes(), i: 0, out: String::new(), depth: 0, in_value: true };
         if p.path().is_some() {
             return p.out;
         }
@@ -337,6 +337,9 @@ struct V0<'a> {
     i: usize,
     out: String,
     depth: u32,
+    /// a path in an expression (`Vec::<u8>::new`) spells its generic arguments with `::<`; one
+    /// in a type (`<Vec<u8>>::push`, `<T as Trait<u8>>`) with `<` (rustc-demangle `in_value`)
+    in_value: bool,
 }
 
 impl<'a> V0<'a> {
@@ -412,6 +415,13 @@ impl<'a> V0<'a> {
         self.i = save;
         r
     }
+    /// A path in type position (a type, a trait): generic arguments without `::`.
+    fn type_path(&mut self) -> Option<()> {
+        let in_value = std::mem::replace(&mut self.in_value, false);
+        let r = self.path();
+        self.in_value = in_value;
+        r
+    }
     fn path(&mut self) -> Option<()> {
         self.depth += 1;
         if self.depth > 200 {
@@ -476,19 +486,19 @@ impl<'a> V0<'a> {
                 self.out.push('<');
                 self.ty()?;
                 self.out.push_str(" as ");
-                self.path()?;
+                self.type_path()?;
                 self.out.push('>');
             }
             b'Y' => {
                 self.out.push('<');
                 self.ty()?;
                 self.out.push_str(" as ");
-                self.path()?;
+                self.type_path()?;
                 self.out.push('>');
             }
             b'I' => {
                 self.path()?;
-                self.out.push_str("::<");
+                self.out.push_str(if self.in_value { "::<" } else { "<" });
                 let mut first = true;
                 while !self.eat(b'E') {
                     if !first {
@@ -650,7 +660,7 @@ impl<'a> V0<'a> {
                 b'B' => self.backref(|p| p.ty()),
                 _ => {
                     self.i -= 1;
-                    self.path()
+                    self.type_path()
                 }
             }
         };
@@ -666,13 +676,16 @@ mod tests {
     #[test]
     fn legacy() {
         assert_eq!(demangle("_ZN4core3ptr13drop_in_place17h0123456789abcdefE"), "core::ptr::drop_in_place");
-        assert_eq!(demangle("_ZN61_$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$core..ops..drop..Drop$GT$4drop17h0123456789abcdefE"), "<alloc::vec::Vec<T> as core::ops::drop::Drop>::drop");
+        assert_eq!(demangle("_ZN66_$LT$alloc..vec..Vec$LT$T$GT$$u20$as$u20$core..ops..drop..Drop$GT$4drop17h0123456789abcdefE"), "<alloc::vec::Vec<T> as core::ops::drop::Drop>::drop");
         assert_eq!(demangle("malloc"), "malloc");
     }
 
     #[test]
     fn v0() {
         assert_eq!(demangle("_RNvCs1234_5hello4main"), "hello::main");
-        assert_eq!(demangle("_RNvMNtCs1234_5alloc3vecINtB4_3VechE4push"), "<alloc::vec::Vec<u8>>::push");
+        assert_eq!(demangle("_RNvMNtCs1234_5alloc3vecINtB2_3VechE4push"), "<alloc::vec::Vec<u8>>::push");
+        // a generic fn in an expression keeps its turbofish; a trait in a type does not
+        assert_eq!(demangle("_RINvNtCs1234_4core3mem4swaphEB2_"), "core::mem::swap::<u8>");
+        assert_eq!(demangle("_RNvXCs1234_5hellohINtNtNtCs1234_4core3ops5arith3AddhE3add"), "<u8 as core::ops::arith::Add<u8>>::add");
     }
 }

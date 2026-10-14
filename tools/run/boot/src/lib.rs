@@ -8,9 +8,9 @@ mod text;
 use document::{Program, BACKGROUND, ERROR_BAND, GLYPH, ICON, PIPE_BANK_SIZE, PROGRESS};
 pub use icon::Icon;
 use makepad_hal::{
-    backend_id, buffer_kind, dialect, font::wire, lifecycle, pass_load, session::HOST, target,
-    window_kind, Attr, CmdWriter, EventBuf, EventQueue, FrameMeta, Hal, HalEvent, HalInfo, Id,
-    Pass, RawEvent,
+    backend_id, buffer_kind, clock_ns, dialect, event_tag, font::wire, input, lifecycle, pass_load,
+    session::HOST, target, window_kind, Attr, CmdWriter, EventBuf, EventQueue, FrameMeta, Hal,
+    HalEvent, HalInfo, Id, Pass, RawEvent,
 };
 use makepad_script::{id, LiveId};
 pub use relax_base::{
@@ -53,6 +53,8 @@ pub enum Action {
     Submit,
     Cancel,
     Select(usize),
+    /// The window's close button: the run ends, as when the window is asked to close.
+    Close,
 }
 
 #[derive(Clone)]
@@ -167,6 +169,11 @@ pub struct Boot {
     renderer: Option<Renderer>,
     overlay: Option<[f32; 4]>,
     environment: Environment,
+    /// `measure_input`: how long each native input event of the window waited, from the window
+    /// system's push to this session's answer (event tag, ns)
+    latencies: Option<Vec<(u16, u64)>>,
+    /// the last turn: ns its pump took beyond the asked timeout, ns its present took
+    turn_parts: (u64, u64),
 }
 
 impl Boot {
@@ -191,6 +198,8 @@ impl Boot {
             renderer: None,
             overlay: None,
             environment: Environment::default(),
+            latencies: None,
+            turn_parts: (0, 0),
         };
         // A backend without a shader dialect has no native HAL window to draw into.
         // In particular Linux/Windows do not manufacture a clear-only fake window.
@@ -345,6 +354,43 @@ impl Boot {
         self.renderer
             .as_ref()
             .is_some_and(|r| contains(r.layout.clip, point))
+    }
+
+    /// What a press at `point` starts, the window system's caption question (`DragQuery`): the
+    /// window's move where the boot screen does not take the press itself -- off every card,
+    /// and off the scroll area while its content overflows (a press there scrolls). The window
+    /// has no system caption bar, so this is the only way it moves.
+    pub fn drag_answer(&self, point: [f32; 2]) -> u32 {
+        let Some(renderer) = &self.renderer else {
+            return input::drag_query::CAPTION;
+        };
+        let layout = &renderer.layout;
+        let on_card = layout.visible_cards(renderer.scroll).any(|card| {
+            let mut rect = card.rect;
+            if !card.fixed {
+                if !contains(layout.clip, point) {
+                    return false;
+                }
+                rect[1] -= renderer.scroll;
+            }
+            contains(rect, point)
+        });
+        let scrolls = layout.content_height > layout.clip[3] && contains(layout.clip, point);
+        if on_card || scrolls {
+            input::drag_query::CLIENT
+        } else {
+            input::drag_query::CAPTION
+        }
+    }
+
+    /// Records from now on how long each native input event waited for this session
+    /// (`take_latencies`): the run's boot probe.
+    pub fn measure_input(&mut self) {
+        self.latencies.get_or_insert_with(Vec::new);
+    }
+
+    pub fn take_latencies(&mut self) -> Vec<(u16, u64)> {
+        self.latencies.as_mut().map(std::mem::take).unwrap_or_default()
     }
 
     pub fn press(&mut self, action: Option<Action>) {
@@ -569,6 +615,7 @@ impl Boot {
         // Pump backend completions, then take session 0's owned queue. A zero-cap
         // pump leaves the events queued. Taking the arena avoids truncating large
         // diagnostics/pastes at an arbitrary EventStore capacity.
+        let pumped = Instant::now();
         hal.pump(
             timeout_ns,
             &mut EventBuf {
@@ -580,6 +627,8 @@ impl Boot {
                 arena_len: 0,
             },
         );
+        let over = (pumped.elapsed().as_nanos() as u64).saturating_sub(timeout_ns);
+        self.turn_parts = (over, 0);
         let mut queue = std::mem::take(&mut self.queue);
         let live = hal.with_world(|world| {
             let Some(session) = world.session_mut(HOST) else {
@@ -593,11 +642,21 @@ impl Boot {
             return false;
         }
         let mut alive = true;
+        let mut drag_queries = Vec::new();
+        let window = self.window;
+        let mut latencies = self.latencies.take();
         queue.drain_with(|mut raw, payload| {
             raw.data.off = 0;
             let Some(event) = raw.decode(payload) else {
                 return;
             };
+            // a drag query counts when it is answered (below)
+            if let Some(latencies) = latencies
+                .as_mut()
+                .filter(|_| Some(raw.window) == window && raw.tag != event_tag::DragQuery)
+            {
+                latencies.push((raw.tag, clock_ns().saturating_sub(raw.time_ns)));
+            }
             if let Some(renderer) = &mut self.renderer {
                 match renderer.text.event(&event) {
                     Ok(changed) => renderer.redraw |= changed,
@@ -622,6 +681,9 @@ impl Boot {
                 }
                 HalEvent::KeyDown { window, .. } if Some(window) == self.window => {
                     self.events.push(Event::KeyDown(raw))
+                }
+                HalEvent::DragQuery { window, x, y } if Some(window) == self.window => {
+                    drag_queries.push((window, [x as f32, y as f32], raw.time_ns))
                 }
                 HalEvent::Text { window, text, .. } if Some(window) == self.window => self
                     .events
@@ -722,6 +784,21 @@ impl Boot {
             }
         });
         self.queue = queue;
+        self.latencies = latencies;
+        if !drag_queries.is_empty() {
+            // answered at once: the window system starts the move only while the button is down
+            let mut writer = CmdWriter::new(HOST);
+            for &(window, point, _) in &drag_queries {
+                writer.drag_reply(window, input::reply::QUERY, self.drag_answer(point));
+            }
+            hal.submit(&writer.buf());
+            if let Some(latencies) = &mut self.latencies {
+                let now = clock_ns();
+                for (_, _, time) in drag_queries {
+                    latencies.push((event_tag::DragQuery, now.saturating_sub(time)));
+                }
+            }
+        }
         if !alive {
             return false;
         }
@@ -743,9 +820,16 @@ impl Boot {
             }
         }
         if present {
+            let presented = Instant::now();
             self.present();
+            self.turn_parts.1 = presented.elapsed().as_nanos() as u64;
         }
         true
+    }
+
+    /// The last turn: how long its pump took beyond the asked timeout and its present took (ns).
+    pub fn turn_parts(&self) -> (u64, u64) {
+        self.turn_parts
     }
 
     fn present(&mut self) {

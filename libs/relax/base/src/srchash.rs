@@ -328,8 +328,33 @@ pub fn diff_message(name: &str, built: &Manifest, current: &Manifest) -> String 
     let mut message = format!("provided crate {name} differs from the library built into makepad:\n");
     for line in files.iter().take(20).chain(metadata.iter()) { message.push_str(line); message.push('\n'); }
     if files.len() > 20 { message.push_str(&format!("  {} more files\n", files.len() - 20)); }
-    message.push_str("rebuild makepad: cargo build --release -p makepad-run");
+    message.push_str(&rebuild_hint());
     message
+}
+
+/// How to fix a `makepad` binary older than the checkout's provided crates: run it through cargo,
+/// which rebuilds it first, with this process's own arguments.
+pub fn rebuild_hint() -> String {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    format!("rebuild makepad by starting it through cargo: {}", rebuild_command(&args))
+}
+
+/// `cargo run --release -p makepad-run --bin makepad -- <args>` (arguments with spaces or quotes
+/// single-quoted); `run <package>` when there are none.
+pub fn rebuild_command(args: &[String]) -> String {
+    let mut command = "cargo run --release -p makepad-run --bin makepad --".to_string();
+    if args.is_empty() { command.push_str(" run <package>"); }
+    for arg in args {
+        command.push(' ');
+        if arg.is_empty() || arg.contains([' ', '\'', '"', '\t']) {
+            command.push('\'');
+            command.push_str(&arg.replace('\'', "'\\''"));
+            command.push('\'');
+        } else {
+            command.push_str(arg);
+        }
+    }
+    command
 }
 
 #[cfg(test)]
@@ -418,7 +443,7 @@ mod tests {
         let message = diff_message("fixture", &built, &current);
         assert!(message.contains("provided crate fixture"));
         for line in ["changed fixture@1.0: src/lib.rs", "added fixture@1.0: src/added.rs", "removed fixture@1.0: src/removed.rs", "fixture@1.0 features:  -> extra"] { assert!(message.contains(line), "{message}"); }
-        assert!(message.ends_with("rebuild makepad: cargo build --release -p makepad-run"));
+        assert!(message.contains("rebuild makepad by starting it through cargo: cargo run --release -p makepad-run --bin makepad --"), "{message}");
         pkgs[0].version = "2.0".into();
         let message = diff_message("fixture", &built, &closure_manifest(&pkgs, 0));
         assert!(message.contains("version: 1.0 -> <absent>"));
@@ -448,5 +473,13 @@ mod tests {
         let host = closure_manifest(&pkgs, 0);
         pkgs[1].features.clear();
         assert_eq!(host, closure_manifest(&pkgs, 0));
+    }
+
+    #[test]
+    fn the_refusal_says_the_cargo_run_that_rebuilds_makepad() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(rebuild_command(&args(&["run", "makepad-example-counter"])), "cargo run --release -p makepad-run --bin makepad -- run makepad-example-counter");
+        assert_eq!(rebuild_command(&args(&["run", "x", "--", "a b", "it's"])), "cargo run --release -p makepad-run --bin makepad -- run x -- 'a b' 'it'\\''s'");
+        assert_eq!(rebuild_command(&[]), "cargo run --release -p makepad-run --bin makepad -- run <package>");
     }
 }

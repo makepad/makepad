@@ -261,9 +261,11 @@ pub(crate) fn resolve_package(
         // makepad-windows-sys on Windows) and only type-checks: it never runs the crates' code,
         // so nothing binds and every provided crate is read from source.
         // `makepad check` runs none of it either: every provided crate is read from source,
-        // whatever source the loader was built from (an identity mismatch refused to check)
+        // whatever source the loader was built from (an identity mismatch refused to check).
+        // The boundary audit (`check --boundary`) binds as a run does: what it reports is what
+        // JIT-compiled code reaches past the bound ops.
         let machine = crate::cfg::CfgSet::machine(sess, &[]).triple();
-        if crate::cfg::CfgSet::host(sess, &[]).triple() == machine && !check_only {
+        if crate::cfg::CfgSet::host(sess, &[]).triple() == machine && (!check_only || crate::boundary::requested()) {
             crate::provided::check_sources(&pkgs)?;
         } else {
             crate::provided::read_identity_files(&pkgs);
@@ -433,6 +435,7 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             // `--boundary a,b`: with --check, audit what JIT-compiled code reaches inside
             // crates a, b (boundary.rs)
             "--boundary" => {
+                crate::boundary::REQUESTED.store(true, Ordering::Relaxed);
                 i += 1;
                 boundary = args.get(i).map(|s| s.split(',').map(|x| x.to_string()).collect());
             }
@@ -970,6 +973,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         crate::jit::compile_watch(Some(("check: unit", 0)));
         let t = Instant::now();
         let mut u = Unit::new(prog, tcx, core);
+        // the program's unit names itself for the diagnostics that have no unit at hand (an
+        // auxiliary unit -- the proc-macro world -- never takes it over)
+        crate::syms::set_unit(&mut *u as *mut Unit);
         phase("unit", t);
         // every body is checked, so the files the selection skipped load first: all of them for
         // selftest, a watch session or --root-only; the checked (app) crates' for the app check
@@ -990,9 +996,21 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
             // the audit lowers every fn of every crate: a constant that cannot be evaluated is one
             // failed row, not the end of the run
             jit::COMPILE_ERRORS_FATAL.store(false, Ordering::Relaxed);
-            let rep = crate::boundary::run(&mut *u);
+            // on the owner thread, as every build of a run (check.rs compile_all): the unit is
+            // the owner's, and the type checks ahead ask it for constants (const_addr_shared) while
+            // the audit lowers; lowering on this thread raced them on the unit's tables (a
+            // SIGSEGV rehashing `consts` under the gate, 2 of ~40 runs)
+            let up: *mut Unit = &mut *u;
+            let (rep, violations) = {
+                let _job = jit::compile_job();
+                crate::owner::call(crate::owner::Class::App, || crate::boundary::run(up))
+            };
             print!("{}", rep);
             std::mem::forget(u);
+            if violations > 0 {
+                eprintln!("makepad check --boundary: {} provided-crate violation(s) (`violation` rows)", violations);
+                return 1;
+            }
             return 0;
         }
         if let Some(out) = session {
@@ -1083,6 +1101,9 @@ fn cmd_run_inner(sess: &std::sync::Arc<crate::Session>, args: &[String], session
         crate::layout::LIVE_SESSION.store(true, Ordering::Relaxed);
     }
     let mut u = Unit::new(prog, tcx, core);
+    // the program's unit names itself for the diagnostics that have no unit at hand (an
+    // auxiliary unit -- the proc-macro world -- never takes it over)
+    crate::syms::set_unit(&mut *u as *mut Unit);
     if let Some((saved_prog, saved_tcx, _)) = verification_graph {
         saved_prog.verify_collected(&u.prog);
         saved_tcx.verify_collected(&saved_prog, &u.prog, &u.tcx);
@@ -2079,6 +2100,9 @@ fn start_monitor(runtime: &crate::options::RuntimeOptions, options: &crate::opti
                 else if crate::cache::front_graph_pending() { Some("front graphs are pending") }
                 else if mid_busy.load(Ordering::SeqCst) { Some("a mid-run cache write is running") }
                 else if !teardown_started { Some("the teardown is not scheduled") }
+                // a quit: the app's threads are ending and must not wait behind the swap's
+                // quiesce (a swap at Stage's quit stalled its loaders past the domain stop)
+                else if jit::QUIT_SEEN.load(Ordering::Relaxed) { Some("the run is quitting") }
                 else { None };
             if let Some(why) = swap_block.filter(|w| !w.is_empty()) {
                 if swap_wait_said != why { swap_wait_said = why; verbose!("makepad-run zone: swap waits: {why}"); }
@@ -2405,6 +2429,11 @@ pub(crate) fn front_recordable() -> bool {
 /// termination handler of its own): the same quit write the platform's hook starts.
 pub fn quit_requested() {
     relax_quit_requested();
+}
+
+/// The run ends (its window closed, the app quit, a signal): no settle swap starts from now on.
+pub fn quitting() {
+    jit::QUIT_SEEN.store(true, Ordering::Relaxed);
 }
 
 pub(crate) extern "C" fn relax_quit_requested() {

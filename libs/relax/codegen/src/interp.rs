@@ -2572,7 +2572,7 @@ fn lower(f: &Func, slots: SlotsPtr, syms: u64, sym_class: u64) -> Result<(IFunc,
     // C ABI body: aggregates arriving in registers are rebuilt in the frame
     let mut cplan = None;
     if let Some(sig) = &f.cabi {
-        let plan = cabi::plan(sig, cabi::HOST);
+        let plan = cabi::plan(sig, sig.conv.target());
         let mut bufs = vec![0u32; plan.args.len()];
         for (j, ap) in plan.args.iter().enumerate() {
             if let ArgPlan::Parts(_) = ap {
@@ -3079,7 +3079,7 @@ fn lower_inst(l: &mut Lw, i: &Inst, slots: SlotsPtr, sym_class: u64, sym_val: &d
             };
             let csig = match callee {
                 Callee::CHost(_, s) | Callee::CIndirect(_, s) | Callee::CFn(_, s) => {
-                    let plan = cabi::plan(s, cabi::HOST);
+                    let plan = cabi::plan(s, s.conv.target());
                     if plan.stack_bytes > 256 {
                         return Err("C call with more than 256 bytes of stack arguments");
                     }

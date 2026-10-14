@@ -3456,6 +3456,24 @@ fn patch_refused_event(what: &str, refused: bool, lines: &[String]) {
 
 // ------------------------------------------------------------ the live session log (scoreboard)
 
+/// What a refused edit reports after its re-check: the first attempt's reasons, then the
+/// retry's new ones. The retry's type check finds the first attempt's errors already reported
+/// and adds only the summary "type checking failed due to previous errors", which goes when a
+/// real error is listed.
+fn refusal_lines(first: Vec<String>, retry: Vec<String>) -> Vec<String> {
+    const SUMMARY: &str = "type checking failed due to previous errors";
+    let mut out = first;
+    for l in retry {
+        if !out.contains(&l) {
+            out.push(l);
+        }
+    }
+    if out.iter().any(|l| !l.ends_with(SUMMARY)) {
+        out.retain(|l| !l.ends_with(SUMMARY));
+    }
+    out
+}
+
 /// The session log: one JSON line per edit (rung, reasons, phase latencies) and per restart
 /// outcome (the program's kept/lost report, through std::relax::live_log), appended across the
 /// restarts of one session (the path travels in MAKEPAD_RUN_LIVE_LOG; default: the temp dir).
@@ -3902,7 +3920,10 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
             None => Vec::new(),
         }
     };
-    let mut stalled: std::collections::HashMap<usize, (Instant, Vec<u8>)> = std::collections::HashMap::new();
+    // a refused or incomplete edit, re-checked after a second of silence: (when, its text, the
+    // first attempt's reasons -- the retry's type check finds the same errors already reported
+    // and says only "type checking failed due to previous errors")
+    let mut stalled: std::collections::HashMap<usize, (Instant, Vec<u8>, Vec<String>)> = std::collections::HashMap::new();
     let mut tick: u32 = 0;
     let mut startup_scan = true;
     let mut restart_required = false;
@@ -3960,16 +3981,20 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
         }
         drain_streams(up);
         // Re-check an unchanged failing prefix once, after one second of silence.
-        let due: Vec<_> = stalled.iter().filter(|(_, (t, _))| t.elapsed().as_secs_f64() >= 1.0).map(|(&k, _)| k).collect();
+        let due: Vec<_> = stalled.iter().filter(|(_, (t, _, _))| t.elapsed().as_secs_f64() >= 1.0).map(|(&k, _)| k).collect();
         for k in due {
-            let (_, src) = stalled.remove(&k).unwrap();
+            let (_, src, first) = stalled.remove(&k).unwrap();
             let f = &mut files[k];
             if stamp(&f.0) != f.2 { continue; }
             let seen = Instant::now();
-            let o = apply_mode(up, vec![Edit { file: f.1, path: f.0.clone(), src }], 0, false);
+            let mut o = apply_mode(up, vec![Edit { file: f.1, path: f.0.clone(), src }], 0, false);
             if o.rung != Rung::Patch {
+                o.lines = refusal_lines(first, std::mem::take(&mut o.lines));
                 log_edit(&f.0, &o, f.2.map(|s| s.0), seen);
-                eprintln!("makepad live: {}: NOT applied after stream stalled", f.0);
+                match o.rung {
+                    Rung::Refuse => eprintln!("makepad live: {}: NOT applied (errors below); the app runs the previous code", f.0),
+                    _ => eprintln!("makepad live: {}: needs a restart (reasons below); the app runs the previous code", f.0),
+                }
                 for l in &o.lines { eprintln!("makepad live:   {}", l); }
                 patch_refused_event(&f.0, o.rung == Rung::Refuse, &o.lines);
             } else {
@@ -4071,7 +4096,13 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
             }
             let package = std::env::var("MAKEPAD_RUN_PACKAGE").unwrap_or_else(|_| "<pkg>".into());
             let what = if changed.iter().any(|&k| std::path::Path::new(&files[k].0).is_dir()) { "source inputs" } else { "files" };
-            let message = format!("{} {what} changed: {reason}; restart `makepad run {package}` to pick them up; keeping the running code", changed.len());
+            // provided crates and std are built into this binary: cargo rebuilds it on the way
+            let restart = if inputs.host_restart_required(changed.iter().map(|&k| files[k].0.as_str())) {
+                format!("restart it through cargo (which rebuilds makepad): {}", crate::srchash::rebuild_command(&std::env::args().skip(1).collect::<Vec<_>>()))
+            } else {
+                format!("restart `makepad run {package}`")
+            };
+            let message = format!("{} {what} changed: {reason}; {restart} to pick them up; keeping the running code", changed.len());
             eprintln!("makepad live: {message}");
             live_log(&format!("{{\"restart_required\":true,\"message\":{}}}", json_str(&message)));
             restart_required = true;
@@ -4128,7 +4159,7 @@ unsafe fn watch(up: *mut Unit, mut inputs: Inputs, quiet: bool) {
         let o = apply(up, edits);
         let incomplete = o.rung == Rung::Refuse || o.lines.iter().any(|l| l.starts_with("incomplete:"));
         if incomplete {
-            for (&k, src) in which.iter().zip(originals) { stalled.insert(k, (Instant::now(), src)); }
+            for (&k, src) in which.iter().zip(originals) { stalled.insert(k, (Instant::now(), src, if o.rung == Rung::Refuse { o.lines.clone() } else { Vec::new() })); }
         }
         if o.rung == Rung::Refuse {
             // Diagnostics are emitted only by the stalled-file check above.
@@ -4187,6 +4218,7 @@ mod round32_tests {
 
     #[test]
     fn enum_reload_snapshots() {
+        isolated_test!(enum_reload_snapshots);
         const CHILD: &str = "MAKEPAD_RUN_ENUM_RELOAD_CASE";
         let Ok(case) = std::env::var(CHILD) else {
             for case in ["same", "changed", "removed", "reordered", "added", "larger", "named", "executable", "callee", "named_code", "unrelated"] {
@@ -4261,6 +4293,7 @@ mod round32_tests {
 mod round43_tests {
     #[test]
     fn generated_impl_identity_ignores_tokenization_whitespace() {
+        isolated_test!(generated_impl_identity_ignores_tokenization_whitespace);
         let session = std::sync::Arc::new(crate::Session::default());
         let source = br#"
             struct App;
@@ -4293,6 +4326,7 @@ mod round51_tests {
 
     #[test]
     fn ctfe_relevance_uses_both_collected_versions() {
+        isolated_test!(ctfe_relevance_uses_both_collected_versions);
         // rustc_resolve/src/def_collector.rs:423-448 @8d1a764: anonymous and
         // inline constants are child owners, including those nested in closures.
         let session = std::sync::Arc::new(crate::Session::default());
@@ -4333,6 +4367,7 @@ mod round51_token_lookup_tests {
 
     #[test]
     fn first_tok_at_steps_over_interp_tokens() {
+        isolated_test!(first_tok_at_steps_over_interp_tokens);
         // ordinary tokens in position order; Interp tokens carry an earlier expression span
         let mut toks = Vec::new();
         for i in 0..64u32 {
@@ -4376,6 +4411,7 @@ mod round52_scope_tests {
 
     #[test]
     fn round52_item_edit_reaches_only_crates_that_see_it() {
+        isolated_test!(round52_item_edit_reaches_only_crates_that_see_it);
         let dir = std::env::temp_dir().join(format!("relax-r52-scope-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let write = |name: &str, src: &str| { let p = dir.join(name); std::fs::write(&p, src).unwrap(); p.to_str().unwrap().to_string() };
@@ -4447,6 +4483,7 @@ mod round52_r2_tests {
     /// context can read (const_contexts_mention), one item at a time.
     #[test]
     fn round52_const_context_mentions() {
+        isolated_test!(round52_const_context_mentions);
         let source = r#"#![no_std]
 pub const C_FN: u32 = 1;
 pub const C_CONST: u32 = 2; const D: u32 = C_CONST + 1;
@@ -4483,6 +4520,7 @@ fn ordinary() -> u32 { let _a = S_FN[0]; C_FN + S_FN[1] }
     /// R2 (a): literal initializers fold without executing code; anything else does not count.
     #[test]
     fn round52_literal_initializers() {
+        isolated_test!(round52_literal_initializers);
         let source = r#"#![no_std]
 pub struct Origin { pub file: &'static str, pub offset: u32, pub line: i32 }
 pub struct WithDefault { pub a: u32 }
@@ -4512,5 +4550,27 @@ pub static N_BINARY: u32 = 1 + 2;
             assert_eq!(literal_initializer(&prog.files[prog.def(d).file as usize], e, 0), name.starts_with("L_"), "{name}");
         }
         std::fs::remove_file(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::*;
+
+    /// A refused edit's re-check lists the type error the first attempt found (path:line:col and
+    /// message), not only the summary its retry adds.
+    #[test]
+    fn a_refused_edit_reports_its_type_error_not_only_the_summary() {
+        isolated_test!(a_refused_edit_reports_its_type_error_not_only_the_summary);
+        let e0308 = "/c/main.rs:51:24: E0308: mismatched types: expected `u32`, found `&str`".to_string();
+        let summary = "/c/main.rs:53:13: type checking failed due to previous errors".to_string();
+        assert_eq!(refusal_lines(vec![e0308.clone()], vec![summary.clone()]), vec![e0308.clone()]);
+        // a retry that finds the error again adds nothing twice
+        assert_eq!(refusal_lines(vec![e0308.clone()], vec![e0308.clone(), summary.clone()]), vec![e0308.clone()]);
+        // only the summary known: it stays (something must say why)
+        assert_eq!(refusal_lines(Vec::new(), vec![summary.clone()]), vec![summary]);
+        // a new reason of the retry is kept after the first ones
+        let other = "/c/other.rs:3:1: E0425: cannot find value `y`".to_string();
+        assert_eq!(refusal_lines(vec![e0308.clone()], vec![other.clone()]), vec![e0308, other]);
     }
 }

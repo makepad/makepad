@@ -3,6 +3,7 @@ use super::*;
 
 #[test]
 fn fn_entry_size() {
+    isolated_test!(fn_entry_size);
     // The original layout measures the inline cost on the same target as FnEntry.
     #[allow(dead_code)]
     struct InlineFnEntry {
@@ -48,6 +49,7 @@ fn fn_entry_size() {
 // Rounds 49-50: restarting leaves the running solver answers and native code intact.
 #[test]
 fn round47_const_fn_body_invalidates_solver_answer() {
+    isolated_test!(round47_const_fn_body_invalidates_solver_answer);
     const CHILD: &str = "MAKEPAD_RUN_R47_CONST_FN_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -99,6 +101,7 @@ fn round47_const_fn_body_invalidates_solver_answer() {
 // candidate is diagnosed separately by a cold check.
 #[test]
 fn round48_const_fn_tentative_check_uses_new_body() {
+    isolated_test!(round48_const_fn_tentative_check_uses_new_body);
     const CHILD: &str = "MAKEPAD_RUN_R48_CONST_FN_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -171,6 +174,7 @@ fn round48_const_fn_tentative_check_uses_new_body() {
 
 #[test]
 fn owner_front_write_serves_waiting_readers() {
+    isolated_test!(owner_front_write_serves_waiting_readers);
     // A front reader waiting for the owner thread (a constant for its type check) holds its read
     // guard; the owner taking the front's write lock serves it meanwhile (front_write pumps), so
     // neither waits for the other.
@@ -197,6 +201,7 @@ fn owner_front_write_serves_waiting_readers() {
 
 #[test]
 fn hot_o3_cache_roundtrip() {
+    isolated_test!(hot_o3_cache_roundtrip);
     // Tiering is process-global: the second unit is a fresh launch, sharing only disk cache.
     const CHILD: &str = "MAKEPAD_RUN_HOT_O3_CACHE_TEST";
     const DIR: &str = "MAKEPAD_RUN_HOT_O3_CACHE_TEST_DIR";
@@ -309,6 +314,7 @@ fn main() {}
 
 #[test]
 fn settle_rebuild_pins_tier1_and_closure_history() {
+    isolated_test!(settle_rebuild_pins_tier1_and_closure_history);
     // Unit installs process-global runtime state. Cache fixtures in the same harness can
     // leave a reentrant unit lock behind; run this fixture in its own runtime process.
     const CHILD: &str = "MAKEPAD_RUN_SETTLE_TEST_CHILD";
@@ -503,6 +509,7 @@ fn unrelated(x: u32) -> u32 { x + 1 }
 
 #[test]
 fn round23_fnptr_keys_preserve_receiver_abi() {
+    isolated_test!(round23_fnptr_keys_preserve_receiver_abi);
     use relax_types::instance::ShimKind;
     let tcx = Tcx::new();
     let pointer = tcx.tys.intern(TyKind::FnPtr(tcx.tys.mk_list(&[tcx.tys.u32_]), tcx.tys.u32_, crate::types::FnHeader::RUST, 0));
@@ -515,6 +522,7 @@ fn round23_fnptr_keys_preserve_receiver_abi() {
 
 #[test]
 fn round42_const_and_build_cancellation_are_retryable() {
+    isolated_test!(round42_const_and_build_cancellation_are_retryable);
     const CHILD: &str = "MAKEPAD_RUN_CONST_PREEMPT_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let status = std::process::Command::new(std::env::current_exe().unwrap())
@@ -582,6 +590,7 @@ fn round42_const_and_build_cancellation_are_retryable() {
 
 #[test]
 fn round50_initializer_reload_policy() {
+    isolated_test!(round50_initializer_reload_policy);
     const CHILD: &str = "MAKEPAD_RUN_R50_INITIALIZER_CHILD";
     let Ok(case) = std::env::var(CHILD) else {
         // (R2, lead decision 52: a foldable const read only by an ordinary fn, and a static,
@@ -665,6 +674,7 @@ fn round50_initializer_reload_policy() {
 
 #[test]
 fn round50_opaque_body_invalidates_solver_answer() {
+    isolated_test!(round50_opaque_body_invalidates_solver_answer);
     const CHILD: &str = "MAKEPAD_RUN_R50_OPAQUE_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -702,6 +712,7 @@ fn round50_opaque_body_invalidates_solver_answer() {
 #[test]
 #[ignore = "T11: candidate CTFE must be transaction-staged or restart; codegen2"]
 fn round50_foldable_const_with_native_dependent() {
+    isolated_test!(round50_foldable_const_with_native_dependent);
     const CHILD: &str = "MAKEPAD_RUN_R50_FOLDED_DEPENDENT_CHILD";
     if std::env::var_os(CHILD).is_none() {
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -741,6 +752,7 @@ fn round50_foldable_const_with_native_dependent() {
 #[test]
 #[ignore = "T11: inline-const candidate CTFE must be transaction-staged or restart; codegen2"]
 fn round50_inline_const_reload() {
+    isolated_test!(round50_inline_const_reload);
     let result = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "jit::settle_tests::round50_initializer_reload_policy", "--nocapture", "--test-threads=1"])
         .env("MAKEPAD_RUN_R50_INITIALIZER_CHILD", "inline_literal").env("MAKEPAD_RUN_CACHE", "off").env("MAKEPAD_RUN_GANDALF", "0").output().unwrap();

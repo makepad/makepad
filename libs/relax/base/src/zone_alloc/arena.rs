@@ -32,8 +32,13 @@ fn class_for(need: usize) -> usize {
     }
 }
 
-#[cfg(target_pointer_width = "64")]
+#[cfg(all(target_pointer_width = "64", not(target_os = "android")))]
 const MAX_ORDER: usize = 15; // 64 GB of virtual address space, not resident memory
+// Android arm64 kernels give a process 39 bits of address space (512 GB) and ART reserves its
+// own share: at 64 GB per arena the phone WM ran out after six domains ('reserving domain heap'
+// for the next app opened). 8 GB each leaves room for dozens.
+#[cfg(all(target_pointer_width = "64", target_os = "android"))]
+const MAX_ORDER: usize = 12;
 #[cfg(not(target_pointer_width = "64"))]
 const MAX_ORDER: usize = 7; // 256 MB on 32-bit; exhaustion falls back to the heap
 const N: usize = 1 << MAX_ORDER;

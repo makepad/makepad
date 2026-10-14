@@ -378,6 +378,7 @@ pub struct FileInput<'a> {
     pub ci: usize,
     pub path: &'a str,
     pub module: &'a str,
+    pub index: &'a FileIndex,
     pub surface: Option<(&'a [u8], &'a [Tok])>,
     pub eager_bodies: Option<&'a BTreeSet<u32>>,
     pub items: Arc<Vec<Item>>,
@@ -456,6 +457,11 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
     // Reverse dependency indexes. A new name schedules only the files/items
     // it can affect, including impl conjunctions and dynamic dispatch markers.
     let mut declarations: HashMap<String, Vec<usize>> = HashMap::default();
+    // Impl headers are globally visible through the self-type/trait index,
+    // even when no body reaches the module containing the impl. Concrete
+    // candidates are keyed by self type; blanket/structural ones by trait.
+    // Loading their declarations does not demand their method bodies.
+    let mut impl_files: HashMap<String, Vec<usize>> = HashMap::default();
     let mut modules: HashMap<String, Vec<usize>> = HashMap::default();
     let mut users: HashMap<String, Vec<(usize, usize)>> = HashMap::default();
     let mut member_users: HashMap<String, Vec<(usize, usize)>> = HashMap::default();
@@ -464,6 +470,9 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
     for (f, items) in parsed.iter().enumerate() {
         modules.entry(files[f].module.to_owned()).or_default().push(f);
         declarations.entry(files[f].module.to_owned()).or_default().push(f);
+        for name in files[f].index.impls.iter().map(|(_, ty)| ty).chain(&files[f].index.blankets) {
+            impl_files.entry(name.clone()).or_default().push(f);
+        }
         if files[f].root || files[f].force || files[f].surface.is_none() {
             let cause = if files[f].root { "crate-root" } else if files[f].force { "forced-file" } else { "no-surface" };
             reach_queue.insert(f, (cause.to_owned(), String::new()));
@@ -486,7 +495,7 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
             }
         }
     }
-    for files in declarations.values_mut() { files.sort_unstable(); files.dedup(); }
+    for files in declarations.values_mut().chain(impl_files.values_mut()) { files.sort_unstable(); files.dedup(); }
     for items in users.values_mut().chain(member_users.values_mut()) { items.sort_unstable(); items.dedup(); }
     let mut used: HashSet<String> = HashSet::default();
     let mut declared: HashSet<String> = HashSet::default();
@@ -519,6 +528,9 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
             if declared.insert(name.clone()) {
                 for &f in declarations.get(name.as_str()).into_iter().flatten() {
                     if !reached[f] { reach_queue.entry(f).or_insert_with(|| { if trace { trigger[f] = Some(name.clone()); } ("name".to_owned(), name.clone()) }); }
+                }
+                for &f in impl_files.get(name.as_str()).into_iter().flatten() {
+                    if !reached[f] { reach_queue.entry(f).or_insert_with(|| { if trace { trigger[f] = Some(name.clone()); } ("impl-index".to_owned(), name.clone()) }); }
                 }
                 // Forwarding scopes matter even when a glob has no local item.
                 if let Some((scope, _)) = name.rsplit_once("::") {
@@ -746,7 +758,13 @@ pub fn closure(names: &mut demand::Names, files: &mut [FileInput<'_>], seeds: BT
                                 let mut refs = if last { std::mem::take(&mut refs) } else { refs.clone() };
                                 let found = if w.strength != Strength::Used { BTreeSet::new() }
                                     else if last { std::mem::take(&mut found) } else { found.clone() };
-                                for name in &w.exclude { if !w.ranges.is_empty() { refs.remove(name); } }
+                                for name in &w.exclude {
+                                    // A loaded type/trait needs its indexed impl
+                                    // declarations even without a body-use edge.
+                                    // Record this in the crate boundary as well.
+                                    if w.strength == Strength::Declared && names.is_type(name) { refs.insert(name.clone()); }
+                                    else if !w.ranges.is_empty() { refs.remove(name); }
+                                }
                                 let fresh: Vec<_> = refs.iter().filter(|name| !seen_declared.contains(name.as_str())
                                     || w.strength == Strength::Used && !seen_used.contains(name.as_str())).map(|name| (w.strength, name.clone())).collect();
                                 let fresh_members: Vec<_> = found.iter().filter(|name| !seen_members.contains(name.as_str())).cloned().collect();

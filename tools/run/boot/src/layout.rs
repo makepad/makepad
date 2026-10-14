@@ -6,6 +6,9 @@ use crate::{
 
 use makepad_script::{id, LiveId};
 
+/// The close button's side, in points.
+const CLOSE_SIZE: f32 = 28.0;
+
 impl Renderer {
     fn label(&mut self, value: &str, style: Line, rect: [f32; 4], fixed: bool) -> TextLine {
         let run = self.text.shape(value, style.size, rect[2], style.height);
@@ -166,7 +169,8 @@ impl Renderer {
             title_style.align = 0.0;
         }
         let title_x = if detail && has_icon { x + 44.0 } else { x };
-        let title_width = (width - (title_x - x)).max(1.0);
+        // the close button's corner stays clear of a left-aligned title
+        let title_width = (width - (title_x - x) - if detail && !env.touch { CLOSE_SIZE } else { 0.0 }).max(1.0);
         let title = self.label(
             &state.app,
             title_style,
@@ -410,6 +414,19 @@ impl Renderer {
                 y = hint.position[1] + hint.run.rows as f32 * hint.style.height;
                 layout.text.push(hint);
             }
+        }
+        if !env.touch {
+            // The close button in the panel's top right corner: the window has no caption of
+            // its own (it drags from anywhere else, `Boot::drag_answer`). Fixed cards come last.
+            let rect = [panel[0] + panel[2] - CLOSE_SIZE - 8.0, panel[1] + 8.0, CLOSE_SIZE, CLOSE_SIZE];
+            let mut style = current_style;
+            style.align = 0.5;
+            style.size = style.size.max(16.0);
+            style.height = CLOSE_SIZE;
+            let mut line = self.label("\u{00d7}", style, [rect[0], rect[1], rect[2], 0.0], true);
+            line.position[1] = rect[1];
+            layout.fixed_text.push(line);
+            layout.cards.push(Card { rect, action: Action::Close, button: true, fixed: true });
         }
         layout.clip = [x, content_top, width, (content_end - content_top).max(1.0)];
         layout.content_height = (y - content_top).max(0.0);

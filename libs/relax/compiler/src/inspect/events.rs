@@ -213,6 +213,8 @@ struct Parked {
     decision: AtomicU32,
     words: Mutex<Vec<u64>>,
     event: std::sync::Arc<str>,
+    /// (thread name, message, location): why-hung's verdict names the parked panic
+    what: (String, String, String),
 }
 
 // ---- retry boundaries (DESIGN.md §10b): makepad's event dispatch runs inside one while an agent
@@ -341,7 +343,7 @@ pub fn on_panic(info: &crate::jit::PanicInfo, unwinds: bool) {
     // Do not park a new cleanup panic after that release.
     if domain.is_some_and(crate::domain::cancelled) { return; }
     let (seq, event) = emit_record("panic", &format!("P{}", id), &fields);
-    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event });
+    let p = std::sync::Arc::new(Parked { id, seq, os_id: super::threads::self_os_id(), domain, decision: AtomicU32::new(0), words: Mutex::new(Vec::new()), event, what: (thread.clone(), info.message.clone(), location.clone()) });
     list.push(p.clone());
     parked_changed();
     if !watched {
@@ -389,6 +391,11 @@ fn panic_site(site: u64) -> String {
         s.map(|(f, p)| u.pos_str(f, p)).unwrap_or_default()
     })
     .unwrap_or_default()
+}
+
+/// The panics parked now: (id, thread os id, thread name, message, location), oldest first.
+pub fn parked_now() -> Vec<(u64, u64, String, String, String)> {
+    PARKED.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|p| (p.id, p.os_id, p.what.0.clone(), p.what.1.clone(), p.what.2.clone())).collect()
 }
 
 pub fn cmd_panics(out: &mut Out) {

@@ -1123,6 +1123,7 @@ impl Program {
             }], None, false, true);
         }
         let ci = self.ahead.remove(&akey).unwrap();
+        let _reads = self.pool.as_ref().unwrap().bind_reads();
         self.crates[krate as usize].context = self.pool.as_ref().unwrap().context(ci);
         let ahead = self.pool.as_ref().unwrap().take_ahead(ci);
         self.module_probes.extend(ahead.probes.iter().cloned());
@@ -1297,8 +1298,9 @@ impl Program {
     /// must notice a missing module appearing after an unsuccessful edit.
     pub fn replay_watched_sources(&self, sources: std::sync::Arc<crate::source::SourceRegistry>, eager: bool, contexts: Option<Vec<std::sync::Arc<crate::source_context::Context>>>, probes: &mut Vec<(String, bool)>) -> Result<Program, String> {
         let mut session = crate::Session { options: self.session.options.clone(), runtime: self.session.runtime.clone() };
+        // Eagerness belongs to this replay. Preserve the configured rs_lazy so
+        // a later edit can build a lazy plan after an eager editor query.
         session.options.source_eager = eager;
-        if eager { session.options.rs_lazy = false; }
         session.runtime.lazy_verify = false;
         let session = std::sync::Arc::new(session);
         let mut recipe = self.load_recipe.clone();

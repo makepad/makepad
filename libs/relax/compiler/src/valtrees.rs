@@ -100,6 +100,7 @@ mod tests {
     use super::*;
     #[test]
     fn jit_query_preserves_aggregate_types_and_reports_panics() {
+        isolated_test!(jit_query_preserves_aggregate_types_and_reports_panics);
         const CHILD: &str = "MAKEPAD_RUN_VALTREE_QUERY_CHILD";
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())

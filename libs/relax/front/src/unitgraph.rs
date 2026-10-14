@@ -855,7 +855,7 @@ static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 
 /// What makepad-platform's build.rs (platform/build.rs) gives the build, as makepad run knows it,
 /// for no-codegen mode, where the script does not run: its cfgs (`apple_sim` from the target, the
-/// `lines` / `apple_bundle` words of the MAKEPAD variable) and its two OUT_DIR files, app_meta_gen.rs (the default bundle name and
+/// `lines` / `apple_bundle` words of the MAKEPAD_BUILD variable) and its two OUT_DIR files, app_meta_gen.rs (the default bundle name and
 /// identifier, from the folder that holds the target folder) and app_icon_gen.rs (the icons in
 /// that folder's resources/). Its link lines are the host binary's: in this mode nothing is
 /// linked at run time. Its side files (makepad-platform.path, a target-folder Info.plist) are for
@@ -865,10 +865,10 @@ fn platform_answer(sess: &std::sync::Arc<crate::Session>, out_dir: &str) -> Resu
     let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
     let target_os = get("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let target = target_triple(sess);
-    let makepad: Vec<String> = std::env::var("MAKEPAD").map(|c| c.split(['+', ',']).map(str::to_string).collect()).unwrap_or_default();
+    let makepad: Vec<String> = std::env::var("MAKEPAD_BUILD").map(|c| c.split(['+', ',']).map(str::to_string).collect()).unwrap_or_default();
     let mut lines = Vec::new();
     let mut cfg = |c: &str| lines.push(format!("cargo:rustc-cfg={}", c));
-    // platform/build.rs: MAKEPAD's build options, the Apple simulator flag
+    // platform/build.rs: MAKEPAD_BUILD's build options, the Apple simulator flag
     for c in &makepad {
         if matches!(c.as_str(), "lines" | "apple_bundle") {
             cfg(c);

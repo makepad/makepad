@@ -210,6 +210,11 @@ mod tests {
 
     #[test]
     fn clean_rules() {
+        isolated_test!(clean_rules);
+        // the rules for an unset target dir: a cargo run of this test may have one set
+        // (CARGO_TARGET_DIR is cargo's, and the child is this test alone)
+        std::env::remove_var("CARGO_TARGET_DIR");
+        std::env::remove_var("CARGO_BUILD_TARGET_DIR");
         let ws = tmp("ws");
         let ws_s = ws.display().to_string();
         w(&ws.join("Cargo.toml"), "[workspace]\nmembers = [\"app\"]\n");

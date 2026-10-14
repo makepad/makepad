@@ -277,16 +277,32 @@ fn not_found(path: &str) -> io::Error {
     io::Error::new(io::ErrorKind::NotFound, format!("{path}: no such file"))
 }
 
-// Read bindings contain only weak references and live for one compiler load.
-// A binding can be released by a different thread when the last pool owner exits.
-// Keeping the guard in the pool also covers the sequential loader's fallback reads.
-struct ReadBinding {
-    thread: std::thread::ThreadId,
-    snapshot: std::sync::Weak<ReadSnapshot>,
+// Read bindings: a load binds its read snapshot to the thread it runs on for the extent of a
+// `ReadScope` on that thread's stack. The binding lives in the thread's own table and owns its
+// snapshot (a strong reference, dropped with the scope): there is no process registry, no weak
+// pointer and no entry another thread or a later compiler generation can reach. A scope is
+// !Send, so no shared state (a preload pool, a Program the settle swap forgets) can keep a
+// thread's binding alive past its load.
+thread_local! {
+    static BOUND: std::cell::RefCell<Vec<(u64, Arc<ReadSnapshot>)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
-static READ_BINDINGS: relax_session::sync::Mutex<Vec<std::sync::Weak<ReadBinding>>> = relax_session::sync::Mutex::new(Vec::new());
+static BIND_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-pub struct ReadScope { _binding: Arc<ReadBinding> }
+/// Binds a snapshot to this thread until dropped (on this thread: it is !Send).
+pub struct ReadScope { id: u64, _thread: std::marker::PhantomData<*const ()> }
+
+impl Drop for ReadScope {
+    fn drop(&mut self) {
+        // (scopes may end out of order: each removes its own entry; at thread exit the table
+        // may already be gone, and with it every entry)
+        let entry = BOUND.try_with(|b| {
+            let mut b = b.borrow_mut();
+            b.iter().rposition(|e| e.0 == self.id).map(|i| b.remove(i))
+        });
+        // the snapshot is released after the table borrow ends
+        drop(entry);
+    }
+}
 
 #[derive(Default)]
 struct ReadEntry {
@@ -312,13 +328,11 @@ pub struct ReadSnapshot {
 impl ReadSnapshot {
     pub fn new(profile: bool) -> Arc<Self> { Arc::new(Self { profile, ..Self::default() }) }
     pub fn bind(self: &Arc<Self>) -> ReadScope {
-        // The registry's weak pointers retain the binding's allocation after its scope ends.
+        let id = BIND_SEQ.fetch_add(1, Ordering::Relaxed);
+        // the thread's table outlives the compiler generation the load runs in
         let _k = crate::zone_alloc::kept();
-        let binding = Arc::new(ReadBinding { thread: std::thread::current().id(), snapshot: Arc::downgrade(self) });
-        let mut bindings = READ_BINDINGS.lock().unwrap();
-        bindings.retain(|b| b.strong_count() != 0);
-        bindings.push(Arc::downgrade(&binding));
-        ReadScope { _binding: binding }
+        BOUND.with(|b| b.borrow_mut().push((id, self.clone())));
+        ReadScope { id, _thread: std::marker::PhantomData }
     }
     pub fn alias(&self, path: &std::path::Path, canonical: &std::path::Path) {
         let path = normalize_components(&path.to_string_lossy(), false);
@@ -379,11 +393,9 @@ impl ReadSnapshot {
         eprintln!("makepad-run source-reads: calls={calls} paths={} opens={opens} repeated_paths={repeated} max_opens_per_path={max}", totals.len());
     }
 }
+/// The innermost snapshot bound on this thread.
 fn read_snapshot() -> Option<Arc<ReadSnapshot>> {
-    let thread = std::thread::current().id();
-    READ_BINDINGS.lock().unwrap().iter().rev()
-        .filter_map(std::sync::Weak::upgrade).find(|b| b.thread == thread)
-        .and_then(|b| b.snapshot.upgrade())
+    BOUND.try_with(|b| b.borrow().last().map(|e| e.1.clone())).ok().flatten()
 }
 fn read_disk(path: &std::path::Path, entry: Option<&ReadEntry>) -> io::Result<Vec<u8>> {
     if let Some(entry) = entry { entry.opens.fetch_add(1, Ordering::Relaxed); }

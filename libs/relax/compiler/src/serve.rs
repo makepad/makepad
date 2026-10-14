@@ -515,7 +515,31 @@ impl Session {
         let eager = force_eager || !self.lazy;
         let mut probes = Vec::new();
         crate::macro_reg::clear_derive_failures(&self.paths());
-        let replacement = self.unit.prog.replay_watched_sources(std::sync::Arc::new(sources), eager, None, &mut probes);
+        let replacement = self.unit.prog.replay_watched_sources(std::sync::Arc::new(sources), eager, None, &mut probes).and_then(|mut prog| {
+            // A missing module was demanded by collection, even if its new
+            // outline has no used items. Check the recovered file before
+            // clearing the parse error; leave unrelated modules skipped.
+            let missing: HashSet<_> = self.failed_probes.iter().filter(|(_, exists)| !exists)
+                .map(|(path, _)| Self::source_spelling(path)).collect();
+            if !missing.is_empty() {
+                let (f0, d0) = (prog.files.len() as u32, prog.defs.len());
+                loop {
+                    let mut modules: Vec<_> = prog.skipped_files.iter()
+                        .filter(|(_, (path, ..))| missing.contains(&Self::source_spelling(path))).map(|(m, _)| *m).collect();
+                    if modules.is_empty() { break; }
+                    modules.sort_unstable();
+                    for module in modules {
+                        if let Err(error) = prog.load_deferred_module(module) {
+                            probes.extend(self.failed_probes.iter().cloned());
+                            probes.extend(prog.module_probes.iter().cloned());
+                            return Err(error);
+                        }
+                    }
+                }
+                if prog.files.len() as u32 != f0 { prog.link_deferred_modules(f0, d0); }
+            }
+            Ok(prog)
+        });
         let prog = match replacement {
             Ok(prog) => prog,
             Err(error) => {
@@ -683,6 +707,7 @@ mod lazy_tests {
 
     #[test]
     fn warm_indexes_queries_and_appearing_files_follow_the_current_sources() {
+        isolated_test!(warm_indexes_queries_and_appearing_files_follow_the_current_sources);
         let dir = std::env::temp_dir().join(format!("relax-warm-context-{}-{}", std::process::id(), crate::clock::wall_ns()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"warm_rx\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[lib]\npath=\"main.rs\"\n").unwrap();
@@ -715,7 +740,8 @@ mod lazy_tests {
         // the same authored path must not resurrect the old overlay bytes.
         warm.did_change(alias, "impl crate::Mark for crate::Base {}".into());
         assert!(warm.query_ready(), "{:?}", warm.diagnostics());
-        assert_eq!(warm.unit.prog.demand_plan.as_ref().unwrap().counts(), (1, 1));
+        // The plan indexes both the crate root and the newly reached sibling.
+        assert_eq!(warm.unit.prog.demand_plan.as_ref().unwrap().counts(), (2, 2));
         assert_eq!(warm.unit.prog.impls.len(), 1);
         warm.did_change(root.clone(), format!("{original} mod added; pub use added::value;"));
         assert!(!warm.query_ready());
@@ -730,6 +756,100 @@ mod lazy_tests {
         drop(warm);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn sibling_impl_index_survives_edits_and_eager_queries() {
+        isolated_test!(sibling_impl_index_survives_edits_and_eager_queries);
+        let dir = std::env::temp_dir().join(format!("relax-warm-impl-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"warm_impl\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[lib]\npath=\"main.rs\"\n").unwrap();
+        let root = dir.join("main.rs").to_string_lossy().into_owned();
+        let sibling = dir.join("sibling.rs").to_string_lossy().into_owned();
+        let idle = dir.join("idle.rs").to_string_lossy().into_owned();
+        // Serve checks this uncalled body too. Nothing refers to `sibling`.
+        let source = "mod sibling; mod idle; pub struct Base; pub trait Mark {} fn require<T: Mark>(_: T) {} pub fn caller() { require(Base); }";
+        let implementation = "impl crate::Mark for crate::Base {}";
+        std::fs::write(&root, source).unwrap();
+        std::fs::write(&sibling, implementation).unwrap();
+        // Identical unqualified names must not demand unrelated impls.
+        std::fs::write(&idle, "pub struct Base; pub trait Mark {} impl Mark for Base {}").unwrap();
+        let sess = std::sync::Arc::new(crate::Session::default());
+        let mut prog = crate::program::Program::new(&sess);
+        let cfg = crate::cfg::CfgSet::host(&sess, &[]);
+        prog.preload(vec![crate::preload::PreCrate { name: "warm_impl".into(), root: root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() }]);
+        let krate = prog.load_crate("warm_impl", &root, 2021, cfg, Vec::new()).unwrap();
+        prog.resolve_imports();
+        let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
+        let mut warm = Session::new(Unit::new(prog, tcx, 0), krate, Vec::new());
+        warm.check();
+        assert!(warm.diagnostics().is_empty(), "{:?}", warm.diagnostics());
+        assert!(warm.file(&sibling).is_some());
+        assert!(warm.file(&idle).is_none());
+        assert_eq!(warm.unit.prog.demand_plan.as_ref().unwrap().counts(), (2, 3));
+
+        warm.reach_query_files().unwrap();
+        assert!(warm.file(&idle).is_some());
+        assert!(warm.unit.prog.session.options.source_eager);
+        assert!(warm.unit.prog.session.options.rs_lazy);
+        warm.did_change(root.clone(), format!("{source}\n"));
+        assert!(warm.diagnostics().is_empty(), "{:?}", warm.diagnostics());
+        assert!(!warm.unit.prog.session.options.source_eager);
+        assert!(warm.file(&idle).is_none());
+        assert!(warm.file(&sibling).is_some());
+        assert_eq!(warm.unit.prog.demand_plan.as_ref().unwrap().counts(), (2, 3));
+
+        warm.did_change(sibling.clone(), String::new());
+        assert!(warm.diagnostics().iter().any(|d| d.code == "E0277"), "{:?}", warm.diagnostics());
+        assert!(warm.file(&sibling).is_none());
+        assert!(warm.file(&idle).is_none());
+        warm.did_change(sibling, implementation.into());
+        assert!(warm.diagnostics().is_empty(), "{:?}", warm.diagnostics());
+        assert_eq!(warm.unit.prog.impls.len(), 1);
+        assert!(warm.file(&idle).is_none());
+        assert_eq!(warm.unit.prog.demand_plan.as_ref().unwrap().counts(), (2, 3));
+
+        let added = dir.join("added.rs").to_string_lossy().into_owned();
+        warm.did_change(root, format!("{source} mod added; pub use added::value;"));
+        assert!(!warm.query_ready());
+        std::fs::write(&added, "pub fn value() {}").unwrap();
+        warm.apply(&[added.clone()]);
+        assert!(warm.query_ready(), "{:?}", warm.diagnostics());
+        assert!(warm.diagnostics().is_empty(), "{:?}", warm.diagnostics());
+        assert!(warm.file(&added).is_some());
+        assert!(warm.file(&idle).is_none(), "recovering a missing module must stay lazy");
+        drop(warm);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn sibling_blanket_impl_is_reached_by_its_trait_index() {
+        isolated_test!(sibling_blanket_impl_is_reached_by_its_trait_index);
+        let dir = std::env::temp_dir().join(format!("relax-warm-blanket-{}-{}", std::process::id(), crate::clock::wall_ns()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Cargo.toml"), "[package]\nname=\"warm_blanket\"\nversion=\"0.1.0\"\nedition=\"2021\"\n[lib]\npath=\"main.rs\"\n").unwrap();
+        let root = dir.join("main.rs").to_string_lossy().into_owned();
+        let sibling = dir.join("sibling.rs").to_string_lossy().into_owned();
+        let idle = dir.join("idle.rs").to_string_lossy().into_owned();
+        std::fs::write(&root, "mod sibling; mod idle; pub trait Mark {} fn require<T: Mark>(_: T) {} pub fn caller() { require(1u8); }").unwrap();
+        std::fs::write(&sibling, "impl<T> crate::Mark for T {}").unwrap();
+        std::fs::write(&idle, "pub trait Mark {} impl<T> Mark for T {}").unwrap();
+        let sess = std::sync::Arc::new(crate::Session::default());
+        let mut prog = crate::program::Program::new(&sess);
+        let cfg = crate::cfg::CfgSet::host(&sess, &[]);
+        prog.preload(vec![crate::preload::PreCrate { name: "warm_blanket".into(), root: root.clone(), edition: 2021, cfg: cfg.clone(), deps: Vec::new(), proc_macro: false, image_deps: Vec::new(), image_dep_names: Vec::new() }]);
+        let krate = prog.load_crate("warm_blanket", &root, 2021, cfg, Vec::new()).unwrap();
+        prog.resolve_imports();
+        let mut tcx = crate::tcx::Tcx::new(); tcx.collect(&prog);
+        let mut warm = Session::new(Unit::new(prog, tcx, 0), krate, Vec::new());
+        warm.check();
+        assert!(warm.diagnostics().is_empty(), "{:?}", warm.diagnostics());
+        assert!(warm.file(&sibling).is_some());
+        assert!(warm.file(&idle).is_none());
+        assert_eq!(warm.unit.prog.impls.len(), 1);
+        assert_eq!(warm.unit.prog.demand_plan.as_ref().unwrap().counts(), (2, 3));
+        drop(warm);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 #[cfg(test)]
@@ -738,6 +858,7 @@ mod round45_tests {
 
     #[test]
     fn checking_body_edits_publish_owner_legacy_results() {
+        isolated_test!(checking_body_edits_publish_owner_legacy_results);
         let dir = std::env::temp_dir().join(format!("relax-check-r45-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let root = dir.join("lib.rs").to_string_lossy().into_owned();
