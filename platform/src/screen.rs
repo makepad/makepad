@@ -43,8 +43,16 @@ pub fn screens() -> Vec<ScreenGeom> {
         return screens;
     }
     let rect = |r: [f64; 4]| Rect { pos: dvec2(r[0], r[1]), size: dvec2(r[2], r[3]) };
-    makepad_hal::screens()
-        .into_iter()
+    let mut all = vec![makepad_hal::ScreenInfo::default(); 8];
+    loop {
+        let n = makepad_hal::hal_screens(&mut all) as usize;
+        if n <= all.len() {
+            all.truncate(n);
+            break;
+        }
+        all.resize(n, makepad_hal::ScreenInfo::default());
+    }
+    all.into_iter()
         .map(|s| ScreenGeom { bounds: rect(s.bounds), work_area: rect(s.work_area), is_primary: s.is_primary })
         .collect()
 }

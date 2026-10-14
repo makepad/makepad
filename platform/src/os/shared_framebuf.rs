@@ -194,19 +194,6 @@ pub enum SharedSwapchainCreateError {
 }
 
 #[cfg(target_os = "linux")]
-pub fn shared_presentable_image_recv_fds_from_aux_chan(
-    image: SharedPresentableImage,
-    client_endpoint: &aux_chan::ClientEndpoint,
-) -> std::io::Result<LinuxPresentableImage> {
-    let id = image.id;
-    let owned_image = aux_chan::recv_image_fds_from_aux_chan(id, image.image, client_endpoint)?;
-    Ok(LinuxPresentableImage {
-        id,
-        image: owned_image,
-    })
-}
-
-#[cfg(target_os = "linux")]
 pub use crate::os::hosted_gpu_sender::{LinuxSwapchainSender, SentSwapchain};
 
 /// An exported handle batch, with no CPU pixel payload. Ownership can move
@@ -221,7 +208,7 @@ pub struct ExportedHostSwapchain {
 
 #[cfg(target_os = "linux")]
 impl ExportedHostSwapchain {
-    pub(crate) fn send(self, endpoint: &aux_chan::HostEndpoint) -> std::io::Result<SharedSwapchain> {
+    pub(crate) fn send(self, endpoint: &makepad_hal::hosted_ipc::HostEndpoint) -> std::io::Result<SharedSwapchain> {
         let mut shared = Vec::with_capacity(SWAPCHAIN_IMAGE_COUNT);
         for image in self.images {
             shared.push(SharedPresentableImage { id: image.id,
@@ -281,10 +268,9 @@ pub fn shared_swapchain_from_host_swapchain(
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub mod aux_chan {
     use super::*;
-    use crate::os::linux_ipc::{self as linux_ipc, FixedSizeEncoding};
+    use makepad_hal::hosted_ipc::{aux_path, HostEndpoint};
     use std::{
         io,
-        os::fd::OwnedFd,
         os::unix::net::UnixListener,
         path::PathBuf,
     };
@@ -306,10 +292,10 @@ pub mod aux_chan {
         if host_port.trim().is_empty() {
             return Err(io_error_other("invalid STUDIO_HOST value"));
         }
-        let port = host_port
+        let port: u16 = host_port
             .rsplit_once(':')
-            .map(|(_, port)| port)
-            .unwrap_or("80");
+            .map_or(Ok(80), |(_, port)| port.parse())
+            .map_err(|_| io_error_other("invalid STUDIO_HOST port"))?;
         let studio_build_id = studio_build_id
             .map(str::trim)
             .filter(|build_id| !build_id.is_empty())
@@ -318,10 +304,7 @@ pub mod aux_chan {
         let Some(studio_build_id) = studio_build_id else {
             return Err(io_error_other("missing app id in STUDIO_BUILD"));
         };
-        Ok(PathBuf::from(format!(
-            "/tmp/makepad-stdin-aux-{port}-{}.sock",
-            studio_build_id
-        )))
+        Ok(aux_path(port, &studio_build_id))
     }
 
     pub struct ExternalEndpointListener {
@@ -364,31 +347,12 @@ pub mod aux_chan {
         }
     }
 
-    // Host->Client and Client->Host message types.
-    pub type H2C = (PresentableImageId, OwnedFd);
-    pub type C2H = linux_ipc::Never;
-
-    impl FixedSizeEncoding<{ u64::BYTE_LEN }, 0> for PresentableImageId {
-        fn encode(&self) -> ([u8; Self::BYTE_LEN], [std::os::fd::BorrowedFd<'_>; 0]) {
-            let (bytes, []) = self.as_u64().encode();
-            (bytes, [])
-        }
-        fn decode(bytes: [u8; Self::BYTE_LEN], fds: [OwnedFd; 0]) -> Self {
-            Self::from_u64(u64::decode(bytes, fds))
-        }
-    }
-
-    pub type HostEndpoint = linux_ipc::Channel<H2C, C2H>;
-    pub type ClientEndpoint = linux_ipc::Channel<C2H, H2C>;
-
-    impl ClientEndpoint {
-        /// Where this child's host listens, from the hub environment.
-        pub fn studio_env_path() -> io::Result<PathBuf> {
-            let studio_host = crate::app_main::resolve_studio_host();
-            if studio_host.is_empty() { return Err(io_error_other("missing STUDIO_HOST")); }
-            path_for_studio(&studio_host, None)
-        }
-
+    /// Where this child's host listens for its descriptor channel, from the hub environment
+    /// (or the window manager that admitted it).
+    pub fn client_path() -> io::Result<PathBuf> {
+        let studio_host = crate::app_main::resolve_studio_host();
+        if studio_host.is_empty() { return Err(io_error_other("missing STUDIO_HOST")); }
+        path_for_studio(&studio_host, None)
     }
 
     pub fn send_image_fds_to_aux_chan(
@@ -417,62 +381,6 @@ pub mod aux_chan {
             },
             plane: makepad_studio_protocol::LinuxSharedImagePlane {
                 dma_buf_fd: makepad_studio_protocol::AuxChannedImageFd { _private: None },
-                offset: plane.offset,
-                stride: plane.stride,
-            },
-        })
-    }
-
-    pub fn recv_image_fds_from_aux_chan(
-        id: PresentableImageId,
-        image: makepad_studio_protocol::LinuxSharedImage,
-        client_endpoint: &ClientEndpoint,
-    ) -> io::Result<LinuxOwnedImage> {
-        let makepad_studio_protocol::LinuxSharedImage { drm_format, plane, vulkan, dma_buf_timeline } = image;
-        if vulkan.is_some() && dma_buf_timeline { return Err(io_error_other("ambiguous hosted image transport")); }
-        let mut mismatches = 0usize;
-        let dma_buf_fd = loop {
-            let (recv_id, recv_fd) = client_endpoint.recv()?;
-            if recv_id == id {
-                break recv_fd;
-            }
-            mismatches += 1;
-            if mismatches >= 64 {
-                return Err(io_error_other(format!(
-                    "recv_fds_from_aux_chan: ID mismatch \
-                     (expected {id:?}, last got {recv_id:?}, dropped {mismatches} stale images)",
-                )));
-            }
-        };
-        if mismatches != 0 {
-            crate::warning!(
-                "recv_fds_from_aux_chan: dropped {mismatches} stale swapchain images before {id:?}"
-            );
-        }
-        let vulkan = match vulkan {
-            Some(info) => {
-                let (recv_id, semaphore_fd) = client_endpoint.recv()?;
-                if recv_id != id {
-                    return Err(io_error_other("Vulkan timeline FD does not match image"));
-                }
-                Some(LinuxOwnedVulkanImage { info, semaphore_fd })
-            }
-            None => None,
-        };
-        let dma_buf_timeline = if dma_buf_timeline {
-            let (recv_id, fd) = client_endpoint.recv()?;
-            if recv_id != id { return Err(io_error_other("DMA-BUF timeline FD does not match image")); }
-            Some(fd)
-        } else { None };
-        Ok(LinuxOwnedImage {
-            vulkan,
-            dma_buf_timeline,
-            drm_format: DrmFormat {
-                fourcc: drm_format.fourcc,
-                modifiers: drm_format.modifiers,
-            },
-            plane: LinuxOwnedImagePlane {
-                dma_buf_fd,
                 offset: plane.offset,
                 stride: plane.stride,
             },

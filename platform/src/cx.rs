@@ -148,8 +148,11 @@ pub struct Cx {
     pub(crate) pending_camera_playbacks: Vec<PendingCameraPlayback>,
 
     pub(crate) new_next_frames: HashSet<NextFrame>,
-    /// A hosted child its host says nothing shows of (`HostedVisible`):
-    /// next-frame callbacks and draws wait until it is shown again.
+    /// Frame requests made so far (`Cx::frame_requests`).
+    pub(crate) frame_requests: u64,
+    /// A child its host says nothing shows of (`HostedVisible`: a hosted process over its
+    /// socket, a HAL domain as an app message from its parent): next-frame callbacks and draws
+    /// wait until it is shown again (`hosted_frames_held`).
     pub(crate) hosted_hidden: bool,
 
     pub new_actions: ActionsBuf,
@@ -926,7 +929,8 @@ impl Cx {
             updated: TextureUpdated::Full,
         });
 
-        let (executor, spawner) = executor::new_executor_and_spawner();
+        // a task woken from another thread wakes the event loop that runs it (an idle loop sleeps)
+        let (executor, spawner) = executor::new_executor_and_spawner(std::sync::Arc::new(crate::thread::wake_ui_event_loop));
         //let (live_file_change_sender, live_file_change_receiver) = crate::makepad_network::mpsc::channel();
         let (action_sender, action_receiver) = crate::makepad_network::mpsc::channel();
         if let Ok(mut sender) = ACTION_SENDER_GLOBAL.lock() {
@@ -1020,6 +1024,7 @@ impl Cx {
             pending_camera_playbacks: Vec::new(),
             studio_http: "".to_string(),
             new_next_frames: Default::default(),
+            frame_requests: 0,
             hosted_hidden: false,
 
             post_draw_hook: None,

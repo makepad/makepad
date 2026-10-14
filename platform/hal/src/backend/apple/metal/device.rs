@@ -23,20 +23,32 @@ pub(crate) enum Done {
     Surface { sid: u32, incarnation: Arc<crate::font::FrameProgress>, window: crate::Id, w: u32, h: u32, buffer: usize },
 }
 
+impl Done {
+    fn sid(&self) -> u32 {
+        match self {
+            Done::Frame { sid, .. } | Done::Readback { sid, .. } | Done::Pick { sid, .. } | Done::PipelineReady { sid, .. }
+            | Done::PipelineFailed { sid, .. } | Done::Surface { sid, .. } => *sid,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Mailbox {
     queue: Arc<Mutex<Vec<Done>>>,
-    wake: Arc<dyn Fn() + Send + Sync>,
+    notify: crate::backend::SessionNotify,
 }
 
 impl Mailbox {
-    pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Mailbox {
-        Mailbox { queue: Arc::new(Mutex::new(Vec::new())), wake }
+    pub fn new(notify: crate::backend::SessionNotify) -> Mailbox {
+        Mailbox { queue: Arc::new(Mutex::new(Vec::new())), notify }
     }
 
+    /// A completion for its session: that session's pump looks (and drains every completion).
     pub(crate) fn push(&self, d: Done) {
+        let sid = d.sid();
+        let window = matches!(d, Done::Frame { kind, .. } if crate::backend::window_frame(kind));
         self.queue.lock().unwrap_or_else(|e| e.into_inner()).push(d);
-        (self.wake)();
+        (self.notify)(sid, window);
     }
 
     pub(crate) fn take(&self) -> Vec<Done> {
@@ -468,7 +480,7 @@ mod tests {
     /// monospace labels, whose rectangles all have one size).
     #[test]
     fn transient_buffers_of_one_address_are_not_deduplicated() {
-        let Some(mut dev) = Device::new(Mailbox::new(Arc::new(|| {}))) else { return };
+        let Some(mut dev) = Device::new(Mailbox::new(Arc::new(|_, _| {}))) else { return };
         let (_, seq) = dev.new_command_buffer();
         let mut seen = Vec::new();
         for i in 0..8u8 {

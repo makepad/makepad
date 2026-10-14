@@ -1506,6 +1506,12 @@ impl Texture {
         cx.textures[self.texture_id()].transient = transient;
     }
 
+    /// Whether the platform may give this render target's storage back while idle (see
+    /// [`Texture::set_transient`]).
+    pub fn is_transient(&self, cx: &Cx) -> bool {
+        cx.textures[self.texture_id()].transient
+    }
+
     /// Records that this texture holds a shrunk copy of an image (or of each frame of an
     /// animation) that's `natural_size` pixels big, so it can still be laid out at that size.
     pub fn set_natural_size(&self, cx: &mut Cx, natural_size: Option<(usize, usize)>) {

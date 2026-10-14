@@ -204,6 +204,9 @@ pub mod open_flags {
     /// Windows start transparent and click-through and show with the first presented frame
     /// (a launcher's child, so the launcher's spinner is all that is seen until then).
     pub const HIDDEN_UNTIL_PRESENT: u32 = 8;
+    /// The process is a window manager: it hosts other apps' windows and never looks for
+    /// another makepad WM to host its own (Linux backend discovery, `wm_socket`).
+    pub const WINDOW_MANAGER: u32 = 16;
 }
 
 /// `HalInfo::flags` bits.
@@ -558,6 +561,20 @@ pub mod input {
         pub const UPDATE: u32 = 1;
         pub const COMMIT: u32 = 2;
         pub const CANCEL: u32 = 3;
+    }
+
+    /// `BackGesture::state`: the step of the system back gesture.
+    pub mod back_state {
+        pub const START: u32 = 0;
+        pub const MOVE: u32 = 1;
+        pub const CANCEL: u32 = 2;
+    }
+
+    /// `BackGesture::edge`: the screen edge the back gesture started from.
+    pub mod back_edge {
+        pub const LEFT: u32 = 0;
+        pub const RIGHT: u32 = 1;
+        pub const NONE: u32 = 2;
     }
 
     /// `ImeAnimate::curve`: the soft keyboard's timing curve.

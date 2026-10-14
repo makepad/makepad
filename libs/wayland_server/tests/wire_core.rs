@@ -1,3 +1,6 @@
+// The compositor is Linux-only (the crate's modules are cfg(target_os = "linux")).
+#![cfg(target_os = "linux")]
+
 use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};

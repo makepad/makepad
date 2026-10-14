@@ -24,10 +24,19 @@ pub mod gl_interop;
 pub mod automation;
 pub mod buffers;
 pub mod clock;
+pub mod fake_camera;
 pub mod clipboard;
 pub mod direct;
 #[cfg(target_os = "linux")]
 pub mod wide_desktop;
+#[cfg(target_os = "linux")]
+pub mod wm_socket;
+/// Descriptor I/O over Unix sockets: hosted clients and hosts, and frame rings (app_host).
+#[cfg(target_os = "linux")]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub mod linux_ipc;
+#[cfg(target_os = "linux")]
+pub mod hosted_ipc;
 pub mod cmds;
 pub mod codec;
 pub mod events;
@@ -104,18 +113,60 @@ struct Signal {
     epoch: u64,
     /// bumped when every session's pump must look again (global wake, clock change)
     all: u64,
-    /// per session: its queue got an event or it was woken
+    /// per session: its queue got an event or it was woken (never reset: a pump compares it)
     per: HashMap<u32, u64>,
     /// `hal_wake` count, and `wake_session` count per session
     wake_all: u64,
     wake_one: HashMap<u32, u64>,
     /// the wake counts each session's pump has turned into a `Wake` event
     taken: HashMap<u32, (u64, u64)>,
+    /// each session's pump blocks on its own condvar: news for one session wakes that pump alone
+    cvs: HashMap<u32, Arc<Condvar>>,
+    /// what each session's pump did, by cause (`hal pump`)
+    counts: HashMap<u32, PumpCounts>,
+}
+
+/// One session's pump loop, counted: every turn steps the backend under the state lock, so an
+/// idle system must show none.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PumpCounts {
+    /// `hal_pump` calls
+    pub calls: u64,
+    /// loop turns (each steps the backend under the state lock)
+    pub turns: u64,
+    /// calls that returned events
+    pub delivered: u64,
+    /// blocked waits that ended because of: events for this session, a wake (`hal_wake` or
+    /// `wake_session`), every pump asked to look (window system news, clock, font glyphs),
+    /// the timeout (a due timer, the deadline)
+    pub by_event: u64,
+    pub by_wake: u64,
+    pub by_all: u64,
+    pub by_timeout: u64,
+}
+
+/// The counters a pump compares across its wait.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Ticks {
+    all: u64,
+    per: u64,
+    wake_all: u64,
+    wake_one: u64,
 }
 
 impl Signal {
-    fn tick(&self, sid: u32) -> u64 {
-        self.all + self.per.get(&sid).copied().unwrap_or(0)
+    fn ticks(&self, sid: u32) -> Ticks {
+        Ticks {
+            all: self.all,
+            per: self.per.get(&sid).copied().unwrap_or(0),
+            wake_all: self.wake_all,
+            wake_one: self.wake_one.get(&sid).copied().unwrap_or(0),
+        }
+    }
+
+    /// The condvar `sid`'s pump blocks on.
+    fn cv(&mut self, sid: u32) -> Arc<Condvar> {
+        self.cvs.entry(sid).or_default().clone()
     }
 
     /// Whether a wake arrived for `sid` since its pump last asked.
@@ -133,10 +184,15 @@ impl Signal {
         self.taken.insert(sid, now);
     }
 
+    /// The session is gone: a pump still blocked for it looks once more (and hears its end).
     fn forget(&mut self, sid: u32) {
-        self.per.remove(&sid);
+        *self.per.entry(sid).or_default() += 1;
+        if let Some(cv) = self.cvs.remove(&sid) {
+            cv.notify_all();
+        }
         self.wake_one.remove(&sid);
         self.taken.remove(&sid);
+        self.counts.remove(&sid);
     }
 }
 
@@ -144,16 +200,21 @@ impl Signal {
 /// own threads.
 struct Sig {
     signal: Mutex<Signal>,
+    /// the host's `await_*` waits (on `epoch`); pumps wait on their session's own condvar
     cv: Condvar,
 }
 
 impl Sig {
-    /// Something happened for these sessions' queues (and for the host's `await_*`).
+    /// Something happened for these sessions' queues (and for the host's `await_*`): only
+    /// their pumps wake.
     fn notify(&self, sessions: &[u32]) {
         let mut s = lock(&self.signal);
         s.epoch += 1;
         for id in sessions {
             *s.per.entry(*id).or_default() += 1;
+            if let Some(cv) = s.cvs.get(id) {
+                cv.notify_all();
+            }
         }
         drop(s);
         self.cv.notify_all();
@@ -166,6 +227,9 @@ impl Sig {
         s.all += 1;
         if wake {
             s.wake_all += 1;
+        }
+        for cv in s.cvs.values() {
+            cv.notify_all();
         }
         drop(s);
         self.cv.notify_all();
@@ -187,12 +251,76 @@ pub struct Hal {
     domain_host: Mutex<Option<Arc<dyn DomainHost>>>,
 }
 
+/// Lifts this process's soft open-file limit to its hard limit (Linux, Android): every process
+/// that makes a HAL (`Hal::new`), the WM and its hosted apps alike. NVIDIA's Linux driver holds
+/// one file descriptor on /dev/nvidiaN per memory allocation, and the usual soft limit is 1024:
+/// a game with a few hundred buffers, textures and upload arenas reached it, and from then on every create on the device -- fences, command pools, upload
+/// arenas, descriptor pools -- failed with OUT_OF_HOST/DEVICE_MEMORY while the GPU had 16 GB free
+/// (149, Sandbox at ~1 fps). The hard limit is the system's real bound (524288 on 149).
+/// Hosted children inherit the raised limit from their host.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub fn raise_open_file_limit() {
+    #[repr(C)]
+    struct Rlimit { current: std::ffi::c_ulong, max: std::ffi::c_ulong }
+    extern "C" {
+        fn getrlimit(resource: std::ffi::c_int, limit: *mut Rlimit) -> std::ffi::c_int;
+        fn setrlimit(resource: std::ffi::c_int, limit: *const Rlimit) -> std::ffi::c_int;
+    }
+    const RLIMIT_NOFILE: std::ffi::c_int = 7;
+    let mut limit = Rlimit { current: 0, max: 0 };
+    if unsafe { getrlimit(RLIMIT_NOFILE, &mut limit) } != 0 || limit.current >= limit.max { return; }
+    let raised = Rlimit { current: limit.max, max: limit.max };
+    if unsafe { setrlimit(RLIMIT_NOFILE, &raised) } != 0 {
+        eprintln!("[hal] open-file limit stays at {} (raising it to {} failed: {})", limit.current, limit.max, std::io::Error::last_os_error());
+    }
+}
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+pub fn raise_open_file_limit() {}
+
+/// The process's open file descriptors and its soft limit, for an out-of-memory report: at the
+/// limit the driver answers every create with out of memory (`raise_open_file_limit`).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn open_files() -> Option<(usize, u64)> {
+    let open = std::fs::read_dir("/proc/self/fd").ok()?.count();
+    let limits = std::fs::read_to_string("/proc/self/limits").ok()?;
+    let soft = limits.lines().find(|l| l.starts_with("Max open files"))?.split_whitespace().nth(3)?.parse().ok()?;
+    Some((open, soft))
+}
+/// Whether `open` descriptors are at the soft limit `soft` for the driver's purposes (a few kept
+/// for the sockets and files a create may open besides its allocation).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(crate) fn at_file_limit(open: usize, soft: u64) -> bool { open as u64 + 16 >= soft }
+
+#[cfg(all(test, any(target_os = "linux", target_os = "android")))]
+mod open_file_limit_tests {
+    #[test]
+    fn a_hal_lifts_the_soft_open_file_limit_to_the_hard_one() {
+        let _hal = super::Hal::new();
+        {
+            let limits = std::fs::read_to_string("/proc/self/limits").unwrap();
+            let line = limits.lines().find(|l| l.starts_with("Max open files")).unwrap();
+            let v: Vec<&str> = line.split_whitespace().collect();
+            assert_eq!(v[3], v[4], "soft limit not raised: {line}");
+            let (open, soft) = super::open_files().unwrap();
+            assert!(open > 0 && soft.to_string() == v[3]);
+        }
+    }
+    #[test]
+    fn the_file_limit_check_keeps_a_margin() {
+        assert!(!super::at_file_limit(200, 1024));
+        assert!(super::at_file_limit(1008, 1024), "16 left counts as the limit");
+        assert!(super::at_file_limit(1024, 1024));
+        assert!(!super::at_file_limit(1024, 524288));
+    }
+}
+
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl Hal {
     pub fn new() -> Arc<Hal> {
+        raise_open_file_limit();
         Arc::new_cyclic(|me| Hal {
             me: me.clone(),
             state: Mutex::new(State { world: World::new(), backend: None, backend_inits: 0 }),
@@ -240,10 +368,28 @@ impl Hal {
         let sig = self.sig.clone();
         #[allow(unused_variables)]
         let notify: Arc<dyn Fn() + Send + Sync> = Arc::new(move || sig.notify_all(false));
+        // a GPU result is news for the session it belongs to, and a window frame also for the
+        // sessions that hear of that session's window frames
+        let sig = self.sig.clone();
+        let listeners = st.world.listeners.clone();
+        #[allow(unused_variables)]
+        let sessions: backend::SessionNotify = Arc::new(move |sid, window| {
+            if !window {
+                return sig.notify(&[sid]);
+            }
+            let l = lock(&listeners);
+            let mut ids = [sid; 3];
+            let mut n = 1;
+            for id in l.get(&sid).into_iter().flatten().take(2) {
+                ids[n] = *id;
+                n += 1;
+            }
+            sig.notify(&ids[..n]);
+        });
         let make = |id: u32| -> Option<Box<dyn Backend>> {
             match id {
                 #[cfg(target_os = "linux")]
-                backend_id::AUTO => match backend::linux::open(req.flags, wake.clone(), notify.clone()) {
+                backend_id::AUTO => match backend::linux::open(req.flags, wake.clone(), sessions.clone(), notify.clone()) {
                     Ok(b) => Some(b),
                     Err(e) => { eprintln!("[hal] {e}"); None }
                 },
@@ -258,19 +404,21 @@ impl Hal {
                 },
                 backend_id::HEADLESS => Some(Box::new(Headless)),
                 #[cfg(target_vendor = "apple")]
-                backend_id::METAL => backend::apple::Metal::new(req.flags, wake.clone(), notify.clone()).map(|m| Box::new(m) as Box<dyn Backend>),
+                backend_id::METAL => backend::apple::Metal::new(req.flags, sessions.clone(), notify.clone()).map(|m| Box::new(m) as Box<dyn Backend>),
                 #[cfg(windows)]
                 backend_id::D3D11 => match backend::windows::D3d11::new(req.flags, wake.clone(), notify.clone()) {
                     Ok(d) => Some(Box::new(d)),
                     Err(e) => { eprintln!("[hal-d3d11] {e}"); None }
                 },
                 #[cfg(target_os = "linux")]
-                backend_id::VULKAN => match backend::vulkan::Vulkan::new(req.flags, wake.clone(), notify.clone()) {
+                backend_id::VULKAN => match backend::vulkan::Vulkan::new(req.flags, sessions.clone(), notify.clone()) {
                     Ok(v) => Some(Box::new(v)),
                     Err(e) => { eprintln!("[hal-vulkan] {e}"); None }
                 },
                 #[cfg(target_os = "android")]
-                backend_id::VULKAN => match backend::android::AndroidBackend::new(req.flags, wake.clone()) {
+                // the Activity's events and frame callbacks make the pumps look (no `Wake` for every
+                // app); a GPU result its own session's
+                backend_id::VULKAN => match backend::android::AndroidBackend::new(req.flags, sessions.clone(), notify.clone()) {
                     Ok(v) => Some(Box::new(v)),
                     Err(e) => { eprintln!("[hal-android] {e}"); None }
                 },
@@ -451,15 +599,25 @@ impl Hal {
     /// Executes a batch. The slices in `buf` are read during this call only.
     pub fn submit(&self, buf: &CmdBuf) {
         let sid = buf.session;
-        let mut guard = lock(&self.state);
-        let st = &mut *guard;
         // SAFETY: the slices are borrowed for this call (hal_submit contract)
         let Some(view) = (unsafe { buf.view() }) else {
-            if let Some(s) = st.world.session_mut(sid) {
+            if let Some(s) = lock(&self.state).world.session_mut(sid) {
                 s.stats.bad_bufs += 1;
             }
             return;
         };
+        // the batch's long driver work (pipeline variants its frames use first) runs on this
+        // session's thread before the batch, without the lock: only this session waits for it
+        let ahead = {
+            let mut guard = lock(&self.state);
+            let st = &mut *guard;
+            st.backend.as_mut().and_then(|(_, b)| b.work_ahead(&st.world, sid, &view))
+        };
+        if let Some(work) = ahead {
+            work();
+        }
+        let mut guard = lock(&self.state);
+        let st = &mut *guard;
         match st.world.session_mut(sid) {
             None => return,
             // closing, or a domain whose app has not (re)opened it: nothing of this caller counts
@@ -471,6 +629,8 @@ impl Hal {
         }
         let Some((_, b)) = st.backend.as_mut() else { return };
         b.submit(&mut st.world, sid, &view);
+        // its windows may have changed: who hears of its window frames
+        st.world.update_listeners(sid);
         // `Quit` ends the session: the same free path as `close`
         if st.world.session(sid).is_some_and(|s| s.quit) {
             st.world.schedule_close(sid, CloseAs::Quit);
@@ -490,13 +650,24 @@ impl Hal {
     }
 
     /// Delivers events for `out.session`, waiting up to `timeout_ns` when there are none (woken
-    /// early by [`Hal::wake`], an injected event, or a due timer). Returns the event count.
+    /// early by [`Hal::wake`], an event for this session, or a due timer). Returns the event
+    /// count. A turn steps the backend under the state lock; the pump blocks until there is news
+    /// for its own session, so other sessions' traffic costs it no turn and an idle system none.
     pub fn pump(&self, timeout_ns: u64, out: &mut EventBuf) -> u32 {
         let sid = out.session;
         let t0 = std::time::Instant::now();
         let deadline = t0.checked_add(Duration::from_nanos(timeout_ns)).unwrap_or_else(|| t0 + Duration::from_secs(86400 * 365));
+        let cv = {
+            let mut sig = lock(&self.sig.signal);
+            sig.counts.entry(sid).or_default().calls += 1;
+            sig.cv(sid)
+        };
         loop {
-            let seen = lock(&self.sig.signal).tick(sid);
+            let seen = {
+                let mut sig = lock(&self.sig.signal);
+                sig.counts.entry(sid).or_default().turns += 1;
+                sig.ticks(sid)
+            };
             let wait = {
                 let mut guard = lock(&self.state);
                 let st = &mut *guard;
@@ -509,7 +680,10 @@ impl Hal {
                 }
                 // A completion or a lent window's geometry can notify another session while
                 // this pump steps the backend. Wake it now, even when no later submit follows.
-                self.sig.notify(&st.world.take_notified());
+                let notified = st.world.take_notified();
+                if !notified.is_empty() {
+                    self.sig.notify(&notified);
+                }
                 let woken = lock(&self.sig.signal).take_wake(sid);
                 let now = st.world.now();
                 // embedded windows' frames (no display link of their own) at display rate
@@ -519,6 +693,10 @@ impl Hal {
                 if st.world.session(sid).is_none() {
                     // the session was ended under its app (killed, crashed, its parent closed):
                     // the app hears one quit request and ends its run
+                    let mut sig = lock(&self.sig.signal);
+                    sig.cvs.remove(&sid);
+                    sig.counts.remove(&sid);
+                    drop(sig);
                     if st.world.take_ended(sid) {
                         let mut q = EventQueue::new();
                         q.set_time(now);
@@ -534,6 +712,7 @@ impl Hal {
                     s.events.wake();
                 }
                 if !s.events.is_empty() {
+                    lock(&self.sig.signal).counts.entry(sid).or_default().delivered += 1;
                     return s.events.drain_into(out);
                 }
                 // nothing yet: sleep until the deadline or the next timer (manual clocks do not
@@ -549,11 +728,39 @@ impl Hal {
                 out.arena_len = 0;
                 return 0;
             }
-            let sig = lock(&self.sig.signal);
-            if sig.tick(sid) == seen {
-                drop(self.sig.cv.wait_timeout(sig, wait).unwrap_or_else(|e| e.into_inner()));
+            // Block until this session has news or the wait ends. Only its own events, a wake,
+            // or an all-sessions look end the wait early; a spurious condvar return waits on.
+            let until = std::time::Instant::now() + wait;
+            let mut sig = lock(&self.sig.signal);
+            loop {
+                let now = sig.ticks(sid);
+                if now != seen {
+                    let c = sig.counts.entry(sid).or_default();
+                    if now.wake_all != seen.wake_all || now.wake_one != seen.wake_one {
+                        c.by_wake += 1;
+                    } else if now.per != seen.per {
+                        c.by_event += 1;
+                    } else {
+                        c.by_all += 1;
+                    }
+                    break;
+                }
+                let left = until.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    sig.counts.entry(sid).or_default().by_timeout += 1;
+                    break;
+                }
+                sig = cv.wait_timeout(sig, left).unwrap_or_else(|e| e.into_inner()).0;
             }
         }
+    }
+
+    /// What each open session's pump did so far, by cause (`hal pump`; tests).
+    pub fn pump_counts(&self) -> Vec<(u32, PumpCounts)> {
+        let sig = lock(&self.sig.signal);
+        let mut v: Vec<_> = sig.counts.iter().map(|(id, c)| (*id, *c)).collect();
+        v.sort_by_key(|(id, _)| *id);
+        v
     }
 
     /// Wakes every session's blocked [`Hal::pump`] (any thread, never waits for the pumping
@@ -575,12 +782,25 @@ impl Hal {
         self.wake();
     }
 
+    /// The host is about to end the process (its sessions are done, its app domains stopped):
+    /// the backend's driver threads run out first, so exit() does not unload the driver under
+    /// them. A host API, called once at the end of the run.
+    pub fn before_exit(&self) {
+        let mut guard = lock(&self.state);
+        if let Some((_, b)) = guard.backend.as_mut() {
+            b.before_exit();
+        }
+    }
+
     /// Wakes one session's pump (a `Wake` event for it alone).
     pub fn wake_session(&self, session: u32) {
         let mut s = lock(&self.sig.signal);
         s.epoch += 1;
         *s.wake_one.entry(session).or_default() += 1;
         *s.per.entry(session).or_default() += 1;
+        if let Some(cv) = s.cvs.get(&session) {
+            cv.notify_all();
+        }
         drop(s);
         self.sig.cv.notify_all();
     }
@@ -766,24 +986,33 @@ pub use backend::apple::shell::{keep_main_loop_alive, MainLoopGuard};
 /// window system's thread (on macOS `NSApp`'s event loop) and does not return until
 /// [`stop_main_loop`]. Every session's Cx runs on its own thread. A host API, not a relax op.
 /// Until a backend asks for windows (`hal_open` without `OFFSCREEN_WINDOWS`) the thread only
-/// waits.
+/// serves its run loop (on macOS the main queue the system frameworks finish their work on).
 pub fn run_main_loop() {
     main_loop::run()
 }
 
 /// A display: its extent and what is left of it after the menu bar and Dock, as x, y, w, h in the
 /// window system's global points (macOS: bottom-left origin, the space window frames are in).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ScreenInfo {
     pub bounds: [f64; 4],
     pub work_area: [f64; 4],
     pub is_primary: bool,
 }
 
-/// The displays attached right now, as the window system last saw them: readable from any
-/// thread. Empty where there is no window system, or before it is up.
-pub fn screens() -> Vec<ScreenInfo> {
-    main_loop::screens()
+/// The displays attached right now, as the window system last saw them (readable from any
+/// thread): the first `out.len()` of them are written to `out`, the number attached is returned
+/// (a larger number: call again with room for all). None where there is no window system, or
+/// before it is up. An op: the list lives in the shell's state.
+#[relax_api]
+pub fn hal_screens(out: &mut [ScreenInfo]) -> u32 {
+    let all = main_loop::screens();
+    for (o, s) in out.iter_mut().zip(&all) {
+        *o = *s;
+    }
+    all.len() as u32
 }
 
 /// Whether the system is in dark mode, as the window system last saw it: readable from any
@@ -818,7 +1047,7 @@ mod main_loop {
 #[cfg(target_os = "linux")]
 mod main_loop {
     pub use super::backend::linux::{expect_main_loop as expect, run_main_loop as run, stop_main_loop as stop};
-    pub fn host_dark() -> Option<bool> { None }
+    pub use super::backend::linux::host_dark;
     pub fn screens() -> Vec<super::ScreenInfo> { super::backend::linux::screens() }
 }
 
@@ -933,10 +1162,65 @@ pub fn hal_pump(timeout_ns: u64, out: &mut EventBuf) -> u32 {
     Hal::global().pump(timeout_ns, out)
 }
 
-/// Wakes a blocked `hal_pump`. Callable from any thread; never waits for the main thread.
+/// Wakes every session's blocked `hal_pump`. Callable from any thread; never waits for the main
+/// thread.
 #[relax_api]
 pub fn hal_wake() {
     Hal::global().wake()
+}
+
+/// Wakes one session's blocked `hal_pump` (a `Wake` event for it alone): what an app's own
+/// threads call, so its signals do not turn every other app's loop. Any thread.
+#[relax_api]
+pub fn hal_wake_session(session: u32) {
+    Hal::global().wake_session(session)
+}
+
+/// One texture or buffer of a session's GPU ledger (`hal_allocations`).
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Allocation {
+    /// a texture; else a buffer
+    pub texture: bool,
+    /// a vertex or index buffer (the ledger's "geometry")
+    pub geometry: bool,
+    pub index: u32,
+    pub gen: u32,
+    /// the backend's allocated bytes
+    pub bytes: u64,
+}
+
+/// What `hal_allocations` found besides the list.
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Allocations {
+    /// the session is open
+    pub open: bool,
+    /// the textures and buffers it has (more than `out` held: call again with room for all)
+    pub count: u32,
+    /// the backend reports the device's own allocated total, `device_allocated`
+    pub has_device: bool,
+    pub device_allocated: u64,
+}
+
+/// The textures and buffers of session `session` as its GPU ledger has them (any thread): the
+/// first `out.len()` are written to `out`. An op: the ledger is the HAL's state.
+#[relax_api]
+pub fn hal_allocations(session: u32, out: &mut [Allocation]) -> Allocations {
+    let Some(report) = Hal::global().report(session, 0) else {
+        return Allocations::default();
+    };
+    let geometry = backend::exec::buffer_detail(buffer_kind::VERTEX);
+    let mut count = 0;
+    for item in report.items.iter().filter(|i| matches!(i.kind, ledger::Kind::Texture | ledger::Kind::Buffer)) {
+        if let Some(o) = out.get_mut(count) {
+            *o = Allocation { texture: item.kind == ledger::Kind::Texture, geometry: item.kind == ledger::Kind::Buffer && item.detail == geometry, index: item.index, gen: item.gen, bytes: item.bytes };
+        }
+        count += 1;
+    }
+    Allocations { open: true, count: count as u32, has_device: report.device_allocated.is_some(), device_allocated: report.device_allocated.unwrap_or(0) }
 }
 
 /// The directory of the app bundle's resources (Foundation, any thread).
@@ -982,6 +1266,7 @@ pub fn bundle_resource(path: &str) -> Option<Vec<u8>> {
 
 /// Queues activation of a running process. The OS may decline the request.
 #[cfg(target_os = "macos")]
+#[relax_api]
 pub fn activate_process(pid: u32) -> bool {
     dispatch_main(move || unsafe {
         use makepad_apple_sys::*;
@@ -994,19 +1279,23 @@ pub fn activate_process(pid: u32) -> bool {
 
 /// Brings a running process's main window to the front; false when it has none or the OS refuses.
 #[cfg(windows)]
+#[relax_api]
 pub fn activate_process(pid: u32) -> bool {
     backend::windows::win32::activate_process(pid)
 }
 
 /// Opens an external URL with its registered handler.
 #[cfg(windows)]
-pub fn open_url(url: String) -> bool {
-    backend::windows::win32::open_url(&url)
+#[relax_api]
+pub fn open_url(url: &str) -> bool {
+    backend::windows::win32::open_url(url)
 }
 
 /// Opens an external URL on the process main thread. The OS handles the URL scheme.
 #[cfg(target_os = "macos")]
-pub fn open_url(url: String) -> bool {
+#[relax_api]
+pub fn open_url(url: &str) -> bool {
+    let url = url.to_string();
     dispatch_main(move || unsafe {
         use makepad_apple_sys::*;
         let value: ObjcId = msg_send![class!(NSURL), URLWithString: str_to_nsstring(&url)];
@@ -1080,6 +1369,179 @@ pub fn hal_socket_close(id: i64) {
     backend::android::socket::close(id)
 }
 
+/// The phone's codecs for makepad_video: HEVC stills (the image tile libraries' frames) and
+/// the file decoder. A call is named by an `id` the caller picks and keeps unique (a file
+/// decoder keeps its open id for its life); its result waits under that id until
+/// `hal_media_take`. Any thread may call.
+#[cfg(target_os = "android")]
+fn media_results() -> &'static std::sync::Mutex<std::collections::HashMap<i64, Result<Vec<u8>, String>>> {
+    static RESULTS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i64, Result<Vec<u8>, String>>>> = std::sync::OnceLock::new();
+    RESULTS.get_or_init(Default::default)
+}
+
+/// Keeps `result` under `id`: its length, or -1 - the length of the error text.
+#[cfg(target_os = "android")]
+fn media_keep(id: i64, result: Result<Vec<u8>, String>) -> i64 {
+    let len = match &result {
+        Ok(bytes) => bytes.len() as i64,
+        Err(e) => -1 - e.len() as i64,
+    };
+    media_results().lock().unwrap_or_else(|e| e.into_inner()).insert(id, result);
+    len
+}
+
+/// Writes the largest frame the HEVC encoder takes into `out` (width, height: little-endian
+/// u32s). Returns 8, or -1 when the phone has no HEVC encoder.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_hevc_encoder_max(out: &mut [u8]) -> i64 {
+    match backend::android::media::hevc::encoder_max_size() {
+        Some((w, h)) if out.len() >= 8 => {
+            out[..4].copy_from_slice(&w.to_le_bytes());
+            out[4..8].copy_from_slice(&h.to_le_bytes());
+            8
+        }
+        _ => -1,
+    }
+}
+
+/// Encodes an NV12 still. The result (`hal_media_take`) is the parameter sets' length (u32 LE),
+/// the parameter sets, then the frame, both Annex-B. Returns its length, or -1 - the error's.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_hevc_encode(id: i64, nv12: &[u8], width: u32, height: u32, bitrate: u32) -> i64 {
+    let result = backend::android::media::hevc::encode(nv12, width, height, bitrate).map(|(config, frame)| {
+        let mut out = Vec::with_capacity(4 + config.len() + frame.len());
+        out.extend_from_slice(&(config.len() as u32).to_le_bytes());
+        out.extend_from_slice(&config);
+        out.extend_from_slice(&frame);
+        out
+    });
+    media_keep(id, result)
+}
+
+/// Decodes one Annex-B access unit of a `width` x `height` picture. The result is its NV12.
+/// Returns its length, or -1 - the error's.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_hevc_decode(id: i64, annex_b: &[u8], width: u32, height: u32) -> i64 {
+    media_keep(id, backend::android::media::hevc::decode(annex_b, width, height))
+}
+
+/// Copies the result (or the error text) of call `id` into `out` and forgets it. Returns the
+/// bytes copied, -1 when there is none.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_media_take(id: i64, out: &mut [u8]) -> i64 {
+    let Some(result) = media_results().lock().unwrap_or_else(|e| e.into_inner()).remove(&id) else { return -1 };
+    let bytes = match &result {
+        Ok(bytes) => bytes.as_slice(),
+        Err(e) => e.as_bytes(),
+    };
+    let n = bytes.len().min(out.len());
+    out[..n].copy_from_slice(&bytes[..n]);
+    n as i64
+}
+
+/// The open video files, by the id they were opened under. A decoder is locked by the one call
+/// using it, never the table, so files decode side by side.
+#[cfg(target_os = "android")]
+fn video_files() -> &'static std::sync::Mutex<std::collections::HashMap<i64, std::sync::Arc<std::sync::Mutex<backend::android::media::video_file::FileDecoder>>>> {
+    static FILES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<i64, std::sync::Arc<std::sync::Mutex<backend::android::media::video_file::FileDecoder>>>>> = std::sync::OnceLock::new();
+    FILES.get_or_init(Default::default)
+}
+
+#[cfg(target_os = "android")]
+fn video_file(id: i64) -> Result<std::sync::Arc<std::sync::Mutex<backend::android::media::video_file::FileDecoder>>, String> {
+    video_files().lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned().ok_or_else(|| format!("no open video file {id}"))
+}
+
+/// Opens the video file at `path` (`audio_only` != 0: its sound alone) as decoder `id`. The result
+/// (`hal_media_take`) is its info: width, height, fps_num, fps_den (u32 LE), duration in
+/// microseconds (i64 LE), the picture's MIME type's length (u32 LE) and text, has_audio (u8),
+/// sample_rate (u32 LE), channels (u16 LE). Returns its length, or -1 - the error's.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_video_file_open(id: i64, path: &str, audio_only: u32) -> i64 {
+    let result = backend::android::media::video_file::FileDecoder::open(path, audio_only != 0).map(|decoder| {
+        let info = decoder.info().clone();
+        video_files().lock().unwrap_or_else(|e| e.into_inner()).insert(id, std::sync::Arc::new(std::sync::Mutex::new(decoder)));
+        let mime = info.video_mime.unwrap_or_default();
+        let mut out = Vec::new();
+        for v in [info.width, info.height, info.fps_num, info.fps_den] {
+            out.extend_from_slice(&v.to_le_bytes());
+        }
+        out.extend_from_slice(&info.duration_us.to_le_bytes());
+        out.extend_from_slice(&(mime.len() as u32).to_le_bytes());
+        out.extend_from_slice(mime.as_bytes());
+        out.push(info.has_audio as u8);
+        out.extend_from_slice(&info.sample_rate.to_le_bytes());
+        out.extend_from_slice(&info.channels.to_le_bytes());
+        out
+    });
+    media_keep(id, result)
+}
+
+/// The next picture of decoder `id`. The result is its time in microseconds (i64 LE), then its
+/// NV12 (the info's width x height). Returns its length, 0 at the end, or -1 - the error's.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_video_file_next_frame(id: i64) -> i64 {
+    let result = video_file(id).and_then(|d| d.lock().unwrap_or_else(|e| e.into_inner()).next_frame());
+    match result {
+        Ok(None) => 0,
+        Ok(Some((time, nv12))) => {
+            let mut out = Vec::with_capacity(8 + nv12.len());
+            out.extend_from_slice(&time.to_le_bytes());
+            out.extend_from_slice(&nv12);
+            media_keep(id, Ok(out))
+        }
+        Err(e) => media_keep(id, Err(e)),
+    }
+}
+
+/// The next chunk of sound of decoder `id`. The result is its time in microseconds (i64 LE),
+/// sample rate (u32 LE), channels (u16 LE) and interleaved 16-bit samples (LE). Returns its
+/// length, 0 at the end, or -1 - the error's.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_video_file_next_audio(id: i64) -> i64 {
+    let result = video_file(id).and_then(|d| d.lock().unwrap_or_else(|e| e.into_inner()).next_audio());
+    match result {
+        Ok(None) => 0,
+        Ok(Some((time, rate, channels, samples))) => {
+            let mut out = Vec::with_capacity(14 + samples.len() * 2);
+            out.extend_from_slice(&time.to_le_bytes());
+            out.extend_from_slice(&rate.to_le_bytes());
+            out.extend_from_slice(&channels.to_le_bytes());
+            for s in samples {
+                out.extend_from_slice(&s.to_le_bytes());
+            }
+            media_keep(id, Ok(out))
+        }
+        Err(e) => media_keep(id, Err(e)),
+    }
+}
+
+/// Puts decoder `id` at the sync sample at or before `time_us`. Returns 0, or -1 - the error's
+/// length (the text waits for `hal_media_take`).
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_video_file_seek(id: i64, time_us: i64) -> i64 {
+    match video_file(id).and_then(|d| d.lock().unwrap_or_else(|e| e.into_inner()).seek(time_us)) {
+        Ok(()) => 0,
+        Err(e) => media_keep(id, Err(e)),
+    }
+}
+
+/// Closes decoder `id`.
+#[cfg(target_os = "android")]
+#[relax_api]
+pub fn hal_video_file_close(id: i64) {
+    video_files().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+    media_results().lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
+}
+
 /// The path prefix naming a stored APK asset in a font open (`apk:<asset path>`).
 #[cfg(target_os = "android")]
 pub const APK_ASSET_PREFIX: &str = "apk:";
@@ -1095,7 +1557,9 @@ pub fn hal_map_asset(path: &str, out: &mut [i64]) -> i64 {
 
 /// Opens an external URL on the process main thread. The OS handles the URL scheme.
 #[cfg(any(target_os = "ios", target_os = "tvos"))]
-pub fn open_url(url: String) -> bool {
+#[relax_api]
+pub fn open_url(url: &str) -> bool {
+    let url = url.to_string();
     dispatch_main(move || unsafe {
         use makepad_apple_sys::*;
         let value: ObjcId = msg_send![class!(NSURL), URLWithString: str_to_nsstring(&url)];

@@ -1,3 +1,6 @@
+// The compositor is Linux-only (the crate's modules are cfg(target_os = "linux")).
+#![cfg(target_os = "linux")]
+
 use std::io::Write;
 use std::os::fd::OwnedFd;
 use wayland_server::shm::*;

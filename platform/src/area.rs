@@ -144,6 +144,7 @@ impl Area {
         self.clone()
     }
 
+    #[track_caller]
     pub fn redraw(&self, cx: &mut Cx) {
         cx.redraw_area(*self);
     }

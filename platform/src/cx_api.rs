@@ -1879,8 +1879,10 @@ impl Cx {
         self.fingers.unblock_scrolling_within_area(scrollable_area);
     }
 
+    #[track_caller]
     pub fn start_timeout(&mut self, delay: f64) -> Timer {
         self.timer_id += 1;
+        crate::frame_sources::timer_started(self.timer_id, std::panic::Location::caller());
         if let Some(now) = crate::remote::app_clock::now() {
             self.app_clock.start_timer(self.timer_id, delay, false, now);
             return Timer(self.timer_id);
@@ -1893,8 +1895,10 @@ impl Cx {
         Timer(self.timer_id)
     }
 
+    #[track_caller]
     pub fn start_interval(&mut self, interval: f64) -> Timer {
         self.timer_id += 1;
+        crate::frame_sources::timer_started(self.timer_id, std::panic::Location::caller());
         if let Some(now) = crate::remote::app_clock::now() {
             self.app_clock.start_timer(self.timer_id, interval, true, now);
             return Timer(self.timer_id);
@@ -2007,19 +2011,20 @@ impl Cx {
     /// squeezed a pixel and the last column showed the clear colour (the Pixel's white line).
     /// A hundredth of a pixel is rounding, not content.
     pub fn get_pass_rect(&self, draw_pass_id: DrawPassId, dpi: f64) -> Option<Rect> {
+        let size = |size: Vec2d| Self::pass_logical_size(size, dpi);
         match self.passes[draw_pass_id].pass_rect {
             Some(CxDrawPassRect::Area(area)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: ((rect.pos * dpi) + 0.01).floor() / dpi,
-                    size: ((rect.size * dpi) - 0.01).ceil() / dpi,
+                    size: size(rect.size),
                 })
             }
             Some(CxDrawPassRect::AreaOrigin(area, origin)) => {
                 let rect = area.rect(self);
                 Some(Rect {
                     pos: origin,
-                    size: ((rect.size * dpi) - 0.01).ceil() / dpi,
+                    size: size(rect.size),
                 })
             }
             /*Some(CxDrawPassRect::ScaledArea(area, scale)) => {
@@ -2029,12 +2034,32 @@ impl Cx {
                     size: scale * ((rect.size * dpi) - 0.01).ceil() / dpi,
                 })
             }*/
-            Some(CxDrawPassRect::Size(size)) => Some(Rect {
+            Some(CxDrawPassRect::Size(s)) => Some(Rect {
                 pos: Vec2d::default(),
-                size: ((size * dpi) - 0.01).ceil() / dpi,
+                size: size(s),
             }),
             None => None,
         }
+    }
+
+    /// A pass's logical size snapped to its whole pixels (`pass_pixel_size` / dpi).
+    pub fn pass_logical_size(size: Vec2d, dpi: f64) -> Vec2d {
+        let (w, h) = Self::pass_pixel_size(size, dpi);
+        dvec2(w as f64 / dpi, h as f64 / dpi)
+    }
+
+    /// The pixel size of a texture pass of logical `size` at `dpi`: the ONE rounding of a pass's
+    /// size to whole pixels (`get_pass_rect`, the frame's pass size and viewport). A render
+    /// target a pass draws into is sized with it too, so the pass is exactly its target: a
+    /// target floored where the pass was ceiled was a pixel smaller at fractional scales (1.25,
+    /// 1.41, 1.75), and the GPU refused the pass every frame (Scope's Glass look and History
+    /// view drew nothing on 149). A hundredth of a pixel is rounding, not content.
+    pub fn pass_pixel_size(size: Vec2d, dpi: f64) -> (usize, usize) {
+        let px = |v: f64| {
+            let p = (v * dpi - 0.01).ceil();
+            if p.is_finite() && p > 0.0 { p as usize } else { 0 }
+        };
+        (px(size.x), px(size.y))
     }
 
     /// What one texel of a BGRA8 render target costs on this backend: the
@@ -2147,10 +2172,14 @@ impl Cx {
         }
     }
 
+    #[track_caller]
     pub fn redraw_all(&mut self) {
+        self.frame_requests += 1;
+        crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
         self.new_draw_event.redraw_all = true;
     }
 
+    #[track_caller]
     pub fn redraw_area(&mut self, area: Area) {
         if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list(draw_list_id);
@@ -2163,16 +2192,20 @@ impl Cx {
         }
     }
 
+    #[track_caller]
     pub fn redraw_area_and_children(&mut self, area: Area) {
         if let Some(draw_list_id) = area.draw_list_id() {
             self.redraw_list_and_children(draw_list_id);
         }
     }
 
+    #[track_caller]
     pub fn redraw_list(&mut self, draw_list_id: DrawListId) {
         if self.in_draw_event {
             return;
         }
+        self.frame_requests += 1;
+        crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
         self.redraw_list_in_draw(draw_list_id);
     }
 
@@ -2189,10 +2222,13 @@ impl Cx {
         self.new_draw_event.draw_lists.push(draw_list_id);
     }
 
+    #[track_caller]
     pub fn redraw_list_and_children(&mut self, draw_list_id: DrawListId) {
         if self.in_draw_event {
             return;
         }
+        self.frame_requests += 1;
+        crate::frame_sources::note(crate::frame_sources::Kind::Redraw, std::panic::Location::caller());
         if self
             .new_draw_event
             .draw_lists_and_children
@@ -2251,11 +2287,21 @@ impl Cx {
         self.keyboard.has_key_focus(focus_area)
     }
 
+    #[track_caller]
     pub fn new_next_frame(&mut self) -> NextFrame {
+        self.frame_requests += 1;
+        crate::frame_sources::note(crate::frame_sources::Kind::NextFrame, std::panic::Location::caller());
         let res = NextFrame(self.next_frame_id);
         self.next_frame_id += 1;
         self.new_next_frames.insert(res);
         res
+    }
+
+    /// How many frames were asked for so far: next frames, and redraws
+    /// outside a draw. Two readings around some work tell whether it asked
+    /// for one (a poll that found nothing changed asks for none).
+    pub fn frame_requests(&self) -> u64 {
+        self.frame_requests
     }
 
     /// The frame `next_frame` asked for has not been sent yet. Once it has,
@@ -2804,6 +2850,32 @@ macro_rules! register_component_factory {
 mod tests {
     use super::*;
 
+    /// A texture pass and its render target come out the same pixel size for every scale and
+    /// window size: the target sized with `pass_pixel_size` of the logical size the pass is set
+    /// to, the pass by `get_pass_rect` (snapped to `pass_logical_size`) and then the frame's
+    /// pass size (`pass_pixel_size` again). A target floored where the pass was ceiled was a
+    /// pixel short at 1.25 / 1.41 / 1.75 and the GPU refused the pass (149, Scope's Glass).
+    #[test]
+    fn a_pass_is_exactly_its_target_at_every_scale_and_size() {
+        let sizes = [1.0, 7.0, 99.5, 333.0, 640.0, 875.25, 876.0, 1179.0, 1180.0, 1235.7, 1920.0, 2559.0, 4097.3];
+        let mut checked = 0;
+        for step in 100..=250 {
+            let dpi = step as f64 / 100.0;
+            for &w in &sizes {
+                for &h in &sizes {
+                    for logical in [dvec2(w, h), dvec2(w, h) * (1.0 - 1e-12)] {
+                        let target = Cx::pass_pixel_size(logical, dpi);
+                        // the pass: snapped in points, then the frame's pass size from that
+                        let pass = Cx::pass_pixel_size(Cx::pass_logical_size(logical, dpi), dpi);
+                        assert_eq!(pass, target, "logical {logical:?} at dpi {dpi}");
+                        checked += 1;
+                    }
+                }
+            }
+        }
+        assert_eq!(checked, 151 * 13 * 13 * 2);
+    }
+
     #[test]
     fn nested_overlay_locks_unwind_one_level_at_a_time() {
         let mut cx = Cx::new(Box::new(|_cx: &mut Cx, _event: &Event| {}));
@@ -3198,5 +3270,20 @@ mod async_load_tests {
         cx.register_async_load_probe("image", |_| 0);
         cx.register_async_load_probe("glyph", |_| 5);
         assert_eq!(cx.pending_async_loads(), vec![("glyph", 5)]);
+    }
+
+    #[test]
+    fn frame_requests_count_next_frames_and_redraws_outside_a_draw() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let start = cx.frame_requests();
+        cx.new_next_frame();
+        cx.redraw_all();
+        assert_eq!(cx.frame_requests(), start + 2);
+        // a redraw asked inside a draw is spent by that draw: no request
+        let list = crate::draw_list::DrawList::new(&mut cx);
+        cx.in_draw_event = true;
+        cx.redraw_list(list.id());
+        cx.in_draw_event = false;
+        assert_eq!(cx.frame_requests(), start + 2);
     }
 }

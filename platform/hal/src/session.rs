@@ -101,6 +101,11 @@ impl<T> Table<T> {
     }
 
     /// (index, generation) of the session's entries.
+    /// Whether any live entry of the session matches.
+    pub fn any_of(&self, session: u32, f: impl Fn(&T) -> bool) -> bool {
+        self.map.iter().any(|((s, _), e)| *s == session && f(&e.val))
+    }
+
     pub fn keys_of(&self, session: u32) -> Vec<Id> {
         let mut v: Vec<Id> = self.map.iter().filter(|((s, _), _)| *s == session).map(|((_, i), e)| Id::new(*i, e.gen)).collect();
         v.sort_by_key(|i| i.index);
@@ -240,6 +245,9 @@ pub struct Stats {
     pub bad_bufs: u64,
     /// draws skipped because their pipeline was not live
     pub skipped_draws: u64,
+    /// passes larger than an attachment, drawn into the attachments' common area
+    /// (`exec::clamped_pass`; a pass is sized as its target, so any is a caller's bug)
+    pub clamped_passes: u64,
     pub frames: u64,
     /// a control command from a session that may not use it, or about a session that is not its
     /// child (rejected)
@@ -260,6 +268,9 @@ pub struct Stats {
     pub draws: u64,
     /// the longest CPU time Cx spent building one frame (`FrameMeta` build start to end), ns
     pub max_frame_ns: u64,
+    /// upload arenas (uniforms, inline instances, texture upload staging) the backend had to
+    /// allocate for this session's frames and uploads; steady frames reuse theirs and add none
+    pub arena_allocs: u64,
     /// media commands a backend without media received
     pub media_unsupported: u64,
     /// WindowOverlay requests a backend could not draw
@@ -295,6 +306,8 @@ pub struct Session {
     pub quit: bool,
     /// pipelines a backend is still compiling (the app paints again when they are ready)
     pub pipelines_pending: u32,
+    /// the targets of passes already reported larger than an attachment (logged once each)
+    pub clamped_pass_targets: Vec<Id>,
     pub clipboard: String,
     /// (req, bytes) of `QueryReply` commands, taken by automation
     pub replies: Vec<(u32, Vec<u8>)>,
@@ -342,6 +355,7 @@ impl Session {
             font_frames: Default::default(),
             quit: false,
             pipelines_pending: 0,
+            clamped_pass_targets: Vec::new(),
             clipboard: String::new(),
             replies: Vec::new(),
             marks: Vec::new(),
@@ -394,6 +408,10 @@ pub struct World {
     next_key: u64,
     /// sessions whose queue got an event from another session's command: the caller wakes them
     notified: Vec<u32>,
+    /// who hears of a session's window frames besides itself (its parent for an embedded window,
+    /// the host for a window lent by the host): a completion thread wakes them with the owner,
+    /// so the news is drained at once and not at the owner's next pump
+    pub listeners: std::sync::Arc<std::sync::Mutex<HashMap<u32, Vec<u32>>>>,
     /// sessions to close, children before their parent
     close_queue: Vec<(u32, CloseAs)>,
     /// calls to the registered `DomainHost`, made after the command batch (no lock held)
@@ -486,6 +504,7 @@ impl World {
             font_notify: None,
             next_key: 1,
             notified: Vec::new(),
+            listeners: Default::default(),
             close_queue: Vec::new(),
             host_calls: Vec::new(),
             trace_exec: false,
@@ -606,6 +625,7 @@ impl World {
     /// under the same id.
     pub fn finish_close(&mut self, id: u32, how: CloseAs) -> bool {
         let Some(mut s) = self.sessions.remove(&id) else { return false };
+        self.listeners.lock().unwrap_or_else(|e| e.into_inner()).remove(&id);
         // its fonts and its interest in glyphs end; the glyphs stay in the host's atlas
         if let Some(fonts) = self.fonts.as_mut() {
             fonts.session_closed(id, s.font_frames.clone());
@@ -665,6 +685,24 @@ impl World {
             self.sessions.insert(id, ns);
         }
         true
+    }
+
+    /// Recomputes who hears of `sid`'s window frames (after its windows changed): the parent
+    /// while it has an embedded window, the host while it presents into a host window.
+    pub fn update_listeners(&mut self, sid: u32) {
+        let (mut parent, mut host) = (None, None);
+        if let Some(s) = self.sessions.get(&sid).filter(|_| sid != HOST) {
+            if s.parent != 0 && s.windows.any_of(sid, |w| w.embedded.is_some()) { parent = Some(s.parent); }
+            if s.windows.any_of(sid, |w| w.alias_of.is_some()) { host = Some(HOST); }
+        }
+        let mut l = self.listeners.lock().unwrap_or_else(|e| e.into_inner());
+        let same = match l.get(&sid) {
+            Some(who) => who.iter().copied().eq(parent.into_iter().chain(host)),
+            None => parent.is_none() && host.is_none(),
+        };
+        if same { return; }
+        let who: Vec<u32> = parent.into_iter().chain(host).collect();
+        if who.is_empty() { l.remove(&sid); } else { l.insert(sid, who); }
     }
 
     /// Reports completion through one path so every backend wakes both the presenter and,

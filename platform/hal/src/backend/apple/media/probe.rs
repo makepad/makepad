@@ -110,7 +110,9 @@ fn probe_apple_h264() -> H264Probe {
 }
 
 
-/// The H.264 encode / decode support of this machine (probed on first use).
+/// The H.264 encode / decode support of this machine (probed on first use). An op: the probe's
+/// one result lives in this crate.
+#[makepad_relax_api::relax_api]
 pub fn video_h264_probe() -> H264Probe {
     static PROBE: OnceLock<H264Probe> = OnceLock::new();
     *PROBE.get_or_init(probe_apple_h264)

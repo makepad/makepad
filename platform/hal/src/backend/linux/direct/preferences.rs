@@ -29,3 +29,15 @@ pub fn natural_scroll() -> bool {
 pub fn set_natural_scroll(on: bool) {
     NATURAL_SCROLL.store(on, Ordering::Relaxed);
 }
+
+/// Tap to click on touchpads: a short touch clicks (one finger primary, two
+/// secondary, three middle). Off by default, as on macOS.
+static TAP_TO_CLICK: AtomicBool = AtomicBool::new(false);
+
+pub fn tap_to_click() -> bool {
+    TAP_TO_CLICK.load(Ordering::Relaxed)
+}
+
+pub fn set_tap_to_click(on: bool) {
+    TAP_TO_CLICK.store(on, Ordering::Relaxed);
+}

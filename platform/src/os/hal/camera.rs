@@ -27,8 +27,13 @@ struct PendingCapture {
 
 pub(crate) struct CameraClient {
     descs: Vec<VideoInputDesc>,
+    /// the HAL has listed the cameras at least once (an empty list is a list)
+    listed: bool,
     /// the (camera, format) each slot reads
     active: Vec<(VideoInputId, VideoFormatId)>,
+    /// slots opened with `video_input_open` that are not streaming: the HAL is not asked for their
+    /// camera, so it stays closed and its light stays off
+    idle: u32,
     video_cb: [Slot<VideoInputFn>; MAX_VIDEO_DEVICE_INDEX],
     frame_cb: [Slot<CameraFrameInputFn>; MAX_VIDEO_DEVICE_INDEX],
     output_cb: [Slot<VideoOutputFn>; MAX_VIDEO_DEVICE_INDEX],
@@ -39,11 +44,55 @@ pub(crate) struct CameraClient {
     captures: std::collections::HashMap<u32, PendingCapture>,
 }
 
+impl CameraClient {
+    fn open_slot(&mut self, slot: usize, input: VideoInputId, format: VideoFormatId) -> Result<VideoFormat, String> {
+        if slot >= MAX_VIDEO_DEVICE_INDEX {
+            return Err(format!("camera slot {slot} is out of range"));
+        }
+        let Some(desc) = self.descs.iter().find(|d| d.input_id == input) else {
+            return Err("that camera is not connected any more".into());
+        };
+        let Some(found) = desc.formats.iter().find(|f| f.format_id == format).copied() else {
+            return Err(format!("{} does not offer that format", desc.name));
+        };
+        while self.active.len() <= slot {
+            self.active.push((VideoInputId(LiveId(0)), VideoFormatId(LiveId(0))));
+        }
+        self.active[slot] = (input, format);
+        self.idle |= 1 << slot;
+        Ok(found)
+    }
+
+    fn stream_slot(&mut self, slot: usize, on: bool) -> Result<(), String> {
+        if !(slot < self.active.len() && self.active[slot].0 .0 != LiveId(0)) {
+            return Err("no camera is open in this slot".into());
+        }
+        if on {
+            self.idle &= !(1 << slot);
+        } else {
+            self.idle |= 1 << slot;
+        }
+        Ok(())
+    }
+
+    fn close_slot(&mut self, slot: usize) {
+        if slot < self.active.len() {
+            self.active[slot] = (VideoInputId(LiveId(0)), VideoFormatId(LiveId(0)));
+        }
+        self.idle &= !(1 << slot);
+        while self.active.last().is_some_and(|(i, _)| i.0 == LiveId(0)) {
+            self.active.pop();
+        }
+    }
+}
+
 impl Default for CameraClient {
     fn default() -> Self {
         Self {
             descs: Vec::new(),
+            listed: false,
             active: Vec::new(),
+            idle: 0,
             video_cb: Default::default(),
             frame_cb: Default::default(),
             output_cb: Default::default(),
@@ -53,6 +102,13 @@ impl Default for CameraClient {
             captures: Default::default(),
         }
     }
+}
+
+/// The cameras the HAL is asked to hold, by slot: a slot that is only open (a slide that is next)
+/// names no camera (id 0 matches none), so the device stays closed and its light off; a camera
+/// nobody names any more is released by the HAL at once.
+fn slot_pairs(active: &[(VideoInputId, VideoFormatId)], idle: u32) -> Vec<u64> {
+    active.iter().enumerate().flat_map(|(slot, (i, f))| if idle & (1 << slot) != 0 { [0, 0] } else { [i.0 .0, f.0 .0] }).collect()
 }
 
 fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -72,12 +128,16 @@ impl Cx {
     /// Tells the HAL which cameras the slots read and which slots want frames.
     pub(crate) fn hal_camera_sync(&mut self) {
         let consumers = self.hal_camera_consumers();
-        let ids: Vec<u64> = self.hal.camera.active.iter().flat_map(|(i, f)| [i.0 .0, f.0 .0]).collect();
+        let ids = slot_pairs(&self.hal.camera.active, self.hal.camera.idle);
         self.hal.frames.w.video_input(consumers, &media::pack_u64s(&ids));
         if consumers != 0 {
             // camera frames are megabytes: the payload room of events grows once
             self.hal.event_arena_min = self.hal.event_arena_min.max(FRAME_ARENA_BYTES);
         }
+    }
+
+    pub(crate) fn hal_video_inputs(&self) -> Option<Vec<VideoInputDesc>> {
+        self.hal.camera.listed.then(|| self.hal.camera.descs.clone())
     }
 
     fn hal_format_of(&self, slot: usize) -> Option<VideoFormat> {
@@ -129,7 +189,33 @@ impl Cx {
         }
     }
 
+    /// Holds the camera `input` for `slot` at `format` without streaming it. The format is the one
+    /// the camera list offers; the HAL negotiates the device's own at the first stream, and every
+    /// frame carries the size it has.
+    pub(crate) fn hal_video_input_open(&mut self, slot: usize, input: VideoInputId, format: VideoFormatId) -> Result<VideoFormat, String> {
+        let found = self.hal.camera.open_slot(slot, input, format)?;
+        crate::log!("camera slot {slot}: held at {}x{} {:?} {:?} fps, not streaming", found.width, found.height, found.pixel_format, found.frame_rate);
+        self.hal_camera_sync();
+        Ok(found)
+    }
+
+    /// Streams (or stops) the camera held in `slot`. Frames of a stopped slot are dropped on arrival,
+    /// so none reaches the callback after this returns.
+    pub(crate) fn hal_video_input_stream(&mut self, slot: usize, on: bool) -> Result<(), String> {
+        self.hal.camera.stream_slot(slot, on)?;
+        crate::log!("camera slot {slot}: {} (the HAL is asked {})", if on { "stream on" } else { "stream off" }, if on { "to open the device" } else { "to release the device" });
+        self.hal_camera_sync();
+        Ok(())
+    }
+
+    pub(crate) fn hal_video_input_close(&mut self, slot: usize) {
+        self.hal.camera.close_slot(slot);
+        crate::log!("camera slot {slot}: closed");
+        self.hal_camera_sync();
+    }
+
     pub(crate) fn hal_use_video_input(&mut self, devices: &[(VideoInputId, VideoFormatId)]) {
+        self.hal.camera.idle = 0;
         self.hal.camera.active = devices.to_vec();
         for index in 0..MAX_VIDEO_DEVICE_INDEX {
             self.hal_refresh_slot_encoder(index);
@@ -293,7 +379,9 @@ impl Cx {
                             .collect(),
                     })
                     .collect();
+                crate::log!("cameras listed: {}", if descs.is_empty() { "none".to_string() } else { descs.iter().map(|d| format!("{} ({} formats)", d.name, d.formats.len())).collect::<Vec<_>>().join(", ") });
                 self.hal.camera.descs = descs.clone();
+                self.hal.camera.listed = true;
                 // slot encoders wait for the format sizes
                 for index in 0..MAX_VIDEO_DEVICE_INDEX {
                     self.hal_refresh_slot_encoder(index);
@@ -301,7 +389,14 @@ impl Cx {
                 self.call_event_handler(&Event::VideoInputs(VideoInputsEvent { descs }));
             }
             HalEvent::CameraFrame { slots, frame } => {
+                let slots = slots & !self.hal.camera.idle;
+                if slots == 0 {
+                    return;
+                }
                 let Some(data) = media::read_camera_frame(frame) else { return };
+                // The platform's display rotation rides on its frames: what
+                // `camera_upright_quarter_turns` turns them upright by.
+                set_display_rotation(data.display_rotation as u32);
                 let layout = match data.layout {
                     media::camera_layout::I420 => CameraFrameLayout::I420,
                     media::camera_layout::NV12 => CameraFrameLayout::NV12,
@@ -394,5 +489,61 @@ impl Cx {
             encoder.push_frame(frame_ref);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(n: u64) -> (VideoInputId, VideoFormatId) {
+        (VideoInputId(LiveId(n)), VideoFormatId(LiveId(n + 100)))
+    }
+
+    #[test]
+    fn entering_the_slide_again_asks_for_the_device_again_five_times() {
+        use crate::video::{VideoFormat, VideoInputDesc, VideoPixelFormat};
+        let format = VideoFormat { format_id: VideoFormatId(LiveId(107)), width: 1920, height: 1080, frame_rate: Some(30.0), pixel_format: VideoPixelFormat::MJPEG };
+        let mut c = CameraClient::default();
+        c.descs = vec![VideoInputDesc { input_id: VideoInputId(LiveId(7)), name: "OBSBOT".into(), sensor_orientation: 0, formats: vec![format] }];
+        let none = 0;
+        for round in 0..5 {
+            // enter: the next-slide pre-warm opens the slot, the device stays closed
+            c.open_slot(0, VideoInputId(LiveId(7)), VideoFormatId(LiveId(107))).unwrap();
+            assert_eq!(slot_pairs(&c.active, c.idle), [none, none], "round {round}");
+            // shown: the device is asked for
+            c.stream_slot(0, true).unwrap();
+            assert_eq!(slot_pairs(&c.active, c.idle), [7, 107], "round {round}");
+            // leave: released, then the slot closes
+            c.stream_slot(0, false).unwrap();
+            assert_eq!(slot_pairs(&c.active, c.idle), [none, none]);
+            // a close still pending when the next enter arrives: the slot is opened again over it
+            if round % 2 == 0 {
+                c.close_slot(0);
+                assert!(slot_pairs(&c.active, c.idle).is_empty());
+            } else {
+                c.open_slot(0, VideoInputId(LiveId(7)), VideoFormatId(LiveId(107))).unwrap();
+                c.stream_slot(0, true).unwrap();
+                assert_eq!(slot_pairs(&c.active, c.idle), [7, 107]);
+                c.close_slot(0);
+            }
+        }
+        assert!(c.stream_slot(0, true).is_err(), "a closed slot cannot stream");
+    }
+
+    #[test]
+    fn a_camera_is_held_only_while_its_slide_shows() {
+        let none = LiveId(0).0;
+        // the next slide's camera is open but idle: the HAL is asked for nothing
+        assert_eq!(slot_pairs(&[pair(7)], 0b1), [none, none]);
+        // its slide shows: the device is asked for
+        assert_eq!(slot_pairs(&[pair(7)], 0), [7, 107]);
+        // the slide moves on beyond next: the slot is idle (or closed), the device is released
+        assert_eq!(slot_pairs(&[pair(7)], 0b1), [none, none]);
+        assert!(slot_pairs(&[], 0).is_empty());
+        // presenter and output show the same camera in two slots: both name it, the HAL opens it once;
+        // one leaving keeps the other's
+        assert_eq!(slot_pairs(&[pair(7), pair(7)], 0), [7, 107, 7, 107]);
+        assert_eq!(slot_pairs(&[pair(7), pair(7)], 0b01), [none, none, 7, 107]);
     }
 }

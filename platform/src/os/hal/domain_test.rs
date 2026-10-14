@@ -221,8 +221,13 @@ fn a_parent_cx_embeds_a_child_cx() {
     assert_eq!(l.listed.len(), 1);
     assert_eq!(l.listed[0].len(), 1);
     drop(l);
-    // the killed child hears that its session ended and ends its run
-    assert!(host.threads.lock().unwrap().is_empty(), "the killed child's run ended and was joined by stop");
+    // the killed child hears that its session ended and ends its run; the HAL carries out the kill
+    // after the parent's last batch, so the stop may still be joining it
+    let t0 = Instant::now();
+    while !host.threads.lock().unwrap().is_empty() {
+        assert!(t0.elapsed() < Duration::from_secs(30), "the killed child's run ended and was joined by stop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
     Hal::global().with_world(|w| assert_eq!(w.session_ids(), [0], "the parent's Quit and the kill freed every session"));
 }
 
@@ -263,4 +268,128 @@ fn a_panic_is_contained_and_spawned_futures_run() {
     assert_eq!(SPAWNED_RAN.load(Ordering::SeqCst), 1, "the spawned future ran");
     assert!(AFTER_PANIC.load(Ordering::SeqCst) >= 1, "the app went on drawing after the panic");
     thread.join().unwrap();
+}
+
+/// What the WM's desk tells a covered domain tile (`HostedVisible` as an app message to the
+/// child's window): the child holds its frames -- no next-frame callbacks, no draws -- while its
+/// timers and input go on, and resumes when shown again. The same rule as a hosted process child.
+#[test]
+fn a_covered_child_cx_holds_its_frames() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static FRAMES: AtomicU32 = AtomicU32::new(0);
+    static STARTS: AtomicU32 = AtomicU32::new(0);
+    /// 0 shown, 1 covered, 2 done: what the test asks the parent to tell the child
+    static WANT: AtomicU32 = AtomicU32::new(0);
+    static TOLD: AtomicU32 = AtomicU32::new(u32::MAX);
+    /// the test asks the parent to relaunch the (covered) child
+    static RELAUNCH: AtomicU32 = AtomicU32::new(0);
+
+    fn frame_child() {
+        STARTS.fetch_add(1, Ordering::SeqCst);
+        let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx: &mut Cx, event: &Event| match event {
+            Event::Startup => {
+                let _window = WindowHandle::new(cx);
+                let _ = cx.new_next_frame();
+            }
+            // a game: every frame asks for the next
+            Event::NextFrame(_) => {
+                FRAMES.fetch_add(1, Ordering::SeqCst);
+                let _ = cx.new_next_frame();
+            }
+            _ => {}
+        }))));
+        cx.borrow_mut().init_cx_os();
+        Cx::event_loop(cx);
+    }
+    struct FrameHost { threads: Mutex<std::collections::HashMap<u32, std::thread::JoinHandle<()>>> }
+    impl DomainHost for FrameHost {
+        fn start(&self, launch: DomainLaunch) -> Result<(), String> {
+            let domain = launch.domain;
+            let t = std::thread::spawn(move || with_launch(&launch, frame_child));
+            self.threads.lock().unwrap().insert(domain, t);
+            Ok(())
+        }
+        fn stop(&self, domain: u32, _mode: u32) {
+            let t = self.threads.lock().unwrap().remove(&domain);
+            if let Some(t) = t { t.join().unwrap(); }
+        }
+        fn relaunch(&self, launch: DomainLaunch) -> Result<(), String> { self.start(launch) }
+    }
+
+    let _one = take_headless_hal();
+    let host = Arc::new(FrameHost { threads: Mutex::new(Default::default()) });
+    Hal::global().set_domain_host(host.clone());
+    let parent = std::thread::spawn(move || {
+        with_caps(Caps { privileged: true }, || {
+            let mut child: Option<(u32, LentId)> = None;
+            // the covered state reached the child's current run (the desk tile's `hidden_told`)
+            let mut told_run = false;
+            let mut started = false;
+            let mut poll = Timer::empty();
+            let cx = Rc::new(RefCell::new(Cx::new(Box::new(move |cx: &mut Cx, event: &Event| match event {
+                Event::Startup => {
+                    let _window = WindowHandle::new(cx);
+                    poll = cx.start_interval(0.02);
+                }
+                Event::WindowGeomChange(_) if !started => {
+                    started = true;
+                    cx.hal_start_domain("child", &[]);
+                }
+                Event::ChildWindow(e) => child = Some((e.child, e.window)),
+                Event::Timer(e) if poll.is_timer(e).is_some() => {
+                    let Some((domain, window)) = child else { return };
+                    let want = WANT.load(Ordering::SeqCst);
+                    if RELAUNCH.swap(0, Ordering::SeqCst) == 1 {
+                        told_run = false;
+                        child = None;
+                        cx.hal_relaunch_domain(domain);
+                    } else if want == 2 {
+                        cx.hal_stop_domain(domain, true);
+                        cx.quit();
+                    // as the desk's domain tile does: a covered tile's new (relaunched) window is told again
+                    } else if TOLD.load(Ordering::SeqCst) != want || (want == 1 && !told_run) {
+                        told_run = want == 1;
+                        let json = makepad_studio_protocol::HostedVisible { visible: want == 0 }.to_json();
+                        let data = makepad_hal::Range { off: 0, len: json.len() as u32 };
+                        cx.hal_forward(domain, window, &makepad_hal::RawEvent::app_message(makepad_hal::Id::NONE, data), json.as_bytes());
+                        TOLD.store(want, Ordering::SeqCst);
+                    }
+                }
+                _ => {}
+            }))));
+            cx.borrow_mut().init_cx_os();
+            Cx::event_loop(cx);
+        })
+    });
+    let wait_for = |what: &str, ok: &dyn Fn() -> bool| {
+        let t0 = Instant::now();
+        while !ok() {
+            assert!(t0.elapsed() < Duration::from_secs(30), "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    };
+    wait_for("the shown child's frames", &|| FRAMES.load(Ordering::SeqCst) >= 10);
+    WANT.store(1, Ordering::SeqCst);
+    wait_for("the parent to say covered", &|| TOLD.load(Ordering::SeqCst) == 1);
+    // the message is in flight for a moment; then nothing more
+    std::thread::sleep(Duration::from_millis(200));
+    let held = FRAMES.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(500));
+    let after = FRAMES.load(Ordering::SeqCst);
+    assert!(after - held <= 1, "a covered child drew {} frames in 0.5 s", after - held);
+    // relaunched while covered: the new run is told again and holds too
+    RELAUNCH.store(1, Ordering::SeqCst);
+    wait_for("the relaunched child", &|| STARTS.load(Ordering::SeqCst) == 2);
+    std::thread::sleep(Duration::from_millis(500));
+    let held = FRAMES.load(Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(500));
+    let after = FRAMES.load(Ordering::SeqCst);
+    assert!(after - held <= 1, "a covered relaunched child drew {} frames in 0.5 s", after - held);
+    WANT.store(0, Ordering::SeqCst);
+    wait_for("the child to resume when shown", &|| FRAMES.load(Ordering::SeqCst) >= after + 10);
+    WANT.store(2, Ordering::SeqCst);
+    parent.join().unwrap();
+    // the kill is carried out by the HAL after the parent's last batch: the next test starts clean
+    wait_for("the child's run to end", &|| host.threads.lock().unwrap().is_empty());
+    wait_for("every session freed", &|| Hal::global().with_world(|w| w.session_ids() == [0]));
 }

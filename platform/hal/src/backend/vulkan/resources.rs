@@ -217,7 +217,17 @@ pub(super) struct Buffer {
 }
 
 impl Buffer {
+    /// A zeroed buffer: a retained buffer is read where the app has not written yet.
     pub fn new(dev: Arc<Device>, size: u64, usage: vk::BufferUsageFlags) -> Result<Arc<Self>, String> {
+        let out = Self::scratch(dev, size, usage)?;
+        unsafe { std::ptr::write_bytes(out.mapped as *mut u8, 0, out.size.max(16) as usize); }
+        out.flush()?;
+        Ok(out)
+    }
+
+    /// A buffer whose bytes are undefined until written: upload arenas and readback staging,
+    /// which are read only where they were written (by the CPU or a GPU copy).
+    pub fn scratch(dev: Arc<Device>, size: u64, usage: vk::BufferUsageFlags) -> Result<Arc<Self>, String> {
         let logical_size = size;
         let size = size.max(16);
         let buffer = unsafe { dev.raw.create_buffer(&vk::BufferCreateInfo::default().size(size).usage(usage)
@@ -237,9 +247,7 @@ impl Buffer {
         unsafe {
             out.dev.raw.bind_buffer_memory(buffer, memory, 0).map_err(error)?;
             out.mapped = out.dev.raw.map_memory(memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()).map_err(error)? as usize;
-            std::ptr::write_bytes(out.mapped as *mut u8, 0, size as usize);
         }
-        out.flush()?;
         Ok(Arc::new(out))
     }
 

@@ -211,6 +211,7 @@ impl DrawVars {
         self.uniform_buffer_slots[slot] = None;
     }
 
+    #[track_caller]
     pub fn redraw(&self, cx: &mut Cx) {
         self.area.redraw(cx);
     }

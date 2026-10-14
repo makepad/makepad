@@ -1,7 +1,7 @@
 //! One persistent descriptor writer per hosted app. Complete batches retain
 //! their ordering; a full queue returns ownership for the UI to retry.
 use crate::{
-    os::shared_framebuf::{aux_chan, ExportedHostSwapchain, SharedSwapchain},
+    os::shared_framebuf::{ExportedHostSwapchain, SharedSwapchain},
     thread::{to_ui_bounded, TaskHandle, ThreadOptions, ThreadSpawner, ToUIReceiver},
 };
 use crate::makepad_network::mpsc::{sync_channel, SyncSender, TrySendError};
@@ -17,7 +17,7 @@ pub struct SentSwapchain {
 pub struct LinuxSwapchainSender {
     requests: SyncSender<(u64, ExportedHostSwapchain)>,
     replies: ToUIReceiver<Result<SentSwapchain, String>>,
-    interrupt: aux_chan::HostEndpoint,
+    interrupt: makepad_hal::hosted_ipc::HostEndpoint,
     failed: Option<String>,
     worker: TaskHandle<()>,
 }
@@ -25,7 +25,7 @@ pub struct LinuxSwapchainSender {
 impl LinuxSwapchainSender {
     pub fn start(
         spawner: &ThreadSpawner,
-        endpoint: aux_chan::HostEndpoint,
+        endpoint: makepad_hal::hosted_ipc::HostEndpoint,
     ) -> Result<Self, String> {
         let interrupt = endpoint.try_clone().map_err(|e| e.to_string())?;
         let (requests, receive) = sync_channel::<(u64, ExportedHostSwapchain)>(2);

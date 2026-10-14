@@ -222,7 +222,7 @@ unsafe fn pack_sample(sample: &IMFSample, format: &VideoFormatInfo, timestamp_ns
 fn frame_payload(bytes: &[u8], format: &VideoFormatInfo, timestamp_ns: u64) -> Option<Vec<u8>> {
     let (width, height) = (format.width, format.height);
     let (w, h) = (width as usize, height as usize);
-    let frame = |layout, matrix, planes| pack_camera_frame(&CameraFrameData { timestamp_ns, width, height, layout, matrix, planes });
+    let frame = |layout, matrix, planes| pack_camera_frame(&CameraFrameData { timestamp_ns, width, height, layout, matrix, display_rotation: 0, planes });
     match format.pixel {
         VideoPixel::NV12 => {
             let uv_rows = h.div_ceil(2);

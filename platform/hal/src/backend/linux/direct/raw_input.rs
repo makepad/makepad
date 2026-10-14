@@ -1,6 +1,6 @@
 //! Native evdev parser and touchpad processing rehomed from os/linux/direct/raw_input.rs.
 //! Device reports, key mapping, absolute touch-as-pointer and gesture rules are unchanged.
-use super::{direct_event::Modifiers, sys as libc_sys, touchpad::{PadContact, PadFrame, PadGesture, PadOutput}};
+use super::{direct_event::Modifiers, sys as libc_sys, touchpad::{PadButton, PadContact, PadFrame, PadGesture, PadOutput}};
 use crate::{buffers::EventQueue, types::input, Id};
 use makepad_key_code::KeyCode;
 use makepad_math::*;
@@ -234,8 +234,9 @@ struct Touchpad {
     tools: [bool; 5],
     /// The pad's button (`BTN_LEFT`) is held.
     button: bool,
-    /// The clickpad press that went out as the secondary button (two fingers).
-    secondary_press: bool,
+    /// The button the clickpad press went out as (`BTN_LEFT`, `BTN_RIGHT`
+    /// or `BTN_MIDDLE`), kept until its release.
+    press: u16,
     gesture: PadGesture,
 }
 
@@ -284,7 +285,7 @@ impl Touchpad {
             contact: false,
             tools: [false; 5],
             button: false,
-            secondary_press: false,
+            press: EvKeyCodes::BTN_LEFT,
             gesture: PadGesture::new(size),
         }
     }
@@ -348,8 +349,9 @@ impl Touchpad {
 
     // Consume only touch coordinates/contact keys. Physical button events
     // still take the ordinary mouse path. In particular BTN_TOUCH is NOT a
-    // click on an indirect touchpad. A clickpad pressed with two fingers
-    // clicks the secondary button, as on a Mac.
+    // click on an indirect touchpad. A clickpad press clicks the button the
+    // gesture picks from the contacts (two fingers or the bottom right corner:
+    // secondary), held as that button until its release.
     fn consume(&mut self, event: &mut InputEvent) -> bool {
         if event.ty == InputEventType::EV_REL
             && matches!(event.code, EvRelCodes::REL_X | EvRelCodes::REL_Y) {
@@ -368,11 +370,9 @@ impl Touchpad {
                 self.button = event.value != 0;
                 if self.buttonpad {
                     if event.value != 0 {
-                        self.secondary_press = self.gesture.finger_count() == 2;
+                        self.press = pad_button_code(self.gesture.click_button());
                     }
-                    if self.secondary_press {
-                        event.code = EvKeyCodes::BTN_RIGHT;
-                    }
+                    event.code = self.press;
                 }
             }
             return false;
@@ -402,7 +402,7 @@ impl Touchpad {
     }
 
     /// The report is complete: hand its contacts to the gesture.
-    fn finish_report(&mut self, time: f64, natural: bool, out: &mut Vec<PadOutput>) {
+    fn finish_report(&mut self, time: f64, natural: bool, tap: bool, out: &mut Vec<PadOutput>) {
         let mm = |pad: &Self, index: usize, value: i32| {
             (value - pad.axes[index].minimum) as f64 / pad.resolution[index]
         };
@@ -429,8 +429,12 @@ impl Touchpad {
             }
         }
         let frame = PadFrame { time, contacts: &contacts, button: self.button };
-        self.gesture.frame(&frame, natural, out);
+        self.gesture.frame(&frame, natural, tap, out);
     }
+}
+
+fn pad_button_code(button: PadButton) -> u16 {
+    EvKeyCodes::BTN_LEFT + button as u16
 }
 
 enum DeviceEvent {
@@ -600,6 +604,7 @@ impl RawInput {
         let mut packets = Vec::new();
         let mut pad_out = Vec::new();
         let natural = super::preferences::natural_scroll();
+        let tap = super::preferences::tap_to_click();
         // Poll nonblocking descriptors directly. Packet state belongs to each
         // device, so a partial report never spins the UI or mixes two devices.
         self.devices.retain_mut(|device| {
@@ -637,7 +642,7 @@ impl RawInput {
                                 if let Some(pad) = device.touchpad.as_mut() {
                                     device.pending.retain_mut(|event| !pad.consume(event));
                                     let report_time = event.time.tv_sec as f64 + event.time.tv_usec as f64 * 1e-6;
-                                    pad.finish_report(report_time, natural, &mut pad_out);
+                                    pad.finish_report(report_time, natural, tap, &mut pad_out);
                                     packets.extend(pad_out.drain(..).map(|out| (device.id, event.time, DeviceEvent::Touchpad(out))));
                                 }
                                 packets.extend(device.pending.drain(..)
@@ -705,6 +710,12 @@ impl RawInput {
                 }
                 DeviceEvent::Touchpad(PadOutput::Pinch { scale, phase }) => {
                     dir_evts.pinch(window_id, self.abs.x, self.abs.y, scale, phase);
+                    continue;
+                }
+                DeviceEvent::Touchpad(PadOutput::Tap(button)) => {
+                    let mask = 1 << (pad_button_code(button) - EvKeyCodes::BTN_LEFT);
+                    dir_evts.mouse_down(window_id, self.abs.x, self.abs.y, mask, self.modifiers.bits());
+                    dir_evts.mouse_up(window_id, self.abs.x, self.abs.y, mask, self.modifiers.bits());
                     continue;
                 }
             };
@@ -1028,7 +1039,7 @@ mod tests {
             if event.ty == InputEventType::EV_SYN {
                 pending.retain_mut(|event| !pad.consume(event));
                 let time = event.time.tv_sec as f64 + event.time.tv_usec as f64 * 1e-6;
-                pad.finish_report(time, true, &mut out);
+                pad.finish_report(time, true, true, &mut out);
                 raw.append(&mut pending);
             } else {
                 pending.push(*event);
@@ -1130,6 +1141,73 @@ mod tests {
         let (_, raw) = feed(&mut pad, &events);
         let buttons: Vec<(u16, i32)> = raw.iter().map(|e| (e.code, e.value)).collect();
         assert_eq!(buttons, [(EvKeyCodes::BTN_RIGHT, 1), (EvKeyCodes::BTN_RIGHT, 0)]);
+    }
+
+    /// One finger (protocol B) at `x`, `y` units, a click, a drag of
+    /// `drag` units right, and the release and lift.
+    fn one_finger_click_drag(x: i32, y: i32, drag: i32) -> Vec<InputEvent> {
+        use EvAbsCodes::*;
+        let (mut t, mut events) = (10.0, Vec::new());
+        let syn = |t: f64, events: &mut Vec<InputEvent>| events.push(event(t, InputEventType::EV_SYN, EvSynCodes::SYN_REPORT, 0));
+        t += 0.007;
+        events.push(event(t, InputEventType::EV_ABS, ABS_MT_SLOT, 0));
+        events.push(event(t, InputEventType::EV_ABS, ABS_MT_TRACKING_ID, 3));
+        events.push(event(t, InputEventType::EV_ABS, ABS_MT_POSITION_X, x));
+        events.push(event(t, InputEventType::EV_ABS, ABS_MT_POSITION_Y, y));
+        events.push(event(t, InputEventType::EV_KEY, EvKeyCodes::BTN_TOUCH, 1));
+        events.push(event(t, InputEventType::EV_KEY, EvKeyCodes::BTN_TOOL_FINGER, 1));
+        syn(t, &mut events);
+        t += 0.007;
+        events.push(event(t, InputEventType::EV_KEY, EvKeyCodes::BTN_LEFT, 1));
+        syn(t, &mut events);
+        for i in 1..=10 {
+            t += 0.007;
+            events.push(event(t, InputEventType::EV_ABS, ABS_MT_POSITION_X, x + drag * i / 10));
+            syn(t, &mut events);
+        }
+        t += 0.007;
+        events.push(event(t, InputEventType::EV_KEY, EvKeyCodes::BTN_LEFT, 0));
+        syn(t, &mut events);
+        t += 0.007;
+        events.push(event(t, InputEventType::EV_ABS, ABS_MT_TRACKING_ID, -1));
+        events.push(event(t, InputEventType::EV_KEY, EvKeyCodes::BTN_TOUCH, 0));
+        events.push(event(t, InputEventType::EV_KEY, EvKeyCodes::BTN_TOOL_FINGER, 0));
+        syn(t, &mut events);
+        events
+    }
+
+    #[test]
+    fn a_bottom_right_click_is_the_secondary_button_for_its_whole_drag() {
+        // 4400, 3000 units = 137, 94 mm on the 149 x 97 mm pad; the drag leaves the corner.
+        let mut pad = clickpad();
+        let (out, raw) = feed(&mut pad, &one_finger_click_drag(4400, 3000, -1600));
+        let buttons: Vec<(u16, i32)> = raw.iter().map(|e| (e.code, e.value)).collect();
+        assert_eq!(buttons, [(EvKeyCodes::BTN_RIGHT, 1), (EvKeyCodes::BTN_RIGHT, 0)]);
+        let moved = out.iter().filter_map(|o| match o { PadOutput::Pointer(d) => Some(*d), _ => None })
+            .fold(dvec2(0.0, 0.0), |s, d| s + d);
+        assert!(moved.x < -40.0, "dragged with the button held: {moved:?} mm");
+    }
+
+    #[test]
+    fn a_click_elsewhere_is_the_primary_button() {
+        for (x, y) in [(2400, 1500), (800, 3000), (4400, 2000)] {
+            let mut pad = clickpad();
+            let (_, raw) = feed(&mut pad, &one_finger_click_drag(x, y, 600));
+            let buttons: Vec<(u16, i32)> = raw.iter().map(|e| (e.code, e.value)).collect();
+            assert_eq!(buttons, [(EvKeyCodes::BTN_LEFT, 1), (EvKeyCodes::BTN_LEFT, 0)], "at {x}, {y}");
+        }
+    }
+
+    #[test]
+    fn a_two_finger_tap_is_a_secondary_tap() {
+        let (mut t, mut events) = (10.0, Vec::new());
+        two_fingers(&mut t, 2000, 0, 3, &mut events);
+        lift(&mut t, &mut events);
+        let mut pad = clickpad();
+        let (out, raw) = feed(&mut pad, &events);
+        assert!(raw.is_empty());
+        let taps: Vec<&PadOutput> = out.iter().filter(|o| matches!(o, PadOutput::Tap(_))).collect();
+        assert_eq!(taps, [&PadOutput::Tap(PadButton::Secondary)]);
     }
 
     #[test]

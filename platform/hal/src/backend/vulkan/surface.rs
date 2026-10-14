@@ -36,6 +36,13 @@ pub trait VkSurfaceSource: Send {
     fn state(&mut self, session: u32, window: Id, requested: [u32; 2]) -> SurfaceState;
     /// Whether the desktop compositor should blend this window's premultiplied alpha.
     fn transparent(&self, _session: u32, _window: Id) -> bool { false }
+    /// A shell that hands out the window's render targets itself (a host compositor's shared
+    /// images): the frame renders straight into the image returned here and the presenter gets
+    /// that same image, with no window target and no copy in between. `None` (no free image of
+    /// at least `size`, or a shell without its own targets) renders into the window target.
+    fn target(&mut self, _session: u32, _window: Id, _size: [u32; 2]) -> Option<Arc<super::Image>> { None }
+    /// Whether `image` is one of the targets [`VkSurfaceSource::target`] handed out.
+    fn is_target(&self, _image: &Arc<super::Image>) -> bool { false }
     /// Create a surface for this instance. The returned lease must keep the native window
     /// alive until Vulkan destroys the surface (including pending presentation).
     ///

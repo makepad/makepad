@@ -114,6 +114,11 @@ extern "C" {
     fn AAudioStream_requestStart(stream: *mut c_void) -> i32;
     fn AAudioStream_requestStop(stream: *mut c_void) -> i32;
     fn AAudioStream_close(stream: *mut c_void) -> i32;
+    fn AAudioStream_getXRunCount(stream: *mut c_void) -> i32;
+    fn AAudioStream_getFramesPerBurst(stream: *mut c_void) -> i32;
+    fn AAudioStream_getBufferCapacityInFrames(stream: *mut c_void) -> i32;
+    fn AAudioStream_getBufferSizeInFrames(stream: *mut c_void) -> i32;
+    fn AAudioStream_setBufferSizeInFrames(stream: *mut c_void, frames: i32) -> i32;
 }
 
 fn result(operation: &str, code: i32) -> Result<(), String> {
@@ -151,6 +156,38 @@ struct Stream {
     pointer: *mut c_void,
     callback: Box<Callback>,
     index: usize,
+    /// Underruns (output) or overruns (input) seen so far.
+    xruns: i32,
+}
+
+/// The most frames a stream may buffer: what the buffer grows to after
+/// underruns (~170 ms at 48 kHz). A stream starts at two bursts, AAudio's
+/// low-latency size, and grows by a burst at each underrun (the latency
+/// tuning AAudio's own guide asks for): a phone whose app stalls the
+/// callback now and then (a JIT compile, a busy core) settles at a size
+/// that never runs dry, and a quiet one keeps its low latency.
+const BUFFER_CAPACITY_FRAMES: i32 = 8192;
+
+impl Stream {
+    /// Grow the buffer after new xruns; logs each change.
+    unsafe fn tune(&mut self) {
+        let xruns = AAudioStream_getXRunCount(self.pointer);
+        if xruns <= self.xruns {
+            return;
+        }
+        let new = xruns - self.xruns;
+        self.xruns = xruns;
+        let burst = AAudioStream_getFramesPerBurst(self.pointer).max(1);
+        let size = AAudioStream_getBufferSizeInFrames(self.pointer);
+        let cap = AAudioStream_getBufferCapacityInFrames(self.pointer);
+        let grown = if size + burst <= cap { AAudioStream_setBufferSizeInFrames(self.pointer, size + burst) } else { size };
+        eprintln!(
+            "[hal-aaudio] device {} {}: {new} new {} ({xruns} in all), buffer {size} -> {grown} frames (burst {burst}, capacity {cap})",
+            self.callback.device,
+            if self.callback.input { "input" } else { "output" },
+            if self.callback.input { "overruns" } else { "underruns" },
+        );
+    }
 }
 impl Stream {
     unsafe fn open(device: &Device, index: usize, slot: Arc<Slot>) -> Result<Self, String> {
@@ -169,7 +206,7 @@ impl Stream {
         AAudioStreamBuilder_setSampleRate(builder.0, 48_000);
         AAudioStreamBuilder_setChannelCount(builder.0, device.desc.channels as i32);
         AAudioStreamBuilder_setFormat(builder.0, 2); // PCM_FLOAT
-        AAudioStreamBuilder_setBufferCapacityInFrames(builder.0, 256); // old backend's latency hint
+        AAudioStreamBuilder_setBufferCapacityInFrames(builder.0, BUFFER_CAPACITY_FRAMES);
         AAudioStreamBuilder_setPerformanceMode(builder.0, 12); // LOW_LATENCY
         let mut callback = Box::new(Callback {
             device: device.desc.id,
@@ -196,6 +233,7 @@ impl Stream {
             pointer,
             callback,
             index,
+            xruns: 0,
         };
         result("open", opened)?;
         let channels = AAudioStream_getChannelCount(pointer);
@@ -210,6 +248,11 @@ impl Stream {
         scratch.planes = (0..channels as usize)
             .map(|c| scratch.samples.as_mut_ptr().add(c * AUDIO_BLOCK_FRAMES))
             .collect();
+        // Low latency to begin with: two bursts (see BUFFER_CAPACITY_FRAMES).
+        let burst = AAudioStream_getFramesPerBurst(pointer);
+        if burst > 0 {
+            AAudioStream_setBufferSizeInFrames(pointer, 2 * burst);
+        }
         result("start", AAudioStream_requestStart(pointer))?;
         Ok(stream)
     }
@@ -504,6 +547,9 @@ impl Audio {
         }
     }
     pub fn poll(&mut self) -> Option<Vec<AudioDeviceInfo>> {
+        for stream in self.streams.iter_mut().flatten() {
+            unsafe { stream.tune() };
+        }
         for (direction, streams) in self.streams.iter_mut().enumerate() {
             streams.retain(|stream| {
                 let error = stream.callback.error.load(Ordering::Acquire);

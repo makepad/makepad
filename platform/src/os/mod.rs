@@ -40,10 +40,6 @@ pub use crate::os::hal::*;
 #[cfg(not(any(target_os = "android", target_arch = "wasm32")))]
 pub mod gl_sys;
 
-#[cfg(target_os = "linux")]
-// Descriptor I/O shared by HAL hosted clients and hosts, and frame rings (app_host).
-#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-pub mod linux_ipc;
 
 #[cfg(target_arch = "wasm32")]
 pub mod web;

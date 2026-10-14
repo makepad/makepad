@@ -1,5 +1,6 @@
 //! V4L2 mmap capture. Device setup, frame copies and teardown run on the media worker.
 use super::{libc_sys, v4l2_sys::*};
+use crate::fake_camera::{self, FakeCapture};
 use crate::media::{
     camera_layout, name_hash, pack_camera_frame, CameraFrameData, CameraPlane, VideoFormatInfo,
     VideoInputInfo, VideoPixel,
@@ -24,6 +25,9 @@ struct Capture {
     buffers: Vec<MmapBuffer>,
     streaming: bool,
     stride: u32,
+    frames: u64,
+    started: Option<std::time::Instant>,
+    warned: bool,
 }
 impl Capture {
     fn open(device_path: &str, format: VideoFormatInfo) -> Result<Self, String> {
@@ -179,6 +183,9 @@ impl Capture {
                 buffers,
                 streaming: false,
                 stride: fmt.fmt.pix.bytesperline,
+                frames: 0,
+                started: None,
+                warned: false,
             })
         }
     }
@@ -345,10 +352,34 @@ impl Capture {
                 return Err(std::io::Error::last_os_error().to_string());
             }
             self.streaming = true;
+            self.started = Some(std::time::Instant::now());
             Ok(())
         }
     }
     fn poll(&mut self) -> Option<Vec<u8>> {
+        let frame = self.poll_frame();
+        match &frame {
+            Some(bytes) => {
+                self.frames += 1;
+                if self.frames == 1 {
+                    eprintln!(
+                        "[hal-camera] {}: first frame, {} bytes, {:?} after streaming started",
+                        self.path,
+                        bytes.len(),
+                        self.started.map(|t| t.elapsed())
+                    );
+                }
+            }
+            None => {
+                if self.frames == 0 && !self.warned && self.started.is_some_and(|t| t.elapsed().as_secs() >= 3) {
+                    self.warned = true;
+                    eprintln!("[hal-camera] {}: no frame 3 s after streaming started (busy, unplugged or the device stalls)", self.path);
+                }
+            }
+        }
+        frame
+    }
+    fn poll_frame(&mut self) -> Option<Vec<u8>> {
         unsafe {
             let mut b: v4l2_buffer = std::mem::zeroed();
             b.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -476,6 +507,7 @@ impl Capture {
                     height: h,
                     layout,
                     matrix: if layout == camera_layout::MJPEG { 3 } else { 1 },
+                    display_rotation: 0,
                     planes,
                 }))
             })();
@@ -508,15 +540,26 @@ impl Drop for Capture {
 pub struct Camera {
     devices: Vec<Device>,
     captures: HashMap<(u64, u64), Capture>,
+    /// the last open error of each wanted camera, so a retry logs only a change
+    failed: HashMap<(u64, u64), String>,
+    /// open captures of the synthetic camera (`MAKEPAD_HAL_FAKE_CAMERA`), if one is listed
+    fakes: HashMap<(u64, u64), FakeCapture>,
+}
+/// The synthetic camera the environment asks for, read once.
+fn fake_desc() -> Option<&'static VideoInputInfo> {
+    static FAKE: std::sync::OnceLock<Option<VideoInputInfo>> = std::sync::OnceLock::new();
+    FAKE.get_or_init(fake_camera::listed).as_ref()
 }
 impl Camera {
     pub fn active(&self) -> bool {
-        !self.captures.is_empty()
+        !self.captures.is_empty() || !self.fakes.is_empty()
     }
     pub fn cadence(&self) -> Option<std::time::Duration> {
         self.captures
             .values()
-            .filter_map(|c| c.format.frame_rate)
+            .map(|c| &c.format)
+            .chain(self.fakes.values().map(|c| c.format()))
+            .filter_map(|f| f.frame_rate)
             .filter(|fps| fps.is_finite() && *fps > 0.0)
             .map(|fps| std::time::Duration::from_secs_f64(0.5 / fps))
             .min()
@@ -541,7 +584,7 @@ impl Camera {
                 .zip(&self.devices)
                 .all(|(p, d)| p == std::path::Path::new(&d.path))
         {
-            return self.devices.iter().map(|d| d.desc.clone()).collect();
+            return self.devices.iter().map(|d| d.desc.clone()).chain(fake_desc().cloned()).collect();
         }
         self.devices = paths
             .iter()
@@ -549,12 +592,35 @@ impl Camera {
             .collect();
         self.captures
             .retain(|(input, _), _| self.devices.iter().any(|d| d.desc.id == *input));
-        self.devices.iter().map(|d| d.desc.clone()).collect()
+        self.devices.iter().map(|d| d.desc.clone()).chain(fake_desc().cloned()).collect()
+    }
+    /// A wanted camera is listed but not open (its open failed: a device that is still busy from
+    /// the last close, say). The worker tries again at its next housekeeping.
+    pub fn unserved(&self, wanted: &[(u64, u64)]) -> bool {
+        wanted.iter().any(|key| {
+            !self.captures.contains_key(key)
+                && !self.fakes.contains_key(key)
+                && self.devices.iter().map(|d| &d.desc).chain(fake_desc()).any(|d| d.id == key.0 && d.formats.iter().any(|f| f.id == key.1))
+        })
     }
     pub fn use_inputs(&mut self, inputs: &[(u64, u64)]) {
+        for key in self.captures.keys().filter(|k| !inputs.contains(k)) {
+            if let Some(c) = self.captures.get(key) {
+                eprintln!("[hal-camera] {}: released ({} frames delivered)", c.path, c.frames);
+            }
+        }
         self.captures.retain(|key, _| inputs.contains(key));
+        self.fakes.retain(|key, _| inputs.contains(key));
+        self.failed.retain(|key, _| inputs.contains(key));
         for &(input, format) in inputs {
-            if self.captures.contains_key(&(input, format)) {
+            if self.captures.contains_key(&(input, format)) || self.fakes.contains_key(&(input, format)) {
+                continue;
+            }
+            if let Some(fake) = fake_desc().filter(|d| d.id == input) {
+                if let Some(info) = fake.formats.iter().find(|f| f.id == format) {
+                    eprintln!("[hal-camera] fake \"{}\": streaming {}x{} {:?} {:?} fps", fake.name, info.width, info.height, info.pixel, info.frame_rate);
+                    self.fakes.insert((input, format), FakeCapture::open(&fake.name, info.clone()));
+                }
                 continue;
             }
             let Some(device) = self.devices.iter().find(|d| d.desc.id == input) else {
@@ -568,19 +634,42 @@ impl Camera {
                 Ok(c)
             }) {
                 Ok(c) => {
+                    eprintln!(
+                        "[hal-camera] {} \"{}\": streaming {}x{} {:?} {:?} fps (asked {}x{} {:?}), {} buffers",
+                        device.path,
+                        device.desc.name,
+                        c.format.width,
+                        c.format.height,
+                        c.format.pixel,
+                        c.format.frame_rate,
+                        format_info.width,
+                        format_info.height,
+                        format_info.pixel,
+                        c.buffers.len()
+                    );
                     self.captures.insert((input, format), c);
                 }
-                Err(e) => eprintln!("[hal-camera] {e}"),
+                Err(e) => {
+                    if self.failed.get(&(input, format)) != Some(&e) {
+                        eprintln!(
+                            "[hal-camera] {} \"{}\": cannot open at {}x{} {:?}: {e} (tried again at every housekeeping until it opens or is no longer wanted)",
+                            device.path, device.desc.name, format_info.width, format_info.height, format_info.pixel
+                        );
+                        self.failed.insert((input, format), e);
+                    }
+                }
             }
         }
     }
     pub fn format(&self, key: (u64, u64)) -> Option<&VideoFormatInfo> {
-        self.captures.get(&key).map(|c| &c.format)
+        self.captures.get(&key).map(|c| &c.format).or_else(|| self.fakes.get(&key).map(|c| c.format()))
     }
     pub fn poll(&mut self) -> Vec<((u64, u64), Vec<u8>)> {
+        let fakes = self.fakes.iter_mut().filter_map(|(key, c)| c.poll().map(|p| (*key, p)));
         self.captures
             .iter_mut()
             .filter_map(|(key, c)| c.poll().map(|p| (*key, p)))
+            .chain(fakes)
             .collect()
     }
     fn probe_device(path: &str) -> Option<Device> {
@@ -613,11 +702,11 @@ impl Camera {
             cap.capabilities
         };
 
-        if (caps & V4L2_CAP_VIDEO_CAPTURE) == 0 {
+        let name = cstr_from_bytes(&cap.card);
+        if let Err(why) = judge_node(&name, caps, None) {
+            eprintln!("[hal-camera] {path} \"{name}\": skipped, {why}");
             return None;
         }
-
-        let name = cstr_from_bytes(&cap.card);
 
         // Enumerate formats
         let mut formats = Vec::new();
@@ -711,11 +800,17 @@ impl Camera {
             fmt_index += 1;
         }
 
-        if formats.is_empty() {
+        if let Err(why) = judge_node(&name, caps, Some(&formats)) {
+            eprintln!("[hal-camera] {path} \"{name}\": skipped, {why}");
             return None;
         }
 
         let input_id = name_hash(path);
+        eprintln!(
+            "[hal-camera] {path} \"{name}\": camera, {} formats ({})",
+            formats.len(),
+            summary(&formats)
+        );
         Some(Device {
             path: path.to_string(),
             desc: VideoInputInfo {
@@ -727,6 +822,59 @@ impl Camera {
         })
     }
 }
+/// Whether a V4L2 node is a camera a deck can show. `formats` is None while only the capabilities
+/// are known. Metadata nodes (an OBSBOT's second node), output nodes and infrared sensors (an
+/// ASUS "IR webcam", greyscale only) are not cameras; the first camera must never be one of them.
+pub(crate) fn judge_node(name: &str, caps: u32, formats: Option<&[VideoFormatInfo]>) -> Result<(), String> {
+    if caps & V4L2_CAP_VIDEO_CAPTURE == 0 {
+        return Err(if caps & V4L2_CAP_META_CAPTURE != 0 {
+            "a metadata node".into()
+        } else {
+            format!("not a video capture node (caps {caps:#x})")
+        });
+    }
+    if name
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|word| word.eq_ignore_ascii_case("ir"))
+    {
+        return Err("an infrared camera".into());
+    }
+    if let Some(formats) = formats {
+        let colour = |f: &VideoFormatInfo| {
+            matches!(
+                f.pixel,
+                VideoPixel::YUY2
+                    | VideoPixel::MJPEG
+                    | VideoPixel::NV12
+                    | VideoPixel::YUV420
+                    | VideoPixel::RGB24
+            )
+        };
+        if formats.is_empty() {
+            return Err("it lists no frame sizes".into());
+        }
+        if !formats.iter().any(colour) {
+            return Err("it offers no colour format (infrared or depth)".into());
+        }
+    }
+    Ok(())
+}
+
+fn summary(formats: &[VideoFormatInfo]) -> String {
+    let mut kinds: Vec<String> = Vec::new();
+    for f in formats {
+        let k = format!("{:?}", f.pixel);
+        if !kinds.contains(&k) {
+            kinds.push(k);
+        }
+    }
+    let best = formats.iter().max_by_key(|f| f.width * f.height);
+    match best {
+        Some(b) => format!("{}; up to {}x{}", kinds.join("/"), b.width, b.height),
+        None => kinds.join("/"),
+    }
+}
+
 fn fourcc_to_video_pixel_format(fourcc: u32) -> VideoPixel {
     match fourcc {
         V4L2_PIX_FMT_YUYV => VideoPixel::YUY2,
@@ -755,4 +903,73 @@ unsafe fn cstr_from_bytes(bytes: &[u8]) -> String {
     // UTF-8 Lossy: V4L2 device names are kernel byte arrays for display only
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
     String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CAPTURE: u32 = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_STREAMING | V4L2_CAP_DEVICE_CAPS;
+    const META: u32 = V4L2_CAP_META_CAPTURE | V4L2_CAP_STREAMING | V4L2_CAP_DEVICE_CAPS;
+
+    fn fmt(pixel: VideoPixel, w: u32, h: u32) -> VideoFormatInfo {
+        VideoFormatInfo { id: 1, width: w, height: h, frame_rate: Some(30.0), pixel }
+    }
+
+    /// The nodes of node 149, with the card strings v4l2 returns (31 characters at most).
+    fn nodes() -> Vec<(&'static str, &'static str, u32, Vec<VideoFormatInfo>)> {
+        let colour = vec![fmt(VideoPixel::MJPEG, 1920, 1080), fmt(VideoPixel::YUY2, 640, 480)];
+        let grey = vec![fmt(VideoPixel::GRAY, 640, 360), fmt(VideoPixel::Unsupported(0x20363159), 640, 360)];
+        vec![
+            ("/dev/video0", "ASUS FHD webcam: ASUS FHD webca", CAPTURE, colour.clone()),
+            ("/dev/video1", "ASUS FHD webcam: ASUS FHD webca", META, vec![]),
+            ("/dev/video2", "ASUS IR webcam: ASUS IR webcam", CAPTURE, grey),
+            ("/dev/video3", "ASUS IR webcam: ASUS IR webcam", META, vec![]),
+            ("/dev/video4", "OBSBOT Meet 2: OBSBOT Meet 2 St", CAPTURE, colour),
+            ("/dev/video5", "OBSBOT Meet 2: OBSBOT Meet 2 St", META, vec![]),
+        ]
+    }
+
+    fn listed() -> Vec<(&'static str, &'static str)> {
+        nodes()
+            .into_iter()
+            .filter(|(_, name, caps, formats)| {
+                judge_node(name, *caps, None).is_ok() && judge_node(name, *caps, Some(formats)).is_ok()
+            })
+            .map(|(path, name, _, _)| (path, name))
+            .collect()
+    }
+
+    #[test]
+    fn only_real_colour_capture_nodes_are_listed() {
+        assert_eq!(
+            listed().iter().map(|(p, _)| *p).collect::<Vec<_>>(),
+            ["/dev/video0", "/dev/video4"]
+        );
+    }
+
+    #[test]
+    fn the_metadata_and_infrared_nodes_say_why() {
+        assert!(judge_node("OBSBOT Meet 2: OBSBOT Meet 2 St", META, None).unwrap_err().contains("metadata"));
+        assert!(judge_node("ASUS IR webcam: ASUS IR webcam", CAPTURE, None).unwrap_err().contains("infrared"));
+        let grey = [fmt(VideoPixel::GRAY, 640, 360)];
+        assert!(judge_node("Depth", CAPTURE, Some(&grey)).unwrap_err().contains("colour"));
+        // "IR" is a word, not a substring: "Mirror cam" and "Fire" are cameras
+        assert!(judge_node("Mirror cam", CAPTURE, None).is_ok());
+    }
+
+    #[test]
+    fn the_slide_names_pick_the_obsbot_or_the_first_asus() {
+        let names: Vec<String> = listed().iter().map(|(_, n)| n.to_lowercase()).collect();
+        let by = |wanted: &str| names.iter().position(|n| n.contains(&wanted.to_lowercase()));
+        assert_eq!(listed()[by("OBSBOT").unwrap()].0, "/dev/video4");
+        assert_eq!(listed()[0].0, "/dev/video0");
+    }
+
+    #[test]
+    fn fourcc_round_trips() {
+        for p in [VideoPixel::YUY2, VideoPixel::MJPEG, VideoPixel::NV12, VideoPixel::YUV420, VideoPixel::RGB24, VideoPixel::GRAY] {
+            assert_eq!(fourcc_to_video_pixel_format(video_pixel_format_to_fourcc(p)), p);
+        }
+    }
 }

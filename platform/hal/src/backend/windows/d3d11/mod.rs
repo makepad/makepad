@@ -156,7 +156,7 @@ impl D3d11 {
             lost_posted: false,
             retry_ns: 0,
             simulate: false,
-            simulate_at_ns: std::env::var("MAKEPAD_HAL_SIMULATE_DEVICE_LOSS_MS").ok().and_then(|v| v.parse::<u64>().ok()).map(|ms| crate::clock_ns() + ms * 1_000_000),
+            simulate_at_ns: super::super::simulated_loss_at(),
         })
     }
 

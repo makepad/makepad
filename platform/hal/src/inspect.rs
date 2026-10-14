@@ -23,6 +23,11 @@ pub const COMMANDS: &[(&str, &str, &str)] = &[
     ),
     ("gpu snap", "<name>", "keep a named HAL ledger snapshot"),
     (
+        "hal pump",
+        "",
+        "each session's pump turns and wake causes, totals and per second since the last call",
+    ),
+    (
         "gpu diff",
         "<a> <b|now>",
         "byte growth by owner and new/freed handles",
@@ -73,8 +78,15 @@ fn fresh(req: &Req) -> Report {
     crate::Hal::global().report_all(idle)
 }
 
-/// True when this is a GPU command. The endpoint thread reads the native ledger directly.
+/// True when this is a GPU or HAL command. The endpoint thread reads the native ledger directly.
 pub fn dispatch(req: &Req, out: &mut Out) -> bool {
+    if req.cmd == "hal" {
+        match req.pos.first().map(String::as_str) {
+            Some("pump") => pump(out),
+            _ => out.err("hal pump"),
+        }
+        return true;
+    }
     if req.cmd != "gpu" {
         return false;
     }
@@ -229,4 +241,36 @@ fn diff(req: &Req, out: &mut Out) {
             ));
         }
     }
+}
+
+/// The last `hal pump` answer, for the rates of the next one.
+static PUMP_LAST: Mutex<Option<(std::time::Instant, Vec<(u32, crate::PumpCounts)>)>> = Mutex::new(None);
+
+fn pump(out: &mut Out) {
+    let now = std::time::Instant::now();
+    let counts = crate::Hal::global().pump_counts();
+    let mut last = PUMP_LAST.lock().unwrap_or_else(|e| e.into_inner());
+    let before = last.take();
+    for (sid, c) in &counts {
+        let rates = before.as_ref().and_then(|(t, prev)| {
+            let secs = now.duration_since(*t).as_secs_f64();
+            let p = prev.iter().find(|(id, _)| id == sid).map(|(_, p)| *p).unwrap_or_default();
+            (secs > 0.0).then(|| format!(
+                ",\"secs\":{:.2},\"turns_per_s\":{:.1},\"calls_per_s\":{:.1},\"event_per_s\":{:.1},\"wake_per_s\":{:.1},\"all_per_s\":{:.1},\"timeout_per_s\":{:.1}",
+                secs,
+                (c.turns - p.turns) as f64 / secs,
+                (c.calls - p.calls) as f64 / secs,
+                (c.by_event - p.by_event) as f64 / secs,
+                (c.by_wake - p.by_wake) as f64 / secs,
+                (c.by_all - p.by_all) as f64 / secs,
+                (c.by_timeout - p.by_timeout) as f64 / secs,
+            ))
+        });
+        out.line(&format!(
+            "{{\"session\":{},\"calls\":{},\"turns\":{},\"delivered\":{},\"by_event\":{},\"by_wake\":{},\"by_all\":{},\"by_timeout\":{}{}}}",
+            sid, c.calls, c.turns, c.delivered, c.by_event, c.by_wake, c.by_all, c.by_timeout,
+            rates.unwrap_or_default(),
+        ));
+    }
+    *last = Some((now, counts));
 }

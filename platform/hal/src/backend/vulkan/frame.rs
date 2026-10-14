@@ -23,9 +23,41 @@ struct Prepared {
     first_instance: u32,
 }
 
-fn slice(range: Range, len: usize) -> Option<std::ops::Range<usize>> {
+pub(super) fn slice(range: Range, len: usize) -> Option<std::ops::Range<usize>> {
     let start = range.off as usize;
     start.checked_add(range.len as usize).filter(|end| *end <= len).map(|end| start..end)
+}
+
+/// Free scanout copies kept for the next frames (the shell holds the ones it shows).
+const SCANOUT_SPARES: usize = 2;
+
+/// Keep `chosen`, every image something else still holds, and at most `spares` free ones.
+fn trim_spares<T>(pool: &mut Vec<Arc<T>>, chosen: &Arc<T>, spares: usize) {
+    let mut free = 0;
+    pool.retain(|image| {
+        if Arc::ptr_eq(image, chosen) || Arc::strong_count(image) > 1 {
+            return true;
+        }
+        free += 1;
+        free <= spares
+    });
+}
+
+#[cfg(test)]
+mod scanout_tests {
+    use super::*;
+
+    /// A burst that grew the scanout pool shrinks back to what is in use plus the spares.
+    #[test]
+    fn a_grown_scanout_pool_gives_its_free_images_back() {
+        let mut pool: Vec<Arc<u32>> = (0..70).map(Arc::new).collect();
+        let held: Vec<Arc<u32>> = pool[10..13].to_vec(); // the shell still shows these
+        let chosen = pool[0].clone();
+        trim_spares(&mut pool, &chosen, 2);
+        assert_eq!(pool.len(), 1 + held.len() + 2, "chosen + held + 2 spares");
+        assert!(pool.iter().any(|p| Arc::ptr_eq(p, &chosen)));
+        assert!(held.iter().all(|h| pool.iter().any(|p| Arc::ptr_eq(p, h))));
+    }
 }
 
 impl Vulkan {
@@ -55,6 +87,10 @@ impl Vulkan {
                 depth: 1, mips: 1, usage: usage::RENDER_TARGET | usage::SAMPLED, bytes: 0, imported: false, uploaded: 0, lent: None })?;
             pool.push(image.clone()); image
         };
+        // An output that held its frames a while (a mode change, a slow flip) grew the pool;
+        // the images it gave back are let go again, a few spares kept. Before, the pool only
+        // grew: 149's WM held 70 desktop-sized copies (3.9 GB).
+        trim_spares(pool, &image, SCANOUT_SPARES);
         source.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
         image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
         let layers = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
@@ -66,6 +102,16 @@ impl Vulkan {
         source.transition(batch.cb, source.sampled_layout());
         batch.images.extend([source.clone(), image.clone()]);
         Ok(image)
+    }
+
+    /// What a snapshot or copy of `window` reads: its newest frame's size (a hosted window's
+    /// shared image is larger), else the whole window image.
+    pub(super) fn window_rect(&self, sid: u32, window: Id, image: Option<&Image>) -> [u32; 4] {
+        match (self.hosted_sizes.get(&(sid, window.index)), image) {
+            (Some([w, h]), Some(i)) => [0, 0, (*w).min(i.desc.w), (*h).min(i.desc.h)],
+            (None, Some(i)) => [0, 0, i.desc.w, i.desc.h],
+            _ => [0; 4],
+        }
     }
 
     pub(super) fn window_image(&mut self, s: &mut Session, id: Id) -> Option<Arc<Image>> {
@@ -99,7 +145,9 @@ impl Vulkan {
     }
 
     pub(super) fn encode_frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> {
-        if self.dev.lost.load(std::sync::atomic::Ordering::Acquire) { let g = s.device_generation; s.events.device_lost(g); return None; }
+        // a lost device draws nothing until it is replaced; the sessions heard DeviceLost once
+        // (`Vulkan::recover`) and wait for DeviceReset
+        if self.dev.lost.load(std::sync::atomic::Ordering::Acquire) { return None; }
         let Some(packet) = view.frames.get(packet as usize) else { s.bad(); return None };
         let (Some(pr), Some(dr)) = (slice(packet.passes, view.passes.len()), slice(packet.draws, view.draws.len())) else { s.bad(); return None };
         if view.passes[pr.clone()].iter().any(|p| slice(p.draws, view.draws.len()).is_none_or(|r| r.start < dr.start || r.end > dr.end)) { s.bad(); return None; }
@@ -120,7 +168,12 @@ impl Vulkan {
             }
         }
         let mut batch = match Batch::new(self.dev.clone(), &self.spares, true, reserve) {
-            Ok(b) => b, Err(e) => { eprintln!("[hal-vulkan] frame allocation: {e}"); s.bad(); return None; }
+            Ok(b) => b,
+            Err(e) => {
+                // at the open-file limit an out of memory is reported once, not every frame
+                if !(super::pipeline::out_of_memory(&e) && self.dev.out_of_files("frame allocation")) { eprintln!("[hal-vulkan] frame allocation: {e}"); }
+                s.bad(); return None;
+            }
         };
         batch.draw_counts = draw_counts;
         s.frame = packet.frame; s.font_frames.submitted(packet.frame);
@@ -165,7 +218,10 @@ impl Vulkan {
                         eprintln!("[hal-vulkan] FramePacket key={key:?} frame={} rendered target={}x{}; acquiring native surface/swapchain", packet.frame, image.desc.w, image.desc.h);
                     }
                     if let Some(presenter) = self.windows.source.presenter(key.0, key.1) {
-                        match self.scanout_image(key, &image, &mut batch) {
+                        // A shell's own target goes to its presenter as rendered: nothing reuses it
+                        // before the shell's host has released it.
+                        let scanout = if self.windows.source.is_target(&image) { Ok(image.clone()) } else { self.scanout_image(key, &image, &mut batch) };
+                        match scanout {
                             Ok(image) => batch.scanout = Some((presenter, image, Self::token(s), target, key.1, key.0, packet.frame)),
                             Err(e) => { eprintln!("[hal-vulkan] scanout target: {e}"); s.bad(); }
                         }
@@ -188,14 +244,22 @@ impl Vulkan {
         }
         batch.tickets.push(Ticket::Frame { token: Self::token(s), target, kind, frame: packet.frame, window: presented });
         let scheduled = presented || batch.scanout.is_some();
-        batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone());
+        s.stats.arena_allocs += batch.allocs;
+        if kind & target::SNAPSHOT != 0 && !pick {
+            // The reads of this frame (a grab, a window snapshot or copy) follow this command in
+            // the same submit: they record into this frame's command buffer, before a hosted
+            // image goes to its host, and the batch is submitted with them (`flush`).
+            self.batch = Some(batch);
+        } else {
+            batch.finish(self.queue.as_ref().unwrap(), self.complete.clone(), self.mailbox.clone());
+        }
         Some(exec::SubmittedFrame { deps, window: scheduled })
     }
 
     fn encode_pass(&mut self, s: &mut Session, target: Id, is_window: bool, pick: bool, pass: &Pass, draws: &[Draw], view: &CmdView,
         batch: &mut Batch, now: u64, deps: &mut Vec<LentRef>) -> Result<Option<Arc<Image>>, String> {
         let v = pass.viewport;
-        if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 { return Err("invalid pass viewport".into()); }
+        if v.iter().any(|v| !v.is_finite() || *v < 0.0) || v[2] <= 0.0 || v[3] <= 0.0 { return Err(format!("invalid pass viewport {v:?} (target {target:?}, window {is_window})")); }
         let size = [(v[0] + v[2]).ceil() as u32, (v[1] + v[3]).ceil() as u32];
         let mut colors: Vec<(usize, Arc<Image>)> = Vec::new();
         let mut window = None;
@@ -210,19 +274,24 @@ impl Vulkan {
         }
         if colors.is_empty() && is_window {
             let embedded = s.windows.get(s.id, target).ok().and_then(|w| w.val.embedded);
-            let image = match embedded { Some(em) => self.resolve(s, em.tex).ok_or("missing embedded window storage")?, None => self.offscreen(s, target, size, now)? };
+            let image = match embedded {
+                Some(em) => self.resolve(s, em.tex).ok_or("missing embedded window storage")?,
+                None => {
+                    let key = self.window_key(s.id, target);
+                    match self.windows.source.target(key.0, key.1, size) { Some(image) => image, None => self.offscreen(s, target, size, now)? }
+                }
+            };
             window = Some(image.clone()); colors.push((0, image));
         }
         let depth = if pass.depth.is_none() { None } else { Some(self.resolve(s, pass.depth).ok_or("missing depth texture")?) };
         if colors.is_empty() && depth.is_none() { return Err("pass has no attachments".into()); }
         for (i, color) in &colors {
-            if color.desc.usage & usage::RENDER_TARGET == 0 || format::is_depth(color.desc.format) || pass.layer[*i] >= color.desc.depth
-                || size[0] > color.desc.w || size[1] > color.desc.h {
+            if color.desc.usage & usage::RENDER_TARGET == 0 || format::is_depth(color.desc.format) || pass.layer[*i] >= color.desc.depth {
                 return Err(format!("invalid color attachment {i}: pass size {size:?} viewport {v:?} dpi {} layer {} target {}x{}x{} format {} usage {:#x}", pass.dpi, pass.layer[*i], color.desc.w, color.desc.h, color.desc.depth, color.desc.format, color.desc.usage));
             }
             if pick && !matches!(color.desc.format, format::RGBA8 | format::BGRA8) { return Err("pick targets require RGBA8/BGRA8".into()); }
         }
-        if depth.as_ref().is_some_and(|d| !format::is_depth(d.desc.format) || d.desc.usage & usage::RENDER_TARGET == 0 || size[0] > d.desc.w || size[1] > d.desc.h) {
+        if depth.as_ref().is_some_and(|d| !format::is_depth(d.desc.format) || d.desc.usage & usage::RENDER_TARGET == 0) {
             let d = depth.as_ref().unwrap();
             return Err(format!("invalid depth attachment: format {} usage {:#x} size {}x{} for a {}x{} pass", d.desc.format, d.desc.usage, d.desc.w, d.desc.h, size[0], size[1]));
         }
@@ -234,13 +303,20 @@ impl Vulkan {
         let mut prepared = Vec::new();
         let attachments: Vec<_> = colors.iter().map(|(_, c)| c.clone()).chain(depth.iter().cloned()).collect();
         let target_size = [attachments.iter().map(|a| a.desc.w).min().unwrap(), attachments.iter().map(|a| a.desc.h).min().unwrap()];
+        if size[0] > target_size[0] || size[1] > target_size[1] {
+            let id = pass.color.iter().copied().find(|id| !id.is_none()).unwrap_or(pass.depth);
+            exec::clamped_pass(s, if id.is_none() { target } else { id }, size, target_size, pass.dpi);
+        }
         for d in draws {
             s.stats.draws += 1;
             if d.index[1] == 0 || d.inst.count == 0 { continue; }
             match self.prepare(s, pass, d, view.arena, pick, render_pass.clone(), &attachments, batch, now, deps) {
                 Ok(Some(p)) => prepared.push((d, p)),
                 Ok(None) => s.stats.skipped_draws += 1,
-                Err(e) => { eprintln!("[hal-vulkan] draw: {e}"); s.bad(); s.stats.skipped_draws += 1; }
+                Err(e) => {
+                    if !(super::pipeline::out_of_memory(&e) && self.dev.out_of_files("draw")) { eprintln!("[hal-vulkan] draw: {e}"); }
+                    s.bad(); s.stats.skipped_draws += 1;
+                }
             }
         }
         let mut views = Vec::new();
@@ -295,10 +371,12 @@ impl Vulkan {
         for (i, color) in colors {
             if !pick && color.desc.mips > 1 { self.generate_mips(&color, pass.layer[i], batch); }
             color.transition(batch.cb, color.sampled_layout());
+            batch.rendered(&color);
         }
         if let Some(depth) = depth { depth.transition(batch.cb, depth.sampled_layout()); }
         if hosted {
             self.win.insert((s.id, target.index), Texture { gen: target.gen, image: window.as_ref().unwrap().clone() });
+            self.hosted_sizes.insert((s.id, target.index), size);
         }
         Ok(window)
     }

@@ -47,6 +47,8 @@ pub fn dispatch_main(f: impl FnOnce() + Send + 'static) -> bool {
     run.wanted = true;
     let ready = run.ready;
     shared.run_cv.notify_all();
+    #[cfg(target_os = "macos")]
+    super::appkit::wake_idle_main();
     drop(run);
     if ready && !shared.scheduled.swap(true, Ordering::AcqRel) {
         native::schedule_drain();
@@ -114,6 +116,8 @@ pub fn keep_main_loop_alive() -> Option<MainLoopGuard> {
     run.keep_alive += 1;
     run.wanted = true;
     shared.run_cv.notify_all();
+    #[cfg(target_os = "macos")]
+    super::appkit::wake_idle_main();
     Some(MainLoopGuard { _private: () })
 }
 
@@ -263,6 +267,8 @@ impl Shared {
         let mut run = lock(&self.run);
         run.wanted = true;
         self.run_cv.notify_all();
+        #[cfg(target_os = "macos")]
+        super::appkit::wake_idle_main();
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !run.ready && !run.stop {
             let left = deadline.saturating_duration_since(std::time::Instant::now());

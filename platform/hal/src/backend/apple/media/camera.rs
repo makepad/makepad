@@ -140,6 +140,7 @@ impl CameraStreamNode {
                             height: height as u32,
                             layout: camera_layout::NV12,
                             matrix: 0,
+                            display_rotation: 0,
                             planes: vec![
                                 CameraPlane { row_stride: y_stride as u32, pixel_stride: 1, bytes: y_slice },
                                 CameraPlane { row_stride: uv_stride as u32, pixel_stride: 2, bytes: uv_slice },
@@ -157,6 +158,7 @@ impl CameraStreamNode {
                             height: height as u32,
                             layout: camera_layout::YUY2,
                             matrix: 0,
+                            display_rotation: 0,
                             planes: vec![CameraPlane { row_stride: bytes_per_row as u32, pixel_stride: 2, bytes: packed }],
                         })
                     })

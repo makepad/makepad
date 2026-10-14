@@ -353,10 +353,11 @@ impl Capture {
                 if row <= 0 || pixel <= 0 { return Err("invalid camera plane stride".into()); }
                 planes.push(CameraPlane { row_stride: row as u32, pixel_stride: pixel as u32, bytes: std::slice::from_raw_parts(data, len as usize) });
             }
-            let raw = CameraFrameData { timestamp_ns: time.max(0) as u64, width: width as u32, height: height as u32, layout: if jpeg { camera_layout::MJPEG } else { camera_layout::I420 }, matrix: if jpeg { 3 } else { 1 }, planes };
+            let display_rotation = lock(&Shared::global().state).params.rotation % 4;
+            let raw = CameraFrameData { timestamp_ns: time.max(0) as u64, width: width as u32, height: height as u32, layout: if jpeg { camera_layout::MJPEG } else { camera_layout::I420 }, matrix: if jpeg { 3 } else { 1 }, display_rotation: display_rotation as u8, planes };
             let packed = Arc::from(pack_camera_frame(&raw));
             let frame = if preview {
-                let rotation = (self.orientation as u32 / 90 + 4 - lock(&Shared::global().state).params.rotation) % 4;
+                let rotation = (self.orientation as u32 / 90 + 4 - display_rotation) % 4;
                 let mut frame = if jpeg { video::jpeg_frame(raw.planes[0].bytes)? } else { video::camera_frame(&raw)? };
                 frame.rotate(rotation);
                 Some(Arc::new(frame))

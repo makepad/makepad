@@ -19,9 +19,16 @@ macro_rules! egl_functions {
             _library: ModuleLoader,
         }
         impl Egl {
-            pub fn load() -> Result<Self, String> {
-                let library = ModuleLoader::load("libEGL.so.1").map_err(|_| "cannot load libEGL.so.1")?;
-                Ok(Self { $($field: library.get_symbol($symbol).map_err(|_| concat!("libEGL lacks ", $symbol))?,)* _library: library })
+            /// The process's libEGL, loaded once and never unloaded: the driver it brings in keeps
+            /// process-wide state (the display, TLS destructors of every thread that made a
+            /// context current), so unloading it when one backend ends crashed the threads of
+            /// the others and its own render thread's exit.
+            pub fn load() -> Result<&'static Self, String> {
+                static EGL: std::sync::OnceLock<Result<Egl, String>> = std::sync::OnceLock::new();
+                EGL.get_or_init(|| {
+                    let library = ModuleLoader::load("libEGL.so.1").map_err(|_| "cannot load libEGL.so.1")?;
+                    Ok(Self { $($field: library.get_symbol($symbol).map_err(|_| concat!("libEGL lacks ", $symbol))?,)* _library: library })
+                }).as_ref().map_err(String::clone)
             }
         }
     }
@@ -45,6 +52,10 @@ egl_functions! {
     destroy_context: "eglDestroyContext" (Handle, Handle) -> u32;
 }
 
+// SAFETY: entry points and a library handle that is never closed; EGL is thread-safe per its spec.
+unsafe impl Send for Egl {}
+unsafe impl Sync for Egl {}
+
 impl Egl {
     pub fn gl(&self) -> Result<Gl, String> {
         Gl::load(|name: &CStr| unsafe { (self.get_proc)(name.as_ptr()) })
@@ -58,15 +69,23 @@ struct Wayland {
     _library: ModuleLoader,
 }
 
+// SAFETY: entry points and a library handle that is never closed.
+unsafe impl Send for Wayland {}
+unsafe impl Sync for Wayland {}
+
 impl Wayland {
-    fn load() -> Result<Self, String> {
-        let lib = ModuleLoader::load("libwayland-egl.so.1").map_err(|_| "cannot load libwayland-egl.so.1")?;
-        Ok(Self {
-            create: lib.get_symbol("wl_egl_window_create").map_err(|_| "libwayland-egl lacks wl_egl_window_create")?,
-            resize: lib.get_symbol("wl_egl_window_resize").map_err(|_| "libwayland-egl lacks wl_egl_window_resize")?,
-            destroy: lib.get_symbol("wl_egl_window_destroy").map_err(|_| "libwayland-egl lacks wl_egl_window_destroy")?,
-            _library: lib,
-        })
+    /// Loaded once for the process, like libEGL (never unloaded under the driver).
+    fn load() -> Result<&'static Self, String> {
+        static WAYLAND: std::sync::OnceLock<Result<Wayland, String>> = std::sync::OnceLock::new();
+        WAYLAND.get_or_init(|| {
+            let lib = ModuleLoader::load("libwayland-egl.so.1").map_err(|_| "cannot load libwayland-egl.so.1")?;
+            Ok(Self {
+                create: lib.get_symbol("wl_egl_window_create").map_err(|_| "libwayland-egl lacks wl_egl_window_create")?,
+                resize: lib.get_symbol("wl_egl_window_resize").map_err(|_| "libwayland-egl lacks wl_egl_window_resize")?,
+                destroy: lib.get_symbol("wl_egl_window_destroy").map_err(|_| "libwayland-egl lacks wl_egl_window_destroy")?,
+                _library: lib,
+            })
+        }).as_ref().map_err(String::clone)
     }
 }
 
@@ -79,7 +98,7 @@ struct Window {
 
 /// The display, config and share group every GL context of the process belongs to.
 pub struct Share {
-    pub egl: Egl,
+    pub egl: &'static Egl,
     pub display: Handle,
     pub config: Handle,
     pub context: Handle,
@@ -92,7 +111,7 @@ unsafe impl Sync for Share {}
 pub struct Context {
     pub gl: Gl,
     pub share: std::sync::Arc<Share>,
-    wayland: Option<Wayland>,
+    wayland: Option<&'static Wayland>,
     source: Box<dyn EglSurfaceSource>,
     windows: HashMap<(u32, Id), Window>,
     current: Handle,

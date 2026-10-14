@@ -278,6 +278,11 @@ impl SlugStore {
         self.glyphs.len()
     }
 
+    /// Curves of the glyphs held (retired and free runs not counted).
+    pub fn curves_held(&self) -> u64 {
+        self.glyphs.values().map(|r| r.count as u64).sum()
+    }
+
     pub fn capacity_curves(&self) -> u32 {
         (self.width * self.rows / CURVE_TEXELS) as u32
     }

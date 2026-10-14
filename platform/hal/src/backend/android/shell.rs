@@ -116,6 +116,7 @@ impl Shell for AndroidShell {
                 if lock(&Shared::global().state).ime_session != Some(sid) { return false; }
                 jni::ime_command(cmd)
             },
+            OsCmd::BackUnhandled => jni::back_unhandled(),
             _ => false,
         }
     }
@@ -123,11 +124,13 @@ impl Shell for AndroidShell {
 
 pub struct AndroidBackend { core: Vulkan, host: Option<Id>, offscreen: bool }
 impl AndroidBackend {
-    pub fn new(flags: u32, wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
-        let mut core = Vulkan::with_sources(flags, wake.clone(), Box::new(AndroidSurfaces), Box::new(NativeImages::default()))?;
+    /// `notify` makes every pump look (the Activity's events and frame callbacks); `sessions` the
+    /// session a GPU result is for.
+    pub fn new(flags: u32, sessions: crate::backend::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
+        let mut core = Vulkan::with_sources(flags, sessions, Box::new(AndroidSurfaces), Box::new(NativeImages::default()))?;
         let offscreen = flags & open_flags::OFFSCREEN_WINDOWS != 0;
         if !offscreen { core.set_shell(Box::new(AndroidShell)); }
-        lock(&Shared::global().state).wake = Some(wake);
+        lock(&Shared::global().state).wake = Some(notify);
         Ok(Self { core, host: None, offscreen })
     }
     pub fn params() -> AndroidParams { lock(&Shared::global().state).params.clone() }

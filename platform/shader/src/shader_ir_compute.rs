@@ -8,7 +8,10 @@
 
 use crate::shader_ir::*;
 use makepad_live_id::LiveId;
+use makepad_relax_api::relax_api;
 
+#[relax_api(plain)]
+#[repr(C, u32)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ComputeSlotKind {
     /// A device buffer address (u64). Writable for `buffer_rw`.
@@ -17,7 +20,9 @@ pub enum ComputeSlotKind {
     Param { scalar: IrScalar, lanes: u32 },
 }
 
-#[derive(Clone, Debug)]
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
 pub struct ComputeSlot {
     pub name: LiveId,
     pub global: GlobalId,

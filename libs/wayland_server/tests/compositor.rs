@@ -1,3 +1,6 @@
+// The compositor is Linux-only (the crate's modules are cfg(target_os = "linux")).
+#![cfg(target_os = "linux")]
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -142,7 +145,7 @@ fn open_window(w: &mut World, reg: u32, evs: &[Ev]) -> (Win, u32, u32) {
 fn window_configure_ack_buffer_map_release() {
     let mut w = World::new();
     let (reg, evs) = w.setup();
-    assert_eq!(named(&evs, "global").len(), 11);
+    assert_eq!(named(&evs, "global").len(), 12);
     let (win, shm, _wm) = open_window(&mut w, reg, &evs);
     let evs = w.pump();
     let conf = named(&evs, "configure");
@@ -394,6 +397,205 @@ fn clipboard_selection_between_clients() {
     rd.read_to_string(&mut text).unwrap();
     assert_eq!(text, "pasted");
     let _ = win1;
+}
+
+fn pipe() -> (std::fs::File, OwnedFd) {
+    use std::os::fd::FromRawFd;
+    let mut fds = [0i32; 2];
+    extern "C" { fn pipe(fds: *mut i32) -> i32; }
+    assert_eq!(unsafe { pipe(fds.as_mut_ptr()) }, 0);
+    unsafe { (std::fs::File::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) }
+}
+fn turn(w: &mut World) { for _ in 0..3 { w.srv.run_once(&mut w.comp, 20).unwrap(); } w.srv.settle(&mut w.comp); }
+
+/// A second client with its own registry; `bind` binds a global by name.
+struct Other { c: Client, reg: u32, globals: Vec<Ev> }
+impl Other {
+    fn join(w: &mut World) -> Other {
+        let (a, b) = UnixStream::pair().unwrap();
+        w.srv.add_client(&mut w.comp, a).unwrap();
+        let mut c = Client::new(b);
+        let reg = c.create(1, wl_display::REQ_GET_REGISTRY, &wl_registry::INTERFACE, vec![]);
+        turn(w);
+        let globals = c.events();
+        Other { c, reg, globals }
+    }
+    fn bind(&mut self, name: &str, v: u32) -> u32 {
+        let g = self.globals.iter().find(|e| e.name == "global" && e.args[1].as_str() == name).unwrap();
+        let gname = g.args[0].as_uint();
+        let id = self.c.alloc(find_iface(name));
+        self.c.req(self.reg, wl_registry::REQ_BIND, vec![Value::Uint(gname), Value::NewIdDyn { interface: name.into(), version: v, id }]);
+        id
+    }
+    /// A surface, a clipboard device and a primary-selection device.
+    fn devices(&mut self) -> (u32, u32, u32) {
+        let comp = self.bind("wl_compositor", 6);
+        let seat = self.bind("wl_seat", 8);
+        let mgr = self.bind("wl_data_device_manager", 3);
+        let pmgr = self.bind("zwp_primary_selection_device_manager_v1", 1);
+        let surf = self.c.create(comp, wl_compositor::REQ_CREATE_SURFACE, &wl_surface::INTERFACE, vec![]);
+        let _keyboard = self.c.create(seat, wl_seat::REQ_GET_KEYBOARD, &wl_keyboard::INTERFACE, vec![]);
+        let dev = self.c.create(mgr, wl_data_device_manager::REQ_GET_DATA_DEVICE, &wl_data_device::INTERFACE, vec![Value::Object(seat)]);
+        let pdev = self.c.create(pmgr, zwp_primary_selection_device_manager_v1::REQ_GET_DEVICE, &zwp_primary_selection_device_v1::INTERFACE, vec![Value::Object(seat)]);
+        (surf, dev, pdev)
+    }
+    /// The offer of the last `selection` event of `dev`.
+    fn selection(evs: &[Ev], dev: u32) -> u32 { evs.iter().filter(|e| e.id == dev && e.name == "selection").last().expect("selection event").args[0].as_uint() }
+    fn paste(&mut self, w: &mut World, offer: u32, primary: bool, mime: &str) -> String {
+        let (mut rd, wr) = pipe();
+        let op = if primary { zwp_primary_selection_offer_v1::REQ_RECEIVE } else { wl_data_offer::REQ_RECEIVE };
+        self.c.req(offer, op, vec![Value::Str(Some(mime.into())), Value::Fd(wr)]);
+        turn(w);
+        let mut text = String::new();
+        rd.read_to_string(&mut text).unwrap();
+        text
+    }
+}
+
+/// Text a host app copied is every Wayland client's selection, offered as the usual text types,
+/// for the clipboard and the primary selection; it comes before the keyboard enter.
+#[test]
+fn host_text_is_the_clients_selection() {
+    let mut w = World::new();
+    let _ = w.setup();
+    let mut o = Other::join(&mut w);
+    let (surf, dev, pdev) = o.devices();
+    turn(&mut w);
+    o.c.events();
+    w.comp.set_host_selection(&mut w.srv.core, Board::Clipboard, "from a makepad app".into());
+    w.comp.set_host_selection(&mut w.srv.core, Board::Primary, "selected in makepad".into());
+    turn(&mut w);
+    assert!(o.c.events().is_empty(), "no selection before the keyboard");
+    w.comp.keyboard_focus(&mut w.srv.core, Some((2, surf)));
+    turn(&mut w);
+    let evs = o.c.events();
+    let order: Vec<&str> = evs.iter().filter(|e| e.name == "selection" || e.name == "enter").map(|e| e.name).collect();
+    assert_eq!(order, ["selection", "selection", "enter"], "{order:?}");
+    let offer = Other::selection(&evs, dev);
+    let mimes: Vec<&str> = evs.iter().filter(|e| e.id == offer && e.name == "offer").map(|e| e.args[0].as_str()).collect();
+    assert_eq!(mimes, TEXT_MIMES);
+    for mime in ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"] {
+        assert_eq!(o.paste(&mut w, offer, false, mime), "from a makepad app");
+    }
+    let poffer = Other::selection(&evs, pdev);
+    assert_eq!(o.paste(&mut w, poffer, true, "text/plain;charset=utf-8"), "selected in makepad");
+    // a newer host copy: the focused client hears it at once, the old offer is stale (closed unanswered)
+    w.comp.set_host_selection(&mut w.srv.core, Board::Clipboard, "second".into());
+    turn(&mut w);
+    let evs = o.c.events();
+    let newer = Other::selection(&evs, dev);
+    assert_ne!(newer, offer);
+    assert_eq!(o.paste(&mut w, offer, false, "text/plain"), "");
+    assert_eq!(o.paste(&mut w, newer, false, "text/plain"), "second");
+}
+
+/// A client's copy is read once for the host (UiEvent::Selection), other clients paste it from the
+/// source, and when the source goes (its app quit) its text stays the selection.
+#[test]
+fn client_selection_reaches_the_host_and_outlives_its_source() {
+    let mut w = World::new();
+    let reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let r2 = reads.clone();
+    w.comp.set_selection_reader(std::sync::Arc::new(move |b, g, t| r2.lock().unwrap().push((b, g, t))));
+    let (reg, evs) = w.setup();
+    let seat1 = w.bind(reg, &evs, "wl_seat", 8);
+    let mgr1 = w.bind(reg, &evs, "wl_data_device_manager", 3);
+    let dev1 = w.c.create(mgr1, wl_data_device_manager::REQ_GET_DATA_DEVICE, &wl_data_device::INTERFACE, vec![Value::Object(seat1)]);
+    let mut o = Other::join(&mut w);
+    let (surf2, dev2, _) = o.devices();
+    turn(&mut w);
+    w.comp.keyboard_focus(&mut w.srv.core, Some((2, surf2)));
+    turn(&mut w);
+    o.c.events();
+    // client 1 copies: offers html and text; the server asks for the text
+    let src = w.c.create(mgr1, wl_data_device_manager::REQ_CREATE_DATA_SOURCE, &wl_data_source::INTERFACE, vec![]);
+    for m in ["text/html", "UTF8_STRING", "text/plain;charset=utf-8"] { w.c.req(src, wl_data_source::REQ_OFFER, vec![Value::Str(Some(m.into()))]); }
+    w.c.req(dev1, wl_data_device::REQ_SET_SELECTION, vec![Value::Object(src), Value::Uint(1)]);
+    turn(&mut w);
+    let evs = w.c.events();
+    let send = evs.iter().find(|e| e.id == src && e.name == "send").expect("the server reads the copy");
+    assert_eq!(send.args[0].as_str(), "text/plain;charset=utf-8");
+    let Value::Fd(fd) = &send.args[1] else { panic!() };
+    std::fs::File::from(fd.try_clone().unwrap()).write_all("copied in a client ✓".as_bytes()).unwrap();
+    drop(evs);
+    let read = loop {
+        if let Some(r) = reads.lock().unwrap().pop() { break r; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    assert_eq!(read.0, Board::Clipboard);
+    w.comp.selection_read(&mut w.srv.core, read.0, read.1, read.2);
+    let got: Vec<String> = w.comp.take_events().into_iter().filter_map(|e| match e { UiEvent::Selection { board: Board::Clipboard, text } => Some(text), _ => None }).collect();
+    assert_eq!(got, ["copied in a client ✓"]);
+    // client 2 (focused) pastes html straight from the source
+    let evs = o.c.events();
+    let offer = Other::selection(&evs, dev2);
+    let mimes: Vec<&str> = evs.iter().filter(|e| e.id == offer && e.name == "offer").map(|e| e.args[0].as_str()).collect();
+    assert_eq!(mimes, ["text/html", "UTF8_STRING", "text/plain;charset=utf-8"]);
+    let (mut rd, wr) = pipe();
+    o.c.req(offer, wl_data_offer::REQ_RECEIVE, vec![Value::Str(Some("text/html".into())), Value::Fd(wr)]);
+    turn(&mut w);
+    let evs = w.c.events();
+    let send = evs.iter().find(|e| e.id == src && e.name == "send").expect("send to the source");
+    assert_eq!(send.args[0].as_str(), "text/html");
+    let Value::Fd(fd) = &send.args[1] else { panic!() };
+    std::fs::File::from(fd.try_clone().unwrap()).write_all(b"<b>x</b>").unwrap();
+    drop(evs);
+    let mut html = String::new();
+    rd.read_to_string(&mut html).unwrap();
+    assert_eq!(html, "<b>x</b>");
+    // client 1 quits: client 2 is offered the text the compositor kept, and pastes it
+    drop(std::mem::replace(&mut w.c, Client::new(UnixStream::pair().unwrap().0)));
+    turn(&mut w);
+    let evs = o.c.events();
+    let kept = Other::selection(&evs, dev2);
+    assert_ne!(kept, offer);
+    assert_eq!(o.paste(&mut w, kept, false, "text/plain;charset=utf-8"), "copied in a client ✓");
+    assert!(w.comp.take_events().iter().all(|e| !matches!(e, UiEvent::Selection { .. })), "the kept text is not news to the host");
+}
+
+/// A source destroyed before its text was read: the text, when it arrives, is the selection.
+/// A clear (set_selection null) and a new copy make an old read stale.
+#[test]
+fn selection_read_after_the_source_went() {
+    let mut w = World::new();
+    let reads = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let r2 = reads.clone();
+    w.comp.set_selection_reader(std::sync::Arc::new(move |b, g, t| r2.lock().unwrap().push((b, g, t))));
+    let (reg, evs) = w.setup();
+    let seat1 = w.bind(reg, &evs, "wl_seat", 8);
+    let pmgr = w.bind(reg, &evs, "zwp_primary_selection_device_manager_v1", 1);
+    let pdev = w.c.create(pmgr, zwp_primary_selection_device_manager_v1::REQ_GET_DEVICE, &zwp_primary_selection_device_v1::INTERFACE, vec![Value::Object(seat1)]);
+    let src = w.c.create(pmgr, zwp_primary_selection_device_manager_v1::REQ_CREATE_SOURCE, &zwp_primary_selection_source_v1::INTERFACE, vec![]);
+    w.c.req(src, zwp_primary_selection_source_v1::REQ_OFFER, vec![Value::Str(Some("text/plain".into()))]);
+    w.c.req(pdev, zwp_primary_selection_device_v1::REQ_SET_SELECTION, vec![Value::Object(src), Value::Uint(1)]);
+    turn(&mut w);
+    let evs = w.c.events();
+    let send = evs.iter().find(|e| e.id == src && e.name == "send").expect("the server reads the selection");
+    let Value::Fd(fd) = &send.args[1] else { panic!() };
+    let fd = fd.try_clone().unwrap();
+    drop(evs);
+    w.c.req(src, zwp_primary_selection_source_v1::REQ_DESTROY, vec![]);
+    turn(&mut w);
+    std::fs::File::from(fd).write_all(b"late").unwrap();
+    let read = loop {
+        if let Some(r) = reads.lock().unwrap().pop() { break r; }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    };
+    assert_eq!(read.0, Board::Primary);
+    let generation = read.1;
+    w.comp.selection_read(&mut w.srv.core, read.0, read.1, read.2);
+    assert!(w.comp.take_events().iter().any(|e| matches!(e, UiEvent::Selection { board: Board::Primary, text } if text == "late")));
+    let mut o = Other::join(&mut w);
+    let (surf, _, opdev) = o.devices();
+    turn(&mut w);
+    w.comp.keyboard_focus(&mut w.srv.core, Some((2, surf)));
+    turn(&mut w);
+    let evs = o.c.events();
+    let offer = Other::selection(&evs, opdev);
+    assert_eq!(o.paste(&mut w, offer, true, "text/plain"), "late");
+    // the same read again (stale now): nothing
+    w.comp.selection_read(&mut w.srv.core, Board::Primary, generation, "again".into());
+    assert!(w.comp.take_events().is_empty());
 }
 
 #[test]

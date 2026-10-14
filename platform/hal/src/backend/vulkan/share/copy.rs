@@ -420,6 +420,18 @@ impl State {
     }
 }
 
+/// The process's Vulkan device was replaced after a loss: the copier and every import made on
+/// the old one are dropped; the next copy makes them again on the new device (the registered
+/// descriptors are kept).
+pub fn device_replaced() {
+    let mut state = lock(&STATE);
+    if let Some(state) = state.as_mut() {
+        state.foreign.clear();
+        for entry in state.registered.values_mut() { entry.image = None; }
+        state.copier = None;
+    }
+}
+
 /// Name an image for the copies below (the descriptor is kept until `release`).
 pub fn register(fd: OwnedFd, layout: Layout) -> u64 {
     let mut state = lock(&STATE);

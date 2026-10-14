@@ -4,10 +4,13 @@
 //! cross by name (`TextureAdoptGl`), and a fence (`GlFence`) after the app's writes makes the
 //! HAL's frames wait for them on the GPU.
 use crate::backend::gl::egl::{Egl, Handle};
+use makepad_relax_api::relax_api;
 use std::ffi::{c_void, CString};
 
+/// A handle to JIT-compiled code (makepad run): the libEGL it uses is this crate's one load.
+#[relax_api(handle)]
 pub struct GlContext {
-    egl: Egl,
+    egl: &'static Egl,
     display: Handle,
     config: Handle,
     context: Handle,
@@ -18,9 +21,16 @@ pub struct GlContext {
 // SAFETY: EGL contexts may be made current on any (one) thread at a time; the handles are values.
 unsafe impl Send for GlContext {}
 
+#[relax_api]
 impl GlContext {
     /// A context sharing the HAL's names: `share` is the `GlShare` event's display, config, context.
-    pub fn new(share: [u64; 3]) -> Result<Self, String> {
+    /// None when it cannot be made (the reason is logged); an op, so the one libEGL load and the
+    /// EGL entry points stay on this crate's side.
+    pub fn new(share: [u64; 3]) -> Option<Self> {
+        Self::make(share).map_err(|e| eprintln!("[hal-gl] GL interop context: {e}")).ok()
+    }
+
+    fn make(share: [u64; 3]) -> Result<Self, String> {
         let egl = Egl::load()?;
         let [display, config, shared] = share.map(|v| v as Handle);
         let context = unsafe { (egl.create_context)(display, config, shared, [0x3098, 3, 0x3038].as_ptr()) };

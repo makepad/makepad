@@ -491,6 +491,7 @@ impl ScriptHeap {
     /// Returns the retained-capacity estimate at the last reconcile plus the
     /// logical bytes charged against the cap since. Without a cap this is the
     /// last reconciled estimate only.
+    #[relax_api]
     pub fn accounted_heap_bytes(&self) -> usize {
         let charged = self.heap_cap.as_ref().map_or(0, |cap| cap.allocated);
         self.heap_baseline_bytes.saturating_add(charged)
@@ -501,6 +502,7 @@ impl ScriptHeap {
     /// VM configuration, host-side value injection, or garbage collection.
     /// Normal script allocation paths update the cached amount in constant
     /// time instead of scanning the heap on every instruction.
+    #[relax_api]
     pub fn reconcile_heap_bytes(&mut self) {
         self.heap_baseline_bytes = self.estimated_heap_bytes();
         let Some(maximum) = self.max_heap_bytes else {

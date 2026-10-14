@@ -535,7 +535,14 @@ impl Player {
                 let _: () = msg_send![media_type_vid, release];
 
                 let video_track_count: usize = msg_send![video_tracks_obj, count];
-                let (width, height) = if video_track_count > 0 {
+                // The item's presentation size first: it is the size the
+                // picture is shown at, and the only one a stream (HLS) has —
+                // its asset lists no tracks, so without it a stream reported
+                // 0x0 and the widget could not keep its aspect.
+                let presented: NSSize = msg_send![self.player_item.as_id(), presentationSize];
+                let (width, height) = if presented.width >= 1.0 && presented.height >= 1.0 {
+                    (presented.width as u32, presented.height as u32)
+                } else if video_track_count > 0 {
                     let track: ObjcId = msg_send![video_tracks_obj, objectAtIndex: 0usize];
                     let size: NSSize = msg_send![track, naturalSize];
                     (size.width as u32, size.height as u32)

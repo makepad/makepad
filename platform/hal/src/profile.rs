@@ -66,12 +66,13 @@ fn name(metric: Metric) -> &'static str {
     }
 }
 
-/// What the user was doing when a sample was taken.
+/// What the user was doing when a sample was taken. Fieldless: `input` is an op.
 #[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Input {
     Move,
-    Button(bool),
+    ButtonDown,
+    ButtonUp,
     Scroll,
 }
 
@@ -95,6 +96,9 @@ struct Samples {
     children: std::collections::HashMap<usize, u64>,
     /// named event counts (e.g. why an app beat without drawing)
     counts: std::collections::BTreeMap<&'static str, u64>,
+    /// each window of the app: its last frame, and the intervals between its frames (us) per
+    /// activity
+    windows: std::collections::BTreeMap<usize, (u64, Vec<Vec<u32>>)>,
 }
 static SAMPLES: Mutex<Option<Samples>> = Mutex::new(None);
 
@@ -109,13 +113,16 @@ pub fn on() -> bool {
 }
 
 /// Turn the profile on (a fresh recording) or off (prints the recording).
+/// An op like the others: JIT code (the remote's `trace` command) calls the
+/// provided crate's own, never a JIT copy with its own statics.
+#[relax_api]
 pub fn set(enable: bool) {
     if enable == on() {
         return;
     }
     if enable {
         let now = crate::clock_ns();
-        *lock() = Some(Samples { started: now, printed: now, data: vec![vec![Vec::new(); METRICS.len()]; ACTIVITIES.len()], children: Default::default(), counts: Default::default() });
+        *lock() = Some(Samples { started: now, printed: now, data: vec![vec![Vec::new(); METRICS.len()]; ACTIVITIES.len()], children: Default::default(), counts: Default::default(), windows: Default::default() });
         ON.store(true, Ordering::Release);
     } else {
         ON.store(false, Ordering::Release);
@@ -134,7 +141,8 @@ pub fn input(input: Input) {
     match input {
         Input::Move => LAST_MOVE.store(now, Ordering::Relaxed),
         Input::Scroll => LAST_SCROLL.store(now, Ordering::Relaxed),
-        Input::Button(down) => HELD.store(down, Ordering::Relaxed),
+        Input::ButtonDown => HELD.store(true, Ordering::Relaxed),
+        Input::ButtonUp => HELD.store(false, Ordering::Relaxed),
     }
 }
 
@@ -173,6 +181,7 @@ pub fn since(metric: Metric, since: u64) {
 }
 
 /// A hosted app (`key`, the host's) delivered a new frame now.
+#[relax_api]
 pub fn child_frame(key: usize) {
     if !on() {
         return;
@@ -180,6 +189,24 @@ pub fn child_frame(key: usize) {
     let now = crate::clock_ns();
     let last = lock().as_mut().and_then(|s| s.children.insert(key, now));
     if let Some(last) = last { record(Metric::ChildFrame, now - last); }
+}
+
+/// The app built a frame of its window `window` now: per-window frame intervals, so a second
+/// window that is paced by the first (or starved by it) shows on its own line.
+#[relax_api]
+pub fn window_frame(window: usize) {
+    if !on() {
+        return;
+    }
+    let now = crate::clock_ns();
+    let a = activity(now);
+    let mut guard = lock();
+    let Some(samples) = guard.as_mut() else { return };
+    let entry = samples.windows.entry(window).or_insert_with(|| (0, vec![Vec::new(); ACTIVITIES.len()]));
+    let last = std::mem::replace(&mut entry.0, now);
+    if last != 0 {
+        entry.1[a].push(((now - last) / 1000).min(u32::MAX as u64) as u32);
+    }
 }
 
 /// Count one `what` (printed with the report).
@@ -208,28 +235,38 @@ fn report(samples: &Samples) -> String {
         for (what, n) in &samples.counts { let _ = write!(out, " {what}={n}"); }
     }
     for (a, metrics) in samples.data.iter().enumerate() {
-        if metrics.iter().all(|m| m.is_empty()) {
+        if metrics.iter().all(|m| m.is_empty()) && samples.windows.values().all(|(_, w)| w[a].is_empty()) {
             continue;
         }
         let _ = write!(out, "\n[frame-profile] -- {}", ACTIVITIES[a]);
         for (i, values) in metrics.iter().enumerate() {
-            if values.is_empty() {
-                continue;
-            }
-            let mut v = values.clone();
-            v.sort_unstable();
-            let q = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize] as f64 / 1000.0;
-            let _ = write!(out, "\n[frame-profile]   {:<18} {:>6} {:>7.2} {:>7.2} {:>7.2} {:>7.2}", name(METRICS[i]), v.len(), q(0.5), q(0.9), q(0.99), *v.last().unwrap() as f64 / 1000.0);
-            if matches!(METRICS[i], Metric::PresentInterval | Metric::PeerPresentInterval | Metric::Beat | Metric::ChildFrame) {
-                const EDGES: [u32; 7] = [5_000, 9_000, 13_000, 17_500, 25_000, 34_000, 50_000];
-                let mut counts = [0usize; 8];
-                for x in &v {
-                    counts[EDGES.iter().position(|e| x < e).unwrap_or(7)] += 1;
-                }
-                let _ = write!(out, " | <5:{} <9:{} <13:{} <17.5:{} <25:{} <34:{} <50:{} >50:{}",
-                    counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7]);
-            }
+            let interval = matches!(METRICS[i], Metric::PresentInterval | Metric::PeerPresentInterval | Metric::Beat | Metric::ChildFrame);
+            line(&mut out, name(METRICS[i]), values, interval);
+        }
+        for (window, (_, per_activity)) in &samples.windows {
+            line(&mut out, &format!("window {window} frame iv"), &per_activity[a], true);
         }
     }
     out
+}
+
+/// One metric's line: n p50 p90 p99 max, and for an interval its histogram.
+fn line(out: &mut String, label: &str, values: &[u32], interval: bool) {
+    use std::fmt::Write;
+    if values.is_empty() {
+        return;
+    }
+    let mut v = values.to_vec();
+    v.sort_unstable();
+    let q = |p: f64| v[((v.len() - 1) as f64 * p).round() as usize] as f64 / 1000.0;
+    let _ = write!(out, "\n[frame-profile]   {:<18} {:>6} {:>7.2} {:>7.2} {:>7.2} {:>7.2}", label, v.len(), q(0.5), q(0.9), q(0.99), *v.last().unwrap() as f64 / 1000.0);
+    if interval {
+        const EDGES: [u32; 7] = [5_000, 9_000, 13_000, 17_500, 25_000, 34_000, 50_000];
+        let mut counts = [0usize; 8];
+        for x in &v {
+            counts[EDGES.iter().position(|e| x < e).unwrap_or(7)] += 1;
+        }
+        let _ = write!(out, " | <5:{} <9:{} <13:{} <17.5:{} <25:{} <34:{} <50:{} >50:{}",
+            counts[0], counts[1], counts[2], counts[3], counts[4], counts[5], counts[6], counts[7]);
+    }
 }

@@ -70,6 +70,9 @@ pub struct Vulkan {
     draw_images: Vec<(u32, makepad_vulkan::vk::DescriptorType, makepad_vulkan::vk::DescriptorImageInfo)>,
     passes: HashMap<PassKey, Arc<RenderPass>>,
     win: HashMap<(u32, u32), Texture>,
+    /// A hosted window's newest frame size: its host's shared image is allocated larger than
+    /// the window (resizes reuse it), and a snapshot or copy reads only what the frame drew.
+    hosted_sizes: HashMap<(u32, u32), [u32; 2]>,
     scanout_images: HashMap<(u32, Id), Vec<Arc<Image>>>,
     aliases: HashMap<(u32, Id), Id>,
     pick_ids: HashMap<(u32, Id), Id>,
@@ -87,25 +90,44 @@ pub struct Vulkan {
     compiler: Worker,
     /// The UI's memory reserve and the creates waiting for room (`crate::gpu_pressure`).
     pressure: crate::gpu_pressure::Pressure,
+    /// The instance extensions the device was made with (a replacement device gets the same).
+    instance_extensions: Vec<&'static std::ffi::CStr>,
+    /// the sessions heard `DeviceLost` and the replacement device is not made yet
+    lost_posted: bool,
+    /// when the next attempt to make a replacement device may run (HAL clock ns), and how
+    /// many attempts failed (the wait doubles, up to `RESET_RETRY_MAX_NS`)
+    retry_ns: u64,
+    reset_failures: u32,
+    /// `simulate_device_loss` asked for a loss: the next step treats the device as lost
+    simulate: bool,
+    /// `MAKEPAD_HAL_SIMULATE_DEVICE_LOSS_MS` (`super::simulated_loss_at`): a loss is simulated
+    /// this long after the backend was made (app-level checks of the reset path, e.g. a grab
+    /// before and after)
+    simulate_at_ns: Option<u64>,
 }
 
+/// The first wait before another attempt at a replacement device, and the longest.
+const RESET_RETRY_NS: u64 = 250_000_000;
+const RESET_RETRY_MAX_NS: u64 = 8_000_000_000;
+
 impl Vulkan {
-    pub fn new(flags: u32, wake: Arc<dyn Fn() + Send + Sync>, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
+    /// `sessions` makes a completion's session look; `notify` (the shell's events) every pump.
+    pub fn new(flags: u32, sessions: super::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Self, String> {
         #[cfg(not(target_os = "linux"))]
         drop(notify);
         #[cfg(target_os = "linux")]
         if flags & open_flags::OFFSCREEN_WINDOWS == 0 {
             let shell = super::linux::Shared::global();
             shell.start(flags, notify)?;
-            return Self::on_shell(flags, wake, shell).inspect_err(|_| super::linux::stop_main_loop());
+            return Self::on_shell(flags, sessions, shell).inspect_err(|_| super::linux::stop_main_loop());
         }
-        Self::with_sources(flags, wake, Box::new(Offscreen), Box::new(NativeImages::default()))
+        Self::with_sources(flags, sessions, Box::new(Offscreen), Box::new(NativeImages::default()))
     }
 
     /// On a started Linux shell (X11, Wayland or the DRM/KMS direct shell).
     #[cfg(target_os = "linux")]
-    pub fn on_shell(flags: u32, wake: Arc<dyn Fn() + Send + Sync>, shell: &'static super::linux::Shared) -> Result<Self, String> {
-        let mut backend = Self::with_sources(flags, wake, super::linux::surface_source(shell), Box::new(NativeImages::default()))?;
+    pub fn on_shell(flags: u32, sessions: super::SessionNotify, shell: &'static super::linux::Shared) -> Result<Self, String> {
+        let mut backend = Self::with_sources(flags, sessions, super::linux::surface_source(shell), Box::new(NativeImages::default()))?;
         backend.info.flags |= info_flags::DISPLAY_CLOCK;
         if shell.client_chrome() { backend.info.flags |= info_flags::CLIENT_CHROME; }
         if shell.direct_display() { backend.info.flags |= info_flags::DIRECT_DISPLAY; }
@@ -115,10 +137,11 @@ impl Vulkan {
     }
 
     /// Shell construction seam. Native surface loss only retires Windows' swapchain objects.
-    pub fn with_sources(flags: u32, wake: Arc<dyn Fn() + Send + Sync>, mut source: Box<dyn VkSurfaceSource>, sharing: Box<dyn VkExternalImages>) -> Result<Self, String> {
+    pub fn with_sources(flags: u32, sessions: super::SessionNotify, mut source: Box<dyn VkSurfaceSource>, sharing: Box<dyn VkExternalImages>) -> Result<Self, String> {
         if flags & open_flags::OFFSCREEN_WINDOWS != 0 { source = Box::new(Offscreen); }
         let mut extensions = source.instance_extensions();
         if !extensions.is_empty() && !extensions.contains(&makepad_vulkan::vk::KHR_SURFACE_NAME) { extensions.push(makepad_vulkan::vk::KHR_SURFACE_NAME); }
+        let instance_extensions = extensions.clone();
         let dev = Device::shared(&extensions, &sharing.device_extensions(), &mut *source)?;
         source.device_ready(dev.clone())?;
         #[cfg(target_os = "linux")]
@@ -139,12 +162,14 @@ impl Vulkan {
         crate::gpu_limits::set_max_gpu_buffer_bytes(info.max_buffer);
         crate::gpu_limits::set_gpu_working_set_bytes(info.working_set);
         Ok(Self { #[cfg(any(target_os = "linux", target_os = "android"))] media: Default::default(), #[cfg(target_os = "linux")] capture_pool: HashMap::new(), #[cfg(any(target_os = "linux", target_os = "android"))] shell: None, dev, info, tex: HashMap::new(), buf: HashMap::new(), pipe: HashMap::new(), programs: HashMap::new(), draw_bins: Vec::new(), draw_images: Vec::new(),
-            passes: HashMap::new(), win: HashMap::new(), scanout_images: HashMap::new(), aliases: HashMap::new(), pick_ids: HashMap::new(), pick_pending: HashSet::new(),
+            passes: HashMap::new(), win: HashMap::new(), hosted_sizes: HashMap::new(), scanout_images: HashMap::new(), aliases: HashMap::new(), pick_ids: HashMap::new(), pick_pending: HashSet::new(),
             fallback: HashMap::new(), windows: surface::Windows::new(source), sharing,
             #[cfg(target_os = "linux")] foreign_support,
-            batch: None, spares: Default::default(), mailbox: Mailbox::new(wake),
+            batch: None, spares: Default::default(), mailbox: Mailbox::new(sessions),
             queue: Some(Worker::new("makepad-vulkan-submit")?), complete: Arc::new(Worker::new("makepad-vulkan-complete")?),
-            compiler: Worker::new("makepad-vulkan-compile")?, pressure: Default::default() })
+            compiler: Worker::new("makepad-vulkan-compile")?, pressure: Default::default(),
+            instance_extensions, lost_posted: false, retry_ns: 0, reset_failures: 0, simulate: false,
+            simulate_at_ns: super::simulated_loss_at() })
     }
 
     #[cfg(target_os = "android")]
@@ -172,6 +197,9 @@ impl Vulkan {
         if object.lent.is_some() || object.imported { return None; }
         // Embedded windows are host table entries whose storage is made at first render.
         let image = Image::new(self.dev.clone(), object).map_err(|e| eprintln!("[hal-vulkan] target allocation: {e}")).ok()?;
+        // a create that starved has its storage now: it is no longer handed back to its app
+        // (that released a texture already drawn into -- a host's copy of a hosted frame)
+        if self.pressure.is_starved(s.id, id) { self.pressure.forget(s.id, id); }
         if let Ok(entry) = s.textures.get_mut(s.id, id) { entry.val.bytes = image.bytes; }
         if let Some(row) = s.ledger.get_mut(Kind::Texture, id.index) { row.bytes = image.bytes; }
         self.tex.insert((sid, id.index), Texture { gen: id.gen, image: image.clone() });
@@ -209,7 +237,6 @@ impl Vulkan {
                 Event::Readback { req, status, rect, pixels } => world.to_session(sid, |q| q.readback(req, status, rect, &pixels)),
                 Event::Pick { req, ids } => world.to_session(sid, |q| q.pick_result(req, &ids.into_iter().flat_map(u32::to_le_bytes).collect::<Vec<_>>())),
                 Event::Shared { id, handle } => world.to_session(sid, |q| q.texture_shared(id, handle)),
-                Event::Lost => { let g = world.device_generation; world.to_session(sid, |q| q.device_lost(g)) }
             }
         }
         for ((sid, index), pipe) in &mut self.pipe {
@@ -252,6 +279,8 @@ impl Vulkan {
     /// HAL first gives back what it holds for nothing (idle transient targets, evictable
     /// buffers), then tells every session how much is still missing.
     fn watch_memory(&mut self, world: &mut World) {
+        // a submission or fence wait out of memory waits on its worker: ask for room now
+        if self.dev.starved.swap(false, Ordering::AcqRel) { self.pressure.submit_starved(); }
         let now = crate::clock_ns();
         if !self.pressure.due(now) { return; }
         let Some(b) = self.dev.memory_budget(true) else {
@@ -262,7 +291,7 @@ impl Vulkan {
         };
         let reserve = crate::gpu_pressure::ui_reserve(b.size);
         let short = self.pressure.shortfall(b.free(), reserve);
-        let freed = if short > 0 {
+        let freed = if self.pressure.sustained(now, short) {
             let world_now = world.now();
             let targets = self.trim_idle_targets(world, world_now);
             targets + if targets < short { self.evict_buffers(world, short - targets) } else { 0 }
@@ -325,10 +354,69 @@ impl Backend for Vulkan {
     #[cfg(target_os = "linux")]
     fn dmabuf(&mut self) -> Option<&mut dyn crate::dmabuf::Api> { Some(self) }
     fn info(&self) -> HalInfo { self.info }
-    fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) { self.drain(world); exec::submit(self, world, sid, view); self.flush(); }
+    fn submit(&mut self, world: &mut World, sid: u32, view: &CmdView) { self.recover(world); self.drain(world); exec::submit(self, world, sid, view); self.flush(); }
+
+    /// The pipeline variants this batch's frames draw with first (a target layout and blend /
+    /// depth-write / cull state the program was not built with), compiled before the batch runs:
+    /// a driver compile is milliseconds to tens of milliseconds, an app's first frame needs
+    /// dozens, and under the HAL's lock every other session (the run's boot window among them)
+    /// would wait for them. A pass whose layout is not known yet (a target this batch does not
+    /// create) compiles in the frame as before.
+    fn work_ahead(&mut self, world: &World, sid: u32, view: &CmdView) -> Option<Box<dyn FnOnce() + Send>> {
+        use crate::cmds::HalCmd;
+        let s = world.session(sid)?;
+        let mut created = HashMap::new();
+        for cmd in view.cmds {
+            if let Some(HalCmd::TextureCreate { id, format, .. }) = cmd.decode(view.arena) { created.insert(id, format); }
+        }
+        let format_of = |id: Id| s.textures.get(sid, id).ok().map(|t| t.val.format).or_else(|| created.get(&id).copied());
+        let mut needed: Vec<(Arc<State>, PassKey, u32)> = Vec::new();
+        for cmd in view.cmds {
+            let Some(HalCmd::Frame { target, kind, packet }) = cmd.decode(view.arena) else { continue };
+            let Some(packet) = view.frames.get(packet as usize) else { continue };
+            let Some(passes) = frame::slice(packet.passes, view.passes.len()) else { continue };
+            let is_window = kind & !target::FLAGS == target::WINDOW;
+            'pass: for pass in &view.passes[passes] {
+                let mut key = PassKey { colors: [pipeline::ABSENT; 4], depth: pipeline::ABSENT, load: pass.load };
+                for (i, id) in pass.color.iter().enumerate().filter(|(_, id)| !id.is_none()) {
+                    let Some(format) = format_of(*id) else { continue 'pass };
+                    key.colors[i] = format;
+                }
+                if key.colors.iter().all(|c| *c == pipeline::ABSENT) && is_window {
+                    // the window's own target: its embedded texture, else a BGRA8 image
+                    key.colors[0] = match s.windows.get(sid, target).ok().and_then(|w| w.val.embedded) {
+                        Some(em) => match format_of(em.tex) { Some(format) => format, None => continue 'pass },
+                        None => format::BGRA8,
+                    };
+                }
+                if !pass.depth.is_none() {
+                    let Some(format) = format_of(pass.depth) else { continue 'pass };
+                    key.depth = format;
+                }
+                let Some(draws) = frame::slice(pass.draws, view.draws.len()) else { continue };
+                for d in &view.draws[draws] {
+                    let Some(p) = self.pipe.get(&(sid, d.pipeline.index)).filter(|p| p.gen == d.pipeline.gen) else { continue };
+                    if p.state.lacks(key, d.flags) && !needed.iter().any(|(state, k, f)| Arc::ptr_eq(state, &p.state) && k.colors == key.colors && k.depth == key.depth && *f == d.flags) {
+                        needed.push((p.state.clone(), key, d.flags));
+                    }
+                }
+            }
+        }
+        if needed.is_empty() { return None; }
+        let dev = self.dev.clone();
+        Some(Box::new(move || {
+            for (state, key, flags) in needed {
+                match RenderPass::new(dev.clone(), key) {
+                    Ok(pass) => { state.select(&pass, flags); }
+                    Err(e) => eprintln!("[hal-vulkan] render pass for a pipeline variant: {e}"),
+                }
+            }
+        }))
+    }
     fn host_gpu(&mut self) -> Option<&mut dyn Gpu> { Some(self) }
     fn step(&mut self, world: &mut World, sid: u32) {
         self.flush(); self.drain(world);
+        self.recover(world);
         #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell {
             for (owner, id) in shell.drain_events(sid, world) {
@@ -365,7 +453,9 @@ impl Backend for Vulkan {
     }
     fn next_due(&self, world: &World, sid: u32) -> Option<u64> {
         let watch = self.pressure.waiting().then(|| world.now() + crate::gpu_pressure::CHECK_NS);
-        let timer = exec::next_timer(world, sid).into_iter().chain(watch).min();
+        // a lost device is tried again (`recover`) without anything else to wake the HAL
+        let reset = self.lost_posted.then(|| world.now() + RESET_RETRY_NS);
+        let timer = exec::next_timer(world, sid).into_iter().chain(watch).chain(reset).min();
         #[cfg(any(target_os = "linux", target_os = "android"))]
         { return timer.into_iter().chain(self.media.next_due(sid, world.now())).min(); }
         #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -379,7 +469,7 @@ impl Backend for Vulkan {
         self.capture_pool.retain(|key, _| key.0 != sid);
         self.windows.close_session(sid, self.queue.as_ref().unwrap());
         self.tex.retain(|k, _| k.0 != sid); self.buf.retain(|k, _| k.0 != sid); self.pipe.retain(|k, _| k.0 != sid);
-        self.win.retain(|k, _| k.0 != sid); self.aliases.retain(|k, _| k.0 != sid);
+        self.win.retain(|k, _| k.0 != sid); self.hosted_sizes.retain(|k, _| k.0 != sid); self.aliases.retain(|k, _| k.0 != sid);
         self.scanout_images.retain(|k, _| k.0 != sid);
         self.pick_ids.retain(|k, _| k.0 != sid); self.pick_pending.retain(|k| k.0 != sid);
         self.programs.retain(|_, state| state.strong_count() > 0);
@@ -391,14 +481,168 @@ impl Backend for Vulkan {
         // exit() unloads the driver under them (a SIGSEGV in the ICD at every quit). Those
         // workers run out first.
         if world.session_ids().iter().all(|id| *id == sid || *id == HOST) {
-            let limit = std::time::Duration::from_secs(2);
-            let settled = self.compiler.settle(limit) && self.queue.as_ref().is_some_and(|q| q.settle(limit)) && self.complete.settle(limit);
-            if !settled { eprintln!("[hal-vulkan] the last session closed with GPU work still running after {limit:?}; exiting may race the driver"); }
+            self.settle_workers("the last session closed");
         }
         #[cfg(target_os = "linux")]
         if let Some(shell) = self.shell { shell.session_closed(sid); }
     }
     fn window_pixels(&mut self, world: &mut World, sid: u32, window: Option<Id>) -> Option<Pixels> { self.host_window_pixels(world, sid, window) }
+    fn simulate_device_loss(&mut self) { self.simulate = true; }
+    // the host's own session (the boot window of `makepad run`) never closes: its pipeline
+    // compiles were still in the driver when exit() unloaded it (a SIGSEGV on
+    // makepad-vulkan-compile at a quit during boot)
+    fn before_exit(&mut self) {
+        self.flush();
+        self.settle_workers("the host is exiting");
+    }
+}
+
+impl Vulkan {
+    /// The driver work on this backend's threads (pipeline compiles, frames in flight whose
+    /// fences free their buffers and descriptor pools) runs out.
+    fn settle_workers(&self, why: &str) {
+        let limit = std::time::Duration::from_secs(2);
+        let settled = self.compiler.settle(limit) && self.queue.as_ref().is_some_and(|q| q.settle(limit)) && self.complete.settle(limit);
+        if !settled { eprintln!("[hal-vulkan] {why} with GPU work still running after {limit:?}; exiting may race the driver"); }
+    }
+}
+
+impl Vulkan {
+    /// Compiles `state`'s program on the compile worker; its answer wakes the pumps of every
+    /// session waiting on it (`State::wait`).
+    fn compile(&self, state: &Arc<State>) {
+        let job = Arc::downgrade(state); let dev = self.dev.clone(); let notify = self.mailbox.notify.clone();
+        self.compiler.push(move || {
+            // the pipelines that wanted it are gone (their session closed, they were
+            // destroyed): no compile. A quit while an app's first pipelines were queued
+            // compiled them all before the last session's close could settle the worker.
+            let Some(job) = job.upgrade() else { return };
+            let src = &job.src;
+            // out of memory waits for room (asked for through `Device::starved`) and compiles
+            // again: a program never fails for want of memory
+            let mut tries = 0u64;
+            let program = loop {
+                match pipeline::Program::new(dev.clone(), src.desc, src.code.clone(), src.bindings.clone(), src.stride) {
+                    Err(e) if pipeline::out_of_memory(&e) && !dev.lost.load(Ordering::Acquire) => {
+                        if tries == 0 { eprintln!("[hal-vulkan] pipeline: {e}; waiting for GPU memory"); }
+                        tries += 1;
+                        dev.refused("pipeline compile");
+                        // the host's pump raises the pressure (`watch_memory`)
+                        notify(HOST, false);
+                        std::thread::sleep(std::time::Duration::from_millis(16));
+                    }
+                    made => break made,
+                }
+            };
+            if let Ok(program) = &program { job.predict(program); }
+            let _ = job.program.set(program); job.epoch.fetch_add(1, Ordering::Release);
+            for sid in job.answered() { notify(sid, false); }
+        });
+    }
+
+    /// A lost device (the driver's VK_ERROR_DEVICE_LOST, or a simulated loss) is replaced
+    /// here: every session hears `DeviceLost` once, then `exec::device_reset` runs until a
+    /// device can be made (tried again after a doubling wait, logged once per loss).
+    fn recover(&mut self, world: &mut World) {
+        if self.simulate_at_ns.is_some_and(|t| crate::clock_ns() >= t) {
+            self.simulate_at_ns = None;
+            self.simulate = true;
+        }
+        // a simulated loss is this backend's alone: the process's device (other Hals share it)
+        // keeps working, so its work in flight completes
+        let simulated = std::mem::take(&mut self.simulate);
+        if !(simulated || self.lost_posted || self.dev.lost.load(Ordering::Acquire)) { return; }
+        if !self.lost_posted {
+            let generation = exec::device_lost(world);
+            eprintln!("[hal-vulkan] device generation {generation} lost; making a new one");
+            self.lost_posted = true;
+            self.retry_ns = 0;
+            self.reset_failures = 0;
+        }
+        let now = crate::clock_ns();
+        if now < self.retry_ns { return; }
+        if exec::device_reset(self, world) {
+            self.lost_posted = false;
+            let name = unsafe { std::ffi::CStr::from_ptr(self.dev.properties.device_name.as_ptr()) };
+            eprintln!("[hal-vulkan] device generation {} on {name:?}{}", world.device_generation,
+                if self.reset_failures > 0 { format!(" after {} attempts", self.reset_failures + 1) } else { String::new() });
+        } else {
+            self.retry_ns = now + (RESET_RETRY_NS << self.reset_failures.min(5)).min(RESET_RETRY_MAX_NS);
+            self.reset_failures += 1;
+        }
+    }
+}
+
+impl exec::DeviceReset for Vulkan {
+    fn replace_device(&mut self, world: &mut World) -> Result<(), String> {
+        let optional = self.sharing.device_extensions();
+        let dev = Device::replace(&self.dev, &self.instance_extensions, &optional)?;
+        // The old device's work: what was recorded is submitted (on a lost device it fails at
+        // once), its workers answer every batch (readbacks and picks as failed, frames as
+        // finished) and run out; those answers are delivered before the tables are emptied.
+        self.flush();
+        let queue = Worker::new("makepad-vulkan-submit")?;
+        let complete = Arc::new(Worker::new("makepad-vulkan-complete")?);
+        let compiler = Worker::new("makepad-vulkan-compile")?;
+        let old_queue = self.queue.replace(queue).expect("live submit worker");
+        let old_complete = std::mem::replace(&mut self.complete, complete);
+        let old_compiler = std::mem::replace(&mut self.compiler, compiler);
+        self.windows.clear(&old_queue);
+        let limit = std::time::Duration::from_secs(2);
+        if !(old_compiler.settle(limit) && old_queue.settle(limit) && old_complete.settle(limit)) {
+            eprintln!("[hal-vulkan] device reset: the old device's work still runs after {limit:?}; its answers come later");
+        }
+        drop((old_queue, old_complete, old_compiler));
+        self.drain(world);
+        #[cfg(target_os = "linux")]
+        self.capture_pool.clear();
+        self.tex.clear();
+        self.buf.clear();
+        self.win.clear();
+        self.hosted_sizes.clear();
+        self.scanout_images.clear();
+        self.fallback.clear();
+        self.passes.clear();
+        self.pick_ids.clear();
+        self.pick_pending.clear();
+        self.spares = Default::default();
+        self.windows.source.device_ready(dev.clone())?;
+        #[cfg(target_os = "linux")]
+        {
+            self.foreign_support = share::foreign_support(&dev);
+            share::copy::device_replaced();
+        }
+        self.dev = dev;
+        Ok(())
+    }
+
+    fn rebuild_pipelines(&mut self, world: &mut World) {
+        self.programs.clear();
+        let mut rebuilt: HashMap<*const State, Arc<State>> = HashMap::new();
+        let keys: Vec<(u32, u32)> = self.pipe.keys().copied().collect();
+        for key in keys {
+            let old = self.pipe[&key].state.clone();
+            let state = match rebuilt.get(&Arc::as_ptr(&old)) {
+                Some(state) => state.clone(),
+                None => {
+                    let state = State::new(old.src.clone());
+                    state.wait(key.0);
+                    self.compile(&state);
+                    self.programs.insert(state.src.key.clone(), Arc::downgrade(&state));
+                    rebuilt.insert(Arc::as_ptr(&old), state.clone());
+                    state
+                }
+            };
+            state.wait(key.0);
+            let pipe = self.pipe.get_mut(&key).expect("listed above");
+            pipe.state = state;
+            pipe.epoch = 0;
+            // pending again until the new program answers
+            if std::mem::replace(&mut pipe.announced, false) {
+                if let Some(s) = world.session_mut(key.0) { s.pipelines_pending += 1; }
+            }
+        }
+    }
 }
 
 impl Drop for Vulkan {
@@ -445,12 +689,25 @@ impl Gpu for Vulkan {
         // only a device out of memory waits; any other failure is final for this create
         if !error.contains("OUT_OF_DEVICE_MEMORY") { return false; }
         let bytes = t.bytes.max(t.w as u64 * t.h as u64 * t.depth.max(1) as u64 * 4);
-        self.pressure.starve(sid, id, bytes, crate::clock_ns());
+        let budget = self.dev.memory_budget(true);
+        let free = budget.map_or(0, |b| b.free());
+        // Refused with the UI's whole reserve (and the texture) free: not a full GPU but a device
+        // the driver crippled -- one made while the GPU was full refused every later image of
+        // its process even with tens of GB free again. It is replaced like a lost device.
+        // (At the open-file limit every create is refused whatever the memory: that is not a
+        // crippled device, and a new device would need more descriptors, not fewer.)
+        let out_of_files = self.dev.out_of_files("texture create");
+        let crippled = !out_of_files && budget.is_some_and(|b| b.free() >= crate::gpu_pressure::ui_reserve(b.size).saturating_add(bytes));
+        if crippled && !self.dev.lost.swap(true, Ordering::AcqRel) {
+            eprintln!("[hal-vulkan] a {bytes}-byte texture was refused with {} MB free: the device is replaced", free >> 20);
+        }
+        // (on a replaced device the room is there: it goes back to its app at the next look)
+        self.pressure.starve(sid, id, bytes, crate::clock_ns(), if crippled { 0 } else { free });
         true
     }
     fn texture_create(&mut self, s: &mut Session, id: Id, t: &mut TextureObj) -> Result<(), String> {
         let image = if t.usage & usage::SHARED != 0 { self.sharing.create(self.dev.clone(), t.clone()) } else { Image::new(self.dev.clone(), t.clone()) }
-            .map_err(|e| { eprintln!("[hal-vulkan] texture create: {e}"); e })?;
+            .map_err(|e| { eprintln!("[hal-vulkan] texture create {}x{}x{} format {} usage {:#x}: {e}", t.w, t.h, t.depth, t.format, t.usage); e })?;
         t.bytes = image.bytes;
         if let Some(old) = self.tex.insert((s.id, id.index), Texture { gen: id.gen, image }) {
             if let Some(registry) = self.sharing.registry() { registry.retire(s.id, &old.image); }
@@ -458,7 +715,10 @@ impl Gpu for Vulkan {
         Ok(())
     }
     fn texture_update(&mut self, s: &mut Session, id: Id, t: &TextureObj, mip: u16, rect: [u32; 4], layer: u32, data: &[u8]) {
-        if let Err(e) = self.upload(s, id, t, mip, rect, layer, data) { eprintln!("[hal-vulkan] texture upload: {e}"); s.bad(); }
+        if let Err(e) = self.upload(s, id, t, mip, rect, layer, data) {
+            if pipeline::out_of_memory(&e) && self.dev.out_of_files("texture upload") { s.bad(); return; }
+            eprintln!("[hal-vulkan] texture upload: {e}"); s.bad();
+        }
     }
     fn texture_destroy(&mut self, sid: u32, id: Id) {
         if self.tex.get(&(sid, id.index)).is_some_and(|t| t.gen <= id.gen) {
@@ -516,15 +776,18 @@ impl Gpu for Vulkan {
         key.extend_from_slice(&(blob.bindings.len() as u64).to_le_bytes());
         key.extend_from_slice(&(blob.vertex_layout.len() as u64).to_le_bytes());
         for v in blob.bindings.iter().chain(blob.vertex_layout.iter()).copied().chain([blob.desc.blend, blob.desc.instance_stride, blob.desc.outputs]) { key.extend_from_slice(&v.to_le_bytes()); }
-        let state = self.programs.get(&key).and_then(Weak::upgrade).unwrap_or_else(|| {
-            let state = State::new(); let job = state.clone(); let dev = self.dev.clone(); let desc = blob.desc;
-            let bindings = blob.bindings.clone(); let stride = blob.vertex_layout.first().copied().unwrap_or(0); let wake = self.mailbox.wake.clone();
-            self.compiler.push(move || {
-                let program = pipeline::Program::new(dev, desc, code, bindings, stride);
-                if let Ok(program) = &program { job.predict(program); }
-                let _ = job.program.set(program); job.epoch.fetch_add(1, Ordering::Release); wake(); });
-            self.programs.insert(key, Arc::downgrade(&state)); state
-        });
+        let state = match self.programs.get(&key).and_then(Weak::upgrade) {
+            Some(state) => state,
+            None => {
+                let stride = blob.vertex_layout.first().copied().unwrap_or(0);
+                let state = State::new(Arc::new(pipeline::Source { desc: blob.desc, code, bindings: blob.bindings.clone(), stride, key: key.clone() }));
+                // registered before the compile is queued, so its answer cannot be missed
+                state.wait(s.id);
+                self.compile(&state);
+                self.programs.insert(key, Arc::downgrade(&state)); state
+            }
+        };
+        state.wait(s.id);
         self.pipe.insert((s.id, id.index), Pipe { gen: id.gen, state, epoch: 0, announced: false }); PipeStatus::Pending
     }
     fn pipeline_destroy(&mut self, sid: u32, id: Id) -> bool {
@@ -533,13 +796,13 @@ impl Gpu for Vulkan {
     fn frame(&mut self, s: &mut Session, sid: u32, target: Id, kind: u32, packet: u32, view: &CmdView, now: u64) -> Option<exec::SubmittedFrame> { self.encode_frame(s, sid, target, kind, packet, view, now) }
     fn pick(&mut self, s: &mut Session, window: Id, req: u32, pos: [f32; 2]) { self.read_pick(s, window, req, pos); }
     fn snapshot(&mut self, s: &mut Session, window: Id, req: u32) {
-        let image = self.window_image(s, window); let rect = image.as_ref().map_or([0; 4], |i| [0, 0, i.desc.w, i.desc.h]); self.read(s, image, req, rect, None);
+        let image = self.window_image(s, window); let rect = self.window_rect(s.id, window, image.as_deref()); self.read(s, image, req, rect, None);
     }
     fn window_copy(&mut self, s: &mut Session, window: Id, texture: Id, req: u32) { self.copy_window(s, window, texture, req); }
     fn window_closed(&mut self, sid: u32, id: Id) {
         #[cfg(target_os = "linux")]
         self.capture_pool.remove(&(sid, id));
-        self.win.remove(&(sid, id.index)); self.pick_ids.remove(&(sid, id));
+        self.win.remove(&(sid, id.index)); self.hosted_sizes.remove(&(sid, id.index)); self.pick_ids.remove(&(sid, id));
         self.scanout_images.remove(&(sid, id));
         self.windows.remove((sid, id), self.queue.as_ref().unwrap());
     }

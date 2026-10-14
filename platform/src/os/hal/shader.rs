@@ -165,9 +165,10 @@ impl DrawVars {
 fn gl_payload(mapping: &CxDrawShaderMapping, sources: &crate::makepad_script::shader_ir_glsl::GlslDrawSources, pick: bool) -> Result<Vec<u8>, String> {
     use crate::makepad_script::shader::{SamplerAddress, SamplerCoord, SamplerFilter, TextureType};
     use makepad_hal::glsl::{Attribute, GlslPipeline, Texture};
+    let info = sources.info();
     let mut attributes = Vec::new();
     for (instance, inputs, prefix) in [(false, &mapping.geometries, "geom"), (true, &mapping.instances, "inst")] {
-        if sources.info.typed_geometry {
+        if info.typed_geometry {
             for input in &inputs.inputs {
                 // Matrix columns occupy consecutive attribute locations; the executor splits them.
                 for column in 0..input.slots.div_ceil(4) {
@@ -179,9 +180,9 @@ fn gl_payload(mapping: &CxDrawShaderMapping, sources: &crate::makepad_script::sh
         } else {
             // the packed vec4 attributes the GL entry points declare; instance vec4s from
             // `instance_fetch_from` on are read from the instance word texture
-            let slots = if instance { sources.info.instance_slots } else { sources.info.geometry_slots };
+            let slots = if instance { info.instance_slots } else { info.geometry_slots };
             let vec4s = slots.div_ceil(4);
-            let count = if instance { sources.info.instance_fetch_from.map_or(vec4s, |from| from.min(vec4s)) } else { vec4s };
+            let count = if instance { info.instance_fetch_from.map_or(vec4s, |from| from.min(vec4s)) } else { vec4s };
             for i in 0..count {
                 attributes.push(Attribute { name: format!("packed_{}_{}", if instance { "instance" } else { "geometry" }, i),
                     offset: i as u32 * 16, format: 3, lanes: (slots - i * 4).min(4) as u32, instance });
@@ -206,8 +207,8 @@ fn gl_payload(mapping: &CxDrawShaderMapping, sources: &crate::makepad_script::sh
             });
         Ok(Texture { name: format!("tex_{}", t.id), shape, sampler })
     }).collect::<Result<Vec<_>, String>>()?;
-    Ok(GlslPipeline { vertex: sources.vertex.clone(), fragment: sources.fragment.clone(), blocks, attributes, textures,
+    Ok(GlslPipeline { vertex: sources.vertex().to_owned(), fragment: sources.fragment().to_owned(), blocks, attributes, textures,
         vertex_stride: mapping.geometry_stride_bytes() as u32,
         instance_stride: mapping.instances.total_slots as u32 * 4,
-        instance_texture: sources.info.instance_fetch_from.is_some(), pick }.encode())
+        instance_texture: info.instance_fetch_from.is_some(), pick }.encode())
 }

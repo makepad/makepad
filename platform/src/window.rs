@@ -691,6 +691,12 @@ impl WindowHandle {
         cx.push_unique_platform_op(CxOsOp::NormalizeWindow(self.window_id()));
     }
 
+    /// A double click on the window's caption makes it fullscreen (`true`) or maximises it
+    /// (`false`, the default); see `CxWindow::double_click_fullscreen`.
+    pub fn set_double_click_fullscreen(&self, cx: &mut Cx, on: bool) {
+        cx.windows[self.window_id()].double_click_fullscreen = on;
+    }
+
     pub fn can_fullscreen(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id()].window_geom.can_fullscreen
     }
@@ -841,6 +847,12 @@ pub struct CxWindow {
     /// Whether makepad draws this window's minimize/maximize/close buttons itself (Windows, Wayland CSD),
     /// so they keep their size in layout points, unlike the OS's own buttons.
     pub(crate) draws_chrome_buttons: bool,
+    /// A double click on the window's caption (or anywhere, for a drag-anywhere window)
+    /// makes it fullscreen on its screen instead of maximised; again restores it. A host
+    /// window manager reads it from the drag query's answer (`makepad_studio_protocol::HostedDragAnswer`).
+    pub double_click_fullscreen: bool,
+    /// The host window manager shows this window fullscreen (`ime::HostedFullscreen`).
+    pub(crate) hosted_fullscreen: bool,
 }
 
 impl Default for CxWindow {
@@ -871,6 +883,8 @@ impl Default for CxWindow {
             uses_client_side_decorations: false,
             wayland_is_fullscreen: false,
             draws_chrome_buttons: false,
+            double_click_fullscreen: false,
+            hosted_fullscreen: false,
         }
     }
 }

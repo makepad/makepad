@@ -67,6 +67,16 @@ struct SharedRec {
     id: Id,
 }
 
+/// What a pass that has a picture waits for before it paints again ([`Cx::fb_pipelines_wait`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum PipelineWait {
+    None,
+    /// a pipeline the HAL is still compiling: its PipelineReady repaints
+    Hal,
+    /// a shader queued for compilation: compiled at the next draw
+    Compile,
+}
+
 /// One HAL pipeline: the draw shaders with the same code, colour format and blend op share it.
 pub(crate) struct PipeRec {
     id: Id,
@@ -90,6 +100,9 @@ pub(crate) struct BuildStats {
     pub(crate) texture_creates: u64,
     pub(crate) buffer_creates: u64,
     pub(crate) pipeline_creates: u64,
+    /// pass frames not built because a pipeline their draws use was still compiling (the pass
+    /// kept its last picture)
+    pub(crate) held_for_pipelines: u64,
     pub(crate) bytes_uploaded: u64,
     /// CPU time the walks took (ns), summed over the pass frames
     pub(crate) build_ns: u64,
@@ -152,6 +165,8 @@ pub(crate) struct FrameBuilder {
     /// the owner (string id) of the draw list being walked
     owner: StrId,
     warned: std::collections::HashSet<&'static str>,
+    /// textures already reported as sampled by a pass that draws into them
+    feedback_warned: std::collections::HashSet<usize>,
     pub(crate) stats: BuildStats,
 }
 
@@ -388,15 +403,26 @@ impl FrameBuilder {
         }
     }
 
+    /// Whether a pass must wait for the pipeline: the HAL is still compiling it. The wait is
+    /// marked, so its PipelineReady (or PipelineFailed) repaints; a failed one is waited for by nobody.
+    pub(crate) fn pipeline_waited_for(&mut self, pipe: usize) -> bool {
+        let Some(p) = self.pipes.get_mut(pipe) else { return false };
+        if p.ready || p.failed { return false; }
+        p.drawn_unready = true;
+        true
+    }
+
     /// Whether the HAL said the pipeline is ready (a draw built for it before is skipped by the HAL).
     pub(crate) fn pipeline_is_ready(&self, pipe: usize) -> bool {
         self.pipes.get(pipe).is_some_and(|p| p.ready)
     }
 
-    pub(crate) fn pipeline_failed(&mut self, id: Id) -> Option<usize> {
+    /// The failed pipeline's first shader, and whether a pass waited for it (it paints again,
+    /// without those draws).
+    pub(crate) fn pipeline_failed(&mut self, id: Id) -> Option<(usize, bool)> {
         let p = self.pipes.get_mut(id.index as usize).filter(|p| p.id == id)?;
         p.failed = true;
-        Some(p.first_shader)
+        Some((p.first_shader, std::mem::take(&mut p.drawn_unready)))
     }
 }
 
@@ -1004,6 +1030,27 @@ impl Cx {
                 // the HAL has not confirmed the window yet: the pass stays dirty
                 return None;
             }
+            if !picking && !self.hal.window_may_paint(w) {
+                // its display has not asked for the next frame yet: the pass stays dirty and
+                // paints at the window's own next FrameReady
+                return None;
+            }
+        } else if !picking {
+            // A texture pass that feeds a window paints only when that window can show the
+            // result: while a hosted window has no free shared image (its frames are still on the
+            // GPU or with the host), its scene passes stay dirty with it. Painted anyway, every
+            // host Tick queued another full scene nobody would see; the GPU queue grew behind the
+            // in-flight window frame, which then took longer still (Sandbox hosted in the WM on 149:
+            // ~60 scene beats/s, window frames 125 ms p90 / 1.3 s max, ~1 fps, and thousands of
+            // upload arenas alive in the queue).
+            if let Some(w) = self.pass_root_window(pass_id) {
+                let shows = self.hal.window_ready(w) && self.hal.window_may_paint(w)
+                    && self.hal.hosted.as_ref().is_none_or(|hosted| hosted.can_present(w));
+                if !shows {
+                    makepad_hal::profile::count("pass waits for its window's image");
+                    return None;
+                }
+            }
         }
         let dpi = self.passes[pass_id].dpi_factor?;
         // Whole device pixels for every pass, windows too (snapping a window to whole points
@@ -1014,6 +1061,27 @@ impl Cx {
         if let Some(w) = window {
             if self.windows.is_valid(w) && self.windows[w].window_geom.inner_size.x > 0.0 {
                 pass_rect.size = self.windows[w].window_geom.inner_size;
+            }
+        }
+        // A pass that has a picture keeps it while a pipeline its draws use is still compiling
+        // (a live shader edit, a widget tree re-evaluated with new shaders): drawn now, those
+        // draws would be left out and the picture would flash without them. It paints when the
+        // pipelines answer (PipelineReady repaints every pass); a failed one does not hold it.
+        if !picking && self.passes[pass_id].painted_serial != 0 && fb.pipelines_pending() != 0 {
+            match self.fb_pipelines_wait(fb, list_id) {
+                PipelineWait::None => {}
+                PipelineWait::Hal => {
+                    self.passes[pass_id].paint_dirty = false;
+                    fb.stats.held_for_pipelines += 1;
+                    makepad_hal::profile::count("pass kept its picture: pipeline compiling");
+                    return None;
+                }
+                PipelineWait::Compile => {
+                    // queued for compilation: compiled at the next draw, the pass stays dirty
+                    fb.stats.held_for_pipelines += 1;
+                    makepad_hal::profile::count("pass kept its picture: pipeline compiling");
+                    return None;
+                }
             }
         }
         if !self.passes[pass_id].keep_camera_matrix {
@@ -1028,8 +1096,18 @@ impl Cx {
         // (the pass rect is ceiled in points, which at a fractional scale is up to 2 px more than the surface).
         let size = match window {
             Some(w) if self.windows.is_valid(w) && self.windows[w].window_geom.inner_size.x > 0.0 => (self.windows[w].window_geom.inner_size * dpi).round(),
-            _ => (pass_rect.size * dpi).round(),
+            _ => {
+                let (w, h) = Self::pass_pixel_size(pass_rect.size, dpi);
+                crate::makepad_math::dvec2(w as f64, h as f64)
+            }
         };
+        // No pixels (a texture pass whose dpi is not known yet, 0 while a hosted app waits for
+        // its host's geometry): nothing to draw, as for an empty rect above. The pass draws when
+        // its size or dpi changes; sent, the HAL refused it ('invalid pass viewport').
+        if !(size.x >= 1.0 && size.y >= 1.0) {
+            self.passes[pass_id].paint_dirty = false;
+            return None;
+        }
         let (tw, th) = (size.x as usize, size.y as usize);
         let hosted_target = match (window, self.hal.hosted.as_ref()) {
             (Some(window), Some(hosted)) => Some(hosted.target(window, tw, th)?),
@@ -1114,6 +1192,12 @@ impl Cx {
             }
         }
         if is_window {
+            if !picking {
+                if let Some(window) = window {
+                    self.hal.window_painted(window);
+                    makepad_hal::profile::window_frame(window.id());
+                }
+            }
             fb.window_frames.push(target);
             fb.window_submitted.insert(target, serial);
             if let (Some(window), Some((index, _))) = (window, hosted_target) {
@@ -1182,6 +1266,30 @@ impl Cx {
             self.fb_draw(fb, pass_id, list_id, item_id, list_name, sploded, zbias, step, uniforms_gen, serial, dump);
         }
         fb.owner = outer_owner;
+    }
+
+    /// What the draws of `list` (and its sub-lists) wait for: a shader still queued for
+    /// compilation, or a pipeline the HAL is still compiling (marked, so its PipelineReady
+    /// repaints). Failed pipelines wait for nothing: their draws are left out for good.
+    fn fb_pipelines_wait(&mut self, fb: &mut FrameBuilder, list: DrawListId) -> PipelineWait {
+        let mut lists = Vec::new();
+        self.pick_lists(list, &mut lists);
+        let mut wait = PipelineWait::None;
+        for list in lists {
+            for index in 0..self.draw_lists[list].draw_items.len() {
+                let Some(call) = self.draw_lists[list].draw_items[index].kind.draw_call() else { continue };
+                let shader = call.draw_shader_id.index;
+                match self.draw_shaders[shader].pipeline_id {
+                    None => {
+                        if self.draw_shaders.compile_set.contains(&shader) { wait = PipelineWait::Compile; }
+                    }
+                    Some(pipe) => {
+                        if fb.pipeline_waited_for(pipe) && wait == PipelineWait::None { wait = PipelineWait::Hal; }
+                    }
+                }
+            }
+        }
+        wait
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1279,6 +1387,20 @@ impl Cx {
             let Some(tid) = tid else { continue };
             if crate::os::cx_shared::samples_incomplete_target(&self.passes, &self.textures, *tid, pass_id) {
                 self.passes[pass_id].paint_dirty = true;
+            }
+            // A draw may not sample a texture its own pass draws into: Vulkan refused the whole
+            // draw, Metal read undefined pixels. Every backend now samples the fallback (empty)
+            // in that slot and the draw goes on; the texture is named once in the log.
+            if self.passes[pass_id].color_textures.iter().any(|a| a.texture.texture_id() == *tid)
+                || self.passes[pass_id].depth_texture.as_ref().is_some_and(|d| d.texture_id() == *tid)
+            {
+                if fb.feedback_warned.insert(tid.0) {
+                    crate::warning!(
+                        "draw samples the texture its own pass draws into (made at {}): it reads empty there",
+                        self.textures[*tid].origin.site.as_deref().unwrap_or("?")
+                    );
+                }
+                continue;
             }
             tex[i] = self.fb_sampled(fb, *tid);
             // A transient target the HAL gave back (idle) and a pass samples again: its
@@ -1548,6 +1670,27 @@ mod tests {
         let img: Vec<u8> = (0..24).collect();
         let packed = pack_rect(&img, 4, 2, [1, 1, 2, 2]);
         assert_eq!(packed, vec![10, 11, 12, 13, 18, 19, 20, 21]);
+    }
+
+    /// A live shader edit: the pass keeps its last picture while the new pipeline compiles,
+    /// paints again when it is ready, and is not held by one that failed.
+    #[test]
+    fn a_compiling_pipeline_holds_the_picture_and_its_answer_repaints() {
+        let mut fb = FrameBuilder::default();
+        let new_id = Id::new(0, 1);
+        let bad_id = Id::new(1, 1);
+        fb.pipes.push(PipeRec { id: new_id, first_shader: 0, ready: false, drawn_unready: false, failed: false, pick: None });
+        fb.pipes.push(PipeRec { id: bad_id, first_shader: 1, ready: false, drawn_unready: false, failed: false, pick: None });
+        assert_eq!(fb.pipelines_pending(), 2);
+        // compiling: the pass waits for it (keeps its picture) and its answer repaints
+        assert!(fb.pipeline_waited_for(0));
+        assert!(fb.pipeline_ready(new_id), "PipelineReady repaints the held pass");
+        assert!(!fb.pipeline_waited_for(0), "ready: nothing to wait for");
+        // a pipeline that fails: the pass that waited paints again, and nobody waits for it after
+        assert!(fb.pipeline_waited_for(1));
+        assert_eq!(fb.pipeline_failed(bad_id), Some((1, true)));
+        assert!(!fb.pipeline_waited_for(1), "a failed pipeline never holds a picture");
+        assert_eq!(fb.pipelines_pending(), 0);
     }
 
     #[test]

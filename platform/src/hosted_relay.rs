@@ -203,6 +203,18 @@ pub fn permission_status_from_name(name: &str) -> PermissionStatus {
     }
 }
 
+/// Set by a host that shows the file and folder pickers for its children
+/// (the Linux WM draws them): a hosted child then relays its file dialogs
+/// instead of opening its own. Not passed on to a child's own children
+/// (`makepad_app_host::launch::configure` removes it).
+pub const HOST_FILE_DIALOGS_ENV: &str = "MAKEPAD_HOST_FILE_DIALOGS";
+
+/// Whether this process's host shows its file dialogs (`HOST_FILE_DIALOGS_ENV`).
+pub fn host_serves_file_dialogs() -> bool {
+    static SERVES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SERVES.get_or_init(|| std::env::var(HOST_FILE_DIALOGS_ENV).is_ok_and(|v| v == "1"))
+}
+
 pub fn relay_file_dialog(kind: &str, dialog: &FileDialog) -> RelayFileDialog {
     RelayFileDialog {
         id: dialog.id.0,
@@ -266,6 +278,8 @@ pub struct HostRelayServer {
     permissions: HashMap<i32, (u64, i32)>,
     dialogs: HashMap<LiveId, PendingDialog>,
     folder_dialogs: Vec<PendingDialog>,
+    /// Host clipboard read id -> (client, the child's id).
+    clipboard_reads: HashMap<u64, (u64, u64)>,
 }
 
 impl HostRelayServer {
@@ -341,6 +355,11 @@ impl HostRelayServer {
                     self.dialogs.insert(host_id, pending);
                 }
             }
+            ChildRelay::ReadClipboard { request_id } => {
+                let host_id = cx.read_clipboard();
+                self.clipboard_reads.insert(host_id, (client, request_id));
+            }
+            ChildRelay::SetPrimarySelection { text } => cx.set_primary_selection(&text),
         }
         Vec::new()
     }
@@ -371,6 +390,15 @@ impl HostRelayServer {
                     if let Some(ev) = relay_http_event(child_id, response) {
                         out.push((client, HostRelay::Http(ev)));
                     }
+                }
+            }
+            Event::Clipboard(e) => {
+                if let Some((client, request_id)) = self.clipboard_reads.remove(&e.request) {
+                    let png = match &e.content.image {
+                        Some(crate::clipboard_read::ClipboardImage::Png(png)) => png.to_vec(),
+                        _ => Vec::new(),
+                    };
+                    out.push((client, HostRelay::Clipboard { request_id, text: e.content.text.clone().unwrap_or_default(), png }));
                 }
             }
             Event::PermissionResult(PermissionResult { permission, request_id, status }) => {
@@ -455,6 +483,7 @@ impl HostRelayServer {
         self.permissions.retain(|_, (c, _)| *c != client);
         self.dialogs.retain(|_, p| p.client != client);
         self.folder_dialogs.retain(|p| p.client != client);
+        self.clipboard_reads.retain(|_, (c, _)| *c != client);
     }
 }
 
@@ -479,6 +508,16 @@ impl Cx {
             }
             HostRelay::FileDialog(result) => {
                 Cx::post_action(file_dialog_action_from_relay(&result));
+            }
+            HostRelay::Clipboard { request_id, text, png } => {
+                use crate::clipboard_read::{ClipboardContent, ClipboardEvent, ClipboardImage};
+                let content = ClipboardContent {
+                    supported: true,
+                    text: (!text.is_empty()).then_some(text),
+                    image: (!png.is_empty()).then(|| ClipboardImage::Png(std::sync::Arc::new(png))),
+                    files: Vec::new(),
+                };
+                self.call_event_handler(&Event::Clipboard(ClipboardEvent { request: request_id, content: std::sync::Arc::new(content) }));
             }
         }
     }

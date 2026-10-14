@@ -174,7 +174,20 @@ fn key(code: i32) -> u32 {
 }
 unsafe extern "system" fn key_down(_: *mut JNIEnv, _: jclass, code: jint, meta: jint, repeat: jboolean) { Shared::global().emit(clock_ns(), |q, id| q.key_down(id, key(code), repeat != 0, mods(meta))); }
 unsafe extern "system" fn key_up(_: *mut JNIEnv, _: jclass, code: jint, meta: jint) { Shared::global().emit(clock_ns(), |q, id| q.key_up(id, key(code), mods(meta))); }
-unsafe extern "system" fn back(env: *mut JNIEnv, class: jclass) { key_down(env, class, 4, 0, 0); key_up(env, class, 4, 0); }
+unsafe extern "system" fn back(_: *mut JNIEnv, _: jclass) { Shared::global().emit(clock_ns(), |q, id| q.back_pressed(id)); }
+/// `x`, `y` are surface pixels (NaN for the back button), `time` the uptime in milliseconds.
+unsafe extern "system" fn back_gesture(_: *mut JNIEnv, _: jclass, state: jint, x: jfloat, y: jfloat, progress: jfloat, edge: jint, time: jlong) {
+    let dpi = Shared::global().dpi() as f64;
+    Shared::global().emit(time as u64 * 1_000_000, |q, id| q.back_gesture(id, state as u32, x as f64 / dpi, y as f64 / dpi, progress as f64, edge as u32));
+}
+/// The app did not take a back press: the activity does the system default.
+pub(super) fn back_unhandled() -> bool {
+    with_activity(|env, activity| unsafe {
+        let ok = void(env, activity, c"onBackUnhandled", c"()V", &[]);
+        if ((**env).ExceptionCheck.unwrap())(env) != 0 { ((**env).ExceptionDescribe.unwrap())(env); ((**env).ExceptionClear.unwrap())(env); }
+        ok
+    }).unwrap_or(false)
+}
 unsafe extern "system" fn character(_: *mut JNIEnv, _: jclass, code: jint) {
     if let Some(c) = char::from_u32(code as u32) { let mut bytes = [0; 4]; let text = c.encode_utf8(&mut bytes); Shared::global().emit(clock_ns(), |q, id| q.text(id, input::text::TYPED, text.as_bytes())); }
 }
@@ -303,6 +316,7 @@ pub fn native_methods() -> Vec<(&'static str, &'static str, *mut c_void)> {
         ("onDisplayRotation", "(I)V", display_rotation as *mut c_void),
         ("initChoreographer", "(FI)V", choreographer as *mut c_void),
         ("onBackPressed", "()V", back as *mut c_void),
+        ("onBackGesture", "(IFFFIJ)V", back_gesture as *mut c_void),
         ("surfaceOnSurfaceCreated", "(Landroid/view/Surface;)V", surface_created as *mut c_void),
         ("surfaceOnSurfaceChanged", "(Landroid/view/Surface;II)V", surface_changed as *mut c_void),
         ("surfaceOnSurfaceDestroyed", "(Landroid/view/Surface;)V", surface_destroyed as *mut c_void),

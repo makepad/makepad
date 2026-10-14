@@ -25,9 +25,47 @@ pub fn attach_parent_console() {
     }
 }
 
+/// `app_main!`'s JNI_OnLoad for a standalone Android app: ART loads libmakepad.so (the app
+/// crate as a cdylib). Chosen here so the app crate never sees the `relax` cfg.
+#[cfg(all(target_os = "android", not(relax)))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! android_jni_entry {
+    ($app:path) => {
+        #[no_mangle]
+        pub unsafe extern "system" fn JNI_OnLoad(vm: *mut std::ffi::c_void, _reserved: *mut std::ffi::c_void) -> i32 {
+            $crate::android_on_load(vm, $app)
+        }
+    };
+}
+
+#[cfg(not(all(target_os = "android", not(relax))))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! android_jni_entry {
+    ($app:path) => {};
+}
+
 /// The process entry of a native app. Under the HAL on macOS/iOS/tvOS/Linux/Windows the HAL owns the
 /// main thread and runs the OS shell there (on iOS / tvOS `UIApplicationMain`, which never
 /// returns); the app, with its `Cx`, runs on its own thread. Elsewhere the app runs right here.
+/// JNI_OnLoad of a standalone Android app (its libmakepad.so is the app, natively compiled):
+/// the HAL shell registers its natives and runs `app` on its own thread once the Activity exists.
+/// `app_main!` exports it; a packed app under makepad run never gets here (the host owns JNI).
+/// # Safety
+/// Called by ART with its JavaVM, once per process.
+#[cfg(all(target_os = "android", not(relax)))]
+#[doc(hidden)]
+pub unsafe fn android_on_load(vm: *mut std::ffi::c_void, app: fn()) -> i32 {
+    makepad_android_state::jni_on_load(vm);
+    unsafe fn activity_ready(activity: makepad_jni_sys::jobject) {
+        if let Some(set) = makepad_android_state::get_activity_setter_fn() {
+            set(activity);
+        }
+    }
+    makepad_hal::backend::android::standalone::on_load(vm, app, activity_ready)
+}
+
 /// `app` is the whole of the app's main: it creates its `Cx` itself.
 /// Under Relax the host has done the same around the program's `main` (it gave the process's main
 /// thread to the HAL and called `main` on a thread of its own), so the app just runs.
@@ -80,7 +118,15 @@ pub fn run_app(app: fn()) {
     app();
 }
 
+/// Whether this process runs hosted: its host launched it as a `--stdin-loop` child, or a
+/// makepad window manager admitted it ([`discover_window_manager`]).
 pub fn should_run_stdin_loop_from_env() -> bool {
+    launched_by_host() || admitted_by_window_manager().is_some()
+}
+
+/// The host started this process as its child (`--stdin-loop` / `MAKEPAD_STDIN_LOOP`): the
+/// child follows its parent's lifetime and the host serves its tools.
+pub fn launched_by_host() -> bool {
     std::env::args().any(|v| v == "--stdin-loop")
         || std::env::var("MAKEPAD_STDIN_LOOP").is_ok_and(|v| {
             matches!(
@@ -88,6 +134,74 @@ pub fn should_run_stdin_loop_from_env() -> bool {
                 "1" | "true" | "yes" | "on"
             )
         })
+}
+
+static WINDOW_MANAGER: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `app_main!` records [`AppMain::window_manager`] here before anything opens.
+pub fn set_window_manager(window_manager: bool) {
+    WINDOW_MANAGER.store(window_manager, std::sync::atomic::Ordering::Release);
+}
+
+/// This process is a window manager: it never becomes a client of another one.
+pub fn is_window_manager() -> bool {
+    WINDOW_MANAGER.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// Where a running makepad window manager admitted this process (Linux, native builds).
+#[derive(Clone, Copy, Debug)]
+pub struct WmAdmission {
+    pub port: u16,
+    pub client: u64,
+    pub crate_name: &'static str,
+}
+
+#[cfg(all(target_os = "linux", not(relax)))]
+static ADMITTED: std::sync::OnceLock<Option<WmAdmission>> = std::sync::OnceLock::new();
+
+pub fn admitted_by_window_manager() -> Option<WmAdmission> {
+    #[cfg(all(target_os = "linux", not(relax)))]
+    return ADMITTED.get().copied().flatten();
+    #[cfg(not(all(target_os = "linux", not(relax))))]
+    None
+}
+
+/// Linux: a UI process looks for a makepad window manager before any display server. Unless
+/// the launch forced a backend (`--linux-backend=`, a backend token in `MAKEPAD`), its host
+/// launched it, it runs hidden or headless, or it is a window manager itself, a live WM that
+/// speaks this build's hosted wire adopts it: its windows become WM windows over the same
+/// hosted path as the apps the WM launches. Otherwise the HAL picks Wayland, then X11.
+/// Under Relax the HAL shell does this for the whole `makepad run` process.
+pub fn discover_window_manager(crate_name: &'static str) {
+    #[cfg(all(target_os = "linux", not(relax)))]
+    ADMITTED.get_or_init(|| {
+        use makepad_hal::wm_socket::{self, Backend};
+        if launched_by_host() || is_window_manager() || resolve_studio_host_from_env().is_some()
+            || std::env::var_os("MAKEPAD_HIDE_WINDOWS").is_some()
+            || std::env::var("MAKEPAD_HAL_BACKEND").is_ok_and(|b| !b.is_empty())
+        {
+            return None;
+        }
+        let forced = wm_socket::forced(std::env::args(), std::env::var("MAKEPAD").ok().as_deref());
+        let wire = makepad_studio_protocol::WIRE;
+        let (backend, reason) = wm_socket::choose(forced, false, false, || wm_socket::discovered(wire).clone());
+        if backend != Backend::Wm {
+            return None;
+        }
+        let path = wm_socket::discovery_path()?;
+        match wm_socket::adopt(&path, wire, std::process::id(), crate_name) {
+            Ok(admission) => {
+                crate::log!("makepad WM at {} hosts this app as client {} ({reason})", path.display(), admission.client);
+                Some(WmAdmission { port: admission.port, client: admission.client, crate_name })
+            }
+            Err(probe) => {
+                crate::error!("the makepad WM at {} did not adopt this app: {probe:?}", path.display());
+                None
+            }
+        }
+    });
+    #[cfg(not(all(target_os = "linux", not(relax))))]
+    let _ = crate_name;
 }
 
 fn normalize_studio_host(host: &str) -> String {
@@ -157,16 +271,25 @@ pub(crate) fn extract_studio_crate_name(studio: &str) -> Option<String> {
     studio_query_value(studio, "crate")
 }
 
-pub(crate) fn resolve_studio_host() -> String {
+fn resolve_studio_host_from_env() -> Option<String> {
     std::env::var("STUDIO_HOST")
         .ok()
         .or_else(|| std::env::var("STUDIO").ok())
         .map(|studio| normalize_studio_host(&studio))
         .filter(|studio_host| !studio_host.is_empty())
-        .unwrap_or_default()
+}
+
+pub(crate) fn resolve_studio_host() -> String {
+    if let Some(wm) = admitted_by_window_manager() {
+        return normalize_studio_host(&format!("127.0.0.1:{}", wm.port));
+    }
+    resolve_studio_host_from_env().unwrap_or_default()
 }
 
 pub(crate) fn resolve_studio_build() -> Option<String> {
+    if let Some(wm) = admitted_by_window_manager() {
+        return Some(wm.client.to_string());
+    }
     std::env::var("STUDIO_BUILD")
         .ok()
         .and_then(|build| {
@@ -181,6 +304,9 @@ pub(crate) fn resolve_studio_build() -> Option<String> {
 }
 
 pub(crate) fn resolve_studio_crate() -> Option<String> {
+    if let Some(wm) = admitted_by_window_manager() {
+        return Some(wm.crate_name.to_string());
+    }
     std::env::var("STUDIO_CRATE")
         .ok()
         .and_then(|crate_name| {
@@ -304,6 +430,15 @@ pub trait AppMain {
     /// `MAKEPAD_HIDE_WINDOWS`, `--stdin-loop`) and `MAKEPAD_NEW_INSTANCE=1`
     /// always run on their own. Mobile OSes keep one instance themselves.
     fn single_instance() -> bool
+    where
+        Self: Sized,
+    {
+        false
+    }
+
+    /// Whether the app is a window manager: it hosts other apps' windows, so it never looks for
+    /// a makepad window manager to host its own (Linux backend discovery).
+    fn window_manager() -> bool
     where
         Self: Sized,
     {
@@ -607,6 +742,9 @@ macro_rules! app_main {
             $crate::run_app(app_main);
         }
 
+        // A standalone Android app's entry (decided in this crate, which knows the `relax` cfg).
+        $crate::android_jni_entry!(app_main);
+
         #[cfg(not(target_arch = "wasm32"))]
         pub fn app_main() {
             $crate::attach_parent_console();
@@ -626,6 +764,8 @@ macro_rules! app_main {
             if Cx::pre_start() {
                 return;
             }
+            $crate::set_window_manager(<$app as AppMain>::window_manager());
+            $crate::discover_window_manager(env!("CARGO_PKG_NAME"));
             $crate::startup_trace("pre_start (objc classes)");
 
             // The event-handler closure (which captures `app` and

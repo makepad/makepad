@@ -1,5 +1,8 @@
 use crate::makepad_script::*;
 use makepad_micro_serde::*;
+use makepad_studio_protocol::HostedWindowOp;
+#[cfg(test)]
+use makepad_studio_protocol::{drag_answer, drag_double, window_op, HostedDragAnswer, HostedDragQuery};
 
 /// Text-input intent for a compositor hosting this application. Key focus alone
 /// is insufficient: canvases, lists and terminal command shortcuts also own it.
@@ -81,27 +84,6 @@ impl HostedPointerCaps {
     pub fn parse(json: &str) -> Option<Self> {
         if !json.contains("\"makepad_pointer_caps\"") { return None; }
         PointerCapsEnvelope::deserialize_json(json).ok().map(|e| e.makepad_pointer_caps)
-    }
-}
-
-/// Visibility, host to app. A host that shows none of this window (minimized,
-/// on another space, fully covered by other windows) sends `visible: false`;
-/// `true` says some of it shows again. A hidden child delivers no
-/// next-frame callbacks and draws nothing -- the screen cannot show it --
-/// and asks for no frames; on `true` it redraws once and resumes. It
-/// reaches the platform as `StudioToApp::Custom`, answered by
-/// `HostedVisible::parse(json)`, and never reaches the app.
-#[derive(Clone, Debug, Default, SerJson, DeJson)]
-pub struct HostedVisible { pub visible: bool }
-#[derive(SerJson, DeJson)]
-struct VisibleEnvelope { makepad_visible: HostedVisible }
-impl HostedVisible {
-    pub fn to_json(&self) -> String {
-        VisibleEnvelope { makepad_visible: self.clone() }.serialize_json()
-    }
-    pub fn parse(json: &str) -> Option<Self> {
-        if !json.contains("\"makepad_visible\"") { return None; }
-        VisibleEnvelope::deserialize_json(json).ok().map(|e| e.makepad_visible)
     }
 }
 
@@ -251,98 +233,85 @@ impl HostedCompact {
     }
 }
 
-// Own chrome: an app that draws its own caption (a title/drag area, caption
-// buttons) tells the host once; the host then draws no frame or title bar for
-// it, and asks the app's window drag query (`Event::WindowDragQuery`, the one
-// the native backends use for borderless windows) where a press landed.
+// Own chrome: a makepad app under the WM always draws its own caption (its theme's
+// chrome, widgets `Window::chrome`); the WM draws no frame or title bar for it, and
+// asks the app's window drag query (`Event::WindowDragQuery`, the one the native
+// backends use for borderless windows) where a press landed.
 //
-//   app -> wm   HostedChrome { own: true }       when the app registers (or drops) its
-//                                                 own caption (`Window::set_drag_region`)
+//   wm  -> app  HostedFullscreen { window_id, on } the window is fullscreen (its own space):
+//                                                 it draws no caption then
+//   (the drag and window-op messages live in `makepad_studio_protocol`: the WM-hosted HAL
+//   shell of `makepad run` relays them too)
 //   wm  -> app  HostedDragQuery { id, x, y }     a press in the window (client points)
-//   app -> wm   HostedDragAnswer { id, response } the query's answer: `drag_answer::*`
+//   app -> wm   HostedDragAnswer { id, response, double_click }
+//                                                 the query's answer: `drag_answer::*`
 //                                                 Caption: the host moves the window and
 //                                                 takes the press away (a cancel);
-//                                                 anything else is the app's own press
+//                                                 anything else is the app's own press.
+//                                                 `double_click` (`drag_double::*`): what a
+//                                                 double click there does
 // The window border stays the host's (resize); the app's caption buttons
 // answer Client, so their presses are the app's.
 
-/// App to host: the app draws its own window chrome (or stopped).
+/// Host to app: the app's window `window_id` (its `WindowId::id`; an app's later windows
+/// are windows of their own on the host) is fullscreen (a space of its own), or not any
+/// more. A fullscreen window draws no caption (edge to edge); a maximised one keeps it.
 #[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
-pub struct HostedChrome { pub own: bool }
+pub struct HostedFullscreen { pub window_id: usize, pub on: bool }
 #[derive(SerJson, DeJson)]
-struct ChromeEnvelope { makepad_chrome: HostedChrome }
-impl HostedChrome {
-    pub fn to_json(&self) -> String { ChromeEnvelope { makepad_chrome: self.clone() }.serialize_json() }
+struct FullscreenEnvelope { makepad_fullscreen: HostedFullscreen }
+impl HostedFullscreen {
+    pub fn to_json(&self) -> String { FullscreenEnvelope { makepad_fullscreen: self.clone() }.serialize_json() }
     pub fn parse(json: &str) -> Option<Self> {
-        if !json.contains("\"makepad_chrome\"") { return None; }
-        ChromeEnvelope::deserialize_json(json).ok().map(|e| e.makepad_chrome)
+        if !json.contains("\"makepad_fullscreen\"") { return None; }
+        FullscreenEnvelope::deserialize_json(json).ok().map(|e| e.makepad_fullscreen)
     }
 }
 
-/// `HostedDragAnswer::response` values (a `WindowDragQueryResponse`).
-pub mod drag_answer {
-    pub const NO_ANSWER: u8 = 0;
-    pub const CLIENT: u8 = 1;
-    pub const CAPTION: u8 = 2;
-    pub const SYS_MENU: u8 = 3;
+/// `HostedWindow::op` values.
+pub mod hosted_window_op {
+    /// Child to host: the window is gone (closed by the app, or after a `CLOSE_REQUEST`).
+    pub const CLOSED: u8 = 0;
+    /// Host to child: the person closed the window on the desk; the app closes it
+    /// unless its `WindowCloseRequested` says no.
+    pub const CLOSE_REQUEST: u8 = 1;
+    /// Child to host: what the app asked of the window (`Window::minimize` and the like).
+    pub const MINIMIZE: u8 = 2;
+    pub const MAXIMIZE: u8 = 3;
+    pub const RESTORE: u8 = 4;
+    pub const FULLSCREEN: u8 = 5;
+    /// Child to host: put the window at `x`, `y` (the app's screen coordinates, the
+    /// `WmEvent::Screens` it was given: relative to its first window).
+    pub const MOVE: u8 = 6;
+    /// Child to host: the window's title is `title` (on its creation and when it changes).
+    pub const TITLE: u8 = 7;
+    /// Child to host, for any of its windows (the first too): the inner size the app asked
+    /// for (`window.inner_size`), `x` by `y` points. The host honours it within its desk.
+    pub const SIZE: u8 = 8;
 }
 
-/// Host to app: where did a press land (the window's own points)?
+/// A hosted app's windows after its first (an output window, a second view): the host
+/// shows each as a window of its own. Both ways, as JSON in `Custom`.
 #[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
-pub struct HostedDragQuery { pub id: u32, pub x: f64, pub y: f64 }
+pub struct HostedWindow { pub window_id: usize, pub op: u8, pub x: f64, pub y: f64, pub title: String }
 #[derive(SerJson, DeJson)]
-struct DragQueryEnvelope { makepad_drag_query: HostedDragQuery }
-impl HostedDragQuery {
-    pub fn to_json(&self) -> String { DragQueryEnvelope { makepad_drag_query: self.clone() }.serialize_json() }
+struct HostedWindowEnvelope { makepad_hosted_window: HostedWindow }
+impl HostedWindow {
+    pub fn new(window_id: usize, op: u8) -> Self { Self { window_id, op, x: 0.0, y: 0.0, title: String::new() } }
+    pub fn title(window_id: usize, title: &str) -> Self { Self { title: title.to_string(), ..Self::new(window_id, hosted_window_op::TITLE) } }
+    pub fn to_json(&self) -> String { HostedWindowEnvelope { makepad_hosted_window: self.clone() }.serialize_json() }
     pub fn parse(json: &str) -> Option<Self> {
-        if !json.contains("\"makepad_drag_query\"") { return None; }
-        DragQueryEnvelope::deserialize_json(json).ok().map(|e| e.makepad_drag_query)
-    }
-}
-
-/// App to host: the answer to a [`HostedDragQuery`].
-#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
-pub struct HostedDragAnswer { pub id: u32, pub response: u8 }
-#[derive(SerJson, DeJson)]
-struct DragAnswerEnvelope { makepad_drag_answer: HostedDragAnswer }
-impl HostedDragAnswer {
-    pub fn to_json(&self) -> String { DragAnswerEnvelope { makepad_drag_answer: self.clone() }.serialize_json() }
-    pub fn parse(json: &str) -> Option<Self> {
-        if !json.contains("\"makepad_drag_answer\"") { return None; }
-        DragAnswerEnvelope::deserialize_json(json).ok().map(|e| e.makepad_drag_answer)
-    }
-}
-
-/// `HostedWindowOp::op` values: what a window of the app asked for.
-pub mod window_op {
-    pub const CLOSE: u8 = 0;
-    pub const MINIMIZE: u8 = 1;
-    /// The maximise button. A hosted app cannot see whether the host has the
-    /// window maximised, so the host decides: it maximises, or restores a
-    /// window that already is.
-    pub const MAXIMIZE: u8 = 2;
-    /// Leave the maximised state; nothing when not maximised.
-    pub const RESTORE: u8 = 3;
-}
-
-/// App to host: the app's window was asked to close, minimise or
-/// maximise/restore (`Window::close` and the like). A hosted child has no
-/// platform window to do it to, so the host, which owns the window, does it
-/// with its own paths. Sent by every hosted backend, so any app with its own
-/// caption buttons gets them working.
-#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
-pub struct HostedWindowOp { pub op: u8 }
-#[derive(SerJson, DeJson)]
-struct WindowOpEnvelope { makepad_window_op: HostedWindowOp }
-impl HostedWindowOp {
-    pub fn to_json(&self) -> String { WindowOpEnvelope { makepad_window_op: self.clone() }.serialize_json() }
-    pub fn parse(json: &str) -> Option<Self> {
-        if !json.contains("\"makepad_window_op\"") { return None; }
-        WindowOpEnvelope::deserialize_json(json).ok().map(|e| e.makepad_window_op)
+        if !json.contains("\"makepad_hosted_window\"") { return None; }
+        HostedWindowEnvelope::deserialize_json(json).ok().map(|e| e.makepad_hosted_window)
     }
 }
 
 impl crate::cx::Cx {
+    /// Tell the host about one of this hosted app's later windows (`hosted_window_op`).
+    pub fn send_hosted_window(message: HostedWindow) {
+        crate::cx::Cx::send_studio_message(makepad_studio_protocol::AppToStudio::Custom(message.to_json()));
+    }
+
     /// A hosted backend's answer to a window op: tell the host (`window_op::*`).
     pub fn send_host_window_op(op: u8) {
         crate::cx::Cx::send_studio_message(makepad_studio_protocol::AppToStudio::Custom(HostedWindowOp { op }.to_json()));
@@ -350,10 +319,19 @@ impl crate::cx::Cx {
 
     /// Tell the host this app draws its own window chrome (`on`) or no longer
     /// does. A no-op when no host is attached.
-    pub fn announce_own_chrome(&mut self, on: bool) {
+    /// A native window draws its own chrome (an app-drawn caption, `Window::set_drag_region`):
+    /// the platform leaves its decorations off. Under a window manager every makepad
+    /// window draws its own caption and nothing is said.
+    pub fn set_own_window_chrome(&mut self, on: bool) {
         #[cfg(not(target_arch = "wasm32"))]
         self.platform_ops.push_back(crate::cx_api::CxOsOp::SetOwnChrome(on));
-        crate::cx::Cx::send_studio_message(makepad_studio_protocol::AppToStudio::Custom(HostedChrome { own: on }.to_json()));
+        #[cfg(target_arch = "wasm32")]
+        let _ = on;
+    }
+
+    /// The host says `window` is fullscreen (`HostedFullscreen`).
+    pub fn hosted_fullscreen(&self, window: crate::window::WindowId) -> bool {
+        self.windows.is_valid(window) && self.windows[window].hosted_fullscreen
     }
 }
 
@@ -548,16 +526,16 @@ mod compact_tests {
 
     #[test]
     fn the_own_chrome_messages_round_trip_and_do_not_mistake_each_other() {
-        let chrome = HostedChrome { own: true }.to_json();
-        assert_eq!(HostedChrome::parse(&chrome), Some(HostedChrome { own: true }));
+        let chrome = HostedFullscreen { window_id: 2, on: true }.to_json();
+        assert_eq!(HostedFullscreen::parse(&chrome), Some(HostedFullscreen { window_id: 2, on: true }));
         let q = HostedDragQuery { id: 7, x: 12.5, y: 3.0 }.to_json();
         assert_eq!(HostedDragQuery::parse(&q), Some(HostedDragQuery { id: 7, x: 12.5, y: 3.0 }));
-        let a = HostedDragAnswer { id: 7, response: drag_answer::CAPTION }.to_json();
-        assert_eq!(HostedDragAnswer::parse(&a), Some(HostedDragAnswer { id: 7, response: drag_answer::CAPTION }));
-        assert!(HostedChrome::parse(&q).is_none() && HostedDragQuery::parse(&a).is_none() && HostedDragAnswer::parse(&chrome).is_none());
+        let a = HostedDragAnswer { id: 7, response: drag_answer::CAPTION, double_click: drag_double::FULLSCREEN }.to_json();
+        assert_eq!(HostedDragAnswer::parse(&a), Some(HostedDragAnswer { id: 7, response: drag_answer::CAPTION, double_click: drag_double::FULLSCREEN }));
+        assert!(HostedFullscreen::parse(&q).is_none() && HostedDragQuery::parse(&a).is_none() && HostedDragAnswer::parse(&chrome).is_none());
         let op = HostedWindowOp { op: window_op::MINIMIZE }.to_json();
         assert_eq!(HostedWindowOp::parse(&op), Some(HostedWindowOp { op: window_op::MINIMIZE }));
-        assert!(HostedWindowOp::parse(&chrome).is_none() && HostedChrome::parse(&op).is_none() && HostedDragQuery::parse(&op).is_none());
+        assert!(HostedWindowOp::parse(&chrome).is_none() && HostedFullscreen::parse(&op).is_none() && HostedDragQuery::parse(&op).is_none());
     }
 
     #[test]
@@ -581,5 +559,20 @@ mod compact_tests {
         assert_eq!(pick_compact_form(&forms, [400.0, 150.0]), Some(0));
         assert_eq!(pick_compact_form(&forms, [200.0, 150.0]), None);
         assert_eq!(pick_compact_form(&[], [400.0, 300.0]), None);
+    }
+}
+
+#[cfg(test)]
+mod hosted_window_tests {
+    use super::*;
+
+    /// A later window's messages survive the trip, its title included (non-ASCII too).
+    #[test]
+    fn a_hosted_window_message_round_trips() {
+        let title = HostedWindow::title(3, "Stage — Program Output");
+        assert_eq!(HostedWindow::parse(&title.to_json()), Some(title));
+        let mv = HostedWindow { x: 1610.5, y: -2.0, ..HostedWindow::new(3, hosted_window_op::MOVE) };
+        assert_eq!(HostedWindow::parse(&mv.to_json()), Some(mv));
+        assert_eq!(HostedWindow::parse(&HostedWindowOp { op: window_op::CLOSE }.to_json()), None);
     }
 }

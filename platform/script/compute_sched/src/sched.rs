@@ -185,10 +185,24 @@ impl ThreadExecutor {
     /// The process-wide pool for [`crate::kernel::Call::run_parallel`]:
     /// the machine's parallelism less one (the caller works too).
     pub fn shared() -> &'static ThreadExecutor {
-        static SHARED: OnceLock<ThreadExecutor> = OnceLock::new();
         SHARED.get_or_init(|| ThreadExecutor::new(std::thread::available_parallelism().map_or(3, |n| n.get()).saturating_sub(1).max(1)))
     }
+
+    /// The app that used the process-wide pool ends while its process goes on (an app domain
+    /// of `makepad run`, which waits for every thread the app started): the workers finish the
+    /// task they run and end; queued tasks are dropped unrun (Stage queued its effect kernels'
+    /// compiles at start-up: seconds of work at a quit). From then on fan-outs run on their
+    /// callers and `spawn` refuses.
+    /// Nothing when the pool never started.
+    pub fn stop_shared() {
+        if let Some(pool) = SHARED.get() {
+            lock(&pool.inner.state).shutdown = true;
+            pool.inner.work.notify_all();
+        }
+    }
 }
+
+static SHARED: OnceLock<ThreadExecutor> = OnceLock::new();
 
 impl Drop for ThreadExecutor {
     fn drop(&mut self) {
@@ -282,7 +296,7 @@ impl Executor for ThreadExecutor {
             return;
         }
         let mut st = lock(&inner.state);
-        let Some(k) = (0..BATCHES).find(|k| !st.used[*k]) else {
+        let Some(k) = (0..BATCHES).find(|k| !st.used[*k]).filter(|_| !st.shutdown) else {
             drop(st);
             for w in 0..n {
                 f(w);

@@ -296,7 +296,7 @@ hal_events! {
     /// Later device failures are inventory statuses. `message` is UTF-8 on failure.
     DirectDisplayResult = 135, direct_display_result { req: u64, command: u32, ok: bool, message: rng };
     /// Initial host preferences and changes applied by this owner.
-    DirectInput = 136, direct_input { window: obj, mouse_speed: u32, touchpad_speed: u32, natural_scroll: bool };
+    DirectInput = 136, direct_input { window: obj, mouse_speed: u32, touchpad_speed: u32, natural_scroll: bool, tap_to_click: bool };
 
     /// The soft keyboard starts to move: it will cover `height` window points of the window's
     /// bottom (`open`), or go away, over `duration` seconds along `curve` (`ime_curve::*`). The
@@ -307,4 +307,13 @@ hal_events! {
     /// The EGL display, config and context of the HAL's GLES context: a context the app makes
     /// with this share context shares its texture and sync names (`TextureAdoptGl`, `GlFence`).
     GlShare = 138, gl_share { display: u64, config: u64, context: u64 };
+
+    // ---- system back (Android), appended
+    /// A step of the system back gesture (`input::back_state::*`) at `x`, `y` window points
+    /// (NaN when it is not a touch: the back button), `progress` 0..1 and the screen `edge`
+    /// (`input::back_edge::*`).
+    BackGesture = 146, back_gesture { window: obj, state: u32, x: f64, y: f64, progress: f64, edge: u32 };
+    /// The system back press or completed back gesture. Unless the app takes it, it answers
+    /// `BackUnhandled`.
+    BackPressed = 147, back_pressed { window: obj };
 }

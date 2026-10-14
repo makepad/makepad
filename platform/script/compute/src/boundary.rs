@@ -450,10 +450,47 @@ pub enum CompileReq<'a> {
     Prepared { program: &'a crate::object::PreparedProgram, backend: Backend, modules: &'a [crate::module::Module<'a>] },
 }
 
+/// The kernel compiles running now, as `kind [name] on thread` (the host's quit trace names
+/// what an app's stop waited for: a compile that has begun runs to its end).
+pub fn kernels_compiling() -> Vec<String> {
+    COMPILING.lock().unwrap_or_else(|e| e.into_inner()).iter().map(|(_, what)| what.clone()).collect()
+}
+
+static COMPILING: std::sync::Mutex<Vec<(u64, String)>> = std::sync::Mutex::new(Vec::new());
+
+/// One running compile in [`COMPILING`], removed when it ends.
+struct Compiling(u64);
+
+impl Compiling {
+    fn begin(req: &CompileReq<'_>) -> Compiling {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let kind = match req {
+            CompileReq::Source { .. } => "source kernel".to_string(),
+            #[cfg(feature = "vm")]
+            CompileReq::Vm { .. } => "splash kernel".to_string(),
+            #[cfg(feature = "vm")]
+            CompileReq::Object { name, .. } => format!("kernel object {name}"),
+            #[cfg(feature = "vm")]
+            CompileReq::Prepared { .. } => "prepared kernel".to_string(),
+        };
+        let what = format!("{kind} on {}", std::thread::current().name().unwrap_or("?"));
+        let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        COMPILING.lock().unwrap_or_else(|e| e.into_inner()).push((id, what));
+        Compiling(id)
+    }
+}
+
+impl Drop for Compiling {
+    fn drop(&mut self) {
+        COMPILING.lock().unwrap_or_else(|e| e.into_inner()).retain(|(id, _)| *id != self.0);
+    }
+}
+
 /// Compiles wholly inside the provided crate. All input views expire on
 /// return; the output owns its kernel or diagnostics independently.
 #[relax_api]
 pub fn kernel_compile(req: &CompileReq<'_>) -> KernelCompilation {
+    let _compiling = Compiling::begin(req);
     let data = match req {
         CompileReq::Source { src, layouts, backend, modules, live } => compile_source(src, layouts, *backend, modules, *live),
         #[cfg(feature = "vm")]

@@ -982,7 +982,8 @@ impl Cx {
                     response: response.clone(),
                 }));
                 let text = response.borrow().clone();
-                if let Some(text) = text {
+                // a copy or cut of nothing leaves the host's clipboard as it is
+                if let Some(text) = text.filter(|t| !t.is_empty()) {
                     Cx::send_studio_message(AppToStudio::SetClipboard(text));
                 }
             }
@@ -992,7 +993,8 @@ impl Cx {
                     response: response.clone(),
                 }));
                 let text = response.borrow().clone();
-                if let Some(text) = text {
+                // a copy or cut of nothing leaves the host's clipboard as it is
+                if let Some(text) = text.filter(|t| !t.is_empty()) {
                     Cx::send_studio_message(AppToStudio::SetClipboard(text));
                 }
             }
@@ -1021,10 +1023,16 @@ impl Cx {
                     let event = Event::BackPressed { handled: std::cell::Cell::new(false) };
                     self.call_event_handler(&event);
                     let Event::BackPressed { handled } = event else { unreachable!() };
-                    Self::send_studio_message(AppToStudio::Custom(crate::ime::HostedBack {
-                        handled: Some(handled.get()),
-                    }.to_json()));
-                } else if let Some(shown) = crate::ime::HostedVisible::parse(&data) {
+                    let reply = crate::ime::HostedBack { handled: Some(handled.get()) }.to_json();
+                    // a domain answers its parent (the WM) over the HAL; a hosted process over its socket
+                    #[cfg(not(target_arch = "wasm32"))]
+                    let sent = self.hal_send_parent_message(&reply);
+                    #[cfg(target_arch = "wasm32")]
+                    let sent = false;
+                    if !sent {
+                        Self::send_studio_message(AppToStudio::Custom(reply));
+                    }
+                } else if let Some(shown) = makepad_studio_protocol::HostedVisible::parse(&data) {
                     let hidden = !shown.visible;
                     if self.hosted_hidden != hidden {
                         self.hosted_hidden = hidden;
@@ -1033,24 +1041,57 @@ impl Cx {
                             self.redraw_all();
                         }
                     }
-                } else if let Some(query) = crate::ime::HostedDragQuery::parse(&data) {
+                } else if let Some(window) = crate::ime::HostedWindow::parse(&data) {
+                    #[cfg(not(target_arch = "wasm32"))]
+                    if window.op == crate::ime::hosted_window_op::CLOSE_REQUEST {
+                        self.hal_hosted_close_request(window.window_id);
+                    }
+                    #[cfg(target_arch = "wasm32")]
+                    let _ = window;
+                } else if let Some(fullscreen) = crate::ime::HostedFullscreen::parse(&data) {
+                    // A fullscreen window draws no caption (widgets `Window`), and its geometry
+                    // says it is fullscreen (`WindowHandle::is_fullscreen`), as a native one's does.
+                    let window_id = self.windows.id_iter().find(|w| w.id() == fullscreen.window_id);
+                    if let Some(window_id) = window_id {
+                        if self.windows[window_id].hosted_fullscreen != fullscreen.on {
+                            self.windows[window_id].hosted_fullscreen = fullscreen.on;
+                            let old_geom = self.windows[window_id].window_geom.clone();
+                            self.windows[window_id].window_geom.is_fullscreen = fullscreen.on;
+                            let new_geom = self.windows[window_id].window_geom.clone();
+                            self.call_event_handler(&Event::WindowGeomChange(crate::event::WindowGeomChangeEvent { window_id, old_geom, new_geom }));
+                            self.redraw_all();
+                        }
+                    }
+                } else if let Some(query) = makepad_studio_protocol::HostedDragQuery::parse(&data) {
                     // The host asks the app's window drag query (the one a
                     // native backend asks for a borderless window).
                     use crate::event::WindowDragQueryResponse as R;
                     let response = std::rc::Rc::new(std::cell::Cell::new(R::NoAnswer));
+                    // The window the point is in (a multi-window app's later windows sit at
+                    // their own origins in the child's window space), in its own points.
+                    let host = crate::makepad_math::dvec2(query.x, query.y);
+                    let (window_id, pos) = if self.windows.len() == 0 {
+                        (crate::window::CxWindowPool::id_zero(), crate::makepad_math::dvec2(0.0, 0.0))
+                    } else {
+                        self.windows.window_id_contains(host)
+                    };
+                    let abs = if self.windows.len() == 0 { host } else { self.stdin_pointer_abs(host, pos, window_id) };
                     self.call_event_handler(&Event::WindowDragQuery(crate::event::WindowDragQueryEvent {
-                        window_id: crate::window::CxWindowPool::id_zero(),
-                        abs: crate::makepad_math::dvec2(query.x, query.y),
+                        window_id,
+                        abs,
                         response: response.clone(),
                     }));
                     let answer = match response.get() {
-                        R::NoAnswer => crate::ime::drag_answer::NO_ANSWER,
-                        R::Client => crate::ime::drag_answer::CLIENT,
-                        R::Caption => crate::ime::drag_answer::CAPTION,
-                        R::SysMenu => crate::ime::drag_answer::SYS_MENU,
+                        R::NoAnswer => makepad_studio_protocol::drag_answer::NO_ANSWER,
+                        R::Client => makepad_studio_protocol::drag_answer::CLIENT,
+                        R::Caption => makepad_studio_protocol::drag_answer::CAPTION,
+                        R::SysMenu => makepad_studio_protocol::drag_answer::SYS_MENU,
                     };
+                    // What a double click there does: the window's own declaration.
+                    let fullscreen = self.windows.len() != 0 && self.windows.is_valid(window_id) && self.windows[window_id].double_click_fullscreen;
+                    let double_click = if fullscreen { makepad_studio_protocol::drag_double::FULLSCREEN } else { makepad_studio_protocol::drag_double::MAXIMISE };
                     Self::send_studio_message(AppToStudio::Custom(
-                        crate::ime::HostedDragAnswer { id: query.id, response: answer }.to_json(),
+                        makepad_studio_protocol::HostedDragAnswer { id: query.id, response: answer, double_click }.to_json(),
                     ));
                 } else {
                     self.call_event_handler(&Event::Custom(data));
@@ -1456,6 +1497,11 @@ impl Cx {
             return;
         }
         crate::remote::note_user_event(self, event);
+        match event {
+            Event::Signal => crate::frame_sources::signal(),
+            Event::Timer(t) => crate::frame_sources::timer_fired(t.timer_id),
+            _ => {}
+        }
         if let Event::Signal = event {
             for hook in self.signal_hooks.clone() {
                 hook(self);
@@ -1989,6 +2035,9 @@ impl Cx {
     /// Wake a hosted child on worker signals. Socket-read loops ask the host for a
     /// Tick; the HAL wakes its event pump and announces demand after servicing signals.
     pub(crate) fn stdin_install_wake(&mut self) {
+        // Each host message used to raise the UI signal too: a full-app
+        // `Event::Signal` per Tick (a hosted Stage pumped 100+ times a second idle).
+        self.studio_socket_wakes_loop_only();
         hosted_demand::tick_began();
         crate::makepad_network::install_ui_waker(Some(crate::makepad_network::UiWaker::new(
             hosted_demand::wake_from_thread,
@@ -2000,10 +2049,16 @@ impl Cx {
         hosted_demand::tick_began();
     }
 
-    /// At most one frame request until the host answers with a Tick. Hidden children
-    /// retain their frame work until the shared HostedVisible dispatch shows them again.
+    /// A hidden hosted child keeps its frame work (next-frame callbacks, draws) until the
+    /// shared HostedVisible dispatch shows it again -- except while a remote request needs a
+    /// frame (a grab, a step, input that waits for its frame): the remote is never starved.
+    pub(crate) fn hosted_frames_held(&self) -> bool {
+        self.hosted_hidden && !crate::remote::needs_ticks()
+    }
+
+    /// At most one frame request until the host answers with a Tick, none while frames are held.
     pub(crate) fn stdin_request_frame(&self) {
-        if !self.hosted_hidden {
+        if !self.hosted_frames_held() {
             hosted_demand::request_frame();
         }
     }
@@ -2014,7 +2069,7 @@ impl Cx {
     pub(crate) fn stdin_announce_demand(&self, timers: &crate::os::shared_framebuf::PollTimers) {
         // As in call_next_frame_event, a virtual clock advances callbacks only on /step.
         let next_frames_due = !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled();
-        if !self.hosted_hidden && (next_frames_due || self.need_redrawing()) {
+        if !self.hosted_frames_held() && (next_frames_due || self.need_redrawing()) {
             self.stdin_request_frame();
         } else if let Some(delay) = timers.next_due_in() {
             Self::send_studio_message(AppToStudio::WakeIn(delay));

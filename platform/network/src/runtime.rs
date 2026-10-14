@@ -45,6 +45,13 @@ impl NetworkRuntime {
         self.sink.set_quiet_socket(socket_id);
     }
 
+    /// Events of `socket_id` wake the event loop through the wake fn but
+    /// raise no UI signal: the platform loop reads them itself (a hosted
+    /// child's host socket), so no `Event::Signal` goes to the app for them.
+    pub fn set_loop_socket(&self, socket_id: Option<LiveId>) {
+        self.sink.set_loop_socket(socket_id);
+    }
+
     pub fn http_start(&self, request_id: LiveId, request: HttpRequest) -> Result<(), NetworkError> {
         self.backend
             .http_start(request_id, request, self.sink.clone())

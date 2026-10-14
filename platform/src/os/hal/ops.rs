@@ -169,6 +169,20 @@ impl Cx {
     }
 
     fn hal_file_dialog(&mut self, kind: DialogKind, settings: crate::file_dialogs::FileDialog) {
+        // A host that draws the pickers for its children (the Linux WM: a hosted child has no
+        // display of its own to show one on) gets the request, and its answer arrives as the
+        // same `FileDialogAction` (hosted_relay.rs).
+        if self.hal.hosted.is_some() && crate::hosted_relay::host_serves_file_dialogs() {
+            let name = match kind {
+                DialogKind::SelectFile => "select_file",
+                DialogKind::SaveFile => "save_file",
+                DialogKind::SelectFolder => "select_folder",
+                DialogKind::SaveFolder => "save_folder",
+            };
+            let relay = crate::hosted_relay::relay_file_dialog(name, &settings);
+            Self::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::FileDialog(relay)));
+            return;
+        }
         self.hal.next_dialog += 1;
         let req = self.hal.next_dialog;
         self.hal.dialogs.insert(req, PendingDialog { kind, id: settings.id });
@@ -232,16 +246,37 @@ impl Cx {
                     let p = self.windows[window_id].window_geom.position;
                     self.hal.frames.w.window_geom(hal_window_id(window_id), [p.x as f32, p.y as f32, size.x as f32, size.y as f32]);
                 }
+                // A hosted app's later windows are windows of their own on the host: what the
+                // app asks of them goes to the host with the window's id; its close is local
+                // (the HAL answers it with `Closed`, which tells the host).
+                CxOsOp::CloseWindow(w) if self.hal_hosted_extra_window(w) => {
+                    if self.windows[w].is_created {
+                        self.windows[w].is_created = false;
+                        self.hal.frames.w.window_close(hal_window_id(w));
+                    }
+                }
+                CxOsOp::MinimizeWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::MINIMIZE)),
+                CxOsOp::MaximizeWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::MAXIMIZE)),
+                CxOsOp::FullscreenWindow(w) if self.hal_hosted_extra_window(w) => Self::send_hosted_window(crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::FULLSCREEN)),
+                CxOsOp::Deminiaturize(w) | CxOsOp::RestoreWindow(w) | CxOsOp::NormalizeWindow(w) if self.hal_hosted_extra_window(w) => {
+                    Self::send_hosted_window(crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::RESTORE))
+                }
+                CxOsOp::SetWindowTitle(w, title) if self.hal_hosted_extra_window(w) => {
+                    Self::send_hosted_window(crate::ime::HostedWindow::title(w.id(), &title))
+                }
+                CxOsOp::RepositionWindow(w, pos) if self.hal_hosted_extra_window(w) => {
+                    Self::send_hosted_window(crate::ime::HostedWindow { x: pos.x, y: pos.y, ..crate::ime::HostedWindow::new(w.id(), crate::ime::hosted_window_op::MOVE) })
+                }
                 CxOsOp::RepositionWindow(window_id, pos) => {
                     let s = self.windows[window_id].window_geom.inner_size;
                     self.hal.frames.w.window_geom(hal_window_id(window_id), [pos.x as f32, pos.y as f32, s.x as f32, s.y as f32]);
                 }
                 // The host owns these operations, including close. Keep the child's
                 // HAL window alive until the host ends the session, as in the stdin backends.
-                CxOsOp::CloseWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(crate::ime::window_op::CLOSE),
-                CxOsOp::MinimizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(crate::ime::window_op::MINIMIZE),
-                CxOsOp::MaximizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(crate::ime::window_op::MAXIMIZE),
-                CxOsOp::RestoreWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(crate::ime::window_op::RESTORE),
+                CxOsOp::CloseWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::CLOSE),
+                CxOsOp::MinimizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MINIMIZE),
+                CxOsOp::MaximizeWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::MAXIMIZE),
+                CxOsOp::RestoreWindow(_) if self.hal.hosted.is_some() => Self::send_host_window_op(makepad_studio_protocol::window_op::RESTORE),
                 CxOsOp::CloseWindow(window_id) if self.hal_is_embedded() => {
                     self.hal.frames.w.window_state(hal_window_id(window_id), window_state::CLOSE);
                 }
@@ -411,7 +446,14 @@ impl Cx {
                     }
                 }
                 CxOsOp::ShareText(text) => self.hal.frames.w.share_text(text.as_bytes()),
-                CxOsOp::SetPrimarySelection(text) => self.hal.frames.w.selection_set(text.as_bytes()),
+                // a hosted child's selection is its host's primary selection
+                CxOsOp::SetPrimarySelection(text) => {
+                    if self.hal.hosted.is_some() {
+                        Self::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::SetPrimarySelection { text }));
+                    } else {
+                        self.hal.frames.w.selection_set(text.as_bytes());
+                    }
+                }
 
                 // the mobile system UI (a desktop backend ignores it)
                 CxOsOp::SetSystemBarDarkIcons(dark) => self.hal.frames.w.mobile_ui(mobile_ui::STATUS_BAR_DARK_ICONS, dark as u32),

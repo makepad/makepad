@@ -1238,8 +1238,14 @@ impl CxDrawListPool {
         self[id].upload_priority = 2;
         self[id].owner = crate::gpu_ledger::innermost_owner();
         self[id].gpu_eviction_distance = f64::INFINITY;
+        self[id].glyph_uses.clear();
         #[cfg(target_arch = "wasm32")]
         self[id].reset_draw_item_uniform_caches();
+    }
+
+    /// Every live draw list.
+    pub fn iter_live(&self) -> impl Iterator<Item = &CxDrawList> + '_ {
+        self.id_iter().map(|id| &self[id])
     }
 
     /// Every live draw list id (the tweaker's colour pulse walks all
@@ -2366,6 +2372,11 @@ pub struct CxDrawList {
     /// Owners with a custom projection update this with their demand census.
     pub gpu_eviction_distance: f64,
     pub reset_zbias: bool,
+    /// The glyphs this list's instances draw (session font, glyph, request kind), as the text
+    /// drawn into it looked them up; cleared when the list is recorded again. Under the HAL a
+    /// glyph's curves or pixels live in the host's store: while this list is alive (painted
+    /// again from its kept instances or not) its glyphs stay in use.
+    pub glyph_uses: Vec<[u32; 3]>,
 
     /// Depth floor for this draw list and everything drawn under it, in
     /// `world.z` units. `0.0` — every ordinary list — costs one compare and
@@ -2836,6 +2847,7 @@ impl CxDrawList {
         }
         self.rect_area_count = 0;
         self.find_appendable_draw_shader_check.clear();
+        self.glyph_uses.clear();
     }
 
     /// Record a rect area for the current record and return its id: the

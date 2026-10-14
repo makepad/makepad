@@ -8,6 +8,7 @@ use crate::shader_ir_draw::{build_gl_entries, GlDrawInfo};
 use crate::shader_ir_text::*;
 use crate::shader_output::*;
 use makepad_live_id::LiveId;
+use makepad_relax_api::relax_api;
 use std::fmt::Write;
 
 pub struct GlslDrawSources {
@@ -20,13 +21,25 @@ pub struct GlslDrawSources {
     pub inline_estimate: (usize, Vec<(String, usize, usize)>),
 }
 
+// Ops: under makepad run the sources are this (provided) crate's values; JIT code reads them
+// only through these.
+#[relax_api]
 impl GlslDrawSources {
+    #[relax_api]
     pub fn vertex(&self) -> &str { &self.vertex }
+    #[relax_api]
     pub fn fragment(&self) -> &str { &self.fragment }
+    #[relax_api]
+    pub fn info(&self) -> GlDrawInfo { self.info.clone() }
+    #[relax_api]
     pub fn inline_bytes(&self) -> usize { self.inline_estimate.0 }
+    #[relax_api]
     pub fn inline_function_count(&self) -> usize { self.inline_estimate.1.len() }
+    #[relax_api]
     pub fn inline_function_name(&self, index: usize) -> &str { &self.inline_estimate.1[index].0 }
+    #[relax_api]
     pub fn inline_function_copies(&self, index: usize) -> usize { self.inline_estimate.1[index].1 }
+    #[relax_api]
     pub fn inline_function_bytes(&self, index: usize) -> usize { self.inline_estimate.1[index].2 }
 }
 

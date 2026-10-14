@@ -22,6 +22,7 @@
 //! kernel only through its push constants (`ComputeLayout`).
 
 pub use makepad_shader::shader_ir_compute::*;
+use makepad_shader::shader_ir::CooperativeMatrix;
 use crate::{
     shader::{ShaderMode, ShaderType},
     shader_lower::IrFnCompiler,
@@ -31,6 +32,57 @@ use crate::{
     vm::ScriptVm,
 };
 use makepad_live_id::{id, LiveId};
+use makepad_relax_api::relax_api;
+
+/// `compile_compute_kernel` as an op (makepad run): the result stays in this crate, JIT code
+/// reads it through `view` and builds its own `CompiledKernel` (`CompiledKernelView::to_kernel`).
+#[relax_api(handle)]
+pub struct CompiledKernelResult {
+    result: Result<CompiledKernel, String>,
+}
+
+#[relax_api]
+pub fn compile_compute_kernel_result(vm: &mut ScriptVm, kernel: ScriptObject) -> CompiledKernelResult {
+    CompiledKernelResult { result: compile_compute_kernel(vm, kernel) }
+}
+
+#[relax_api]
+impl CompiledKernelResult {
+    /// The kernel's SPIR-V and layout as plain data, or the error.
+    #[relax_api]
+    pub fn view(&self) -> CompiledKernelView<'_> {
+        match &self.result {
+            Ok(k) => CompiledKernelView { error: None, spirv: &k.spirv, slots: &k.layout.slots, cooperative_matrices: &k.layout.cooperative_matrices,
+                push_size: k.layout.push_size, workgroup: k.layout.workgroup, shared_bytes: k.layout.shared_bytes },
+            Err(e) => CompiledKernelView { error: Some(e), ..Default::default() },
+        }
+    }
+}
+
+/// [`CompiledKernelResult::view`].
+#[relax_api(plain)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct CompiledKernelView<'a> {
+    pub error: Option<&'a str>,
+    pub spirv: &'a [u32],
+    pub slots: &'a [ComputeSlot],
+    pub cooperative_matrices: &'a [CooperativeMatrix],
+    pub push_size: u32,
+    pub workgroup: [u32; 3],
+    pub shared_bytes: u32,
+}
+
+impl CompiledKernelView<'_> {
+    /// The compiled kernel (a copy on the caller's side), or the error.
+    pub fn to_kernel(&self) -> Result<CompiledKernel, String> {
+        if let Some(error) = self.error {
+            return Err(error.to_string());
+        }
+        Ok(CompiledKernel { spirv: self.spirv.to_vec(), layout: ComputeLayout { slots: self.slots.to_vec(), push_size: self.push_size,
+            workgroup: self.workgroup, shared_bytes: self.shared_bytes, cooperative_matrices: self.cooperative_matrices.to_vec() } })
+    }
+}
 
 /// A compiled kernel: its SPIR-V (entry point `kernel_main`) and the
 /// push-constant layout its host fills.

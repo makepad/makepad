@@ -31,10 +31,20 @@ pub struct Device {
     pub timestamp_bits: u32,
     pub extensions: HashSet<String>,
     pub present_wait: bool,
-    // Display-only devices borrow the compositor's instance. It outlives every peer.
-    instance_owner: Option<Arc<Device>>,
+    /// The instance, destroyed after the last device made on it (display peers and a device
+    /// that replaced a lost one share it).
+    life: Arc<InstanceLife>,
     pub allocated: AtomicU64,
+    /// The driver reported VK_ERROR_DEVICE_LOST (or a simulated loss): the backend replaces
+    /// the device. Nothing else marks a device lost; running out of memory never does.
     pub lost: AtomicBool,
+    /// A submission or fence wait ran out of memory and waits for room: the backend raises
+    /// GPU pressure at once (the host asks the AI hub to yield) instead of after a sustained
+    /// shortage.
+    pub starved: AtomicBool,
+    /// An out-of-memory answer at the open-file limit was reported (`refused`); cleared by the
+    /// next refusal below the limit, so each episode logs once.
+    files_reported: AtomicBool,
     /// The last device budget read (`memory_budget`) and when.
     budget: Mutex<Option<(std::time::Instant, MemoryBudget)>>,
 }
@@ -53,10 +63,41 @@ impl MemoryBudget {
     pub fn free(&self) -> u64 { self.budget.saturating_sub(self.usage) }
 }
 
+/// The device-local heaps' free bytes for this process and their size (VK_EXT_memory_budget),
+/// read before a device exists.
+fn device_local_free(instance: &makepad_vulkan::Instance, physical: vk::PhysicalDevice) -> Option<(u64, u64)> {
+    let mut heaps = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+    let mut props = vk::PhysicalDeviceMemoryProperties2::default().next_physical_device_memory_budget_properties_ext(&mut heaps);
+    unsafe { instance.get_physical_device_memory_properties2(physical, &mut props); }
+    let m = props.memory_properties;
+    let (mut free, mut size) = (0u64, 0u64);
+    for i in 0..(m.memory_heap_count as usize).min(m.memory_heaps.len()) {
+        if m.memory_heaps[i].flags.as_raw() & 1 == 0 { continue; } // VK_MEMORY_HEAP_DEVICE_LOCAL_BIT
+        free += heaps.heap_budget[i].saturating_sub(heaps.heap_usage[i]);
+        size += m.memory_heaps[i].size;
+    }
+    (size > 0).then_some((free, size))
+}
+
+/// How long a device creation out of memory waits before it tries again.
+const DEVICE_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// How long a budget read is reused: it answers every submit, and the driver call is not free.
 const BUDGET_REUSE: std::time::Duration = std::time::Duration::from_millis(250);
 
 static SHARED: Mutex<Option<(Vec<String>, Arc<Device>)>> = Mutex::new(None);
+
+/// Owns a VkInstance: destroyed when the last device on it is gone.
+struct InstanceLife(makepad_vulkan::Instance);
+impl Drop for InstanceLife {
+    fn drop(&mut self) { unsafe { self.0.destroy_instance(None) } }
+}
+
+/// What a logical device was made with on its physical device, to make it again after a loss.
+struct Wanted<'a> {
+    instance_extensions: &'a [&'a CStr],
+    optional: &'a [&'a CStr],
+}
 
 impl Device {
     /// The process's Vulkan device if a backend made it already (code outside any session,
@@ -98,105 +139,143 @@ impl Device {
         let instance = unsafe { entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&names), None) }
             .map_err(|e| format!("vkCreateInstance: {e:?}"))?;
         if log_enabled() { eprintln!("[hal-vulkan] vkCreateInstance succeeded"); }
-        let result = (|| {
-            let mut devices = unsafe { instance.enumerate_physical_devices() }
-                .map_err(|e| format!("vkEnumeratePhysicalDevices: {e:?}"))?;
-            devices.sort_by_key(|p| match unsafe { instance.get_physical_device_properties(*p) }.device_type {
-                vk::PhysicalDeviceType::DISCRETE_GPU => 0,
-                vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
-                _ => 2,
-            });
-            source.order_devices(&instance, &mut devices)?;
-            for physical in devices {
-                let properties = unsafe { instance.get_physical_device_properties(physical) };
-                let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
-                if log_enabled() { eprintln!("[hal-vulkan] device candidate={name:?} handle={physical:?} type={:?} api={:#x} driver={:#x}", properties.device_type, properties.api_version, properties.driver_version); }
-                if properties.api_version < vk::API_VERSION_1_1 {
-                    if log_enabled() { eprintln!("[hal-vulkan] skipping {name:?}: Vulkan 1.1 required"); }
-                    continue;
-                }
-                let queues = unsafe { instance.get_physical_device_queue_family_properties(physical) };
-                let Some((family, queue)) = queues.iter().enumerate().find(|(_, q)| q.queue_count > 0 && q.queue_flags.contains(vk::QueueFlags::GRAPHICS)) else {
-                    if log_enabled() { eprintln!("[hal-vulkan] skipping {name:?}: no graphics queue"); }
-                    continue;
-                };
-                let available = unsafe { instance.enumerate_device_extension_properties(physical) }
-                    .map_err(|e| format!("vkEnumerateDeviceExtensionProperties device={name:?}: {e:?}"))?;
-                let supported = |name: &CStr| available.iter().any(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) == name });
-                if instance_extensions.contains(&vk::KHR_SURFACE_NAME) && !supported(vk::KHR_SWAPCHAIN_NAME) {
-                    if log_enabled() { eprintln!("[hal-vulkan] skipping {name:?}: VK_KHR_swapchain unavailable"); }
-                    continue;
-                }
-                // External-image extensions form one capability, including their dependencies.
-                let mut wanted = if optional.iter().all(|n| supported(n)) { optional.to_vec() } else { Vec::new() };
-                #[cfg(target_os = "linux")]
-                let mut timeline = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
-                #[cfg(target_os = "linux")]
-                {
-                    // OPAQUE_FD hosted imports and sync are independent of modifier support.
-                    if supported(vk::KHR_EXTERNAL_MEMORY_FD_NAME) { wanted.push(vk::KHR_EXTERNAL_MEMORY_FD_NAME); }
-                    if supported(vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME) { wanted.push(vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME); }
-                    if supported(vk::KHR_TIMELINE_SEMAPHORE_NAME) {
-                        let mut features = vk::PhysicalDeviceFeatures2::default().next_physical_device_timeline_semaphore_features(&mut timeline);
-                        unsafe { instance.get_physical_device_features2(physical, &mut features); }
-                        if timeline.timeline_semaphore != 0 { wanted.push(vk::KHR_TIMELINE_SEMAPHORE_NAME); }
-                    }
-                }
-                if instance_extensions.contains(&vk::KHR_SURFACE_NAME) { wanted.push(vk::KHR_SWAPCHAIN_NAME); }
-                let mut present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default();
-                let mut present_wait = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
-                let wants_display_clock = instance_extensions.contains(&vk::KHR_DISPLAY_NAME);
-                let pacing = wants_display_clock && supported(vk::KHR_PRESENT_ID_NAME) && supported(vk::KHR_PRESENT_WAIT_NAME);
-                if pacing {
-                    let mut query = vk::PhysicalDeviceFeatures2::default()
-                        .next_physical_device_present_id_features_khr(&mut present_id)
-                        .next_physical_device_present_wait_features_khr(&mut present_wait);
-                    unsafe { instance.get_physical_device_features2(physical, &mut query); }
-                }
-                let pacing = pacing && present_id.present_id != 0 && present_wait.present_wait != 0;
-                // These were chained for the feature query. Reusing that chain while
-                // prepending the same structures would make a cyclic pNext list.
-                present_id.p_next = std::ptr::null_mut();
-                present_wait.p_next = std::ptr::null_mut();
-                if pacing { wanted.extend([vk::KHR_PRESENT_ID_NAME, vk::KHR_PRESENT_WAIT_NAME]); }
-                // the device's real budget (other processes included), for the UI's memory reserve
-                if supported(vk::EXT_MEMORY_BUDGET_NAME) { wanted.push(vk::EXT_MEMORY_BUDGET_NAME); }
-                wanted.sort_by(|a, b| a.to_bytes().cmp(b.to_bytes()));
-                wanted.dedup();
-                if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice device={name:?} queue_family={family} extensions={wanted:?}"); }
-                let extensions = wanted.iter().map(|n| n.to_string_lossy().into_owned()).collect();
-                let wanted: Vec<_> = wanted.iter().map(|n| n.as_ptr()).collect();
-                let supported_features = unsafe { instance.get_physical_device_features(physical) };
-                let features = vk::PhysicalDeviceFeatures::default()
-                    .independent_blend(supported_features.independent_blend == vk::TRUE)
-                    .texture_compression_bc(supported_features.texture_compression_bc == vk::TRUE)
-                    .texture_compression_astc_ldr(supported_features.texture_compression_astc_ldr == vk::TRUE);
-                let priorities = [1.0];
-                let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(family as u32).queue_priorities(&priorities)];
-                let mut create = vk::DeviceCreateInfo::default()
-                    .queue_create_infos(&queues).enabled_extension_names(&wanted).enabled_features(&features);
-                #[cfg(target_os = "linux")]
-                if timeline.timeline_semaphore != 0 { create = create.next_physical_device_timeline_semaphore_features(&mut timeline); }
-                if pacing { create = create.next_physical_device_present_id_features_khr(&mut present_id)
-                    .next_physical_device_present_wait_features_khr(&mut present_wait); }
-                let raw = unsafe { instance.create_device(physical, &create, None) }
-                    .map_err(|e| format!("vkCreateDevice device={name:?} queue_family={family}: {e:?}"))?;
-                if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice succeeded device={name:?} queue_family={family}"); }
-                let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
-                let formats = std::array::from_fn(|f| unsafe {
-                    instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap())
-                });
-                return Ok(Arc::new(Self {
-                    queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
-                    physical, family: family as u32, properties, memory, features, formats,
-                    timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, instance_owner: None,
-                    allocated: AtomicU64::new(0), lost: AtomicBool::new(false), budget: Mutex::new(None),
-                }));
+        let life = Arc::new(InstanceLife(instance.clone()));
+        let mut devices = unsafe { instance.enumerate_physical_devices() }
+            .map_err(|e| format!("vkEnumeratePhysicalDevices: {e:?}"))?;
+        devices.sort_by_key(|p| match unsafe { instance.get_physical_device_properties(*p) }.device_type {
+            vk::PhysicalDeviceType::DISCRETE_GPU => 0,
+            vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+            _ => 2,
+        });
+        source.order_devices(&instance, &mut devices)?;
+        let wanted = Wanted { instance_extensions, optional };
+        for physical in devices {
+            if let Some(device) = Self::open(&life, physical, &wanted)? { return Ok(device); }
+        }
+        Err("no Vulkan 1.1 graphics device".into())
+    }
+
+    /// A new logical device on the physical device of `lost`, with the same instance,
+    /// extensions and features: the replacement after a device loss (`Vulkan::replace_device`).
+    /// The process's shared device becomes the new one.
+    pub(crate) fn replace(lost: &Arc<Self>, instance_extensions: &[&CStr], optional: &[&CStr]) -> Result<Arc<Self>, String> {
+        let wanted = Wanted { instance_extensions, optional };
+        let device = Self::open(&lost.life, lost.physical, &wanted)?.ok_or("the GPU no longer offers a Vulkan 1.1 graphics queue")?;
+        if let Some((_, shared)) = lock(&SHARED).as_mut() { *shared = device.clone(); }
+        Ok(device)
+    }
+
+    /// A logical device on `physical`; `None` when that GPU does not qualify.
+    fn open(life: &Arc<InstanceLife>, physical: vk::PhysicalDevice, wanted_by: &Wanted) -> Result<Option<Arc<Self>>, String> {
+        let instance = &life.0;
+        let (instance_extensions, optional) = (wanted_by.instance_extensions, wanted_by.optional);
+        let properties = unsafe { instance.get_physical_device_properties(physical) };
+        let name = unsafe { CStr::from_ptr(properties.device_name.as_ptr()) };
+        if log_enabled() { eprintln!("[hal-vulkan] device candidate={name:?} handle={physical:?} type={:?} api={:#x} driver={:#x}", properties.device_type, properties.api_version, properties.driver_version); }
+        if properties.api_version < vk::API_VERSION_1_1 {
+            if log_enabled() { eprintln!("[hal-vulkan] skipping {name:?}: Vulkan 1.1 required"); }
+            return Ok(None);
+        }
+        let queues = unsafe { instance.get_physical_device_queue_family_properties(physical) };
+        let Some((family, queue)) = queues.iter().enumerate().find(|(_, q)| q.queue_count > 0 && q.queue_flags.contains(vk::QueueFlags::GRAPHICS)) else {
+            if log_enabled() { eprintln!("[hal-vulkan] skipping {name:?}: no graphics queue"); }
+            return Ok(None);
+        };
+        let available = unsafe { instance.enumerate_device_extension_properties(physical) }
+            .map_err(|e| format!("vkEnumerateDeviceExtensionProperties device={name:?}: {e:?}"))?;
+        let supported = |name: &CStr| available.iter().any(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) == name });
+        if instance_extensions.contains(&vk::KHR_SURFACE_NAME) && !supported(vk::KHR_SWAPCHAIN_NAME) {
+            if log_enabled() { eprintln!("[hal-vulkan] skipping {name:?}: VK_KHR_swapchain unavailable"); }
+            return Ok(None);
+        }
+        // External-image extensions form one capability, including their dependencies.
+        let mut wanted = if optional.iter().all(|n| supported(n)) { optional.to_vec() } else { Vec::new() };
+        #[cfg(target_os = "linux")]
+        let mut timeline = vk::PhysicalDeviceTimelineSemaphoreFeatures::default();
+        #[cfg(target_os = "linux")]
+        {
+            // OPAQUE_FD hosted imports and sync are independent of modifier support.
+            if supported(vk::KHR_EXTERNAL_MEMORY_FD_NAME) { wanted.push(vk::KHR_EXTERNAL_MEMORY_FD_NAME); }
+            if supported(vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME) { wanted.push(vk::KHR_EXTERNAL_SEMAPHORE_FD_NAME); }
+            if supported(vk::KHR_TIMELINE_SEMAPHORE_NAME) {
+                let mut features = vk::PhysicalDeviceFeatures2::default().next_physical_device_timeline_semaphore_features(&mut timeline);
+                unsafe { instance.get_physical_device_features2(physical, &mut features); }
+                if timeline.timeline_semaphore != 0 { wanted.push(vk::KHR_TIMELINE_SEMAPHORE_NAME); }
             }
-            Err("no Vulkan 1.1 graphics device".into())
-        })();
-        if result.is_err() { unsafe { instance.destroy_instance(None) }; }
-        result
+        }
+        if instance_extensions.contains(&vk::KHR_SURFACE_NAME) { wanted.push(vk::KHR_SWAPCHAIN_NAME); }
+        let mut present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default();
+        let mut present_wait = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
+        let wants_display_clock = instance_extensions.contains(&vk::KHR_DISPLAY_NAME);
+        let pacing = wants_display_clock && supported(vk::KHR_PRESENT_ID_NAME) && supported(vk::KHR_PRESENT_WAIT_NAME);
+        if pacing {
+            let mut query = vk::PhysicalDeviceFeatures2::default()
+                .next_physical_device_present_id_features_khr(&mut present_id)
+                .next_physical_device_present_wait_features_khr(&mut present_wait);
+            unsafe { instance.get_physical_device_features2(physical, &mut query); }
+        }
+        let pacing = pacing && present_id.present_id != 0 && present_wait.present_wait != 0;
+        // These were chained for the feature query. Reusing that chain while
+        // prepending the same structures would make a cyclic pNext list.
+        present_id.p_next = std::ptr::null_mut();
+        present_wait.p_next = std::ptr::null_mut();
+        if pacing { wanted.extend([vk::KHR_PRESENT_ID_NAME, vk::KHR_PRESENT_WAIT_NAME]); }
+        // the device's real budget (other processes included), for the UI's memory reserve
+        if supported(vk::EXT_MEMORY_BUDGET_NAME) { wanted.push(vk::EXT_MEMORY_BUDGET_NAME); }
+        wanted.sort_by(|a, b| a.to_bytes().cmp(b.to_bytes()));
+        wanted.dedup();
+        if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice device={name:?} queue_family={family} extensions={wanted:?}"); }
+        let extensions = wanted.iter().map(|n| n.to_string_lossy().into_owned()).collect();
+        let wanted: Vec<_> = wanted.iter().map(|n| n.as_ptr()).collect();
+        let supported_features = unsafe { instance.get_physical_device_features(physical) };
+        let features = vk::PhysicalDeviceFeatures::default()
+            .independent_blend(supported_features.independent_blend == vk::TRUE)
+            .texture_compression_bc(supported_features.texture_compression_bc == vk::TRUE)
+            .texture_compression_astc_ldr(supported_features.texture_compression_astc_ldr == vk::TRUE);
+        let priorities = [1.0];
+        let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(family as u32).queue_priorities(&priorities)];
+        let mut create = vk::DeviceCreateInfo::default()
+            .queue_create_infos(&queues).enabled_extension_names(&wanted).enabled_features(&features);
+        #[cfg(target_os = "linux")]
+        if timeline.timeline_semaphore != 0 { create = create.next_physical_device_timeline_semaphore_features(&mut timeline); }
+        if pacing { create = create.next_physical_device_present_id_features_khr(&mut present_id)
+            .next_physical_device_present_wait_features_khr(&mut present_wait); }
+        // A GPU full of other work (an AI model) has no room for a device yet: the app waits
+        // for room -- the desktop's owner asks the hub to yield on the sustained shortage --
+        // instead of falling back to another renderer. It never fails for want of memory.
+        // (NVIDIA answers a full GPU with ERROR_INITIALIZATION_FAILED as well: that counts as
+        // out of memory while the GPU's free memory is under the UI's reserve.)
+        let budget = supported(vk::EXT_MEMORY_BUDGET_NAME);
+        let short_of_memory = |e: vk::Result| match e {
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY | vk::Result::ERROR_OUT_OF_HOST_MEMORY => true,
+            vk::Result::ERROR_INITIALIZATION_FAILED => budget && device_local_free(instance, physical)
+                .is_some_and(|(free, size)| free < crate::gpu_pressure::ui_reserve(size)),
+            _ => false,
+        };
+        let mut waited = 0u64;
+        let raw = loop {
+            match unsafe { instance.create_device(physical, &create, None) } {
+                Ok(raw) => break raw,
+                Err(e) if short_of_memory(e) => {
+                    if waited == 0 { eprintln!("[hal-vulkan] vkCreateDevice device={name:?}: {e:?}; waiting for GPU memory"); }
+                    waited += 1;
+                    std::thread::sleep(DEVICE_RETRY);
+                }
+                Err(e) => return Err(format!("vkCreateDevice device={name:?} queue_family={family}: {e:?}")),
+            }
+        };
+        if waited > 0 { eprintln!("[hal-vulkan] vkCreateDevice device={name:?}: made after {waited} tries out of GPU memory"); }
+        if log_enabled() { eprintln!("[hal-vulkan] vkCreateDevice succeeded device={name:?} queue_family={family}"); }
+        let memory = unsafe { instance.get_physical_device_memory_properties(physical) };
+        let formats = std::array::from_fn(|f| unsafe {
+            instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap())
+        });
+        Ok(Some(Arc::new(Self {
+            queue: unsafe { raw.get_device_queue(family as u32, 0) }, queue_lock: Mutex::new(()), raw, instance: instance.clone(),
+            physical, family: family as u32, properties, memory, features, formats,
+            timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, life: life.clone(),
+            allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None),
+        })))
     }
 
     pub fn memory_type(&self, bits: u32, required: vk::MemoryPropertyFlags) -> Result<u32, String> {
@@ -229,6 +308,27 @@ impl Device {
         }
         *cached = Some((now, b));
         Some(b)
+    }
+
+    /// A create or wait on this device answered out of memory (`what` names it) while the
+    /// process is at its open-file limit: the driver needs a descriptor per allocation and has
+    /// none left, so it is not a full GPU, and asking the host and the AI hub for GPU memory
+    /// frees nothing. Reported once per episode with the numbers; `true` at the limit.
+    pub fn out_of_files(&self, what: &str) -> bool {
+        if let Some((open, soft)) = crate::open_files().filter(|(open, soft)| crate::at_file_limit(*open, *soft)) {
+            if !self.files_reported.swap(true, Ordering::AcqRel) {
+                eprintln!("[hal-vulkan] {what}: out of memory at the open-file limit ({open} of {soft} descriptors; the driver holds one per allocation), not a full GPU");
+            }
+            return true;
+        }
+        self.files_reported.store(false, Ordering::Release);
+        false
+    }
+
+    /// A submission, fence wait, arena or compile out of memory: below the open-file limit the
+    /// backend asks for room at once (`starved`); at it, see `out_of_files`.
+    pub fn refused(&self, what: &str) {
+        if !self.out_of_files(what) { self.starved.store(true, Ordering::Release); }
     }
 
     pub fn charge(&self, bytes: u64) { self.allocated.fetch_add(bytes, Ordering::Relaxed); }
@@ -277,15 +377,16 @@ impl Device {
         let formats = std::array::from_fn(|f| unsafe { instance.get_physical_device_format_properties(physical, super::resources::vk_format(f as u32).unwrap()) });
         Ok(Arc::new(Self { instance: instance.clone(), queue: unsafe { raw.get_device_queue(family as u32, 0) },
             raw, physical, queue_lock: Mutex::new(()), family: family as u32, properties, memory, features, formats,
-            timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, instance_owner: Some(owner),
-            allocated: AtomicU64::new(0), lost: AtomicBool::new(false), budget: Mutex::new(None) }))
+            timestamp_bits: queue.timestamp_valid_bits, extensions, present_wait: pacing, life: owner.life.clone(),
+            allocated: AtomicU64::new(0), lost: AtomicBool::new(false), starved: AtomicBool::new(false), files_reported: AtomicBool::new(false), budget: Mutex::new(None) }))
     }
 }
 
 impl Drop for Device {
     fn drop(&mut self) {
-        // Every in-flight submission and resource owns an Arc<Device>. The last one is gone.
-        unsafe { self.raw.destroy_device(None); if self.instance_owner.is_none() { self.instance.destroy_instance(None); } }
+        // Every in-flight submission and resource owns an Arc<Device>. The last one is gone; the
+        // instance goes with the last device made on it (`life`).
+        unsafe { self.raw.destroy_device(None); }
     }
 }
 

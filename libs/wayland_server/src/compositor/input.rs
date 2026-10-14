@@ -10,7 +10,6 @@ pub(crate) struct InputState {
     keymap_size: u32,
     pointers: HashMap<ClientId, Vec<u32>>,
     keyboards: HashMap<ClientId, Vec<u32>>,
-    pub data_devices: HashMap<ClientId, Vec<u32>>,
     pub pointer_focus: Option<SurfKey>,
     pub kb_focus: Option<SurfKey>,
 }
@@ -23,12 +22,11 @@ impl InputState {
         let mut file = std::fs::File::from(unsafe { OwnedFd::from_raw_fd(fd) });
         file.write_all(&bytes)?;
         Ok(Self { tracker: Tracker::new(layout), keymap: file, keymap_size: bytes.len() as u32,
-                  pointers: HashMap::new(), keyboards: HashMap::new(), data_devices: HashMap::new(), pointer_focus: None, kb_focus: None })
+                  pointers: HashMap::new(), keyboards: HashMap::new(), pointer_focus: None, kb_focus: None })
     }
     pub fn client_gone(&mut self, c: ClientId) {
         self.pointers.remove(&c);
         self.keyboards.remove(&c);
-        self.data_devices.remove(&c);
         if self.pointer_focus.is_some_and(|k| k.0 == c) { self.pointer_focus = None; }
         if self.kb_focus.is_some_and(|k| k.0 == c) { self.kb_focus = None; }
     }
@@ -127,6 +125,8 @@ impl Compositor {
             for kb in self.keyboards_of(old.0) { let _ = core.send(old.0, kb, wl_keyboard::EVT_LEAVE, vec![Value::Uint(serial), Value::Object(old.1)]); }
         }
         let Some(k) = k else { return };
+        // the selections come right before the keyboard (wl_data_device.selection)
+        self.send_selection(core, k.0);
         let serial = core.next_serial();
         let keys: Vec<u8> = self.input.tracker.pressed().iter().flat_map(|&c| (c as u32).to_ne_bytes()).collect();
         for kb in self.keyboards_of(k.0) {
@@ -134,7 +134,6 @@ impl Compositor {
         }
         self.send_modifiers(core, k);
         self.input.kb_focus = Some(k);
-        self.send_selection(core, k.0);
     }
     /// Feeds a raw key (evdev code) to the tracker and the focused client.
     pub fn key(&mut self, core: &mut Core, time: u32, evdev: u16, pressed: bool) {

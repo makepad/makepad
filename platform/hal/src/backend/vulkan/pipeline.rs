@@ -160,18 +160,53 @@ impl VariantKey {
     }
 }
 
+/// A driver call failed for want of host or device memory (as formatted by `device::error`):
+/// it may succeed once there is room, so it is not a final failure.
+pub(super) fn out_of_memory(e: &str) -> bool { e.contains("OUT_OF_DEVICE_MEMORY") || e.contains("OUT_OF_HOST_MEMORY") }
+
+/// A pipeline's create, as the app sent it: the program is made from it (again on a device that
+/// replaced a lost one). `key` names identical creates, which share one program.
+pub(super) struct Source {
+    pub desc: PipelineDesc,
+    pub code: SpirvPipeline,
+    pub bindings: Vec<u32>,
+    pub stride: u32,
+    pub key: Vec<u8>,
+}
+
 /// A program and the pipelines made from it. The likeliest pipeline (`predict`) is built with
 /// the program; any other (a target layout plus the blend, depth-write and cull state) when a
 /// draw first needs it (`select`). Only what is drawn with gets compiled (a driver pipeline
 /// compile is milliseconds and tens of thousands of allocations on NVIDIA).
 pub(super) struct State {
+    /// what the program is made from: compiled again on a replacement device
+    pub src: Arc<Source>,
     pub program: OnceLock<Result<Arc<Program>, String>>,
     variants: Mutex<HashMap<VariantKey, Result<Arc<Pipeline>, String>>>,
     pub epoch: AtomicU64,
+    /// the sessions whose pipelines wait for this program while it compiles (programs are shared
+    /// by shader content, so every session that created a pipeline with it is told); `None` once
+    /// the compile has answered
+    waiters: Mutex<Option<Vec<u32>>>,
 }
 
 impl State {
-    pub fn new() -> Arc<Self> { Arc::new(Self { program: OnceLock::new(), variants: Mutex::new(HashMap::new()), epoch: AtomicU64::new(0) }) }
+    pub fn new(src: Arc<Source>) -> Arc<Self> {
+        Arc::new(Self { src, program: OnceLock::new(), variants: Mutex::new(HashMap::new()), epoch: AtomicU64::new(0), waiters: Mutex::new(Some(Vec::new())) })
+    }
+
+    /// Session `sid` has a pipeline on this program: its pump is woken when the compile answers.
+    /// A program that has already answered needs no wake (the session's own turn sees it).
+    pub fn wait(&self, sid: u32) {
+        if let Some(waiters) = self.waiters.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            if !waiters.contains(&sid) { waiters.push(sid); }
+        }
+    }
+
+    /// The compile answered: the sessions that waited for it.
+    pub fn answered(&self) -> Vec<u32> {
+        self.waiters.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default()
+    }
 
     /// Builds, with the program and before it is announced ready, the pipeline its draws most
     /// often need: its own colour layout over a depth target, writing depth, blending into a
@@ -189,7 +224,15 @@ impl State {
         let flags = Draw::DEPTH_WRITE | if blends { Draw::BLEND } else { 0 };
         let made = RenderPass::new(program.dev.clone(), key).and_then(|pass| create_variant(program.clone(), &pass, flags));
         if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); }
+        // out of memory is not this pipeline's failure: the first draw that needs it tries again
+        if made.as_ref().is_err_and(|e| out_of_memory(e)) { return; }
         lock(&self.variants).insert(VariantKey::new(key, flags), made);
+    }
+
+    /// Whether a draw into a pass of `key` with `flags` would compile its pipeline now: the
+    /// program is built and that variant is not.
+    pub fn lacks(&self, key: PassKey, flags: u32) -> bool {
+        matches!(self.program.get(), Some(Ok(_))) && !lock(&self.variants).contains_key(&VariantKey::new(key, flags))
     }
 
     pub fn failure(&self) -> Option<String> {
@@ -207,6 +250,8 @@ impl State {
         if let Some(made) = lock(&self.variants).get(&key) { return made.as_ref().ok().cloned(); }
         let made = create_variant(program, pass, flags);
         if let Err(e) = &made { eprintln!("[hal-vulkan] pipeline variant: {e}"); }
+        // out of memory is not kept: the next draw tries again (the frame skips it meanwhile)
+        if made.as_ref().is_err_and(|e| out_of_memory(e)) { return None; }
         lock(&self.variants).entry(key).or_insert(made).as_ref().ok().cloned()
     }
 }

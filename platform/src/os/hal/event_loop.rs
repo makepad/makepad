@@ -15,8 +15,6 @@ use std::{cell::RefCell, rc::Rc};
 /// Time between beats while the app animates or waits for a frame: 60 Hz. The headless backend
 /// has no display to pace it; a window system's `FrameReady` takes this place.
 const BEAT: std::time::Duration = std::time::Duration::from_nanos(16_666_667);
-/// Longest an ordinary window loop sleeps; a timer, an event or a wake ends it earlier.
-const IDLE_TURN_NS: u64 = 250_000_000;
 /// A frame request the HAL has not answered for this long is made again.
 const REREQUEST: std::time::Duration = std::time::Duration::from_millis(500);
 /// One budget for all glyph waits and rebuilds of a frame, including newly revealed text.
@@ -70,6 +68,7 @@ impl Cx {
         }
         self.hal.frames.open(info.session, info);
         self.hal.events = Some(EventStore::new(info.session, 512, 1 << 20));
+        super::register_wake_session(info.session);
     }
 
     /// One externally scheduled turn. Hidden contexts still consume events and
@@ -135,7 +134,7 @@ impl Cx {
 
     /// The paint clock stands still when nothing needs a frame.
     pub(super) fn hal_has_work(&self) -> bool {
-        if self.hal.hosted.is_some() && self.hosted_hidden {
+        if self.hosted_frames_held() {
             return false;
         }
         let next_frames_due = !self.new_next_frames.is_empty() && !crate::remote::app_clock::enabled();
@@ -151,6 +150,14 @@ impl Cx {
     }
 
     fn hal_run(&mut self) {
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        fn termination_requested() -> bool {
+            crate::os::termination_signal::seen()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        fn termination_requested() -> bool {
+            false
+        }
         // before anything reads a relative path or loads a resource
         let dev_launch = dev_launch_begin();
         #[cfg(any(target_os = "ios", target_os = "tvos"))]
@@ -193,6 +200,9 @@ impl Cx {
         if crate::launched_hidden_until_first_present() {
             windows |= open_flags::HIDDEN_UNTIL_PRESENT;
         }
+        if crate::app_main::is_window_manager() {
+            windows |= open_flags::WINDOW_MANAGER;
+        }
         let info = hal_open(&OpenReq::from_env(app_key(), windows, dpi_hint));
         if info.session == 0 {
             crate::error!("hal: the HAL refused to open a session");
@@ -215,14 +225,26 @@ impl Cx {
             // edge, so left pending it silenced every later wake (a hosted child then slept
             // through its host's messages: the cold `makepad run` Browser showed no page).
             let signal_pending = SignalToUI::any_pending();
+            // Terminated while hosted: the host's Ticks are not what the shutdown waits for
+            // (the host may be gone, or hung), so the child runs its own timers until it quits.
+            let quitting = hosted && termination_requested();
             let timeout = if host_poll_due || signal_pending {
                 0
-            } else if hosted {
+            } else if quitting {
+                self.hal.hosted.as_ref().and_then(|hosted| hosted.timers.next_due_in()).map_or(u64::MAX, |secs| (secs * 1e9) as u64)
+            } else if hosted || self.hal.device_lost {
                 // Host input, GPU completion and worker signals all wake the HAL pump.
                 // The host schedules logical timers, so an idle child needs no polling.
+                // A lost GPU device draws nothing: the pump sleeps until the HAL's DeviceReset
+                // (or input, a signal) wakes it.
                 u64::MAX
             } else if display_clock || !self.hal_has_work() {
-                IDLE_TURN_NS
+                // idle: sleep until an event, a timer the app set or a wake; a frame asked for
+                // and not announced is asked again when its wait runs out
+                match requested.filter(|_| display_clock && self.hal_has_work()) {
+                    Some(at) => (at + REREQUEST).saturating_duration_since(std::time::Instant::now()).as_nanos() as u64,
+                    None => u64::MAX,
+                }
             } else {
                 next_beat.saturating_duration_since(std::time::Instant::now()).as_nanos() as u64
             };
@@ -246,6 +268,15 @@ impl Cx {
                 // gets another nonblocking pump, including wakes consumed by the glyph wait.
                 let Some(received) = self.hal_hosted_poll() else { break 'turns };
                 host_poll_due = received;
+                if quitting {
+                    // Nothing is drawn or announced to the host: timers and signals run.
+                    self.hosted_hidden = true;
+                    if !self.hal_guarded(true, |cx| cx.hal_beat()) {
+                        self.call_event_handler(&Event::Shutdown);
+                        self.hal_submit_batch();
+                        break 'turns;
+                    }
+                }
             }
             let announced = std::mem::take(&mut self.hal.beat);
             let due = std::time::Instant::now() >= next_beat;
@@ -287,6 +318,7 @@ impl Cx {
         // buffers, pipelines, windows)
         self.hal.frames.w.quit();
         self.hal_submit_batch();
+        super::unregister_wake_session(info.session);
         self.hal.hosted.take();
         if crate::restart::hosted() {
             crate::restart::stop_workers();
@@ -370,12 +402,16 @@ impl Cx {
         self.hal.frames.submitted();
         // the HAL no longer calls the audio entries this batch replaced
         self.hal.retired_ctx.clear();
+        if let Some(hosted) = self.hal.hosted.as_mut() {
+            hosted.batch_submitted();
+        }
     }
 
     /// The frame beat (what macOS ran on its paint clock): services, next-frame callbacks, the
     /// draw event, shader compiles, then the passes into commands.
     pub(super) fn hal_beat(&mut self) -> bool {
         frame_log::beat();
+        crate::frame_sources::beat();
         if makepad_hal::profile::on() {
             use makepad_hal::profile::{record, Metric};
             let now = makepad_hal::clock_ns();
@@ -402,12 +438,12 @@ impl Cx {
                 self.call_event_handler(&Event::Timer(event));
             }
         }
-        if self.hal.hosted.is_none() || !self.hosted_hidden {
+        if !self.hosted_frames_held() {
             self.hal_poll_software_videos();
         }
         self.handle_networking_events();
         self.run_live_edit_if_needed("hal");
-        if self.hal.hosted.is_none() || !self.hosted_hidden {
+        if !self.hosted_frames_held() {
             if !self.hal_draw_frame() {
                 return false;
             }
@@ -431,6 +467,20 @@ impl Cx {
 
     /// Visible frame work: hidden hosted children keep callbacks and dirty passes pending.
     fn hal_draw_frame(&mut self) -> bool {
+        // the GPU device is lost: nothing is drawn until the HAL's DeviceReset (dirty passes
+        // stay dirty and paint then)
+        if self.hal.device_lost {
+            return true;
+        }
+        // A hosted app whose main window has no free shared image runs no frame beat at all:
+        // like a native swapchain acquire, it waits (next-frame callbacks and dirty passes stay
+        // pending, the Tick's demand asks the host again). `fb_pass` already holds the passes
+        // of such a window; this also skips the app's NextFrame and draw walk, which a game ran
+        // on every 240 Hz host Tick for frames nobody could see.
+        if self.hal.hosted.as_ref().is_some_and(|h| h.first.is_some_and(|w| h.window_blocked(w))) {
+            makepad_hal::profile::count("beat: hosted images busy");
+            return true;
+        }
         let time_now = self.hal_now();
         let draw_start = makepad_hal::profile::on().then(makepad_hal::clock_ns);
         if !self.new_next_frames.is_empty() {
@@ -439,7 +489,7 @@ impl Cx {
         let mut deadline = None;
         loop {
             // A control-channel visibility message may arrive during the glyph wait.
-            if self.hal.hosted.is_some() && self.hosted_hidden {
+            if self.hosted_frames_held() {
                 return true;
             }
             self.hal.glyph_wait.pending.clear();

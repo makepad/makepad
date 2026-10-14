@@ -529,10 +529,11 @@ impl Cx {
             }
             #[cfg(target_os = "linux")]
             HalEvent::ScreenSurface { window, size: _, handle } => {
-                if let Some(surface) = makepad_hal::backend::linux::media::capture_surface::take(self.hal.frames.w.session(), handle) {
-                    let (width, height) = (surface.width, surface.height);
+                let lease = makepad_hal::backend::linux::media::capture_surface::take_lease(self.hal.frames.w.session(), handle);
+                if lease.found() {
+                    let (width, height) = (lease.width(), lease.height());
                     crate::screen_capture::deliver_capture_surface(Some(window.index as usize), crate::screen_capture::ScreenCaptureSurface {
-                        inner: crate::screen_capture::SurfaceInner(surface), width, height, time_ns: 0,
+                        inner: crate::screen_capture::SurfaceInner(std::sync::Arc::new(lease)), width, height, time_ns: 0,
                     });
                 }
             }
@@ -542,10 +543,10 @@ impl Cx {
 }
 
 #[cfg(target_os = "linux")]
-impl crate::screen_capture::MappedCapture for makepad_hal::backend::linux::media::capture_surface::Surface {
+impl crate::screen_capture::MappedCapture for makepad_hal::backend::linux::media::capture_surface::CaptureLease {
     fn bytes(&self) -> &[u8] { self.bytes() }
-    fn stride(&self) -> usize { self.stride() }
-    fn bgra(&self) -> bool { self.bgra }
+    fn stride(&self) -> usize { self.width() as usize * 4 }
+    fn bgra(&self) -> bool { self.bgra() }
 }
 
 #[cfg(any(target_vendor = "apple", target_os = "windows"))]

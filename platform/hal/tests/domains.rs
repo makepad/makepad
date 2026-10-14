@@ -557,6 +557,138 @@ fn sessions_pump_and_wake_independently_from_their_own_threads() {
     assert_eq!(hal.with_world(|w| w.session(b).unwrap().textures.len()), 1);
 }
 
+/// Turns of `sid`'s pump so far.
+fn turns(hal: &Hal, sid: u32) -> PumpCounts {
+    hal.pump_counts().into_iter().find(|(id, _)| *id == sid).map(|(_, c)| c).unwrap_or_default()
+}
+
+#[test]
+fn an_idle_wm_with_domains_takes_no_pump_turns() {
+    // a WM and three child domains, each pumping from its own thread with nothing to do
+    let hal = Hal::new();
+    let wm = hal.open(&open_req(201, 0)).session;
+    let mut sids = vec![wm];
+    for key in 202..205 {
+        sids.push(hal.with_world(|w| w.open_session(key, wm, false, 1.0)));
+    }
+    for sid in &sids {
+        let mut store = EventStore::new(*sid, 16, 256);
+        let mut buf = store.buf();
+        hal.pump(0, &mut buf); // Startup
+    }
+    let before: Vec<PumpCounts> = sids.iter().map(|sid| turns(&hal, *sid)).collect();
+    let idle = Duration::from_millis(400);
+    let threads: Vec<_> = sids.iter().map(|sid| {
+        let (hal, sid) = (hal.clone(), *sid);
+        std::thread::spawn(move || {
+            let mut store = EventStore::new(sid, 16, 256);
+            let mut buf = store.buf();
+            hal.pump(idle.as_nanos() as u64, &mut buf)
+        })
+    }).collect();
+    for t in threads {
+        assert_eq!(t.join().unwrap(), 0, "nothing was due");
+    }
+    for (sid, b) in sids.iter().zip(before) {
+        let a = turns(&hal, *sid);
+        // one turn finds nothing, the wait ends at the deadline, the next turn returns
+        assert_eq!(a.calls - b.calls, 1);
+        assert!(a.turns - b.turns <= 2, "session {sid} turned {} times while idle: {a:?}", a.turns - b.turns);
+        assert_eq!((a.by_event - b.by_event, a.by_all - b.by_all, a.by_wake - b.by_wake), (0, 0, 0), "session {sid}: {a:?}");
+    }
+}
+
+#[test]
+fn an_idle_session_takes_no_turn_for_two_seconds() {
+    // a WM and two domains blocked in their pumps (Cx's idle loop: no timeout of its own)
+    let hal = Hal::new();
+    let wm = hal.open(&open_req(221, 0)).session;
+    let sids = [wm, hal.with_world(|w| w.open_session(222, wm, false, 1.0)), hal.with_world(|w| w.open_session(223, wm, false, 1.0))];
+    for sid in sids {
+        let mut store = EventStore::new(sid, 16, 256);
+        let mut buf = store.buf();
+        hal.pump(0, &mut buf); // Startup
+    }
+    let threads: Vec<_> = sids.iter().map(|sid| {
+        let (hal, sid) = (hal.clone(), *sid);
+        std::thread::spawn(move || {
+            let mut store = EventStore::new(sid, 16, 256);
+            let mut buf = store.buf();
+            let n = hal.pump(u64::MAX, &mut buf);
+            store.reader(n, buf.arena_len).map(|(_, e)| format!("{e:?}")).collect::<Vec<_>>()
+        })
+    }).collect();
+    std::thread::sleep(Duration::from_millis(100));
+    let blocked: Vec<PumpCounts> = sids.iter().map(|sid| turns(&hal, *sid)).collect();
+    std::thread::sleep(Duration::from_secs(2));
+    for (sid, b) in sids.iter().zip(&blocked) {
+        assert_eq!(turns(&hal, *sid), *b, "session {sid} turned while idle");
+    }
+    // each one's own wake ends its wait, and only its
+    for (i, sid) in sids.iter().enumerate() {
+        hal.wake_session(*sid);
+        std::thread::sleep(Duration::from_millis(20));
+        for (j, other) in sids.iter().enumerate().skip(i + 1) {
+            assert_eq!(turns(&hal, *other).turns, blocked[j].turns, "session {other} turned for {sid}'s wake");
+        }
+    }
+    for t in threads {
+        let evs = t.join().unwrap();
+        assert!(evs.len() == 1 && evs[0].starts_with("Wake"), "{evs:?}");
+    }
+}
+
+#[test]
+fn news_for_one_session_does_not_turn_another_sessions_pump() {
+    let hal = Hal::new();
+    let wm = hal.open(&open_req(211, 0)).session;
+    let busy = hal.with_world(|w| w.open_session(212, wm, false, 1.0));
+    let quiet = hal.with_world(|w| w.open_session(213, wm, false, 1.0));
+    for sid in [wm, busy, quiet] {
+        let mut store = EventStore::new(sid, 16, 256);
+        let mut buf = store.buf();
+        hal.pump(0, &mut buf); // Startup
+    }
+    let mut w = CmdWriter::new(busy);
+    w.window_create(WIN, window_kind::NORMAL, Id::NONE, [0.0, 0.0, 200.0, 100.0], false);
+    hal.submit(&w.buf());
+    let before = turns(&hal, quiet);
+    let blocked = {
+        let hal = hal.clone();
+        std::thread::spawn(move || {
+            let mut store = EventStore::new(quiet, 64, 4096);
+            let mut buf = store.buf();
+            let t0 = Instant::now();
+            let n = hal.pump(600_000_000, &mut buf);
+            (n, t0.elapsed())
+        })
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    // the busy child presents (its own FrameDone, the WM's ChildFrame), gets input forwarded
+    // and injected; the WM submits
+    for frame in 1..=20u64 {
+        let mut w = CmdWriter::new(busy);
+        w.frame_begin(frame, FrameMeta::default());
+        w.pass(Pass::default());
+        w.frame_end(WIN, target::WINDOW);
+        hal.submit(&w.buf());
+        hal.inject(busy, RawEvent::default());
+        hal.submit(&CmdWriter::new(wm).buf());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let (n, took) = blocked.join().unwrap();
+    assert_eq!(n, 0, "the quiet session had nothing");
+    assert!(took >= Duration::from_millis(550), "{took:?}");
+    let after = turns(&hal, quiet);
+    assert!(after.turns - before.turns <= 2, "the quiet pump turned for others' news: {before:?} -> {after:?}");
+    assert_eq!(after.by_event - before.by_event, 0);
+    // and the busy sessions did get theirs
+    let mut store = EventStore::new(wm, 256, 65536);
+    let mut buf = store.buf();
+    let n = hal.pump(0, &mut buf);
+    assert!(store.reader(n, buf.arena_len).any(|(_, e)| matches!(e, HalEvent::ChildFrame { .. })));
+}
+
 #[test]
 fn forward_and_domain_payloads_round_trip() {
     let raw = RawEvent::scroll(Id::new(1, 2), 1.5, 2.5, -3.0, 4.0, 3, true, 2);

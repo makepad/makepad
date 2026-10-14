@@ -308,6 +308,8 @@ hal_commands! {
     /// Mouse or touchpad speed in hundredths; the host clamps it to the native preference range.
     DirectPointerSpeed = 136, direct_pointer_speed { touchpad: bool, hundredths: u32 };
     DirectNaturalScroll = 137, direct_natural_scroll { on: bool };
+    /// Touchpad tap to click (direct backend).
+    DirectTapToClick = 149, direct_tap_to_click { on: bool };
 
     /// The window's UI dpi override, or 0 to restore its native dpi. AppKit uses the
     /// ratio to the backing scale to center native buttons in the app's zoomed caption.
@@ -343,4 +345,11 @@ hal_commands! {
     /// The pacing setting (`direct::DisplayPacing`), packed strings: `auto`, `slowest`,
     /// `fastest` or `screen <name>`.
     DirectDisplayPacing = 145, direct_display_pacing { req: u64, args: rng };
+    /// The app did not take a `BackPressed`: the host does what the system does by default
+    /// (Android: finish the activity, or move its task to the back). Other backends ignore it.
+    BackUnhandled = 148, back_unhandled {};
+    /// The app drew from `count` atlas slots (`font::pack_slots`) since its last touch: when the
+    /// atlas is full the HAL takes back the least recently DRAWN slots first (a slot's own use
+    /// time is otherwise only its delivery).
+    GlyphTouch = 150, glyph_touch { count: u32, slots: rng };
 }

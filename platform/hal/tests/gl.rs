@@ -427,3 +427,34 @@ fn adopted_app_texture_is_sampled_after_its_fence() {
     assert_eq!(hal.with_world(|w| w.session(sid).unwrap().stats.bad_args), 0);
     assert!(hal.close(sid));
 }
+
+/// A pass a pixel larger than its colour target (a target floored where its pass was ceiled, at
+/// a fractional scale such as 1.41) still draws: clipped to the target, never refused. Refused,
+/// the pass drew nothing every frame (Scope's Glass look on 149; GLES too).
+#[test]
+fn a_pass_a_pixel_larger_than_its_target_still_draws() {
+    let Some((hal, info)) = open() else { return };
+    let sid = info.session;
+    resources(&hal, sid);
+    let before = hal.with_world(|w| w.session(sid).unwrap().stats);
+    let mut w = CmdWriter::new(sid);
+    w.frame_begin(1, FrameMeta::default());
+    let mut p = pass(TEX, 33, 33, [17.0 / 255.0, 34.0 / 255.0, 51.0 / 255.0, 1.0]);
+    p.dpi = 1.41;
+    w.pass(p);
+    w.draw(draw());
+    w.frame_end(TEX, target::TEXTURE);
+    hal.submit(&w.buf());
+    frame_done(&hal, sid, 1);
+    let after = hal.with_world(|w| w.session(sid).unwrap().stats);
+    assert_eq!(after.passes - before.passes, 1, "the pass was refused");
+    assert_eq!(after.clamped_passes - before.clamped_passes, 1);
+    w.clear();
+    w.texture_readback(TEX, 3, [0, 0, 32, 32]);
+    hal.submit(&w.buf());
+    let image = pixels(&hal, sid, 3);
+    // the clear in the top corners, the triangle's base along the bottom
+    for x in [0, 31] { assert_eq!(&image[x * 4..][..4], &[17, 34, 51, 255]); }
+    for x in [6, 16, 26] { assert_eq!(&image[(29 * 32 + x) * 4..][..4], &[255; 4], "x {x}"); }
+    assert!(hal.close(sid));
+}

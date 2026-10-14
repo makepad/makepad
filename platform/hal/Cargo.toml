@@ -22,6 +22,11 @@ makepad-zune-jpeg = { path = "../../libs/zune/zune-jpeg", version = "0.5.15" }
 makepad-math = { path = "../../libs/math", version = "1.0.0" }
 wayland-client = { path = "../../libs/linux/wayland-client" }
 wayland-protocols = { path = "../../libs/linux/wayland-protocols", features = ["client", "unstable", "staging"] }
+# WM discovery checks the hosted wire a makepad window manager speaks (wm_socket.rs), and the
+# WM-hosted shell and hosted clients share its swapchain types (hosted_ipc.rs)
+makepad-studio-protocol = { path = "../studio", version = "0.1.0" }
+# the WM-hosted shell speaks the hub protocol's binary frames (backend/linux/wm.rs)
+makepad-micro-serde = { path = "../../libs/micro_serde", version = "1.0.0" }
 
 # The Metal backend and its AppKit / UIKit shells: the shared Apple bindings and the objc runtime
 [target.'cfg(target_vendor = "apple")'.dependencies]

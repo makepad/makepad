@@ -326,6 +326,19 @@ const MONOSPACE: &[FontAsset] = &[LIBERATION_MONO];
 const ICONS: &[FontAsset] = &[FONT_AWESOME];
 
 const NO_LAZY_FONTS: &[LazyFontAsset] = &[];
+/// The CJK and emoji faces every font family falls back to. A family that
+/// names no member of these families gets them appended as lazy members
+/// (makepad-draw's `FontFamily`), so a hand-picked face -- a monospace code
+/// font, a terminal's -- still draws Chinese and emoji. Lazy: the face is
+/// opened on the first glyph its own members miss, never at startup.
+pub const LAZY_FONT_FALLBACKS: &[LazyFontAsset] = LATIN_LAZY_REGULAR;
+/// Every face of the lazy families (both CJK weights, the emoji face): a
+/// family naming one of them already falls back to that family.
+pub const LAZY_FONT_FACES: &[LazyFontAsset] = &[
+    LazyFontAsset { family: LazyFontFamily::Cjk, asset: LXGW_REGULAR },
+    LazyFontAsset { family: LazyFontFamily::Cjk, asset: LXGW_BOLD },
+    LazyFontAsset { family: LazyFontFamily::Emoji, asset: NOTO_COLOR_EMOJI },
+];
 const LATIN_LAZY_REGULAR: &[LazyFontAsset] = &[
     LazyFontAsset { family: LazyFontFamily::Cjk, asset: LXGW_REGULAR },
     LazyFontAsset { family: LazyFontFamily::Emoji, asset: NOTO_COLOR_EMOJI },

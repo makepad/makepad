@@ -4,11 +4,10 @@
 //! The UI connects the channel: one attempt per poll until the host listens,
 //! which for a warm instance is its adoption, however long after startup.
 use crate::{
-    os::shared_framebuf::{
-        aux_chan, shared_presentable_image_recv_fds_from_aux_chan, LinuxPresentableImage,
-    },
+    os::shared_framebuf::aux_chan,
     thread::{to_ui_bounded, TaskHandle, ThreadOptions, ThreadSpawner, ToUIReceiver},
 };
+use makepad_hal::{dmabuf::DmaBuf, hosted_ipc::{self, ClientEndpoint}};
 use makepad_studio_protocol::SharedSwapchain;
 use crate::makepad_network::mpsc::{sync_channel, SyncSender, TrySendError};
 use std::{
@@ -29,12 +28,13 @@ pub(crate) struct SwapchainRequest {
 
 pub(crate) struct LoadedSwapchain {
     pub request: SwapchainRequest,
-    pub images: Vec<LinuxPresentableImage>,
+    /// The images' import descriptors, in the swapchain's order.
+    pub images: Vec<DmaBuf>,
 }
 
 // Shuts the worker's stream down: merely dropping a cloned file descriptor
 // would leave the worker's recvmsg blocked.
-struct Interrupt(aux_chan::ClientEndpoint);
+struct Interrupt(ClientEndpoint);
 impl Drop for Interrupt {
     fn drop(&mut self) {
         let _ = self.0.shutdown();
@@ -49,7 +49,7 @@ enum Reply {
 pub(crate) struct GpuInbox {
     path: PathBuf,
     /// Hands the connected endpoint to the worker; None once connected.
-    connect: Option<SyncSender<aux_chan::ClientEndpoint>>,
+    connect: Option<SyncSender<ClientEndpoint>>,
     requests: SyncSender<SwapchainRequest>,
     replies: Option<ToUIReceiver<Reply>>,
     pending: VecDeque<SwapchainRequest>,
@@ -63,8 +63,8 @@ pub(crate) struct GpuInbox {
 
 impl GpuInbox {
     pub fn start(spawner: &ThreadSpawner) -> Result<Self, String> {
-        let path = aux_chan::ClientEndpoint::studio_env_path().map_err(|error| error.to_string())?;
-        let (connect, connected) = sync_channel::<aux_chan::ClientEndpoint>(1);
+        let path = aux_chan::client_path().map_err(|error| error.to_string())?;
+        let (connect, connected) = sync_channel::<ClientEndpoint>(1);
         let (requests, receive) = sync_channel::<SwapchainRequest>(4);
         let (publish, replies) = to_ui_bounded(NonZeroUsize::new(4).unwrap());
         let stop = Arc::new(AtomicBool::new(false));
@@ -92,9 +92,8 @@ impl GpuInbox {
                                 .presentable_images
                                 .iter()
                                 .map(|image| {
-                                    shared_presentable_image_recv_fds_from_aux_chan(
-                                        *image, &endpoint,
-                                    )
+                                    hosted_ipc::recv_image(&endpoint, *image,
+                                        request.swapchain.alloc_width, request.swapchain.alloc_height)
                                 })
                                 .collect::<Result<Vec<_>, _>>()
                                 .map_err(|error| error.to_string())?;
@@ -172,7 +171,7 @@ impl GpuInbox {
     /// One connect attempt while the host has no listener for this child yet.
     fn try_connect(&mut self) -> Result<(), String> {
         let Some(connect) = &self.connect else { return Ok(()) };
-        let Some(endpoint) = aux_chan::ClientEndpoint::try_connect(&self.path)
+        let Some(endpoint) = ClientEndpoint::try_connect(&self.path)
             .map_err(|error| format!("auxiliary connect: {error}"))? else { return Ok(()) };
         // The host publishes metadata only after sending its complete
         // FD batch. Missing bytes therefore mean broken transport,

@@ -875,10 +875,12 @@ impl State {
             | OsCmd::WindowDpiOverride { .. }
             | OsCmd::DirectPointerSpeed { .. }
             | OsCmd::DirectNaturalScroll { .. }
+            | OsCmd::DirectTapToClick { .. }
             | OsCmd::MenuSet { .. }
             | OsCmd::ClipboardActions { .. }
             | OsCmd::ShareText { .. }
             | OsCmd::MobileUi { .. }
+            | OsCmd::BackUnhandled
             | OsCmd::SelectionHandles { .. } => {}
             OsCmd::DirectDisplay { req, command } => self.shared.push((sid, crate::Id::NONE), |q, _| {
                 q.direct_display_result(req, command.tag() as u32, false, b"Wayland does not own direct displays");

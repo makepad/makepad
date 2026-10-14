@@ -58,6 +58,7 @@ pub enum OsCmd {
     DragReply { id: Id, to: u32, answer: u32 },
     FrameRequest { id: Id },
     MobileUi { op: u32, value: u32 },
+    BackUnhandled,
     SelectionHandles { id: Id, op: u32, start: [f32; 2], end: [f32; 2] },
     #[cfg(target_os = "linux")]
     DirectDisplay { req: u64, command: crate::direct::DisplayCommand },
@@ -65,6 +66,8 @@ pub enum OsCmd {
     DirectPointerSpeed { touchpad: bool, hundredths: u32 },
     #[cfg(target_os = "linux")]
     DirectNaturalScroll { on: bool },
+    #[cfg(target_os = "linux")]
+    DirectTapToClick { on: bool },
 }
 
 /// A window position the window system was to choose (NaN) is the origin where nothing places windows
@@ -166,6 +169,18 @@ pub enum LentState {
 
 /// Resolves a texture id of a draw: ids from [`LENT_BASE`] on are the HAL's own aliases of other
 /// sessions' surfaces.
+/// A pass larger than one of its attachments (`size` vs the attachments' common `fits`): it is
+/// drawn into the attachments' common area (render area and scissors clamp to it; the viewport
+/// keeps the pass's mapping), as Metal does, never dropped -- a dropped pass drew nothing every
+/// frame (a target sized a pixel under its pass at a fractional scale). Counted, and logged once
+/// per target: a pass is sized as its target (`Cx::pass_pixel_size`), so this is a caller's bug.
+pub fn clamped_pass(s: &mut Session, target: Id, size: [u32; 2], fits: [u32; 2], dpi: f32) {
+    s.stats.clamped_passes += 1;
+    if s.clamped_pass_targets.contains(&target) { return; }
+    s.clamped_pass_targets.push(target);
+    eprintln!("[hal] pass {size:?} at dpi {dpi} is larger than its attachments {fits:?} (target {target:?}); drawn clipped to them");
+}
+
 pub fn lent_state(s: &Session, sid: u32, id: Id) -> LentState {
     if id.is_none() || id.index < LENT_BASE {
         return LentState::Own;
@@ -669,7 +684,7 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
             return;
         }
         // ---- the font service (the host's glyph atlases)
-        HalCmd::FontOpen { .. } | HalCmd::GlyphRequest { .. } | HalCmd::GlyphRelease { .. } => {
+        HalCmd::FontOpen { .. } | HalCmd::GlyphRequest { .. } | HalCmd::GlyphRelease { .. } | HalCmd::GlyphTouch { .. } => {
             crate::font::command(gpu, world, sid, c);
             return;
         }
@@ -733,7 +748,8 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         | HalCmd::GpuBudget { .. }
         | HalCmd::FontOpen { .. }
         | HalCmd::GlyphRequest { .. }
-        | HalCmd::GlyphRelease { .. } => unreachable!("handled above"),
+        | HalCmd::GlyphRelease { .. }
+        | HalCmd::GlyphTouch { .. } => unreachable!("handled above"),
         HalCmd::WindowHostedGeom { id, geom, dpi } => match s.windows.get_mut(sid, id) {
             Ok(e) if e.val.is_hosted() && dpi.is_finite() && dpi > 0.0
                 && geom.iter().all(|v| v.is_finite()) && geom[2] >= 0.0 && geom[3] >= 0.0 => {
@@ -793,6 +809,9 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::SelectionHandles { id, op, start, end } => os_window(gpu, s, id, OsCmd::SelectionHandles { id, op, start, end }),
         HalCmd::MobileUi { op, value } => {
             gpu.os(sid, OsCmd::MobileUi { op, value });
+        }
+        HalCmd::BackUnhandled {} => {
+            gpu.os(sid, OsCmd::BackUnhandled);
         }
         HalCmd::ShowInDock { on } => {
             gpu.os(sid, OsCmd::ShowInDock { on });
@@ -866,6 +885,12 @@ fn exec(gpu: &mut dyn Gpu, world: &mut World, sid: u32, c: HalCmd, view: &CmdVie
         HalCmd::DirectNaturalScroll { on } => {
             #[cfg(target_os = "linux")]
             if gpu.os(sid, OsCmd::DirectNaturalScroll { on }) { return; }
+            let _ = on;
+            s.bad();
+        }
+        HalCmd::DirectTapToClick { on } => {
+            #[cfg(target_os = "linux")]
+            if gpu.os(sid, OsCmd::DirectTapToClick { on }) { return; }
             let _ = on;
             s.bad();
         }

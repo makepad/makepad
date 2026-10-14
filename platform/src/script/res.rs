@@ -359,6 +359,14 @@ pub fn register_crate_resource_path(vm: &mut ScriptVm, logical_path: &str) -> Sc
     register_crate_resource_parts(vm, res_type, crate_part, file_path)
 }
 
+/// The absolute path a stable logical `crate_name/path` resolves to, as a
+/// `crate_resource("crate_name:path")` member would name it. Registers
+/// nothing: makepad-draw matches font family members with it.
+pub fn crate_resource_abs_path(vm: &mut ScriptVm, logical_path: &str) -> Option<String> {
+    let (crate_part, file_path) = logical_path.split_once('/')?;
+    resolve_crate_resource_paths(vm, crate_part, file_path).map(|(abs_path, _, _)| abs_path)
+}
+
 fn font_policy_declares_path(font_set: crate::FontSet, dependency_path: Option<&str>) -> bool {
     let Some(dependency_path) = dependency_path else {
         return false;

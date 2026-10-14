@@ -87,6 +87,11 @@ impl Timeline {
         self.next.store(next, Ordering::Release);
         Ok((wait, wait + 1))
     }
+    /// A batch that called [`Self::submitted`] was never submitted (its recording failed): the
+    /// frame it would have published does not exist, the image stays the writer's.
+    pub fn unsubmitted(&self, wait: u64) {
+        let _ = self.next.compare_exchange(wait + 2, wait, Ordering::AcqRel, Ordering::Acquire);
+    }
     pub fn sequence(&self) -> u64 { self.next.load(Ordering::Acquire).saturating_sub(1) }
     pub fn accept(&self, sequence: u64) -> Result<(), String> {
         if self.producer || sequence < 3 || sequence & 1 == 0 || sequence == u64::MAX

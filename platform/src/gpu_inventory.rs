@@ -179,22 +179,27 @@ struct Measured {
 impl Measured {
     #[cfg(not(target_arch = "wasm32"))]
     fn of(cx: &Cx) -> Self {
-        use makepad_hal::ledger::Kind;
-        let Some(report) = makepad_hal::Hal::global().report(cx.hal.frames.w.session(), 0) else {
+        let session = cx.hal.frames.w.session();
+        let mut items = vec![makepad_hal::Allocation::default(); 256];
+        let mut found = makepad_hal::hal_allocations(session, &mut items);
+        if found.count as usize > items.len() {
+            items.resize(found.count as usize, makepad_hal::Allocation::default());
+            found = makepad_hal::hal_allocations(session, &mut items);
+        }
+        if !found.open {
             return Self::default();
-        };
+        }
+        items.truncate((found.count as usize).min(items.len()));
         let mut buffers = std::collections::HashMap::new();
-        let mut m = Self { device: report.device_allocated, ..Self::default() };
-        for item in &report.items {
-            match item.kind {
-                Kind::Texture => { m.textures.insert((item.index, item.gen), item.bytes); }
-                Kind::Buffer => {
-                    buffers.insert((item.index, item.gen), item.bytes);
-                    if item.detail == makepad_hal::backend::exec::buffer_detail(makepad_hal::buffer_kind::VERTEX) {
-                        *m.geometry.get_or_insert(0) += item.bytes;
-                    }
+        let mut m = Self { device: found.has_device.then_some(found.device_allocated), ..Self::default() };
+        for item in &items {
+            if item.texture {
+                m.textures.insert((item.index, item.gen), item.bytes);
+            } else {
+                buffers.insert((item.index, item.gen), item.bytes);
+                if item.geometry {
+                    *m.geometry.get_or_insert(0) += item.bytes;
                 }
-                _ => {}
             }
         }
         for (list, id) in cx.hal.frames.instance_buffers() {

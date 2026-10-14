@@ -221,6 +221,11 @@ impl CmdWriter {
     pub fn release_glyphs(&mut self, slots: &[(u32, u32)]) {
         self.glyph_release(slots.len() as u32, &pack_slots(slots));
     }
+
+    /// Names the atlas slots the app drew from recently (see `GlyphTouch`).
+    pub fn touch_glyphs(&mut self, slots: &[(u32, u32)]) {
+        self.glyph_touch(slots.len() as u32, &pack_slots(slots));
+    }
 }
 
 #[cfg(test)]

@@ -73,6 +73,7 @@ pub enum IrTy {
     Sampler(bool),
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum CooperativeScalar {
     F16,
@@ -99,6 +100,7 @@ impl CooperativeScalar {
     }
 }
 
+#[relax_api(plain)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum CooperativeUse {
     A,
@@ -106,6 +108,8 @@ pub enum CooperativeUse {
     Accumulator,
 }
 
+#[relax_api(plain)]
+#[repr(C)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct CooperativeMatrix {
     pub scalar: CooperativeScalar,

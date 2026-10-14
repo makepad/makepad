@@ -104,8 +104,8 @@ impl Cx {
             use makepad_hal::profile::{input, Input};
             match event {
                 HalEvent::MouseMove { .. } => input(Input::Move),
-                HalEvent::MouseDown { .. } => input(Input::Button(true)),
-                HalEvent::MouseUp { .. } => input(Input::Button(false)),
+                HalEvent::MouseDown { .. } => input(Input::ButtonDown),
+                HalEvent::MouseUp { .. } => input(Input::ButtonUp),
                 HalEvent::Scroll { .. } => input(Input::Scroll),
                 _ => {}
             }
@@ -292,6 +292,33 @@ impl Cx {
                     self.drag_drop.cycle_drag();
                 }
             }
+            HalEvent::BackGesture { window, state, x, y, progress, edge } => {
+                let window_id = window_id(window);
+                let abs = (!x.is_nan() && !y.is_nan()).then(|| {
+                    let mut abs = dvec2(x, y);
+                    self.dpi_override_scale(&mut abs, window_id);
+                    abs
+                });
+                let state = match state {
+                    input::back_state::START => BackGestureState::Start,
+                    input::back_state::MOVE => BackGestureState::Move,
+                    _ => BackGestureState::Cancel,
+                };
+                let edge = match edge {
+                    input::back_edge::LEFT => BackGestureEdge::Left,
+                    input::back_edge::RIGHT => BackGestureEdge::Right,
+                    _ => BackGestureEdge::None,
+                };
+                self.call_event_handler(&Event::BackGesture(BackGestureEvent { state, abs, progress, edge, time }));
+            }
+            HalEvent::BackPressed { .. } => {
+                let event = Event::BackPressed { handled: Cell::new(false) };
+                self.call_event_handler(&event);
+                let Event::BackPressed { handled } = event else { unreachable!() };
+                if !handled.get() {
+                    self.hal.frames.w.back_unhandled();
+                }
+            }
             HalEvent::LongPress { window, x, y, pointer } => {
                 let window_id = window_id(window);
                 let mut abs = dvec2(x, y);
@@ -352,9 +379,9 @@ impl Cx {
             #[cfg(target_os = "linux")]
             HalEvent::DirectDisplayResult { req, command, ok, message } => self.hal_display_result(req, command, ok, message),
             #[cfg(target_os = "linux")]
-            HalEvent::DirectInput { window, mouse_speed, touchpad_speed, natural_scroll } => {
+            HalEvent::DirectInput { window, mouse_speed, touchpad_speed, natural_scroll, tap_to_click } => {
                 if self.hal.direct_display.window == Some(window) {
-                    crate::linux_input::report(mouse_speed, touchpad_speed, natural_scroll);
+                    crate::linux_input::report(mouse_speed, touchpad_speed, natural_scroll, tap_to_click);
                 }
             }
             #[cfg(not(target_os = "linux"))]
@@ -557,6 +584,9 @@ impl Cx {
                     crate::remote::note_user_closed_window(window_id.id(), &title);
                 }
                 self.hal.windows.remove(&window_id.0);
+                if self.hal_hosted_extra_window(window_id) {
+                    Self::send_hosted_window(crate::ime::HostedWindow::new(window_id.id(), crate::ime::hosted_window_op::CLOSED));
+                }
                 if let Some(hosted) = self.hal.hosted.as_mut() {
                     hosted.window_closed(window_id);
                 }
@@ -778,6 +808,10 @@ impl Cx {
                 let window_id = window_id(window);
                 if self.windows.is_valid(window_id) {
                     self.hal.beat = true;
+                    if let Some(w) = self.hal.windows.get_mut(&window_id.0) {
+                        w.paced = true;
+                        w.credit = true;
+                    }
                     makepad_hal::profile::credit();
                 }
             }
@@ -797,8 +831,12 @@ impl Cx {
                 self.draw_lists.retire_free_items_with_ids(&pool, frame, |list, item, _| frames.inst_destroy((list.index(), item)));
                 self.poll_texture_lifetimes();
                 self.hal.frames_done += 1;
-                if let Some(draw) = self.hal.hosted.as_mut().and_then(|h| h.completed(window, frame)) {
-                    Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw));
+                match self.hal.hosted.as_mut().map(|h| h.completed(window, frame)) {
+                    Some(crate::os::hal::HostedDone::Publish(draw)) => Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw)),
+                    // a hosted frame the GPU dropped: nothing to publish, paint it again
+                    #[cfg(target_os = "linux")]
+                    Some(crate::os::hal::HostedDone::Dropped) => self.hal_repaint_all(),
+                    Some(crate::os::hal::HostedDone::Unknown) | None => {}
                 }
                 // (the first frame the HAL finished is the first one on the glass; once per app)
                 crate::startup_trace_first_present();
@@ -810,11 +848,13 @@ impl Cx {
                 }
             }
             HalEvent::PipelineFailed { pipeline, log } => {
-                if let Some(shader) = self.hal.frames.pipeline_failed(pipeline) {
+                if let Some((shader, waited)) = self.hal.frames.pipeline_failed(pipeline) {
                     let name = self.draw_shaders[shader].debug_id;
                     let error = format!("hal: pipeline of shader {:?} failed: {}", name, String::from_utf8_lossy(log));
                     crate::shader_error::note(error.clone());
                     crate::error!("{}", error);
+                    // a pass that kept its picture for this pipeline paints again
+                    if waited { self.hal_repaint_all(); }
                 }
             }
             HalEvent::BufferEvicted { buffer } => {
@@ -845,8 +885,16 @@ impl Cx {
                 }
             }
             HalEvent::DeviceLost { generation } => {
-                crate::error!("hal: GPU device {generation} was lost; waiting for the HAL to replace it");
-                self.hal.device_lost = true;
+                // Nothing is drawn until DeviceReset: the event loop waits on the HAL's events
+                // (no frames are built or asked of a host meanwhile), so this is said once.
+                if !std::mem::replace(&mut self.hal.device_lost, true) {
+                    crate::error!("hal: GPU device {generation} was lost; waiting for the HAL to replace it");
+                }
+                // frames sent to the lost device are never published to a host; its shared
+                // images are imported again after the reset
+                if let Some(hosted) = self.hal.hosted.as_mut() {
+                    hosted.device_lost();
+                }
             }
             HalEvent::DeviceReset { generation } => self.hal_device_reset(generation),
             HalEvent::GpuPressure { wanted_mb, free_mb, budget_mb, reserve_mb, failed } => {
@@ -861,8 +909,8 @@ impl Cx {
             #[cfg(target_os = "android")]
             HalEvent::GlShare { .. } => {}
             HalEvent::TextureImported { texture, ok } => {
-                if let Some(hosted) = self.hal.hosted.as_mut() {
-                    hosted.imported(texture, ok);
+                if let Some(draw) = self.hal.hosted.as_mut().and_then(|hosted| hosted.imported(texture, ok)) {
+                    Self::send_studio_message(crate::studio::AppToStudio::DrawCompleteAndFlip(draw));
                 }
             }
             HalEvent::Readback { req, status, rect, pixels } => {
@@ -932,6 +980,8 @@ impl Cx {
             }
         }
         self.hal_repaint_all();
+        // what only the GPU held is the app's to redo (`Event::GpuReset`)
+        self.call_event_handler(&Event::GpuReset);
         self.redraw_all();
     }
 
@@ -977,7 +1027,8 @@ impl Cx {
         new_geom.inner_size = inner_size;
         new_geom.outer_size = inner_size;
         new_geom.dpi_factor = dpi;
-        new_geom.is_fullscreen = state == window_state::FULLSCREEN;
+        // A hosted window is fullscreen when its host window manager says so (`HostedFullscreen`).
+        new_geom.is_fullscreen = state == window_state::FULLSCREEN || self.windows[window_id].hosted_fullscreen;
         let safe = self.hal.safe_area;
         let window = &mut self.windows[window_id];
         window.os_dpi_factor = Some(dpi);
@@ -995,12 +1046,13 @@ impl Cx {
     }
 
     /// Copy or cut: asks the focused widget for its text and puts the answer on the clipboard.
-    fn hal_clipboard_chord(&mut self, copy: bool) {
+    /// A copy or cut of nothing (no selection) leaves the clipboard as it is.
+    pub(crate) fn hal_clipboard_chord(&mut self, copy: bool) {
         let response = Rc::new(RefCell::new(None));
         let e = TextClipboardEvent { response: response.clone() };
         self.call_event_handler(&if copy { Event::TextCopy(e) } else { Event::TextCut(e) });
         let text = response.borrow().clone();
-        if let Some(text) = text {
+        if let Some(text) = text.filter(|t| !t.is_empty()) {
             self.hal.frames.w.clip_set(text.as_bytes());
         }
     }

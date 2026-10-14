@@ -5,6 +5,8 @@ use {
 
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 static REQUESTED: AtomicBool = AtomicBool::new(false);
+/// A termination was asked for at some point (never cleared).
+static SEEN: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn install() {
     if INSTALLED.swap(true, Ordering::AcqRel) {
@@ -16,6 +18,7 @@ pub(crate) fn install() {
 }
 
 fn request() {
+    SEEN.store(true, Ordering::Release);
     REQUESTED.store(true, Ordering::Release);
     relax_quit_requested();
     SignalToUI::set_internal_signal();
@@ -36,6 +39,11 @@ fn relax_quit_requested() {
 
 #[cfg(not(any(unix, windows)))]
 fn relax_quit_requested() {}
+
+/// Whether SIGTERM/SIGINT/SIGHUP (or the console's close) ever arrived.
+pub(crate) fn seen() -> bool {
+    SEEN.load(Ordering::Acquire)
+}
 
 pub(crate) fn take_requested() -> bool {
     REQUESTED.swap(false, Ordering::AcqRel)
@@ -215,5 +223,18 @@ mod native {
             return Err(io::Error::last_os_error());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_request_is_seen_for_good_and_taken_once() {
+        assert!(!super::seen());
+        super::request();
+        assert!(super::seen());
+        assert!(super::take_requested());
+        assert!(!super::take_requested());
+        assert!(super::seen(), "taking the request does not forget it");
     }
 }

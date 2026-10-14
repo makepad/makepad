@@ -88,8 +88,10 @@ extern "C" {
 }
 
 pub const MFD_CLOEXEC: u32 = 1;
+pub const O_CLOEXEC: i32 = 0x80000;
 extern "C" {
     pub fn memfd_create(name: *const std::ffi::c_char, flags: u32) -> i32;
+    pub fn pipe2(fds: *mut i32, flags: i32) -> i32;
 }
 
 pub const POLLIN: i16 = 1;

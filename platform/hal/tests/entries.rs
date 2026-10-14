@@ -11,7 +11,7 @@ fn the_four_ops_and_the_plain_types_are_marked() {
     let count = |k| mine.iter().filter(|e| e.kind == k).count();
     println!("makepad_hal entries: ops {} plain {} handle {}", count(OP), count(PLAIN), count(HANDLE));
     let ops: Vec<String> = mine.iter().filter(|e| e.kind == OP).map(|e| (e.key)().to_string()).collect();
-    for name in ["hal_open", "hal_submit", "hal_pump", "hal_wake"] {
+    for name in ["hal_open", "hal_submit", "hal_pump", "hal_wake", "hal_wake_session"] {
         assert!(ops.iter().any(|o| o.ends_with(name)), "{name} missing from {ops:?}");
     }
     assert!(mine.iter().filter(|e| e.kind == PLAIN).all(|e| e.size > 0));

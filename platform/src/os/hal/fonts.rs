@@ -81,6 +81,11 @@ impl Cx {
         self.hal.frames.w.release_glyphs(slots);
     }
 
+    /// Names the atlas slots this session drew from since its last touch.
+    pub fn hal_glyph_touch(&mut self, slots: &[(u32, u32)]) {
+        self.hal.frames.w.touch_glyphs(slots);
+    }
+
     /// The font service events that arrived since the last call.
     pub fn hal_take_font_events(&mut self) -> Vec<HalFontEvent> {
         std::mem::take(&mut self.hal.font_events)

@@ -18,9 +18,7 @@ use std::sync::atomic::Ordering;
 
 #[link(name = "CoreFoundation", kind = "framework")]
 extern "C" {
-    fn CFRunLoopGetMain() -> *mut c_void;
     fn CFRunLoopPerformBlock(rl: *mut c_void, mode: ObjcId, block: *const c_void);
-    fn CFRunLoopWakeUp(rl: *mut c_void);
 }
 
 #[repr(C)]
@@ -55,7 +53,7 @@ pub fn host_dark() -> Option<bool> {
     }
 }
 
-/// Publishes the attached displays for `makepad_hal::screens`.
+/// Publishes the attached displays for `makepad_hal::hal_screens`.
 pub(super) fn publish_screens() {
     let list: Vec<crate::ScreenInfo> = window::screens()
         .into_iter()
@@ -178,14 +176,35 @@ pub fn note_exit_requested() {
 /// once when the host stopped it before any window was wanted).
 pub fn run_main_loop() {
     let shared = Shared::global();
-    {
-        let mut run = lock(&shared.run);
-        while !run.wanted && !run.stop {
-            run = shared.run_cv.wait(run).unwrap_or_else(|e| e.into_inner());
+    // Until a backend wants windows the main thread still runs its run loop: system frameworks
+    // finish their work there (AVFoundation's player items only become ready through the main
+    // queue), so offscreen sessions (hidden runs) get video, location etc. as windowed ones do.
+    // `wake_idle_main` ends each wait when the run state changes.
+    unsafe {
+        let mut context = CFRunLoopSourceContext {
+            version: 0, info: std::ptr::null_mut(), retain: None, release: None, copy_description: None,
+            equal: None, hash: None, schedule: None, cancel: None, perform: Some(idle_wake_perform),
+        };
+        let source = CFRunLoopSourceCreate(std::ptr::null(), 0, &mut context);
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, kCFRunLoopDefaultMode);
+        IDLE_WAKE.store(source as usize, Ordering::Release);
+    }
+    super::main_lag::start();
+    loop {
+        {
+            let run = lock(&shared.run);
+            if run.wanted {
+                // the window system's loop serves the run loop from here on
+                IDLE_WAKE.store(0, Ordering::Release);
+                break;
+            }
+            if run.stop {
+                drop(run);
+                super::main_lag::finish();
+                return;
+            }
         }
-        if run.stop && !run.wanted {
-            return;
-        }
+        unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0e10, 1); }
     }
     unsafe {
         init();
@@ -214,6 +233,24 @@ pub fn run_main_loop() {
         drain_ops();
         windows_gone_before_exit();
     }
+    super::main_lag::finish();
+}
+
+/// The main thread's wake source while it waits for a backend to want windows.
+static IDLE_WAKE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+extern "C" fn idle_wake_perform(_: *mut c_void) {}
+
+/// Ends the main thread's wait in [`run_main_loop`] for a backend to want windows, so it looks
+/// at the run state again (any thread; nothing to do once the window system runs).
+pub(crate) fn wake_idle_main() {
+    let source = IDLE_WAKE.load(Ordering::Acquire);
+    if source != 0 {
+        unsafe {
+            CFRunLoopSourceSignal(source as CFRunLoopSourceRef);
+            CFRunLoopWakeUp(CFRunLoopGetMain());
+        }
+    }
 }
 
 /// Ends [`run_main_loop`] (any thread).
@@ -224,6 +261,7 @@ pub fn stop_main_loop() {
         run.stop = true;
         shared.run_cv.notify_all();
     }
+    wake_idle_main();
     // an event ends the main loop's wait for the next event, which then sees the stop
     let ready = lock(&shared.run).ready;
     if ready {
@@ -1124,7 +1162,7 @@ fn command(sid: u32, cmd: OsCmd) {
             }
         }
         OsCmd::AppIcon { w, h, rgba } => set_application_icon(w, h, &rgba),
-        OsCmd::ImeSync { .. } | OsCmd::SelectionSet { .. } | OsCmd::ShareText { .. } | OsCmd::ClipboardActions { .. } | OsCmd::ChromelessWhenMax { .. } | OsCmd::MobileUi { .. } | OsCmd::SelectionHandles { .. } => {}
+        OsCmd::ImeSync { .. } | OsCmd::SelectionSet { .. } | OsCmd::ShareText { .. } | OsCmd::ClipboardActions { .. } | OsCmd::ChromelessWhenMax { .. } | OsCmd::MobileUi { .. } | OsCmd::BackUnhandled | OsCmd::SelectionHandles { .. } => {}
         OsCmd::ClipRead { req, .. } => {
             let content = super::clipboard::read().pack();
             Shared::global().push(sid, |q| {

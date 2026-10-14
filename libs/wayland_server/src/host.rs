@@ -1,6 +1,6 @@
 //! The server on its own thread. The host (UI) thread sends `Command`s and receives `UiEvent`s,
 //! so a stalling or flooding client can never block the host's frame loop.
-use crate::compositor::{Compositor, OutputInfo, SurfKey, UiEvent};
+use crate::compositor::{Board, Compositor, OutputInfo, SurfKey, UiEvent};
 use crate::server::{Server, Waker};
 use std::io;
 use std::path::Path;
@@ -24,6 +24,10 @@ pub enum Command {
     SetScale(f64),
     /// The host finished reading a dmabuf buffer; the fence covers its reads.
     BufferDone { client: u32, buffer: u32, fence: Option<std::os::fd::OwnedFd> },
+    /// A host app copied (or selected) text: it becomes the Wayland clients' selection.
+    SetSelection { board: Board, text: String },
+    /// A client selection's text was read (the server's own reading thread sends this).
+    SelectionRead { board: Board, generation: u64, text: String },
     Shutdown,
 }
 
@@ -46,6 +50,11 @@ impl Host {
         if let Some(cfg) = dmabuf { comp.enable_dmabuf(&mut srv.core, cfg)?; }
         let waker = srv.waker()?;
         let (tx, rx) = channel::<Command>();
+        // client selections are read off the server thread; the text comes back as a command
+        let (read_tx, read_waker) = (tx.clone(), srv.waker()?);
+        comp.set_selection_reader(std::sync::Arc::new(move |board, generation, text| {
+            if read_tx.send(Command::SelectionRead { board, generation, text }).is_ok() { read_waker.wake(); }
+        }));
         let (etx, erx) = channel::<UiEvent>();
         let join = std::thread::Builder::new().name("wayland-server".into()).spawn(move || {
             'run: loop {
@@ -95,6 +104,8 @@ fn apply(srv: &mut Server, comp: &mut Compositor, cmd: Command) -> bool {
         Command::PopupBounds(r) => comp.popup_bounds = r,
         Command::SetScale(s) => comp.set_scale(core, s),
         Command::BufferDone { client, buffer, fence } => comp.buffer_done(core, client, buffer, fence),
+        Command::SetSelection { board, text } => comp.set_host_selection(core, board, text),
+        Command::SelectionRead { board, generation, text } => comp.selection_read(core, board, generation, text),
         Command::Shutdown => return false,
     }
     true

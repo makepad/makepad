@@ -164,12 +164,16 @@ pub enum Event {
     WindowGeomChange(WindowGeomChangeEvent),
     VirtualKeyboard(VirtualKeyboardEvent),
     ClearAtlasses,
-    /// The GPU context was lost and has been restored (a WebGL context the
-    /// browser took away and gave back). Every GPU object was recreated from
-    /// what the CPU side keeps: vec textures, geometries, instance data and
-    /// shaders are uploaded again and every pass is repainted. Contents only
-    /// the GPU held are gone (a render target drawn once and not redrawn,
-    /// results of GPU work read back later): handle this to redo that work.
+    /// The GPU device was lost and has been replaced (a WebGL context the
+    /// browser took away and gave back; the HAL's DeviceReset after the
+    /// driver's VK_ERROR_DEVICE_LOST or a device removal). Every GPU object
+    /// was recreated from what the CPU side keeps: vec textures, geometries,
+    /// instance data and shaders are uploaded again and every pass is
+    /// repainted. Contents only the GPU held are gone (a render target drawn
+    /// once and not redrawn, data whose CPU copy was dropped after upload,
+    /// results of GPU work read back later, shared images a host lent its
+    /// child): handle this to redo that work. Delivered once per reset, after
+    /// the uploads were queued and before the repaint.
     GpuReset,
     /// Clear all hover/pressed visual state, e.g. after an overlay that
     /// swallowed the hover-outs (a context menu) has closed.

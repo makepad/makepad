@@ -214,7 +214,7 @@ pub(super) fn did_finish_launching() {
     }
 }
 
-/// Publishes the screen for `makepad_hal::screens` (one screen, the window's work area is the
+/// Publishes the screen for `makepad_hal::hal_screens` (one screen, the window's work area is the
 /// whole of it: the safe area is the window's business).
 pub(super) fn publish_screens() {
     let bounds: NSRect = unsafe {
@@ -480,6 +480,7 @@ fn command(sid: u32, cmd: OsCmd, taken: u64) {
         | OsCmd::PointerLock { .. }
         | OsCmd::ShowInDock { .. }
         | OsCmd::ActivateApp
+        | OsCmd::BackUnhandled
         | OsCmd::AppIcon { .. }
         | OsCmd::MenuSet { .. }
         | OsCmd::SelectionSet { .. }

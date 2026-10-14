@@ -630,6 +630,121 @@ impl StudioToApp {
     }
 }
 
+/// Visibility, host to app. A host that shows none of this window (minimized,
+/// on another space, fully covered by other windows) sends `visible: false`;
+/// `true` says some of it shows again. A hidden child delivers no
+/// next-frame callbacks and draws nothing -- the screen cannot show it --
+/// and asks for no frames; on `true` it redraws once and resumes. It
+/// travels as `StudioToApp::Custom`, read by `HostedVisible::parse(json)` in
+/// the child's platform (a native app's Cx, the WM-hosted HAL shell of
+/// `makepad run`), and never reaches the app.
+#[derive(Clone, Debug, Default, SerJson, DeJson)]
+pub struct HostedVisible { pub visible: bool }
+#[derive(SerJson, DeJson)]
+struct VisibleEnvelope { makepad_visible: HostedVisible }
+impl HostedVisible {
+    pub fn to_json(&self) -> String {
+        VisibleEnvelope { makepad_visible: self.clone() }.serialize_json()
+    }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_visible\"") { return None; }
+        VisibleEnvelope::deserialize_json(json).ok().map(|e| e.makepad_visible)
+    }
+}
+
+/// Appearance, host to app: whether the window system is dark (the WM's color scheme, the one
+/// its portal gives browsers). Sent on connect and on every change, as `StudioToApp::Custom`.
+/// Read by what draws without a stylesheet: `makepad run`'s load screen through the WM-hosted
+/// HAL shell (`makepad_hal::host_dark`); a widgets app follows the `makepad_style` sheet.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedAppearance { pub dark: bool }
+#[derive(SerJson, DeJson)]
+struct AppearanceEnvelope { makepad_appearance: HostedAppearance }
+impl HostedAppearance {
+    pub fn to_json(&self) -> String { AppearanceEnvelope { makepad_appearance: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_appearance\"") { return None; }
+        AppearanceEnvelope::deserialize_json(json).ok().map(|e| e.makepad_appearance)
+    }
+}
+
+// Own chrome (the contract is described in the platform's `ime.rs`): the WM asks a makepad
+// window's drag query on a press and the app answers; the app's window buttons ask the WM for
+// the window op. Both travel as `Custom` JSON. They live here, not in the platform, because the
+// WM-hosted HAL shell of `makepad run` relays them too (`platform/hal/src/backend/linux/wm.rs`).
+
+/// `HostedDragAnswer::response` values (a `WindowDragQueryResponse`).
+pub mod drag_answer {
+    pub const NO_ANSWER: u8 = 0;
+    pub const CLIENT: u8 = 1;
+    pub const CAPTION: u8 = 2;
+    pub const SYS_MENU: u8 = 3;
+}
+
+/// Host to app: where did a press land (the window's own points)?
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedDragQuery { pub id: u32, pub x: f64, pub y: f64 }
+#[derive(SerJson, DeJson)]
+struct DragQueryEnvelope { makepad_drag_query: HostedDragQuery }
+impl HostedDragQuery {
+    pub fn to_json(&self) -> String { DragQueryEnvelope { makepad_drag_query: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_drag_query\"") { return None; }
+        DragQueryEnvelope::deserialize_json(json).ok().map(|e| e.makepad_drag_query)
+    }
+}
+
+/// `HostedDragAnswer::double_click` values: what a double click on the caption does
+/// (the window's `CxWindow::double_click_fullscreen`).
+pub mod drag_double {
+    /// Maximise to the screen's work area (bars and dock stay), again restores.
+    pub const MAXIMISE: u8 = 0;
+    /// Fullscreen on its screen (over bars and dock, no caption), again restores.
+    pub const FULLSCREEN: u8 = 1;
+}
+
+/// App to host: the answer to a [`HostedDragQuery`].
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedDragAnswer { pub id: u32, pub response: u8, pub double_click: u8 }
+#[derive(SerJson, DeJson)]
+struct DragAnswerEnvelope { makepad_drag_answer: HostedDragAnswer }
+impl HostedDragAnswer {
+    pub fn to_json(&self) -> String { DragAnswerEnvelope { makepad_drag_answer: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_drag_answer\"") { return None; }
+        DragAnswerEnvelope::deserialize_json(json).ok().map(|e| e.makepad_drag_answer)
+    }
+}
+
+/// `HostedWindowOp::op` values: what a window of the app asked for.
+pub mod window_op {
+    pub const CLOSE: u8 = 0;
+    pub const MINIMIZE: u8 = 1;
+    /// The maximise button. A hosted app cannot see whether the host has the
+    /// window maximised, so the host decides: it maximises, or restores a
+    /// window that already is.
+    pub const MAXIMIZE: u8 = 2;
+    /// Leave the maximised state; nothing when not maximised.
+    pub const RESTORE: u8 = 3;
+}
+
+/// App to host: the app's window was asked to close, minimise or
+/// maximise/restore (`Window::close` and the like). A hosted child has no
+/// platform window to do it to, so the host, which owns the window, does it
+/// with its own paths. Sent by every hosted backend, so any app with its own
+/// caption buttons gets them working.
+#[derive(Clone, Debug, Default, PartialEq, SerJson, DeJson)]
+pub struct HostedWindowOp { pub op: u8 }
+#[derive(SerJson, DeJson)]
+struct WindowOpEnvelope { makepad_window_op: HostedWindowOp }
+impl HostedWindowOp {
+    pub fn to_json(&self) -> String { WindowOpEnvelope { makepad_window_op: self.clone() }.serialize_json() }
+    pub fn parse(json: &str) -> Option<Self> {
+        if !json.contains("\"makepad_window_op\"") { return None; }
+        WindowOpEnvelope::deserialize_json(json).ok().map(|e| e.makepad_window_op)
+    }
+}
+
 #[cfg(test)]
 mod studio_batch_tests {
     use super::*;

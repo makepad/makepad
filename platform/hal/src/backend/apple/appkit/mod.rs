@@ -23,11 +23,13 @@ mod classes;
 mod clipboard;
 mod ime;
 mod keys;
+mod main_lag;
 mod screen;
 mod test_resize;
 mod window;
 
 pub use app::{host_dark, run_main_loop, stop_main_loop};
+pub(crate) use app::wake_idle_main;
 use super::shell::{lock, log_enabled, Op, Shared};
 
 /// What `super::shell` needs of AppKit.

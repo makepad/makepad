@@ -8,6 +8,7 @@ pub(crate) mod io;
 mod wayland;
 mod x11;
 pub mod direct;
+mod wm;
 
 use super::exec::OsCmd;
 use super::log_enabled;
@@ -19,7 +20,7 @@ use std::ffi::CStr;
 use std::io::{Read, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 
 type Key = (u32, Id);
@@ -32,6 +33,8 @@ enum Protocol {
     X11,
     Wayland,
     Direct,
+    /// A makepad window manager hosts the windows (wm.rs).
+    Wm,
 }
 
 enum Op {
@@ -360,7 +363,7 @@ impl VkSurfaceSource for SurfaceSource {
         {
             Some(Protocol::Wayland) => vec![vk::KHR_WAYLAND_SURFACE_NAME],
             Some(Protocol::X11) => vec![vk::KHR_XLIB_SURFACE_NAME],
-            Some(Protocol::Direct) => Vec::new(),
+            Some(Protocol::Direct) | Some(Protocol::Wm) => Vec::new(),
             None => Vec::new(),
         }
     }
@@ -391,7 +394,7 @@ impl VkSurfaceSource for SurfaceSource {
         let call = match native.protocol {
             Protocol::Wayland => "vkCreateWaylandSurfaceKHR",
             Protocol::X11 => "vkCreateXlibSurfaceKHR",
-            Protocol::Direct => return Err("direct displays use the KMS presentation provider".into()),
+            Protocol::Direct | Protocol::Wm => return Err("this shell presents through its own provider, not a window-system surface".into()),
         };
         if native.display == 0 || native.window == 0 {
             return Err(format!("{call} key={:?}: null native display/window handle", (sid, id)));
@@ -412,7 +415,7 @@ impl VkSurfaceSource for SurfaceSource {
                     .window(native.window as _),
                 None,
             ),
-            Protocol::Direct => return Err("direct displays use the KMS presentation provider".into()),
+            Protocol::Direct | Protocol::Wm => return Err("this shell presents through its own provider, not a window-system surface".into()),
         }
         .map_err(|e| format!("{call} key={:?} token={}: {e:?}", (sid, id), native.token))?;
         if log_enabled() {
@@ -432,8 +435,11 @@ pub fn screens() -> Vec<crate::ScreenInfo> {
     lock(&Shared::global().screens).clone()
 }
 pub fn surface_source(shared: &'static Shared) -> Box<dyn VkSurfaceSource> {
-    if shared.direct_display() { Box::new(direct::Source::new()) }
-    else { Box::new(SurfaceSource(shared)) }
+    match lock(&shared.run).ready.as_ref() {
+        Some(Ok(Protocol::Direct)) => Box::new(direct::Source::new()),
+        Some(Ok(Protocol::Wm)) => Box::new(wm::Source::new()),
+        _ => Box::new(SurfaceSource(shared)),
+    }
 }
 /// How the default selection ranks a backend that opened, lower first: hardware Vulkan, hardware
 /// GL, software Vulkan, software GL (a CPU Vulkan such as lavapipe is slower than a GPU's GL).
@@ -470,14 +476,14 @@ fn prefer(vulkan: Result<super::vulkan::Vulkan, String>, gl: impl FnOnce() -> Re
 }
 
 /// Linux desktop's backend when none is forced, both on the one shell start; see [`preference`].
-pub fn open(flags: u32, wake: Arc<dyn Fn() + Send + Sync>, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Box<dyn super::Backend>, String> {
+pub fn open(flags: u32, wake: Arc<dyn Fn() + Send + Sync>, sessions: super::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>) -> Result<Box<dyn super::Backend>, String> {
     use super::{gl::GlBackend, vulkan::Vulkan};
     if flags & open_flags::OFFSCREEN_WINDOWS != 0 {
-        return prefer(Vulkan::new(flags, wake.clone(), notify.clone()), || GlBackend::new(flags, wake, notify));
+        return prefer(Vulkan::new(flags, sessions, notify.clone()), || GlBackend::new(flags, wake, notify));
     }
     let shell = Shared::global();
     shell.start(flags, notify)?;
-    let opened = prefer(Vulkan::on_shell(flags, wake.clone(), shell), || GlBackend::on_shell(wake, shell));
+    let opened = prefer(Vulkan::on_shell(flags, sessions, shell), || GlBackend::on_shell(wake, shell));
     if opened.is_err() { stop_main_loop(); }
     opened
 }
@@ -505,53 +511,53 @@ pub fn stop_main_loop() {
     s.signal();
 }
 
-fn connect(shared: &'static Shared) -> Result<Box<dyn Shell>, String> {
-    let forced = std::env::args()
-        .find_map(|a| {
-            a.strip_prefix("--linux-backend=")
-                .filter(|v| matches!(*v, "x11" | "wayland" | "linux_direct" | "direct"))
-                .map(|v| (v.to_owned(), "--linux-backend"))
-        })
-        .or_else(|| {
-            std::env::var("MAKEPAD").ok().and_then(|s| {
-                s.split(['+', ','])
-                    .find(|v| matches!(*v, "x11" | "wayland" | "linux_direct" | "direct"))
-                    .map(|v| (v.to_owned(), "MAKEPAD"))
-            })
-        });
-    let forced_backend = forced.as_ref().map(|(backend, _)| backend.as_str());
-    if matches!(forced_backend, Some("linux_direct" | "direct")) {
-        return direct::App::connect(shared).map(|app| Box::new(app) as Box<dyn Shell>);
+/// Whether the window system is dark: 0 unknown, 1 light, 2 dark. The WM-hosted shell sets it
+/// from the WM's `HostedAppearance`; Wayland and X11 have no appearance of their own here.
+static HOST_DARK: AtomicU8 = AtomicU8::new(0);
+
+pub fn host_dark() -> Option<bool> {
+    match HOST_DARK.load(Ordering::Acquire) {
+        1 => Some(false),
+        2 => Some(true),
+        _ => None,
     }
+}
+
+fn set_host_dark(dark: bool) {
+    HOST_DARK.store(if dark { 2 } else { 1 }, Ordering::Release);
+}
+
+fn connect(shared: &'static Shared) -> Result<Box<dyn Shell>, String> {
+    use crate::wm_socket::{self, Backend};
+    let forced = wm_socket::forced(std::env::args(), std::env::var("MAKEPAD").ok().as_deref());
+    let window_manager = shared.flags.load(Ordering::Acquire) & open_flags::WINDOW_MANAGER != 0;
     let wayland_display = std::env::var_os("WAYLAND_DISPLAY").filter(|s| !s.is_empty());
     let wayland_socket = std::env::var_os("WAYLAND_SOCKET").filter(|s| !s.is_empty());
     let display = std::env::var_os("DISPLAY").filter(|s| !s.is_empty());
-    let wayland = forced_backend == Some("wayland")
-        || (forced_backend != Some("x11") && (wayland_display.is_some() || wayland_socket.is_some()));
-    if log_enabled() {
-        let reason = forced.as_ref().map_or_else(
-            || if wayland { "Wayland environment is set" } else { "no Wayland environment; default X11" },
-            |(_, source)| *source,
-        );
-        eprintln!("[hal-linux] backend={} reason={reason}; WAYLAND_DISPLAY={wayland_display:?} WAYLAND_SOCKET={wayland_socket:?} DISPLAY={display:?}; XDG_RUNTIME_DIR={:?}",
-            if wayland { "wayland" } else { "x11" }, std::env::var_os("XDG_RUNTIME_DIR"));
+    let (backend, reason) = wm_socket::choose(forced, window_manager, wayland_display.is_some() || wayland_socket.is_some(),
+        || wm_socket::discovered(makepad_studio_protocol::WIRE).clone());
+    if log_enabled() || matches!(backend, Backend::Wm | Backend::Direct) {
+        eprintln!("[hal-linux] backend={backend:?} reason={reason}; WAYLAND_DISPLAY={wayland_display:?} WAYLAND_SOCKET={wayland_socket:?} DISPLAY={display:?}; XDG_RUNTIME_DIR={:?}",
+            std::env::var_os("XDG_RUNTIME_DIR"));
     }
-    if wayland {
-        match wayland::App::connect(shared) {
-            Ok(app) => return Ok(Box::new(app)),
+    match backend {
+        Backend::Direct => direct::App::connect(shared).map(|app| Box::new(app) as Box<dyn Shell>),
+        Backend::Wm => wm::App::connect(shared).map(|app| Box::new(app) as Box<dyn Shell>),
+        Backend::Wayland => match wayland::App::connect(shared) {
+            Ok(app) => Ok(Box::new(app)),
             Err(e) => {
-                if forced_backend == Some("wayland") || display.is_none() {
+                if forced.is_some() || display.is_none() {
                     return Err(format!("Wayland connection failed: {e}; no X11 fallback ({})",
-                        if forced_backend == Some("wayland") { "Wayland explicitly selected" } else { "DISPLAY unset/empty" }));
+                        if forced.is_some() { "Wayland explicitly selected" } else { "DISPLAY unset/empty" }));
                 }
                 eprintln!("[hal-linux] Wayland connection failed: {e}; backend=x11 fallback because DISPLAY is set");
-                return x11::App::connect(shared)
+                x11::App::connect(shared)
                     .map(|app| Box::new(app) as Box<dyn Shell>)
-                    .map_err(|x| format!("Wayland failed: {e}; X11 fallback failed: {x}"));
+                    .map_err(|x| format!("Wayland failed: {e}; X11 fallback failed: {x}"))
             }
-        }
+        },
+        Backend::X11 => x11::App::connect(shared).map(|app| Box::new(app) as Box<dyn Shell>),
     }
-    x11::App::connect(shared).map(|app| Box::new(app) as Box<dyn Shell>)
 }
 
 pub fn run_main_loop() {
@@ -593,14 +599,28 @@ pub fn run_main_loop() {
     if log_enabled() {
         eprintln!("[hal-linux] {:?} connection ready; serving window commands", app.protocol());
     }
+    // MAKEPAD_HAL_MAIN_LAG: the loop's own wake fd is signalled every 4 ms, so an idle loop comes
+    // around at that rate and every longer gap is time the window system waited for this thread
+    let pinger = super::main_lag::wanted().then(|| {
+        super::main_lag::start();
+        std::thread::Builder::new().name("hal-main-lag".into()).spawn(move || {
+            while !lock(&s.run).stopped {
+                std::thread::sleep(super::main_lag::TICK);
+                s.signal();
+            }
+        })
+    });
     let mut stopping = false;
     let mut disconnected = false;
     loop {
+        super::main_lag::tick();
         for op in s.take() {
             app.command(op);
         }
         if lock(&s.run).stopped && !stopping {
             stopping = true;
+            // the pings end with the run: teardown waits are not the window system's
+            super::main_lag::finish();
             if log_enabled() {
                 eprintln!("[hal-linux] main loop stopping; closing windows and draining native leases");
             }
@@ -633,6 +653,10 @@ pub fn run_main_loop() {
             stop_main_loop();
             disconnected = true;
         }
+    }
+    super::main_lag::finish();
+    if let Some(Ok(pinger)) = pinger {
+        let _ = pinger.join();
     }
     if log_enabled() {
         eprintln!("[hal-linux] main loop exited; native windows retired");

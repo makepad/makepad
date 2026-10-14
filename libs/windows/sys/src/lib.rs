@@ -819,6 +819,7 @@ pub const ERROR_INSUFFICIENT_BUFFER: crate::Win32::Foundation::WIN32_ERROR = cra
 pub const ERROR_IO_PENDING: crate::Win32::Foundation::WIN32_ERROR = crate::Win32::Foundation::WIN32_ERROR(997u64 as _);
 pub const ERROR_LOCK_VIOLATION: crate::Win32::Foundation::WIN32_ERROR = crate::Win32::Foundation::WIN32_ERROR(33u64 as _);
 pub const ERROR_NOTIFY_ENUM_DIR: crate::Win32::Foundation::WIN32_ERROR = crate::Win32::Foundation::WIN32_ERROR(1022u64 as _);
+pub const ERROR_OPERATION_ABORTED: crate::Win32::Foundation::WIN32_ERROR = crate::Win32::Foundation::WIN32_ERROR(995u64 as _);
 pub const ERROR_SUCCESS: crate::Win32::Foundation::WIN32_ERROR = crate::Win32::Foundation::WIN32_ERROR(0u64 as _);
 pub const E_ACCESSDENIED: crate::core::HRESULT = crate::core::HRESULT(-2147024891i64 as _);
 pub const E_INVALIDARG: crate::core::HRESULT = crate::core::HRESULT(-2147024809i64 as _);
@@ -18129,11 +18130,25 @@ Ok(())
 }
 }
 pub mod IO {
+mod import_CancelIoEx { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "CancelIoEx"] pub fn call(hFile: crate::Win32::Foundation::HANDLE,lpOverlapped: *const crate::Win32::System::IO::OVERLAPPED) -> crate::core::BOOL; } }
+pub use import_CancelIoEx::call as CancelIoEx_raw;
+#[inline]
+pub unsafe fn CancelIoEx(hFile: crate::Win32::Foundation::HANDLE,lpOverlapped: Option<*const crate::Win32::System::IO::OVERLAPPED>) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_CancelIoEx::call(hFile,lpOverlapped.unwrap_or(::core::ptr::null())); hr__.ok()?;
+Ok(())
+}
 mod import_CreateIoCompletionPort { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "CreateIoCompletionPort"] pub fn call(FileHandle: crate::Win32::Foundation::HANDLE,ExistingCompletionPort: crate::Win32::Foundation::HANDLE,CompletionKey: usize,NumberOfConcurrentThreads: u32) -> crate::Win32::Foundation::HANDLE; } }
 pub use import_CreateIoCompletionPort::call as CreateIoCompletionPort_raw;
 #[inline]
 pub unsafe fn CreateIoCompletionPort(FileHandle: crate::Win32::Foundation::HANDLE,ExistingCompletionPort: Option<crate::Win32::Foundation::HANDLE>,CompletionKey: usize,NumberOfConcurrentThreads: u32) -> Result<crate::Win32::Foundation::HANDLE, crate::core::HRESULT> {
 let hr__ = import_CreateIoCompletionPort::call(FileHandle,ExistingCompletionPort.unwrap_or(unsafe { ::core::mem::zeroed() }),CompletionKey,NumberOfConcurrentThreads); if hr__.is_invalid() {return Err(crate::core::HRESULT::from_thread());} return Ok(hr__);
+}
+mod import_GetOverlappedResult { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetOverlappedResult"] pub fn call(hFile: crate::Win32::Foundation::HANDLE,lpOverlapped: *const crate::Win32::System::IO::OVERLAPPED,lpNumberOfBytesTransferred: *mut u32,bWait: crate::core::BOOL) -> crate::core::BOOL; } }
+pub use import_GetOverlappedResult::call as GetOverlappedResult_raw;
+#[inline]
+pub unsafe fn GetOverlappedResult(hFile: crate::Win32::Foundation::HANDLE,lpOverlapped: *const crate::Win32::System::IO::OVERLAPPED,lpNumberOfBytesTransferred: *mut u32,bWait: bool) -> Result<(), crate::core::HRESULT> {
+let hr__ = import_GetOverlappedResult::call(hFile,lpOverlapped,lpNumberOfBytesTransferred,crate::core::BOOL(bWait as i32)); hr__.ok()?;
+Ok(())
 }
 mod import_GetQueuedCompletionStatus { #[link(name = "KERNEL32", kind = "raw-dylib")] extern "system" { #[link_name = "GetQueuedCompletionStatus"] pub fn call(CompletionPort: crate::Win32::Foundation::HANDLE,lpNumberOfBytesTransferred: *mut u32,lpCompletionKey: *mut usize,lpOverlapped: *mut *mut crate::Win32::System::IO::OVERLAPPED,dwMilliseconds: u32) -> crate::core::BOOL; } }
 pub use import_GetQueuedCompletionStatus::call as GetQueuedCompletionStatus_raw;

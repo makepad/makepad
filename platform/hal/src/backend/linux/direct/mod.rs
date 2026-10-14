@@ -36,6 +36,8 @@ enum Command {
     Primary(String),
     Arrangement(crate::direct::DisplayArrangement),
     Pacing(crate::direct::DisplayPacing),
+    /// The HAL replaced its lost GPU device: the presenter renders with this one from now on.
+    Device(Arc<Device>),
 }
 
 #[derive(Default)]
@@ -59,6 +61,8 @@ struct State {
     released: AtomicBool,
     ready: AtomicU64,
     timings_changed: AtomicBool,
+    /// At least one display is driven (DRM master taken, mode set): input may open.
+    acquired: AtomicBool,
     dpi: f64,
 }
 static STATE: OnceLock<Arc<State>> = OnceLock::new();
@@ -109,7 +113,11 @@ impl VkSurfaceSource for Source {
         if !device.formats[format::BGRA8 as usize].optimal_tiling_features.contains(vk::FormatFeatureFlags::BLIT_SRC) {
             return Err("direct display requires BGRA8 BLIT_SRC on the compositor GPU".into());
         }
-        if self.0.started.swap(true, Ordering::AcqRel) { return Ok(()); }
+        // A replacement device after a loss: the presenter thread swaps it in, keeping the
+        // displays it holds (`render::Context::replace_device`).
+        if self.0.started.swap(true, Ordering::AcqRel) {
+            return if self.0.post(Command::Device(device)) { Ok(()) } else { Err("the display presenter stopped".into()) };
+        }
         render::export_device(&device);
         let state = self.0.clone();
         if let Err(e) = std::thread::Builder::new().name("makepad-kms-present".into()).spawn(move || render::run(state, device)) {
@@ -126,6 +134,8 @@ impl VkSurfaceSource for Source {
 }
 
 pub(super) struct App {
+    /// The per-user direct-display lock, held for the process's life (see `claim_displays`).
+    _owner: std::fs::File,
     state: Arc<State>,
     window: Option<Key>,
     recipient: Option<Key>,
@@ -147,6 +157,8 @@ impl App {
                 dpi = scale.parse().ok().filter(|v: &f64| v.is_finite() && *v > 0.0).ok_or("-scale must be a positive finite number")?;
             }
         }
+        // Before the console, the displays or any input device: one direct shell per user.
+        let owner = claim_displays()?;
         let terminal = terminal::DirectTerminal::enter()?;
         if terminal.is_none() { eprintln!("[hal-direct] no local VT; DRM access still requires an owned active console"); }
         let (reader, writer) = UnixStream::pair().map_err(|e| e.to_string())?;
@@ -154,11 +166,13 @@ impl App {
         writer.set_nonblocking(true).map_err(|e| e.to_string())?;
         let state = Arc::new(State { shared, reader, writer, ops: Default::default(), snapshot: Default::default(), window: Default::default(),
             generation: AtomicU64::new(0), started: AtomicBool::new(false), stopped: AtomicBool::new(false),
-            released: AtomicBool::new(false), ready: AtomicU64::new(0), timings_changed: AtomicBool::new(false), dpi });
+            released: AtomicBool::new(false), ready: AtomicU64::new(0), timings_changed: AtomicBool::new(false), acquired: AtomicBool::new(false), dpi });
         STATE.set(state.clone()).map_err(|_| "direct display shell already initialized")?;
         shared.dpi.store((dpi as f32).to_bits(), Ordering::Release);
         eprintln!("[hal-direct] Ctrl+Alt+Backspace exits; Ctrl+Alt+F1..F12 switches VT");
-        Ok(Self { state, window: None, recipient: None, input: Some(raw_input::RawInput::new(0.0, 0.0, dpi)),
+        // Input devices open once a display is driven (`dispatch`): a shell that gets no
+        // display must not take the keyboard and pointer from whoever has them.
+        Ok(Self { _owner: owner, state, window: None, recipient: None, input: None,
             terminal, generation: 0, active: true, releasing: false, stopping: false, clipboard: Default::default(), selection: Default::default() })
     }
     fn publish(&mut self) {
@@ -209,7 +223,7 @@ impl App {
     fn publish_input(&self) {
         if let Some(key) = self.recipient {
             self.state.shared.push(key, |q, id| q.direct_input(id, preferences::pointer_speed(false),
-                preferences::pointer_speed(true), preferences::natural_scroll()));
+                preferences::pointer_speed(true), preferences::natural_scroll(), preferences::tap_to_click()));
         }
     }
     fn owns_display(&self, sid: u32) -> bool {
@@ -290,6 +304,42 @@ impl App {
     }
 }
 
+/// Where a user's direct shell holds its lock: the runtime dir, else /tmp by uid.
+fn owner_lock_path() -> std::path::PathBuf {
+    extern "C" { fn getuid() -> u32; }
+    match crate::wm_socket::runtime_dir() {
+        Some(dir) => dir.join("makepad-direct.lock"),
+        // SAFETY: getuid has no failure mode.
+        None => std::env::temp_dir().join(format!("makepad-direct-{}.lock", unsafe { getuid() })),
+    }
+}
+
+/// One direct shell per user: an exclusive lock taken before the console, the displays or any
+/// input device is touched, released by the kernel when the process ends. A second start (a
+/// process that inherited the WM's `MAKEPAD=linux_direct`, a second WM) is refused here, before
+/// it can take the touchpad or fight for DRM master.
+fn claim_displays() -> Result<std::fs::File, String> {
+    use std::os::fd::AsRawFd;
+    extern "C" { fn flock(fd: i32, operation: i32) -> i32; }
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    let path = owner_lock_path();
+    let mut file = std::fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).open(&path)
+        .map_err(|e| format!("direct display lock {}: {e}", path.display()))?;
+    // SAFETY: flock on a descriptor this function owns.
+    if unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) } != 0 {
+        let mut holder = String::new();
+        let _ = file.read_to_string(&mut holder);
+        let holder = holder.trim();
+        return Err(format!("another makepad direct-display shell{} owns the displays and input devices ({}); \
+            a process started inside the window manager runs as its client, never on the direct display",
+            if holder.is_empty() { String::new() } else { format!(" (pid {holder})") }, path.display()));
+    }
+    file.set_len(0).and_then(|_| file.write_all(format!("{}\n", std::process::id()).as_bytes()))
+        .map_err(|e| format!("direct display lock {}: {e}", path.display()))?;
+    Ok(file)
+}
+
 impl Shell for App {
     fn protocol(&self) -> Protocol { Protocol::Direct }
     fn command(&mut self, op: Op) {
@@ -320,6 +370,10 @@ impl Shell for App {
                 OsCmd::DirectNaturalScroll { on } => {
                     if self.owns_display(sid) { preferences::set_natural_scroll(on); self.publish_input(); }
                     else { eprintln!("[hal-direct] session={sid} cannot set natural scrolling: it does not own the desktop"); }
+                }
+                OsCmd::DirectTapToClick { on } => {
+                    if self.owns_display(sid) { preferences::set_tap_to_click(on); self.publish_input(); }
+                    else { eprintln!("[hal-direct] session={sid} cannot set tap to click: it does not own the desktop"); }
                 }
                 OsCmd::ClipSet { text } => self.clipboard.text = text,
                 OsCmd::SelectionSet { text } => self.selection.text = text,
@@ -382,6 +436,11 @@ impl Shell for App {
         if self.active {
             let next = self.state.ready.swap(0, Ordering::AcqRel);
             if next != 0 { if let Some(key) = self.recipient { self.state.shared.push(key, |q,id| q.frame_ready(id,next)); } }
+        }
+        if self.input.is_none() && self.active && self.state.acquired.load(Ordering::Acquire) {
+            eprintln!("[hal-direct] a display is driven; opening input devices");
+            self.input = Some(raw_input::RawInput::new(0.0, 0.0, self.state.dpi));
+            self.publish();
         }
         if self.active { self.input(); }
         Ok(())

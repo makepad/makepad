@@ -45,6 +45,7 @@
 //! interleaved with video or in one block at the end for short clips.
 
 pub mod annex_b;
+pub mod hevc_config;
 pub mod mp4_first_frame;
 pub mod nv12;
 pub mod stream_debug;
@@ -186,8 +187,8 @@ mod apple_encoder;
 mod apple_intra_frame;
 #[cfg(target_vendor = "apple")]
 mod apple_texture_intake;
-// Pure Rust and portable, but only the macOS still-writer uses it so far.
-#[cfg(target_vendor = "apple")]
+// Pure Rust and portable: the still writers that get bitstreams, not files (Apple, Android).
+#[cfg(any(target_vendor = "apple", target_os = "android"))]
 mod mp4_single_frame;
 #[cfg(target_vendor = "apple")]
 mod apple_stream_encoder;
@@ -213,6 +214,12 @@ mod linux_decoder;
 use linux_decoder::LinuxVideoFileDecoder as OsVideoFileDecoder;
 #[cfg(target_os = "linux")]
 use linux_encoder::LinuxVideoFileEncoder as OsVideoFileEncoder;
+
+// Android arm: NDK MediaExtractor + MediaCodec in the HAL host, reached through its ops.
+#[cfg(target_os = "android")]
+mod android_decoder;
+#[cfg(target_os = "android")]
+use android_decoder::AndroidVideoFileDecoder as OsVideoFileDecoder;
 
 #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
 const UNSUPPORTED: &str = "video file codec is not implemented on this platform yet";
@@ -722,12 +729,68 @@ pub fn decode_first_frame_from_bytes(bytes: &[u8]) -> Result<DecodedVideoFrame, 
             nv12: frame.nv12,
         });
     }
-    #[cfg(not(any(target_os = "windows", target_vendor = "apple")))]
+    #[cfg(target_os = "android")]
+    {
+        let au = mp4_first_frame::first_access_unit(bytes)?;
+        if au.codec != stream_encoder::StreamVideoCodec::Hevc {
+            return Err(VideoFileError::new("first frame decode: the phone decodes HEVC stills only"));
+        }
+        let nv12 = android_hevc::decode(&au.annex_b, au.width, au.height)?;
+        return Ok(DecodedVideoFrame { pts_100ns: 0, width: au.width, height: au.height, nv12 });
+    }
+    #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "android")))]
     {
         let _ = bytes;
         Err(VideoFileError::new(
             "in-memory first frame decode is not implemented on this platform yet",
         ))
+    }
+}
+
+/// The first video frame of a file: what a still reader wants.
+pub fn decode_first_frame_from_file(path: &str) -> Result<DecodedVideoFrame, VideoFileError> {
+    let mut decoder = VideoFileDecoder::open(path)?;
+    decoder.next_frame()?.ok_or_else(|| VideoFileError::new(format!("no frame in {path}")))
+}
+
+/// The largest frame (width, height) this machine's HEVC encoder takes, where the platform
+/// caps it below what a still writer may ask for: a phone (the Pixel's stops at 3840x2176).
+/// `None` = no cap known (the desktops' encoders take any still size we write).
+pub fn hevc_encoder_max_size() -> Option<(u32, u32)> {
+    #[cfg(target_os = "android")]
+    {
+        let mut out = [0u8; 8];
+        if makepad_hal::hal_hevc_encoder_max(&mut out) == 8 {
+            let w = u32::from_le_bytes(out[..4].try_into().unwrap());
+            let h = u32::from_le_bytes(out[4..].try_into().unwrap());
+            return Some((w, h));
+        }
+        return Some((0, 0));
+    }
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
+/// The phone's HEVC codec through the HAL's `hal_hevc_*` ops (AMediaCodec in the host).
+#[cfg(target_os = "android")]
+mod android_hevc {
+    use crate::android_decoder::{next_id, take};
+    use crate::VideoFileError;
+
+    /// (parameter sets, frame), both Annex-B.
+    pub fn encode(nv12: &[u8], width: u32, height: u32, bitrate: u32) -> Result<(Vec<u8>, Vec<u8>), VideoFileError> {
+        let id = next_id();
+        let packed = take(id, makepad_hal::hal_hevc_encode(id, nv12, width, height, bitrate))?;
+        let config_len = packed.get(..4).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize).unwrap_or(usize::MAX);
+        if packed.len() < 4 + config_len {
+            return Err(VideoFileError::new("HEVC: a short encoder result"));
+        }
+        Ok((packed[4..4 + config_len].to_vec(), packed[4 + config_len..].to_vec()))
+    }
+
+    pub fn decode(annex_b: &[u8], width: u32, height: u32) -> Result<Vec<u8>, VideoFileError> {
+        let id = next_id();
+        take(id, makepad_hal::hal_hevc_decode(id, annex_b, width, height))
     }
 }
 
@@ -740,17 +803,17 @@ pub struct DecodedAudioChunk {
 }
 
 pub struct VideoFileDecoder {
-    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
     os: OsVideoFileDecoder,
     /// Where [`VideoFileDecoder::seek`]'s discard loop stopped: the frame and
     /// chunk it kept, handed to the next `next_frame`/`next_audio` call. Held
     /// here rather than in each backend so the "first at or after the target"
     /// rule is written once and cannot drift between platforms.
-    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
     pending_video: Option<DecodedVideoFrame>,
-    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+    #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
     pending_audio: Option<DecodedAudioChunk>,
-    #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+    #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
     info: VideoFileInfo,
 }
 
@@ -759,7 +822,7 @@ impl VideoFileDecoder {
     /// opener here wants a picture and refuses a file with none; for a
     /// file that has only sound, see [`Self::open_audio`].
     pub fn open(path: &str) -> Result<Self, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             let os = OsVideoFileDecoder::open(path)?;
             return Ok(Self {
@@ -768,7 +831,7 @@ impl VideoFileDecoder {
                 pending_audio: None,
             });
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -788,7 +851,7 @@ impl VideoFileDecoder {
         // decoder is built for every Apple target, not macOS alone. Guarded
         // by `target_os = "macos"` this fell through to `UNSUPPORTED` on
         // iOS and tvOS, a constant those targets do not have.
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             let os = OsVideoFileDecoder::open_audio(path)?;
             return Ok(Self {
@@ -797,7 +860,7 @@ impl VideoFileDecoder {
                 pending_audio: None,
             });
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         {
             let _ = path;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -819,35 +882,35 @@ impl VideoFileDecoder {
     }
 
     pub fn info(&self) -> &VideoFileInfo {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         return self.os.info();
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         return &self.info;
     }
 
     /// Pull the next decoded video frame; `Ok(None)` at end of stream.
     pub fn next_frame(&mut self) -> Result<Option<DecodedVideoFrame>, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             if let Some(frame) = self.pending_video.take() {
                 return Ok(Some(frame));
             }
             return self.os.next_frame();
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         return Err(VideoFileError::new(UNSUPPORTED));
     }
 
     /// Pull the next decoded PCM audio chunk; `Ok(None)` at end of stream.
     pub fn next_audio(&mut self) -> Result<Option<DecodedAudioChunk>, VideoFileError> {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             if let Some(chunk) = self.pending_audio.take() {
                 return Ok(Some(chunk));
             }
             return self.os.next_audio();
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         return Err(VideoFileError::new(UNSUPPORTED));
     }
 
@@ -870,7 +933,7 @@ impl VideoFileDecoder {
     /// [`next_frame`]: VideoFileDecoder::next_frame
     /// [`next_audio`]: VideoFileDecoder::next_audio
     pub fn seek(&mut self, pts_100ns: i64) -> Result<(), VideoFileError> {
-        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux"))]
+        #[cfg(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android"))]
         {
             let target = pts_100ns.max(0);
             // Anything held from a previous seek belongs to the old position.
@@ -905,7 +968,7 @@ impl VideoFileDecoder {
             }
             return Ok(());
         }
-        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux")))]
+        #[cfg(not(any(target_os = "windows", target_vendor = "apple", target_os = "linux", target_os = "android")))]
         {
             let _ = pts_100ns;
             return Err(VideoFileError::new(UNSUPPORTED));
@@ -945,13 +1008,50 @@ pub fn encode_intra_frame_mp4(
     apple_intra_frame::encode_intra_frame_mp4(nv12, width, height, fps.max(1), bitrate_bps, codec)
 }
 
+/// The single-frame mp4 on a phone: MediaCodec gives the parameter sets and the frame as
+/// bitstreams; the `hvcC` record and the sample are made from them ([`hevc_config`]) and the
+/// boxes written by hand, as on Apple. HEVC only.
+#[cfg(target_os = "android")]
+pub fn encode_intra_frame_mp4(
+    nv12: &[u8],
+    width: u32,
+    height: u32,
+    fps: u32,
+    bitrate_bps: u32,
+    codec: VideoFileCodec,
+) -> Result<Vec<u8>, VideoFileError> {
+    if width == 0 || height == 0 || width % 2 != 0 || height % 2 != 0 {
+        return Err(VideoFileError::new(format!(
+            "invalid frame size {width}x{height} (must be nonzero and even)"
+        )));
+    }
+    if !matches!(codec, VideoFileCodec::H265) {
+        return Err(VideoFileError::new("the phone writes HEVC stills only"));
+    }
+    let (config, frame) = android_hevc::encode(nv12, width, height, bitrate_bps)?;
+    // Some encoders put the parameter sets in band instead of a config buffer.
+    let sets = if config.is_empty() { &frame } else { &config };
+    let record = hevc_config::hvcc_from_annex_b(sets)
+        .ok_or_else(|| VideoFileError::new("HEVC: the encoder gave no sequence parameter set"))?;
+    let sample = hevc_config::sample_from_annex_b(&frame);
+    Ok(mp4_single_frame::write_single_frame_mp4(&mp4_single_frame::IntraSample {
+        data: &sample,
+        config: &record,
+        sample_entry: *b"hvc1",
+        config_atom: *b"hvcC",
+        width,
+        height,
+        fps: fps.max(1),
+    }))
+}
+
 /// The same single-frame mp4 on the other platforms, through the platform
 /// file encoder (Media Foundation sink writer on Windows, GStreamer on
 /// Linux): one keyframe-only stream, one frame, written to a scratch file
 /// and read back. It pays the container machinery the Apple path avoids,
 /// but the bytes mean the same thing to every decoder, which is what a
 /// tile tape needs — the tape format is not a platform's.
-#[cfg(not(target_vendor = "apple"))]
+#[cfg(not(any(target_vendor = "apple", target_os = "android")))]
 pub fn encode_intra_frame_mp4(
     nv12: &[u8],
     width: u32,

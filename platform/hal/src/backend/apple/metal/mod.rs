@@ -110,9 +110,10 @@ pub struct Metal {
 
 impl Metal {
     /// `None` when there is no Metal device, or when real windows are wanted and the host never
-    /// ran the main loop. `wake` wakes the pump for GPU results, `notify` for the shell's events.
-    pub fn new(flags: u32, wake: Arc<dyn Fn() + Send + Sync>, notify: Arc<dyn Fn() + Send + Sync>) -> Option<Metal> {
-        let dev = Device::new(Mailbox::new(wake))?;
+    /// ran the main loop. `sessions` makes a GPU result's session look, `notify` every pump (the
+    /// shell's events).
+    pub fn new(flags: u32, sessions: crate::backend::SessionNotify, notify: Arc<dyn Fn() + Send + Sync>) -> Option<Metal> {
+        let dev = Device::new(Mailbox::new(sessions))?;
         let shell = if flags & open_flags::OFFSCREEN_WINDOWS == 0 {
             let shell = Shared::global();
             if !shell.start(dev.device, flags, notify) {

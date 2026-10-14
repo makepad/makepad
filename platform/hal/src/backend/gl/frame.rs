@@ -235,19 +235,23 @@ impl GlBackend {
         if colors.is_empty() && depth.is_none() { return Err("pass has no attachments".into()); }
         for (i, color) in &colors {
             if color.desc.usage & usage::RENDER_TARGET == 0 || format::is_depth(color.desc.format) || format::is_block(color.desc.format)
-                || pass.layer[*i] >= color.desc.depth || size[0] > color.desc.w || size[1] > color.desc.h {
+                || pass.layer[*i] >= color.desc.depth {
                 return Err(format!("invalid color attachment {i}: pass {size:?} target {}x{}", color.desc.w, color.desc.h));
             }
             if pick && !matches!(color.desc.format, format::RGBA8 | format::BGRA8) { return Err("pick targets require RGBA8/BGRA8".into()); }
         }
         if let Some(d) = &depth {
-            if !format::is_depth(d.desc.format) || d.desc.usage & usage::RENDER_TARGET == 0 || size[0] > d.desc.w || size[1] > d.desc.h {
+            if !format::is_depth(d.desc.format) || d.desc.usage & usage::RENDER_TARGET == 0 {
                 return Err("invalid depth attachment".into());
             }
             s.ledger.touch(Kind::Texture, pass.depth.index, pass.depth.gen, s.frame, now);
         }
         let target_size = [colors.iter().map(|(_, c)| c.desc.w).chain(depth.iter().map(|d| d.desc.w)).min().unwrap(),
             colors.iter().map(|(_, c)| c.desc.h).chain(depth.iter().map(|d| d.desc.h)).min().unwrap()];
+        if size[0] > target_size[0] || size[1] > target_size[1] {
+            let id = pass.color.iter().copied().find(|id| !id.is_none()).unwrap_or(pass.depth);
+            exec::clamped_pass(s, if id.is_none() { target } else { id }, size, target_size, pass.dpi);
+        }
         let mut prepared = Vec::new();
         for d in draws {
             s.stats.draws += 1;

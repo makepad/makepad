@@ -14,6 +14,7 @@ const fn ioc(dir: u32, ty: u32, nr: u32, size: usize) -> c_ulong {
 
 // V4L2 capabilities
 pub const V4L2_CAP_VIDEO_CAPTURE: u32 = 0x00000001;
+pub const V4L2_CAP_META_CAPTURE: u32 = 0x00800000;
 pub const V4L2_CAP_STREAMING: u32 = 0x04000000;
 pub const V4L2_CAP_DEVICE_CAPS: u32 = 0x80000000;
 

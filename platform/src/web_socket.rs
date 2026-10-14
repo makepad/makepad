@@ -49,6 +49,15 @@ pub(crate) static LOCAL_PROFILE_SAMPLES: Mutex<Vec<LocalProfileSample>> = Mutex:
 const LOCAL_PROFILE_SAMPLE_BUFFER_LIMIT: usize = 16_384;
 const STUDIO_SOCKET_ID: u64 = 0;
 
+#[cfg(not(target_arch = "wasm32"))]
+impl Cx {
+    /// The host socket is read by this process's own loop (a hosted child):
+    /// its messages wake the loop and never signal the app.
+    pub(crate) fn studio_socket_wakes_loop_only(&self) {
+        self.net.set_loop_socket(Some(LiveId(STUDIO_SOCKET_ID)));
+    }
+}
+
 /// A response of the host (studio) socket rather than an app socket.
 pub(crate) fn is_studio_socket_response(response: &NetworkResponse) -> bool {
     match response {

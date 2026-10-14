@@ -7,7 +7,7 @@
 
 use crate::makepad_math::Vec2d;
 pub use makepad_remote::json_str;
-use makepad_studio_protocol::{KeyCode, PinchPhase, RemoteKeyModifiers};
+use makepad_studio_protocol::{KeyCode, PinchPhase, RemoteKeyModifiers, ScrollPhase};
 pub use crate::remote_schema::{CmdRisk, Command};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -193,34 +193,53 @@ impl Drop for GrabBytes {
     }
 }
 
-pub fn encode_queue() -> &'static Result<SyncSender<EncodeJob>, String> {
-    static ENCODER: OnceLock<Result<SyncSender<EncodeJob>, String>> = OnceLock::new();
-    ENCODER.get_or_init(|| {
-        let (tx, rx) = sync_channel::<EncodeJob>(MAX_PENDING_GRABS);
-        std::thread::Builder::new()
-            .name("makepad-remote-png".into())
-            .spawn(move || {
-                while let Ok(mut job) = rx.recv() {
-                    if job.sink.cancelled.load(Ordering::Relaxed) {
-                        continue;
-                    }
-                    let started = Instant::now();
-                    let result = encode_grab(&job).map(|(width, height, data)| Grabbed {
-                        window_id: job.sink.window.unwrap_or(0),
-                        width,
-                        height,
-                        data,
-                        capture_ms: job.capture_ms,
-                        encode_ms: started.elapsed().as_secs_f64() * 1000.0,
-                        backend_png: job.backend_png,
-                        _bytes: job.bytes.take(),
-                    });
-                    let _ = job.sink.tx.try_send(result);
+/// The encoder worker's queue: `None` until a grab command starts it, and again after the
+/// app ended it ([`stop_encoder`]).
+fn encoder() -> &'static Mutex<Option<SyncSender<EncodeJob>>> {
+    static ENCODER: Mutex<Option<SyncSender<EncodeJob>>> = Mutex::new(None);
+    &ENCODER
+}
+
+/// Starts the encoder worker if it is not running (a grab command's thread, never the UI or a
+/// GPU callback). It runs until [`stop_encoder`].
+pub fn start_encoder() -> Result<(), String> {
+    let mut encoder = encoder().lock().unwrap_or_else(|e| e.into_inner());
+    if encoder.is_some() {
+        return Ok(());
+    }
+    let (tx, rx) = sync_channel::<EncodeJob>(MAX_PENDING_GRABS);
+    std::thread::Builder::new()
+        .name("makepad-remote-png".into())
+        .spawn(move || {
+            while let Ok(mut job) = rx.recv() {
+                if job.sink.cancelled.load(Ordering::Relaxed) {
+                    continue;
                 }
-            })
-            .map_err(|err| format!("grab worker: {err}"))?;
-        Ok(tx)
-    })
+                let started = Instant::now();
+                let result = encode_grab(&job).map(|(width, height, data)| Grabbed {
+                    window_id: job.sink.window.unwrap_or(0),
+                    width,
+                    height,
+                    data,
+                    capture_ms: job.capture_ms,
+                    encode_ms: started.elapsed().as_secs_f64() * 1000.0,
+                    backend_png: job.backend_png,
+                    _bytes: job.bytes.take(),
+                });
+                let _ = job.sink.tx.try_send(result);
+            }
+        })
+        .map_err(|err| format!("grab worker: {err}"))?;
+    *encoder = Some(tx);
+    Ok(())
+}
+
+/// The app ends: the encoder worker finishes the jobs it has and ends. A hosted app's
+/// domain waits for every thread it started (restart::stop_workers); the worker waited on its
+/// queue forever, so every quit of a grabbed app under `makepad run` gave up on it as leaked
+/// after the stop's 5 s, with the thread still running.
+pub(crate) fn stop_encoder() {
+    encoder().lock().unwrap_or_else(|e| e.into_inner()).take();
 }
 
 /// 2x2 box-filter a raw readback in place of the job's pixels (same
@@ -281,16 +300,17 @@ pub fn submit_encode(mut job: EncodeJob, raw: bool) {
     };
     job.bytes = Some(GrabBytes(len));
     job.backend_png = !raw;
-    match encode_queue() {
-        Ok(tx) => {
+    let tx = encoder().lock().unwrap_or_else(|e| e.into_inner()).clone();
+    match tx {
+        Some(tx) => {
             if let Err(err) = tx.try_send(job) {
                 let (std::sync::mpsc::TrySendError::Full(job)
                 | std::sync::mpsc::TrySendError::Disconnected(job)) = err;
                 let _ = job.sink.tx.try_send(Err("grab encoder queue full".into()));
             }
         }
-        Err(err) => {
-            let _ = job.sink.tx.try_send(Err(err.clone()));
+        None => {
+            let _ = job.sink.tx.try_send(Err("the grab encoder has ended (the app is quitting)".into()));
         }
     }
 }
@@ -443,6 +463,17 @@ pub enum Input {
         /// The event's timestamp on the app clock (`/m?time=`), or now:
         /// drag samples with their own times drive velocity-dependent
         /// gestures (a flick's momentum) the same way every run.
+        time: Option<f64>,
+    },
+    /// One step of a two-finger touchpad scroll (`/m?k=scroll&phase=`):
+    /// is_mouse false, with the gesture phase.
+    PadScroll {
+        x: f64,
+        y: f64,
+        dx: f64,
+        dy: f64,
+        phase: ScrollPhase,
+        mods: RemoteKeyModifiers,
         time: Option<f64>,
     },
     /// One step of a trackpad pinch (`/m?k=pinch&scale=&phase=`).
@@ -684,7 +715,7 @@ pub const COMMANDS: &[Command] = &[
     Command { words: "gseq", args: "[n=8] [every_ms=50] [scale=1] [w=ID] [out=DIR]", answers: "client side (frames service): n frames, a separate present per deadline; n=1..64, every_ms>=8, span<=60s", service: "ui", risk: CmdRisk::Read, params: "\"n\":{\"type\":\"integer\"},\"every_ms\":{\"type\":\"integer\"},\"scale\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "rec", args: "[out=DIR] [seconds=5] [fps=30] [codec=png|raw] [w=ID]", answers: "client side (frames cap=1): capture by streaming -- every presented frame is read back on the device and written here as frame_<slot>.png; prints {\"dir\",\"frames\",\"missing\",\"slots\",\"sz\"}; no video encoder on the device", service: "ui", risk: CmdRisk::Read, params: "\"seconds\":{\"type\":\"number\"},\"fps\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"},\"out\":{\"type\":\"string\"}", required: &[], positional: &[] },
     Command { words: "gq", args: "[scale=1] [w=ID]", answers: "client side: FINISH HERE: grab every window, then quit. {\"png\":[paths],\"quit\":1}", service: "ui", risk: CmdRisk::Destructive, params: "\"scale\":{\"type\":\"number\"},\"w\":{\"type\":\"integer\"}", required: &[], positional: &[] },
-    Command { words: "mouse", args: "k=move|down|up|click|scroll|pinch x= y= [b=0] [dx= dy=] [scale= phase=begin|update|end] [time=] [hw=1] [shift=1 ctrl=1 alt=1 cmd=1] [w=ID] [wait=1]", answers: "inject a mouse event through the real event path", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"move\",\"down\",\"up\",\"click\",\"scroll\",\"pinch\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"dx\":{\"type\":\"number\"},\"dy\":{\"type\":\"number\"},\"scale\":{\"type\":\"number\"},\"phase\":{\"type\":\"string\",\"enum\":[\"begin\",\"update\",\"end\"]},\"time\":{\"type\":\"number\"},\"hw\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["k"], positional: &[] },
+    Command { words: "mouse", args: "k=move|down|up|click|scroll|pinch x= y= [b=0] [dx= dy=] [scale= phase=begin|update|end] [scroll phase=touched|began|changed|ended|momentum|momentum_ended: a touchpad scroll] [time=] [hw=1] [shift=1 ctrl=1 alt=1 cmd=1] [w=ID] [wait=1]", answers: "inject a mouse event through the real event path", service: "ui", risk: CmdRisk::Act, params: "\"k\":{\"type\":\"string\",\"enum\":[\"move\",\"down\",\"up\",\"click\",\"scroll\",\"pinch\"]},\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"dx\":{\"type\":\"number\"},\"dy\":{\"type\":\"number\"},\"scale\":{\"type\":\"number\"},\"phase\":{\"type\":\"string\",\"enum\":[\"begin\",\"update\",\"end\",\"touched\",\"began\",\"changed\",\"ended\",\"momentum\",\"momentum_ended\"]},\"time\":{\"type\":\"number\"},\"hw\":{\"type\":\"boolean\"},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["k"], positional: &[] },
     Command { words: "click", args: "x= y= [b=0] [w=ID] [wait=1]", answers: "mouse k=click", service: "ui", risk: CmdRisk::Act, params: "\"x\":{\"type\":\"number\"},\"y\":{\"type\":\"number\"},\"b\":{\"type\":\"integer\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["x", "y"], positional: &[] },
     Command { words: "key", args: "t=TEXT | c=KeyA [k=down|up|press] [shift=1 ...] [w=ID] [wait=1]", answers: "type text or press a key (Escape ReturnKey Tab Backspace ArrowLeft F1 Key1 ..)", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\",\"description\":\"text to type\"},\"c\":{\"type\":\"string\",\"description\":\"a key code: Escape ReturnKey Tab Backspace ArrowLeft F1 KeyA Key1 ..\"},\"k\":{\"type\":\"string\",\"enum\":[\"down\",\"up\",\"press\"]},\"shift\":{\"type\":\"boolean\"},\"ctrl\":{\"type\":\"boolean\"},\"alt\":{\"type\":\"boolean\"},\"logo\":{\"type\":\"boolean\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &[], positional: &[] },
     Command { words: "text", args: "t=TEXT [w=ID] [wait=1]", answers: "type text", service: "ui", risk: CmdRisk::Act, params: "\"t\":{\"type\":\"string\"},\"w\":{\"type\":\"integer\"},\"wait\":{\"type\":\"boolean\"}", required: &["t"], positional: &[] },
@@ -924,7 +955,15 @@ pub fn route_mouse(p: &Params, force_kind: Option<&str>) -> Answer {
             mouse(MouseKind::Down),
             mouse(MouseKind::Up),
         ],
-        "scroll" | "wheel" => vec![mouse(MouseKind::Scroll)],
+        "scroll" | "wheel" => match p.get(&["phase"]) {
+            None => vec![mouse(MouseKind::Scroll)],
+            Some(name) => {
+                let Some(phase) = pad_scroll_phase(name) else {
+                    return err(&format!("bad scroll phase {name}"));
+                };
+                vec![Input::PadScroll { x, y, dx, dy, phase, mods, time }]
+            }
+        },
         "pinch" => {
             let phase = match p.get(&["phase"]).unwrap_or("update") {
                 "begin" => PinchPhase::Begin,
@@ -944,6 +983,19 @@ pub fn route_mouse(p: &Params, force_kind: Option<&str>) -> Answer {
         other => return err(&format!("bad kind {other}")),
     };
     send_input(window, inputs, p.flag(&["wait"]))
+}
+
+/// A touchpad scroll phase by name (`/m?k=scroll&phase=`).
+fn pad_scroll_phase(name: &str) -> Option<ScrollPhase> {
+    Some(match name {
+        "touched" => ScrollPhase::Touched,
+        "began" | "begin" => ScrollPhase::Began,
+        "changed" | "update" => ScrollPhase::Changed,
+        "ended" | "end" => ScrollPhase::Ended,
+        "momentum" => ScrollPhase::Momentum,
+        "momentum_ended" => ScrollPhase::MomentumEnded,
+        _ => return None,
+    })
 }
 
 pub fn route_key(p: &Params) -> Answer {
@@ -1133,7 +1185,7 @@ pub fn arm_grabs(
     let started = Instant::now();
     // Start the long-lived worker on this command thread, never from the UI
     // or a GPU callback. No temporary worker is spawned for a frame.
-    encode_queue().as_ref().map_err(Clone::clone)?;
+    start_encoder()?;
     if !scale.is_finite() || scale <= 0.0 {
         return Err("grab scale must be positive and finite".into());
     }
@@ -1621,6 +1673,14 @@ pub fn num(value: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scroll_phase_names() {
+        assert_eq!(pad_scroll_phase("changed"), Some(ScrollPhase::Changed));
+        assert_eq!(pad_scroll_phase("momentum"), Some(ScrollPhase::Momentum));
+        assert_eq!(pad_scroll_phase("momentum_ended"), Some(ScrollPhase::MomentumEnded));
+        assert_eq!(pad_scroll_phase("wobble"), None);
+    }
 
     #[test]
     fn file_drop_requires_unambiguous_path_coordinates_and_options() {

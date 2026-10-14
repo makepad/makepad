@@ -3,6 +3,7 @@
 //! methods taking `&mut Core` (in). No rendering and no threads here.
 pub mod geom;
 mod data;
+pub use data::{Board, SelectionReader, TEXT_MIMES};
 mod dmabuf;
 mod syncobj;
 pub use dmabuf::{DmabufBuffer, DmabufConfig, DmabufFrame, DmabufPlane};
@@ -54,6 +55,9 @@ pub enum UiEvent {
     /// The client destroyed a dmabuf wl_buffer: the host drops its import of it.
     BufferGone { client: ClientId, buffer: u32 },
     ClientGone(ClientId),
+    /// A client's selection text, read once when it set the selection (only with a selection
+    /// reader installed; the host hands the read back through `Compositor::selection_read`).
+    Selection { board: data::Board, text: String },
     /// The server cut the client off: a protocol error or an output queue it did not drain.
     ClientKilled { client: ClientId, why: String },
 }
@@ -87,9 +91,9 @@ pub(crate) enum Obj {
     Timeline { handle: u32 },
     DmaParams(dmabuf::Params),
     DmaBuffer(Arc<DmabufBuffer>),
-    DataSource { mimes: Vec<String> },
-    DataDevice,
-    DataOffer { source: (ClientId, u32) },
+    DataSource { board: data::Board, mimes: Vec<String> },
+    DataDevice { board: data::Board },
+    DataOffer { generation: u64 },
 }
 
 pub struct Compositor {
@@ -98,8 +102,9 @@ pub struct Compositor {
     pub output: OutputInfo,
     pub popup_bounds: Rect,
     pub(crate) input: input::InputState,
-    /// The current clipboard source: (client, wl_data_source id).
-    pub(crate) selection: Option<(ClientId, u32)>,
+    /// The clipboard and the primary selection (`data::Board` order).
+    pub(crate) boards: [data::BoardState; 2],
+    pub(crate) selection_reader: Option<data::SelectionReader>,
     /// Output scale as clients are told it (fractional).
     pub(crate) scale: f64,
     pub(crate) fractional: Vec<(ClientId, u32)>,
@@ -124,6 +129,7 @@ impl Compositor {
         globals.push(core.add_global(&wl_seat::INTERFACE, 8));
         globals.push(core.add_global(&wl_output::INTERFACE, 4));
         globals.push(core.add_global(&wl_data_device_manager::INTERFACE, 3));
+        globals.push(core.add_global(&zwp_primary_selection_device_manager_v1::INTERFACE, 1));
         globals.push(core.add_global(&wp_viewporter::INTERFACE, 1));
         globals.push(core.add_global(&wp_fractional_scale_manager_v1::INTERFACE, 1));
         globals.push(core.add_global(&wp_cursor_shape_manager_v1::INTERFACE, 1));
@@ -131,7 +137,7 @@ impl Compositor {
         Ok(Self {
             objs: HashMap::new(), events: Vec::new(), output,
             popup_bounds: Rect::new(-100_000, -100_000, 200_000, 200_000),
-            input: input::InputState::new(keymap)?, selection: None, scale: 1.0, fractional: Vec::new(), dmabuf: None, drm: None, release_points: HashMap::new(), timelines: Vec::new(), outputs: Vec::new(), globals,
+            input: input::InputState::new(keymap)?, boards: Default::default(), selection_reader: None, scale: 1.0, fractional: Vec::new(), dmabuf: None, drm: None, release_points: HashMap::new(), timelines: Vec::new(), outputs: Vec::new(), globals,
         })
     }
         pub(crate) fn surface(&mut self, k: SurfKey) -> Option<&mut surface::Surface> {
@@ -167,7 +173,8 @@ impl Handler for Compositor {
             "wp_viewporter" | "wp_viewport" | "wp_fractional_scale_manager_v1" | "wp_cursor_shape_manager_v1" | "wp_cursor_shape_device_v1" | "zxdg_decoration_manager_v1" | "zxdg_toplevel_decoration_v1" => self.ext_request(core, c, o, op, &args)?,
             "wp_linux_drm_syncobj_manager_v1" | "wp_linux_drm_syncobj_surface_v1" | "wp_linux_drm_syncobj_timeline_v1" => self.syncobj_request(core, c, o, op, &mut args)?,
             "zwp_linux_dmabuf_v1" | "zwp_linux_buffer_params_v1" => self.dmabuf_request(core, c, o, op, &mut args)?,
-            "wl_data_device_manager" | "wl_data_source" | "wl_data_device" | "wl_data_offer" => self.data_request(core, c, o, op, &mut args)?,
+            "wl_data_device_manager" | "wl_data_source" | "wl_data_device" | "wl_data_offer"
+            | "zwp_primary_selection_device_manager_v1" | "zwp_primary_selection_source_v1" | "zwp_primary_selection_device_v1" | "zwp_primary_selection_offer_v1" => self.data_request(core, c, o, op, &mut args)?,
             "wl_compositor" => match op {
                 wl_compositor::REQ_CREATE_SURFACE => {
                     self.objs.insert((c, uint(&args[0])), Obj::Surface(surface::Surface::new()));
@@ -209,6 +216,7 @@ impl Handler for Compositor {
         if let Some(d) = &self.drm { for (_, h) in self.timelines.iter().filter(|(k, _)| *k == c) { d.destroy(*h); } }
         self.timelines.retain(|(k, _)| *k != c);
         self.input.client_gone(c);
+        self.data_client_gone(c);
         self.events.push(UiEvent::ClientGone(c));
     }
 }

@@ -31,6 +31,7 @@ impl Vulkan {
         if !valid_rect(&image, mip as u32, rect) || layer >= image.desc.depth { return Err("invalid upload region".into()); }
         if data.len() as u64 != format::level_bytes(image.desc.format, rect[2], rect[3]) { return Err("upload byte count differs from region".into()); }
         let batch = self.ensure_batch()?;
+        let allocs = batch.allocs;
         batch.images.push(image.clone());
         image.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
         let mut copies: Vec<(vk::ImageAspectFlags, Vec<u8>)> = Vec::new();
@@ -50,15 +51,18 @@ impl Vulkan {
                 unsafe { batch.dev.raw.cmd_copy_buffer_to_image(batch.cb, staging.buffer, image.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[r]); }
             }
         }
-        image.transition(batch.cb, image.sampled_layout()); Ok(())
+        image.transition(batch.cb, image.sampled_layout());
+        s.stats.arena_allocs += batch.allocs - allocs;
+        Ok(())
     }
 
     fn record_read(batch: &mut Batch, image: Arc<Image>, rect: [u32; 4]) -> Result<(Arc<Buffer>, Option<Arc<Buffer>>), String> {
         if !valid_rect(&image, 0, rect) { return Err("invalid readback region".into()); }
+        batch.may_read(&image)?;
         let size = format::level_bytes(image.desc.format, rect[2], rect[3]);
-        let staging = Buffer::new(batch.dev.clone(), size, buffer_usage())?;
+        let staging = Buffer::scratch(batch.dev.clone(), size, buffer_usage())?;
         let packed_depth = image.desc.format == format::DEPTH24_STENCIL8;
-        let stencil = if packed_depth { Some(Buffer::new(batch.dev.clone(), rect[2] as u64 * rect[3] as u64, buffer_usage())?) } else { None };
+        let stencil = if packed_depth { Some(Buffer::scratch(batch.dev.clone(), rect[2] as u64 * rect[3] as u64, buffer_usage())?) } else { None };
         image.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
         let aspect = if packed_depth { vk::ImageAspectFlags::DEPTH } else { image.aspect };
         unsafe {
@@ -109,12 +113,13 @@ impl Vulkan {
         let result = (|| {
             let source = self.window_image(s, window).ok_or("window has no retained frame")?;
             let destination = self.resolve(s, texture).ok_or("copy destination has no storage")?;
-            if source.desc.w != destination.desc.w || source.desc.h != destination.desc.h || source.desc.format != destination.desc.format
+            let rect = self.window_rect(s.id, window, Some(&source));
+            if rect[2] != destination.desc.w || rect[3] != destination.desc.h || source.desc.format != destination.desc.format
                 || Arc::ptr_eq(&source, &destination) { return Err("window copy dimensions/format differ".into()); }
             let batch = self.ensure_batch()?;
+            batch.may_read(&source)?;
             source.transition(batch.cb, vk::ImageLayout::TRANSFER_SRC_OPTIMAL); destination.transition(batch.cb, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             let sub = vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1);
-            let rect = [0, 0, source.desc.w, source.desc.h];
             let copy = vk::ImageCopy::default().src_subresource(sub).dst_subresource(sub)
                 .extent(vk::Extent3D { width: rect[2], height: rect[3], depth: 1 });
             unsafe { batch.dev.raw.cmd_copy_image(batch.cb, source.image, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, destination.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[copy]); }

@@ -262,13 +262,15 @@ pub(crate) fn hosted() -> bool {
     }
 }
 
-/// A hosted app ends: its background workers (the logger, the restart watcher) end with it.
+/// A hosted app ends: its background workers (the logger, the restart watcher, the remote's
+/// grab encoder) end with it.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn stop_workers() {
     #[cfg(relax)]
     STOP_WAKER.store(true, std::sync::atomic::Ordering::Release);
     #[cfg(not(target_arch = "wasm32"))]
     crate::log::stop_sink();
+    crate::remote::stop_encoder();
 }
 
 #[cfg(relax)]

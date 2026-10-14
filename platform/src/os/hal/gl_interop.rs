@@ -41,7 +41,7 @@ impl Cx {
         {
             let share = self.hal.gl.share?;
             if self.hal.gl.context.is_none() {
-                let context = makepad_hal::gl_interop::GlContext::new(share).map_err(|e| crate::error!("GL interop: {e}")).ok()?;
+                let context = makepad_hal::gl_interop::GlContext::new(share)?;
                 if !context.make_current() {
                     crate::error!("GL interop: the share-group context cannot be made current");
                     return None;
@@ -99,7 +99,7 @@ impl Cx {
         #[cfg(target_os = "linux")]
         {
             let inner = self.hal.gl.share.and_then(|share| {
-                makepad_hal::gl_interop::GlContext::new(share).map_err(|e| crate::error!("GL render bridge: {e}")).ok()
+                makepad_hal::gl_interop::GlContext::new(share)
             });
             GlRenderBridge { inner }
         }

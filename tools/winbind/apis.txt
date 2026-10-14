@@ -1012,6 +1012,10 @@ Windows.Win32.Storage.FileSystem.LOCKFILE_EXCLUSIVE_LOCK
 Windows.Win32.Storage.FileSystem.LOCKFILE_FAIL_IMMEDIATELY
 Windows.Win32.Storage.FileSystem.LockFileEx
 Windows.Win32.Storage.FileSystem.ReadDirectoryChangesW
+# the filesystem watcher's overlapped directory reads: cancelled when the watcher stops
+Windows.Win32.System.IO.CancelIoEx
+Windows.Win32.System.IO.GetOverlappedResult
+Windows.Win32.Foundation.ERROR_OPERATION_ABORTED
 Windows.Win32.Storage.FileSystem.ReadFile
 Windows.Win32.Storage.FileSystem.SetFilePointerEx
 Windows.Win32.System.Console.COORD

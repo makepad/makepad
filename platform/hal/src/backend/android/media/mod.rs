@@ -23,6 +23,9 @@ mod haptics;
 mod audio;
 mod midi;
 mod video;
+mod mediacodec;
+pub mod hevc;
+pub mod video_file;
 
 use crate::{
     backend::{exec::OsCmd, vulkan::Vulkan},

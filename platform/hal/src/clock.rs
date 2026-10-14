@@ -38,8 +38,10 @@ pub fn raw_ns() -> u64 {
     qpc_to_ns(t)
 }
 
-/// A QueryPerformanceCounter value (such as DXGI's `SyncQPCTime`) on the HAL clock.
+/// A QueryPerformanceCounter value (such as DXGI's `SyncQPCTime`) on the HAL clock. An op under
+/// `makepad run`: the frequency is a static of this crate, read where its one copy lives.
 #[cfg(windows)]
+#[makepad_relax_api::relax_api]
 pub fn qpc_to_ns(qpc: i64) -> u64 {
     use makepad_windows_sys::Win32::System::Performance::QueryPerformanceFrequency;
     use std::sync::OnceLock;

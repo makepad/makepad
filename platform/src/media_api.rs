@@ -173,6 +173,14 @@ pub trait CxMediaApi {
 
     fn use_video_input(&mut self, devices: &[(VideoInputId, VideoFormatId)]);
 
+    /// The cameras the platform has listed so far (None: not listed yet). The list also arrives as
+    /// `Event::VideoInputs`, once when capture is first used and again when it changes; a reader that
+    /// starts later (a deck opened a second time) asks here instead of waiting for an event that
+    /// does not come again.
+    fn video_inputs(&self) -> Option<Vec<VideoInputDesc>> {
+        None
+    }
+
     /// Open the camera `input` in `index` at `format` without streaming it:
     /// the device is held (and its format fixed) but captures nothing and
     /// its light stays off. Returns the format the device agreed to. Unlike

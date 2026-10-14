@@ -70,6 +70,9 @@ pub(super) struct Win {
     pub(super) drop_target: RefCell<Option<IDropTarget>>,
     /// a maximized window keeps no frame inset and covers its monitor
     chromeless_when_max: Cell<bool>,
+    /// fullscreen: maximized over the whole monitor (taskbar covered) with no frame inset;
+    /// a restore puts back the rect it had before
+    fullscreen: Cell<bool>,
     /// Alt went down alone: its release opens the menu
     alt_tap: Cell<bool>,
     /// keys whose press reached the app (their release goes too), a bit per virtual key
@@ -85,6 +88,11 @@ impl Win {
     }
     fn maximized(&self) -> bool {
         unsafe { IsZoomed(self.hwnd.get()).as_bool() }
+    }
+    /// A maximized window covers the whole monitor, frameless: chromeless when maximized,
+    /// or fullscreen.
+    fn covers_monitor(&self) -> bool {
+        self.chromeless_when_max.get() || self.fullscreen.get()
     }
 }
 
@@ -220,8 +228,11 @@ pub(super) fn start(s: &'static Shared) -> Result<(), String> {
             Err(e) => eprintln!("[hal-win32] OleInitialize failed ({e:?}): no drag and drop"),
         }
         refresh_screens(s);
-        // ops queued before the dispatch window existed
-        let _ = PostMessageW(Some(dispatch), WM_HAL_OPS, WPARAM(0), LPARAM(0));
+        // ops queued before the dispatch window existed, and a stop that came before it
+        // (stop_main_loop sets `stopped` before it reads `dispatch`: it posts the stop itself, or
+        // this sees it) -- else the loop never ended
+        let stopped = lock(&s.run).stopped;
+        let _ = PostMessageW(Some(dispatch), WM_HAL_OPS, WPARAM(stopped as usize), LPARAM(0));
     }
     Ok(())
 }
@@ -380,6 +391,7 @@ fn create(s: &'static Shared, sid: u32, id: Id, kind: u32, parent: Id, geom: [f3
         drag_answer: Cell::new(input::drag_response::NONE),
         drop_target: RefCell::new(None),
         chromeless_when_max: Cell::new(false),
+        fullscreen: Cell::new(false),
         alt_tap: Cell::new(false),
         forwarded: Cell::new([0; 4]),
     });
@@ -454,8 +466,10 @@ fn publish_geom(w: &Win) {
         if IsIconic(hwnd).as_bool() {
             window_state::MINIMIZE
         } else if IsZoomed(hwnd).as_bool() {
-            window_state::MAXIMIZE
+            if w.fullscreen.get() { window_state::FULLSCREEN } else { window_state::MAXIMIZE }
         } else {
+            // restored by any path (the system menu, a key): no longer fullscreen
+            w.fullscreen.set(false);
             window_state::RESTORE
         }
     };
@@ -511,9 +525,20 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
         }
         OsCmd::WindowState { id, state } => {
             if let Some(w) = target(id) {
+                // fullscreen is a maximize over the whole monitor: switching between the two
+                // goes through the normal rect, so a later restore finds it
+                let full = state == window_state::FULLSCREEN;
+                if matches!(state, window_state::MAXIMIZE | window_state::FULLSCREEN) && w.fullscreen.get() != full {
+                    if w.maximized() {
+                        unsafe {
+                            let _ = ShowWindow(w.hwnd.get(), SW_RESTORE);
+                        }
+                    }
+                    w.fullscreen.set(full);
+                }
                 let cmd = match state {
                     window_state::MINIMIZE => SW_MINIMIZE,
-                    window_state::MAXIMIZE => SW_MAXIMIZE,
+                    window_state::MAXIMIZE | window_state::FULLSCREEN => SW_MAXIMIZE,
                     window_state::HIDE => SW_HIDE,
                     window_state::SHOW => if w.no_focus { SW_SHOWNOACTIVATE } else { SW_SHOW },
                     _ => SW_RESTORE,
@@ -609,7 +634,7 @@ fn command(s: &'static Shared, sid: u32, cmd: OsCmd) {
             }
         }
         // the taskbar shows every app window; the primary selection is X11's
-        OsCmd::ShowInDock { .. } | OsCmd::SelectionSet { .. } | OsCmd::MobileUi { .. } | OsCmd::SelectionHandles { .. } => {}
+        OsCmd::ShowInDock { .. } | OsCmd::SelectionSet { .. } | OsCmd::MobileUi { .. } | OsCmd::BackUnhandled | OsCmd::SelectionHandles { .. } => {}
         // The app scales its own caption buttons; only AppKit positions native ones.
         OsCmd::WindowDpiOverride { .. } => {}
         other => {
@@ -880,7 +905,7 @@ unsafe fn min_max_info(w: &Win, info: &mut MINMAXINFO) {
         return;
     }
     let (m, work) = (mi.rcMonitor, mi.rcWork);
-    if w.chromeless_when_max.get() {
+    if w.covers_monitor() {
         info.ptMaxPosition = POINT { x: 0, y: 0 };
         info.ptMaxSize = POINT { x: m.right - m.left, y: m.bottom - m.top };
     } else {
@@ -912,7 +937,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lpar
         WM_NCCALCSIZE if wparam.0 != 0 && !w.popup() => {
             // the client covers the whole window; a maximized window keeps its frame's inset so
             // its client matches the work area (unless it is chromeless when maximized)
-            if w.maximized() && !w.chromeless_when_max.get() {
+            if w.maximized() && !w.covers_monitor() {
                 let params = &mut *(lparam.0 as *mut NCCALCSIZE_PARAMS);
                 let dpi = GetDpiForWindow(hwnd);
                 let mut frame = RECT::default();

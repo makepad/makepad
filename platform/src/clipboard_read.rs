@@ -52,8 +52,13 @@ impl Cx {
     pub fn read_clipboard(&mut self) -> u64 {
         self.clipboard.next += 1;
         let request = self.clipboard.next;
+        // a hosted child reads its host's clipboard (the one every app of the host shares)
         #[cfg(not(target_arch = "wasm32"))]
-        self.hal.frames.w.clip_read(request, false);
+        if self.hal.hosted.is_some() {
+            Cx::send_studio_message(crate::studio::AppToStudio::Relay(crate::studio::ChildRelay::ReadClipboard { request_id: request }));
+        } else {
+            self.hal.frames.w.clip_read(request, false);
+        }
         #[cfg(target_arch = "wasm32")]
         {
             self.clipboard.pending.push(request);

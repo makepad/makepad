@@ -10,7 +10,7 @@ mod linux_video_playback;
 pub(crate) mod module_loader;
 mod pulse_audio;
 pub mod pulse_sys;
-mod v4l2_camera;
+pub mod v4l2_camera;
 pub mod v4l2_sys;
 pub use linux_video_playback::can_play_type;
 pub mod capture_surface;
@@ -653,6 +653,15 @@ impl Engine {
             || !self.players.is_empty()
             || !self.dialogs.is_empty()
     }
+    fn wanted_cameras(&self) -> Vec<(u64, u64)> {
+        let mut wanted = self.inputs.clone();
+        for preview in self.previews.values().filter(|p| p.active) {
+            if !wanted.contains(&preview.key) {
+                wanted.push(preview.key);
+            }
+        }
+        wanted
+    }
     fn refresh_camera(&mut self, messages: &mut Vec<Message>) {
         if self.camera.is_none() {
             let mut camera = v4l2_camera::Camera::default();
@@ -660,12 +669,7 @@ impl Engine {
             messages.push(Message::Inputs(self.camera_descs.clone()));
             self.camera = Some(camera);
         }
-        let mut wanted = self.inputs.clone();
-        for preview in self.previews.values().filter(|p| p.active) {
-            if !wanted.contains(&preview.key) {
-                wanted.push(preview.key);
-            }
-        }
+        let wanted = self.wanted_cameras();
         self.camera.as_mut().unwrap().use_inputs(&wanted);
     }
     fn command(&mut self, request: Request, messages: &mut Vec<Message>) {
@@ -944,6 +948,9 @@ impl Engine {
                     self.midi_descs = descs;
                     messages.push(Message::MidiPorts(self.midi_descs.clone()));
                 }
+            }
+            if self.camera.as_ref().is_some_and(|c| c.unserved(&self.wanted_cameras())) {
+                self.refresh_camera(messages);
             }
             if let Some(c) = &mut self.camera {
                 let descs = c.enumerate();

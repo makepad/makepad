@@ -65,6 +65,9 @@ pub struct FontStats {
     pub slug_bytes: u64,
     pub raster_slots: usize,
     pub slug_glyphs: usize,
+    /// curves the slug store holds (live glyphs), and how many it can hold
+    pub slug_curves: u64,
+    pub slug_capacity: u64,
     /// jobs queued or running
     pub in_flight: usize,
 }
@@ -119,6 +122,10 @@ pub struct FontService {
     aliases: HashMap<(u32, u32), Id>,
     next_host_texture: u32,
     next_slot: u32,
+    /// The use rank a slot gets (its `last_use`; eviction takes the lowest first): a delivery
+    /// ranks `tick`, a `GlyphTouch` (the session drew from it since its last touch) `tick + 1`,
+    /// and each touch moves `tick` on by two. So a glyph a session still shows outranks one
+    /// delivered in the same period and not drawn since, and the oldest unused go first.
     tick: u64,
     stats: FontStats,
     session_stats: HashMap<u32, SessionFontStats>,
@@ -169,6 +176,8 @@ impl FontService {
         s.slug_bytes = self.slug.as_ref().map_or(0, |a| a.bytes());
         s.raster_slots = self.raster.as_ref().map_or(0, |a| a.len());
         s.slug_glyphs = self.slug.as_ref().map_or(0, |a| a.len());
+        s.slug_curves = self.slug.as_ref().map_or(0, |a| a.curves_held());
+        s.slug_capacity = self.slug.as_ref().map_or(0, |a| a.capacity_curves() as u64);
         s.in_flight = self.in_flight();
         s.raster_ns = self.pool.as_ref().map_or(0, |p| p.busy_ns());
         s
@@ -210,6 +219,7 @@ impl FontService {
             HalCmd::FontOpen { font, index, kind, nvars, desc } => self.font_open(world, sid, font, index, kind, nvars, desc),
             HalCmd::GlyphRequest { font, kind, count, glyphs } => self.glyph_request(gpu, world, sid, font, kind, count, glyphs),
             HalCmd::GlyphRelease { count, slots } => self.glyph_release(sid, count, slots),
+            HalCmd::GlyphTouch { count, slots } => self.glyph_touch(count, slots),
             _ => {}
         }
         self.flush(world);
@@ -351,6 +361,22 @@ impl FontService {
         }
     }
 
+    /// The slots a session drew from recently: they are used now (eviction takes the least
+    /// recently used first).
+    fn glyph_touch(&mut self, count: u32, slots: &[u8]) {
+        self.tick += 2;
+        let tick = self.tick + 1;
+        for (slot, gen) in wire::read_slots(slots, count) {
+            if let Some(rec) = self.raster.as_mut().filter(|a| a.generation == gen).and_then(|a| a.slot_mut(slot)) {
+                rec.last_use = tick;
+                continue;
+            }
+            if let Some(rec) = self.slug.as_mut().filter(|a| a.generation == gen).and_then(|a| a.by_slot_mut(slot)) {
+                rec.last_use = tick;
+            }
+        }
+    }
+
     fn glyph_release(&mut self, sid: u32, count: u32, slots: &[u8]) {
         for (slot, gen) in wire::read_slots(slots, count) {
             if let Some(a) = self.raster.as_mut().filter(|a| a.generation == gen) {
@@ -437,8 +463,10 @@ impl FontService {
             if self.slug.is_some() {
                 return true;
             }
-            let Some(tex) = self.host_texture(gpu, world, format::RGBA32F, SLUG_WIDTH, SLUG_ROWS, LABEL_SLUG, now) else { return false };
-            self.slug = Some(SlugStore::new(tex, SLUG_WIDTH, SLUG_ROWS, self.known.clone()));
+            // the curve store follows the atlas size (MAKEPAD_TEXT_ATLAS_SIZE shrinks both for tests)
+            let rows = (SLUG_ROWS * self.settings.atlas_size.width / 2048).clamp(4, SLUG_ROWS * 4);
+            let Some(tex) = self.host_texture(gpu, world, format::RGBA32F, SLUG_WIDTH, rows, LABEL_SLUG, now) else { return false };
+            self.slug = Some(SlugStore::new(tex, SLUG_WIDTH, rows, self.known.clone()));
         }
         true
     }
@@ -504,7 +532,6 @@ impl FontService {
             Some(p) if p.has_done() => p.take_done(),
             _ => Vec::new(),
         };
-        self.tick += 1;
         if raster_reclaimed || slug_reclaimed {
             for d in std::mem::take(&mut self.deferred) {
                 self.apply(gpu, world, d, false);

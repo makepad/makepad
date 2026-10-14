@@ -31,6 +31,7 @@ mod shared_bytes;
 pub mod action;
 pub mod game_input;
 pub mod frame_trace;
+pub mod frame_sources;
 pub mod present_trace;
 
 pub mod audio;
@@ -172,8 +173,11 @@ pub fn host_dark() -> Option<bool> {
         None
     }
 }
+#[cfg(all(target_os = "android", not(relax)))]
+pub use crate::app_main::android_on_load;
 pub use crate::app_main::{
-    attach_parent_console, new_cx_with_font_set, resolve_studio_http, run_app, should_run_stdin_loop_from_env,
+    admitted_by_window_manager, attach_parent_console, discover_window_manager, is_window_manager, launched_by_host,
+    new_cx_with_font_set, resolve_studio_http, run_app, set_window_manager, should_run_stdin_loop_from_env, WmAdmission,
 };
 // Working-tree startup instrumentation (`MAKEPAD_TRACE=startup`).
 pub use crate::cx::{
@@ -220,7 +224,7 @@ pub use {
         display_context::{DisplayContext, ScreenOrientation, SystemBarAppearance},
         font_policy::{
             extend_font_asset_manifest, font_asset_manifest_len, FontAsset, FontChain, FontPolicy,
-            FontRole, FontSet, LazyFontAsset, LazyFontFamily, FONT_ASSET_MANIFEST_SECTION,
+            FontRole, FontSet, LazyFontAsset, LazyFontFamily, FONT_ASSET_MANIFEST_SECTION, LAZY_FONT_FACES, LAZY_FONT_FALLBACKS,
             INTERNATIONAL_FONT_ASSET_MANIFEST, LATIN_FONT_ASSET_MANIFEST,
             LATIN_FONT_ASSET_PACKAGE_MANIFEST, MATH_VIEW_FONT_ASSET, INTER_FONT_ASSET,
             ROBOTO_FLEX_FONT_ASSET, UI_SYMBOL_FALLBACK,

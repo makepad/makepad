@@ -21,6 +21,9 @@ pub mod assets;
 pub mod socket;
 
 #[cfg(target_os = "android")]
+pub mod standalone;
+
+#[cfg(target_os = "android")]
 pub mod media;
 #[cfg(target_os = "android")]
 pub(crate) mod jhelp;

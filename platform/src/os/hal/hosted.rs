@@ -23,12 +23,20 @@ use crate::studio::SharedPresentableImage;
 #[derive(Default)]
 pub(crate) struct HostedClient {
     windows: HashMap<Id, HostedSwapchain>,
+    /// Swapchains replaced (or closed) since the last submit. Their images' import commands may
+    /// still be in the unsubmitted batch, so their shared-image tickets are released only once
+    /// that batch has gone out (`hal_submit_batch`): releasing at once made a replaced
+    /// swapchain's queued imports name unknown tickets (two swapchains arriving in one poll).
+    retired: Vec<HostedSwapchain>,
     pending: HashMap<u64, PendingPresent>,
     /// Logical timers run only on host Ticks; the host owns their wake schedule.
     pub(super) timers: PollTimers,
     pub(super) demand_changed: bool,
     /// Geometry the host sent for windows this app had not made yet.
     early_geom: EarlyGeom,
+    /// The app's first window: its main window, the one the host's tile shows. Every later
+    /// window is a window of its own on the host (`ime::HostedWindow`).
+    pub(super) first: Option<WindowId>,
     #[cfg(target_os = "linux")]
     inbox: Option<crate::os::hosted_gpu::GpuInbox>,
 }
@@ -83,7 +91,25 @@ struct HostedImage {
     hal: Id,
     import: ImportState,
     in_flight: Option<u64>,
+    /// the newest timeline value of this image published to the host
+    #[cfg(target_os = "linux")]
+    published: u64,
+    /// The newest frame sent to a device that was then lost (or replaced): published after the
+    /// image is imported again if that frame did complete (its timeline went past `published`).
+    #[cfg(target_os = "linux")]
+    unpublished: Option<(u64, PresentableDraw)>,
     warned: bool,
+}
+
+/// What a finished frame means for the host.
+pub(crate) enum HostedDone {
+    /// publish this frame (`DrawCompleteAndFlip`)
+    Publish(PresentableDraw),
+    /// the GPU dropped the frame (its batch never ran): no new frame exists, paint again
+    #[cfg(target_os = "linux")]
+    Dropped,
+    /// not a hosted frame this client is waiting for
+    Unknown,
 }
 
 struct SharedHandle {
@@ -93,7 +119,7 @@ struct SharedHandle {
 }
 #[cfg(target_os = "linux")]
 impl Drop for SharedHandle {
-    fn drop(&mut self) { makepad_hal::Hal::global().dmabuf_release(self.session, self.value); }
+    fn drop(&mut self) { makepad_hal::dmabuf::hal_dmabuf_unregister(self.session, self.value); }
 }
 
 struct PendingPresent {
@@ -108,20 +134,45 @@ struct PendingPresent {
 }
 
 impl HostedClient {
+    /// The batch that held the retired swapchains' last commands was submitted.
+    pub(crate) fn batch_submitted(&mut self) {
+        self.retired.clear();
+    }
+
     pub(crate) fn target(&self, window: WindowId, width: usize, height: usize) -> Option<(usize, Id)> {
         let swapchain = self.windows.get(&hal_window_id(window))?;
         if width > swapchain.width as usize || height > swapchain.height as usize {
             // Geometry can precede the matching swapchain during resize. Keep the pass dirty.
             return None;
         }
+        Self::free_image(swapchain)
+    }
+
+    /// Whether a frame of `window` could be presented now: one of its shared images is imported,
+    /// not in flight and released by the host. While none is, the passes that only feed the
+    /// window wait with it (`Cx::fb_pass`).
+    pub(crate) fn can_present(&self, window: WindowId) -> bool {
+        self.windows.get(&hal_window_id(window)).is_some_and(|swapchain| Self::free_image(swapchain).is_some())
+    }
+
+    fn free_image(swapchain: &HostedSwapchain) -> Option<(usize, Id)> {
         (0..swapchain.images.len()).find_map(|offset| {
             let index = (swapchain.next + offset) % swapchain.images.len();
             let image = &swapchain.images[index];
             let ready = image.import == ImportState::Ready && image.in_flight.is_none();
             #[cfg(target_os = "linux")]
-            let ready = ready && makepad_hal::Hal::global().dmabuf_write_available(image.handle.session, image.hal).unwrap_or(false);
+            let ready = ready && makepad_hal::dmabuf::hal_dmabuf_write_available(image.handle.session, image.hal) == 1;
             ready.then_some((index, image.hal))
         })
+    }
+
+    /// Every imported image of `window`'s swapchain is in flight or still with its host
+    /// (`can_present` false), so no frame built now could be shown. Images still being imported
+    /// do not count: until one is ready the app draws as before.
+    pub(crate) fn window_blocked(&self, window: WindowId) -> bool {
+        self.windows.get(&hal_window_id(window))
+            .is_some_and(|s| !s.images.is_empty() && s.images.iter().all(|i| i.import == ImportState::Ready))
+            && !self.can_present(window)
     }
 
     pub(crate) fn submitted(&mut self, window: WindowId, index: usize, frame: u64, size: [u32; 2]) {
@@ -140,11 +191,11 @@ impl HostedClient {
         swapchain.next = (index + 1) % swapchain.images.len();
     }
 
-    pub(crate) fn completed(&mut self, window: Id, frame: u64) -> Option<PresentableDraw> {
+    pub(crate) fn completed(&mut self, window: Id, frame: u64) -> HostedDone {
         if !self.pending.get(&frame).is_some_and(|p| hal_window_id(p.window) == window) {
-            return None;
+            return HostedDone::Unknown;
         }
-        let pending = self.pending.remove(&frame)?;
+        let Some(pending) = self.pending.remove(&frame) else { return HostedDone::Unknown };
         if let Some(swapchain) = self.windows.get_mut(&window) {
             for image in &mut swapchain.images {
                 if image.image == pending.draw.target_id && image.in_flight == Some(frame) {
@@ -155,30 +206,80 @@ impl HostedClient {
         #[cfg(target_os = "linux")]
         let pending = {
             let mut pending = pending;
-            match makepad_hal::Hal::global().dmabuf_sequence(pending.session, pending.hal) {
-                Ok(sequence) => pending.draw.sequence = sequence,
-                Err(error) => { crate::error!("hal hosted completion: {error}"); return None; }
+            let mut sequence = 0;
+            if !makepad_hal::dmabuf::hal_dmabuf_sequence(pending.session, pending.hal, &mut sequence) {
+                crate::error!("hal hosted completion: {}", super::linux::dmabuf_error());
+                return HostedDone::Unknown;
             }
+            // a frame whose batch never ran published nothing: its image's timeline is where
+            // the previous frame left it
+            let image = self.windows.get_mut(&window).and_then(|s| s.images.iter_mut().find(|i| i.image == pending.draw.target_id));
+            if let Some(image) = image {
+                if sequence <= image.published { return HostedDone::Dropped; }
+                image.published = sequence;
+            }
+            pending.draw.sequence = sequence;
             pending
         };
-        Some(pending.draw)
+        HostedDone::Publish(pending.draw)
     }
 
-    pub(crate) fn window_closed(&mut self, window: WindowId) {
-        self.windows.remove(&hal_window_id(window));
-        self.pending.retain(|_, pending| pending.window != window);
-    }
-
-    pub(crate) fn imported(&mut self, texture: Id, ok: bool) {
+    /// The GPU device was lost: the frames sent to it are never published, and the shared
+    /// images are imported again once the HAL replaced the device (`TextureImported`).
+    pub(crate) fn device_lost(&mut self) {
+        let pending = std::mem::take(&mut self.pending);
         for swapchain in self.windows.values_mut() {
             for image in &mut swapchain.images {
-                if image.hal != texture { continue; }
-                image.import = if ok { ImportState::Ready } else { ImportState::Retry };
-                if !ok && !std::mem::replace(&mut image.warned, true) {
-                    crate::warning!("hal: shared image {:?} could not be imported; retrying on host ticks", image.image);
+                image.in_flight = None;
+                // imported again after DeviceReset (`imported`), without a warning
+                image.import = ImportState::Retry;
+                #[cfg(target_os = "linux")]
+                for (frame, p) in &pending {
+                    if p.draw.target_id == image.image && image.unpublished.as_ref().is_none_or(|(f, _)| f < frame) {
+                        image.unpublished = Some((*frame, p.draw));
+                    }
                 }
             }
         }
+        #[cfg(not(target_os = "linux"))]
+        drop(pending);
+    }
+
+    pub(crate) fn window_closed(&mut self, window: WindowId) {
+        self.retired.extend(self.windows.remove(&hal_window_id(window)));
+        self.pending.retain(|_, pending| pending.window != window);
+    }
+
+    /// A shared image's import answered. After a device reset, the frame the lost device
+    /// finished but this client never published (the host holds the image until it hears of
+    /// it) is returned to publish now.
+    pub(crate) fn imported(&mut self, texture: Id, ok: bool) -> Option<PresentableDraw> {
+        #[cfg(target_os = "linux")]
+        let mut publish = None;
+        #[cfg(not(target_os = "linux"))]
+        let publish = None;
+        for swapchain in self.windows.values_mut() {
+            for image in &mut swapchain.images {
+                if image.hal != texture { continue; }
+                let again = image.import == ImportState::Retry;
+                image.import = if ok { ImportState::Ready } else { ImportState::Retry };
+                if !ok && !again && !std::mem::replace(&mut image.warned, true) {
+                    crate::warning!("hal: shared image {:?} could not be imported; retrying on host ticks", image.image);
+                }
+                #[cfg(target_os = "linux")]
+                if ok {
+                    if let Some((_, mut draw)) = image.unpublished.take() {
+                        let mut sequence = 0;
+                        if makepad_hal::dmabuf::hal_dmabuf_sequence(image.handle.session, image.hal, &mut sequence) && sequence > image.published {
+                            image.published = sequence;
+                            draw.sequence = sequence;
+                            publish = Some(draw);
+                        }
+                    }
+                }
+            }
+        }
+        publish
     }
 }
 
@@ -200,12 +301,41 @@ impl Cx {
         self.windows[window].is_created = true;
         self.hal.windows.insert(window.0, super::HalWindow::default());
         self.hal.frames.w.window_create(hal_window_id(window), window_kind::HOSTED, Id::NONE, [0.0; 4], false);
+        if let Some(hosted) = self.hal.hosted.as_mut() {
+            hosted.first.get_or_insert(window);
+        }
         Self::send_studio_message(AppToStudio::CreateWindow {
             window_id: window.id(), kind_id: self.windows[window].kind_id,
         });
+        // The size the app asked for: the host opens the window at it (within its desk).
+        if let Some(size) = self.windows[window].create_inner_size.filter(|s| s.x > 0.0 && s.y > 0.0) {
+            Self::send_hosted_window(crate::ime::HostedWindow { x: size.x, y: size.y, ..crate::ime::HostedWindow::new(window.id(), crate::ime::hosted_window_op::SIZE) });
+        }
+        // A later window is a window of its own on the host: it is named by its own title.
+        if self.hal_hosted_extra_window(window) {
+            Self::send_hosted_window(crate::ime::HostedWindow::title(window.id(), &self.windows[window].create_title));
+        }
         let early = self.hal.hosted.as_mut().and_then(|hosted| hosted.early_geom.take(window.id()));
         if let Some(geom) = early {
             self.hal_hosted_geom(window, geom);
+        }
+    }
+
+    /// One of this app's later windows (not its first), which the host shows as a window
+    /// of its own: what the host is told about it instead of the main window's ops.
+    pub(crate) fn hal_hosted_extra_window(&self, window: WindowId) -> bool {
+        self.hal.hosted.as_ref().is_some_and(|hosted| hosted.first.is_some_and(|first| first != window))
+    }
+
+    /// The host closed one of this app's later windows: asked like a native close button.
+    pub(crate) fn hal_hosted_close_request(&mut self, window_id: usize) {
+        let Some(window) = self.windows.id_iter().find(|w| w.id() == window_id && self.windows[*w].is_created) else { return };
+        if !self.hal_hosted_extra_window(window) { return; }
+        let accept_close = std::rc::Rc::new(std::cell::Cell::new(true));
+        self.call_event_handler(&Event::WindowCloseRequested(crate::event::WindowCloseRequestedEvent { window_id: window, accept_close: accept_close.clone() }));
+        if accept_close.get() {
+            self.windows[window].is_created = false;
+            self.hal.frames.w.window_close(hal_window_id(window));
         }
     }
 
@@ -257,11 +387,13 @@ impl Cx {
             self.textures[id].alloc_shared();
             let hal = self.hal.frames.external_texture(id.0, id.generation());
             self.hal.frames.w.texture_import(hal, handle.value, texture_handle::NATIVE);
-            HostedImage { image: image.id, handle, texture, hal, import: ImportState::Pending, in_flight: None, warned: false }
+            HostedImage { image: image.id, handle, texture, hal, import: ImportState::Pending, in_flight: None, #[cfg(target_os = "linux")] published: 0, #[cfg(target_os = "linux")] unpublished: None, warned: false }
         }).collect();
-        self.hal.hosted.as_mut().unwrap().windows.insert(hal_window_id(window), HostedSwapchain {
+        let hosted = self.hal.hosted.as_mut().unwrap();
+        let replaced = hosted.windows.insert(hal_window_id(window), HostedSwapchain {
             width: swapchain.alloc_width, height: swapchain.alloc_height, images, next: 0,
         });
+        hosted.retired.extend(replaced);
         self.redraw_all();
     }
 
@@ -321,7 +453,7 @@ impl Cx {
                     self.call_event_handler(&Event::Shutdown);
                     return true;
                 }
-                if !self.hosted_hidden {
+                if !self.hosted_frames_held() {
                     self.hal_hosted_retry_imports();
                 }
                 if !self.hal_beat() || !self.hal_handle_platform_ops() {
@@ -380,8 +512,9 @@ impl Cx {
             self.stdin_announce_demand(&self.hal.hosted.as_ref().unwrap().timers);
         }
         // HAL completions can dirty passes without a new Draw/NextFrame request. They
-        // share the same coalesced demand as the end of a Tick and worker signals.
-        if self.hal_has_work() {
+        // share the same coalesced demand as the end of a Tick and worker signals. A lost GPU
+        // device asks for no frames: DeviceReset repaints everything and asks again.
+        if !self.hal.device_lost && self.hal_has_work() {
             self.stdin_request_frame();
         }
     }
@@ -406,9 +539,13 @@ impl Cx {
         let session = self.hal.frames.w.session();
         for batch in loaded {
             let swapchain = batch.request.swapchain;
-            let handles: Result<Vec<_>, String> = batch.images.into_iter().map(|image| {
-                let descriptor = super::linux::hosted_descriptor(image.image, swapchain.alloc_width, swapchain.alloc_height)?;
-                let value = unsafe { makepad_hal::Hal::global().dmabuf_register(session, descriptor) }?;
+            let handles: Result<Vec<_>, String> = batch.images.into_iter().map(|descriptor| {
+                use std::os::fd::IntoRawFd;
+                let (fd, timeline, desc) = descriptor.into_parts();
+                let value = makepad_hal::dmabuf::hal_dmabuf_import(session, fd.into_raw_fd(), timeline.map_or(-1, |t| t.into_raw_fd()), &desc);
+                if value == 0 {
+                    return Err(super::linux::dmabuf_error());
+                }
                 Ok(SharedHandle { value, session })
             }).collect();
             match handles {

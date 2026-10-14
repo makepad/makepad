@@ -388,10 +388,9 @@ impl Compositor {
             "xdg_toplevel" | "xdg_popup" | "xdg_surface" => self.xdg_destroyed(core, c, o),
             "wl_pointer" => { self.input.pointer_gone(c, o.id); self.objs.remove(&k); }
             "wl_keyboard" => { self.input.keyboard_gone(c, o.id); self.objs.remove(&k); }
-            "wl_data_source" => self.data_source_gone(core, c, o.id),
+            "wl_data_source" | "wl_data_device" | "wl_data_offer" | "zwp_primary_selection_source_v1" | "zwp_primary_selection_device_v1" | "zwp_primary_selection_offer_v1" => self.data_object_gone(core, c, o.id),
             "wp_viewport" | "wp_fractional_scale_v1" | "wp_cursor_shape_device_v1" | "zxdg_toplevel_decoration_v1" => self.ext_gone(c, o),
             "wp_linux_drm_syncobj_timeline_v1" | "wp_linux_drm_syncobj_surface_v1" => self.syncobj_gone(c, o),
-            "wl_data_device" => { if let Some(v) = self.input.data_devices.get_mut(&c) { v.retain(|&d| d != o.id); } self.objs.remove(&k); }
             "wl_buffer" => {
                 if matches!(self.objs.remove(&k), Some(Obj::DmaBuffer(_))) {
                     self.events.push(UiEvent::BufferGone { client: c, buffer: o.id });

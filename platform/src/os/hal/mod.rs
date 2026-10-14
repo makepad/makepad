@@ -9,13 +9,14 @@ mod display;
 #[cfg(test)]
 mod domain_test;
 pub(crate) use domain::lent_id;
+pub(crate) use hosted::HostedDone;
 mod event_loop;
 mod fonts;
 #[cfg(not(target_os = "android"))]
 pub(crate) mod gl_interop;
 mod hosted;
 #[cfg(target_os = "linux")]
-mod linux;
+pub(crate) mod linux;
 mod media;
 mod ops;
 mod query;
@@ -45,9 +46,34 @@ use makepad_hal::{EventStore, HalInfo};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Any thread (signals, actions, audio and network threads) wakes the loop blocked in `hal_pump`.
+/// The HAL sessions whose loops this Cx code runs (statics are per process natively and per
+/// domain under relax, so a domain's signals wake its own session only).
+static WAKE_SESSIONS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+
+fn wake_sessions() -> std::sync::MutexGuard<'static, Vec<u32>> {
+    WAKE_SESSIONS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// The session's loop is one this code's signals wake.
+pub(crate) fn register_wake_session(session: u32) {
+    let mut sessions = wake_sessions();
+    if !sessions.contains(&session) {
+        sessions.push(session);
+    }
+}
+
+/// The session's loop has ended.
+pub(crate) fn unregister_wake_session(session: u32) {
+    wake_sessions().retain(|s| *s != session);
+}
+
+/// Any thread (signals, actions, audio and network threads) wakes the loops blocked in
+/// `hal_pump`: the sessions this code runs, not every app in the process. Before a session is
+/// open there is no pump to wake (the loop services a pending signal at its first turn).
 pub(crate) fn wake_ui_event_loop() {
-    makepad_hal::hal_wake();
+    for session in wake_sessions().iter() {
+        makepad_hal::hal_wake_session(*session);
+    }
 }
 
 /// `FileDialog::kind` of the HAL command (low byte; bit 8: choose several).
@@ -73,6 +99,13 @@ pub(crate) struct HalWindow {
     pub(crate) confirmed: bool,
     /// Native button bounds and level from Chrome, retained for subsequent Geom events.
     pub(crate) chrome: Option<(crate::makepad_math::Rect, bool)>,
+    /// The window system paces this window with frames of its own (a `FrameReady` named it):
+    /// its pass paints only with `credit`, so each window presents at its own display's
+    /// rate. A window the backend never names (the second window of a single-output backend)
+    /// is not paced and paints on any beat, as before.
+    pub(crate) paced: bool,
+    /// A `FrameReady` for this window arrived and no frame of it was built since.
+    pub(crate) credit: bool,
 }
 
 pub struct HalClient {
@@ -209,6 +242,23 @@ impl Default for HalClient {
 impl HalClient {
     pub(crate) fn window_ready(&self, id: WindowId) -> bool {
         self.windows.get(&id.0).is_some_and(|w| w.confirmed)
+    }
+
+    /// A frame of the window may be built now: it is not paced by its display, or its display
+    /// announced a frame it has not used. Two windows on two displays (DECK's output window)
+    /// share one beat, which comes at every vsync of either: without this a window was built
+    /// and presented at both displays' vsyncs together, more often than its display shows
+    /// frames, and the presents queued up and blocked.
+    pub(crate) fn window_may_paint(&self, id: WindowId) -> bool {
+        let display_clock = self.info.as_ref().is_some_and(|info| info.flags & makepad_hal::info_flags::DISPLAY_CLOCK != 0);
+        !display_clock || self.hosted.is_some() || self.externally_driven || self.windows.get(&id.0).is_none_or(|w| !w.paced || w.credit)
+    }
+
+    /// A frame of the window was built: its credit is used.
+    pub(crate) fn window_painted(&mut self, id: WindowId) {
+        if let Some(w) = self.windows.get_mut(&id.0) {
+            w.credit = false;
+        }
     }
 
     /// Seconds on the app clock for a HAL time stamp.
@@ -350,6 +400,22 @@ impl CxMediaApi for Cx {
     fn use_video_input(&mut self, devices: &[(VideoInputId, VideoFormatId)]) {
         self.hal_use_video_input(devices);
     }
+
+    fn video_inputs(&self) -> Option<Vec<crate::video::VideoInputDesc>> {
+        self.hal_video_inputs()
+    }
+
+    fn video_input_open(&mut self, index: usize, input: VideoInputId, format: VideoFormatId) -> Result<crate::video::VideoFormat, String> {
+        self.hal_video_input_open(index, input, format)
+    }
+
+    fn video_input_stream(&mut self, index: usize, on: bool) -> Result<(), String> {
+        self.hal_video_input_stream(index, on)
+    }
+
+    fn video_input_close(&mut self, index: usize) {
+        self.hal_video_input_close(index);
+    }
 }
 
 #[cfg(target_os = "android")]
@@ -390,7 +456,7 @@ impl crate::cx_api::CxOsApi for Cx {
 
     fn open_url(&mut self, url: &str, _in_place: OpenUrlInPlace) {
         #[cfg(any(target_vendor = "apple", target_os = "windows"))]
-        if !makepad_hal::open_url(url.to_string()) { crate::error!("open_url: the system did not open {url}"); }
+        if !makepad_hal::open_url(url) { crate::error!("open_url: the system did not open {url}"); }
         #[cfg(not(any(target_vendor = "apple", target_os = "windows")))]
         crate::warning!("open_url is unavailable on this HAL backend: {url}");
     }

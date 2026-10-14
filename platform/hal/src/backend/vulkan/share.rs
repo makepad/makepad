@@ -125,11 +125,11 @@ impl crate::dmabuf::Api for super::Vulkan {
         // acquires it again, after the compositor has observed the producer's fence.
         Ok(())
     }
-    fn fence(&mut self, notify: Arc<dyn Fn() + Send + Sync>) -> Result<crate::dmabuf::Fence, String> {
+    fn fence(&mut self, session: u32, notify: Arc<dyn Fn() + Send + Sync>) -> Result<crate::dmabuf::Fence, String> {
         let semaphore = sync::Semaphore::sync_file(self.dev.clone())?;
         self.flush();
-        let wake = self.mailbox.wake.clone();
-        let (fence, reply) = crate::dmabuf::FenceReply::new(Arc::new(move || { notify(); wake(); }));
+        let look = self.mailbox.notify.clone();
+        let (fence, reply) = crate::dmabuf::FenceReply::new(Arc::new(move || { notify(); look(session, false); }));
         self.ensure_batch()?.release_fence = Some((semaphore, reply));
         self.flush();
         Ok(fence)
@@ -171,3 +171,24 @@ impl crate::dmabuf::Api for super::Vulkan {
 
 #[cfg(target_os = "linux")]
 pub(super) fn foreign_support(dev: &Device) -> Option<DmaBufSupport> { NativeHandle::support(dev) }
+
+/// A host compositor's shared image (a hosted window's swapchain image) as a render target of
+/// this device, with the host's timeline: [`Image::hosted_writable`], [`Image::hosted_sequence`].
+#[cfg(target_os = "linux")]
+pub(crate) fn import_hosted(dev: Arc<Device>, native: Arc<NativeHandle>) -> Result<Arc<Image>, String> {
+    let image = NativeHandle::import(dev, native)?;
+    if image.timeline.as_ref().is_none_or(|t| !t.producer) { return Err("hosted image has no writer timeline".into()); }
+    Ok(image)
+}
+
+#[cfg(target_os = "linux")]
+impl Image {
+    /// The host released this hosted image: the next frame may render into it.
+    pub(crate) fn hosted_writable(&self) -> bool {
+        self.timeline.as_ref().is_some_and(|t| t.producer && t.available().unwrap_or(false))
+    }
+    /// The timeline value that publishes the newest frame rendered into this hosted image.
+    pub(crate) fn hosted_sequence(&self) -> Option<u64> {
+        self.timeline.as_ref().filter(|t| t.producer).map(|t| t.sequence())
+    }
+}

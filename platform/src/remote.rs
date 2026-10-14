@@ -100,6 +100,7 @@ mod imp {
         is_active, note_window_close_requested, requested, tag_window_title,
         take_window_close_requested,
     };
+    pub(crate) use super::bridge::stop_encoder;
 
     /// Commands built by the platform-side routes; they travel through the
     /// core queue as `Cmd::Platform`.
@@ -569,7 +570,7 @@ mod imp {
     /// until an upper crate serves the real one (makepad-ai-services, at the first AI port) the
     /// answer is: no tools. An app a window manager hosts serves none: the WM serves its tools.
     fn serves_own_app() -> bool {
-        !crate::app_main::should_run_stdin_loop_from_env()
+        !crate::app_main::launched_by_host()
     }
 
     /// The HAL inspector's command table (the words are the request).
@@ -1916,6 +1917,28 @@ mod imp {
                                 }),
                             }
                         }
+                        Input::PadScroll {
+                            x,
+                            y,
+                            dx,
+                            dy,
+                            phase,
+                            mods,
+                            time: at,
+                        } => {
+                            let native = cx.windows[window_id]
+                                .layout_vec2d_to_native_points(dvec2(x, y));
+                            StudioToApp::Scroll(RemoteScroll {
+                                time: at.unwrap_or(time),
+                                x: native.x,
+                                y: native.y,
+                                sx: dx,
+                                sy: dy,
+                                is_mouse: false,
+                                modifiers: mods,
+                                phase,
+                            })
+                        }
                         Input::Pinch {
                             x,
                             y,
@@ -1998,6 +2021,17 @@ mod imp {
                             continue;
                         }
                     };
+                    // A HAL app's copy / cut chord, as a physical key press gives it (hal_intake):
+                    // the focused widget's text goes on the clipboard before the key itself.
+                    if let StudioToApp::KeyDown(e) = &msg {
+                        if (e.modifiers.control || e.modifiers.logo) && cx.hal.hosted.is_none() {
+                            match e.key_code {
+                                crate::event::KeyCode::KeyC => cx.hal_clipboard_chord(true),
+                                crate::event::KeyCode::KeyX => cx.hal_clipboard_chord(false),
+                                _ => {}
+                            }
+                        }
+                    }
                     cx.dispatch_studio_msg(msg, window_id, dvec2(0.0, 0.0));
                 }
                 if wait {

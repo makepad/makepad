@@ -15,7 +15,7 @@ path = "src/lib.rs"
 makepad-apple-sys = { path = "../../libs/apple_sys", version = "1.0.0" }
 makepad-objc-sys = { path = "../../libs/objc-sys", version = "1.0.0" }
 
-[target.'cfg(any(target_os = "linux", windows))'.dependencies]
+[target.'cfg(any(target_os = "linux", windows, target_os = "android"))'.dependencies]
 makepad-hal = { path = "../hal", version = "1.0.0" }
 
 [target.'cfg(windows)'.dependencies.windows]

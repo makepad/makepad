@@ -365,12 +365,17 @@ pub struct CameraFrameData<'a> {
     pub height: u32,
     pub layout: u8,
     pub matrix: u8,
+    /// The display's rotation in quarter turns when the frame was taken
+    /// (Android's Surface.ROTATION_*): what turns the frame upright on the
+    /// screen as it is held now, with the input's `sensor_orientation`.
+    /// 0 where the platform does not turn the display under the app.
+    pub display_rotation: u8,
     pub planes: Vec<CameraPlane<'a>>,
 }
 
 pub fn pack_camera_frame(f: &CameraFrameData) -> Vec<u8> {
     let mut w = PackW::new();
-    w.u64(f.timestamp_ns).u32(f.width).u32(f.height).u8(f.layout).u8(f.matrix).u8(f.planes.len() as u8);
+    w.u64(f.timestamp_ns).u32(f.width).u32(f.height).u8(f.layout).u8(f.matrix).u8(f.display_rotation).u8(f.planes.len() as u8);
     for p in &f.planes {
         w.u32(p.row_stride).u32(p.pixel_stride).bytes(p.bytes);
     }
@@ -379,15 +384,17 @@ pub fn pack_camera_frame(f: &CameraFrameData) -> Vec<u8> {
 
 pub fn read_camera_frame(b: &[u8]) -> Option<CameraFrameData<'_>> {
     let mut r = PackR::new(b);
-    let (timestamp_ns, width, height, layout, matrix, n) = (r.u64(), r.u32(), r.u32(), r.u8(), r.u8(), r.u8());
+    let (timestamp_ns, width, height, layout, matrix, display_rotation, n) = (r.u64(), r.u32(), r.u32(), r.u8(), r.u8(), r.u8(), r.u8());
     let mut planes = Vec::new();
     for _ in 0..n.min(3) {
         planes.push(CameraPlane { row_stride: r.u32(), pixel_stride: r.u32(), bytes: r.bytes() });
     }
-    r.ok.then_some(CameraFrameData { timestamp_ns, width, height, layout, matrix, planes })
+    r.ok.then_some(CameraFrameData { timestamp_ns, width, height, layout, matrix, display_rotation, planes })
 }
 
 /// What VideoToolbox can do with H.264 on this machine (`video_h264_probe`).
+#[makepad_relax_api::relax_api(plain)]
+#[repr(C)]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct H264Probe {
     pub encode_hardware: bool,

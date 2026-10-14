@@ -149,14 +149,16 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(apple_bundle,apple_sim,lines,makepad_precompiled_shaders,makepad_shader_pack,makepad_no_studio)");
     // Every variable declared here rebuilds this crate and everything that
     // depends on it (draw, widgets, every app) when its value changes: keep
-    // per-app inputs out (see src/app_meta.rs). MAKEPAD selects build options
-    // for bundle packaging and diagnostics;
-    // words that only concern a crate further up belong in a variable of
-    // that crate's own.
-    println!("cargo:rerun-if-env-changed=MAKEPAD");
+    // per-app inputs out (see src/app_meta.rs). MAKEPAD_BUILD selects build
+    // options for bundle packaging and diagnostics; words that only concern a
+    // crate further up belong in a variable of that crate's own. Never the
+    // runtime MAKEPAD (vulkan, linux_direct, ...): a window manager, Code and a
+    // terminal start the same `cargo run` with different values of it, and
+    // each would rebuild every app.
+    println!("cargo:rerun-if-env-changed=MAKEPAD_BUILD");
     println!("cargo:rerun-if-env-changed=IPHONEOS_DEPLOYMENT_TARGET");
 
-    if let Ok(configs) = env::var("MAKEPAD") {
+    if let Ok(configs) = env::var("MAKEPAD_BUILD") {
         for config in configs.split(['+', ',']) {
             match config {
                 "lines" => println!("cargo:rustc-cfg=lines"),

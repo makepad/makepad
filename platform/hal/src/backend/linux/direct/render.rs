@@ -49,19 +49,34 @@ pub(super) fn order_devices(instance: &makepad_vulkan::Instance, devices: &mut V
             || (pin.is_none() && pci_pin.as_ref().is_some_and(|p| device_pci(instance,physical).as_ref() == Some(p)
                 || owned.iter().any(|(c,_)| pci(&c.card).as_ref() == Some(p))));
         let builtin = owned.iter().map(|(c,_)| connector_rank(&c.name).0).min().unwrap_or(2);
-        ranked.push((!selected, builtin, rank, physical));
+        let kind = unsafe { instance.get_physical_device_properties(physical) }.device_type;
+        ranked.push((render_rank(selected, kind, builtin, rank), physical));
     }
-    let selected = ranked.iter().any(|r| !r.0);
+    let selected = ranked.iter().any(|r| !r.0.0);
     if pin.is_some() && !selected {
         return Err("requested compositor GPU UUID is not available".into());
     }
     if pci_pin.is_some() && !selected {
         eprintln!("[hal-direct] saved compositor PCI is unavailable; using the display GPU");
     }
-    if selected { ranked.retain(|r| !r.0); }
-    ranked.sort_by_key(|r| (r.0,r.1,r.2));
-    *devices = ranked.into_iter().map(|r| r.3).collect();
+    if selected { ranked.retain(|r| !r.0.0); }
+    ranked.sort_by_key(|r| r.0);
+    *devices = ranked.into_iter().map(|r| r.1).collect();
     Ok(())
+}
+
+/// The compositor's render GPU, best first: an explicit pin (MAKEPAD_VULKAN_COMPOSITOR_UUID/PCI),
+/// then a discrete GPU over an integrated one, whichever GPU owns the panel. A GPU's
+/// connectors make it a scan-out target only: the bridge feeds the outputs of every other GPU
+/// (the eDP on an Intel card0 of a laptop is shown from the discrete GPU's frames). The
+/// built-in-connector owner only breaks ties between GPUs of the same kind, then enumeration.
+fn render_rank(selected: bool, kind: vk::PhysicalDeviceType, builtin: u8, index: usize) -> (bool, u8, u8, usize) {
+    let kind = match kind {
+        vk::PhysicalDeviceType::DISCRETE_GPU => 0,
+        vk::PhysicalDeviceType::INTEGRATED_GPU => 1,
+        _ => 2,
+    };
+    (!selected, kind, builtin, index)
 }
 
 struct SavedCrtc { crtc: drm::Crtc, connectors: Vec<u32> }
@@ -450,7 +465,8 @@ fn drain_parked_acquires() {
     let fences = std::mem::take(&mut *lock(&PARKED_ACQUIRES));
     let mut pending = Vec::new();
     for (device,fence) in fences {
-        if unsafe { device.raw.get_fence_status(fence) }.unwrap_or(false) {
+        // an error is a lost device: nothing will signal the fence any more
+        if unsafe { device.raw.get_fence_status(fence) }.unwrap_or(true) {
             unsafe { device.raw.destroy_fence(fence,None); }
         } else { pending.push((device,fence)); }
     }
@@ -534,6 +550,28 @@ impl Context {
         Ok(Self { devices:HashMap::from([(compositor.physical,compositor.clone())]),compositor,physical,
             cards:HashMap::new(),outputs:Vec::new(),failed:Vec::new(),working:HashMap::new(),mirror:None,pacing:Default::default(),connectors:Vec::new(),filter:DrmFilter::from_env(),
             modes,mode,order,primary:None,size:[0,0],active:true,window:None,current:None,frames:VecDeque::new(),presenting:VecDeque::new(),sequence:0,demand:false,awaiting:false })
+    }
+    /// The HAL replaced its lost GPU device. The outputs' swapchains, surfaces, copy jobs and
+    /// peers lived on the old device and are dropped; the cards keep DRM master and their
+    /// display acquisitions (a release would restore the console's CRTCs, and NVIDIA refuses
+    /// a display re-acquired on the same descriptor), so the next reconcile rebuilds every
+    /// output on the new device. The frames of the old device are let go (their presents
+    /// reported, so no credit is lost) and the window asks for a new one.
+    fn replace_device(&mut self,device:Arc<Device>,state:&State) {
+        eprintln!("[hal-direct] the render GPU device was replaced: rebuilding the outputs");
+        self.outputs.clear();
+        self.frames.clear(); self.current = None;
+        let now = crate::clock_ns();
+        for (_,presented) in self.presenting.drain(..) { presented(now); }
+        let old = self.compositor.physical;
+        for card in self.cards.values_mut() {
+            for (dev,_) in &mut card.displays { if dev.physical == old { *dev = device.clone(); } }
+        }
+        self.devices.insert(device.physical,device.clone());
+        self.compositor = device;
+        self.connectors.clear(); self.failed.clear();
+        state.ready.store(0,Ordering::Release);
+        self.demand = self.window.is_some(); self.awaiting = false;
     }
     fn drain_outputs(&mut self) {
         self.outputs.clear();
@@ -733,6 +771,20 @@ impl Context {
         self.outputs.sort_by_key(|o| connector_rank(&o.connector.name));
         self.layout(); self.publish(state);
     }
+    /// Mirror <-> Extended: only what each output presents changes (the whole shared
+    /// desktop scaled into its swapchain, or its own rectangle of the wide desktop) and the
+    /// screen list. Every output keeps its display, mode, plane, surface and swapchain: no
+    /// blank, no modeset. The desktop size changes, so the client gets a fresh credit and
+    /// draws a whole frame at the new size; until then the retained frame is letterboxed.
+    fn recompose(&mut self,state:&State) {
+        let before = (self.size,self.outputs.iter().map(|o| o.placement).collect::<Vec<_>>());
+        self.layout();
+        if before == (self.size,self.outputs.iter().map(|o| o.placement).collect::<Vec<_>>()) { self.publish(state); return; }
+        self.awaiting = false; self.demand |= self.window.is_some();
+        state.ready.store(0,Ordering::Release);
+        eprintln!("[hal-direct] arrangement {}: desktop {}x{}, no output rebuilt",self.mirror_target().map_or("extended".to_string(),|n| format!("mirror of {n}")),self.size[0],self.size[1]);
+        self.publish(state);
+    }
     /// The mirrored screen, when mirroring is asked for and that screen is shown.
     fn mirror_target(&self) -> Option<&str> {
         self.mirror.as_deref().filter(|name| self.outputs.iter().any(|o| o.connector.name == *name))
@@ -802,6 +854,7 @@ impl Context {
             let arrangement = self.mirror_target().map_or(crate::direct::DisplayArrangement::Extended,|name| crate::direct::DisplayArrangement::Mirror { optimise_for:name.to_owned() });
             let paced_by = self.paced_by();
             snapshot.displays = LinuxDisplaySnapshot { direct:true,outputs,arrangement,pacing:self.pacing.clone(),paced_by }; snapshot.size = self.size;
+            if !self.outputs.is_empty() { state.acquired.store(true,Ordering::Release); }
             // A reacquired output has no phase until its new swapchain presents.
             snapshot.timings = self.outputs.iter().filter(|o| o.last_present != 0 && o.mode.refresh_mhz != 0)
                 .map(|o| (o.connector.name.clone(), (o.last_present, 1000.0 / o.mode.refresh_mhz as f64))).collect();
@@ -928,13 +981,15 @@ pub(super) fn run(state:Arc<State>,device:Arc<Device>) {
                     rescan = true;
                 }
                 Command::Order(order) => { context.order = order; rescan = true; }
+                // A composition change, never a mode change: no output is touched.
                 Command::Arrangement(arrangement) => {
                     context.mirror = match arrangement { crate::direct::DisplayArrangement::Mirror { optimise_for } => Some(optimise_for), _ => None };
-                    rescan = true;
+                    context.recompose(&state);
                 }
                 Command::Primary(name) => { context.primary = Some(name); context.publish(&state); }
                 // No modeset: the next credit follows the newly resolved output.
                 Command::Pacing(pacing) => { context.pacing = pacing; context.publish(&state); }
+                Command::Device(device) => { context.replace_device(device,&state); rescan = true; }
             }
         }
         if stop { break; }
@@ -1006,6 +1061,24 @@ mod tests {
         let tie = [c(0,"card0-eDP-1",60,false,false,false),c(1,"card1-DP-3",60,true,true,true)];
         assert_eq!(pacing_choice(&DisplayPacing::Slowest,false,&tie),Some((1,true)),"ties prefer the main screen");
         assert_eq!(pacing_choice(&DisplayPacing::Auto,false,&[]),None);
+    }
+    fn render_order(devices:&[(bool,vk::PhysicalDeviceType,u8)]) -> Vec<usize> {
+        let mut ranked:Vec<_> = devices.iter().enumerate().map(|(i,(selected,kind,builtin))| (render_rank(*selected,*kind,*builtin,i),i)).collect();
+        ranked.sort_by_key(|r| r.0);
+        ranked.into_iter().map(|r| r.1).collect()
+    }
+    #[test]
+    fn the_discrete_gpu_renders_and_the_panel_gpu_only_scans_out() {
+        use vk::PhysicalDeviceType as T;
+        // 149: the eDP on the Intel GPU (enumerated first), HDMI on the NVIDIA GPU
+        assert_eq!(render_order(&[(false,T::INTEGRATED_GPU,0),(false,T::DISCRETE_GPU,1)])[0],1,"the dGPU renders, the iGPU's eDP is bridged");
+        assert_eq!(render_order(&[(false,T::DISCRETE_GPU,1),(false,T::INTEGRATED_GPU,0)])[0],0);
+        assert_eq!(render_order(&[(false,T::DISCRETE_GPU,2),(false,T::INTEGRATED_GPU,0)])[0],0,"a dGPU with no outputs still renders");
+        assert_eq!(render_order(&[(false,T::INTEGRATED_GPU,0)]),vec![0],"iGPU only: the iGPU");
+        assert_eq!(render_order(&[(false,T::DISCRETE_GPU,0)]),vec![0],"dGPU only: the dGPU");
+        assert_eq!(render_order(&[(false,T::DISCRETE_GPU,1),(false,T::DISCRETE_GPU,0)])[0],1,"two dGPUs: the panel's one");
+        assert_eq!(render_order(&[(false,T::CPU,0),(false,T::INTEGRATED_GPU,1)])[0],1,"never a CPU device while a GPU is there");
+        assert_eq!(render_order(&[(false,T::DISCRETE_GPU,1),(true,T::INTEGRATED_GPU,0)])[0],1,"an explicit pin wins");
     }
     fn connector(card:&str,name:&str,id:u32,fingerprint:u64) -> DrmConnector {
         DrmConnector { card:PathBuf::from(format!("/dev/dri/{card}")),name:format!("{card}-{name}"),id,fingerprint }
