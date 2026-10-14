@@ -312,6 +312,35 @@ fn lrect_contains(outer: LRect, inner: LRect) -> bool {
         && inner.x + inner.w <= outer.x + outer.w + EPS && inner.y + inner.h <= outer.y + outer.h + EPS
 }
 
+/// Is `me` fully covered by the union of `over` (the windows drawn above it)? A window
+/// partly visible is not: it keeps getting frames.
+fn covered_by_union(me: LRect, over: &[LRect]) -> bool {
+    const EPS: f64 = 0.5;
+    // What is still visible of `me`, as rects; each window above cuts them.
+    let mut visible = vec![me];
+    for o in over {
+        let mut next = Vec::with_capacity(visible.len() + 3);
+        for r in visible {
+            let (x0, y0) = (o.x.max(r.x), o.y.max(r.y));
+            let (x1, y1) = ((o.x + o.w).min(r.x + r.w), (o.y + o.h).min(r.y + r.h));
+            if x1 - x0 <= 0.0 || y1 - y0 <= 0.0 {
+                next.push(r);
+                continue;
+            }
+            // the parts of r outside o: above, below, left, right
+            if y0 - r.y > EPS { next.push(LRect::new(r.x, r.y, r.w, y0 - r.y)); }
+            if r.y + r.h - y1 > EPS { next.push(LRect::new(r.x, y1, r.w, r.y + r.h - y1)); }
+            if x0 - r.x > EPS { next.push(LRect::new(r.x, y0, x0 - r.x, y1 - y0)); }
+            if r.x + r.w - x1 > EPS { next.push(LRect::new(x1, y0, r.x + r.w - x1, y1 - y0)); }
+        }
+        visible = next;
+        if visible.is_empty() {
+            return true;
+        }
+    }
+    visible.is_empty()
+}
+
 fn compose_zorder(closing: &[ClientId], rest: &[ClientId], previews: &[ClientId]) -> Vec<ClientId> {
     closing
         .iter()
@@ -443,6 +472,10 @@ pub struct WmState {
     /// quad size that keeps missing the swapchain's true resolution
     /// (blur/shimmer). See `WmDesk::draw_walk`'s sync loop.
     pub dragging: Vec<ClientId>,
+    /// An edge, divider or SUPER+right-button drag is resizing windows: their apps get
+    /// each new size, one per frame, and draw into frames with room to grow (app_host
+    /// `HostedApp::set_live_resize`). Set by the WM before each draw.
+    pub live_resize: bool,
     /// The tile a SHIFT-drag is hovering, so the desk can paint its ring in
     /// the accent: dropping here makes the dragged window a TAB of this
     /// tile instead of swapping the two.
@@ -1108,6 +1141,9 @@ pub struct WmDesk {
     #[live] shell_draw: ShellDraw,
     #[rust] style: StyleTween,
     #[rust] titles: HashMap<ClientId, String>,
+    /// A later window's tile -> its app's client (`client_windows.rs`): one process draws
+    /// them all, so it stops drawing only when none of them shows.
+    #[rust] window_owners: HashMap<ClientId, ClientId>,
     #[rust] window_apps: HashMap<ClientId, String>,
     #[rust] startup_sheet: Option<desktop_style::StyleSheet>,
     #[rust] app_icons: AppIconDraw,
@@ -1136,8 +1172,11 @@ pub struct WmDesk {
     #[rust] last_drawn: HashMap<ClientId, (Rect, Pose, f32)>,
     /// The outgoing layer of a compact cross-fade.
     #[rust] swap_out: HashMap<ClientId, SwapOut>,
-    /// Clients that draw their own chrome (`own_chrome.rs`).
-    #[rust] own_chrome: HashSet<ClientId>,
+    /// Makepad clients whose card has the desk's title bar instead of their own caption:
+    /// a crashed or exited domain app (it draws nothing). Every other makepad window draws
+    /// its own chrome (`own_chrome.rs`); a foreign (Wayland) window and an in-process
+    /// module get the desk's.
+    #[rust] desk_chrome: HashSet<ClientId>,
     /// FULLSCREEN CAPTION (design). A fullscreen window uses the whole screen.
     /// Its caption comes in two kinds. PLAIN: only a title and the window
     /// buttons (the WM draws it for every app that does not draw its own):
@@ -1419,7 +1458,13 @@ impl WmDesk {
 
     /// Start the close animation: the tile keeps its last frame while it
     /// pops back to 87% and fades, and is dropped when that finishes.
+    /// `tile` shows a later window of the app `owner` (see `window_owners`).
+    pub fn set_window_owner(&mut self, tile: ClientId, owner: ClientId) {
+        self.window_owners.insert(tile, owner);
+    }
+
     pub fn remove_client(&mut self, client: ClientId) {
+        self.window_owners.remove(&client);
         match self.anims.get_mut(&client) {
             Some(anim) if anim.close_t.is_none() => {
                 anim.close_t = Some(0.0);
@@ -1704,7 +1749,7 @@ impl WmDesk {
         // is swapped in once the client presented a frame at that size.
         if let (true, Some(fp)) = (!vr && self.warp.compact.frozen(client), compact.map(|r| Pose::compact(r, side)).or(pose)) {
             if let (Some(mut frame), Some(&(cap, _, rounding))) = (self.desktop_frames.remove(&client), self.last_drawn.get(&client)) {
-                let child = self.settled_child_rect(target, cfg_compact || self.own_chrome.contains(&client), spanned, grouped, dpi);
+                let child = self.settled_child_rect(target, cfg_compact || self.draws_own_chrome(client), spanned, grouped, dpi);
                 if let Some(mut v) = self.items.get(&client).and_then(|item| item.borrow_mut::<MpRunView>()) {
                     v.configure(cx, child.size, dpi);
                 }
@@ -1818,7 +1863,7 @@ impl WmDesk {
         if let Some(snapshot) = backdrop {
             self.terminal_glass.draw_surface_with_backdrop(cx, inner, Some(snapshot), fade as f32);
         }
-        let own_chrome = self.own_chrome.contains(&client);
+        let own_chrome = self.draws_own_chrome(client);
         let title_h = if compact.is_some() || spanned || own_chrome { 0.0 } else { self.skin.title_height(self.style.title_height()).min((inner.size.y * 0.3).max(0.0)) };
         let chrome_h = title_h;
         if title_h > 0.1 {
@@ -1885,7 +1930,7 @@ impl WmDesk {
         // Chrome may still be morphing, but its intermediate border/taskbar
         // dimensions must never become another child resize request.
         // A compact window is configured at its compact size, 1:1.
-        let settled_child = self.settled_child_rect(target, cfg_compact || self.own_chrome.contains(&client), spanned, grouped, dpi);
+        let settled_child = self.settled_child_rect(target, cfg_compact || self.draws_own_chrome(client), spanned, grouped, dpi);
         if !self.minimized.contains(&client) {
             if let Some(state) = scope.data.get_mut::<WmState>() {
                 state.tile_origins.insert(
@@ -1903,6 +1948,7 @@ impl WmDesk {
             .data
             .get_mut::<WmState>()
             .is_some_and(|s| s.history.holds_resize(crate::host::now()));
+        let live_resize = scope.data.get_mut::<WmState>().is_some_and(|s| s.live_resize);
         if let Some(item) = self.item(cx, client) {
             with_tile_host(&item, |view| {
                 // Minimize only changes the compositor quad. Reconfiguring the
@@ -1910,6 +1956,8 @@ impl WmDesk {
                 if !self.minimized.contains(&client) && !scrubbing {
                     view.set_target_size(Some(settled_child.size));
                 }
+                view.set_live_resize(live_resize);
+                view.set_fullscreen(spanned);
                 view.set_close_crop(None);
                 view.set_fade(fade as f32);
             });
@@ -2173,7 +2221,7 @@ impl WmDesk {
         let mut h = std::collections::hash_map::DefaultHasher::new();
         (rect.pos.x.to_bits(), rect.pos.y.to_bits(), rect.size.x.to_bits(), rect.size.y.to_bits(), (focus * 1000.0) as i32, (fade * 1000.0) as i32).hash(&mut h);
         (self.titles.get(&client), self.chrome_hover.filter(|(c, _)| *c == client).map(|(_, hit)| format!("{hit:?}")), self.chrome_pressed.filter(|(c, _)| *c == client).map(|(_, hit)| format!("{hit:?}"))).hash(&mut h);
-        (std::mem::discriminant(&self.style.target), self.style.dark, self.spanned_tiles.contains(&client), std::mem::discriminant(&self.skin), self.own_chrome.contains(&client), dpi.to_bits()).hash(&mut h);
+        (std::mem::discriminant(&self.style.target), self.style.dark, self.spanned_tiles.contains(&client), std::mem::discriminant(&self.skin), self.draws_own_chrome(client), dpi.to_bits()).hash(&mut h);
         // Everything the capture is made of but the client's frame: when only
         // the frame differs, the client's dirty region is all that does.
         let base = h.clone().finish();
@@ -2187,20 +2235,22 @@ impl WmDesk {
     /// drawn yet is never hidden, and a hidden one must stay unseen for
     /// `HIDE_AFTER_SECS` first, so a window flicking past does not stop and
     /// restart its child. Parked windows are visible.
-    fn update_visibility(&mut self, cx: &mut Cx, glass: bool, mobile: bool) {
+    fn update_visibility(&mut self, cx: &mut Cx, mobile: bool) {
         let now = crate::host::now();
         let drawn: HashSet<ClientId> = self.zorder.iter().copied().collect();
         let settled = |a: &TileAnim| a.close_t.is_none() && a.popin() == (1.0, 1.0) && a.move_t() >= 1.0;
         let mut unseen: HashSet<ClientId> = HashSet::new();
         for (i, client) in self.zorder.iter().enumerate() {
             let gone = self.minimized.contains(client) && !self.dock_warps.get(client).is_some_and(DockWarp::active);
-            let covered = !glass && self.anims.get(client).is_some_and(|me| {
-                !self.warp.pose_for(*client, me.cur).displaced() && self.zorder[i + 1..].iter().any(|over| {
+            // Fully covered by the windows above it (one or several together) is unseen: the
+            // app gets no frames until it shows again. With glass the desk blurs what lies
+            // behind a window; a covered window's last frame is what it shows there.
+            let covered = self.anims.get(client).is_some_and(|me| {
+                if self.warp.pose_for(*client, me.cur).displaced() { return false; }
+                let over: Vec<LRect> = self.zorder[i + 1..].iter().filter(|over| {
                     !self.minimized.contains(over) && !self.dock_warps.contains_key(over)
-                        && self.anims.get(over).is_some_and(|a| {
-                            settled(a) && !self.warp.pose_for(*over, a.cur).displaced() && lrect_contains(a.cur, me.cur)
-                        })
-                })
+                }).filter_map(|over| self.anims.get(over).filter(|a| settled(a) && !self.warp.pose_for(*over, a.cur).displaced()).map(|a| a.cur)).collect();
+                covered_by_union(me.cur, &over)
             });
             if gone || covered {
                 unseen.insert(*client);
@@ -2209,6 +2259,10 @@ impl WmDesk {
         if !mobile {
             unseen.extend(self.items.keys().filter(|c| !drawn.contains(c)).copied());
         }
+        // An app with several windows hides only when every one of them is unseen.
+        let owner = |c: &ClientId| self.window_owners.get(c).copied().unwrap_or(*c);
+        let seen_apps: HashSet<ClientId> = self.items.keys().filter(|c| !unseen.contains(c)).map(owner).collect();
+        unseen.retain(|c| !seen_apps.contains(&owner(c)));
         let clients: Vec<ClientId> = self.items.keys().copied().collect();
         for client in clients {
             let want_hidden = unseen.contains(&client);
@@ -2288,7 +2342,7 @@ impl WmDesk {
             self.send_parked(cx, client, &msg);
         }
         let cfg = pose.and(self.warp.compact_config_rect(client, target));
-        let child = self.settled_child_rect(cfg.unwrap_or(target), cfg.is_some() || self.own_chrome.contains(&client), spanned, self.group_tabs.contains_key(&client), dpi);
+        let child = self.settled_child_rect(cfg.unwrap_or(target), cfg.is_some() || self.draws_own_chrome(client), spanned, self.group_tabs.contains_key(&client), dpi);
         let ready = self
             .items
             .get(&client)
@@ -2356,14 +2410,14 @@ impl WmDesk {
         }
     }
     /// A client says it draws its own chrome (or stopped).
+    /// A domain app ended (`own` false: its card gets the desk's title bar) or runs again.
     pub(crate) fn set_own_chrome(&mut self, cx: &mut Cx, client: ClientId, own: bool) {
-        if self.domain_clients.contains(&client) && self.own_chrome.contains(&client) == own { return; }
-        if own { self.own_chrome.insert(client); } else { self.own_chrome.remove(&client); }
-        self.with_run_view(cx, client, |_, v| v.set_own_chrome(own));
+        if self.draws_own_chrome(client) == own { return; }
+        if own { self.desk_chrome.remove(&client); } else { self.desk_chrome.insert(client); }
         if self.domain_clients.contains(&client) {
             self.with_domain_view(cx, client, |_, v| v.set_own_chrome(own));
-            self.redraw(cx);
         }
+        self.redraw(cx);
     }
     /// The pose of a visible window (None when it is not drawn).
     pub(crate) fn warp_pose(&self, client: ClientId) -> Option<Pose> {
@@ -2391,7 +2445,7 @@ impl WmDesk {
     }
     /// The fullscreen window shown now whose caption is the WM's (plain).
     fn fullscreen_plain_client(&self) -> Option<ClientId> {
-        self.zorder.iter().rev().copied().find(|c| self.spanned_tiles.contains(c) && !self.own_chrome.contains(c) && !self.minimized.contains(c))
+        self.zorder.iter().rev().copied().find(|c| self.spanned_tiles.contains(c) && !self.draws_own_chrome(*c) && !self.minimized.contains(c))
     }
     /// An event started something that moves: the clock of the animation
     /// loop starts now, so its first step is one frame, not the time since
@@ -2480,7 +2534,7 @@ impl WmDesk {
     }
     /// The app draws its own caption (`own_chrome.rs`).
     pub fn draws_own_chrome(&self, client: ClientId) -> bool {
-        self.own_chrome.contains(&client)
+        !self.wayland_clients.contains(&client) && !self.module_clients.contains(&client) && !self.desk_chrome.contains(&client)
     }
     pub fn chrome_button_rect(&self, client: ClientId, hit: ChromeHit) -> Option<Rect> {
         self.title_hits.iter().rev().find(|(c,_,h)|*c==client && *h==hit).map(|(_,r,_)|*r)
@@ -2717,6 +2771,8 @@ impl Widget for WmDesk {
             vec![(state.screens.active, area)]
         };
         self.warp.mode = state.warp.mode;
+        state.warp.tiling = !state.style.target.floating();
+        self.warp.tiling = state.warp.tiling;
         self.warp.parked = state.screens.screens.iter().flat_map(|s| s.layout.desktop.windows.iter().filter(|w| w.warped).map(|w| w.client)).collect();
         // The pull-out in progress (kept in the shared state by the drag): its
         // growing pose is what the window is drawn and hit at.
@@ -2734,7 +2790,7 @@ impl Widget for WmDesk {
             self.warp.set_hidden(*area, hidden);
         }
         self.refresh_swell();
-        state.backdrop.classic = self.warp.mode == crate::spacewarp::Mode::Classic;
+        state.backdrop.classic = !self.warp.shelves_on();
         state.backdrop.set_warp(match (self.warp.first_zones(), shown.first()) {
             (Some(z), _) => crate::backdrop::WarpUniforms::from_zones(&z),
             (None, Some((_, a))) => crate::backdrop::WarpUniforms::flat(a),
@@ -3041,8 +3097,8 @@ impl Widget for WmDesk {
         }
         self.draw_shelf_pulse(cx);
         self.draw_fullscreen_caption(cx);
-        let (glass, mobile) = (self.style.weights[1] > 0.001, self.style.target.mobile());
-        self.update_visibility(cx, glass, mobile);
+        let mobile = self.style.target.mobile();
+        self.update_visibility(cx, mobile);
         let vr_lens = vr_plan.and_then(|plan| self.draw_vr(cx, scope, plan, &borders));
         // The strip and the cheat sheet are above everything.
         self.draw_strip(cx, scope);
@@ -3113,7 +3169,7 @@ impl Widget for WmDesk {
         }
         // While a slide runs the spaces are pictures: nothing under the
         // pointer can be clicked.
-        if matches!(event, Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_))
+        if matches!(event, Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_) | Event::Pinch(_))
             && scope.data.get_mut::<WmState>().is_some_and(|s| s.spaces.slides.any())
         {
             return;
@@ -3220,7 +3276,7 @@ impl Widget for WmDesk {
         // makes the actually-topmost widget claim it instead; anything not
         // in `zorder` (a hidden workspace's tiles) is offered last, same
         // as before.
-        let input=matches!(event,Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_) | Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
+        let input=matches!(event,Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_) | Event::Pinch(_) | Event::KeyDown(_) | Event::KeyUp(_) | Event::TextInput(_));
         let mut items: Vec<WidgetRef> = self
             .zorder
             .iter()
@@ -3241,7 +3297,7 @@ impl Widget for WmDesk {
                 cx.redraw_area(self.area);
             }
         }
-        if matches!(event, Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_)) {
+        if matches!(event, Event::MouseDown(_) | Event::MouseUp(_) | Event::MouseMove(_) | Event::Scroll(_) | Event::Pinch(_)) {
             let order: Vec<(ClientId, Rect)> = self.zorder.iter().rev()
                 .filter(|c| !self.minimized.contains(c) && !self.dock_warps.get(c).is_some_and(DockWarp::active))
                 .filter_map(|c| self.anims.get(c).map(|a| (*c, Self::lrect_to_rect(a.cur)))).collect();
@@ -3254,9 +3310,14 @@ impl Widget for WmDesk {
         }
         // Scroll is NOT a captured hit: every area containing the point
         // receives it, so a wheel over a float would also scroll the tile
-        // underneath. Deliver a scroll only to the TOPMOST window under
-        // the pointer.
-        if let Event::Scroll(e) = event {
+        // underneath. Deliver a scroll (or pinch) only to the TOPMOST
+        // window under the pointer.
+        let wheel_at = match event {
+            Event::Scroll(e) => Some(e.abs),
+            Event::Pinch(e) => Some(e.abs),
+            _ => None,
+        };
+        if let Some(abs) = wheel_at {
             let top = self
                 .zorder
                 .iter()
@@ -3264,7 +3325,7 @@ impl Widget for WmDesk {
                 .find(|c| {
                     !self.minimized.contains(c) && self.anims
                         .get(c)
-                        .map(|a| Self::lrect_to_rect(a.cur).contains(e.abs))
+                        .map(|a| Self::lrect_to_rect(a.cur).contains(abs))
                         .unwrap_or(false)
                 })
                 .copied();
@@ -3679,6 +3740,22 @@ mod tests {
         assert!(lrect_contains(outer, outer));
         assert!(!lrect_contains(outer, LRect::new(60.0, 10.0, 50.0, 50.0)));
         assert!(!lrect_contains(LRect::new(10.0, 10.0, 50.0, 50.0), outer));
+    }
+
+    /// A window under others is unseen only when they cover all of it, together: one
+    /// window over it, two side by side over it, but not with a sliver left showing.
+    #[test]
+    fn a_window_is_covered_only_when_every_part_is_under_others() {
+        let me = LRect::new(100.0, 100.0, 400.0, 300.0);
+        assert!(!covered_by_union(me, &[]));
+        assert!(covered_by_union(me, &[LRect::new(0.0, 0.0, 1000.0, 800.0)]), "a maximised window over it");
+        let left = LRect::new(50.0, 50.0, 260.0, 400.0);
+        let right = LRect::new(300.0, 80.0, 300.0, 400.0);
+        assert!(covered_by_union(me, &[left, right]), "two windows together");
+        assert!(!covered_by_union(me, &[left]), "one half still shows");
+        let short = LRect::new(300.0, 80.0, 300.0, 300.0); // ends at y 380, me ends at 400
+        assert!(!covered_by_union(me, &[left, short]), "a 20 pt strip at the bottom still shows");
+        assert!(!covered_by_union(me, &[LRect::new(600.0, 600.0, 100.0, 100.0)]), "not overlapping");
     }
 
     #[test]

@@ -466,6 +466,7 @@ pub struct MenuModel {
     /// Touchpad scrolling moves the content with the fingers (the Theme
     /// menu's check row).
     pub natural_scroll: bool,
+    pub tap_to_click: bool,
     /// `Some(dark)` when the current style has a dark variant: the Theme
     /// menu then offers the appearance row.
     pub dark_choice: Option<bool>,
@@ -488,6 +489,7 @@ impl Default for MenuModel {
             dock_rest: Vec::new(),
             dock_autohide: false,
             natural_scroll: true,
+            tap_to_click: false,
             warp_shelves: true,
             shelf_autohide: [false; 2],
             dark_choice: None,
@@ -579,6 +581,9 @@ impl MenuModel {
             if cfg!(target_os = "linux") {
                 let mut row = MenuItem::new("desktop.natural-scroll", "Natural scrolling", MenuKind::Action).divided();
                 row.checked = self.natural_scroll;
+                items.push(row);
+                let mut row = MenuItem::new("desktop.tap-to-click", "Tap to click", MenuKind::Action);
+                row.checked = self.tap_to_click;
                 items.push(row);
             }
         }

@@ -32,7 +32,7 @@ use crate::host;
 use makepad_widgets::makepad_platform::thread::{SignalToUI, TaskPool, ThreadSpawner, ThreadOptions};
 
 use makepad_app_host::ClientId;
-use makepad_app_registry::{AppLaunch, BuildPolicy, LaunchEvent, ProcessOutput};
+use makepad_app_registry::{AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchPolicy {
@@ -261,6 +261,7 @@ pub fn word_match(haystack: &str, pattern: &str) -> bool {
 /// `sheet` with the own artwork (`<dir>/resources/icon.svg`) of every registry app the
 /// style has no bundled icon for (Stage, an app added later): the dock, the taskbars and
 /// the launcher draw the app's icon, not the generic one. Children get it with the sheet.
+#[cfg_attr(target_arch = "wasm32", allow(unused_mut))] // the web has no registry dirs to read artwork from
 pub fn with_app_artwork(mut sheet: makepad_widgets::desktop_style::StyleSheet) -> makepad_widgets::desktop_style::StyleSheet {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(root) = repo_root() {
@@ -482,6 +483,10 @@ impl WarmPool {
     /// Retire only unused browsers on a light/dark change. Removing them
     /// from the adoption pool is immediate; the host closes their processes
     /// and refills after they exit. Deliberate retirement is not a crash.
+    /// The dark/light the WM gives browsers and apps (None before the first).
+    pub fn browser_appearance(&self) -> Option<bool> {
+        self.browser_dark
+    }
     pub fn set_browser_appearance(&mut self, dark: bool) -> Vec<ClientId> {
         let previous = self.browser_dark.replace(dark);
         if previous.is_some_and(|previous| previous != dark) {
@@ -656,8 +661,12 @@ pub struct ClientSlot {
     pub closing: Option<f64>,
     /// The aichat child seated in the AI pane: not in the layout, no tile.
     pub pane: bool,
-    /// Registered through wm-start; its launcher owns the process.
+    /// Came to the WM by itself through its socket (adopt.rs): its launcher owns the
+    /// process, and the tile ends when its hub socket closes.
     pub external: bool,
+    /// One of an app's later windows (`client_windows.rs`): the app's client. No process
+    /// of its own; its sender is the app's.
+    pub parent: Option<ClientId>,
 }
 
 impl ClientSlot {
@@ -690,11 +699,33 @@ impl ClientSlot {
             closing: None,
             pane: false,
             external: false,
+            parent: None,
         }
+    }
+
+    /// The slot of `window_id`, a later window of the app in `owner` (client `parent`):
+    /// a window on the desk with the app's sender and no process.
+    pub fn later_window(id: ClientId, parent: ClientId, owner: &ClientSlot, window_id: usize) -> ClientSlot {
+        let mut slot = ClientSlot::module(id, &owner.app, owner.display_title());
+        slot.sender = owner.sender.clone();
+        slot.window_id = window_id;
+        slot.ground = owner.ground;
+        slot.parent = Some(parent);
+        slot
     }
 }
 
 impl ClientSlot {
+    /// The slot of an app the WM socket admitted: a window like a launched one, without a
+    /// process handle (adopt.rs).
+    pub fn adopted(id: ClientId, app: &str) -> ClientSlot {
+        let mut slot = ClientSlot::module(id, app, "");
+        slot.ready = false;
+        slot.external = true;
+        slot.status = "starting…".into();
+        slot
+    }
+
     pub fn display_title(&self) -> &str {
         if self.title.is_empty() {
             &self.app
@@ -766,7 +797,13 @@ fn spawn_process(
     // Both streams are piped so a reader thread can put the newest line on
     // the tile — cargo talks on stderr.
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    // A client (or its build) never outlives the WM: it ends when the WM's UI thread, the one
+    // spawning it, goes (quit, crash or kill), as app_host's hosted children do.
+    #[cfg(target_os = "linux")]
+    makepad_app_host::launch::exit_with_parent(&mut cmd);
     let mut child = cmd.spawn().map_err(|e| format!("spawn {what}: {e}"))?;
+    #[cfg(windows)]
+    makepad_app_host::launch::exit_with_parent(&child);
     // Child output goes to a per-client log — silent children are
     // undebuggable — and every line also reaches the UI.
     let log = std::fs::File::create(&log_path).ok();
@@ -814,6 +851,7 @@ fn client_slot(pool: &TaskPool, id: ClientId, app: &AppDef, child: Child, warm: 
         closing: None,
         pane: false,
         external: false,
+        parent: None,
     }
 }
 
@@ -840,8 +878,8 @@ pub fn spawn_client(
 ) -> Result<ClientSlot, String> {
     let entry = makepad_app_registry::find(&app.id).ok_or_else(|| format!("unknown app: {}", app.id))?;
     let extra = app.args.iter().chain(extra_args).cloned().collect();
-    let (launch, child) = AppLaunch::start(entry, repo_root(), extra, policy, |cmd, build| {
-        spawn_for_client(pool, spawner, id, &app.bin, cwd, term_colors, warm, hub_port, cmd, build, lines.clone())
+    let (launch, child) = AppLaunch::start(entry, repo_root(), extra, policy, false, |cmd, kind| {
+        spawn_for_client(pool, spawner, id, &app.bin, cwd, term_colors, warm, hub_port, cmd, kind, lines.clone())
     })?;
     let mut slot = client_slot(pool, id, app, child, warm);
     slot.status = launch.status().to_string();
@@ -861,17 +899,24 @@ fn spawn_for_client(
     warm: bool,
     hub_port: u16,
     mut cmd: Command,
-    build: bool,
+    kind: LaunchKind,
     lines: Sender<ClientLine>,
 ) -> Result<Child, String> {
-    if build {
+    if kind == LaunchKind::Build {
         return spawn_process(pool, spawner, id, client_log(id, true), cmd, bin, lines);
     }
+    // The app, or `cargo run` of it (cargo's progress on the tile, then the app): the
+    // app's environment either way.
     // The hub environment, and the child as its own process group.
     makepad_app_host::launch::configure(&mut cmd, hub_port, id, bin);
     // The app owns any controls it embeds in its caption. Keep that content
     // inside the tile; the WM still supplies the outer window decorations.
     cmd.env("MAKEPAD_WM_CAPTION_CONTENT", "1");
+    // The WM draws the app's file and folder pickers (shell/file_picker.rs): a hosted
+    // app on Linux has no display of its own to open a system one on. Elsewhere the
+    // app keeps its system dialogs.
+    #[cfg(target_os = "linux")]
+    cmd.env(makepad_widgets::makepad_platform::hosted_relay::HOST_FILE_DIALOGS_ENV, "1");
     if let Some(cwd) = cwd {
         // The terminal's Omarchy behavior: open where the focused one is.
         cmd.arg("--cwd").arg(cwd);
@@ -913,9 +958,9 @@ impl ClientSlot {
         let cwd = self.launch_cwd.as_ref();
         let warm = self.warm;
         let pool = self.task_pool.as_ref().ok_or("no task pool for the client")?;
-        launch.poll(&mut self.child, |cmd, build| {
+        launch.poll(&mut self.child, |cmd, kind| {
             let entry = makepad_app_registry::find(app).ok_or_else(|| format!("unknown app: {app}"))?;
-            spawn_for_client(pool, spawner, id, entry.bin, cwd, term_colors, warm, hub_port, cmd, build, lines.clone())
+            spawn_for_client(pool, spawner, id, entry.bin, cwd, term_colors, warm, hub_port, cmd, kind, lines.clone())
         })
     }
 }
@@ -1059,6 +1104,7 @@ mod tests {
                 "Task Manager",
                 "Sheets",
                 "Photos",
+                "Camera",
                 "Clock",
                 "Weather",
                 "Translator",
@@ -1075,6 +1121,7 @@ mod tests {
                 "Fab",
                 "Scope",
                 "Stage",
+                "Sandbox",
             ]
             .map(str::to_string)
         );
@@ -1413,7 +1460,11 @@ mod tests {
 impl Drop for ClientSlot {
     fn drop(&mut self) {
         // Ask the app to go first over its own socket (it may be a wrapper's
-        // child), then reap the process we hold.
+        // child), then reap the process we hold. A later window's slot holds the
+        // app's sender: it never ends the app.
+        if self.parent.is_some() {
+            return;
+        }
         if let Some(sender) = self.sender.take() {
             makepad_app_host::send_to_app(
                 &sender,

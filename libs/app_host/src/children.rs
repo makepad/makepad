@@ -21,19 +21,15 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use makepad_app_registry::{AppEntry, AppLaunch, BuildPolicy, LaunchEvent, ProcessOutput};
+use makepad_app_registry::{AppEntry, AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput};
 use makepad_error_log::log;
 use makepad_platform::thread::{SignalToUI, TaskHandle, TaskPool, ThreadOptions, ThreadSpawner};
 use makepad_platform::*;
-use makepad_studio_protocol::{AppToStudio, StudioToApp};
+use makepad_studio_protocol::{AppToStudio, ChildRelay, HostRelay, StudioToApp};
 
 use crate::hub::{AppHub, ClientId, HubEvent};
 use crate::launch;
 use crate::{Clock, HostedApp};
-
-/// The beat the hub and the hosted apps are pumped on when no event of
-/// theirs wakes the loop (seconds).
-const BEAT: f64 = 0.016;
 
 /// The windows of one multi-window child are this far apart in its window
 /// space, so the child's hit test tells them apart.
@@ -154,9 +150,6 @@ pub struct Slot<K, X> {
     pub born: f64,
     /// Its scratch folder: the logs, and the home of a `Home::Scratch` child.
     pub folder: PathBuf,
-    /// Its binary was built from other protocol sources than this host
-    /// (it stated another wire): it is being rebuilt, once.
-    pub rebuilt_stale: bool,
     /// What the owner keeps per slot.
     pub extra: X,
 }
@@ -249,10 +242,14 @@ pub struct Children<K, X> {
     next_client: ClientId,
     /// Each slot's folder is `<scratch>/<client>-<label>`.
     scratch: PathBuf,
-    timer: Option<Timer>,
+    /// The owner's one-shot wake (`wake_at`): when it fires the hub is
+    /// pumped like on a signal. Nothing else is timed.
+    wake: Option<(Timer, f64)>,
     output_tx: Sender<(ClientId, ProcessOutput)>,
     output_rx: Receiver<(ClientId, ProcessOutput)>,
     events: Vec<ChildEvent<K>>,
+    /// Clipboard reads the children asked the host for: host read id -> (client, the child's id).
+    clipboard_reads: HashMap<u64, (ClientId, u64)>,
 }
 
 impl<K: Clone + PartialEq, X> Children<K, X> {
@@ -270,10 +267,11 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
             sockets: HashMap::new(),
             next_client: 1,
             scratch,
-            timer: None,
+            wake: None,
             output_tx,
             output_rx,
             events: Vec::new(),
+            clipboard_reads: HashMap::new(),
         }
     }
 
@@ -330,7 +328,6 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
             sender: None,
             born: Cx::monotonic_now(),
             folder,
-            rebuilt_stale: false,
             extra,
         });
         self.slots.last_mut().unwrap()
@@ -358,7 +355,6 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
         }
         self.events.push(ChildEvent::Changed(slot.key.clone()));
         self.slots.insert(at, slot);
-        self.update_beat(cx);
     }
 
     fn spawn(&mut self, cx: &mut Cx, slot: &mut Slot<K, X>, policy: BuildPolicy) -> Result<Child, String> {
@@ -377,8 +373,8 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
         let pool = self.pool.clone();
         let output = self.output_tx.clone();
         let (spec, folder, client) = (&slot.spec, &slot.folder, slot.client);
-        let (pending, child) = AppLaunch::start(entry, makepad_app_registry::repo_root(), spec.args.clone(), policy, |cmd, building| {
-            spawn_process(&spawner, &pool, spec, folder, client, port, entry.bin, cmd, building, output.clone())
+        let (pending, child) = AppLaunch::start(entry, makepad_app_registry::repo_root(), spec.args.clone(), policy, slot.hold_build, |cmd, kind| {
+            spawn_process(&spawner, &pool, spec, folder, client, port, entry.bin, cmd, kind, output.clone())
         })?;
         slot.life = if pending.is_building() { Life::Building } else { Life::Starting };
         slot.launch = Some(pending);
@@ -410,8 +406,7 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
             }
             self.closing.push(Closing { label: slot.label.clone(), child: Some(child), reaper: None, busy_logged: false, folder: slot.folder.clone() });
         }
-        self.poll_closing();
-        self.update_beat(cx);
+        self.retry_closing(cx);
     }
 
     /// Quit every child.
@@ -420,12 +415,21 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
         for key in all {
             self.quit(cx, &key);
         }
-        if let Some(timer) = self.timer.take() {
+        if let Some((timer, _)) = self.wake.take() {
             cx.stop_timer(timer);
         }
     }
 
-    fn poll_closing(&mut self) {
+    fn retry_closing(&mut self, cx: &mut Cx) {
+        if self.poll_closing() {
+            self.wake_at(cx, Cx::monotonic_now() + 0.05);
+        }
+    }
+
+    /// True when a reaper could not start (the pool is busy): the owner
+    /// of the pump retries a moment later.
+    fn poll_closing(&mut self) -> bool {
+        let mut busy = false;
         self.closing.retain(|closing| !closing.reaper.as_ref().is_some_and(TaskHandle::is_finished));
         for closing in &mut self.closing {
             let Some(child) = closing.child.take() else { continue };
@@ -438,31 +442,30 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
                     }
                     closing.busy_logged = true;
                     closing.child = Some(child);
+                    busy = true;
                 }
             }
         }
+        busy
     }
 
-    /// The beat runs while some child is starting or running; children
-    /// held at 0 fps leave the loop asleep until the hub's signal.
-    pub fn update_beat(&mut self, cx: &mut Cx) {
-        let needed = !self.closing.is_empty()
-            || self.slots.iter().any(|slot| {
-                matches!(slot.life, Life::Ready | Life::Building | Life::Starting | Life::Live)
-                    && (!slot.hosted.throttled() || !slot.hosted.presenting())
-            });
-        match (needed, self.timer) {
-            (true, None) => self.timer = Some(cx.start_interval(BEAT)),
-            (false, Some(timer)) => {
-                cx.stop_timer(timer);
-                self.timer = None;
-            }
-            _ => {}
+    /// Pump the hub once at monotonic time `at` (an owner's deadline: a
+    /// settle delay, a held build's release). One wake is kept, the
+    /// earliest; the owner arms the next after it fired. Everything else
+    /// wakes the loop by a signal: a child's message or frame, the end of
+    /// a build or of a process, a finished reaper.
+    pub fn wake_at(&mut self, cx: &mut Cx, at: f64) {
+        match self.wake {
+            Some((_, due)) if due <= at => return,
+            Some((timer, _)) => cx.stop_timer(timer),
+            None => {}
         }
+        self.wake = Some((cx.start_timeout((at - Cx::monotonic_now()).max(0.0)), at));
     }
 
     /// Every event: the hosted windows' own beats, and the hub's messages
-    /// when it is woken (its signal, or this beat). True when the loop beat.
+    /// when it is woken (a signal, or the owner's `wake_at`). True when the
+    /// hub was pumped.
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
         for slot in &mut self.slots {
             // A window that does not pace hands its wish for a frame to
@@ -474,21 +477,39 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
                 hosted.handle_event(cx, event);
             }
         }
+        // the host clipboard's answer to a child's read
+        if let Event::Clipboard(e) = event {
+            if let Some((client, request_id)) = self.clipboard_reads.remove(&e.request) {
+                let png = match &e.content.image {
+                    Some(makepad_platform::clipboard_read::ClipboardImage::Png(png)) => png.to_vec(),
+                    _ => Vec::new(),
+                };
+                let text = e.content.text.clone().unwrap_or_default();
+                if let Some(slot) = self.slots.iter_mut().find(|slot| slot.client == client) {
+                    slot.hosted.send(vec![StudioToApp::Relay(HostRelay::Clipboard { request_id, text, png })]);
+                }
+            }
+        }
         let beat = match event {
-            Event::Timer(timer) => self.timer.is_some_and(|beat| beat.is_timer(timer).is_some()),
+            Event::Timer(timer) => {
+                let fired = self.wake.is_some_and(|(wake, _)| wake.is_timer(timer).is_some());
+                if fired {
+                    self.wake = None;
+                }
+                fired
+            }
             Event::Signal => true,
             _ => false,
         };
         if beat {
             self.pump(cx);
-            self.update_beat(cx);
         }
         self.flush();
         beat
     }
 
     fn pump(&mut self, cx: &mut Cx) {
-        self.poll_closing();
+        self.retry_closing(cx);
         while let Some(event) = self.hub.as_ref().and_then(|hub| hub.rx.try_recv().ok()) {
             match event {
                 HubEvent::Connected { client, socket, sender } => {
@@ -508,7 +529,7 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
                 HubEvent::FromApp { client, msgs } => {
                     let Some(slot) = self.slots.iter_mut().find(|slot| slot.client == client) else { continue };
                     for msg in msgs {
-                        route(cx, slot, client, msg, &mut self.events);
+                        route(cx, slot, client, msg, &mut self.events, &mut self.clipboard_reads);
                     }
                 }
             }
@@ -532,9 +553,9 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
             let hold = slot.hold_build;
             let Some(pending) = slot.launch.as_mut().filter(|pending| !pending.is_building() || !hold) else { continue };
             let (spec, folder, client) = (&slot.spec, &slot.folder, slot.client);
-            let polled = pending.poll(&mut slot.child, |cmd, building| {
+            let polled = pending.poll(&mut slot.child, |cmd, kind| {
                 let entry = registry_entry(&spec.app).ok_or_else(|| format!("unknown hosted app: {}", spec.app))?;
-                spawn_process(&spawner, &self.pool, spec, folder, client, port, entry.bin, cmd, building, self.output_tx.clone())
+                spawn_process(&spawner, &self.pool, spec, folder, client, port, entry.bin, cmd, kind, self.output_tx.clone())
             });
             match polled {
                 Ok(Some(LaunchEvent::Started)) => {
@@ -568,11 +589,11 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
         }
     }
 
-    /// The child of `client` was built from other protocol sources than this
-    /// host (`wire`: what it stated): it would hang in its first steps. It
-    /// is stopped, and rebuilt from this checkout once when its policy
-    /// allows; otherwise, or when the rebuilt binary still states another
-    /// wire, the slot says so.
+    /// The child of `client` was built from other protocol sources than this host (`wire`:
+    /// what it stated): it would hang in its first steps. It is stopped and the slot says
+    /// why. From a checkout a child is started with `cargo run`, so it is built from this
+    /// host's sources; a mismatch is a binary from elsewhere (an installation of another
+    /// version), which a rebuild here would not fix.
     fn stale(&mut self, cx: &mut Cx, client: ClientId, wire: Option<u64>) {
         let Some(at) = self.slots.iter().position(|slot| slot.client == client && matches!(slot.life, Life::Starting | Life::Live)) else { return };
         let mut slot = self.slots.remove(at);
@@ -590,23 +611,10 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
             hosted.clear_run_target(cx);
         }
         slot.windows.clear();
-        match stale_verdict(&label, slot.rebuilt_stale, slot.spec.policy, makepad_app_registry::repo_root().is_some()) {
-            StaleVerdict::Rebuild => {
-                slot.rebuilt_stale = true;
-                match self.spawn(cx, &mut slot, BuildPolicy::Rebuild) {
-                    Ok(child) => {
-                        log!("{} {}: rebuilding pid {}", self.name, slot.label, child.id());
-                        slot.child = Some(child);
-                    }
-                    Err(why) => slot.life = Life::Missing(why),
-                }
-            }
-            StaleVerdict::Fail(why) => slot.life = Life::Missing(why),
-        }
+        slot.life = Life::Missing(stale_message(&label, makepad_app_registry::repo_root().is_some()));
         self.events.push(ChildEvent::Changed(slot.key.clone()));
         self.slots.insert(at, slot);
-        self.poll_closing();
-        self.update_beat(cx);
+        self.retry_closing(cx);
     }
 
     /// Send what the hosted windows queued.
@@ -633,8 +641,16 @@ impl<K: Clone + PartialEq, X> Children<K, X> {
 }
 
 /// Route one message of a child to the window it is for.
-fn route<K: Clone, X>(cx: &mut Cx, slot: &mut Slot<K, X>, client: ClientId, msg: AppToStudio, events: &mut Vec<ChildEvent<K>>) {
+fn route<K: Clone, X>(cx: &mut Cx, slot: &mut Slot<K, X>, client: ClientId, msg: AppToStudio, events: &mut Vec<ChildEvent<K>>,
+    clipboard_reads: &mut HashMap<u64, (ClientId, u64)>) {
     match msg {
+        // The children share the host's clipboard: a child's copy is the host's (which, hosted
+        // itself, hands it on to its own host), a child's read is answered from it.
+        AppToStudio::SetClipboard(text) => cx.copy_to_clipboard(&text),
+        AppToStudio::Relay(ChildRelay::SetPrimarySelection { text }) => cx.set_primary_selection(&text),
+        AppToStudio::Relay(ChildRelay::ReadClipboard { request_id }) => {
+            clipboard_reads.insert(cx.read_clipboard(), (client, request_id));
+        }
         AppToStudio::CreateWindow { window_id, .. } => {
             let first = slot.life == Life::Starting;
             let pacer = slot.hosted.target().is_some_and(|target| target.window_id == window_id);
@@ -684,22 +700,12 @@ fn route<K: Clone, X>(cx: &mut Cx, slot: &mut Slot<K, X>, client: ClientId, msg:
     }
 }
 
-/// What becomes of a child built from other protocol sources.
-#[derive(Debug, PartialEq)]
-enum StaleVerdict {
-    /// Build it again from this checkout, then launch it.
-    Rebuild,
-    /// Show this.
-    Fail(String),
-}
-
-fn stale_verdict(label: &str, rebuilt: bool, policy: BuildPolicy, has_checkout: bool) -> StaleVerdict {
-    if rebuilt {
-        StaleVerdict::Fail(format!("{label} still speaks another hosted protocol after a rebuild: its binary is not built from this host's sources"))
-    } else if policy == BuildPolicy::BuiltOnly || !has_checkout {
-        StaleVerdict::Fail(format!("{label} was built for another version of this host (its hosted protocol differs): rebuild it"))
+/// What a child built from other protocol sources than this host is told.
+fn stale_message(label: &str, has_checkout: bool) -> String {
+    if has_checkout {
+        format!("{label} is not built from this checkout's sources (its hosted protocol differs): start it from this checkout")
     } else {
-        StaleVerdict::Rebuild
+        format!("{label} was built for another version of this host (its hosted protocol differs): update it")
     }
 }
 
@@ -797,11 +803,18 @@ fn spawn_process(
     port: u16,
     bin: &str,
     mut command: Command,
-    building: bool,
+    kind: LaunchKind,
     lines: Sender<(ClientId, ProcessOutput)>,
 ) -> Result<Child, String> {
+    let building = kind == LaunchKind::Build;
+    // A build's progress and errors, or cargo's (a `cargo run`) then the app's own log. The
+    // folder is made here, each time: a temp folder can be gone by the time a launch that
+    // waited (a held build, a slide that settled later) opens its log.
+    std::fs::create_dir_all(folder).map_err(|error| format!("{}: {error}", folder.display()))?;
     let log_path = folder.join(if building { "build.log" } else { "app.log" });
     let log_file = std::fs::File::create(&log_path).map_err(|error| format!("{}: {error}", log_path.display()))?;
+    // Output piped to the card: a build's, and a `cargo run`'s (cargo's progress first).
+    let piped = kind != LaunchKind::App;
     command.stdin(Stdio::null());
     #[cfg(unix)]
     launch::own_process_group(&mut command);
@@ -815,9 +828,12 @@ fn spawn_process(
     } else {
         command
             .envs(spec.env.iter().map(|(key, value)| (key, expand_home(value))))
-            .env("MAKEPAD_HIDE_WINDOWS", "1")
-            .stdout(Stdio::null())
-            .stderr(log_file.try_clone().map_err(|error| error.to_string())?);
+            .env("MAKEPAD_HIDE_WINDOWS", "1");
+        if piped {
+            command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        } else {
+            command.stdout(Stdio::null()).stderr(log_file.try_clone().map_err(|error| error.to_string())?);
+        }
         if spec.home == Home::Scratch {
             let home = folder.join("home");
             command.env("SANDBOX_HOME", &home).env("MAKEPAD_HOME", &home);
@@ -831,12 +847,17 @@ fn spawn_process(
         launch::exit_with_parent(&mut command);
     }
     let mut child = command.spawn().map_err(|error| format!("launch {bin}: {error}"))?;
+    // Its end wakes the loop (a build finishing, an app dying before it connected).
+    if let Err(why) = launch::signal_on_exit(spawner, &child, format!("app-{client}-exit")) {
+        launch::reap_child_group(child, launch::GROUP_KILL_GRACE, pool);
+        return Err(why);
+    }
     // A hosted child never outlives this host: Windows ties it to the host's job here.
     #[cfg(windows)]
     if !building {
         launch::exit_with_parent(&child);
     }
-    if building {
+    if piped {
         let streams: Vec<Box<dyn std::io::Read + Send>> = vec![Box::new(child.stdout.take().unwrap()), Box::new(child.stderr.take().unwrap())];
         for stream in streams {
             let log_file = log_file.try_clone().ok();
@@ -864,21 +885,14 @@ fn spawn_process(
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_with, stale_verdict, window_origin, StaleVerdict};
-    use makepad_app_registry::BuildPolicy;
+    use super::{expand_with, stale_message, window_origin};
 
-    /// A child that states another wire is rebuilt once from the checkout;
-    /// without one, under BuiltOnly, or again after the rebuild, it says so
-    /// (never "starting…" forever).
+    /// A child that states another wire is refused with a clear reason (never "starting…"
+    /// forever, never a rebuild loop).
     #[test]
-    fn a_stale_child_is_rebuilt_once_or_named() {
-        assert_eq!(stale_verdict("Calculator", false, BuildPolicy::IfMissing, true), StaleVerdict::Rebuild);
-        assert_eq!(stale_verdict("Calculator", false, BuildPolicy::Rebuild, true), StaleVerdict::Rebuild);
-        let StaleVerdict::Fail(why) = stale_verdict("Calculator", false, BuildPolicy::BuiltOnly, true) else { panic!() };
-        assert!(why.starts_with("Calculator was built for another version"), "{why}");
-        assert!(matches!(stale_verdict("Calculator", false, BuildPolicy::IfMissing, false), StaleVerdict::Fail(_)));
-        let StaleVerdict::Fail(why) = stale_verdict("Calculator", true, BuildPolicy::IfMissing, true) else { panic!() };
-        assert!(why.contains("after a rebuild"), "{why}");
+    fn a_stale_child_is_named() {
+        assert!(stale_message("Calculator", true).starts_with("Calculator is not built from this checkout"));
+        assert!(stale_message("Calculator", false).starts_with("Calculator was built for another version"));
     }
 
     fn env(name: &str) -> Option<String> {

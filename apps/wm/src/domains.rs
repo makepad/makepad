@@ -206,8 +206,10 @@ impl App {
                         DomainStatus::Exited => format!("exited {}", e.message),
                     };
                     if let Some(slot) = self.state_mut().clients.get_mut(&client) { slot.status = text.clone(); }
-                    if ended && !self.state_mut().clients[&client].pane {
-                        if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() { desk.set_own_chrome(cx, client, false); }
+                    if !self.state_mut().clients[&client].pane {
+                        // A crashed or exited app draws nothing: its card gets the desk's title bar to
+                        // close it by, until the app runs (and draws its own) again.
+                        if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() { desk.set_own_chrome(cx, client, !ended); }
                     }
                     self.with_domain_view(cx, client, |cx, v| {
                         v.set_domain(e.domain);
@@ -265,9 +267,8 @@ impl App {
                     return;
                 }
                 match &e.action {
-                    ChildWindowAction::OwnChrome(own) => {
-                        if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() { desk.set_own_chrome(cx, client, *own); }
-                    }
+                    // Every makepad window draws its own chrome (own_chrome.rs): nothing to hear.
+                    ChildWindowAction::OwnChrome(_) => {}
                     ChildWindowAction::DragAnswer { request, response } => {
                         let start = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut desk|
                             desk.with_domain_view(cx, client, |cx, v| v.take_caption_press(cx, *request, *response)).flatten());

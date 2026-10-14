@@ -30,6 +30,7 @@ fn abs_of(event: &Event) -> Option<Vec2d> {
         Event::MouseMove(e) => Some(e.abs),
         Event::MouseUp(e) => Some(e.abs),
         Event::Scroll(e) => Some(e.abs),
+        Event::Pinch(e) => Some(e.abs),
         _ => None,
     }
 }
@@ -41,6 +42,7 @@ fn with_abs(event: &Event, abs: Vec2d) -> Option<Event> {
         Event::MouseMove(e) => { let mut e = e.clone(); e.abs = abs; Event::MouseMove(e) }
         Event::MouseUp(e) => { let mut e = e.clone(); e.abs = abs; Event::MouseUp(e) }
         Event::Scroll(e) => { let mut e = e.clone(); e.abs = abs; Event::Scroll(e) }
+        Event::Pinch(e) => { let mut e = e.clone(); e.abs = abs; Event::Pinch(e) }
         _ => return None,
     })
 }
@@ -117,24 +119,7 @@ impl App {
             return;
         }
         if mode == Mode::Classic {
-            if let Some(mut desk) = self.desk(cx).borrow_mut::<crate::desk::WmDesk>() {
-                desk.begin_unpark();
-            }
-            let gap = self.state_mut().gap;
-            for screen in 0..self.state_mut().screens.live_count() {
-                let Some(z) = self.warp_zones(cx, screen) else { continue };
-                let area = self.screen_area(cx, screen);
-                let layout = self.state_mut().layout_at(screen);
-                let floats: Vec<(ClientId, LRect)> =
-                    layout.rects(area, gap).into_iter().filter(|(c, _)| layout.is_float(*c) && !layout.is_client_fullscreen(*c)).collect();
-                for (c, r) in floats {
-                    let back = restore_inside(&z, r);
-                    if back != r {
-                        self.state_mut().layout_at_mut(screen).set_float_rect(c, back);
-                    }
-                    self.warp_flag(c, false);
-                }
-            }
+            self.unpark_all(cx);
         }
         let state = self.state_mut();
         state.warp.mode = mode;
@@ -149,6 +134,30 @@ impl App {
             self.apply_background(cx, 0);
         }
         self.redraw_all(cx);
+    }
+
+    /// Every parked window back full size inside its display (Classic, or the desktop
+    /// going to a tiling style, which has no shelves). Call while the shelves are still on:
+    /// the zones say where each parked window is shown.
+    pub(crate) fn unpark_all(&mut self, cx: &mut Cx) {
+        if let Some(mut desk) = self.desk(cx).borrow_mut::<crate::desk::WmDesk>() {
+            desk.begin_unpark();
+        }
+        let gap = self.state_mut().gap;
+        for screen in 0..self.state_mut().screens.live_count() {
+            let Some(z) = self.warp_zones(cx, screen) else { continue };
+            let area = self.screen_area(cx, screen);
+            let layout = self.state_mut().layout_at(screen);
+            let floats: Vec<(ClientId, LRect)> =
+                layout.rects(area, gap).into_iter().filter(|(c, _)| layout.is_float(*c) && !layout.is_client_fullscreen(*c)).collect();
+            for (c, r) in floats {
+                let back = restore_inside(&z, r);
+                if back != r {
+                    self.state_mut().layout_at_mut(screen).set_float_rect(c, back);
+                }
+                self.warp_flag(c, false);
+            }
+        }
     }
 
     /// The saved behaviour, read from the storage (the web's restore).
@@ -747,7 +756,7 @@ impl App {
     /// SUPER+CTRL+`: bring the next parked window of the active display to
     /// the centre (nearest to the centre first, each once per round).
     pub(crate) fn warp_cycle(&mut self, cx: &mut Cx) {
-        if self.state_mut().warp.mode == Mode::Classic {
+        if !self.state_mut().warp.shelves_on() {
             return;
         }
         let focus = self.state_mut().layout().focused_client();
@@ -812,8 +821,9 @@ impl App {
     /// left / right zone; a window parked on the other side comes back to
     /// the band.
     pub(crate) fn warp_park(&mut self, cx: &mut Cx, right: bool) {
-        if self.state_mut().warp.mode == Mode::Classic {
-            self.show_osd(cx, crate::shell::osd::OsdShow::message("Classic desktop: no shelves"));
+        if !self.state_mut().warp.shelves_on() {
+            let message = if self.state_mut().warp.tiling { "Tiling: no shelves" } else { "Classic desktop: no shelves" };
+            self.show_osd(cx, crate::shell::osd::OsdShow::message(message));
             return;
         }
         let Some(client) = self.state_mut().layout().focused_client() else { return };

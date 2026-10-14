@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::{Child, Command as Process, Stdio};
 use makepad_widgets::makepad_platform::foreign_dmabuf::{ForeignDmabuf, ForeignDmabufPlane, ForeignDmabufFence};
-use wayland_server::compositor::{BufferUpdate, DmabufConfig, DmabufFrame, Frame, OutputInfo, Rect as WRect, UiEvent};
+use wayland_server::compositor::{Board, BufferUpdate, DmabufConfig, DmabufFrame, Frame, OutputInfo, Rect as WRect, UiEvent};
 use wayland_server::host::{Command, Host};
 use wayland_server::compositor::xdg::{STATE_ACTIVATED, STATE_TILED_BOTTOM, STATE_TILED_LEFT, STATE_TILED_RIGHT, STATE_TILED_TOP};
 
@@ -54,6 +54,9 @@ struct Shared {
     imports: HashMap<(u32, u32), Texture>,
     releases: Vec<(u32, u32, ForeignDmabufFence)>,
     release_retry: Vec<(u32, u32)>,
+    /// The last text the makepad apps copied (clipboard) and selected (primary), handed to the
+    /// server when it starts: a browser opened after a copy pastes it.
+    selection: [Option<String>; 2],
 }
 
 thread_local! {
@@ -90,6 +93,11 @@ pub fn send(cmd: ViewCmd) {
             ViewCmd::PointerButton { button, pressed } => host_send(s, Command::PointerButton { time: t, button, pressed }),
             ViewCmd::PointerAxis { axis, value, v120 } => host_send(s, Command::PointerAxis { time: t, axis, value, v120 }),
             ViewCmd::Key { evdev, pressed } => host_send(s, Command::Key { time: t, evdev, pressed }),
+            ViewCmd::Selection { primary, text } => {
+                let board = if primary { Board::Primary } else { Board::Clipboard };
+                s.selection[board as usize] = Some(text.clone());
+                host_send(s, Command::SetSelection { board, text });
+            }
             ViewCmd::DismissPopups(client) => {
                 if let Some(win) = s.wins.get(&client) {
                     for (p, _) in win.popups.iter().rev() { host_send(s, Command::DismissPopup(*p)); }
@@ -319,6 +327,14 @@ impl App {
             UiEvent::Mapped { surface } => self.wayland_map(cx, surface),
             UiEvent::Unmapped { surface } => self.wayland_unmapped(cx, surface),
             UiEvent::SurfaceGone { surface } => self.wayland_gone(cx, surface),
+            // A Wayland client copied (selected): the makepad apps paste it from the WM's clipboard.
+            UiEvent::Selection { board, text } => {
+                log!("wm: a wayland client {} {} bytes; the makepad apps paste it", if board == Board::Primary { "selected" } else { "copied" }, text.len());
+                match board {
+                    Board::Clipboard => cx.copy_to_clipboard(&text),
+                    Board::Primary => cx.set_primary_selection(&text),
+                }
+            }
             UiEvent::ClientKilled { client, why } => log!("wm: wayland client {client} was cut off: {why}"),
             UiEvent::PopupNew { surface, parent, rect, .. } => with(|s| {
                 let Some(client) = s.owner.get(&parent).copied() else { return };
@@ -450,6 +466,9 @@ impl App {
                 let output = OutputInfo { width: area.w as i32, height: area.h as i32, ..Default::default() };
                 let dmabuf = dmabuf_config(cx);
                 let host = Host::spawn(&dir, "wayland-wm", output, keymap_layout(), dmabuf, || SignalToUI::set_ui_signal())?;
+                for (board, text) in [Board::Clipboard, Board::Primary].into_iter().zip(s.selection.clone()) {
+                    if let Some(text) = text { host.send(Command::SetSelection { board, text }); }
+                }
                 s.dir = dir;
                 s.host = Some(host);
             }
@@ -460,8 +479,14 @@ impl App {
         };
         let dir = with(|s| s.dir.clone());
         let mut p = Process::new(&program);
+        makepad_app_registry::child_env::scrub(&mut p);
         p.args(&argv[1..]).envs(env).env("WAYLAND_DISPLAY", &socket).env("XDG_RUNTIME_DIR", &dir).env("XDG_SESSION_TYPE", "wayland")
             .env_remove("DISPLAY").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        // A WM started from a console has no session bus address; its apps find the user bus
+        // (and the WM's portal: dark mode, file dialogs) at the standard place.
+        if std::env::var_os("DBUS_SESSION_BUS_ADDRESS").is_none() && dir.join("bus").exists() {
+            p.env("DBUS_SESSION_BUS_ADDRESS", format!("unix:path={}", dir.join("bus").display()));
+        }
         match p.spawn() {
             Ok(child) => { log!("wm: started wayland client '{}' on {}", line, socket); with(|s| s.children.push(child)); }
             Err(e) => log!("wm: cannot start '{}': {}", program, e),

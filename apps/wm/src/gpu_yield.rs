@@ -12,8 +12,10 @@
 //! its chat model grows back to its configured context when the budget allows. Plain state over event times, so it
 //! is tested without a hub or a GPU.
 
-/// Seconds a step is given to show in the device's free memory before the next one.
-pub const SETTLE_S: f64 = 4.0;
+/// Seconds a step is given to show in the device's free memory before the next one: the
+/// hub rebuilding a 27B model at a smaller window takes a few seconds, and the HAL only
+/// repeats a shortage that lasted 4 s.
+pub const SETTLE_S: f64 = 12.0;
 /// Asked for on top of the shortage, so the next allocation does not start it again.
 pub const MARGIN_MB: u64 = 256;
 
@@ -92,12 +94,12 @@ mod tests {
         // repeats while the first step settles: nothing new
         assert_eq!(p.on_pressure(500, 1536, 2.0), None);
         // still short after it settled: the model may go
-        assert_eq!(p.on_pressure(400, 1536, 4.5), Some(Ask { mb: 656, unload: true, reserve_mb: 1536 }));
-        assert_eq!(p.on_pressure(400, 1536, 6.0), None);
+        assert_eq!(p.on_pressure(400, 1536, 12.5), Some(Ask { mb: 656, unload: true, reserve_mb: 1536 }));
+        assert_eq!(p.on_pressure(400, 1536, 14.0), None);
         // still short after that too: nothing more to ask
-        assert_eq!(p.on_pressure(400, 1536, 9.0), None);
+        assert_eq!(p.on_pressure(400, 1536, 25.0), None);
         assert!(p.exhausted());
-        assert_eq!(p.on_pressure(400, 1536, 30.0), None);
+        assert_eq!(p.on_pressure(400, 1536, 60.0), None);
     }
 
     #[test]

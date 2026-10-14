@@ -36,6 +36,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// What a second launch of an app does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,8 +84,9 @@ pub struct AppEntry {
 
 mod table;
 mod launch;
+pub mod child_env;
 
-pub use launch::{cargo_progress, launch_argv, read_output, AppLaunch, BuildPolicy, LaunchEvent, ProcessOutput};
+pub use launch::{cargo_progress, launch_argv, read_output, AppLaunch, BuildPolicy, LaunchEvent, LaunchKind, ProcessOutput};
 
 impl AppEntry {
     /// What the checkout helpers need to know about it.
@@ -103,6 +105,10 @@ pub struct AppTarget<'a> {
     pub bin: &'a str,
     pub manifest: Option<&'a str>,
 }
+
+/// The `makepad` tool that runs apps from source (`makepad run`, tools/run).
+pub const MAKEPAD_RUN: AppTarget<'static> =
+    AppTarget { id: "makepad-run", package: "makepad-run", dir: "tools/run", bin: "makepad", manifest: None };
 
 /// Every app: the menu rows first, in menu order (table.rs enforces it),
 /// then the hidden ones.
@@ -308,6 +314,77 @@ pub fn build_argv(app: &AppTarget, root: &Path) -> (PathBuf, Vec<String>) {
     cargo_argv(app, root)
 }
 
+/// `cargo run` of `app` from the checkout `root` with `app_args` after `--`: cargo
+/// recompiles what changed (nothing, when fresh) and then starts the app in its place
+/// (Unix: the same process). How a checkout launches a hosted app: it never starts a
+/// binary older than its sources. Release, always.
+pub fn run_argv(app: &AppTarget, root: &Path, app_args: &[String]) -> (PathBuf, Vec<String>) {
+    let (program, mut args) = cargo_argv(app, root);
+    args[0] = "run".to_string();
+    args.push("--".to_string());
+    args.extend(app_args.iter().cloned());
+    (program, args)
+}
+
+/// Variables that change what cargo compiles (the profile, rustc flags, the
+/// build options platform/build.rs reads, values `option_env!` bakes into a
+/// crate) and that a launcher's environment may carry from wherever it was
+/// started (a lane shell's CARGO_INCREMENTAL=0, a packaging tool's bundle
+/// name). [`cargo_env`] clears them so every launcher builds a package with
+/// the user's plain `cargo run --release -p <pkg>` fingerprint: the WM, Code,
+/// DECK, the deploy script and a terminal share one set of artifacts and
+/// never recompile each other's.
+pub const CARGO_SPLIT_ENV: &[&str] = &[
+    "CARGO_INCREMENTAL",
+    "RUSTFLAGS",
+    "CARGO_ENCODED_RUSTFLAGS",
+    "CARGO_BUILD_RUSTFLAGS",
+    "RUSTDOCFLAGS",
+    "RUSTC_WRAPPER",
+    "RUSTC_WORKSPACE_WRAPPER",
+    "CARGO_BUILD_TARGET",
+    "MAKEPAD_BUILD",
+    "MAKEPAD_PACKAGE_DIR",
+    "MAKEPAD_BUNDLE_NAME",
+    "MAKEPAD_BUNDLE_IDENTIFIER",
+    "MAKEPAD_APP_ICON_32",
+    "MAKEPAD_APP_ICON_64",
+    "MAKEPAD_APP_ICON_128",
+    "MAKEPAD_APP_ICON_256",
+    "MAKEPAD_APP_ICON_512",
+    "MAKEPAD_APP_ICON_1024",
+];
+
+/// The environment of every cargo a launcher starts: [`CARGO_SPLIT_ENV`] and
+/// any `CARGO_PROFILE_*` override cleared (the workspace's Cargo.toml profile
+/// decides) and cargo's progress as plain lines the hosts parse
+/// (cargo_progress). Leaves `CARGO_TARGET_DIR` (where the binary is, see
+/// `checkout_binary`) and the host's own scrub (child_env) to the host.
+pub fn cargo_env(command: &mut Command) {
+    for key in CARGO_SPLIT_ENV {
+        command.env_remove(key);
+    }
+    for (key, _) in std::env::vars_os() {
+        if key.to_str().is_some_and(|key| key.starts_with("CARGO_PROFILE_")) {
+            command.env_remove(key);
+        }
+    }
+    command
+        .env("CARGO_TERM_COLOR", "never")
+        .env("CARGO_TERM_PROGRESS_WHEN", "always")
+        .env("CARGO_TERM_PROGRESS_WIDTH", "100")
+        .env("MAKEPAD_BUILD_PROGRESS_LINES", "1");
+}
+
+/// `program args` (a [`build_argv`] / [`run_argv`]) as a command in `root`
+/// with [`cargo_env`]: how every launcher starts cargo.
+pub fn cargo_command(program: &Path, args: &[String], root: &Path) -> Command {
+    let mut command = Command::new(program);
+    command.args(args).current_dir(root);
+    cargo_env(&mut command);
+    command
+}
+
 fn cargo_argv(app: &AppTarget, root: &Path) -> (PathBuf, Vec<String>) {
     let manifest = root.join(app.manifest.unwrap_or("Cargo.toml"));
     let manifest = manifest.to_string_lossy();
@@ -345,12 +422,14 @@ pub fn is_available(entry: &AppEntry) -> bool {
     }
 }
 
-/// The command that builds `entry`: `(program, args, cwd)` of `build_argv`,
-/// run in the checkout root. None outside a checkout.
-pub fn build_command(entry: &AppEntry) -> Option<(PathBuf, Vec<String>, PathBuf)> {
+/// The command that builds `entry`: `build_argv` in the checkout root with
+/// the launchers' cargo environment (`cargo_command`), so a build from a tool
+/// (Stage's app runs) leaves what the WM, Code and DECK find fresh. None
+/// outside a checkout.
+pub fn build_command(entry: &AppEntry) -> Option<Command> {
     let root = repo_root()?;
     let (program, args) = build_argv(&entry.target(), &root);
-    Some((program, args, root))
+    Some(cargo_command(&program, &args, &root))
 }
 
 #[cfg(test)]
@@ -477,7 +556,7 @@ mod tests {
         assert!(amp.menu_visible && amp.wm_launchable);
         assert_eq!(find_by_bin("makepad-app-amp").unwrap().id, "amp");
         // The commercial repository's apps sit in its checkout inside Makepad.
-        for id in ["scope", "stage"] {
+        for id in ["scope", "stage", "sandbox"] {
             assert!(find(id).unwrap().target().dir.starts_with("apps/commercial/"), "{id}");
         }
     }
@@ -502,6 +581,44 @@ mod tests {
         let own = AppTarget { manifest: Some("apps/x/Cargo.toml"), ..find("notes").unwrap().target() };
         let (_, args) = cargo_argv(&own, &root);
         assert_eq!(args[3], root.join("apps/x/Cargo.toml").to_string_lossy());
+    }
+
+    /// Every launcher's cargo builds with the workspace profile and no
+    /// inherited flags: a lane's CARGO_INCREMENTAL=0, RUSTFLAGS, a profile
+    /// override or a packaging tool's MAKEPAD_BUILD would each give the same
+    /// package another fingerprint and recompile it for the next launcher.
+    #[test]
+    fn every_launcher_builds_with_the_same_cargo_environment() {
+        let root = Path::new("/checkout");
+        let (program, args) = build_argv(&MAKEPAD_RUN, root);
+        let command = cargo_command(&program, &args, root);
+        let envs: Vec<(String, Option<String>)> = command
+            .get_envs()
+            .map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned())))
+            .collect();
+        for key in CARGO_SPLIT_ENV {
+            assert!(envs.contains(&(key.to_string(), None)), "{key} passes to cargo");
+        }
+        assert!(!envs.iter().any(|(k, _)| k == "MAKEPAD"), "the runtime MAKEPAD is not a build input");
+        assert!(!envs.iter().any(|(k, _)| k == "CARGO_TARGET_DIR"), "the target dir stays the launcher's");
+        assert_eq!(command.get_current_dir(), Some(root));
+        let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(&args[..2], ["build", "--release"]);
+    }
+
+    /// From a checkout an app starts as `cargo run --release` of exactly its binary, the
+    /// app's own arguments after `--`: cargo compiles what changed, then runs it.
+    #[test]
+    fn a_checkout_launch_is_a_release_cargo_run_with_the_apps_arguments() {
+        let root = PathBuf::from("/checkout");
+        let app_args = vec!["--stdin-loop".to_string(), "--demo".to_string()];
+        let (program, args) = run_argv(&find("route").unwrap().target(), &root, &app_args);
+        assert!(program.to_string_lossy().ends_with("cargo"), "{program:?}");
+        let manifest = root.join("Cargo.toml").to_string_lossy().into_owned();
+        assert_eq!(
+            args,
+            ["run", "--release", "--manifest-path", manifest.as_str(), "-p", "makepad-app-route", "--bin", "makepad-app-route", "--", "--stdin-loop", "--demo"]
+        );
     }
 
     #[test]

@@ -193,11 +193,13 @@ class Rig:
 
     # ---- trace ------------------------------------------------------------
     def last(self):
-        """The newest frame record."""
+        """The newest complete frame record (the WM may be writing the next line as it is read:
+        a line without its newline is not finished yet)."""
         last = None
         with open(self.trace) as f:
             for line in f:
-                last = line
+                if line.endswith("\n"):
+                    last = line
         return json.loads(last) if last else None
 
     def window(self, client=None, app_index=None):

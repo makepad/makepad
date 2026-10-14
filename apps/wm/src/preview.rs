@@ -201,7 +201,7 @@ pub fn spawn_for_request(
     // Never `warm`: a Quick-Look viewer has its own warm-cache mechanism
     // (`PreviewCache`), which keeps a viewer alive between panels rather
     // than standing one by before the first.
-    spawn_client(pool, spawner, &app, id, hub_port, None, None, &extra, false, makepad_app_registry::BuildPolicy::BuiltOnly, lines)
+    spawn_client(pool, spawner, &app, id, hub_port, None, None, &extra, false, makepad_app_registry::BuildPolicy::IfMissing, lines)
 }
 
 #[cfg(test)]

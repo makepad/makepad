@@ -1,8 +1,9 @@
 //! The AI hub as the WM's top-bar panel sees it: a snapshot of what the hub
 //! holds and does, and the few commands the panel sends back. The panel and
-//! the bar talk only to [`HubControl`]; the client of the hub's real control
-//! API implements it, and [`StubHub`] (`MAKEPAD_WM_HUB_STUB=1`) stands in
-//! until then. [`NoHub`] is the honest reading when no hub is reachable.
+//! the bar talk only to [`HubLink`]: the WM's own hub child (`hub_child`) and
+//! the client of its control API, or [`StubHub`] (`MAKEPAD_WM_HUB_STUB=1`), or
+//! a hub elsewhere (`MAKEPAD_WM_HUB=<url>`, which the WM then does not start).
+//! [`NoHub`] is the honest reading when no hub is reachable.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModelState {
@@ -50,8 +51,8 @@ impl ModelKind {
     /// One line on what the model does.
     pub fn what(self) -> &'static str {
         match self {
-            ModelKind::Chat => "Chat language model: answers, writes, translates",
-            ModelKind::Vision => "Vision language model: reads pictures",
+            ModelKind::Chat => "Chat and translation",
+            ModelKind::Vision => "Reads pictures",
             ModelKind::SpeechToText => "Speech to text",
             ModelKind::TextToSpeech => "Text to speech",
             ModelKind::Image => "Image generation and editing",
@@ -87,6 +88,15 @@ pub struct Activity {
     pub tokens_per_s: Option<f32>,
     /// 0..1, for work with a known length.
     pub progress: Option<f32>,
+    /// The job's stage as the hub says it ("load t5 1.4/4.6GB", "denoise 3/4").
+    pub stage: String,
+}
+
+impl Activity {
+    /// Still getting its model ready (makepad_ai_hub::control::is_load_stage).
+    pub fn loading(&self) -> bool {
+        makepad_ai_hub::control::is_load_stage(&self.stage)
+    }
 }
 
 /// A finished request.
@@ -131,11 +141,119 @@ pub struct HubSnapshot {
     /// The context sizes the hub offers, ascending.
     pub context_options: Vec<u32>,
     pub kv: KvPrecision,
+    /// The WM's own hub process (None: the WM does not run one).
+    pub process: Option<HubProcess>,
+    /// The chat models of the hub's registry (`GET /models`), by id: the WM's chat model pick.
+    pub chat_models: Vec<String>,
+    /// What the hub's memory policy did last, when it was recent ("ran flux1-schnell-q4
+    /// for flux1-schnell: …", "unloaded qwen3.8-27b for flux1-schnell-q4 …").
+    pub policy: Option<String>,
+}
+
+/// A policy note older than this is not shown.
+const POLICY_SHOWN_MS: u64 = 15 * 60 * 1000;
+
+/// What the hub process is doing, as the panel shows it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum HubPhase {
+    /// cargo is compiling it: its stage ("compiling 120/300 crates · makepad-ai-llm…").
+    Building(String),
+    /// The process runs and does not answer yet.
+    Starting,
+    /// It answers; the chat model is being loaded (or downloaded).
+    LoadingModel,
+    /// It answers and its chat model was loaded (residency after that is the hub's).
+    Ready,
+    /// The chat model could not be loaded: the hub's own reason is on its row.
+    ModelFailed,
+    /// It exited; it starts again in `restart_in` seconds.
+    Crashed { reason: String, restart_in: u32 },
+    /// Its build failed; the panel's Restart builds it again.
+    BuildFailed(String),
+    /// Being stopped, for a restart.
+    Restarting,
+}
+
+impl HubPhase {
+    /// One line for the panel's header.
+    pub fn headline(&self, model: &str) -> String {
+        match self {
+            HubPhase::Building(stage) if stage.is_empty() => "Building".to_string(),
+            HubPhase::Building(stage) => format!("Building: {stage}"),
+            HubPhase::Starting => "Starting".to_string(),
+            HubPhase::LoadingModel => format!("Loading {model}"),
+            HubPhase::Ready => "Ready".to_string(),
+            HubPhase::ModelFailed => format!("{model} did not load"),
+            HubPhase::Crashed { restart_in, .. } => format!("Crashed, restarting in {restart_in} s"),
+            HubPhase::BuildFailed(_) => "Build failed".to_string(),
+            HubPhase::Restarting => "Restarting".to_string(),
+        }
+    }
+
+    /// The reason under it, for a crash or a failed build.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            HubPhase::Crashed { reason, .. } | HubPhase::BuildFailed(reason) => Some(reason),
+            _ => None,
+        }
+    }
+}
+
+/// The hub process as the panel sees it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HubProcess {
+    pub phase: HubPhase,
+    /// The chat model of the settings (empty: none loaded at start).
+    pub model: String,
 }
 
 impl HubSnapshot {
     pub fn busy(&self) -> bool {
         !self.activity.is_empty()
+    }
+
+    /// The panel's status line, from what the hub reports: its process on the way up or
+    /// down (the WM's own hub), else the job at work ("Generating · yue2-3b · stage ·
+    /// 42%"), else a model whose weights load ("Loading flux1-schnell-q4"), else Ready.
+    pub fn status(&self) -> String {
+        if let Some(p) = self.process.as_ref().filter(|p| !matches!(p.phase, HubPhase::Ready | HubPhase::LoadingModel)) {
+            return p.phase.headline(&p.model);
+        }
+        if !self.available {
+            return match &self.process {
+                Some(p) => p.phase.headline(&p.model),
+                None => "No hub running".to_string(),
+            };
+        }
+        // A job still loading its model says so; one past that generates.
+        if let Some(a) = self.activity.iter().find(|a| !a.loading()) {
+            let mut line = format!("Generating \u{b7} {}", a.model);
+            if !a.app.is_empty() {
+                line.push_str(&format!(" \u{b7} {}", a.app));
+            }
+            match (a.tokens_per_s, a.progress) {
+                (Some(t), _) => line.push_str(&format!(" \u{b7} {t:.0} tok/s")),
+                (None, Some(p)) if !a.stage.is_empty() => line.push_str(&format!(" \u{b7} {} \u{b7} {:.0}%", a.stage, p * 100.0)),
+                (None, Some(p)) => line.push_str(&format!(" \u{b7} {:.0}%", p * 100.0)),
+                _ => {}
+            }
+            let more = self.activity.len() - 1 + self.queue as usize;
+            if more > 0 {
+                line.push_str(&format!(" (+{more})"));
+            }
+            return line;
+        }
+        if let Some(a) = self.activity.first() {
+            return format!("Loading {}", a.model);
+        }
+        if let Some(m) = self.models.iter().find(|m| m.state == ModelState::Loading) {
+            return format!("Loading {}", m.id);
+        }
+        match &self.process {
+            Some(p) if p.phase == HubPhase::LoadingModel => p.phase.headline(&p.model),
+            Some(_) => "Ready".to_string(),
+            None => "Idle".to_string(),
+        }
     }
 }
 
@@ -148,6 +266,10 @@ pub enum HubCommand {
     /// Give `mb` of GPU memory back to the UI (`gpu_yield`); the chat model may be
     /// unloaded only with `unload`; the hub keeps `reserve_mb` free from now on.
     Yield { mb: u64, unload: bool, reserve_mb: u64 },
+    /// Stop the WM's hub child and start it again (a failed build builds again).
+    Restart,
+    /// The chat model the WM's hub loads at start: saved, and the hub restarts with it.
+    SetModel(String),
 }
 
 pub trait HubControl {
@@ -199,11 +321,12 @@ impl Default for StubHub {
         StubHub {
             snap: HubSnapshot {
                 available: true,
+                // names as long as a real hub's (the panel's columns are checked against them)
                 models: vec![
-                    model("chat", "Chat 8B", ModelState::Loaded, 9200, "GPU 0"),
-                    model("vision", "Vision 4B", ModelState::Loaded, 5100, "GPU 0"),
-                    model("speech", "Speech", ModelState::Unloaded, 0, "GPU 0"),
-                    model("image", "Image", ModelState::Unloaded, 0, "GPU 0"),
+                    model("chat", "qwen3.8-27b", ModelState::Loaded, 9200, "GPU 0"),
+                    model("vision", "qwen3.8-27b-vision", ModelState::Loaded, 5100, "GPU 0"),
+                    model("speech", "kokoro-82m-multilingual-voices", ModelState::Unloaded, 0, "GPU 0"),
+                    model("image", "flux2-dev-q4-24g", ModelState::Unloaded, 0, "GPU 0"),
                 ],
                 activity: Vec::new(),
                 queue: 0,
@@ -218,6 +341,10 @@ impl Default for StubHub {
                 chat_model: Some("chat".into()),
                 context_options: vec![4096, 8192, 16384, 32768],
                 kv: KvPrecision::F16,
+                // As the WM's own hub: the chat model row and Restart show.
+                process: Some(HubProcess { phase: HubPhase::Ready, model: "chat".into() }),
+                chat_models: vec!["chat".into(), "qwen3.5-9b".into()],
+                policy: Some("ran flux1-schnell-q4 for flux1-schnell: flux1-schnell needs 21504 MB, 21872 MB can be free and the UI keeps 2048 MB".into()),
             },
             loading: Vec::new(),
             polls: 0,
@@ -231,11 +358,22 @@ impl StubHub {
         self.polls += 1;
         // A language model at work for 12 polls out of 20.
         let working = self.polls % 20 < 12 && self.snap.models.iter().any(|m| m.id == "chat" && m.state == ModelState::Loaded);
+        let was = self.snap.activity.iter().map(|a| a.model.clone()).collect::<Vec<_>>();
         self.snap.activity = if working {
-            vec![Activity { model: "chat".into(), app: "translator".into(), tokens_per_s: Some(38.0 + (self.polls % 7) as f32), progress: None }]
+            vec![Activity { model: "chat".into(), app: "translator".into(), tokens_per_s: Some(38.0 + (self.polls % 7) as f32), progress: None, stage: "generate".into() }]
         } else {
             Vec::new()
         };
+        // An image job in the middle of the idle stretch, for a second glowing row.
+        if (6..10).contains(&(self.polls % 20)) && self.snap.models.iter().any(|m| m.id == "vision" && m.state == ModelState::Loaded) && self.snap.models.iter().any(|m| m.id == "chat" && m.state == ModelState::Loaded) {
+            self.snap.activity.push(Activity { model: "vision".into(), app: "notes".into(), tokens_per_s: None, progress: Some((self.polls % 20 - 5) as f32 / 5.0), stage: "encode".into() });
+        }
+        // What stopped is a finished request, newest first.
+        let now: Vec<_> = self.snap.activity.iter().map(|a| a.model.clone()).collect();
+        for id in was.into_iter().filter(|id| !now.contains(id)) {
+            self.snap.recent.insert(0, Request { model: id, app: "translator".into(), millis: 900, ok: true });
+            self.snap.recent.truncate(5);
+        }
         self.snap.queue = if working { (self.polls % 3) as u32 } else { 0 };
         for (id, left) in &mut self.loading {
             *left = left.saturating_sub(1);
@@ -276,6 +414,7 @@ impl HubControl for StubHub {
             }
             HubCommand::SetKv(kv) => self.snap.kv = kv,
             HubCommand::SetContext(c) => self.snap.context = c,
+            HubCommand::Restart | HubCommand::SetModel(_) => {}
             HubCommand::Yield { mb, unload, .. } => {
                 let chat = self.snap.models.iter_mut().find(|m| m.id == "chat" && m.state == ModelState::Loaded);
                 self.report = Some(match (chat, unload) {
@@ -299,16 +438,6 @@ impl HubControl for StubHub {
     }
 }
 
-/// The hub the WM talks to: the stub when asked for, else the hub control
-/// API (`CONTROL_API.md`) at `MAKEPAD_WM_HUB` or the local hub.
-pub fn connect() -> Box<dyn HubControl> {
-    if std::env::var_os("MAKEPAD_WM_HUB_STUB").is_some() {
-        Box::<StubHub>::default()
-    } else {
-        let base = std::env::var("MAKEPAD_WM_HUB").unwrap_or_else(|_| "https://127.0.0.1:8123".to_string());
-        Box::new(FleetHub::start(base))
-    }
-}
 
 /// What the worker thread publishes.
 #[derive(Default)]
@@ -359,11 +488,19 @@ impl HubControl for FleetHub {
     }
 }
 
+impl FleetHub {
+    /// Whether the hub answered its last poll, and `model`'s state there: what the
+    /// WM's hub child needs to follow its start (`hub_child`).
+    pub fn peek(&self, model: &str) -> (bool, Option<ModelState>) {
+        self.shared.lock().map_or((false, None), |s| (s.snap.available, s.snap.models.iter().find(|m| m.id == model).map(|m| m.state)))
+    }
+}
+
 /// Sends one command. A yield is followed to its end (`GET /job/<id>`), and the hub's
 /// report lands in the shared state for the WM to log and show.
 fn run_command(t: &mut makepad_ai_hub::providers::qwen::HttpFleetTransport, base: &str, cmd: &HubCommand, shared: &std::sync::Mutex<Shared>) {
     use makepad_ai_hub::providers::qwen::FleetTransport;
-    let (url, body) = command_request(base, cmd);
+    let Some((url, body)) = command_request(base, cmd) else { return };
     let answer = match t.post_json(&url, &body) {
         Ok(v) => v,
         Err(err) => {
@@ -413,6 +550,8 @@ fn worker(
     makepad_ai_hub::fleet_auth::mark_fleet_endpoint(base.trim_start_matches("https://").trim_start_matches("http://"));
     let mut t = HttpFleetTransport;
     let mut since = 0u64;
+    // The registry's chat models, asked once per hub that answers.
+    let mut chat_models: Option<Vec<String>> = None;
     loop {
         while let Ok(cmd) = rx.try_recv() {
             run_command(&mut t, &base, &cmd, &shared);
@@ -427,7 +566,11 @@ fn worker(
         match t.get_json(&url) {
             Ok(v) => {
                 since = v.get("seq").and_then(|s| s.as_u64()).unwrap_or(since);
-                let snap = parse_snapshot(&v);
+                let mut snap = parse_snapshot(&v);
+                if chat_models.is_none() {
+                    chat_models = t.get_json(&format!("{base}/models")).ok().map(|m| parse_chat_models(&m));
+                }
+                snap.chat_models = chat_models.clone().unwrap_or_default();
                 if let Ok(mut s) = shared.lock() {
                     s.snap = snap;
                 }
@@ -443,15 +586,17 @@ fn worker(
                     s.snap = HubSnapshot::default();
                 }
                 since = 0;
+                chat_models = None;
                 std::thread::sleep(Duration::from_secs(3));
             }
         }
     }
 }
 
-fn command_request(base: &str, cmd: &HubCommand) -> (String, makepad_strict_json::Value) {
+/// The control API request for `cmd`; None for the commands the WM's hub child takes.
+fn command_request(base: &str, cmd: &HubCommand) -> Option<(String, makepad_strict_json::Value)> {
     use makepad_strict_json::{obj, s, Value};
-    match cmd {
+    Some(match cmd {
         HubCommand::Load(id) => (format!("{base}/control/model"), obj(vec![("model", s(id.as_str())), ("action", s("load"))])),
         HubCommand::Unload(id) => (format!("{base}/control/model"), obj(vec![("model", s(id.as_str())), ("action", s("unload"))])),
         HubCommand::SetKv(kv) => (format!("{base}/llm/context"), obj(vec![("kv", s(kv.name())), ("apply", Value::Bool(true))])),
@@ -460,7 +605,22 @@ fn command_request(base: &str, cmd: &HubCommand) -> (String, makepad_strict_json
             format!("{base}/control/yield"),
             obj(vec![("mb", Value::Int(*mb as i64)), ("unload", Value::Bool(*unload)), ("reserve_mb", Value::Int(*reserve_mb as i64))]),
         ),
-    }
+        HubCommand::Restart | HubCommand::SetModel(_) => return None,
+    })
+}
+
+/// The chat models (`domain` text) of `GET /models`, sorted by id.
+pub fn parse_chat_models(v: &makepad_strict_json::Value) -> Vec<String> {
+    let mut ids: Vec<String> = v
+        .get("models")
+        .and_then(|m| m.as_arr())
+        .unwrap_or(&[])
+        .iter()
+        .filter(|m| m.get("domain").and_then(|d| d.as_str()) == Some("text") && m.get("available").and_then(|a| a.as_bool()) != Some(false))
+        .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string))
+        .collect();
+    ids.sort();
+    ids
 }
 
 /// `GET /control` as the panel shows it.
@@ -507,6 +667,7 @@ pub fn parse_snapshot(v: &makepad_strict_json::Value) -> HubSnapshot {
         app: app_of(j),
         tokens_per_s: f32_of(j.get("tok_s")),
         progress: f32_of(j.get("progress")),
+        stage: str_of(j.get("stage")),
     }).collect();
     let recent = v.get("recent").and_then(|a| a.as_arr()).unwrap_or(&[]).iter().map(|j| Request {
         model: str_of(j.get("model")),
@@ -526,15 +687,161 @@ pub fn parse_snapshot(v: &makepad_strict_json::Value) -> HubSnapshot {
         chat_model: llm.and_then(|l| l.get("model")).and_then(|m| m.as_str()).map(|m| m.to_string()),
         context_options: llm.and_then(|l| l.get("context_options")).and_then(|o| o.as_arr()).unwrap_or(&[]).iter().filter_map(|c| c.as_u64().map(|c| c as u32)).collect(),
         kv: if llm.and_then(|l| l.get("kv")).and_then(|k| k.as_str()) == Some("q8") { KvPrecision::Q8 } else { KvPrecision::F16 },
+        process: None,
+        chat_models: Vec::new(),
+        policy: v
+            .get("policy")
+            .and_then(|p| p.as_arr())
+            .and_then(|p| p.first())
+            .filter(|n| n.get("ago_ms").and_then(|a| a.as_u64()).is_some_and(|a| a < POLICY_SHOWN_MS))
+            .and_then(|n| n.get("text").and_then(|t| t.as_str()).map(str::to_string)),
     }
 }
 
+/// The hub the WM talks to, made at first use: the stub when asked for; a hub
+/// elsewhere at `MAKEPAD_WM_HUB`; else the WM's own hub child (`hub_child`, unless its
+/// settings turn it off or this build hosts no processes) and the control client
+/// pointed at it.
 #[derive(Default)]
-pub struct HubLink(Option<Box<dyn HubControl>>);
+pub struct HubLink {
+    link: Option<Link>,
+}
+
+enum Link {
+    Stub(StubHub),
+    Fleet {
+        hub: FleetHub,
+        #[cfg(not(target_arch = "wasm32"))]
+        child: Option<crate::hub_child::HubChild>,
+    },
+}
 
 impl HubLink {
-    pub fn get(&mut self) -> &mut dyn HubControl {
-        self.0.get_or_insert_with(connect).as_mut()
+    /// `processes`: this build can start child processes (`App::processes`).
+    fn link(&mut self, processes: bool) -> &mut Link {
+        self.link.get_or_insert_with(|| {
+            if std::env::var_os("MAKEPAD_WM_HUB_STUB").is_some() {
+                return Link::Stub(StubHub::default());
+            }
+            if let Ok(base) = std::env::var("MAKEPAD_WM_HUB") {
+                return Link::Fleet {
+                    hub: FleetHub::start(base),
+                    #[cfg(not(target_arch = "wasm32"))]
+                    child: None,
+                };
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let settings = crate::hub_child::HubSettings::load();
+                let base = settings.base_url();
+                let child = (processes && settings.enabled).then(|| crate::hub_child::HubChild::new(settings));
+                // The apps the WM starts chat with the model its hub loads.
+                if let Some(model) = child.as_ref().map(|c| c.settings.model.as_str()).filter(|m| !m.is_empty()) {
+                    crate::host::set_child_env("MAKEPAD_AI_MODEL", std::ffi::OsStr::new(model));
+                }
+                if child.is_none() {
+                    makepad_widgets::log!("wm: the WM starts no AI hub (off in {}, or a hidden or in-process WM)", crate::hub_child::HubSettings::path().display());
+                }
+                Link::Fleet { hub: FleetHub::start(base), child }
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = processes;
+                Link::Fleet { hub: FleetHub::start("https://127.0.0.1:8123".to_string()) }
+            }
+        })
+    }
+
+    pub fn get(&mut self, processes: bool) -> &mut dyn HubControl {
+        self.link(processes);
+        self
+    }
+
+    /// Once a second: the hub child's output, exit, restart and start-up (a no-op
+    /// without one).
+    pub fn tick(&mut self, processes: bool, now: f64) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Link::Fleet { hub, child: Some(child) } = self.link(processes) {
+            let (answers, model) = hub.peek(&child.settings.model);
+            if child.tick(now, answers, model) {
+                makepad_widgets::log!("wm: AI hub answers: loading {}", child.settings.model);
+                hub.send(HubCommand::Load(child.settings.model.clone()));
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = (processes, now);
+    }
+
+    /// The WM quits: its hub child stops.
+    pub fn shutdown(&mut self, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(Link::Fleet { child: Some(child), .. }) = self.link.as_mut() {
+            child.stop(pool);
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = pool;
+    }
+
+    /// A command for the hub child (Restart, SetModel) or the hub. Restart needs the
+    /// task pool to stop the old process.
+    pub fn command(&mut self, command: HubCommand, now: f64, pool: &makepad_widgets::makepad_platform::thread::TaskPool) {
+        match (command, self.link.as_mut()) {
+            #[cfg(not(target_arch = "wasm32"))]
+            (HubCommand::Restart, Some(Link::Fleet { child: Some(child), .. })) => {
+                let settings = crate::hub_child::HubSettings::load_or(&child.settings);
+                child.restart(settings, now, pool);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            (HubCommand::SetModel(model), Some(Link::Fleet { child: Some(child), .. })) => {
+                let mut settings = crate::hub_child::HubSettings::load_or(&child.settings);
+                settings.model = model;
+                if let Err(e) = settings.save() {
+                    makepad_widgets::log!("wm: AI hub settings not saved: {e}");
+                }
+                crate::host::set_child_env("MAKEPAD_AI_MODEL", std::ffi::OsStr::new(&settings.model));
+                child.restart(settings, now, pool);
+            }
+            (HubCommand::Restart | HubCommand::SetModel(_), _) => {}
+            (command, _) => self.send(command),
+        }
+    }
+}
+
+impl HubControl for HubLink {
+    fn active(&mut self) -> bool {
+        match &mut self.link {
+            Some(Link::Stub(h)) => h.active(),
+            Some(Link::Fleet { hub, .. }) => hub.active(),
+            None => false,
+        }
+    }
+    fn snapshot(&mut self) -> HubSnapshot {
+        match &mut self.link {
+            Some(Link::Stub(h)) => h.snapshot(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(Link::Fleet { hub, child }) => {
+                let mut snap = hub.snapshot();
+                snap.process = child.as_ref().map(|c| c.process());
+                snap
+            }
+            #[cfg(target_arch = "wasm32")]
+            Some(Link::Fleet { hub }) => hub.snapshot(),
+            None => HubSnapshot::default(),
+        }
+    }
+    fn send(&mut self, command: HubCommand) {
+        match &mut self.link {
+            Some(Link::Stub(h)) => h.send(command),
+            Some(Link::Fleet { hub, .. }) => hub.send(command),
+            None => {}
+        }
+    }
+    fn take_report(&mut self) -> Option<String> {
+        match &mut self.link {
+            Some(Link::Stub(h)) => h.take_report(),
+            Some(Link::Fleet { hub, .. }) => hub.take_report(),
+            None => None,
+        }
     }
 }
 
@@ -554,7 +861,8 @@ mod tests {
                     {"id":"roformer","kind":"music","domain":"stems","state":"downloading","resident_mb":null,"device":"RTX"}],
           "active":[{"model":"qwen","client":"c1","app":"translator","state":"running","progress":0.4,"tok_s":31.5},
                     {"model":"qwen","client":"c2","app":null,"state":"queued","progress":null,"tok_s":null}],
-          "recent":[{"model":"whisper","client":"c1","app":null,"state":"error","run_ms":1040}]}"#;
+          "recent":[{"model":"whisper","client":"c1","app":null,"state":"error","run_ms":1040}],
+          "policy":[{"text":"ran flux1-schnell-q4 for flux1-schnell: too big","ago_ms":5000},{"text":"older","ago_ms":9000}]}"#;
         let v = makepad_strict_json::parse(text.as_bytes()).unwrap();
         let s = parse_snapshot(&v);
         assert!(s.available && s.gpu_used_mb == 21900 && s.gpu_total_mb == 24463);
@@ -564,16 +872,53 @@ mod tests {
         assert_eq!(s.models.iter().map(|m| m.kind).collect::<Vec<_>>(), [ModelKind::Chat, ModelKind::SpeechToText, ModelKind::TextToSpeech, ModelKind::Stems]);
         assert_eq!((s.models[0].gpu_mb, s.models[0].context_fit, s.models[1].context_fit), (18800, Some(57344), None));
         assert_eq!(s.chat_model.as_deref(), Some("q"));
+        assert_eq!(s.policy.as_deref(), Some("ran flux1-schnell-q4 for flux1-schnell: too big"));
         assert_eq!((s.activity.len(), s.queue), (1, 2), "queued jobs are not working");
         assert_eq!(s.activity[0].app, "translator");
         assert_eq!(s.activity[0].tokens_per_s, Some(31.5));
         assert_eq!((s.context, s.kv, s.context_options.clone()), (16384, KvPrecision::Q8, vec![16384, 32768]));
         assert_eq!((s.recent[0].app.as_str(), s.recent[0].ok), ("c1", false));
+        let models = makepad_strict_json::parse(br#"{"models":[{"id":"qwen3.8-27b","domain":"text","available":true},{"id":"kokoro","domain":"speech"},
+          {"id":"qwen3.5-4b","domain":"text"},{"id":"old","domain":"text","available":false}]}"#).unwrap();
+        assert_eq!(parse_chat_models(&models), ["qwen3.5-4b", "qwen3.8-27b"]);
         let mut h = FleetHub::start("https://127.0.0.1:1".into());
         assert!(!h.active(), "no hub: idle");
         assert!(!h.snapshot().available);
     }
 
+
+    #[test]
+    fn the_status_line_follows_the_hubs_own_state() {
+        let model = |id: &str, state| ModelInfo { id: id.into(), name: id.into(), kind: ModelKind::Music, state, context_fit: None, gpu_mb: 0, device: String::new() };
+        let process = |phase| Some(HubProcess { phase, model: "qwen3.8-27b".into() });
+        // 149: the start-up load still pending, a music job generating: the job shows
+        let s = HubSnapshot {
+            available: true,
+            models: vec![model("yue2-3b", ModelState::Loaded)],
+            activity: vec![Activity { model: "yue2-3b".into(), app: "stage".into(), tokens_per_s: None, progress: Some(0.42), stage: "generate 120/400".into() }],
+            process: process(HubPhase::LoadingModel),
+            ..Default::default()
+        };
+        assert_eq!(s.status(), "Generating \u{b7} yue2-3b \u{b7} stage \u{b7} generate 120/400 \u{b7} 42%");
+        // the job's model still loading its weights
+        let mut s = s;
+        s.activity[0].stage = "load lm 1.2/7.8GB".into();
+        assert_eq!(s.status(), "Loading yue2-3b");
+        // a chat turn
+        let s = HubSnapshot {
+            available: true,
+            activity: vec![Activity { model: "qwen3.8-27b".into(), app: "translator".into(), tokens_per_s: Some(31.4), progress: None, stage: "decode".into() }],
+            queue: 1,
+            process: process(HubPhase::Ready),
+            ..Default::default()
+        };
+        assert_eq!(s.status(), "Generating \u{b7} qwen3.8-27b \u{b7} translator \u{b7} 31 tok/s (+1)");
+        let idle = HubSnapshot { available: true, process: process(HubPhase::Ready), ..Default::default() };
+        assert_eq!(idle.status(), "Ready");
+        let starting = HubSnapshot { process: process(HubPhase::Starting), ..Default::default() };
+        assert_eq!(starting.status(), "Starting");
+        assert_eq!(HubSnapshot::default().status(), "No hub running");
+    }
 
     #[test]
     fn the_stub_loads_and_unloads_and_works_in_turns() {

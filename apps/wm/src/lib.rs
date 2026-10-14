@@ -23,6 +23,8 @@ mod ai_bus;
 mod apps;
 mod binds;
 mod build;
+mod client_windows;
+use client_windows::ClientWindows;
 mod clients;
 mod demo_home;
 mod desk;
@@ -46,6 +48,9 @@ mod dock_warp;
 mod dock_layout;
 mod dock_autohide;
 mod hub_control;
+#[cfg(not(target_arch = "wasm32"))]
+mod hub_child;
+mod hub_glow;
 mod gpu_yield;
 mod scroll_gesture;
 use scroll_gesture::Gesture as ScrollGesture;
@@ -64,6 +69,14 @@ mod stereo;
 mod headset_imu;
 #[cfg(target_os = "linux")]
 mod linux_controls;
+#[cfg(target_os = "linux")]
+mod adopt;
+#[cfg(target_os = "linux")]
+mod sdbus;
+#[cfg(target_os = "linux")]
+mod portal;
+#[cfg(target_os = "linux")]
+mod portal_file_chooser;
 #[cfg(target_os = "linux")]
 use linux_controls::LinuxControls;
 pub mod module_host;
@@ -98,7 +111,7 @@ use makepad_widgets::makepad_platform::shared_framebuf::HostSwapchain;
 use makepad_widgets::makepad_platform::shared_framebuf::shared_swapchain_from_host_swapchain;
 use makepad_app_host::{send_to_app, AppHub, ClientId, HubEvent};
 use layout::{Axis, Dir, DividerHit, LRect, WindowMode};
-use makepad_studio_protocol::{AppToStudio, StudioToApp};
+use makepad_studio_protocol::{AppToStudio, ChildRelay, StudioToApp};
 use makepad_wm_api::{ScreenSpan, WmEvent, WmRequest};
 use preview::PreviewCache;
 use run_view::MpRunView;
@@ -207,6 +220,8 @@ script_mod! {
                         shell_notes := ShellNotifications{}
                         shell_osd := ShellOsd{}
                         shot_overlay := ShotOverlay{}
+                        // Over everything: a client's file dialog (shell/file_picker.rs).
+                        file_picker := ShellFilePicker{}
                     }
                     }
                     // `wm --gallery`: every ported omarchy surface with
@@ -630,6 +645,12 @@ pub struct App {
     #[cfg(target_os = "linux")]
     #[rust]
     wifi: Option<shell::wifi_linux::WifiLink>,
+    /// The WM's xdg-desktop-portal backend (portal.rs): the appearance for browsers, and
+    /// the interfaces the UI answers. None off Linux, without a session bus, or with
+    /// MAKEPAD_WM_PORTAL=0.
+    #[cfg(target_os = "linux")]
+    #[rust]
+    portal: Option<portal::Portal>,
     /// Ticks the Wi-Fi dropdown has been open, for its address re-reads.
     #[cfg(target_os = "linux")]
     #[rust]
@@ -639,8 +660,15 @@ pub struct App {
     linux_controls: LinuxControls,
     #[rust]
     hub: Option<AppHub>,
+    /// The WM socket apps started elsewhere in the session find it by (adopt.rs).
+    #[cfg(target_os = "linux")]
+    #[rust]
+    adoptions: Option<adopt::Adoptions>,
     #[rust]
     next_id: ClientId,
+    /// The hosted apps' later windows, each a window of its own (`client_windows.rs`).
+    #[rust]
+    client_windows: ClientWindows,
     #[rust]
     tick: Timer,
     /// Module instances whose root panicked, with when: their tiles show
@@ -946,6 +974,32 @@ impl App {
     // Client lifecycle
     // --------------------------------------------------------------
 
+    /// The oldest window of the app `app_id` (by its class or title), for a
+    /// launch-or-focus app: `omarchy-launch-or-focus` matches `\b<pattern>\b`
+    /// case-insensitively against the window's CLASS OR TITLE and focuses the
+    /// first hit.
+    fn running_client(&mut self, app_id: &str) -> Option<ClientId> {
+        let mut existing: Vec<ClientId> = self
+            .state_mut()
+            .clients
+            .iter()
+            .filter(|(_, slot)| {
+                // A warm instance is NOT a window: matching one here
+                // would "focus" something invisible and the app would
+                // never open at all. Nor is the AI pane's child.
+                !slot.warm
+                    && !slot.pane
+                    && !slot.is_preview
+                    && slot.closing.is_none()
+                    && (clients::word_match(&slot.app, app_id) || clients::word_match(&slot.title, app_id))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        // `head -n1` over hyprctl's client list: take the oldest.
+        existing.sort_unstable();
+        existing.first().copied()
+    }
+
     fn launch_app(&mut self, cx: &mut Cx, app_id: &str) {
         if (!self.domains_enabled() || app_id.starts_with("wl.") || app_id.starts_with("wayland="))
             && self.wayland_launch(cx, app_id) {
@@ -962,29 +1016,7 @@ impl App {
         // matches `\b<pattern>\b` case-insensitively against the window's
         // CLASS OR TITLE and focuses the first hit.
         if app.policy == LaunchPolicy::OrFocus {
-            let pattern = app.id.clone();
-            let pattern = pattern.as_str();
-            let mut existing: Vec<ClientId> = self
-                .state_mut()
-                .clients
-                .iter()
-                .filter(|(_, slot)| {
-                    // A warm instance is NOT a window: matching one here
-                    // would "focus" something invisible and the app would
-                    // never open at all. Nor is the AI pane's child.
-                    !slot.warm
-                        && !slot.pane
-                        && !slot.is_preview
-                        && slot.closing.is_none()
-                        && (clients::word_match(&slot.app, pattern)
-                            || clients::word_match(&slot.title, pattern))
-                })
-                .map(|(id, _)| *id)
-                .collect();
-            // `head -n1` over hyprctl's client list: take the oldest.
-            existing.sort_unstable();
-            let existing = existing.first().copied();
-            if let Some(client) = existing {
+            if let Some(client) = self.running_client(&app.id) {
                 #[cfg(not(target_arch = "wasm32"))]
                 if self.domains.ended(client) { self.relaunch_domain(cx, client); }
                 self.activate_client(cx, client);
@@ -1227,7 +1259,7 @@ impl App {
             (app.id == "terminal").then_some(term_env.as_str()),
             &[],
             true,
-            BuildPolicy::BuiltOnly,
+            BuildPolicy::IfMissing,
             lines,
         ) {
             Ok(slot) => {
@@ -1605,7 +1637,8 @@ impl App {
         let mut out = Vec::new();
         for (client, tile) in &state.tile_origins {
             let Some(slot) = state.clients.get(client) else { continue };
-            if slot.warm || slot.sender.is_none() {
+            // A later window's app is told its screens once, for its first window.
+            if slot.warm || slot.sender.is_none() || slot.parent.is_some() {
                 continue;
             }
             let span = state.screens.fullscreen_span_of(*client);
@@ -1637,6 +1670,17 @@ impl App {
         #[cfg(not(target_arch = "wasm32"))]
         if self.domains.enabled {
             if let Some((app, extra)) = preview::app_for_request(&req) {
+                // A launch-or-focus app that runs already takes the file
+                // itself: it comes up and shows it (Camera's last shot in
+                // the Photos that is open), no second instance.
+                if app.policy == LaunchPolicy::OrFocus && !req.preview {
+                    if let Some(client) = self.running_client(&app.id) {
+                        if self.domains.ended(client) { self.relaunch_domain(cx, client); }
+                        self.activate_client(cx, client);
+                        self.send_wm_event(client, WmEvent::Open { path: req.path.to_string_lossy().to_string() });
+                        return;
+                    }
+                }
                 let client = self.start_domain_client(cx, &app, &extra, false);
                 self.seat_domain(cx, client);
             }
@@ -1919,6 +1963,17 @@ impl App {
     }
 
     fn request_close(&mut self, cx: &mut Cx, client: ClientId) {
+        // One of an app's later windows: the app is asked to close that window only, and
+        // its tile goes when the app says the window is gone.
+        if let Some((owner, window_id)) = self.client_windows.owner(client) {
+            if let Some(sender) = self.state_mut().clients.get(&owner).and_then(|slot| slot.sender.clone()) {
+                let ask = makepad_platform::ime::HostedWindow::new(window_id, makepad_platform::ime::hosted_window_op::CLOSE_REQUEST);
+                send_to_app(&sender, vec![StudioToApp::Custom(ask.to_json())]);
+            } else {
+                self.remove_client(cx, client);
+            }
+            return;
+        }
         #[cfg(not(target_arch = "wasm32"))]
         if self.close_domain(cx, client) { return; }
         // A foreign Wayland window is asked to close and ends when its client does.
@@ -1990,11 +2045,85 @@ impl App {
         }
     }
 
+    /// Calls on the portal's UI-answered interfaces: a browser's file dialog opens the WM's
+    /// picker (portal_file_chooser.rs); its answer is the call's reply (`file_picker_event`).
+    #[cfg(target_os = "linux")]
+    fn portal_calls(&mut self, cx: &mut Cx) {
+        let Some(calls) = self.portal.as_ref().map(|p| p.take_calls()) else { return };
+        for call in calls {
+            let request = (call.interface == portal_file_chooser::NAME)
+                .then(|| call.args.downcast::<makepad_widgets::makepad_platform::studio::RelayFileDialog>().ok())
+                .flatten();
+            let Some(request) = request else {
+                if let Some(portal) = &self.portal {
+                    portal.reply_error(call.id, "org.freedesktop.DBus.Error.UnknownMethod".into(), format!("{}.{} is not served", call.interface, call.member));
+                }
+                continue;
+            };
+            log!("wm portal: FileChooser.{} kind {} location {:?} name {:?} filters {:?} multiple {}", call.member, request.kind, request.location, request.filename, request.filters, request.multiple);
+            let picker = self.ui.widget(cx, ids!(file_picker));
+            if let Some(mut p) = picker.borrow_mut::<shell::file_picker::ShellFilePicker>() {
+                p.request(cx, shell::file_picker::PickRequest { from: shell::file_picker::Requester::Portal(call.id), relay: *request, anchor: None });
+            }
+            cx.set_key_focus(Area::Empty);
+            self.redraw_all(cx);
+        }
+    }
+
+    /// The file picker's share of an event: true when it took it (`handle_event`).
+    fn file_picker_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        let picker = self.ui.widget(cx, ids!(file_picker));
+        let answer = {
+            let Some(mut p) = picker.borrow_mut::<shell::file_picker::ShellFilePicker>() else { return false };
+            if !p.is_open() {
+                return false;
+            }
+            match event {
+                Event::MouseMove(_) | Event::MouseDown(_) | Event::Scroll(_) => p.pointer(cx, event),
+                Event::MouseUp(_) | Event::TouchUpdate(_) | Event::FingerCancel(_) | Event::KeyUp(_) => None,
+                Event::KeyDown(e) => p.key(cx, e),
+                Event::TextInput(e) => {
+                    p.typed(cx, &e.input);
+                    None
+                }
+                Event::TextRangeReplace(_) | Event::TextCopy(_) | Event::TextCut(_) | Event::ImeAction(_) => None,
+                _ => return false,
+            }
+        };
+        if let Some((from, result)) = answer {
+            match from {
+                shell::file_picker::Requester::Client(client) => {
+                    self.send_relays(vec![(client, makepad_widgets::makepad_platform::studio::HostRelay::FileDialog(result))]);
+                }
+                #[cfg(target_os = "linux")]
+                shell::file_picker::Requester::Portal(id) => {
+                    if let Some(portal) = &self.portal {
+                        portal.reply(id, portal_file_chooser::reply(&result));
+                    }
+                }
+                #[cfg(not(target_os = "linux"))]
+                shell::file_picker::Requester::Portal(_) => {}
+            }
+            if let Some(focus) = self.state.as_mut().and_then(|s| s.layout().focused_client()) {
+                self.focus_client(cx, focus);
+            }
+            self.redraw_all(cx);
+        }
+        true
+    }
+
     fn remove_client(&mut self, cx: &mut Cx, client: ClientId) {
+        // An app's later windows go with it; a later window going is forgotten here.
+        for window in self.client_windows.forget(client) {
+            self.remove_client(cx, window);
+        }
         #[cfg(not(target_arch = "wasm32"))]
         self.forget_domain(client);
         log!("wm: removing client {}", client);
         self.relay.forget_client(cx, client);
+        if let Some(mut p) = self.ui.widget(cx, ids!(file_picker)).borrow_mut::<shell::file_picker::ShellFilePicker>() {
+            p.forget_client(cx, client);
+        }
         // A finger held on the closing app lets go of it first.
         if let Some(mut desk) = self.desk(cx).borrow_mut::<WmDesk>() {
             if desk.phone_finger_on(client) {
@@ -2388,7 +2517,7 @@ impl App {
     /// the person opened the pane, so an aichat that is not built or out of
     /// date is built (in the pane); the desktop's own start runs only an
     /// up-to-date aichat and never compiles.
-    fn launch_ai_pane(&mut self, cx: &mut Cx, opened: bool) -> bool {
+    fn launch_ai_pane(&mut self, cx: &mut Cx, _opened: bool) -> bool {
         let Some(app) = clients::find_app("aichat") else {
             log!("wm: no aichat entry in the registry");
             return false;
@@ -2408,12 +2537,9 @@ impl App {
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        let current = app.is_current();
-        if !opened && !current {
-            log!("wm: aichat is not built or out of date; the pane builds it when opened");
-            return false;
-        }
-        let policy = if opened && !current { BuildPolicy::Rebuild } else { BuildPolicy::BuiltOnly };
+        // Like every app: from a checkout `cargo run` compiles what changed (the pane shows
+        // cargo's progress); installed, a binary out of date is built first.
+        let policy = if app.is_current() { BuildPolicy::IfMissing } else { BuildPolicy::Rebuild };
         let spawned = spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, policy, lines);
         match spawned {
             Ok(mut slot) => {
@@ -2968,6 +3094,8 @@ impl App {
     // --------------------------------------------------------------
 
     fn drain_hub(&mut self, cx: &mut Cx) {
+        #[cfg(target_os = "linux")]
+        self.drain_adoptions(cx);
         let Some(hub) = self.hub.as_ref() else {
             return;
         };
@@ -3019,9 +3147,17 @@ impl App {
                         .find(|(_, s)| s.socket == Some(socket))
                         .map(|(id, _)| *id);
                     if let Some(client) = client {
+                        let mut adopted = false;
                         if let Some(slot) = self.state_mut().clients.get_mut(&client) {
                             slot.sender = None;
                             slot.socket = None;
+                            adopted = slot.external;
+                        }
+                        // An app that came by itself has no process here to reap: its
+                        // socket closing is its end.
+                        if adopted {
+                            self.remove_client(cx, client);
+                            self.update_bar(cx);
                         }
                     }
                 }
@@ -3041,6 +3177,130 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The app `client` made another window (`window_id`): a window of its own on the desk,
+    /// a tile showing that window, with the app's sender and no process of its own.
+    fn open_later_window(&mut self, cx: &mut Cx, client: ClientId, window_id: usize) {
+        if self.client_windows.route(client, window_id) != client || self.is_warm(client) || self.ai_bus.is_pane(client) {
+            return;
+        }
+        let id = self.next_id;
+        let Some(owner) = self.state_mut().clients.get(&client) else { return };
+        if owner.parent.is_some() || owner.window_id == window_id {
+            return;
+        }
+        let slot = clients::ClientSlot::later_window(id, client, owner, window_id);
+        self.next_id += 1;
+        let origin = self.client_windows.next_origin(client);
+        self.client_windows.add(client, window_id, id);
+        log!("wm: client {client} opened window {window_id}: client {id}");
+        self.state_mut().clients.insert(id, slot);
+        let area = self.desk_area(cx);
+        let state = self.state_mut();
+        let gap = state.gap;
+        // It opens on the app's screen, on a desktop (never inside the app's fullscreen
+        // space, which holds the app's window only).
+        if let Some(screen) = state.screens.screen_of(client) {
+            state.screens.active = screen;
+        }
+        state.layout_mut().insert_on_desktop(id, area, gap);
+        self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| {
+            d.set_window_owner(id, client);
+            // What the app said of its pointer input holds for this window too.
+            let mouse_cancel = d.with_run_view(cx, client, |_, v| v.hosted.takes_mouse_cancel()).unwrap_or(false);
+            d.with_run_view(cx, id, |_, v| {
+                v.hosted.set_pointer_caps(makepad_widgets::makepad_platform::ime::HostedPointerCaps { mouse_cancel })
+            });
+            d.with_run_view(cx, id, |cx, v| {
+                v.set_window_origin(dvec2(origin, 0.0));
+                v.set_later_window_target(cx, id, window_id, client);
+                v.app_ready(cx, id, window_id);
+            })
+        });
+        self.activate_client(cx, id);
+        self.redraw_all(cx);
+    }
+
+    /// The app `client` closed one of its later windows, or asked something of it.
+    fn later_window_op(&mut self, cx: &mut Cx, client: ClientId, window: makepad_platform::ime::HostedWindow) {
+        use makepad_platform::ime::hosted_window_op as op;
+        // Any window's asked size, the app's first window included.
+        if window.op == op::SIZE {
+            let tile = self.client_windows.route(client, window.window_id);
+            self.apply_requested_size(cx, tile, window.x, window.y);
+            return;
+        }
+        if window.op == op::CLOSED {
+            if let Some(tile) = self.client_windows.closed(client, window.window_id) {
+                log!("wm: client {client} closed window {}: client {tile} goes", window.window_id);
+                self.remove_client(cx, tile);
+                // The app's own window is where the person goes back to.
+                if self.state_mut().clients.contains_key(&client) {
+                    self.focus_client(cx, client);
+                }
+            }
+            return;
+        }
+        let tile = self.client_windows.route(client, window.window_id);
+        if tile == client || !self.state_mut().clients.contains_key(&tile) {
+            return;
+        }
+        match window.op {
+            op::MINIMIZE => self.minimize_desktop(cx, tile),
+            op::MAXIMIZE => self.maximise_toggle(cx, tile),
+            op::FULLSCREEN => self.fullscreen_request(cx, tile, true),
+            op::RESTORE => self.fullscreen_request(cx, tile, false),
+            op::MOVE => self.move_later_window(cx, client, tile, dvec2(window.x, window.y)),
+            op::TITLE => {
+                if let Some(slot) = self.state_mut().clients.get_mut(&tile) {
+                    slot.title = window.title;
+                }
+                self.update_bar(cx);
+                self.redraw_all(cx);
+            }
+            _ => {}
+        }
+    }
+
+    /// The inner size an app asked for its window shown by `tile`: on a floating desktop the
+    /// window opens at that size (plus the desk's title bar), within its screen's usable
+    /// area (minus bar and dock), centred.
+    fn apply_requested_size(&mut self, cx: &mut Cx, tile: ClientId, w: f64, h: f64) {
+        if !self.state_mut().style.target.floating() || self.is_warm(tile) {
+            return;
+        }
+        let Some(screen) = self.state_mut().screens.screen_of(tile) else { return };
+        let mut area = self.screen_area(cx, screen);
+        let state = self.state_mut();
+        let reserve = state.layout_of(tile).desktop.shelf_reserve;
+        area.h = (area.h - reserve).max(1.0);
+        let title = state.style.title_height();
+        if state.layout_of_mut(tile).desktop.request_size(tile, w, h + title, area) {
+            log!("wm: client {tile} opens at the {w}x{h} it asked for (within {:.0}x{:.0})", area.w, area.h);
+            self.redraw_all(cx);
+        }
+    }
+
+    /// Put a later window on the screen at `at`, a point in the app's coordinates (those of
+    /// the screens it was told: relative to its first window's tile).
+    fn move_later_window(&mut self, cx: &mut Cx, client: ClientId, tile: ClientId, at: Vec2d) {
+        let origin = self.state_mut().tile_origins.get(&client).map_or(dvec2(0.0, 0.0), |r| dvec2(r.x, r.y));
+        let p = origin + at;
+        let state = self.state_mut();
+        let target = state.screen_under(p.x, p.y);
+        let (gap, reserved, gaps_out) = (state.gap, state.style.reserved_height(), state.gaps_out);
+        for _ in 0..state.screens.live_count() {
+            let state = self.state_mut();
+            if state.screens.screen_of(tile) == Some(target) {
+                break;
+            }
+            if state.screens.move_to_screen(tile, true, gap, reserved, gaps_out).is_none() {
+                break;
+            }
+        }
+        self.focus_client(cx, tile);
+        self.redraw_all(cx);
     }
 
     fn on_app_msg(&mut self, cx: &mut Cx, client: ClientId, msg: AppToStudio) {
@@ -3063,6 +3323,9 @@ impl App {
                         }
                     })
                     .unwrap_or(false);
+                if !first {
+                    self.open_later_window(cx, client, window_id);
+                }
                 if first {
                     // A warm instance has no tile to be ready IN: it gets
                     // a framebuffer of its own instead, and draws into it
@@ -3084,6 +3347,8 @@ impl App {
                 }
             }
             AppToStudio::DrawCompleteAndFlip(pd) => {
+                // A later window's frame is its own tile's.
+                let client = self.client_windows.route(client, pd.window_id);
                 makepad_app_host::hosted::trace_host(host::wall_now(), &format!("rx-flip c{}", client));
                 // A CLOSING client's tile is frozen on its last good frame:
                 // the zoom-out plays over that, never over the app's own
@@ -3211,6 +3476,8 @@ impl App {
             }
             AppToStudio::SetClipboard(text) => {
                 cx.copy_to_clipboard(&text);
+                // the Wayland clients (a browser) paste it too
+                wayland_host::send(wayland_host::ViewCmd::Selection { primary: false, text });
             }
             AppToStudio::Relay(relay) => {
                 // Only a client the WM launched and still holds a channel to
@@ -3223,12 +3490,32 @@ impl App {
                     log!("wm: relay from unknown client {} ignored", client);
                     return;
                 }
+                // A file dialog: the WM draws the picker over the window that asked
+                // (a hosted app has no display of its own to open a system one on).
+                #[cfg(not(target_os = "android"))]
+                if let makepad_widgets::makepad_platform::studio::ChildRelay::FileDialog(dialog) = relay {
+                    let anchor = self
+                        .desk(cx)
+                        .borrow_mut::<WmDesk>()
+                        .and_then(|mut d| d.with_run_view(cx, client, |cx, v| v.area().rect(cx)));
+                    let picker = self.ui.widget(cx, ids!(file_picker));
+                    if let Some(mut p) = picker.borrow_mut::<shell::file_picker::ShellFilePicker>() {
+                        p.request(cx, shell::file_picker::PickRequest { from: shell::file_picker::Requester::Client(client), relay: dialog, anchor });
+                    }
+                    cx.set_key_focus(Area::Empty);
+                    self.redraw_all(cx);
+                    return;
+                }
                 // The child's window starts where its view is drawn.
                 let origin = self
                     .desk(cx)
                     .borrow_mut::<WmDesk>()
                     .and_then(|mut d| d.with_run_view(cx, client, |cx, v| v.area().rect(cx).pos))
                     .unwrap_or_default();
+                // a hosted app's selection is the Wayland clients' primary selection too
+                if let ChildRelay::SetPrimarySelection { text } = &relay {
+                    wayland_host::send(wayland_host::ViewCmd::Selection { primary: true, text: text.clone() });
+                }
                 let answers = self.relay.on_child(cx, client, origin, relay);
                 self.send_relays(answers);
             }
@@ -3250,23 +3537,24 @@ impl App {
                 // What the child's pointer input understands: a child that
                 // never says so gets no `MouseCancel` (see MpRunView).
                 if let Some(caps) = makepad_platform::ime::HostedPointerCaps::parse(&json) {
+                    // Every window of the app: a later window's view relays its cancelled
+                    // presses only when it knows the app takes them.
+                    let tiles = self.client_windows.tiles_of(client);
                     if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
-                        d.with_run_view(cx, client, |_, v| v.hosted.set_pointer_caps(caps));
+                        for tile in tiles {
+                            d.with_run_view(cx, tile, |_, v| v.hosted.set_pointer_caps(caps.clone()));
+                        }
                     }
                     return;
                 }
-                // The app draws its own chrome (own_chrome.rs): no frame or
-                // title bar from the desk, presses ask the app's drag query.
-                if let Some(chrome) = makepad_platform::ime::HostedChrome::parse(&json) {
-                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
-                        d.set_own_chrome(cx, client, chrome.own);
-                    }
-                    self.redraw_all(cx);
+                // One of the app's later windows: closed by the app, or what it asked of it.
+                if let Some(window) = makepad_platform::ime::HostedWindow::parse(&json) {
+                    self.later_window_op(cx, client, window);
                     return;
                 }
                 // The app's own caption buttons (own_chrome.rs): the desk does
                 // what its own close / minimise / maximise would.
-                if let Some(op) = makepad_platform::ime::HostedWindowOp::parse(&json) {
+                if let Some(op) = makepad_studio_protocol::HostedWindowOp::parse(&json) {
                     let state = {
                         let layout = self.state_mut().layout_of(client);
                         own_chrome::WindowState { maximised: layout.is_maximised(client), fullscreen: layout.is_fullscreen_space(client) }
@@ -3274,19 +3562,57 @@ impl App {
                     match own_chrome::route_window_op(&op, state) {
                         Some(own_chrome::WindowAction::Close) => self.request_close(cx, client),
                         Some(own_chrome::WindowAction::Minimize) => self.minimize_desktop(cx, client),
-                        // The app's green button is FULLSCREEN: a desktop of its own.
-                        Some(own_chrome::WindowAction::Maximise(on)) => self.fullscreen_request(cx, client, on),
+                        // The app's maximise button toggles maximise, as a double click on its
+                        // caption does (the window keeps its caption; fullscreen is the app's
+                        // own fullscreen request).
+                        Some(own_chrome::WindowAction::Maximise(_)) => self.maximise_toggle(cx, client),
                         Some(own_chrome::WindowAction::LeaveFullscreen) => self.fullscreen_request(cx, client, false),
+                        Some(own_chrome::WindowAction::EnterFullscreen) => self.fullscreen_request(cx, client, true),
                         None => {}
                     }
                     return;
                 }
-                if let Some(answer) = makepad_platform::ime::HostedDragAnswer::parse(&json) {
-                    let start = self.desk(cx).borrow_mut::<WmDesk>().and_then(|mut d| {
-                        d.with_run_view(cx, client, |cx, v| v.take_caption_press(cx, &answer, host::now())).flatten()
-                    });
-                    if let Some(abs) = start {
-                        self.begin_drag_on(cx, client, abs, false, false);
+                if let Some(answer) = makepad_studio_protocol::HostedDragAnswer::parse(&json) {
+                    let now = host::now();
+                    // The answer comes on the app's channel; the press was made in one of its
+                    // windows (its later windows are desk clients of their own).
+                    let tiles = self.client_windows.tiles_of(client);
+                    let mut start = None;
+                    if let Some(mut d) = self.desk(cx).borrow_mut::<WmDesk>() {
+                        for tile in tiles {
+                            if let Some(press) = d.with_run_view(cx, tile, |cx, v| v.take_caption_press(cx, &answer, now)).flatten() {
+                                start = Some((tile, press));
+                                break;
+                            }
+                        }
+                    }
+                    if let Some((client, press)) = start {
+                        // The app's caption is a title bar: a second press there soon after
+                        // the first maximises, as on the desk's own title bars (a quick click
+                        // is released before the answer comes: it counts, but drags nothing).
+                        let abs = press.abs();
+                        let double = self.title_press.is_some_and(|(c, time, pos)| {
+                            c == client && now - time < 0.5 && (pos - abs).length() < 5.0
+                        });
+                        if double {
+                            self.title_press = None;
+                            // What the window declared (`double_click` on its `Window`):
+                            // maximise in place, or fullscreen on its screen (an output window).
+                            let state = {
+                                let layout = self.state_mut().layout_of(client);
+                                own_chrome::WindowState { maximised: layout.is_maximised(client), fullscreen: layout.is_fullscreen_space(client) }
+                            };
+                            match own_chrome::caption_double_click(answer.double_click, state) {
+                                own_chrome::WindowAction::EnterFullscreen => self.fullscreen_request(cx, client, true),
+                                own_chrome::WindowAction::LeaveFullscreen => self.fullscreen_request(cx, client, false),
+                                _ => self.maximise_toggle(cx, client),
+                            }
+                        } else {
+                            self.title_press = Some((client, now, abs));
+                            if let own_chrome::CaptionPress::Drag(abs) = press {
+                                self.begin_drag_on(cx, client, abs, false, false);
+                            }
+                        }
                     }
                     return;
                 }
@@ -3696,6 +4022,12 @@ impl App {
                 host::persist_natural_scroll(on);
                 host::apply_natural_scroll(on);
             }
+            "desktop.tap-to-click" => {
+                self.close_shell_menu(cx);
+                let on = !host::load_tap_to_click();
+                host::persist_tap_to_click(on);
+                host::apply_tap_to_click(on);
+            }
             "desktop.autohide-dock" => {
                 self.close_shell_menu(cx);
                 let on = !self.state_mut().dock_autohide.enabled;
@@ -3810,21 +4142,20 @@ impl App {
     /// it; otherwise only the cheap activity flag, which pulses the bar's
     /// icon. Once a second (the status tick) and on every panel command.
     fn hub_poll(&mut self, cx: &mut Cx) {
+        let processes = self.processes();
+        self.hub_link.tick(processes, host::now());
         self.gpu_yield_report(cx);
         let panel = self.ui.widget(cx, ids!(shell_panel));
         let open = panel.borrow::<shell::panels::ShellPanel>().is_some_and(|p| p.open == Some(shell::panels::PanelKind::Hub));
         let active = if open {
-            let snap = self.hub_link.get().snapshot();
+            let snap = self.hub_link.get(processes).snapshot();
             let busy = snap.busy();
             if let Some(mut p) = panel.borrow_mut::<shell::panels::ShellPanel>() {
-                if p.data.hub != snap {
-                    p.data.hub = snap;
-                    p.redraw(cx);
-                }
+                p.hub_update(cx, snap);
             }
             busy
         } else {
-            self.hub_link.get().active()
+            self.hub_link.get(processes).active()
         };
         if self.bar_sample.hub_active != active {
             self.bar_sample.hub_active = active;
@@ -3838,10 +4169,11 @@ impl App {
         static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         let now = START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64();
         let was_exhausted = self.yield_policy.exhausted();
+        let processes = self.processes();
         match self.yield_policy.on_pressure(e.wanted_mb, e.reserve_mb, now) {
             Some(ask) if ask.mb == 0 => {
                 log!("wm: GPU memory for the UI is back ({} MB free): the AI hub may grow its model back", e.free_mb);
-                self.hub_link.get().send(hub_control::HubCommand::Yield { mb: 0, unload: false, reserve_mb: ask.reserve_mb });
+                self.hub_link.get(processes).send(hub_control::HubCommand::Yield { mb: 0, unload: false, reserve_mb: ask.reserve_mb });
             }
             Some(ask) => {
                 log!(
@@ -3849,7 +4181,7 @@ impl App {
                     e.wanted_mb, e.free_mb, e.reserve_mb, if e.failed { ", a texture create failed" } else { "" },
                     ask.mb, if ask.unload { ", the model may be unloaded" } else { "" }
                 );
-                self.hub_link.get().send(hub_control::HubCommand::Yield { mb: ask.mb, unload: ask.unload, reserve_mb: ask.reserve_mb });
+                self.hub_link.get(processes).send(hub_control::HubCommand::Yield { mb: ask.mb, unload: ask.unload, reserve_mb: ask.reserve_mb });
             }
             None if e.wanted_mb == 0 => log!("wm: GPU memory for the UI is back ({} MB free)", e.free_mb),
             None if self.yield_policy.exhausted() && !was_exhausted => {
@@ -3861,7 +4193,8 @@ impl App {
 
     /// The hub's answer to a yield: logged, and shown when the user loses something.
     fn gpu_yield_report(&mut self, cx: &mut Cx) {
-        let Some(report) = self.hub_link.get().take_report() else { return };
+        let processes = self.processes();
+        let Some(report) = self.hub_link.get(processes).take_report() else { return };
         log!("wm: AI hub: {report}");
         if let Some(notice) = gpu_yield::notice_for(&report) {
             self.notify(cx, "GPU memory", notice);
@@ -5589,8 +5922,16 @@ impl MatchEvent for App {
         // The pool as this build wants it: nothing to keep warm without
         // processes (the platform's, or the build's `modules_only`).
         self.warm_pool = WarmPool::from_env(self.processes());
-        self.warm_pool.set_browser_appearance(desktop_app::browser_appearance(
-            self.build.style, false, &source));
+        let browser_dark = desktop_app::browser_appearance(self.build.style, false, &source);
+        self.warm_pool.set_browser_appearance(browser_dark);
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("MAKEPAD_WM_PORTAL").is_none_or(|v| v != "0") {
+            let scheme = if browser_dark { portal::PREFER_DARK } else { portal::PREFER_LIGHT };
+            match portal::Portal::start(&cx.thread_spawner(), vec![portal_file_chooser::interface()], scheme) {
+                Ok(p) => self.portal = Some(p),
+                Err(e) => log!("wm portal: not served: {e}"),
+            }
+        }
         let term_env = theme::scan_term_palette(&source)
             .map(|p| p.env_value())
             .unwrap_or_default();
@@ -5615,8 +5956,13 @@ impl MatchEvent for App {
             log!("wm: could not bind the client hub; tiles will not start");
         }
         self.hub = hub;
+        #[cfg(target_os = "linux")]
+        if self.hub.is_some() {
+            self.adoptions = adopt::Adoptions::start(cx, hub_port);
+        }
 
         host::apply_natural_scroll(host::load_natural_scroll());
+        host::apply_tap_to_click(host::load_tap_to_click());
         self.state = Some(WmState {
             snap: Default::default(),
             shot: Default::default(),
@@ -5654,6 +6000,7 @@ impl MatchEvent for App {
             gap: desk::TILE_GAP,
             gaps_out: desk::GAPS_OUT,
             dragging: Vec::new(),
+            live_resize: false,
             drop_hint: None,
             pane_sliding: false,
             style: Default::default(),
@@ -5908,7 +6255,8 @@ impl MatchEvent for App {
             match wa.cast::<ShellPanelAction>() {
                 ShellPanelAction::SetVolume(v) => self.set_volume(cx, v),
                 ShellPanelAction::Hub(command) => {
-                    self.hub_link.get().send(command);
+                    let pool = cx.task_pool();
+                    self.hub_link.command(command, host::now(), &pool);
                     self.hub_poll(cx);
                 }
                 ShellPanelAction::ToggleMute => {
@@ -5933,6 +6281,11 @@ impl MatchEvent for App {
                                 let _ = sender.send(msg_bin);
                             }
                         }
+                    }
+                    // A later window does not pace its app: what it sent is drawn on the
+                    // app's next Tick, which the app's first window sends.
+                    if let Some((owner, _)) = self.client_windows.owner(client) {
+                        self.desk(cx).borrow_mut::<WmDesk>().map(|mut d| d.with_run_view(cx, owner, |cx, v| v.request_tick(cx)));
                     }
                 }
                 MpRunViewAction::Clicked { client } => {
@@ -5982,6 +6335,7 @@ impl App {
             Event::MouseMove(e) => e.abs,
             Event::MouseUp(e) => e.abs,
             Event::Scroll(e) => e.abs,
+            Event::Pinch(e) => e.abs,
             _ => return None,
         };
         let captured = self.vr_pointer_capture;
@@ -6014,12 +6368,18 @@ impl App {
             Event::MouseMove(e) => { let mut e = e.clone(); e.abs = logical; Event::MouseMove(e) }
             Event::MouseUp(e) => { let mut e = e.clone(); e.abs = logical; Event::MouseUp(e) }
             Event::Scroll(e) => { let mut e = e.clone(); e.abs = logical; Event::Scroll(e) }
+            Event::Pinch(e) => { let mut e = e.clone(); e.abs = logical; Event::Pinch(e) }
             _ => return None,
         }))
     }
 }
 
 impl AppMain for App {
+    /// The WM hosts other apps' windows; it never looks for another WM to host its own.
+    fn window_manager() -> bool {
+        true
+    }
+
     fn script_mod(vm: &mut ScriptVm) -> ScriptValue {
         // The build the binary set on Cx (build.rs): the style the widgets
         // come up in, and whether the assistant's families are linked.
@@ -6134,7 +6494,7 @@ impl AppMain for App {
         if self.history_event(cx, event) { return; }
         self.dock_autohide_event(cx, event);
         self.shelf_autohide_event(cx, event);
-        if matches!(event, Event::NetworkResponses(_) | Event::PermissionResult(_)) {
+        if matches!(event, Event::NetworkResponses(_) | Event::PermissionResult(_) | Event::Clipboard(_)) {
             let answers = self.relay.on_event(event);
             self.send_relays(answers);
         }
@@ -6159,6 +6519,11 @@ impl AppMain for App {
         // the clipboard/IME queries while it is up (shell/panels.rs): taken
         // before the WM's own binds, the AI pane and any hosted child.
         if self.state.is_some() && self.shell_panel_secret_input(cx, event) {
+            return;
+        }
+        // A client's file dialog is modal while it is up: the pointer, the keys and the
+        // typed text are its own, before the WM's binds and any client.
+        if self.file_picker_event(cx, event) {
             return;
         }
         // A reconcile in the last desk draw: the bar follows it now.
@@ -6322,6 +6687,9 @@ impl AppMain for App {
             if self.state.is_some() {
                 self.sync_ai_pane_geometry(cx);
                 self.sync_surface_targets(cx);
+                let live = self.drag.as_ref().is_some_and(|d| d.resize && d.armed) || self.div_drag.is_some();
+                let state = self.state_mut();
+                state.live_resize = live || state.warp.unfold_resize.is_some();
             }
         }
         // SUPER + mouse:272 / mouse:273 — move and resize (tiling.lua).
@@ -6448,6 +6816,9 @@ impl AppMain for App {
             }
         }
         if let Event::Shutdown = event {
+            // The WM's AI hub ends with it (hub_child).
+            let pool = cx.task_pool();
+            self.hub_link.shutdown(&pool);
             if self.state.is_some() {
                 self.kill_warm_previews(cx);
                 self.kill_pane_child(cx);
@@ -6515,6 +6886,11 @@ impl AppMain for App {
                 #[cfg(target_os = "linux")]
                 self.poll_linux_controls(cx);
             }
+            // Every signal, whoever cleared the flag: a portal call is a cheap channel read.
+            #[cfg(target_os = "linux")]
+            if self.state.is_some() {
+                self.portal_calls(cx);
+            }
         }
 
         // An in-process assistant's calls arrive on channels, not events:
@@ -6531,6 +6907,13 @@ impl AppMain for App {
             self.ui.handle_event(cx, event, &mut scope);
         } else {
             self.ui.handle_event(cx, event, &mut Scope::empty());
+        }
+        // The WM's own text fields copied or cut: the Wayland clients paste it too (a hosted
+        // app's copy arrives as SetClipboard; its tile leaves the response empty).
+        if let Event::TextCopy(e) | Event::TextCut(e) = event {
+            if let Some(text) = e.response.borrow().clone().filter(|t| !t.is_empty()) {
+                wayland_host::send(wayland_host::ViewCmd::Selection { primary: false, text });
+            }
         }
         self.sync_phone_keyboard(cx);
         #[cfg(not(target_arch = "wasm32"))]

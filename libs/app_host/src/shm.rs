@@ -112,6 +112,14 @@ impl SharedMem {
         Ok(SharedMem { ptr: view.0.cast(), len, path: path.to_path_buf(), owner, mapping, _file: file })
     }
 
+    #[cfg(not(any(unix, windows)))]
+    fn map(_file: std::fs::File, path: &Path, _len: usize, owner: bool) -> io::Result<SharedMem> {
+        if owner {
+            let _ = std::fs::remove_file(path);
+        }
+        Err(io::Error::new(io::ErrorKind::Unsupported, "shared memory is not available on this platform"))
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -226,6 +234,11 @@ impl Semaphore {
         }
         .map_err(|e| io::Error::from_raw_os_error(e.0 & 0xffff))?;
         Ok(Semaphore { sem, name: cname })
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    fn open_with(_name: &str, _create: bool) -> io::Result<Semaphore> {
+        Err(io::Error::new(io::ErrorKind::Unsupported, "shared semaphores are not available on this platform"))
     }
 
     pub fn name(&self) -> &str {

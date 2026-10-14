@@ -54,6 +54,8 @@ pub enum ViewCmd {
     Scale(f64),
     /// Screen rectangle in tile coordinates, so popups are placed inside the screen.
     PopupBounds { x: i32, y: i32, w: i32, h: i32 },
+    /// A makepad app copied text (`primary`: selected it): the Wayland clients' selection.
+    Selection { primary: bool, text: String },
 }
 
 /// The surfaces to draw for a window, bottom to top (the window's own tree, then popups).

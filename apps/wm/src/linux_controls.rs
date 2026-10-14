@@ -11,11 +11,12 @@
 //! * The display layout (`display-layout`, see `shell::display_layout`):
 //!   screen order, main screen, per-screen modes, mirror and the render-on
 //!   GPU. The WM keeps a working copy; every edit updates it and queues the
-//!   whole file for saving (one slot, newest intent). A mode or an
-//!   arrangement (Extended / Mirror) is tried first (`shell::display_menu`):
-//!   sent at once, then kept by the person within 15 s or reverted; a
-//!   failure is reported under its screen and the previous one sent again.
-//!   Only a kept one reaches the layout. At start-up the
+//!   whole file for saving (one slot, newest intent). A screen's mode
+//!   is tried first (`shell::display_menu`): sent at once, then kept by the
+//!   person within 15 s or reverted; a failure is reported under its screen
+//!   and the previous one sent again. Only a kept one reaches the layout.
+//!   Extended / Mirror reinitialises no output: it applies at once and is
+//!   saved when the renderer takes it. At start-up the
 //!   saved layout is restored as a safety net behind the session script's
 //!   environment (`restore_plan`): order and modes once, on the first
 //!   display generation that has a laid-out desktop; the main screen
@@ -77,9 +78,13 @@ pub enum ControlAction {
     /// (connector names, a neighbour swap of the drawn order): applied
     /// through `linux_set_display_order` and saved.
     DisplayOrder(Vec<String>),
-    /// Try a screen's mode or the arrangement: sent at once, saved only
-    /// once kept (`DisplayKeep`), reverted by `DisplayRevert` or after 15 s.
+    /// Try a screen's mode: sent at once, saved only once kept
+    /// (`DisplayKeep`), reverted by `DisplayRevert` or after 15 s.
     DisplayTry(Change),
+    /// Extended, or Mirror sized for a screen: it reinitialises no output,
+    /// so it is sent at once with no confirm and saved once the renderer
+    /// takes it.
+    DisplayArrangement(DisplayArrangement),
     DisplayKeep,
     DisplayRevert,
     /// Which screen paces the frames: applied at once (no modeset, so no
@@ -184,7 +189,7 @@ pub struct LinuxControls {
     /// The sequence of the `SaveDisplayLayout` a restart (or an ordinary
     /// edit) is waiting on, until its outcome (success or failure) lands.
     layout_save_seq: Option<Seq>,
-    /// The mode or arrangement change being tried, and the notes under the
+    /// The mode change being tried, a pending Extended / Mirror switch and the notes under the
     /// Display menu's controls.
     trials: DisplayTrials,
 }
@@ -571,12 +576,26 @@ impl App {
                             self.linux_controls.trials.selected_mode(name, o.mode_override.as_deref()).map(str::to_string)
                         }),
                     },
-                    Change::Arrangement(_) => {
-                        Change::Arrangement(self.linux_controls.trials.selected_arrangement(&displays.arrangement).clone())
-                    }
                 };
                 let out = self.linux_controls.trials.begin(change, running, cx.linux_display_generation(), Cx::monotonic_now());
                 self.apply_trial_out(cx, out);
+                self.poll_linux_controls(cx);
+                self.redraw_all(cx);
+                return;
+            }
+            ControlAction::DisplayArrangement(arrangement) => {
+                self.linux_controls.notice.clear();
+                let displays = cx.linux_display_snapshot();
+                if self.linux_controls.trials.switch_arrangement(arrangement.clone(), &displays.arrangement) {
+                    // Saved once the renderer takes it (`display_result`).
+                    match cx.linux_set_display_arrangement(&arrangement) {
+                        Ok(()) => log!("wm: display arrangement {arrangement:?} asked"),
+                        Err(message) => {
+                            log!("wm: display arrangement {arrangement:?} refused: {message}");
+                            self.linux_controls.trials.arrangement_refused(&arrangement, &message, &displays);
+                        }
+                    }
+                }
                 self.poll_linux_controls(cx);
                 self.redraw_all(cx);
                 return;
@@ -651,6 +670,7 @@ impl App {
                 | ControlAction::DisplaySource(_)
                 | ControlAction::DisplayOrder(_)
                 | ControlAction::DisplayTry(_)
+                | ControlAction::DisplayArrangement(_)
                 | ControlAction::DisplayKeep
                 | ControlAction::DisplayRevert
                 | ControlAction::DisplayPacing(_)
@@ -1001,7 +1021,6 @@ impl App {
                 TrialOut::Send(change) => {
                     let sent = match &change {
                         Change::Mode { name, mode } => cx.linux_set_display_mode(name, mode.as_deref()),
-                        Change::Arrangement(arrangement) => cx.linux_set_display_arrangement(arrangement),
                     };
                     match sent {
                         Ok(()) => log!("wm: display: trying {change:?}"),
@@ -1017,7 +1036,7 @@ impl App {
         }
     }
 
-    /// A kept mode or arrangement goes into the layout and is saved.
+    /// A kept mode goes into the layout and is saved.
     fn save_kept_change(&mut self, cx: &mut Cx, change: Change) {
         log!("wm: display: kept {change:?}");
         let displays = cx.linux_display_snapshot();
@@ -1032,11 +1051,18 @@ impl App {
                 }),
                 None => log!("wm: mode for {name} not saved: it is no longer listed or its card has no PCI address"),
             },
-            Change::Arrangement(DisplayArrangement::Extended) => {
-                self.linux_controls.edit_layout(Some(&displays), |layout| layout.mirror = None)
-            }
-            Change::Arrangement(DisplayArrangement::Mirror { optimise_for }) => {
-                match displays.outputs.iter().find(|o| o.name == optimise_for).and_then(screen_key) {
+        }
+    }
+
+    /// An arrangement the renderer took goes into the layout and is saved.
+    fn save_arrangement(&mut self, cx: &mut Cx, arrangement: &DisplayArrangement) {
+        log!("wm: display arrangement {arrangement:?}");
+        let displays = cx.linux_display_snapshot();
+        self.linux_controls.layout_set_by_person();
+        match arrangement {
+            DisplayArrangement::Extended => self.linux_controls.edit_layout(Some(&displays), |layout| layout.mirror = None),
+            DisplayArrangement::Mirror { optimise_for } => {
+                match displays.outputs.iter().find(|o| o.name == *optimise_for).and_then(screen_key) {
                     Some(key) => self.linux_controls.edit_layout(Some(&displays), |layout| layout.mirror = Some(key)),
                     None => log!("wm: mirror for {optimise_for} not saved: it is no longer listed or its card has no PCI address"),
                 }
@@ -1077,11 +1103,26 @@ impl App {
             self.redraw_all(cx);
             return;
         }
+        if let LinuxDisplayCommand::Arrangement(arrangement) = command {
+            match result {
+                Ok(()) => self.save_arrangement(cx, arrangement),
+                Err(message) => {
+                    log!("wm: display arrangement {arrangement:?} refused: {message}");
+                    let displays = cx.linux_display_snapshot();
+                    self.linux_controls.trials.arrangement_refused(arrangement, message, &displays);
+                }
+            }
+            self.poll_linux_controls(cx);
+            self.redraw_all(cx);
+            return;
+        }
         let Err(message) = result else { return };
         let change = match command {
             LinuxDisplayCommand::Mode { name, mode } => Change::Mode { name: name.clone(), mode: mode.clone() },
-            LinuxDisplayCommand::Arrangement(arrangement) => Change::Arrangement(arrangement.clone()),
-            LinuxDisplayCommand::Source(_) | LinuxDisplayCommand::Order(_) | LinuxDisplayCommand::Pacing(_) => return,
+            LinuxDisplayCommand::Arrangement(_)
+            | LinuxDisplayCommand::Source(_)
+            | LinuxDisplayCommand::Order(_)
+            | LinuxDisplayCommand::Pacing(_) => return,
         };
         let displays = cx.linux_display_snapshot();
         let out = self.linux_controls.trials.refused(&change, message, &displays, Cx::monotonic_now());

@@ -255,7 +255,7 @@ mod tests {
         };
         let mut phone_ids = offered(&phone);
         phone_ids.sort();
-        assert_eq!(phone_ids, ["amp", "calculator", "clock", "notes", "photos", "translator", "weather"]);
+        assert_eq!(phone_ids, ["amp", "calculator", "camera", "clock", "notes", "photos", "weather"]);
         let desk_ids = offered(&desk);
         for id in ["code", "task", "terminal", "files", "score"] {
             assert!(desk_ids.iter().any(|d| d == id), "the desktop still offers {id}");

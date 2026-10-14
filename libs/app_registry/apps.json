@@ -45,6 +45,11 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"], "mobile": true
   },
   {
+    "id": "camera", "label": "Camera", "package": "makepad-app-camera",
+    "dir": "apps/camera", "bin": "makepad-app-camera", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": true
+  },
+  {
     "id": "clock", "label": "Clock", "package": "makepad-app-clock",
     "dir": "apps/clock", "bin": "makepad-app-clock", "manifest": null, "args": [],
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": ["standalone"], "mobile": true
@@ -57,7 +62,7 @@
   {
     "id": "translator", "label": "Translator", "package": "makepad-app-translator",
     "dir": "apps/translator", "bin": "makepad-app-translator", "manifest": null, "args": [],
-    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": true
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {
     "id": "finance", "label": "Finance", "package": "makepad-app-finance",
@@ -125,6 +130,11 @@
     "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
   },
   {
+    "id": "sandbox", "label": "Sandbox", "package": "makepad-sandbox",
+    "dir": "apps/commercial/sandbox", "bin": "makepad-sandbox", "manifest": null, "args": [],
+    "policy": "or_focus", "menu_visible": true, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
     "id": "image", "label": "Image Viewer", "package": "makepad-app-image",
     "dir": "apps/image", "bin": "makepad-app-image", "manifest": null, "args": [],
     "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": [], "mobile": false
@@ -137,6 +147,11 @@
   {
     "id": "splash", "label": "Splash", "package": "makepad-example-splash",
     "dir": "examples/splash", "bin": "makepad-example-splash", "manifest": null, "args": [],
+    "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": [], "mobile": false
+  },
+  {
+    "id": "splash-live", "label": "Splash, live", "package": "makepad-example-splash-live",
+    "dir": "examples/splash_live", "bin": "makepad-example-splash-live", "manifest": null, "args": [],
     "policy": "always_new", "menu_visible": false, "wm_launchable": true, "features": [], "mobile": false
   },
   {

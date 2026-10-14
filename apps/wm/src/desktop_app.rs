@@ -51,9 +51,16 @@ impl App {
         let sheet_name = sheet.name.clone();
         let sheet_ground = sheet.theme_color("color_bg_app");
         app_icon::install(cx, style, &sheet.icons);
+        // Tiling and the shelves exclude each other: parked windows come back full size
+        // while the shelves still say where they are shown, then the shelves go off. The
+        // user's shelf setting (`warp.mode`) is kept for the next floating style.
+        if !style.floating() && previous.floating() {
+            self.unpark_all(cx);
+        }
         let state = self.state_mut();
         state.dragging.clear();
         state.style.select(style);
+        state.warp.tiling = !style.floating();
         if changes_size { state.style.step(1.0); }
         let shelf_reserve = state.shelf_reserve();
         for (i, s) in state.screens.screens.iter_mut().enumerate() {
@@ -141,6 +148,8 @@ impl App {
         let Some(json) = self.stylesheet.as_ref().map(|s| s.to_json()) else {
             return;
         };
+        // with the dark/light it stands for (`HostedAppearance`), for a process client
+        let appearance = self.warm_pool.browser_appearance().map(|dark| makepad_studio_protocol::HostedAppearance { dark }.to_json());
         #[cfg(not(target_arch = "wasm32"))]
         if self.domains.owns(client) {
             self.domains.send_message(client, json);
@@ -153,13 +162,29 @@ impl App {
             .filter(|s| s.ready)
             .and_then(|s| s.sender.as_ref())
         {
-            send_to_app(sender, vec![StudioToApp::Custom(json)]);
+            let mut msgs = vec![StudioToApp::Custom(json)];
+            msgs.extend(appearance.map(StudioToApp::Custom));
+            send_to_app(sender, msgs);
         }
     }
     pub(super) fn refresh_warm_browser_appearance(&mut self, cx: &mut Cx, dark: bool) {
+        // browsers and other portal clients follow (Chromium: SettingChanged color-scheme)
+        #[cfg(target_os = "linux")]
+        if let Some(portal) = &self.portal {
+            portal.set_color_scheme(if dark { crate::portal::PREFER_DARK } else { crate::portal::PREFER_LIGHT });
+        }
         for client in self.warm_pool.set_browser_appearance(dark) {
             log!("wm: retiring warm browser {} for {} appearance", client, if dark {"dark"} else {"light"});
             self.request_close(cx, client);
+        }
+        // Running apps hear it too (`HostedAppearance`): what draws without a stylesheet, such
+        // as `makepad run`'s load screen, follows it.
+        let json = makepad_studio_protocol::HostedAppearance { dark }.to_json();
+        let state = self.state_mut();
+        for slot in state.clients.values().filter(|slot| slot.ready) {
+            if let Some(sender) = &slot.sender {
+                send_to_app(sender, vec![StudioToApp::Custom(json.clone())]);
+            }
         }
         // Normal top-up runs after reaping; no new process overlaps the old
         // profile lock, and pages the user has opened stay in their process.
@@ -361,6 +386,7 @@ impl App {
                 menu.model.dock_autohide = autohide;
                 menu.model.dark_choice = dark;
                 menu.model.natural_scroll = host::load_natural_scroll();
+                menu.model.tap_to_click = host::load_tap_to_click();
             }
         }
         let anchor = if self.state_mut().style.target.mobile() {

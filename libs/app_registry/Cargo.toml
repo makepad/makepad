@@ -21,3 +21,8 @@ path = "src/lib.rs"
 
 [dependencies]
 makepad-strict-json = { path = "../strict_json" }
+
+# cargo with the launchers' exact command and environment, for deploy scripts
+[[bin]]
+name = "makepad-cargo"
+path = "src/bin/makepad_cargo.rs"

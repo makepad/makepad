@@ -31,6 +31,10 @@ pub trait TileHost {
     fn arrival_fade(&self) -> f32;
     /// The layout's settled size while the rect tweens (resize-sync).
     fn set_target_size(&mut self, size: Option<Vec2d>);
+    /// The window is fullscreen (a space of its own): a makepad app draws no caption then.
+    fn set_fullscreen(&mut self, _on: bool) {}
+    /// A drag is resizing windows (`WmState::live_resize`).
+    fn set_live_resize(&mut self, _on: bool) {}
     /// While closing: the quad's place inside the original tile rect.
     fn set_close_crop(&mut self, crop: Option<(Vec2d, Vec2d)>);
     /// The popin fade the desk drives during open/close (1 = solid).

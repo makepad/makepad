@@ -444,6 +444,9 @@ pub fn restore_inside(z: &Zones, desk: LRect) -> LRect {
 pub struct Warp {
     /// Classic has no zones at all.
     pub mode: Mode,
+    /// The desktop tiles (a tiling style): the shelves are off whatever `mode`, the
+    /// user's shelf setting, says; it is left as it is, so leaving tiling restores it.
+    pub tiling: bool,
     zones: Vec<Zones>,
     /// The parked window a drag is pulling out of its zone.
     pub leave: Option<Leave>,
@@ -496,7 +499,11 @@ impl Warp {
     /// The zones of a display (none only for a degenerate area).
     pub fn zones_for(&self, area: LRect) -> Option<Zones> {
         let z = Zones::new(area);
-        (self.mode == Mode::Warp && z.zone_w() >= 1.0).then_some(z)
+        (self.shelves_on() && z.zone_w() >= 1.0).then_some(z)
+    }
+    /// Shelves (edge zones, parking): the user's setting, and never while tiling.
+    pub fn shelves_on(&self) -> bool {
+        self.mode == Mode::Warp && !self.tiling
     }
     /// Set the displays' areas (once per desk draw).
     pub fn set_areas(&mut self, areas: impl IntoIterator<Item = LRect>) {
@@ -1060,6 +1067,27 @@ mod tests {
         // Wider than the display: clamped to it.
         let huge = restore_inside(&z, slot_at(&z, -1, z.zone_w() * 0.5, 3000.0, 600.0));
         assert!(huge.x >= 0.0 && huge.x + huge.w <= 1920.0);
+    }
+
+    /// Tiling turns the shelves off whatever the user's shelf setting is, and leaving
+    /// tiling gives back exactly that setting: on comes back on, off stays off.
+    #[test]
+    fn tiling_forces_the_shelves_off_and_leaving_it_restores_the_setting() {
+        let screen = LRect::new(0.0, 0.0, 1610.0, 980.0);
+        for setting in [Mode::Warp, Mode::Classic] {
+            let mut w = Warp::default();
+            w.mode = setting;
+            w.tiling = true;
+            assert!(!w.shelves_on());
+            assert!(w.zones_for(screen).is_none(), "{setting:?}: no zones while tiling");
+            w.set_areas([screen]);
+            assert!(!w.active(), "{setting:?}: no shelf drawn or parked while tiling");
+            assert_eq!(w.mode, setting, "the setting is kept");
+            w.tiling = false;
+            w.set_areas([screen]);
+            assert_eq!(w.shelves_on(), setting == Mode::Warp);
+            assert_eq!(w.active(), setting == Mode::Warp, "{setting:?}: restored as set");
+        }
     }
 
     #[test]

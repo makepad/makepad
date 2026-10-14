@@ -68,6 +68,20 @@ pub struct History {
     pending_until: f64,
     /// Clients already put in their place: never moved again by this.
     placed: Vec<ClientId>,
+    /// The file as this WM last read or wrote it: a file changed since (somebody
+    /// edited it, another WM wrote it) is read again before the next write, so an
+    /// external edit is never written over.
+    disk: Option<std::time::SystemTime>,
+}
+
+fn modified(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// An example or test app (`examples/*` in the registry, e.g. counter): never part of the
+/// layout history, so a restart never waits for or places one the user did not open.
+fn is_example(app: &str) -> bool {
+    makepad_app_registry::find(app).is_some_and(|entry| entry.dir.starts_with("examples/"))
 }
 
 /// How long (s) a restored window is waited for.
@@ -79,18 +93,33 @@ fn file() -> PathBuf {
 
 impl History {
     pub fn load() -> Self {
-        let ring = std::fs::read_to_string(file()).map(|t| parse(&t)).unwrap_or_default();
-        Self { ring, ..Default::default() }
+        let path = file();
+        let mut ring = std::fs::read_to_string(&path).map(|t| parse(&t)).unwrap_or_default();
+        ring.retain_wins(|w| !is_example(&w.app));
+        Self { ring, disk: modified(&path), ..Default::default() }
     }
 
-    fn save(&self) {
-        let path = file();
+    /// Store `snap` as the newest layout and write the file. The file is read again
+    /// first when it changed on disk since this WM last touched it.
+    fn store(&mut self, snap: Snapshot) {
+        self.store_at(&file(), snap)
+    }
+
+    fn store_at(&mut self, path: &std::path::Path, snap: Snapshot) {
+        let path = path.to_path_buf();
+        if modified(&path) != self.disk {
+            self.ring = std::fs::read_to_string(&path).map(|t| parse(&t)).unwrap_or_default();
+            self.ring.retain_wins(|w| !is_example(&w.app));
+        }
+        if !self.ring.push(snap) {
+            return;
+        }
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
         let tmp = path.with_extension("new");
-        if std::fs::write(&tmp, serialise(&self.ring)).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+        if std::fs::write(&tmp, serialise(&self.ring)).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+            self.disk = modified(&path);
         }
     }
 
@@ -111,7 +140,7 @@ impl App {
         let mut out = Vec::new();
         for s in &state.screens.screens {
             for c in s.layout.all_clients() {
-                if let Some(slot) = state.clients.get(&c).filter(|s| !s.warm && !s.is_preview) {
+                if let Some(slot) = state.clients.get(&c).filter(|s| !s.warm && !s.is_preview && !is_example(&s.app)) {
                     out.push(Live { client: c, app: slot.app.clone(), title: slot.title.clone() });
                 }
             }
@@ -154,7 +183,7 @@ impl App {
             let l = &s.layout;
             let focus = l.focused_client();
             let mut add = |client: ClientId, rect: LRect, minimized, maximized, parked, snap| {
-                let Some(slot) = state.clients.get(&client).filter(|s| !s.warm && !s.is_preview) else {
+                let Some(slot) = state.clients.get(&client).filter(|s| !s.warm && !s.is_preview && !is_example(&s.app)) else {
                     return;
                 };
                 wins.push(Win {
@@ -313,10 +342,7 @@ impl App {
         }
         let snap = self.history_capture();
         if seen.is_some_and(|s| s.same(&snap)) {
-            let h = &mut self.state_mut().history;
-            if h.ring.push(snap) {
-                h.save();
-            }
+            self.state_mut().history.store(snap);
         } else {
             self.history_poke(cx);
         }
@@ -471,5 +497,44 @@ impl App {
         }
         self.history_poke(cx);
         self.redraw_all(cx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::store::{parse, Snapshot, Win};
+    use super::History;
+    use crate::layout::LRect;
+
+    fn snap(t: u64, app: &str, x: f64) -> Snapshot {
+        let w = Win { app: app.into(), title: String::new(), client: None, rect: LRect::new(x, 0.0, 100.0, 100.0),
+            minimized: false, maximized: false, parked: false, space: 0, snap: None, focus: false };
+        Snapshot { t, style: 1, desktops: 1, cur: 0, wins: vec![w] }
+    }
+
+    /// Somebody edits the file (takes windows out) while the WM runs: the WM's next
+    /// write keeps the edit instead of writing its old memory back over it.
+    #[test]
+    fn an_edit_of_the_file_is_kept_by_the_next_write() {
+        let dir = std::env::temp_dir().join(format!("wm-history-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("layouts");
+        let mut h = History::default();
+        h.store_at(&path, snap(1, "notes", 0.0));
+        h.store_at(&path, snap(2, "code", 0.0));
+        assert_eq!(parse(&std::fs::read_to_string(&path).unwrap()).snaps.len(), 2);
+        // The edit: only the notes layout stays (written a moment later, a new mtime).
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let edited = super::store::serialise(&{
+            let mut r = super::store::Ring::default();
+            r.push(snap(1, "notes", 0.0));
+            r
+        });
+        std::fs::write(&path, edited).unwrap();
+        h.store_at(&path, snap(3, "notes", 50.0));
+        let back = parse(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(back.snaps.iter().map(|s| s.t).collect::<Vec<_>>(), vec![1, 3], "the code layout the edit removed came back");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

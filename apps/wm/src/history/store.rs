@@ -131,6 +131,16 @@ impl Ring {
         true
     }
 
+    /// Keep only the windows `keep` accepts; snapshots left empty, or the same as the
+    /// one before, go.
+    pub fn retain_wins(&mut self, keep: impl Fn(&Win) -> bool) {
+        let snaps = std::mem::take(&mut self.snaps);
+        for mut s in snaps {
+            s.wins.retain(|w| keep(w));
+            self.push(s);
+        }
+    }
+
     /// The snapshots a scrub of desktop `space` visits: those under `style`
     /// in which that desktop's windows differ from the last one visited,
     /// oldest first. Each desktop has a history of its own.
@@ -376,6 +386,19 @@ mod tests {
         let mut m = a.clone();
         m.minimized = true;
         assert!(r.push(snap(4, vec![b, m])));
+    }
+
+    /// Taking an app's windows out (example apps) drops the snapshots left empty and
+    /// the ones that became the same as the one before.
+    #[test]
+    fn windows_taken_out_leave_no_empty_or_repeated_layouts() {
+        let mut r = Ring::default();
+        r.push(snap(1, vec![win("counter", "", Some(1), 0.0)]));
+        r.push(snap(2, vec![win("notes", "", Some(2), 0.0), win("counter", "", Some(1), 0.0)]));
+        r.push(snap(3, vec![win("notes", "", Some(2), 0.0), win("counter", "", Some(1), 40.0)]));
+        r.push(snap(4, vec![win("notes", "", Some(2), 9.0)]));
+        r.retain_wins(|w| w.app != "counter");
+        assert_eq!(r.snaps.iter().map(|s| s.t).collect::<Vec<_>>(), vec![2, 4]);
     }
 
     #[test]

@@ -48,6 +48,10 @@ pub fn forward_hit(hosted: &mut HostedApp, hit: &Hit, local: impl Fn(Vec2d) -> O
             let is_mouse = e.device.is_mouse() && e.phase == makepad_platform::event::ScrollPhase::None;
             hosted.scroll(at, e.scroll, is_mouse, e.phase, e.time, &e.modifiers);
         }
+        Hit::FingerPinch(e) => {
+            let Some(at) = local(e.abs) else { return Forwarded::No };
+            hosted.pinch(at, e.scale, e.phase, e.time, &e.modifiers);
+        }
         Hit::TextInput(e) => hosted.text_input(e.clone()),
         Hit::KeyDown(e) => hosted.key_down(e.clone()),
         Hit::KeyUp(e) => hosted.key_up(e.clone()),

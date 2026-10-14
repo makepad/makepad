@@ -228,6 +228,13 @@ impl PhoneSurface {
     pub fn icon_at(&self, p: Vec2d, app: &str) -> Option<Rect> {
         self.app_icons.iter().rev().find(|(hit, id, _)| id == app && hit.contains(p)).map(|(_, _, icon)| *icon)
     }
+    /// The phone's app list (id, label): the launcher's apps for this build, then the shell's
+    /// own Settings, which opens the settings page (`SETTINGS_APP`).
+    pub fn phone_apps(launchable: &crate::apps::Launchable) -> Vec<(String,String)> {
+        let mut ids: Vec<(String,String)>=crate::shell::launcher::apps(launchable).iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
+        ids.push((SETTINGS_APP.to_string(),"Settings".to_string()));
+        ids
+    }
     /// An app hit, with the icon drawn for it.
     fn app_hit(&mut self, hit: Rect, app: &str, icon: Rect) {
         self.hits.push((hit, PhoneHit::App(app.to_string())));
@@ -413,8 +420,7 @@ impl PhoneSurface {
         if opacity<0.01 && drawer<0.001 {return;}
         self.xf=(!ios && (home_scale-1.0).abs()>1e-4).then(||(screen.pos+screen.size*0.5,home_scale));
         let landscape=screen.size.x>screen.size.y;
-        let apps=crate::shell::launcher::apps(&state.launchable);
-        let ids: Vec<(String,String)>=apps.iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
+        let ids=Self::phone_apps(&state.launchable);
         if drawer>0.001 && ios {
             self.draw_app_library(cx,state,screen,&ids,phone.drawer as f32,backdrop.clone());
         }
@@ -527,9 +533,6 @@ impl PhoneSurface {
             self.label(cx,r,"All apps  ↑",14.0,false,alpha(ink,opacity));
             self.hits.push((rect(r.pos.x-10.0,r.pos.y-10.0,120.0,48.0),PhoneHit::Drawer));
         }
-        if home && !edit.active {
-            self.draw_settings_pill(cx,state,screen,opacity);
-        }
         if edit.active {
             // "Done" leaves edit mode; so does a tap beside the icons.
             let top=screen.pos.y+phone.chrome.top_reserve(screen)+8.0;
@@ -549,22 +552,6 @@ impl PhoneSurface {
                 self.icons.draw(cx,&drag.id,style,r,1.0,ink);
             }
         }
-    }
-    /// The home screen's way into the settings page: one small pill where the look switcher was.
-    fn draw_settings_pill(&mut self, cx: &mut Cx2d, state: &WmState, screen: Rect, opacity: f32) {
-        let phone=&state.phone;
-        let dark=state.style.dark;
-        let ios=state.style.target==DesktopStyle::Ios;
-        let (w,h)=(96.0,30.0);
-        let dock=Self::home_dock(screen,phone.chrome);
-        let r=rect(screen.pos.x+(screen.size.x-w)*0.5,dock.pos.y-32.0-8.0-h,w,h);
-        let saved=self.xf.take();
-        let ink=if dark {rgb(255,255,255)} else {rgb(31,27,38)};
-        let fill=if ios {alpha(if dark {rgb(60,60,67)} else {rgb(118,118,128)},0.24*opacity)} else {alpha(if dark {rgb(43,41,48)} else {rgb(243,237,247)},0.92*opacity)};
-        self.rounded(cx,r,(h*0.5) as f32,fill);
-        self.label(cx,r,"Settings",12.0,false,alpha(ink,opacity*0.9));
-        self.hits.push((rect(r.pos.x-8.0,r.pos.y-8.0,w+16.0,h+16.0),PhoneHit::Settings));
-        self.xf=saved;
     }
     /// The settings page over everything: the look (Light · Dark · iOS), the WM's themes and
     /// the JIT cache (its size, clear with a confirmation, restart into a new process).
@@ -655,6 +642,14 @@ impl PhoneSurface {
                 self.hits.push((b,PhoneHit::ClearCache));
             }
         }
+        // The home pill, as under an app: a tap on the strip or a swipe up from it goes home.
+        let bottom_h=phone.chrome.bottom_reserve(screen);
+        if bottom_h>0.0 {
+            let bottom=rect(screen.pos.x,screen.pos.y+screen.size.y-bottom_h,screen.size.x,bottom_h);
+            let pill=phone.chrome.shell_pill(screen).unwrap_or_else(||rect(bottom.pos.x+bottom.size.x*0.5-60.0,bottom.pos.y+(bottom_h-4.0)*0.5,120.0,4.0));
+            self.rounded(cx,pill,pill.size.y as f32,ink);
+            self.hits.push((bottom,PhoneHit::SettingsClose));
+        }
         self.xf=saved;
     }
     /// Android's app drawer over the home page and its live tiles (the desk
@@ -666,8 +661,7 @@ impl PhoneSurface {
         let phone=&state.phone;
         if state.style.target==DesktopStyle::Ios || phone.drawer<=0.001 || (phone.screen==PhoneScreen::App && phone.openness>=0.999) {return;}
         self.use_fonts(false);
-        let apps=crate::shell::launcher::apps(&state.launchable);
-        let ids: Vec<(String,String)>=apps.iter().map(|a|(a.id.trim_start_matches("apps.").to_string(),a.label.clone())).collect();
+        let ids=Self::phone_apps(&state.launchable);
         // `drawer` past 1 is the overscroll: the grid stretches.
         self.draw_android_drawer(cx,state,screen,&ids,phone.drawer.min(1.2));
     }

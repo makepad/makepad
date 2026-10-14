@@ -28,7 +28,7 @@ pub mod protocol;
 use std::collections::VecDeque;
 use std::path::PathBuf;
 
-use makepad_app_host::{forward_hit, BuildPolicy, ChildEvent, ChildSpec, Children, Forwarded, Home, HostAudioRing, HostRing, HostedApp, Life, RingSpec};
+use makepad_app_host::{forward_hit, ChildEvent, ChildSpec, Children, Forwarded, Home, HostAudioRing, HostRing, HostedApp, Life, RingSpec};
 use makepad_error_log::log;
 use makepad_platform::*;
 use makepad_studio_protocol::AppToStudio;
@@ -184,14 +184,15 @@ impl BrowserViews {
         BrowserViews { children: None, profile, views: Vec::new(), next_view: 1, next_eval: 1, unavailable: None, cursor: MouseCursor::Default, start_pending: false, closing: Vec::new() }
     }
 
-    /// Whether pages can be shown: the browser host is built (a build is
-    /// never started for it).
+    /// Whether pages can be shown: from a checkout the browser host's sources are there
+    /// (it starts with `cargo run`, built from them when needed, like every app);
+    /// installed, its binary is.
     pub fn availability() -> Result<(), String> {
         let entry = makepad_app_registry::find(protocol::HOST_APP).ok_or("no browser host in the app registry")?;
-        if makepad_app_registry::is_built(entry) {
+        if makepad_app_registry::is_available(entry) {
             Ok(())
         } else {
-            Err(format!("the browser host is not built ({})", entry.bin))
+            Err(format!("the browser host is not installed ({})", entry.bin))
         }
     }
 
@@ -234,7 +235,6 @@ impl BrowserViews {
         let children = self.children.get_or_insert_with(|| Children::new(cx, "browser view:", scratch));
         let mut spec = ChildSpec::new(protocol::HOST_APP);
         spec.home = Home::Inherit;
-        spec.policy = BuildPolicy::BuiltOnly;
         spec.multi_window = true;
         // Pages arrive through their frame rings; the windows carry input.
         spec.frames_external = true;
@@ -533,6 +533,18 @@ impl BrowserViews {
     /// Every event. True when a page changed (a frame, its state): the
     /// owner redraws.
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        if let Event::GpuReset = event {
+            // The rings' shared textures belonged to the replaced GPU device: each page gets a
+            // ring of a new generation (made and set up at the next `service`), the producer
+            // renders into that one.
+            for view in &mut self.views {
+                if let Some(mut old) = view.ring.take() {
+                    old.close();
+                }
+                view.retired.clear();
+                view.ring_dirty = true;
+            }
+        }
         let Some(children) = &mut self.children else { return self.service(cx) };
         children.handle_event(cx, event);
         let mut changed = false;

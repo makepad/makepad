@@ -450,12 +450,18 @@ def dock_icon(t, app):
     raise Fail(f"no {app} icon in the dock")
 
 
+def shown(w):
+    """The app has presented its first frame into the window (what a person waits for before
+    reaching for its buttons: until then the window may still take the size the app asks)."""
+    return bool(w and w.get("host") and w["host"].get("has"))
+
+
 def t_dock_open_close_reopen(t):
     app = "calculator"
     r = dock_icon(t, app)
     t.click(*t.center(r))
     deadline = time.time() + 60
-    while time.time() < deadline and not t.win(app):
+    while time.time() < deadline and not shown(t.win(app)):
         time.sleep(0.5)
     t.still()
     w = t.win(app)
@@ -471,7 +477,7 @@ def t_dock_open_close_reopen(t):
         raise Fail("close button: still there")
     t.click(*t.center(dock_icon(t, app)))
     deadline = time.time() + 60
-    while time.time() < deadline and not t.win(app):
+    while time.time() < deadline and not shown(t.win(app)):
         time.sleep(0.5)
     t.still()
     if not t.win(app):
@@ -543,12 +549,19 @@ def t_overlap_raise(t):
     return "raised by click"
 
 
+# The size setup() gives its two windows (the layout the tasks after it start from): apps
+# open at the size they ask for (955d138a8b), so setup sizes them to this rather than by a
+# fixed shrink of whatever they opened at.
+SETUP_SIZE = (680, 290)
+
+
 def setup(t):
     """Two smaller windows side by side in the centre band, clear of the dock."""
     for app, (x, y) in (("notes", (200, 50)), ("clock", (600, 240))):
         t.raise_(app)
+        w = t.win(app)
         a = t.center(t.hit(app, "r++"))
-        t.drag(a, (a[0] - 230, a[1] - 230), speed=1200)
+        t.drag(a, (a[0] - (w["s"][2] - SETUP_SIZE[0]), a[1] - (w["s"][3] - SETUP_SIZE[1])), speed=1200)
         t.still()
         w = t.win(app)
         c = t.caption(app)
@@ -650,7 +663,11 @@ def t_shot_cancel(t):
 
 def t_shot_window(t):
     before = shots(t)
-    w = t.win("notes")
+    # The window on top (apps open at their asked sizes, centred: Code's 1440x900 lies over
+    # the middle of Notes's 1240x800), picked at its centre.
+    fr = t.last()
+    order = fr["zorder"]
+    w = max((t.win(app, fr) for app in ("notes", "code")), key=lambda x: order.index(x["c"]) if x and x["c"] in order else -1)
     s = w["s"]
     t.key("Key4", logo=1, shift=1)
     time.sleep(1.2)
@@ -714,7 +731,7 @@ AUTOHIDE_TASKS = [
 ]
 
 
-def run_session(root, out, tasks, autohide, only, rows, screens, shots_session=False):
+def run_session(root, out, tasks, autohide, only, rows, screens, desk, shots_session=False):
     files = {"wm/current-shelf-autohide": "left right\n"} if autohide else {}
     env = {"MAKEPAD_WM_FAKE_SCREENS": screens} if screens else {}
     tag = "usability-autohide" if autohide else "usability-shots" if shots_session else "usability"
@@ -723,7 +740,7 @@ def run_session(root, out, tasks, autohide, only, rows, screens, shots_session=F
         # A home of its own: ~/Screenshots is the session's.
         env["HOME"] = os.path.join(out, tag, "home")
         os.makedirs(env["HOME"], exist_ok=True)
-    rig = Rig(root, tag, apps=apps, files=files, env=env, virtual=False, out=os.path.join(out, tag)).up()
+    rig = Rig(root, tag, apps=apps, files=files, env=env, size=desk, virtual=False, out=os.path.join(out, tag)).up()
     t = T(rig, out)
     try:
         deadline = time.time() + 120
@@ -780,20 +797,25 @@ def main():
     ap.add_argument("root")
     ap.add_argument("--only", default="")
     ap.add_argument("--out", default=os.path.expanduser("~/lanes/wm-review-runs/usability"))
-    ap.add_argument("--screens", default="eDP-1:0,0,1280,800", help="fake per-screen desk like Linux direct ('' = nested single desk)")
+    # A desk like the real screens (149, a laptop): apps open at the size they ask for
+    # (955d138a8b) -- Notes 1240x800, Code 1440x900 -- and fit on it beside each other.
+    ap.add_argument("--desk", default="1920x1200", help="the WM window's size in points (the Rig's weston output)")
+    ap.add_argument("--screens", default=None, help="fake per-screen desk like Linux direct ('' = nested single desk; default: one screen the size of --desk)")
     ap.add_argument("--no-autohide", action="store_true")
     a = ap.parse_args()
+    if a.screens is None:
+        a.screens = "eDP-1:0,0,{},{}".format(*a.desk.split("x"))
     only = [o for o in a.only.split(",") if o]
     rows = []
     t0 = time.time()
     def wanted(tasks):
         return not only or any(o in name for name, _ in tasks for o in only)
     if wanted(TASKS):
-        run_session(a.root, a.out, TASKS, False, only, rows, a.screens)
+        run_session(a.root, a.out, TASKS, False, only, rows, a.screens, a.desk)
     if not a.no_autohide and wanted(AUTOHIDE_TASKS):
-        run_session(a.root, a.out, AUTOHIDE_TASKS, True, only, rows, a.screens)
+        run_session(a.root, a.out, AUTOHIDE_TASKS, True, only, rows, a.screens, a.desk)
     if wanted(SHOT_TASKS):
-        run_session(a.root, a.out, SHOT_TASKS, False, only, rows, a.screens, shots_session=True)
+        run_session(a.root, a.out, SHOT_TASKS, False, only, rows, a.screens, a.desk, shots_session=True)
     print()
     print(f"{'#':>2}  {'task':<46} {'result':<6} {'frames':<13} detail")
     for i, r in enumerate(rows, 1):

@@ -39,6 +39,19 @@ impl DesktopWindows {
             warped: false,
         });
     }
+    /// The size the app asked for (`w` x `h`, its whole window): clamped to `area` (the
+    /// screen minus bar and dock) and centred there. A maximised, snapped or parked
+    /// window keeps its place. True when the window changed.
+    pub fn request_size(&mut self, client: ClientId, w: f64, h: f64, area: LRect) -> bool {
+        let Some(win) = self.get_mut(client) else { return false };
+        if win.maximized || win.snap.is_some() || win.warped || !(w > 0.0 && h > 0.0) {
+            return false;
+        }
+        let rect = area.centered(w.max(1.0), h.max(1.0));
+        let changed = win.rect != rect;
+        win.rect = rect;
+        changed
+    }
     pub fn get(&self, client: ClientId) -> Option<&DesktopWindow> {
         self.windows.iter().find(|w| w.client == client)
     }
@@ -82,6 +95,27 @@ pub fn fit(mut r: LRect, area: LRect) -> LRect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// 149: Stage asks for 1680x1040 and opened at the default 715x606 on a 1969x1231
+    /// desk. The asked size is honoured, centred; an ask bigger than the desk is clamped
+    /// to it; a maximised window keeps its place.
+    #[test]
+    fn an_apps_requested_size_is_honoured_clamped_and_centred() {
+        let area = LRect::new(0.0, 26.0, 1969.0, 1231.0 - 26.0 - 74.0);
+        let mut d = DesktopWindows::default();
+        d.enabled = true;
+        d.ensure(1, area);
+        assert!(d.request_size(1, 1680.0, 1040.0 + 32.0, area));
+        let r = d.get(1).unwrap().rect;
+        assert_eq!((r.w, r.h), (1680.0, 1072.0));
+        assert!((r.x + r.w * 0.5 - (area.x + area.w * 0.5)).abs() < 1e-9 && (r.y + r.h * 0.5 - (area.y + area.h * 0.5)).abs() < 1e-9, "{r:?}");
+        // bigger than the desk: the desk's usable area, exactly
+        assert!(d.request_size(1, 4000.0, 3000.0, area));
+        assert_eq!(d.get(1).unwrap().rect, area);
+        // a maximised window is left alone
+        d.get_mut(1).unwrap().maximized = true;
+        assert!(!d.request_size(1, 800.0, 600.0, area));
+        assert!(!d.request_size(2, 800.0, 600.0, area), "unknown window");
+    }
     #[test]
     fn maximize_and_minimize_keep_restore_rect_and_stack() {
         let area = LRect::new(0.0, 30.0, 1200.0, 800.0);

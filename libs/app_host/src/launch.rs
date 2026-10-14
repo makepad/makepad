@@ -6,7 +6,7 @@ use std::process::Command;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 
-use makepad_platform::thread::{CancellationToken, Lane, TaskHandle, TaskPool};
+use makepad_platform::thread::{CancellationToken, Lane, SignalToUI, TaskHandle, TaskPool, ThreadOptions, ThreadSpawner};
 use makepad_platform::Cx;
 
 use crate::hub::ClientId;
@@ -29,6 +29,7 @@ pub fn reap_closed_child(mut child: Child, pool: &TaskPool, after_exit: impl FnO
         loop {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 after_exit();
+                SignalToUI::set_ui_signal();
                 return;
             }
             let now = Cx::monotonic_now();
@@ -46,7 +47,80 @@ pub fn reap_closed_child(mut child: Child, pool: &TaskPool, after_exit: impl FnO
         let _ = child.kill();
         let _ = child.wait();
         after_exit();
+        SignalToUI::set_ui_signal();
     }))
+}
+
+/// Block until process `pid` has exited, without reaping it: its owner's
+/// `try_wait` still collects the status. Returns at once when the process
+/// is not this one's child any more (already reaped).
+#[cfg(unix)]
+fn wait_exit(pid: u32) {
+    extern "C" {
+        fn waitid(idtype: i32, id: u32, info: *mut u64, options: i32) -> i32;
+    }
+    const P_PID: i32 = 1;
+    const WEXITED: i32 = 4;
+    #[cfg(target_os = "macos")]
+    const WNOWAIT: i32 = 0x20;
+    #[cfg(not(target_os = "macos"))]
+    const WNOWAIT: i32 = 0x0100_0000;
+    // A siginfo_t is 104 (macOS) or 128 (Linux) bytes.
+    let mut info = [0u64; 16];
+    loop {
+        // SAFETY: `info` is larger than any platform's siginfo_t.
+        if unsafe { waitid(P_PID, pid, info.as_mut_ptr(), WEXITED | WNOWAIT) } == 0 {
+            return;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return;
+        }
+    }
+}
+
+#[cfg(windows)]
+fn wait_exit_handle(child: &Child) -> Option<impl FnOnce() + Send + 'static> {
+    use std::os::windows::io::AsRawHandle;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn DuplicateHandle(source: isize, handle: isize, target: isize, result: *mut isize, access: u32, inherit: i32, options: u32) -> i32;
+        fn WaitForSingleObject(handle: isize, millis: u32) -> u32;
+        fn CloseHandle(handle: isize) -> i32;
+    }
+    let mut own = 0isize;
+    // SAFETY: the child's handle is valid here; the duplicate is this waiter's own.
+    unsafe {
+        let me = GetCurrentProcess();
+        if DuplicateHandle(me, child.as_raw_handle() as isize, me, &mut own, 0, 0, 2) == 0 {
+            return None;
+        }
+    }
+    Some(move || unsafe {
+        WaitForSingleObject(own, 0xFFFF_FFFF);
+        CloseHandle(own);
+    })
+}
+
+/// Wake the UI loop when `child` exits (a build ends, an app dies before
+/// it ever connected): the owner then polls its exit, so no timer has to
+/// watch for it. The worker blocks in the OS; it ends with the process.
+pub fn signal_on_exit(spawner: &ThreadSpawner, child: &Child, name: String) -> Result<(), String> {
+    #[cfg(unix)]
+    let wait = {
+        let pid = child.id();
+        move || wait_exit(pid)
+    };
+    #[cfg(windows)]
+    let Some(wait) = wait_exit_handle(child) else { return Err("exit watch: no handle".to_string()) };
+    let task = spawner
+        .spawn_worker(ThreadOptions { name: Some(name.into()), ..Default::default() }, move || {
+            wait();
+            SignalToUI::set_ui_signal();
+        })
+        .map_err(|error| format!("exit watch: {error}"))?;
+    task.detach();
+    Ok(())
 }
 
 /// What a child needs to find the hub as client `id`: `STUDIO_HOST`,
@@ -57,7 +131,10 @@ pub fn reap_closed_child(mut child: Child, pool: &TaskPool, after_exit: impl FnO
 pub fn configure(cmd: &mut Command, hub_port: u16, id: ClientId, bin: &str) {
     cmd.env("STUDIO_HOST", format!("http://127.0.0.1:{}", hub_port))
         .env("STUDIO_BUILD", id.to_string())
-        .env("STUDIO_CRATE", bin);
+        .env("STUDIO_CRATE", bin)
+        // A host that draws its children's pickers says so itself (the WM); this host's
+        // own host's promise is not this host's.
+        .env_remove(makepad_platform::hosted_relay::HOST_FILE_DIALOGS_ENV);
     #[cfg(unix)]
     own_process_group(cmd);
 }
@@ -172,6 +249,12 @@ pub fn process_alive(pid: u32) -> bool {
         let _ = CloseHandle(process);
         alive
     }
+    // No processes to ask about (the web): treated as alive, as before Windows had its own arm.
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        true
+    }
 }
 
 /// Kill the whole process group a launched child heads -- the fix for
@@ -246,6 +329,20 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::process::Stdio;
+
+    /// The exit watch returns when the process ends, and leaves it for the
+    /// owner's own `try_wait` (it does not reap).
+    #[cfg(unix)]
+    #[test]
+    fn exit_watch_returns_at_exit_and_does_not_reap() {
+        let mut child = Command::new("sleep").arg("0.2").stdin(Stdio::null()).spawn().unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+        wait_exit(child.id());
+        let status = child.try_wait().unwrap().expect("exited, still collectable");
+        assert!(status.success());
+        // Reaped: a second watch returns at once instead of blocking.
+        wait_exit(child.id());
+    }
 
     /// Windows: a hosted child dies with its host. The host's job is what the system closes
     /// when the host process ends; this test plays that by closing a job of its own made the

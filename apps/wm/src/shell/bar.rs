@@ -296,7 +296,9 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let out = std::process::Command::new(cmd).args(args).output().ok()?;
+        let mut command = std::process::Command::new(cmd);
+        makepad_app_registry::child_env::scrub(&mut command);
+        let out = command.args(args).output().ok()?;
         if !out.status.success() {
             return None;
         }
@@ -1076,7 +1078,7 @@ impl ShellBar {
             if *module == BarModule::Hub && data.hub_active {
                 // A slow breath between the text colour and the accent.
                 let k = (0.5 - 0.5 * (self.pulse_t * std::f64::consts::TAU / 1.6).cos()) as f32;
-                color = mix_color(fg, accent, 0.25 + 0.6 * k);
+                color = mix_color(vec4(0.22, 0.65, 0.35, 1.0), vec4(0.40, 0.88, 0.52, 1.0), k);
             }
             self.d.icon_centered(cx, *ico, cell, canvas, color);
             self.hits.push((seg, *module, cell));

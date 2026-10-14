@@ -8,6 +8,11 @@ use makepad_widgets::widget_async::{enter_isolate, leave_isolate};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PhonePointerPhase { Down, Move, Up, Scroll }
 
+/// How far (pt) a swipe from the bottom strip rises before it closes the settings page.
+const SETTINGS_SWIPE_HOME: f64 = 40.0;
+/// How far (pt) a finger may move on the settings page and still tap.
+const SETTINGS_TAP_SLOP: f64 = 12.0;
+
 impl App {
     pub(super) fn animate_phone(&mut self,cx:&mut Cx) {
         self.phone_frame=cx.new_next_frame();
@@ -268,7 +273,7 @@ impl App {
         self.next_id += 1;
         let lines = self.line_sender();
         let pool = cx.task_pool();
-        match spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, BuildPolicy::BuiltOnly, lines) {
+        match spawn_client(&pool, &cx.thread_spawner(), &app, id, hub_port, None, None, &[], false, BuildPolicy::IfMissing, lines) {
             Ok(slot) => {
                 self.state_mut().clients.insert(id, slot);
                 // The tile widget exists from now on: its ticks drive the
@@ -317,10 +322,10 @@ impl App {
     // namespace, the old favorites rule as the first-run default.
     // --------------------------------------------------------------
 
-    /// Every app the launcher lists for this build, in its order.
+    /// Every app the launcher lists for this build, in its order, then the shell's Settings.
     fn home_app_ids(&mut self) -> Vec<String> {
         let launchable=&self.state_mut().launchable;
-        crate::shell::launcher::apps(launchable).iter().map(|a|a.id.trim_start_matches("apps.").to_string()).collect()
+        PhoneSurface::phone_apps(launchable).into_iter().map(|(id,_)|id).collect()
     }
     /// The order is valid for this build: the default until storage
     /// answers, reconciled with the apps the build has.
@@ -601,6 +606,7 @@ impl App {
         // In edit mode an icon is for arranging, not launching.
         if self.state_mut().phone.edit.active && matches!(hit,PhoneHit::App(_)) {return;}
         match hit {
+            PhoneHit::App(app) if app==SETTINGS_APP=>{crate::jit_cache::refresh();self.state_mut().phone.settings=1;}
             PhoneHit::App(app)=>{
                 // A running window of the app, a home tile's own client
                 // included: the same client opens, never a second one.
@@ -626,7 +632,6 @@ impl App {
             }
             PhoneHit::Style=>self.open_style_menu(cx),
             PhoneHit::Look(look)=>self.set_phone_look(cx,look),
-            PhoneHit::Settings=>{crate::jit_cache::refresh();self.state_mut().phone.settings=1;}
             PhoneHit::SettingsClose=>self.state_mut().phone.settings=0,
             PhoneHit::SettingsPage=>{}
             PhoneHit::Theme(name)=>self.set_theme(cx,&name),
@@ -676,6 +681,12 @@ impl App {
             if matches!(event,Event::BackPressed{handled} if !handled.get()) {self.state_mut().phone.navigate(PhoneScreen::Home);}
         }else if let Some(sender)=self.state_mut().clients.get(&client).and_then(|s|s.sender.as_ref()) {
             send_to_app(sender,vec![StudioToApp::Custom(makepad_platform::ime::HostedBack::default().to_json())]);
+        }else{
+            // a domain (the phone under makepad run): it answers through a child message
+            #[cfg(not(target_arch = "wasm32"))]
+            if !self.domains.send_message(client,makepad_platform::ime::HostedBack::default().to_json()) {
+                self.state_mut().phone.navigate(PhoneScreen::Home);
+            }
         }
     }
     fn type_phone_key(&mut self,cx:&mut Cx,key:&str) {
@@ -767,7 +778,11 @@ impl App {
             }
             let time = point.time + self.state_mut().phone.touch_time_offset;
             let handled = self.phone_pointer_at(cx, phase, point.abs, time, true, 0.0);
-            if point.state == TouchState::Start && handled && self.state_mut().phone.gesture.is_some() {
+            // The touch stays ours to its end: a gesture follows it, and the
+            // settings page acts on its release (unowned, the release would
+            // never come back here: only starting touches are looked for).
+            if point.state == TouchState::Start && handled
+                && (self.state_mut().phone.gesture.is_some() || self.state_mut().phone.settings != 0) {
                 self.state_mut().phone.touch = Some(point.uid);
             }
             if point.state == TouchState::Stop { self.state_mut().phone.touch = None; }
@@ -784,11 +799,31 @@ impl App {
     }
     fn phone_pointer_at(&mut self, cx: &mut Cx, phase: PhonePointerPhase, p: Vec2d, time: f64, primary: bool, scroll: f64) -> bool {
         // The settings page takes every touch: a tap on a control acts, nothing else moves.
+        // A swipe up from the bottom strip goes home, as from an app; a drag
+        // elsewhere is no tap.
         if self.state_mut().phone.settings!=0 {
-            if phase==PhonePointerPhase::Up && primary {
-                let hit=self.desk(cx).borrow::<WmDesk>().and_then(|d|d.phone_hit(p));
-                if let Some(hit)=hit {self.phone_action(cx,hit);}
-                self.redraw_all(cx);
+            if !primary {return true;}
+            match phase {
+                PhonePointerPhase::Down=>{
+                    let phone=&mut self.state_mut().phone;
+                    let bottom=phone.chrome.bottom_zone(phone.viewport,p);
+                    phone.settings_press=Some((p,bottom));
+                }
+                PhonePointerPhase::Up=>{
+                    let press=self.state_mut().phone.settings_press.take();
+                    let (from,bottom)=press.unwrap_or((p,false));
+                    if bottom && p.y<from.y-SETTINGS_SWIPE_HOME {
+                        let phone=&mut self.state_mut().phone;
+                        phone.settings=0;
+                        phone.navigate(PhoneScreen::Home);
+                    } else if (p-from).length()<=SETTINGS_TAP_SLOP {
+                        let hit=self.desk(cx).borrow::<WmDesk>().and_then(|d|d.phone_hit(p));
+                        if let Some(hit)=hit {self.phone_action(cx,hit);}
+                    }
+                    self.animate_phone(cx);
+                    self.redraw_all(cx);
+                }
+                _=>{}
             }
             return true;
         }

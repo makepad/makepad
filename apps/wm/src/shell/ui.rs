@@ -325,6 +325,8 @@ script_mod! {
             speaker +: {svg: crate_resource("self:resources/icons/speaker.svg")}
             headphone +: {svg: crate_resource("self:resources/icons/headphone.svg")}
             lock +: {svg: crate_resource("self:resources/icons/lock.svg")}
+            folder +: {svg: crate_resource("self:resources/icons/folder.svg")}
+            file +: {svg: crate_resource("self:resources/icons/file.svg")}
         }
     }
 }
@@ -447,6 +449,10 @@ pub struct ShellIcons {
     pub headphone: DrawSvg,
     #[live]
     pub lock: DrawSvg,
+    #[live]
+    pub folder: DrawSvg,
+    #[live]
+    pub file: DrawSvg,
 }
 
 /// Which glyph a module wants. Named for what it MEANS, so the bar can
@@ -501,6 +507,9 @@ pub enum Ico {
     WindowRestore,
     /// A command prompt: chevron and block cursor (terminals, coding agents).
     Prompt,
+    /// The file picker's folders and files.
+    Folder,
+    File,
 }
 
 impl ShellIcons {
@@ -550,6 +559,8 @@ impl ShellIcons {
             Ico::Speaker => &mut self.speaker,
             Ico::Headphone => &mut self.headphone,
             Ico::Lock => &mut self.lock,
+            Ico::Folder => &mut self.folder,
+            Ico::File => &mut self.file,
         }
     }
 }

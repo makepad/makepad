@@ -1,19 +1,34 @@
-//! The shared build-then-launch flow for hosted registry apps. Hosts supply
-//! process I/O and their hub environment; this module chooses the executable,
-//! build command, arguments and transition from a completed build to the app.
+//! The shared launch flow for hosted registry apps. Hosts supply process I/O and their
+//! hub environment; this module chooses the command. From a checkout an app starts as
+//! `cargo run --release` (cargo recompiles what changed, nothing when fresh, then runs
+//! it), so a host never starts a binary older than its sources; an installation (no
+//! checkout, or the Builder's) starts the built binary, building it first when allowed.
 
-use crate::{build_argv, built_binary, has_sources, AppEntry};
+use crate::{build_argv, builder_install, built_binary, has_sources, run_argv, AppEntry};
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus};
 
-/// Automatic preparation can require an existing binary; an explicit open
-/// can build a missing binary or rebuild one the host knows is stale.
+/// From a checkout every start is `cargo run` (never a binary older than its sources);
+/// installed, `IfMissing` starts the binary and `Rebuild` builds it first. A host that must
+/// not compile in the background (a warm pool, previews) checks `AppEntry::is_current`
+/// before it starts anything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildPolicy {
-    BuiltOnly,
     IfMissing,
     Rebuild,
+}
+
+/// What a spawned process is, for the host's environment and output handling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LaunchKind {
+    /// A build only (an installation's Builder or `cargo build`): no app environment.
+    Build,
+    /// The app's binary.
+    App,
+    /// `cargo run`: the app, compiled first when needed. It gets the app's environment,
+    /// and its output (cargo's progress, then the app's log) is piped like a build's.
+    Run,
 }
 
 pub enum LaunchEvent {
@@ -48,6 +63,10 @@ pub struct AppLaunch {
     root: Option<PathBuf>,
     extra: Vec<String>,
     building: bool,
+    /// Started as `cargo run`: one process compiles and becomes the app.
+    run: bool,
+    /// Cargo said it runs the app (`Running ...`): `poll` reports `Started` once.
+    ran: bool,
     status: String,
     progress: String,
     diagnostic: String,
@@ -58,27 +77,34 @@ pub struct AppLaunch {
 impl AppLaunch {
     /// The spawn callback pipes both build streams through `read_output`
     /// and feeds its events to `output`. App I/O is the host's choice.
+    /// `held`: the host compiles now and starts the app later (`poll` waits until it
+    /// polls again: DECK's next slides), so the build runs on its own (`cargo build`)
+    /// and the fresh binary starts when released.
     pub fn start(
         app: &'static AppEntry,
         root: Option<PathBuf>,
         extra: Vec<String>,
         policy: BuildPolicy,
-        mut spawn: impl FnMut(Command, bool) -> Result<Child, String>,
+        held: bool,
+        mut spawn: impl FnMut(Command, LaunchKind) -> Result<Child, String>,
     ) -> Result<(Self, Child), String> {
-        let building = root.is_some() && match policy {
-            BuildPolicy::BuiltOnly => false,
+        let policy = if held { BuildPolicy::Rebuild } else { policy };
+        let run = !held && builder_install().is_none()
+            && root.as_deref().is_some_and(|root| has_sources(&app.target(), root));
+        let building = run || root.is_some() && match policy {
             BuildPolicy::IfMissing => built_binary(&app.target(), root.as_deref()).is_none(),
             BuildPolicy::Rebuild => true,
         };
         let launch = Self {
-            app, root, extra, building,
-            status: if building { format!("building {}…", app.label) } else { format!("starting {}…", app.label) },
+            app, root, extra, building, run, ran: false,
+            status: if run { format!("starting {}…", app.label) } else if building { format!("building {}…", app.label) } else { format!("starting {}…", app.label) },
             progress: String::new(),
             diagnostic: String::new(),
             last_output: String::new(),
             closed_streams: 0,
         };
-        let child = spawn(launch.command()?, building)?;
+        let kind = if run { LaunchKind::Run } else if building { LaunchKind::Build } else { LaunchKind::App };
+        let child = spawn(launch.command()?, kind)?;
         Ok((launch, child))
     }
 
@@ -105,13 +131,25 @@ impl AppLaunch {
                 return None;
             }
         };
-        if !self.building { return cargo_progress(text); }
+        if !self.building {
+            // After cargo handed over, the lines are the app's own log.
+            return if self.run { None } else { cargo_progress(text) };
+        }
         self.last_output.clone_from(text);
         if text.starts_with("error:") || text.starts_with("error[") || !self.diagnostic.is_empty() {
             self.diagnostic.push_str(text);
             self.diagnostic.push('\n');
         }
         let (stage, linked) = cargo_progress(text)?;
+        if self.run && text.trim_start().starts_with("Running ") {
+            // cargo starts the app now (in its own process): no second launch.
+            self.building = false;
+            self.ran = true;
+            self.progress.clear();
+            self.diagnostic.clear();
+            self.status = format!("starting {}…", self.app.label);
+            return Some((self.status.clone(), true));
+        }
         if self.progress == stage { return None; }
         self.status = format!("building {}… {stage}", self.app.label);
         self.progress = stage;
@@ -119,7 +157,13 @@ impl AppLaunch {
     }
 
     fn command(&self) -> Result<Command, String> {
-        let (program, args) = if self.building {
+        let (program, args) = if self.run {
+            let root = self.root.as_deref().ok_or("no checkout to run from")?;
+            let mut app_args = vec!["--stdin-loop".to_string()];
+            app_args.extend(self.app.args.iter().map(|arg| arg.to_string()));
+            app_args.extend(self.extra.iter().cloned());
+            run_argv(&self.app.target(), root, &app_args)
+        } else if self.building {
             let root = self.root.as_deref().ok_or("no checkout to build from")?;
             if !has_sources(&self.app.target(), root) {
                 return Err(format!("sources not found: {}", self.app.dir));
@@ -130,14 +174,12 @@ impl AppLaunch {
         };
         let mut command = Command::new(program);
         command.args(args);
+        crate::child_env::scrub(&mut command);
+        if self.building || self.run {
+            crate::cargo_env(&mut command);
+        }
         if let Some(root) = &self.root {
             command.current_dir(root);
-        }
-        if self.building {
-            command.env("CARGO_TERM_COLOR", "never")
-                .env("CARGO_TERM_PROGRESS_WHEN", "always")
-                .env("CARGO_TERM_PROGRESS_WIDTH", "100")
-                .env("MAKEPAD_BUILD_PROGRESS_LINES", "1");
         }
         Ok(command)
     }
@@ -147,8 +189,30 @@ impl AppLaunch {
     pub fn poll(
         &mut self,
         child: &mut Option<Child>,
-        mut spawn: impl FnMut(Command, bool) -> Result<Child, String>,
+        mut spawn: impl FnMut(Command, LaunchKind) -> Result<Child, String>,
     ) -> Result<Option<LaunchEvent>, String> {
+        if self.run {
+            if std::mem::take(&mut self.ran) {
+                return Ok(Some(LaunchEvent::Started));
+            }
+            let Some(process) = child.as_mut() else { return Ok(None) };
+            let Some(exit) = process.try_wait().map_err(|error| format!("{}: {error}", self.app.label))? else { return Ok(None) };
+            if !self.building {
+                return Ok(Some(LaunchEvent::Exited(exit)));
+            }
+            // cargo ended before it ran the app: the build failed.
+            if self.closed_streams < 2 { return Ok(None); }
+            child.take();
+            self.building = false;
+            self.progress.clear();
+            self.status = format!("building {} failed ({exit})", self.app.label);
+            let detail = if self.diagnostic.is_empty() { &self.last_output } else { &self.diagnostic };
+            if !detail.is_empty() {
+                self.status.push_str(":\n");
+                self.status.push_str(detail.trim_end());
+            }
+            return Err(self.status.clone());
+        }
         // The two streams are stdout and stderr, both piped by the host's
         // build spawn. Their workers never block this polling thread.
         if self.building && self.closed_streams < 2 { return Ok(None); }
@@ -172,7 +236,7 @@ impl AppLaunch {
         }
         self.diagnostic.clear();
         self.last_output.clear();
-        *child = Some(spawn(self.command()?, false)?);
+        *child = Some(spawn(self.command()?, LaunchKind::App)?);
         self.status = format!("starting {}…", self.app.label);
         Ok(Some(LaunchEvent::Started))
     }

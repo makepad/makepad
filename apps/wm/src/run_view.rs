@@ -41,6 +41,11 @@ script_mod! {
             tex_size: instance(vec2(1.0, 1.0))
             host_dpi_factor: instance(1.0)
             packed_header: instance(1.0)
+            // The size the app was last told, in pixels (0: unknown). A frame drawn at
+            // another size (an older one, while a resize waits for the app) is shown at
+            // its own size from the top-left, not stretched; past its edge the edge
+            // pixels continue.
+            expect_px: instance(vec2(0.0, 0.0))
             // The close-crop: while a tile closes, its quad shrinks but the
             // frozen app image must STAY PUT — the quad becomes a moving
             // window over the unmoving texture. crop_origin/crop_span map
@@ -56,7 +61,12 @@ script_mod! {
                 let cpos = self.crop_origin + self.pos * self.crop_span
                 let uv = cpos
                 if self.packed_header < 0.5 {
-                    return self.tex.sample(uv * self.tex_scale) * self.fade
+                    if self.expect_px.x <= 0.0 || self.expect_px.y <= 0.0 {
+                        return self.tex.sample(uv * self.tex_scale) * self.fade
+                    }
+                    let drawn = self.tex_scale * self.tex_size
+                    let px = min(uv * self.expect_px, max(drawn - vec2(0.5), vec2(0.5)))
+                    return self.tex.sample(px / self.tex_size) * self.fade
                 }
                 let tp1 = self.tex.sample(vec2(0.5 / self.tex_size.x, 0.5 / self.tex_size.y))
                 let tp2 = self.tex.sample(vec2(1.5 / self.tex_size.x, 0.5 / self.tex_size.y))
@@ -116,6 +126,14 @@ pub enum MpRunViewAction {
 
 #[derive(Script, Widget)]
 pub struct MpRunView {
+    /// Since a live resize began, until a frame of the size the app was told arrives
+    /// after it: frames of another size are shown unscaled from the top-left
+    /// (`expect_px`). Otherwise a frame fills the quad as before (open and close
+    /// animations scale it on purpose).
+    #[rust]
+    anchor_frames: bool,
+    #[rust]
+    live_resize: bool,
     #[uid]
     uid: WidgetUid,
     #[source]
@@ -183,9 +201,12 @@ pub struct MpRunView {
     /// The app draws its own chrome (`own_chrome.rs`): a press asks it where
     /// it landed.
     #[rust]
-    own_chrome: bool,
-    #[rust]
     chrome_press: ChromePresses,
+    /// Whether the window is fullscreen, and what the app was last told (`HostedFullscreen`).
+    #[rust]
+    fullscreen: bool,
+    #[rust]
+    told_fullscreen: Option<bool>,
 }
 
 impl ScriptHook for MpRunView {
@@ -219,20 +240,17 @@ impl MpRunView {
         self.redraw(cx);
     }
 
-    /// The app draws its own chrome, or stopped (`HostedChrome`).
-    pub fn set_own_chrome(&mut self, own: bool) {
-        self.own_chrome = own;
-        self.chrome_press.end();
-    }
 
     /// The app's answer to the press' drag query: where the window drag
     /// starts when the press was on its caption. The press is then the
     /// window manager's, so the app is told it was cancelled.
-    pub fn take_caption_press(&mut self, cx: &mut Cx, answer: &makepad_widgets::makepad_platform::ime::HostedDragAnswer, time: f64) -> Option<Vec2d> {
-        let abs = self.chrome_press.answer(answer)?;
-        self.hosted.mouse_up(None, MouseButton::PRIMARY, time, &KeyModifiers::default(), true);
-        self.flush(cx);
-        Some(abs)
+    pub fn take_caption_press(&mut self, cx: &mut Cx, answer: &makepad_studio_protocol::HostedDragAnswer, time: f64) -> Option<crate::own_chrome::CaptionPress> {
+        let press = self.chrome_press.answer(answer)?;
+        if let crate::own_chrome::CaptionPress::Drag(_) = press {
+            self.hosted.mouse_up(None, MouseButton::PRIMARY, time, &KeyModifiers::default(), true);
+            self.flush(cx);
+        }
+        Some(press)
     }
 
     /// Send the child a compact-forms message (`HostedParked`, see
@@ -280,7 +298,7 @@ impl MpRunView {
     /// Tell the child whether any of its window shows (`HostedVisible`).
     pub fn send_visible(&mut self, cx: &mut Cx, visible: bool) -> bool {
         if self.hosted.client().is_none() { return false; }
-        let json = makepad_widgets::makepad_platform::ime::HostedVisible { visible }.to_json();
+        let json = makepad_studio_protocol::HostedVisible { visible }.to_json();
         self.hosted.send(vec![makepad_studio_protocol::StudioToApp::Custom(json)]);
         self.flush(cx);
         true
@@ -364,6 +382,21 @@ impl MpRunView {
         if self.hosted.set_run_target(cx, client, window_id, hub_port) {
             self.target_changed(cx, had_target);
         }
+    }
+
+    /// Show one of the app `owner`'s later windows (`window_id`) as the desk client
+    /// `client` (`client_windows.rs`): its GPU channel is the app's.
+    pub fn set_later_window_target(&mut self, cx: &mut Cx, client: ClientId, window_id: usize, owner: ClientId) {
+        let had_target = self.hosted.client().is_some();
+        if self.hosted.set_window_target(cx, client, window_id, owner) {
+            self.target_changed(cx, had_target);
+        }
+    }
+
+    /// Where this window starts in the app's coordinates (a later window's is far from
+    /// the first's, so the app tells their pointer events apart).
+    pub fn set_window_origin(&mut self, origin: Vec2d) {
+        self.hosted.set_window_origin(origin);
     }
 
     /// CreateWindow arrived: the child's stdin loop is live, share the
@@ -522,6 +555,13 @@ impl Widget for MpRunView {
         }
 
         let target = self.hosted.target();
+        // The app draws no caption while its window is fullscreen (`HostedFullscreen`).
+        if target.is_some() && self.told_fullscreen != Some(self.fullscreen) {
+            self.told_fullscreen = Some(self.fullscreen);
+            self.hosted.send(vec![makepad_studio_protocol::StudioToApp::Custom(
+                makepad_widgets::makepad_platform::ime::HostedFullscreen { window_id: target.map_or(0, |t| t.window_id), on: self.fullscreen }.to_json())]);
+            self.flush(cx);
+        }
         if target.is_some() {
             self.hosted.set_geometry(cx, rect, dpi_factor);
             let applied = self.hosted.retry_pending_draw(cx);
@@ -543,6 +583,13 @@ impl Widget for MpRunView {
         self.draw_app
             .draw_vars
             .set_dyn_instance(cx, id!(host_dpi_factor), &[dpi_factor as f32]);
+        let told = self.hosted.trace_config().0 * dpi_factor;
+        let told = [told.x.ceil() as u32, told.y.ceil() as u32];
+        if self.anchor_frames && !self.live_resize && self.hosted.presented_px() == Some(told) {
+            self.anchor_frames = false;
+        }
+        let expect = if self.anchor_frames { [told[0] as f32, told[1] as f32] } else { [0.0, 0.0] };
+        self.draw_app.draw_vars.set_dyn_instance(cx, id!(expect_px), &expect);
         let (crop_origin, crop_span) = self
             .close_crop
             .unwrap_or((dvec2(0.0, 0.0), dvec2(1.0, 1.0)));
@@ -673,8 +720,8 @@ impl MpRunView {
                     );
                     self.redraw(cx);
                     self.hosted.mouse_down(local, Self::default_mouse_button(&e.device), e.time, &e.modifiers);
-                    if self.own_chrome && Self::default_mouse_button(&e.device) == MouseButton::PRIMARY {
-                        let query = self.chrome_press.begin(e.abs, local);
+                    if Self::default_mouse_button(&e.device) == MouseButton::PRIMARY {
+                        let query = self.chrome_press.begin(e.abs, self.hosted.child_point(local));
                         self.hosted.send(vec![makepad_studio_protocol::StudioToApp::Custom(query.to_json())]);
                     }
                 }
@@ -706,6 +753,11 @@ impl MpRunView {
                     // trackpad gesture is the one that carries a phase.
                     let is_mouse = e.device.is_mouse() && e.phase == makepad_widgets::makepad_platform::event::ScrollPhase::None;
                     self.hosted.scroll(local, e.scroll, is_mouse, e.phase, e.time, &e.modifiers);
+                }
+            }
+            Hit::FingerPinch(e) => {
+                if let Some(local) = self.local_from_area(cx, e.abs) {
+                    self.hosted.pinch(local, e.scale, e.phase, e.time, &e.modifiers);
                 }
             }
             Hit::TextInput(e) => self.hosted.text_input(e),
@@ -774,6 +826,16 @@ impl crate::tile::TileHost for MpRunView {
 
     fn set_target_size(&mut self, size: Option<Vec2d>) {
         self.hosted.set_target_size(size)
+    }
+
+    fn set_fullscreen(&mut self, on: bool) {
+        self.fullscreen = on;
+    }
+
+    fn set_live_resize(&mut self, on: bool) {
+        self.live_resize = on;
+        self.anchor_frames |= on;
+        self.hosted.set_live_resize(on)
     }
 
     fn set_close_crop(&mut self, crop: Option<(Vec2d, Vec2d)>) {

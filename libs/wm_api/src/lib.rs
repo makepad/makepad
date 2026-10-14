@@ -80,6 +80,10 @@ pub enum WmEvent {
     /// (same viewer type as it was spawned for). The viewer swaps content
     /// in place — no respawn, no focus change.
     PreviewFile { path: String },
+    /// To an app that runs already: show `path`. The WM sends it when a
+    /// `WmRequest::Open` names this launch-or-focus app (Camera's last shot
+    /// opening in the Photos that is open) and brings the app up with it.
+    Open { path: String },
     /// The panel was hidden: the warm viewer UNLOADS what it was showing
     /// (drop decoders/textures/file handles, stop playback, blank state)
     /// and idles at near-zero cost until the next `PreviewFile`.

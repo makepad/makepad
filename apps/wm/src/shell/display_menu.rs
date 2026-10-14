@@ -1,6 +1,8 @@
 //! The Display menu's model: each screen's resolutions and the refresh
-//! rates of a resolution, the screen's title, and the try → confirm /
-//! auto-revert state machine every mode or arrangement change goes through.
+//! rates of a resolution, the screen's title, the try → confirm /
+//! auto-revert state machine every resolution or refresh change goes
+//! through, and the Extended / Mirror switch, which applies at once (it
+//! reinitialises no output) and is saved as soon as the renderer takes it.
 //!
 //! A change is sent at once and shown as "Keep this mode? Reverting in
 //! 15 s". Keep saves it; Revert, or the 15 s running out, sends the
@@ -21,8 +23,8 @@ use super::display_layout::{connector_suffix, PEER_PENDING_STATUS};
 pub const CONFIRM_SECONDS: f64 = 15.0;
 /// How long a change may take to come up before it counts as failed.
 pub const APPLY_TIMEOUT: f64 = 10.0;
-/// The message slot of the arrangement (Extended / Mirror); a screen's
-/// slot is its connector name.
+/// The message slot of the arrangement (Extended / Mirror): a refused
+/// switch is reported there. A screen's slot is its connector name.
 pub const ARRANGEMENT_SLOT: &str = "";
 
 // ---------------------------------------------------------------- modes
@@ -277,20 +279,29 @@ pub fn mode_matches(output: &LinuxDisplayOutput, mode: Option<&str>) -> bool {
 
 // ---------------------------------------------------------------- trials
 
-/// One change the menu can try.
+/// What Extended / Mirror reads as in a message.
+pub fn arrangement_label(arrangement: &DisplayArrangement, snapshot: &LinuxDisplaySnapshot) -> String {
+    match arrangement {
+        DisplayArrangement::Extended => "Extended desktop".into(),
+        DisplayArrangement::Mirror { optimise_for } => {
+            let title = snapshot.outputs.iter().find(|o| o.name == *optimise_for).map(screen_title);
+            format!("Mirror for {}", title.unwrap_or_else(|| connector_suffix(optimise_for)))
+        }
+    }
+}
+
+/// One change the menu can try: a screen's resolution and refresh.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Change {
     /// Screen `name` in `mode` (the renderer's syntax), `None` automatic.
     Mode { name: String, mode: Option<String> },
-    Arrangement(DisplayArrangement),
 }
 
 impl Change {
-    /// The message slot: the screen's name, or the arrangement's.
+    /// The message slot: the screen's name.
     pub fn slot(&self) -> &str {
         match self {
             Change::Mode { name, .. } => name,
-            Change::Arrangement(_) => ARRANGEMENT_SLOT,
         }
     }
 
@@ -304,11 +315,6 @@ impl Change {
                     None => mode.clone().unwrap_or_else(|| "automatic".into()),
                 }
             }
-            Change::Arrangement(DisplayArrangement::Extended) => "Extended desktop".into(),
-            Change::Arrangement(DisplayArrangement::Mirror { optimise_for }) => {
-                let title = snapshot.outputs.iter().find(|o| o.name == *optimise_for).map(screen_title);
-                format!("Mirror for {}", title.unwrap_or_else(|| connector_suffix(optimise_for)))
-            }
         }
     }
 
@@ -318,7 +324,6 @@ impl Change {
             Change::Mode { name, mode } => {
                 snapshot.outputs.iter().any(|o| o.name == *name && mode_matches(o, mode.as_deref()))
             }
-            Change::Arrangement(arrangement) => snapshot.arrangement == *arrangement,
         }
     }
 }
@@ -367,6 +372,9 @@ pub struct DisplayTrials {
     /// until the renderer does (or the apply timeout passes).
     pub restoring: Option<(Change, f64)>,
     pub notes: Vec<Note>,
+    /// An Extended / Mirror switch sent and not yet in the renderer's
+    /// snapshot: the switch shows it meanwhile.
+    pub arrangement_pending: Option<DisplayArrangement>,
 }
 
 impl DisplayTrials {
@@ -413,6 +421,9 @@ impl DisplayTrials {
     /// One look at the renderer's snapshot (`generation` is its display
     /// generation) at `now`.
     pub fn observe(&mut self, snapshot: &LinuxDisplaySnapshot, generation: u64, now: f64) -> Vec<TrialOut> {
+        if self.arrangement_pending.as_ref() == Some(&snapshot.arrangement) {
+            self.arrangement_pending = None;
+        }
         if let Some((change, since)) = &self.restoring {
             if change.shown_by(snapshot) || now - since > APPLY_TIMEOUT {
                 self.restoring = None;
@@ -424,7 +435,6 @@ impl DisplayTrials {
                 None => Some("the screen was disconnected".to_string()),
                 Some(output) => output_failure(output).map(str::to_string),
             },
-            Change::Arrangement(_) => None,
         };
         match trial.phase {
             Phase::Applying { since, generation: sent } => {
@@ -504,17 +514,31 @@ impl DisplayTrials {
             .unwrap_or(running)
     }
 
-    /// The arrangement the switch shows.
+    /// The arrangement the switch shows: one sent and on its way, else
+    /// `running` (the renderer's).
     pub fn selected_arrangement<'a>(&'a self, running: &'a DisplayArrangement) -> &'a DisplayArrangement {
-        let pick = |change: &'a Change| match change {
-            Change::Arrangement(a) => Some(a),
-            _ => None,
-        };
-        self.trial
-            .as_ref()
-            .and_then(|t| pick(&t.change))
-            .or_else(|| self.restoring.as_ref().and_then(|(c, _)| pick(c)))
-            .unwrap_or(running)
+        self.arrangement_pending.as_ref().unwrap_or(running)
+    }
+
+    /// Switch Extended / Mirror (or the screen a mirror is sized for): no
+    /// confirm, it reinitialises no output. True when `wanted` is to be
+    /// sent; nothing to send when the switch already shows it.
+    pub fn switch_arrangement(&mut self, wanted: DisplayArrangement, running: &DisplayArrangement) -> bool {
+        self.clear_note(ARRANGEMENT_SLOT);
+        if *self.selected_arrangement(running) == wanted {
+            return false;
+        }
+        self.arrangement_pending = Some(wanted);
+        true
+    }
+
+    /// The renderer refused a switch: the switch goes back to what runs and
+    /// the reason is noted under it.
+    pub fn arrangement_refused(&mut self, wanted: &DisplayArrangement, message: &str, snapshot: &LinuxDisplaySnapshot) {
+        if self.arrangement_pending.as_ref() == Some(wanted) {
+            self.arrangement_pending = None;
+        }
+        self.note(ARRANGEMENT_SLOT, format!("Couldn't switch to {}: {message}", arrangement_label(wanted, snapshot)), true);
     }
 
     pub fn note_for(&self, slot: &str) -> Option<&Note> {
@@ -594,6 +618,7 @@ pub fn gallery_fixture() -> (LinuxDisplaySnapshot, DisplayTrials) {
             phase: Phase::Confirming { deadline: CONFIRM_SECONDS },
         }),
         restoring: None,
+        arrangement_pending: None,
         notes: vec![Note {
             slot: "card0-eDP-1".into(),
             text: "Couldn't set 2560\u{d7}1600 \u{b7} 60 Hz: failed: VK_ERROR_INITIALIZATION_FAILED. Back to 2560\u{d7}1600 \u{b7} 240 Hz".into(),
@@ -606,7 +631,7 @@ pub fn gallery_fixture() -> (LinuxDisplaySnapshot, DisplayTrials) {
 /// A screen that took the request but runs another mode: the renderer's
 /// fallback when the requested one cannot be shown.
 fn other_mode(change: &Change, snapshot: &LinuxDisplaySnapshot) -> Option<String> {
-    let Change::Mode { name, mode } = change else { return None };
+    let Change::Mode { name, mode } = change;
     let output = snapshot.outputs.iter().find(|o| o.name == *name)?;
     (output.active && output.mode_override == *mode && output.width > 0)
         .then(|| format!("the screen shows {} instead", mode_label(output.width, output.height, output.refresh_hz)))
@@ -864,54 +889,89 @@ mod tests {
         assert!(t.begin(mode(None), mode(None), 1, 2.0).is_empty());
     }
 
-    fn mirror(name: &str) -> Change {
-        Change::Arrangement(DisplayArrangement::Mirror { optimise_for: name.into() })
+    fn mirror(name: &str) -> DisplayArrangement {
+        DisplayArrangement::Mirror { optimise_for: name.into() }
     }
 
     #[test]
-    fn mirror_and_extended_switch_through_try_and_keep() {
-        let extended = Change::Arrangement(DisplayArrangement::Extended);
+    fn mirror_and_extended_switch_at_once_without_a_trial() {
         let mut s = snap(vec![hdmi(None, 3840, 2160, 239.995)]);
         let mut t = DisplayTrials::default();
-        assert_eq!(t.begin(mirror("card0-eDP-1"), extended.clone(), 1, 0.0), [TrialOut::Send(mirror("card0-eDP-1"))]);
-        assert_eq!(
-            t.selected_arrangement(&DisplayArrangement::Extended),
-            &DisplayArrangement::Mirror { optimise_for: "card0-eDP-1".into() }
-        );
-        s.arrangement = DisplayArrangement::Mirror { optimise_for: "card0-eDP-1".into() };
-        t.observe(&s, 2, 1.0);
-        assert_eq!(t.seconds_left(1.0), Some(15));
-        assert_eq!(t.keep(), [TrialOut::Save(mirror("card0-eDP-1"))]);
-        // Back to extended: tried, not kept -> mirror again.
-        t.begin(extended.clone(), mirror("card0-eDP-1"), 2, 2.0);
+        assert!(t.switch_arrangement(mirror("card0-eDP-1"), &s.arrangement));
+        // No confirm: nothing to keep, nothing that reverts.
+        assert!(t.trial.is_none() && t.seconds_left(0.0).is_none());
+        assert_eq!(t.selected_arrangement(&s.arrangement), &mirror("card0-eDP-1"));
+        // Asking again for what is on its way sends nothing.
+        assert!(!t.switch_arrangement(mirror("card0-eDP-1"), &s.arrangement));
+        s.arrangement = mirror("card0-eDP-1");
+        assert!(t.observe(&s, 2, 1.0).is_empty());
+        assert!(t.arrangement_pending.is_none());
+        // Long after: still mirrored, nothing sent back.
+        assert!(t.observe(&s, 2, 60.0).is_empty());
+        assert!(t.switch_arrangement(DisplayArrangement::Extended, &s.arrangement));
         s.arrangement = DisplayArrangement::Extended;
-        t.observe(&s, 3, 3.0);
-        assert_eq!(t.observe(&s, 3, 18.0), [TrialOut::Send(mirror("card0-eDP-1"))]);
-        assert_eq!(t.note_for(ARRANGEMENT_SLOT).unwrap().error, false);
+        assert!(t.observe(&s, 3, 61.0).is_empty());
+        assert_eq!(t.selected_arrangement(&s.arrangement), &DisplayArrangement::Extended);
     }
 
     #[test]
-    fn optimise_for_another_screen_is_a_new_trial_and_a_refusal_keeps_the_switch() {
+    fn optimise_for_another_screen_switches_and_a_refusal_keeps_what_runs() {
+        let mut s = snap(vec![hdmi(None, 3840, 2160, 239.995)]);
+        s.arrangement = mirror("card0-eDP-1");
+        let mut t = DisplayTrials::default();
+        assert!(t.switch_arrangement(mirror("card1-HDMI-A-2"), &s.arrangement));
+        assert_eq!(t.selected_arrangement(&s.arrangement), &mirror("card1-HDMI-A-2"));
+        t.arrangement_refused(&mirror("card1-HDMI-A-2"), "card1-HDMI-A-2 is not connected", &s);
+        assert_eq!(t.selected_arrangement(&s.arrangement), &mirror("card0-eDP-1"));
+        let note = t.note_for(ARRANGEMENT_SLOT).unwrap();
+        assert!(note.error && note.text.contains("Mirror for HDMI") && note.text.contains("not connected"), "{note:?}");
+        // The next switch clears the note.
+        assert!(t.switch_arrangement(DisplayArrangement::Extended, &s.arrangement));
+        assert!(t.note_for(ARRANGEMENT_SLOT).is_none());
+    }
+
+    #[test]
+    fn a_mode_change_in_mirror_is_tried_kept_and_reverted_like_in_extended() {
+        // Mirror sized for the panel; the HDMI has no rectangle of its own.
+        let mut edp = hdmi(None, 2560, 1600, 240.0);
+        edp.name = "card0-eDP-1".into();
+        edp.modes = vec![(2560, 1600, 240.0), (2560, 1600, 60.0), (1920, 1200, 60.0)];
+        let mut tv = hdmi(None, 3840, 2160, 239.995);
+        tv.desktop_position = None;
+        let mut s = snap(vec![edp.clone(), tv.clone()]);
+        s.arrangement = mirror("card0-eDP-1");
+        let mut t = DisplayTrials::default();
+        // The audience screen's own refresh: tried, shown, kept.
+        t.begin(mode(Some("3840x2160@60")), mode(None), 1, 0.0);
+        let mut tv60 = tv.clone();
+        tv60.mode_override = Some("3840x2160@60".into());
+        tv60.refresh_hz = 60.0;
+        t.observe(&LinuxDisplaySnapshot { outputs: vec![edp.clone(), tv60], ..s.clone() }, 2, 1.0);
+        assert_eq!(t.seconds_left(1.0), Some(15));
+        assert_eq!(t.keep(), [TrialOut::Save(mode(Some("3840x2160@60")))]);
+        // The optimised screen's resolution (the mirror's size): tried, not
+        // kept, reverted after 15 s.
+        let panel = |m: Option<&str>| Change::Mode { name: "card0-eDP-1".into(), mode: m.map(str::to_string) };
+        t.begin(panel(Some("1920x1200@60")), panel(None), 2, 2.0);
+        let mut small = edp.clone();
+        small.mode_override = Some("1920x1200@60".into());
+        small.width = 1920;
+        small.height = 1200;
+        small.refresh_hz = 60.0;
+        let up = LinuxDisplaySnapshot { outputs: vec![small, tv], ..s.clone() };
+        t.observe(&up, 3, 3.0);
+        assert!(t.seconds_left(3.0).is_some());
+        assert_eq!(t.observe(&up, 3, 18.0), [TrialOut::Send(panel(None))]);
+        // The switch stayed on Mirror throughout.
+        assert_eq!(t.selected_arrangement(&s.arrangement), &mirror("card0-eDP-1"));
+    }
+
+    #[test]
+    fn an_arrangement_switch_leaves_a_mode_trial_alone() {
         let s = snap(vec![hdmi(None, 3840, 2160, 239.995)]);
         let mut t = DisplayTrials::default();
-        t.begin(mirror("card1-HDMI-A-2"), mirror("card0-eDP-1"), 1, 0.0);
-        assert_eq!(t.trial_for(ARRANGEMENT_SLOT).unwrap().previous, mirror("card0-eDP-1"));
-        // The renderer refuses (mirroring not there yet): the switch shows the kept one.
-        assert!(t.refused(&mirror("card1-HDMI-A-2"), "mirroring is not implemented by the renderer yet", &s, 0.1).is_empty());
-        assert_eq!(
-            t.selected_arrangement(&DisplayArrangement::Mirror { optimise_for: "card0-eDP-1".into() }),
-            &DisplayArrangement::Mirror { optimise_for: "card0-eDP-1".into() }
-        );
-        let note = t.note_for(ARRANGEMENT_SLOT).unwrap();
-        assert!(note.error && note.text.contains("not implemented"), "{note:?}");
-    }
-
-    #[test]
-    fn a_mode_change_reverts_an_unconfirmed_mirror_first() {
-        let extended = Change::Arrangement(DisplayArrangement::Extended);
-        let mut t = DisplayTrials::default();
-        t.begin(mirror("card0-eDP-1"), extended.clone(), 1, 0.0);
-        let out = t.begin(mode(Some("1920x1080@60")), mode(None), 1, 1.0);
-        assert_eq!(out, [TrialOut::Send(extended), TrialOut::Send(mode(Some("1920x1080@60")))]);
+        t.begin(mode(Some("1920x1080@60")), mode(None), 1, 0.0);
+        assert!(t.switch_arrangement(mirror("card1-HDMI-A-2"), &s.arrangement));
+        assert_eq!(t.trial_for("card1-HDMI-A-2").unwrap().change, mode(Some("1920x1080@60")));
     }
 }

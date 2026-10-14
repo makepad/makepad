@@ -61,7 +61,7 @@ fn icon_for(id: &str) -> Option<Ico> {
         "mixer" => Ico::Speaker,
         "amp" => Ico::Play,
         "code" => Ico::Prompt,
-        "photos" => Ico::Photo,
+        "photos" | "camera" => Ico::Photo,
         "clock" => Ico::Calendar,
         "weather" => Ico::Sun,
         "finance" => Ico::Pulse,
@@ -139,25 +139,44 @@ fn scan_apps(launchable: &Launchable) -> Vec<MenuItem> {
         description: String::new(),
         aliases: if id == "wl.chromium" { vec![id, "browser".into()] } else { vec![id] },
     });
-    let mut items = items;
-    let foreign: Vec<MenuItem> = foreign.collect();
-    // Chromium takes the browser's slot: our own browser app leaves the list (it stays in the repo).
-    if let Some(chromium) = foreign.iter().position(|i| i.id == BROWSER_REPLACEMENT) {
-        let slot = items.iter().position(|i| i.id == "apps.browser");
-        items.retain(|i| i.id != "apps.browser");
-        let mut foreign = foreign;
-        let c = foreign.remove(chromium);
-        items.insert(slot.unwrap_or(0).min(items.len()), c);
-        items.extend(foreign);
-        return items;
+    place_foreign(items, foreign.collect())
+}
+
+/// Chromium takes the browser's slot (our own browser app leaves the list; it stays in the repo).
+/// A foreign app listed under one of our apps' ids (`code` = VS Code) sits right after that app.
+/// The rest follow our apps.
+fn place_foreign(mut items: Vec<MenuItem>, foreign: Vec<MenuItem>) -> Vec<MenuItem> {
+    let mut rest = Vec::new();
+    for f in foreign {
+        if f.id == BROWSER_REPLACEMENT {
+            let slot = items.iter().position(|i| i.id == "apps.browser").unwrap_or(0).min(items.len());
+            items.retain(|i| i.id != "apps.browser");
+            items.insert(slot.min(items.len()), f);
+        } else if let Some(ours) = f.id.strip_prefix("apps.wl.").and_then(|bare| items.iter().position(|i| i.id == format!("apps.{bare}"))) {
+            items.insert(ours + 1, f);
+        } else {
+            rest.push(f);
+        }
     }
-    items.extend(foreign);
+    items.extend(rest);
     items
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(id: &str) -> MenuItem {
+        MenuItem { id: id.into(), label: id.into(), icon: None, kind: MenuKind::App, checked: false, divider: false, disabled: false, description: String::new(), aliases: vec![] }
+    }
+
+    #[test]
+    fn vscode_sits_next_to_code_and_chromium_takes_the_browser_slot() {
+        let ours = ["apps.files", "apps.browser", "apps.code", "apps.stage"].map(row).to_vec();
+        let foreign = ["apps.wl.code", "apps.wl.gimp", "apps.wl.chromium"].map(row).to_vec();
+        let ids: Vec<String> = place_foreign(ours, foreign).into_iter().map(|i| i.id).collect();
+        assert_eq!(ids, ["apps.files", "apps.wl.chromium", "apps.code", "apps.wl.code", "apps.stage", "apps.wl.gimp"]);
+    }
 
     #[test]
     fn hides_match_exactly_and_case_sensitively() {

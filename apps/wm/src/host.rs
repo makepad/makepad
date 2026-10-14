@@ -221,6 +221,33 @@ pub fn apply_natural_scroll(on: bool) {
     let _ = on;
 }
 
+/// Remember the touchpad's tap to click choice beside natural scrolling's.
+pub fn persist_tap_to_click(on: bool) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::fs::write(crate::theme::themes_dir().join("../current-tap-to-click"), if on { "on" } else { "off" });
+    }
+    let _ = on;
+}
+
+/// The saved tap to click choice: off unless turned on.
+pub fn load_tap_to_click() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        return std::fs::read_to_string(crate::theme::themes_dir().join("../current-tap-to-click"))
+            .map_or(false, |text| text.trim() == "on");
+    }
+    #[cfg(target_arch = "wasm32")]
+    false
+}
+
+/// Applies tap to click to the direct backend's touchpad.
+pub fn apply_tap_to_click(on: bool) {
+    #[cfg(target_os = "linux")]
+    makepad_widgets::makepad_platform::linux_input::set_tap_to_click(on);
+    let _ = on;
+}
+
 /// The saved shelf auto-hide choice (native; both off when nothing was saved).
 pub fn load_shelf_autohide() -> [bool; 2] {
     #[cfg(not(target_arch = "wasm32"))]

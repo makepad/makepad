@@ -12,7 +12,10 @@
 //!   resolution picker (the screen's modes, native marked) and a refresh
 //!   picker (the rates of the chosen resolution). A picker unfolds as a
 //!   grid of chips under its screen.
-//! * Every arrangement or mode change is tried first: "Keep this mode?
+//! * Extended / Mirror and "Optimise for" switch at once (no output is
+//!   reinitialised) and are saved when the renderer takes them; a refusal
+//!   is noted under the switch.
+//! * Every resolution or refresh change is tried first: "Keep this mode?
 //!   Reverting in 15 s" with Keep and Revert under the controls. A change
 //!   that fails shows the renderer's error there and the previous one is
 //!   sent again; the controls stay usable, so another mode can be tried at
@@ -27,7 +30,7 @@ use super::super::ui::HAlign;
 use crate::linux_controls::ControlAction;
 use crate::shell::display_layout::{screen_rows, screens_span_gpus, swap_neighbour};
 use crate::shell::display_menu::{
-    mode_for, mode_label, native_resolution, rate_after_resolution, rate_label, rates_for, resolution_label, resolutions, screen_title,
+    mode_for, native_resolution, rate_after_resolution, rate_label, rates_for, resolution_label, resolutions, screen_title,
     shown_mode, pacing_choices, pacing_label, Change, Phase, ARRANGEMENT_SLOT,
 };
 use crate::shell::system_linux::{Availability, BatteryStatus, GpuInfo, SystemCommand, DISPLAY_SCALE_MAX, DISPLAY_SCALE_MIN};
@@ -237,14 +240,14 @@ impl ShellPanel {
                 };
                 self.close_display_lists();
                 if let Some(wanted) = wanted.filter(|wanted| *wanted != now) {
-                    self.system_action(cx, ControlAction::DisplayTry(Change::Arrangement(wanted)));
+                    self.system_action(cx, ControlAction::DisplayArrangement(wanted));
                 }
             }
             Hit::OptimiseFor(row) => {
                 let name = self.screen_at(row).map(|o| o.name);
                 self.close_display_lists();
                 if let Some(optimise_for) = name {
-                    self.system_action(cx, ControlAction::DisplayTry(Change::Arrangement(DisplayArrangement::Mirror { optimise_for })));
+                    self.system_action(cx, ControlAction::DisplayArrangement(DisplayArrangement::Mirror { optimise_for }));
                 }
             }
             Hit::PacePicker => {
@@ -639,7 +642,8 @@ impl ShellPanel {
             rest = next;
             self.draw_optimise_for(cx, row, &order);
         }
-        rest = self.draw_slot_extra(cx, rest, ARRANGEMENT_SLOT, "Keep this arrangement?");
+        // A switch takes no confirm; only a refusal is noted here.
+        rest = self.draw_slot_extra(cx, rest, ARRANGEMENT_SLOT, "");
         let (sep, next) = cut_top(rest, SEP_H);
         rest = next;
         self.d.separator(cx, sep, fg, 0.12);
@@ -820,7 +824,14 @@ impl ShellPanel {
         let name_w = self.d.measure(cx, true, tok.font.body_small, &title).min((right - name_x).max(0.0));
         self.d.label_elided(cx, rect(name_x, line.pos.y, name_w, line.size.y), true, tok.font.body_small, text, HAlign::Left, &title);
         let (status, problem) = self.screen_status(output);
-        let detail = if status.is_empty() { self.screen_gpu_label(output) } else { status };
+        let detail = if !status.is_empty() {
+            status
+        } else if mirror {
+            let target = matches!(self.arrangement_shown(), DisplayArrangement::Mirror { optimise_for } if optimise_for == output.name);
+            if target { "mirror size".into() } else { "scaled to fit".into() }
+        } else {
+            self.screen_gpu_label(output)
+        };
         let detail_x = name_x + name_w + 8.0;
         self.d.label_elided(cx, rect(detail_x, line.pos.y, (right - detail_x).max(0.0), line.size.y),
             false, tok.font.caption, if problem { tok.bar.active } else { dim }, HAlign::Left, &detail);
@@ -830,15 +841,10 @@ impl ShellPanel {
         let inner = rect(controls.pos.x + icon_w + 6.0, controls.pos.y + 2.0,
             (controls.size.x - icon_w - 6.0).max(0.0), controls.size.y - 4.0);
         let shown = shown_mode(output, self.mode_shown(output));
-        if mirror {
-            let target = matches!(self.arrangement_shown(), DisplayArrangement::Mirror { optimise_for } if optimise_for == output.name);
-            let text = match (target, output.width > 0) {
-                (true, true) => format!("Native {}", mode_label(output.width, output.height, output.refresh_hz)),
-                (false, true) => format!("Scaled to fit \u{b7} {}", mode_label(output.width, output.height, output.refresh_hz)),
-                _ => "Not showing".to_string(),
-            };
-            self.d.label_elided(cx, inner, false, tok.font.body_small, if output.active { fg } else { dim }, HAlign::Left, &text);
-        } else {
+        // Every screen keeps its own resolution and refresh in Mirror too:
+        // the mirror is rendered at the optimised screen's mode (changing it
+        // resizes the mirror), the others scale it into theirs.
+        {
             let enabled = direct && !output.modes.is_empty();
             let res_w = (inner.size.x * 0.6).floor();
             let res = rect(inner.pos.x, inner.pos.y, res_w - 4.0, inner.size.y);

@@ -755,7 +755,7 @@ impl ProducerRing {
 mod linux {
     use super::RingSlot;
     use makepad_platform::makepad_hal::dmabuf::{copy, hal_dmabuf_register};
-    use makepad_platform::os::linux_ipc::{Channel, Never};
+    use makepad_platform::makepad_hal::linux_ipc::{Channel, Never};
     use makepad_platform::thread::ThreadOptions;
     use makepad_platform::Cx;
     use std::io;
@@ -842,7 +842,7 @@ mod linux {
                 if at != index as u64 {
                     return Err(io::Error::new(io::ErrorKind::InvalidData, "frame ring: descriptors out of order"));
                 }
-                let handle = copy::register(fd, layout);
+                let handle = hal_dmabuf_register(fd.into_raw_fd(), &layout.to_words());
                 local.push(handle);
                 slot.handle = handle;
             }
@@ -850,7 +850,7 @@ mod linux {
         })();
         if let Err(error) = result {
             for handle in local {
-                copy::release(handle);
+                makepad_platform::makepad_hal::dmabuf::hal_dmabuf_release(handle);
             }
             return Err(error);
         }

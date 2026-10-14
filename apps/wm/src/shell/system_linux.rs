@@ -867,6 +867,7 @@ impl fmt::Display for ExecError {
 /// with the worker thread that spawned it.
 fn spawn_process(program: &str, args: &[&str], stdout: Stdio, stderr: Stdio) -> Result<Child, ExecError> {
     let mut command = Command::new(program);
+    makepad_app_registry::child_env::scrub(&mut command);
     command
         .args(args)
         .env("LC_ALL", "C")

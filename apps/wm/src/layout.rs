@@ -377,8 +377,10 @@ impl WmLayout {
     }
 
     /// Where a workspace's tiles are laid out in `area`.
+    /// Only a floating desktop keeps the edge zones for parked windows: a tiling style has
+    /// no shelves, its tiles fill the whole area.
     fn tile_area(&self, ws: usize, area: LRect) -> LRect {
-        if self.zoned && ws != SCRATCHPAD { crate::spacewarp::band_of(area) } else { area }
+        if self.zoned && self.desktop.enabled && ws != SCRATCHPAD { crate::spacewarp::band_of(area) } else { area }
     }
 
     /// The App hands us the desk rect each time it acts, since the tile
@@ -538,6 +540,16 @@ impl WmLayout {
     /// focused slot is a group the client JOINS it (`group:auto_group`).
     pub fn insert(&mut self, client: ClientId, area: LRect, gap: f64) {
         self.insert_on(self.active, client, area, gap);
+    }
+
+    /// Insert on a desktop: the current one, or the one a shown fullscreen space returns
+    /// to (a fullscreen space holds its one window only).
+    pub fn insert_on_desktop(&mut self, client: ClientId, area: LRect, gap: f64) {
+        let ws = match self.spaces.current().kind {
+            crate::spaces::Kind::Fullscreen { home, .. } => home,
+            crate::spaces::Kind::Desktop => self.active,
+        };
+        self.insert_on(ws, client, area, gap);
     }
 
     pub fn insert_on(&mut self, ws: usize, client: ClientId, area: LRect, gap: f64) {
@@ -2679,18 +2691,34 @@ mod tests {
         assert_eq!(rect_of(&l, 2).h, 330.0);
     }
 
+    /// Tiling and the shelves exclude each other: a tiling layout of a real display uses
+    /// its whole area (the screen minus the bar and dock, which `area` already leaves
+    /// out), never the centre band, and its tiles cover it exactly up to the gap.
     #[test]
-    fn a_zoned_layout_tiles_and_maximizes_in_the_centre_band() {
+    fn a_tiling_layout_fills_the_whole_screen_area_no_shelf_zones() {
         let band = crate::spacewarp::band_of(AREA);
         assert!(band.x > AREA.x && band.w < AREA.w);
+        let gap = 4.0;
         let mut l = WmLayout::zoned();
-        l.insert(1, AREA, 0.0);
-        l.insert(2, AREA, 0.0);
-        for (_, r) in l.rects(AREA, 0.0) {
-            assert!(r.x >= band.x - 1e-9 && r.x + r.w <= band.x + band.w + 1e-9);
-        }
+        assert!(!l.desktop.enabled, "a tiling style");
+        l.insert(1, AREA, gap);
+        l.insert(2, AREA, gap);
+        let rects: Vec<LRect> = l.rects(AREA, gap).into_iter().map(|(_, r)| r).collect();
+        let x0 = rects.iter().map(|r| r.x).fold(f64::MAX, f64::min);
+        let x1 = rects.iter().map(|r| r.x + r.w).fold(f64::MIN, f64::max);
+        let y0 = rects.iter().map(|r| r.y).fold(f64::MAX, f64::min);
+        let y1 = rects.iter().map(|r| r.y + r.h).fold(f64::MIN, f64::max);
+        assert!((x0 - AREA.x).abs() < 1e-6 && (x1 - (AREA.x + AREA.w)).abs() < 1e-6, "{rects:?} in {AREA:?}");
+        assert!((y0 - AREA.y).abs() < 1e-6 && (y1 - (AREA.y + AREA.h)).abs() < 1e-6, "{rects:?} in {AREA:?}");
+        // side by side, exactly one gap between them
+        let covered: f64 = rects.iter().map(|r| r.w).sum();
+        assert!((covered + gap - AREA.w).abs() < 1e-6, "{rects:?}");
         l.toggle_full_width();
-        assert_eq!(l.rects(AREA, 0.0)[0].1, band);
+        assert_eq!(l.rects(AREA, gap)[0].1, AREA);
+        // the same layout on a floating desktop keeps the band for parked windows
+        l.toggle_full_width();
+        l.desktop.enabled = true;
+        assert_eq!(l.tile_area(l.active, AREA), band);
     }
 
     #[test]
@@ -2710,15 +2738,14 @@ mod tests {
     }
 
     #[test]
-    fn a_tile_dragged_into_a_zone_floats_and_dropping_it_in_the_band_reinserts_it() {
+    fn a_tile_dragged_out_floats_and_dropping_it_back_reinserts_it() {
         let mut l = WmLayout::zoned();
         l.insert(1, AREA, 0.0);
         l.insert(2, AREA, 0.0);
-        let band = crate::spacewarp::band_of(AREA);
         l.float_from_tree(2, LRect::new(-300.0, 100.0, 400.0, 300.0), AREA, 0.0);
         assert!(l.is_float(2));
-        // The remaining tile now fills the band.
-        assert_eq!(rect_of(&l, 1), band);
+        // The remaining tile now fills the area (a tiling layout has no shelf zones).
+        assert_eq!(rect_of(&l, 1), AREA);
         // A plain float is not reinserted; the torn-out tile is.
         assert!(!l.reinsert(1, AREA, 0.0));
         assert!(l.reinsert(2, AREA, 0.0));
