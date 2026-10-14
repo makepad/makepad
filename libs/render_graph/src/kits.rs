@@ -497,14 +497,16 @@ $M.kit_lut = fn(p) {
 // ---------------------------------------------------------------- DepthOfField
 // A thin lens: circle of confusion from the view distance against `focus`
 // (metres), `aperture` its size (pixels at 1080p for something at
-// infinity), capped at `max_blur` (pixels at 1080p). A full-resolution
+// infinity), capped at `max_blur` (pixels at 1080p); `range` the in-focus
+// band, the defocus |1 - focus / distance| below which nothing blurs (the
+// blur grows from its edge). A full-resolution
 // gather of 24 taps on a disc, each tap counted where its own blur reaches
 // this pixel and never beyond this pixel's own (a blurred background does
 // not bleed over a sharp foreground, and what is in focus stays sharp).
-$M.DepthOfField = $M.DepthOfField{focus: 5 aperture: 8 max_blur: 16}
+$M.DepthOfField = $M.DepthOfField{focus: 5 aperture: 8 max_blur: 16 range: 0}
 $M.kit_dof = fn(p) {
     return [
-        {at: @hdr reads: [@color, @depth] uniforms: {focus: p.focus aperture: p.aperture max_blur: p.max_blur}
+        {at: @hdr reads: [@color, @depth] uniforms: {focus: p.focus aperture: p.aperture max_blur: p.max_blur range: p.range}
             pixel: fn() -> vec4 {
                 let px = self.size().y / 1080.0
                 let f = max(self.focus, 0.001)
@@ -514,7 +516,7 @@ $M.kit_dof = fn(p) {
                 if d0 < 0.99999 {
                     z0 = self.view_depth_at(self.uv(), d0)
                 }
-                let c0 = min(abs(1.0 - f / max(z0, 0.001)) * self.aperture * px, maxb)
+                let c0 = min(max(abs(1.0 - f / max(z0, 0.001)) - self.range, 0.0) * self.aperture * px, maxb)
                 var sum = self.color.sample_nearest(self.uv())
                 var wsum = 1.0
                 for k in 0..24 {
@@ -526,7 +528,7 @@ $M.kit_dof = fn(p) {
                     if d < 0.99999 {
                         z = self.view_depth_at(suv, d)
                     }
-                    let sc = min(abs(1.0 - f / max(z, 0.001)) * self.aperture * px, maxb)
+                    let sc = min(max(abs(1.0 - f / max(z, 0.001)) - self.range, 0.0) * self.aperture * px, maxb)
                     let reach = min(sc, c0 + 0.25)
                     let w = clamp(reach - r + 0.5, 0.0, 1.0)
                     sum = sum + self.color.sample_nearest(suv) * w

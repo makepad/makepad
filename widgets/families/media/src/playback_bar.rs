@@ -139,6 +139,8 @@ script_mod! {
             knob_size_hover: uniform(15.0)
             /** clear ring around the knob in pixels 0..6 step 0.5 */
             knob_ring: uniform(2.0)
+            /** the whole bar's opacity, for a host that fades it in and out 0..1 step 0.01 */
+            fade: instance(1.0)
             /** corner rounding; the full radius makes a pill 0..24 step 0.5 */
             border_radius: uniform(theme.radius_full)
             /** bevel thickness in pixels 0..4 step 0.5 */
@@ -225,7 +227,7 @@ script_mod! {
                     sdf.circle(kx, mid, kr)
                     sdf.fill(self.color_knob)
                 }
-                return sdf.result
+                return sdf.result * self.fade
             }
         }
 
@@ -636,6 +638,12 @@ impl ScriptHook for PlaybackBar {
 }
 
 impl PlaybackBar {
+    /// The whole bar's opacity (0..1) for its next draws: a host fading
+    /// its transport in and out sets it before each draw.
+    pub fn set_fade(&mut self, cx: &mut Cx, fade: f32) {
+        self.draw_bg.draw_vars.set_dyn_instance(cx, id!(fade), &[fade.clamp(0.0, 1.0)]);
+    }
+
     /// A length nobody has said is not a track anybody can seek into.
     fn seekable(&self) -> bool {
         self.duration.is_finite() && self.duration > 0.0

@@ -69,7 +69,7 @@
 //! every widget was built from, and leaves the panel re-scanning every draw
 //! slot after every draw for as long as the app runs.
 
-use crate::desktop_style::{self, StyleSheet};
+use crate::desktop_style;
 use crate::makepad_platform::{ScriptVm, ScriptVmCx};
 use crate::theme_tokens::{
     held_pairs, random_weights, reads_on, set_weight, to_relative, Scheme, ThemeBlend,
@@ -242,7 +242,8 @@ impl PinnedTheme {
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
     base: BaseTheme,
-    sheet: Option<&'static str>,
+    /// The sheet as it was worn: picked, or handed down by the window system.
+    wearing: desktop_style::Wearing,
     theme: BlendTheme,
     /// The tokens the entry theme pins over its base and its sheet, and
     /// `None` for a theme that is just those two: every built-in, and every
@@ -412,7 +413,8 @@ impl ThemeLab {
             return;
         }
         let base = crate::base_theme(vm.cx_mut());
-        let sheet = desktop_style::current_name(vm).and_then(|name| desktop_style::find(&name).map(|entry| entry.id));
+        let wearing = desktop_style::wearing(vm);
+        let sheet = wearing.sheet().and_then(|sheet| desktop_style::find(&sheet.name).map(|entry| entry.id));
         let theme = match sheet {
             Some(id) => BlendTheme::Sheet(id),
             None => BlendTheme::Base(match base {
@@ -428,7 +430,7 @@ impl ThemeLab {
             // one behind, so the tree has to be walked over it again.
             vm.cx_mut().request_script_reapply();
         }
-        self.entry = Some(Entry { base, sheet, theme, pinned });
+        self.entry = Some(Entry { base, wearing, theme, pinned });
         self.installed = false;
         self.show(theme.appearance());
         self.applied = Some((self.appearance, self.weights()));
@@ -930,13 +932,7 @@ impl ThemeLab {
     fn install_entry(&mut self, vm: &mut ScriptVm, entry: &Entry) {
         self.rebuilds = self.rebuilds.saturating_add(1);
         crate::set_base_theme(vm.cx_mut(), entry.base);
-        match entry.sheet {
-            Some(id) => match StyleSheet::named(id) {
-                Some(sheet) => desktop_style::install(vm, sheet),
-                None => desktop_style::uninstall(vm),
-            },
-            None => desktop_style::uninstall(vm),
-        }
+        desktop_style::put_back(vm, entry.wearing.clone());
         let pinned = entry.pinned.as_ref().map(|pinned| pinned.script.clone());
         crate::set_theme_mix(vm.cx_mut(), pinned);
         vm.cx_mut().request_style_reload();
@@ -946,6 +942,7 @@ impl ThemeLab {
 #[cfg(test)]
 mod theme_lab_tests {
     use super::*;
+    use crate::desktop_style::StyleSheet;
     use crate::makepad_platform::{Cx, LiveId, ScriptMod};
     use crate::theme_tokens::{
         mix_rgb, theme_module_script, BlendValue, ThemeValues, TokenValue, READABLE,

@@ -43,6 +43,14 @@ impl Rasterizer {
         glyph
     }
 
+    /// As `refresh_glyph`, for slug curves.
+    pub fn refresh_slug_glyph(&mut self, glyph: super::slug_atlas::SlugGlyphInfo) -> super::slug_atlas::SlugGlyphInfo {
+        glyph
+    }
+
+    /// Glyphs here never leave the atlas while drawn: nothing to record per draw list.
+    pub fn take_glyph_uses(&mut self, _into: &mut Vec<[u32; 3]>) {}
+
     pub(crate) fn export_glyph(&self, glyph: RasterizedGlyph) -> Option<PublishedGlyph> {
         let key = self.cached_slots.iter().find_map(|(key, slot)| {
             (slot.rect == glyph.atlas_image_bounds && slot.plane.index() == glyph.atlas_plane)

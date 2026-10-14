@@ -36,6 +36,9 @@ pub struct SlugGlyphInfo {
     pub band_offset: usize,
     pub band_count: usize,
     pub fill_flags: u32,
+    /// The key a kept copy is looked up by again when drawn (the HAL's font service owns the
+    /// curves; they can be taken back). Default: curves this process owns.
+    pub source: makepad_font_core::raster::GlyphSource,
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -337,6 +340,7 @@ impl SlugAtlas {
             band_offset,
             band_count,
             fill_flags: 0,
+            source: Default::default(),
         })
     }
 }

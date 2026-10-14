@@ -57,6 +57,8 @@ pub struct Outbox {
     /// (the session's font id, request kind, glyphs with their size)
     pub requests: Vec<(u32, u32, Vec<(u32, f32)>)>,
     pub releases: Vec<(u32, u32)>,
+    /// Slots in use since the last sweep: the host keeps them over unused ones when it evicts.
+    pub touches: Vec<(u32, u32)>,
     /// Requests referenced by this draw, including ones sent by an earlier draw.
     /// (font, glyph, kind, size bits); the Cx client decides which must precede presentation.
     pub pending: Vec<(u32, u32, u32, u32)>,
@@ -64,17 +66,28 @@ pub struct Outbox {
 
 impl Outbox {
     pub fn is_empty(&self) -> bool {
-        self.opens.is_empty() && self.requests.is_empty() && self.releases.is_empty() && self.pending.is_empty()
+        self.opens.is_empty() && self.requests.is_empty() && self.releases.is_empty() && self.touches.is_empty() && self.pending.is_empty()
     }
 }
 
 /// A glyph key: the session's font id, glyph, request kind.
 type Key = (u32, u16, u32);
 
+/// A glyph a draw list draws: (session font id, glyph, request kind). A list keeps these with
+/// its instances; while the list is alive its glyphs are in use (see `GlyphClient::sweep`).
+pub type GlyphUse = [u32; 3];
+
 struct Held {
     dpxs_bits: u32,
     entry: HalGlyphEntry,
     used: u64,
+}
+
+/// What `GlyphClient::slug` answers: the glyph's curves (or the zero-curve box while they are on
+/// their way), or nothing to draw.
+pub enum SlugLookup {
+    Ready(SlugGlyphInfo),
+    Empty,
 }
 
 pub enum Lookup {
@@ -92,6 +105,8 @@ pub struct GlyphClient {
     /// instances of one variable font (animated weight/width) stand in for each other
     group_of: FxHashMap<u32, u64>,
     groups: FxHashMap<u64, Vec<u32>>,
+    /// each local font's variation axis values: the nearest instance stands in for a new one
+    coords_of: FxHashMap<u32, Vec<(u32, f32)>>,
     fonts: FxHashMap<u32, FontId>,
     failed: FxHashSet<u32>,
     next_local: u32,
@@ -111,9 +126,10 @@ pub struct GlyphClient {
     slug_generation: u32,
     /// bumped when entries are taken away (eviction, a new atlas): runs built on them are stale
     epoch: u64,
-    /// Idle glyphs were found and a full redraw asked for: they are let go only after a draw of
-    /// every list has looked up what is still on screen (see `end_frame`).
-    release_check: bool,
+    /// Glyphs looked up since they were last handed to a draw list (`take_uses`): the keys
+    /// the list that is drawing records, so a list kept on screen keeps its glyphs.
+    uses: Vec<GlyphUse>,
+    out_touches: Vec<(u32, u32)>,
     frame: u64,
 }
 
@@ -125,6 +141,11 @@ impl GlyphClient {
     /// Glyphs asked for and not answered.
     pub fn pending(&self) -> usize {
         self.requested.len()
+    }
+
+    /// Font instances opened with the host (each variable-axis value is one).
+    pub fn fonts_open(&self) -> usize {
+        self.locals.len()
     }
 
     /// Entries held, for the memory report.
@@ -157,7 +178,9 @@ impl GlyphClient {
             Some(path) => OpenSource::Path(path.to_string_lossy().into_owned()),
             None => OpenSource::Bytes(data.as_slice().to_vec()),
         };
-        self.out_opens.push(OpenSpec { local, index: font.face().index(), vars: font.variation_coords(), source });
+        let vars = font.variation_coords();
+        self.coords_of.insert(local, vars.clone());
+        self.out_opens.push(OpenSpec { local, index: font.face().index(), vars, source });
         local
     }
 
@@ -176,6 +199,7 @@ impl GlyphClient {
         let sizeless = kind == wire::kind::SLUG;
         let bits = if sizeless { 0 } else { dpxs.to_bits() };
         let key: Key = (local, glyph, kind);
+        self.uses.push([local, glyph as u32, kind]);
         let frame = self.frame;
         let mut stand_in = None;
         if let Some(held) = self.ready.get_mut(&key) {
@@ -198,22 +222,32 @@ impl GlyphClient {
             }
         }
         // A new instance of a variable font (an animated axis) has nothing of its own yet: the
-        // same glyph of another instance of the file stands in (nearest size), so the text
-        // never blanks or stalls the frame while the exact instance is rasterised.
-        if stand_in.is_none() && !sizeless {
+        // same glyph of another instance of the file stands in, so the text never blanks or
+        // stalls the frame while the exact instance is made. An atlas image comes from the
+        // nearest size; slug curves (sizeless) from the instance nearest on the axes, which for
+        // an animated weight is the value drawn a frame before. A draw that records once into a
+        // kept draw list (a Motion slide, a render target) is not drawn again when the answer
+        // arrives, so without a stand-in it presented the letter blank: the motion deck's weight
+        // wave flickered, a letter vanishing on each frame its weight stepped to a new value.
+        if stand_in.is_none() {
             if let Some(members) = self.group_of.get(&local).and_then(|g| self.groups.get(g)) {
                 let want = dpxs.max(f32::MIN_POSITIVE);
-                let mut best: Option<(f32, usize, HalGlyphEntry)> = None;
+                let coords = self.coords_of.get(&local);
+                let mut best: Option<(f32, HalGlyphEntry)> = None;
                 for &other in members.iter().filter(|o| **o != local) {
                     let Some(held) = self.ready.get(&(other, glyph, kind)) else { continue };
                     for h in held.iter().filter(|h| h.entry.atlas_kind != wire::glyph::EMPTY) {
-                        let r = ratio(f32::from_bits(h.dpxs_bits), want);
+                        let r = if sizeless {
+                            axis_distance(coords, self.coords_of.get(&other))
+                        } else {
+                            ratio(f32::from_bits(h.dpxs_bits), want)
+                        };
                         if best.as_ref().is_none_or(|b| r < b.0) {
-                            best = Some((r, 0, h.entry));
+                            best = Some((r, h.entry));
                         }
                     }
                 }
-                stand_in = best.map(|b| b.2);
+                stand_in = best.map(|b| b.1);
             }
         }
         if self.requested.insert((key, bits)) {
@@ -292,7 +326,8 @@ impl GlyphClient {
         }
         match self.lookup_local(source.font, source.glyph, f32::from_bits(source.dpxs_bits), source.kind) {
             Lookup::Ready(e) => self.rasterized_from(&e, source),
-            Lookup::Empty | Lookup::Pending => glyph,
+            // nothing there (any more): its old rectangle may hold another glyph now
+            Lookup::Empty | Lookup::Pending => RasterizedGlyph { atlas_kind: AtlasKind::Unresolved, ..glyph },
         }
     }
 
@@ -317,6 +352,33 @@ impl GlyphClient {
         }
     }
 
+    /// A slug glyph kept from an earlier draw (a prepared run), looked up again (see `refresh`).
+    pub fn refresh_slug(&mut self, glyph: SlugGlyphInfo) -> SlugGlyphInfo {
+        let source = glyph.source;
+        if source.font == 0 {
+            return glyph;
+        }
+        match self.lookup_local(source.font, source.glyph, 0.0, wire::kind::SLUG) {
+            Lookup::Ready(e) => SlugGlyphInfo { source, ..Self::slug_info(&e) },
+            // nothing there (any more): its old curves may be another glyph's now
+            Lookup::Empty | Lookup::Pending => SlugGlyphInfo { curve_offset: 0, curve_count: 0, ..glyph },
+        }
+    }
+
+    /// A slug glyph of `font` as the client holds it, with the key a kept copy is looked up by.
+    pub fn slug(&mut self, font: &Font, glyph: GlyphId) -> SlugLookup {
+        let local = self.local_of(font);
+        let source = GlyphSource { font: local, glyph, kind: wire::kind::SLUG, dpxs_bits: 0 };
+        match self.lookup_local(local, glyph, 0.0, wire::kind::SLUG) {
+            Lookup::Ready(e) => SlugLookup::Ready(SlugGlyphInfo { source, ..Self::slug_info(&e) }),
+            Lookup::Empty => SlugLookup::Empty,
+            Lookup::Pending => match Self::unresolved_slug_info(font, glyph) {
+                Some(info) => SlugLookup::Ready(SlugGlyphInfo { source, ..info }),
+                None => SlugLookup::Empty,
+            },
+        }
+    }
+
     pub fn slug_info(e: &HalGlyphEntry) -> SlugGlyphInfo {
         SlugGlyphInfo {
             origin_in_ems: Point::new(e.origin[0], e.origin[1]),
@@ -326,6 +388,7 @@ impl GlyphClient {
             band_offset: 0,
             band_count: 0,
             fill_flags: 0,
+            source: GlyphSource::default(),
         }
     }
 
@@ -343,6 +406,7 @@ impl GlyphClient {
             band_offset: 0,
             band_count: 0,
             fill_flags: 0,
+            source: GlyphSource::default(),
         })
     }
 
@@ -431,30 +495,58 @@ impl GlyphClient {
         }
     }
 
-    /// The end of a draw (`full`: every draw list was drawn again): glyphs not drawn for a long
-    /// while are let go of (their slots become the host's first candidates when its atlas is
-    /// full, and the host draws other glyphs into them).
-    ///
-    /// "Not drawn" is only known after a full draw: a draw list that is not redrawn keeps its
-    /// glyph instances on screen without looking them up (a code pane at rest beside an animated
-    /// slide). So a sweep that finds idle glyphs asks for a full redraw (returns true) and lets
-    /// go only of what that full draw did not show. Before, such a list kept sampling slots the
-    /// host had given to other glyphs: words went blank or garbled until it was redrawn.
-    pub fn end_frame(&mut self, full: bool) -> bool {
-        self.frame += 1;
-        let limit = self.frame.saturating_sub(IDLE_FRAMES);
-        if self.release_check {
-            if full {
-                self.release_check = false;
-                self.release_idle(limit);
+    /// The glyphs looked up since the last call, for the draw list that drew them.
+    pub fn take_uses(&mut self, into: &mut Vec<GlyphUse>) {
+        into.append(&mut self.uses);
+    }
+
+    /// Whether this frame's end sweeps (`sweep`): the caller then names the glyphs its kept
+    /// draw lists still show.
+    pub fn sweep_due(&self) -> bool {
+        (self.frame + 1) % SWEEP_FRAMES == 0
+    }
+
+    /// A glyph a live draw list shows: in use, every size of it held.
+    pub fn retained(&mut self, glyph: GlyphUse) {
+        let frame = self.frame;
+        if let Some(held) = self.ready.get_mut(&(glyph[0], glyph[1] as u16, glyph[2])) {
+            for h in held.iter_mut() {
+                h.used = frame;
             }
-            return false;
         }
+    }
+
+    /// The end of a draw. Every `SWEEP_FRAMES`: glyphs not in use for `IDLE_FRAMES` are let go
+    /// of (their slots become the host's first candidates when its atlas is full), and the slots
+    /// in use are touched, so a full atlas takes back what is least recently DRAWN, not what was
+    /// delivered first.
+    ///
+    /// In use = looked up by a draw, or kept on screen by a live draw list (the caller reports
+    /// those with `retained` before this, when `sweep_due`). A list that is not redrawn (a
+    /// render target painted again from its kept instances, a code pane at rest) shows its
+    /// glyphs without looking them up. Before, they were let go after IDLE_FRAMES, the host
+    /// drew other glyphs into their slots, and words went blank or garbled ("Re ax").
+    pub fn end_frame(&mut self) {
+        self.frame += 1;
+        // lookups no draw list took (a measurement) are no one's
+        self.uses.clear();
         if self.frame % SWEEP_FRAMES != 0 {
-            return false;
+            return;
         }
-        self.release_check = self.ready.values().any(|held| held.iter().any(|h| h.used < limit));
-        self.release_check
+        let limit = self.frame.saturating_sub(IDLE_FRAMES);
+        self.release_idle(limit);
+        let since = self.frame.saturating_sub(SWEEP_FRAMES);
+        let mut touched: Vec<(u32, u32)> = Vec::new();
+        for held in self.ready.values() {
+            for h in held {
+                if h.used >= since && h.entry.slot != 0 {
+                    touched.push((h.entry.slot, h.entry.slot_gen));
+                }
+            }
+        }
+        touched.sort_unstable();
+        touched.dedup();
+        self.out_touches = touched;
     }
 
     fn release_idle(&mut self, limit: u64) {
@@ -485,7 +577,7 @@ impl GlyphClient {
         requests.sort_by_key(|r| (r.0, r.1));
         let mut pending = std::mem::take(&mut self.out_pending);
         pending.extend(self.draw_pending.drain().map(|((font, glyph, kind), bits)| (font, glyph as u32, kind, bits)));
-        Outbox { opens: std::mem::take(&mut self.out_opens), requests, releases: std::mem::take(&mut self.out_releases), pending }
+        Outbox { opens: std::mem::take(&mut self.out_opens), requests, releases: std::mem::take(&mut self.out_releases), touches: std::mem::take(&mut self.out_touches), pending }
     }
 
     /// Takes back an outbox's pending list once the host has been told, for the next frame's.
@@ -494,6 +586,23 @@ impl GlyphClient {
         pending.clear();
         self.out_pending = pending;
     }
+}
+
+/// How far apart two instances of a font are on their variation axes (an axis one of them
+/// does not name counts as its full value).
+fn axis_distance(a: Option<&Vec<(u32, f32)>>, b: Option<&Vec<(u32, f32)>>) -> f32 {
+    let (a, b) = (a.map_or(&[][..], |v| v.as_slice()), b.map_or(&[][..], |v| v.as_slice()));
+    let value = |v: &[(u32, f32)], tag: u32| v.iter().find(|(t, _)| *t == tag).map(|(_, x)| *x);
+    let mut d = 0.0;
+    for &(tag, x) in a {
+        d += (x - value(b, tag).unwrap_or(0.0)).abs();
+    }
+    for &(tag, x) in b {
+        if value(a, tag).is_none() {
+            d += x.abs();
+        }
+    }
+    d
 }
 
 fn ratio(have: f32, want: f32) -> f32 {
@@ -570,6 +679,16 @@ impl Rasterizer {
     pub fn refresh_glyph(&mut self, glyph: RasterizedGlyph) -> RasterizedGlyph {
         self.client.refresh(glyph)
     }
+
+    /// See `GlyphClient::refresh_slug`.
+    pub fn refresh_slug_glyph(&mut self, glyph: SlugGlyphInfo) -> SlugGlyphInfo {
+        self.client.refresh_slug(glyph)
+    }
+
+    /// See `GlyphClient::take_uses`.
+    pub fn take_glyph_uses(&mut self, into: &mut Vec<GlyphUse>) {
+        self.client.take_uses(into)
+    }
 }
 
 #[cfg(test)]
@@ -633,41 +752,88 @@ mod tests {
         assert_eq!(kept.atlas_kind, AtlasKind::Grayscale);
         for _ in 0..(IDLE_FRAMES + 2 * SWEEP_FRAMES) {
             let _ = client.refresh(kept);
-            client.end_frame(false);
+            client.end_frame();
         }
         assert!(client.take_outbox().releases.is_empty(), "a glyph drawn every frame is not released");
         assert_eq!(client.held(), 1);
     }
 
-    /// A glyph on screen in a draw list that is not redrawn (a code pane at rest while a slide
-    /// animates) is not looked up for a long while, yet still shown. The sweep asks for a full
-    /// redraw first and lets go only of what that full draw did not show: the retained list's
-    /// glyphs keep their slots (before, they were released after IDLE_FRAMES and the host drew
-    /// other glyphs into them: words went blank or garbled until the pane was redrawn).
+    /// A glyph on screen in a draw list that is not redrawn (a render target painted again from
+    /// its kept instances, a code pane at rest) is not looked up for a long while, yet still
+    /// shown: the draw list keeps its glyphs (`take_uses`), and at the sweep the caller names
+    /// them (`retained`). They keep their slots; a glyph no list shows is let go. Before, they
+    /// were released after IDLE_FRAMES and the host drew other glyphs into their slots (the
+    /// Relax deck title read "Re ax" on 149).
     #[test]
     fn a_glyph_in_a_retained_list_keeps_its_slot_and_an_unshown_one_is_let_go() {
         let a = instance(0xB3, 400.0);
         let settings = layouter::Settings::default().loader.rasterizer;
         let mut client = GlyphClient::default();
         let shown = client.raster(&a, 46, 18.0, wire::kind::SDF, &settings).expect("planned");
+        let mut list = Vec::new();
+        client.take_uses(&mut list);
         let _ = client.raster(&a, 47, 18.0, wire::kind::SDF, &settings).expect("planned");
         client.on_ready(shown.source.font, &[entry(46, 18.0, 11), entry(47, 18.0, 12)]);
         let _ = client.take_outbox();
-        // partial draws only (the retained list is not redrawn) until the sweep asks
-        let mut asked = 0;
+        assert_eq!(list, vec![[shown.source.font, 46, wire::kind::SDF]], "the list keeps what it drew");
+        let mut releases = Vec::new();
         for _ in 0..(IDLE_FRAMES + 2 * SWEEP_FRAMES) {
-            if client.end_frame(false) {
-                asked += 1;
+            if client.sweep_due() {
+                for glyph in &list {
+                    client.retained(*glyph);
+                }
+            }
+            client.end_frame();
+            releases.extend(client.take_outbox().releases);
+        }
+        assert_eq!(releases, vec![(12, 1)], "only the glyph no list shows is let go");
+        assert_eq!(client.held(), 1);
+    }
+
+    /// The slots in use are touched at every sweep, so the host's eviction takes the least
+    /// recently DRAWN glyphs, not the ones delivered first (a title on screen for minutes was
+    /// the oldest delivery, so the first taken when the store filled).
+    #[test]
+    fn the_sweep_touches_the_slots_in_use() {
+        let a = instance(0xB4, 400.0);
+        let settings = layouter::Settings::default().loader.rasterizer;
+        let mut client = GlyphClient::default();
+        let g = client.raster(&a, 48, 18.0, wire::kind::SDF, &settings).expect("planned");
+        let _ = client.raster(&a, 49, 18.0, wire::kind::SDF, &settings).expect("planned");
+        client.on_ready(g.source.font, &[entry(48, 18.0, 21), entry(49, 18.0, 22)]);
+        let _ = client.take_outbox();
+        let mut touches = Vec::new();
+        // the first sweep still sees both deliveries; the second only what was drawn since
+        for _ in 0..2 * SWEEP_FRAMES {
+            let _ = client.raster(&a, 48, 18.0, wire::kind::SDF, &settings);
+            client.end_frame();
+            let out = client.take_outbox();
+            if !out.touches.is_empty() {
+                touches = out.touches;
             }
         }
-        assert_eq!(asked, 1, "the sweep asks for one full redraw");
-        assert!(client.take_outbox().releases.is_empty(), "nothing is let go before a full draw");
-        // the full draw: the retained list draws its glyph again (46), the other is not on screen
-        let _ = client.refresh(shown);
-        assert!(!client.end_frame(true));
-        let releases = client.take_outbox().releases;
-        assert_eq!(releases, vec![(12, 1)], "only the glyph the full draw did not show is let go");
-        assert_eq!(client.held(), 1);
+        assert_eq!(touches, vec![(21, 1)], "only the slot drawn since the last sweep is touched");
+    }
+
+    /// A slug glyph kept in a prepared run is looked up again when drawn: curves taken back and
+    /// delivered again elsewhere draw from where they are now.
+    #[test]
+    fn a_kept_slug_glyph_follows_its_curves() {
+        let a = instance(0xB5, 400.0);
+        let mut client = GlyphClient::default();
+        let SlugLookup::Ready(kept) = client.slug(&a, 50) else { panic!("an outline glyph") };
+        assert_eq!(kept.curve_count, 0, "on its way");
+        let local = kept.source.font;
+        let slug = |offset: u32, slot: u32| HalGlyphEntry {
+            glyph: 50, dpxs_bits: 0, kind: wire::kind::SLUG, atlas_kind: wire::glyph::SLUG, plane: 0,
+            rect: [offset, 12, 0, 0], padding: 0, origin: [0.0; 2], scale: 0.5, size_h: 0.7, slot, slot_gen: 1, replaces: 0, replaces_gen: 0,
+        };
+        client.on_ready(local, &[slug(100, 31)]);
+        assert_eq!(client.refresh_slug(kept).curve_offset, 100);
+        client.on_evicted(&[(31, 1)]);
+        assert_eq!(client.refresh_slug(kept).curve_count, 0, "taken back: drawn as nothing (not someone else's curves), asked for again");
+        client.on_ready(local, &[slug(400, 32)]);
+        assert_eq!(client.refresh_slug(kept).curve_offset, 400);
     }
 
     /// An animated axis makes a new font instance per value: until its own glyph arrives the
@@ -690,5 +856,36 @@ mod tests {
         let out = client.take_outbox();
         assert!(out.pending.is_empty(), "a glyph with a stand-in does not hold the frame");
         assert!(out.requests.iter().any(|r| !r.2.is_empty()), "its own glyph is still asked for");
+    }
+
+    /// Slug curves (all text by default) of a new variable instance: the curves of the instance
+    /// nearest on the axis stand in until its own arrive, never the zero-curve box. Before, a
+    /// letter whose animated weight stepped to a value not drawn yet drew blank for that frame
+    /// (the motion deck's weight wave flickered: Motion records a frame once, so the HAL's wait
+    /// for the answer redrew nothing).
+    #[test]
+    fn a_new_variable_instance_draws_slug_curves_of_the_nearest_weight_until_its_own_arrive() {
+        let (light, heavy, mid) = (instance(0xC1, 300.0), instance(0xC2, 800.0), instance(0xC3, 760.0));
+        let mut client = GlyphClient::default();
+        let slug = |offset: u32, slot: u32| HalGlyphEntry {
+            glyph: 50, dpxs_bits: 0, kind: wire::kind::SLUG, atlas_kind: wire::glyph::SLUG, plane: 0,
+            rect: [offset, 12, 0, 0], padding: 0, origin: [0.0; 2], scale: 0.5, size_h: 0.7, slot, slot_gen: 1, replaces: 0, replaces_gen: 0,
+        };
+        let SlugLookup::Ready(first) = client.slug(&light, 50) else { panic!("an outline glyph") };
+        assert_eq!(first.curve_count, 0, "the first instance of the file has nothing to stand in");
+        client.on_ready(first.source.font, &[slug(100, 41)]);
+        let SlugLookup::Ready(second) = client.slug(&heavy, 50) else { panic!("an outline glyph") };
+        assert_eq!(second.curve_offset, 100, "the only other instance stands in");
+        client.on_ready(second.source.font, &[slug(200, 42)]);
+        let _ = client.take_outbox();
+        // a weight not drawn before: the nearest weight's curves, and nothing holds the frame
+        let SlugLookup::Ready(now) = client.slug(&mid, 50) else { panic!("an outline glyph") };
+        assert_eq!((now.curve_offset, now.curve_count), (200, 12), "760 draws with 800's curves, not blank");
+        let out = client.take_outbox();
+        assert!(out.pending.is_empty(), "a stand-in does not hold the frame");
+        assert!(out.requests.iter().any(|r| r.1 == wire::kind::SLUG && r.2.iter().any(|g| g.0 == 50)), "its own curves are asked for");
+        // its own curves, once here
+        client.on_ready(now.source.font, &[slug(300, 43)]);
+        assert_eq!(client.refresh_slug(now).curve_offset, 300);
     }
 }

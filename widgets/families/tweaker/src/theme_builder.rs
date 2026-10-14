@@ -189,7 +189,7 @@
 //! a test holds that list to the installer. A theme that only moved its
 //! palette skips all of this and derives straight from the base object.
 
-use crate::desktop_style::{self, StyleSheet};
+use crate::desktop_style;
 use crate::makepad_platform::{LiveId, ScriptMod, ScriptObject, ScriptVm, ScriptVmCx};
 use crate::theme_combinations::{COMBINATIONS, PAIRS};
 use crate::theme_tokens::{
@@ -1306,11 +1306,29 @@ fn house_text_contrast(scheme: Scheme) -> f64 {
 /// file's text: `space_factor: 6. // Increase for a less dense layout` is 6.
 /// `None` for a key the file derives rather than states.
 fn file_number(scheme: Scheme, key: &str) -> Option<f64> {
-    let opening = format!("        {key}:");
-    scheme.source().lines().find_map(|line| {
-        let rest = line.strip_prefix(&opening)?;
-        rest.split("//").next()?.trim().parse::<f64>().ok()
-    })
+    file_lines(scheme, key).iter().find_map(|rest| rest.split("//").next()?.trim().parse::<f64>().ok())
+}
+
+/// The theme files' top-level lines indexed once by key: every line that is
+/// `        key:` and then something, in file order, each as what follows the
+/// colon. The build looks a handful of keys up hundreds of times, and
+/// scanning a four-thousand-line file for each of them was most of its time.
+fn file_lines(scheme: Scheme, key: &str) -> &'static [&'static str] {
+    type Index = std::collections::HashMap<&'static str, Vec<&'static str>>;
+    static INDEX: std::sync::OnceLock<[Index; 3]> = std::sync::OnceLock::new();
+    let indexes = INDEX.get_or_init(|| {
+        Scheme::ALL.map(|scheme| {
+            let mut index = Index::new();
+            for line in scheme.source().lines() {
+                let Some(rest) = line.strip_prefix("        ") else { continue };
+                let Some((name, after)) = rest.split_once(':') else { continue };
+                index.entry(name).or_default().push(after);
+            }
+            index
+        })
+    });
+    let at = Scheme::ALL.iter().position(|one| *one == scheme).unwrap_or(0);
+    indexes[at].get(key).map(Vec::as_slice).unwrap_or(&[])
 }
 
 /// A script for a set of pins whose DIMENSIONS moved, or `None` where none
@@ -1471,11 +1489,9 @@ fn file_key(scheme: Scheme, key: &str, known: &BTreeMap<String, u32>, depth: u32
 /// surrounding space taken off: `color_inset: theme.color_d_1` is
 /// `theme.color_d_1`.
 fn file_stated(scheme: Scheme, key: &str) -> Option<String> {
-    let opening = format!("        {key}: ");
-    scheme
-        .source()
-        .lines()
-        .find_map(|line| line.strip_prefix(&opening))
+    file_lines(scheme, key)
+        .iter()
+        .find_map(|after| after.strip_prefix(' '))
         .map(|rest| rest.split("//").next().unwrap_or(rest).trim().to_string())
 }
 
@@ -5292,7 +5308,7 @@ impl Applied {
 /// both taken off by an install and both go back.
 #[derive(Clone, Debug, PartialEq)]
 struct Entry {
-    sheet: Option<StyleSheet>,
+    sheet: desktop_style::Wearing,
     /// Whatever stood at the seam: nothing, a lab's mix, a saved theme's
     /// pins. The builder does not ask whose it is.
     standing: Option<String>,
@@ -5387,8 +5403,8 @@ impl ThemeBuilder {
         if self.entry.is_some() {
             return;
         }
-        let sheet = desktop_style::current(vm);
-        let dark = match sheet.as_ref().and_then(|sheet| desktop_style::find(&sheet.name)) {
+        let sheet = desktop_style::wearing(vm);
+        let dark = match sheet.sheet().and_then(|sheet| desktop_style::find(&sheet.name)) {
             // A sheet's appearance is its base theme's, which two of the dark
             // ones do not say in their name; the equalizer's table knows.
             Some(entry) => BlendTheme::Sheet(entry.id).appearance() == Appearance::Dark,
@@ -5680,10 +5696,7 @@ impl ThemeBuilder {
     /// would clear the very script being handed back.
     fn install_entry(&mut self, vm: &mut ScriptVm, entry: &Entry) {
         self.rebuilds = self.rebuilds.saturating_add(1);
-        match &entry.sheet {
-            Some(sheet) => desktop_style::install(vm, sheet.clone()),
-            None => desktop_style::uninstall(vm),
-        }
+        desktop_style::put_back(vm, entry.sheet.clone());
         crate::set_theme_mix(vm.cx_mut(), entry.standing.clone());
         vm.cx_mut().request_style_reload();
     }
@@ -5692,6 +5705,7 @@ impl ThemeBuilder {
 #[cfg(test)]
 mod theme_builder_tests {
     use super::*;
+    use crate::desktop_style::StyleSheet;
     use crate::makepad_platform::Cx;
     use crate::theme_lab::ThemeLab;
     use crate::theme_tokens::{assigned_keys, theme_keys, BlendCache, BlendValue, ThemeValues};

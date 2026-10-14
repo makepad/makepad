@@ -616,7 +616,9 @@ impl ChartView {
     }
 
     fn zoom_at(&mut self, cx: &mut Cx, scroll: f64, abs: DVec2) {
-        let factor = if scroll > 0.0 { 0.9 } else { 1.0 / 0.9 };
+        // A wheel notch (32+ points) is one step, a touchpad's small deltas a fraction of one.
+        let step = if scroll > 0.0 { 0.9 } else { 1.0 / 0.9 };
+        let factor = f64::powf(step, (scroll.abs() / 32.0).min(1.0));
         let pr = &self.plot_rect;
         let frac_x = ((abs.x - pr.pos.x) / pr.size.x).clamp(0.0, 1.0);
         let data_x = self.viewport.x_min + frac_x * self.viewport.x_range();

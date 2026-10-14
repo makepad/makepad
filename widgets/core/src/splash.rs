@@ -318,6 +318,12 @@ impl Splash {
             view.walk = self.view.walk;
             // Cache the body index for host->script calls (call_script_fn etc).
             self.body_id = cx.with_script_vm_id(vm_id, |vm| vm.body_by_module_path(&body_key));
+            // Redraw where the OLD view was drawn: the new view has no area yet,
+            // so a redraw after the swap reaches nothing, and a body re-evaluated
+            // with no other redraw pending (a settled edit, a timer) kept
+            // showing the old draw calls -- a time-reading shader animated on
+            // with its old code.
+            self.view.redraw(cx);
             self.view = view;
             // Make `ui` a global in this splash's VM so helper `fn`s inside the block can use
             // `ui.<id>.set_text(...)`, not just inline handlers. It points at the Splash widget

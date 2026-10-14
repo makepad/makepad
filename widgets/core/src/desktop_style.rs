@@ -321,9 +321,30 @@ pub struct StyleSheet {
 struct Envelope {
     makepad_style: StyleSheet,
 }
+/// What a heap wears. `Inherited` is the sheet the window system handed
+/// down (`MAKEPAD_WIDGET_STYLE`, a WM's `makepad_style` event); `Picked` is
+/// what the app or somebody using it chose, `None` being the plain theme.
+/// A pick stands: the window system's sheet neither comes back over it on
+/// the next read nor replaces it when the system look changes.
+#[derive(Clone, Debug, PartialEq)]
+enum Worn {
+    Inherited(StyleSheet),
+    Picked(Option<StyleSheet>),
+}
+impl Worn {
+    fn sheet(&self) -> Option<&StyleSheet> {
+        match self {
+            Worn::Inherited(sheet) => Some(sheet),
+            Worn::Picked(sheet) => sheet.as_ref(),
+        }
+    }
+}
 #[derive(Default)]
 struct Styles {
-    heaps: HashMap<usize, StyleSheet>,
+    heaps: HashMap<usize, Worn>,
+    /// The window system's family (the environment's sheet, then its makepad_style
+    /// events), whatever the app picked for itself: `None` until read.
+    system: Option<Option<DesktopStyle>>,
 }
 
 impl StyleSheet {
@@ -392,35 +413,70 @@ pub(crate) fn gc_heaps(cx: &mut Cx, heaps: &[usize]) {
         .heaps
         .retain(|key, _| !heaps.contains(key));
 }
+/// Wear `sheet` from now on: the app's (or its user's) pick, which the
+/// window system's sheet does not override.
 pub fn install(vm: &mut ScriptVm, sheet: StyleSheet) {
-    crate::app_icon::install(vm.cx_mut(), sheet.family, &sheet.icons);
-    let key = vm.heap_key();
-    vm.cx_mut().global::<Styles>().heaps.insert(key, sheet);
+    wear(vm, Worn::Picked(Some(sheet)));
 }
-/// Take the sheet off again, so the next evaluation runs under the plain
-/// theme. `install` had no way back: an app that lets somebody try a sheet
-/// could put one on and never return to what it started with. A sheet named
-/// by `MAKEPAD_WIDGET_STYLE` (or `MAKEPAD_WIDGET_STYLE_FILE`) comes back on the next read, as it would have
-/// arrived in the first place.
+/// Take the sheet off: the next evaluation runs under the plain theme, and
+/// stays there. The plain theme is a pick like any sheet, so a sheet named by
+/// `MAKEPAD_WIDGET_STYLE` (or `MAKEPAD_WIDGET_STYLE_FILE`) or sent by the WM
+/// does not come back over it.
 pub fn uninstall(vm: &mut ScriptVm) {
+    wear(vm, Worn::Picked(None));
+}
+fn wear(vm: &mut ScriptVm, worn: Worn) {
+    if let Some(sheet) = worn.sheet() {
+        crate::app_icon::install(vm.cx_mut(), sheet.family, &sheet.icons);
+    }
     let key = vm.heap_key();
-    vm.cx_mut().global::<Styles>().heaps.remove(&key);
+    vm.cx_mut().global::<Styles>().heaps.insert(key, worn);
+}
+/// What a VM wears, taken to put back later: the sheet and whether it was
+/// picked or handed down by the window system, so a tool that tries other
+/// sheets and returns leaves an app that followed the system following it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Wearing(Option<Worn>);
+impl Wearing {
+    pub fn sheet(&self) -> Option<&StyleSheet> {
+        self.0.as_ref().and_then(Worn::sheet)
+    }
+}
+/// What `vm` wears now (the environment's sheet adopted first, as any read).
+pub fn wearing(vm: &mut ScriptVm) -> Wearing {
+    current(vm);
+    let key = vm.heap_key();
+    Wearing(worn(vm.cx_mut(), key))
+}
+/// Put back what [`wearing`] took.
+pub fn put_back(vm: &mut ScriptVm, wearing: Wearing) {
+    match wearing.0 {
+        Some(worn) => wear(vm, worn),
+        None => {
+            let key = vm.heap_key();
+            vm.cx_mut().global::<Styles>().heaps.remove(&key);
+        }
+    }
+}
+/// What the heap `key` wears, if it has settled on anything yet.
+fn worn(cx: &mut Cx, key: usize) -> Option<Worn> {
+    cx.global::<Styles>().heaps.get(&key).cloned()
 }
 /// The sheet installed on the heap `key`, if any: what a VM allocated from
 /// that one inherits.
 pub(crate) fn sheet_of_heap(cx: &mut Cx, key: usize) -> Option<StyleSheet> {
-    cx.global::<Styles>().heaps.get(&key).cloned()
+    worn(cx, key)?.sheet().cloned()
 }
 pub fn current(vm: &mut ScriptVm) -> Option<StyleSheet> {
     let key = vm.heap_key();
-    if let Some(sheet) = vm.cx_mut().global::<Styles>().heaps.get(&key).cloned() {
-        return Some(sheet);
+    if let Some(worn) = worn(vm.cx_mut(), key) {
+        return worn.sheet().cloned();
     }
     // Opt-in only. Picking a sheet from OsType restyled every app that had
     // never asked for one, and an app that calls `theme_mod` + `widgets_mod`
     // without `script_mod` got the theme half of it and not the widget half.
     let sheet = env_sheet()?;
-    install(vm, sheet.clone());
+    wear(vm, Worn::Inherited(sheet.clone()));
     Some(sheet)
 }
 /// The sheet the environment names. `MAKEPAD_WIDGET_STYLE_FILE` is a
@@ -440,16 +496,28 @@ fn env_sheet() -> Option<StyleSheet> {
 /// Read just the active appearance without cloning the Splash and SVG payloads.
 pub fn current_name(vm: &mut ScriptVm) -> Option<String> {
     let key = vm.heap_key();
-    if let Some(sheet) = vm.cx_mut().global::<Styles>().heaps.get(&key) {
-        return Some(sheet.name.clone());
+    if let Some(worn) = vm.cx_mut().global::<Styles>().heaps.get(&key) {
+        return worn.sheet().map(|sheet| sheet.name.clone());
     }
     current(vm).map(|sheet| sheet.name)
+}
+/// The window system's family: the sheet the environment names (the WM hands every app
+/// its look) or the WM's newest style event, independent of what the app picked for
+/// itself. What the window's controls follow under a window manager (window.rs): they are
+/// the WM's chrome, drawn by the app. `None` without a window system's sheet.
+pub fn system_style(cx: &mut Cx) -> Option<DesktopStyle> {
+    if let Some(system) = cx.global::<Styles>().system {
+        return system;
+    }
+    let system = env_sheet().map(|sheet| sheet.family);
+    cx.global::<Styles>().system = Some(system);
+    system
 }
 /// The active family, without copying a stylesheet or its assets.
 pub fn current_style(vm: &mut ScriptVm) -> DesktopStyle {
     let key=vm.heap_key();
-    if let Some(sheet)=vm.cx_mut().global::<Styles>().heaps.get(&key) {
-        return sheet.family;
+    if let Some(worn)=vm.cx_mut().global::<Styles>().heaps.get(&key) {
+        return worn.sheet().map(|sheet| sheet.family).unwrap_or_default();
     }
     current(vm).map(|sheet| sheet.family).unwrap_or_default()
 }
@@ -866,12 +934,20 @@ pub fn handle_event(cx: &mut Cx, event: &Event) {
     let Some(sheet) = StyleSheet::parse(json) else {
         return;
     };
+    // The window system's look: it restyles an app that wears the system
+    // sheet (or has not read one yet), never one that picked its own. Its
+    // family is the window controls' style either way (`system_style`).
+    cx.global::<Styles>().system = Some(Some(sheet.family));
     let changed = cx.with_vm(|vm| {
-        if current(vm).as_ref() == Some(&sheet) {
-            return false;
+        let key = vm.heap_key();
+        match worn(vm.cx_mut(), key) {
+            Some(Worn::Picked(_)) => false,
+            Some(Worn::Inherited(worn)) if worn == sheet => false,
+            _ => {
+                wear(vm, Worn::Inherited(sheet));
+                true
+            }
         }
-        install(vm, sheet);
-        true
     });
     if changed {
         cx.request_style_reload();
@@ -883,6 +959,22 @@ mod tests {
     use super::*;
 
     use crate::sheet_checks;
+
+    /// A tool that tries a sheet and goes back (the Tweaker's lab and
+    /// builder, a token resolve) leaves an app that wore the window system's
+    /// sheet still following the system, not holding that sheet as a pick.
+    #[test]
+    fn put_back_keeps_a_system_sheet_the_systems() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.init_cx_os();
+        let send = |cx: &mut Cx, id: &str| handle_event(cx, &Event::Custom(StyleSheet::named(id).unwrap().to_json()));
+        send(&mut cx, "macos");
+        let before = cx.with_vm(wearing);
+        cx.with_vm(|vm| install(vm, StyleSheet::named("windows").unwrap()));
+        cx.with_vm(|vm| put_back(vm, before));
+        send(&mut cx, "macos-dark");
+        assert_eq!(cx.with_vm(current_name).as_deref(), Some("macos-dark"), "put_back turned the system's sheet into a pick");
+    }
 
     /// A row of fields is one height, under every sheet in the catalogue.
     #[test]

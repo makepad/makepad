@@ -348,6 +348,19 @@ impl GraphRunner {
         self.last = Default::default();
     }
 
+    /// Give every target's GPU storage back (history cold, recorded passes
+    /// dropped), for a host whose picture nothing reads for now. The
+    /// handles stay: the next run allocates them again.
+    pub fn release_targets(&mut self, cx: &mut Cx) {
+        self.reset_history(cx);
+        for (_, texture) in &self.targets {
+            texture.release(cx);
+        }
+        for h in &self.history {
+            h.twin.release(cx);
+        }
+    }
+
     /// Whether any pass keeps history.
     pub fn has_history(&self) -> bool {
         self.decls.iter().any(|d| d.history)

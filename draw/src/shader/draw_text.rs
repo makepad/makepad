@@ -439,6 +439,16 @@ impl PreparedGlyph {
 
 impl ScriptHook for DrawText {}
 
+/// The glyphs looked up since the last call go to the draw list being recorded: while that list
+/// is alive (painted again from its kept instances or not) they stay in use (`CxDrawList::glyph_uses`).
+fn note_glyph_uses(cx: &mut Cx2d) {
+    let Some(list) = cx.draw_list_stack.last().copied() else { return };
+    let fonts = cx.fonts.clone();
+    let fonts = fonts.borrow();
+    let mut rasterizer = fonts.rasterizer().borrow_mut();
+    rasterizer.take_glyph_uses(&mut cx.cx.draw_lists[list].glyph_uses);
+}
+
 /// How a laid-out glyph draws at `dpxs_per_em`: slug curves for outline glyphs (unless the
 /// SDF/MSDF atlas is selected for this size), the atlas for colour/bitmap glyphs and outlines slug
 /// cannot hold. A glyph without an outline or image (a space) is nothing: it never asks the host
@@ -558,6 +568,7 @@ impl DrawText {
                 );
             }
             self.many_instances = Some(instances);
+            note_glyph_uses(cx);
             return;
         }
 
@@ -583,6 +594,7 @@ impl DrawText {
         }
 
         self.finish_many_instances(cx, instances);
+        note_glyph_uses(cx);
     }
 
     fn reserve_glyph_storage(
@@ -612,7 +624,9 @@ impl DrawText {
             PreparedGlyph::Raster(raster) => {
                 return self.draw_rasterized_glyph_abs(cx, origin_in_lpxs, font_size_in_lpxs, raster, color);
             }
-            PreparedGlyph::Slug(slug) => slug,
+            // a kept glyph is looked up again (curves upgraded, taken back, or still on their
+            // way when it was prepared), which also keeps it in use
+            PreparedGlyph::Slug(slug) => cx.fonts.borrow().rasterizer().borrow_mut().refresh_slug_glyph(slug),
         };
         let open = self.many_instances.take();
         let batch_was_open = open.is_some();
@@ -633,6 +647,7 @@ impl DrawText {
         } else {
             self.finish_many_instances(cx, instances);
         }
+        note_glyph_uses(cx);
     }
 
     pub fn draw_rasterized_glyph_abs(
@@ -1360,6 +1375,61 @@ impl DrawText {
         text: &str,
     ) -> Rc<LaidoutText> {
         self.text_style.font_family.ensure_fonts_loaded(cx);
+        let laidout = self.layout_loaded(
+            cx,
+            first_row_indent_in_lpxs,
+            first_row_min_line_spacing_below_in_lpxs,
+            max_width_in_lpxs,
+            wrap,
+            align,
+            text,
+        );
+        let has_missing_glyph = laidout
+            .rows
+            .iter()
+            .flat_map(|row| &row.glyphs)
+            .any(|glyph| glyph.id == 0);
+        // A glyph the family's own faces miss brings in its lazy CJK or emoji
+        // face (read from disk here, a memory map); laid out again at once,
+        // the text shows the real glyph on this very frame, not a box first.
+        if !has_missing_glyph {
+            return laidout;
+        }
+        let started = Cx::time_now();
+        if self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
+            cx,
+            text,
+            has_missing_glyph,
+        ) {
+            let laidout = self.layout_loaded(
+                cx,
+                first_row_indent_in_lpxs,
+                first_row_min_line_spacing_below_in_lpxs,
+                max_width_in_lpxs,
+                wrap,
+                align,
+                text,
+            );
+            log!(
+                "lazy font face loaded and text laid out again in {:.2} ms",
+                (Cx::time_now() - started) * 1000.0
+            );
+            return laidout;
+        }
+        laidout
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn layout_loaded(
+        &self,
+        cx: &mut Cx,
+        first_row_indent_in_lpxs: f32,
+        first_row_min_line_spacing_below_in_lpxs: f32,
+        max_width_in_lpxs: Option<f32>,
+        wrap: bool,
+        align: Align,
+        text: &str,
+    ) -> Rc<LaidoutText> {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let mut fonts = fonts.borrow_mut();
 
@@ -1387,16 +1457,6 @@ impl DrawText {
             },
         });
         drop(fonts);
-        let has_missing_glyph = laidout
-            .rows
-            .iter()
-            .flat_map(|row| &row.glyphs)
-            .any(|glyph| glyph.id == 0);
-        self.text_style.font_family.request_lazy_fonts_for_glyph_miss(
-            cx,
-            text,
-            has_missing_glyph,
-        );
         laidout
     }
 
@@ -1417,6 +1477,7 @@ impl DrawText {
                     );
                 }
                 self.many_instances = Some(instances);
+                note_glyph_uses(cx);
                 return;
             }
             let Some(mut instances) = cx.begin_many_aligned_instances(&self.draw_vars) else {
@@ -1434,6 +1495,7 @@ impl DrawText {
             }
             self.flush_slug_textures_if_allowed(cx);
             self.finish_many_instances(cx, instances);
+            note_glyph_uses(cx);
         }
     }
 
@@ -1747,10 +1809,12 @@ impl DrawText {
         self.draw_vars.area
     }
 
+    #[track_caller]
     pub fn redraw_areas(&self, cx: &mut Cx) {
         self.draw_vars.area.redraw(cx);
     }
 
+    #[track_caller]
     pub fn redraw(&self, cx: &mut Cx) {
         self.redraw_areas(cx);
     }
@@ -2069,12 +2133,14 @@ impl FontFamily {
         self.update_font_definitions(cx, &mut fonts_ref);
     }
 
+    /// Whether a lazy face was asked for (and, where the bytes are at hand,
+    /// is in the family now).
     fn request_lazy_fonts_for_glyph_miss(
         &self,
         cx: &mut Cx,
         text: &str,
         has_missing_glyph: bool,
-    ) {
+    ) -> bool {
         let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
         let family_id = self.to_font_family_id();
         let handles = {
@@ -2095,7 +2161,7 @@ impl FontFamily {
                 .collect::<Vec<_>>()
         };
         if handles.is_empty() {
-            return;
+            return false;
         }
         for path in handles {
             load_font_resource(cx, path);
@@ -2105,6 +2171,48 @@ impl FontFamily {
         // Native file reads may have completed above; wasm will redraw again
         // when the HTTP response populates the resource.
         cx.redraw_all();
+        true
+    }
+}
+
+/// Every family ends with the platform's CJK and emoji faces
+/// (`LAZY_FONT_FALLBACKS`), unless it names one of that family or that face
+/// itself: a family picked for its Latin face (a code font, a terminal's)
+/// draws Chinese and emoji like the rest of the UI instead of empty boxes.
+/// They are lazy members: nothing is opened until a CJK or emoji glyph misses
+/// in the family's own faces, so a family that never meets one costs nothing,
+/// and one whose own faces cover it (the International UI chain) never loads
+/// them.
+fn append_lazy_fallbacks(vm: &mut ScriptVm, members: &mut Vec<FontMemberDef>) {
+    if members.is_empty() {
+        return;
+    }
+    use crate::makepad_platform::script::res::crate_resource_abs_path;
+    for fallback in LAZY_FONT_FALLBACKS {
+        if members.iter().any(|member| member.lazy == Some(fallback.family)) {
+            continue;
+        }
+        let named = LAZY_FONT_FACES
+            .iter()
+            .filter(|face| face.family == fallback.family)
+            .filter_map(|face| crate_resource_abs_path(vm, face.asset.resource_path))
+            .any(|path| members.iter().any(|member| member.resource_path == path));
+        if named {
+            continue;
+        }
+        let Some(resource_path) = crate_resource_abs_path(vm, fallback.asset.resource_path) else {
+            continue;
+        };
+        members.push(FontMemberDef {
+            handle: ScriptHandle::ZERO,
+            resource_path,
+            id: fallback.asset.id.to_string(),
+            asc: fallback.asset.ascender,
+            desc: fallback.asset.descender,
+            weight: fallback.asset.weight,
+            variations: Vec::new(),
+            lazy: Some(fallback.family),
+        });
     }
 }
 
@@ -2231,6 +2339,8 @@ impl ScriptHook for FontFamily {
                 crate::trace!("font", "family={:?} member {} dropped: res is None", self.id.0, i);
             }
         }
+
+        append_lazy_fallbacks(vm, &mut self.members);
 
         // Object and handle indices are local to a script heap. Font caches
         // belong to Cx, so identify the complete ordered family by its actual

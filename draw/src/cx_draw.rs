@@ -55,8 +55,7 @@ impl<'a> DerefMut for CxDraw<'a> {
 
 impl<'a> Drop for CxDraw<'a> {
     fn drop(&mut self) {
-        let full_draw = self.draw_event.redraw_all;
-        if !self.fonts.borrow_mut().prepare_textures(self.cx, full_draw) {
+        if !self.fonts.borrow_mut().prepare_textures(self.cx) {
             self.cx.redraw_all();
         }
         self.pass_stack.clear();

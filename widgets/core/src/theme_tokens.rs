@@ -2678,7 +2678,7 @@ impl BlendCache {
     /// back on, and the module is reloaded, so the caller can apply a blend on
     /// top of a VM that is none the wiser.
     pub fn fill(&mut self, vm: &mut ScriptVm, themes: &[BlendTheme]) {
-        let restore = crate::desktop_style::current(vm);
+        let restore = crate::desktop_style::wearing(vm);
         let mut resolved_any = false;
         for theme in themes {
             if self.get(*theme).is_some() {
@@ -2689,10 +2689,7 @@ impl BlendCache {
             resolved_any = true;
         }
         if resolved_any {
-            match restore {
-                Some(sheet) => crate::desktop_style::install(vm, sheet),
-                None => crate::desktop_style::uninstall(vm),
-            }
+            crate::desktop_style::put_back(vm, restore);
             vm.with_reload(crate::script_mod_as_registered);
             // Fifteen resolves are fifteen module rebuilds, each leaving the
             // last behind; collect once here rather than carry them all.

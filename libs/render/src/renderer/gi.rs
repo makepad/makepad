@@ -4,6 +4,14 @@
 use super::*;
 
 impl Renderer {
+    /// The GPU device was replaced (`Event::GpuReset`): the GI field and cascades, and the
+    /// baked lightmaps, lived only on the GPU. GI starts over; the lightmap bakes again into
+    /// its regions.
+    pub fn gpu_reset(&mut self) {
+        self.gi.release();
+        self.gpu_baker.debug_redirty();
+    }
+
     /// Hosts that light in linear space (HDR output) tell GI their albedo
     /// inputs are sRGB-encoded, so bounce light is computed on decoded
     /// albedo. Relights the field; nothing is re-traced.

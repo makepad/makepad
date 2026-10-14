@@ -29,6 +29,8 @@ pub struct RenderTarget {
     depth: Option<Texture>,
     size: (u32, u32),
     format: RenderTargetFormat,
+    /// Its owner in the GPU ledger (`gpu top`).
+    name: &'static str,
 }
 
 fn unsized_texture(cx: &mut Cx) -> Texture {
@@ -37,7 +39,7 @@ fn unsized_texture(cx: &mut Cx) -> Texture {
 
 impl RenderTarget {
     /// A target with no pixels yet (sized by [`RenderTarget::ensure`]).
-    pub fn new(cx: &mut Cx, name: &str) -> Self {
+    pub fn new(cx: &mut Cx, name: &'static str) -> Self {
         Self {
             pass: DrawPass::new_with_name(cx, name),
             list: DrawList2d::new(cx),
@@ -45,6 +47,7 @@ impl RenderTarget {
             depth: None,
             size: (0, 0),
             format: RenderTargetFormat::Bgra8,
+            name,
         }
     }
 
@@ -67,12 +70,26 @@ impl RenderTarget {
         self.texture = Texture::new_with_format(cx, match format {
             RenderTargetFormat::Bgra8 => TextureFormat::RenderBGRAu8 { size: fixed, initial: true },
             RenderTargetFormat::Rgba16f => TextureFormat::RenderRGBAf16 { size: fixed, initial: true },
-        });
+        }).label(cx, self.name);
         self.texture.set_transient(cx, true);
         self.depth = None;
         self.size = size;
         self.format = format;
         true
+    }
+
+    /// As [`RenderTarget::ensure`], for a target that keeps its picture
+    /// between frames (a cache a host draws into now and then and samples
+    /// in the frames between): its texture is not transient, so the platform
+    /// never gives its storage back for idleness while the picture is still
+    /// wanted (a transient one comes back empty, and a pass that is not
+    /// recorded again never paints it).
+    pub fn ensure_kept(&mut self, cx: &mut Cx, size: (u32, u32), format: RenderTargetFormat) -> bool {
+        let reallocated = self.ensure(cx, size, format);
+        if reallocated {
+            self.texture.set_transient(cx, false);
+        }
+        reallocated
     }
 
     /// Its depth texture, made at its size on first use (freed with the
@@ -84,7 +101,7 @@ impl RenderTarget {
                 let depth = Texture::new_with_format(cx, TextureFormat::DepthD32 {
                     size: TextureSize::Fixed { width: w.max(1) as usize, height: h.max(1) as usize },
                     initial: true,
-                });
+                }).label(cx, self.name);
                 depth.set_transient(cx, true);
                 depth
             })
@@ -180,7 +197,7 @@ impl RenderTargetPool {
     /// draws ask for the same sizes every frame, so a steady scene
     /// allocates nothing, and a use that appears or goes does not move
     /// every other use to another target. Returns its index.
-    pub fn take(&mut self, cx: &mut Cx, size: (u32, u32), format: RenderTargetFormat, name: &str) -> usize {
+    pub fn take(&mut self, cx: &mut Cx, size: (u32, u32), format: RenderTargetFormat, name: &'static str) -> usize {
         let free = |t: &Pooled| !t.used;
         let index = match self.targets.iter().position(|t| free(t) && t.target.size == size && t.target.format == format) {
             Some(i) => i,
@@ -231,5 +248,27 @@ impl std::ops::Index<usize> for RenderTargetPool {
 impl std::ops::IndexMut<usize> for RenderTargetPool {
     fn index_mut(&mut self, index: usize) -> &mut RenderTarget {
         &mut self.targets[index].target
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kept_target_is_not_transient_and_a_frame_target_is() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut frame = RenderTarget::new(&mut cx, "frame");
+        let mut kept = RenderTarget::new(&mut cx, "kept");
+        assert!(frame.ensure(&mut cx, (8, 8), RenderTargetFormat::Bgra8));
+        assert!(kept.ensure_kept(&mut cx, (8, 8), RenderTargetFormat::Bgra8));
+        assert!(frame.texture.is_transient(&cx), "a per-frame target is rebuilt by every use");
+        assert!(!kept.texture.is_transient(&cx), "a kept picture is sampled in frames that do not draw it");
+        // The same size again keeps the texture (and its state).
+        assert!(!kept.ensure_kept(&mut cx, (8, 8), RenderTargetFormat::Bgra8));
+        assert!(!kept.texture.is_transient(&cx));
+        // A new size allocates anew: still kept.
+        assert!(kept.ensure_kept(&mut cx, (16, 8), RenderTargetFormat::Bgra8));
+        assert!(!kept.texture.is_transient(&cx));
     }
 }

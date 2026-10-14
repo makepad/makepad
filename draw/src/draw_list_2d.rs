@@ -158,6 +158,7 @@ impl DrawListExt for DrawList {
             panic!("calling end on a view that didnt get begin called this redraw cycle");
         }
         cx.cx.draw_lists[draw_list_id].draw_items.finish_recording();
+        crate::makepad_platform::frame_sources::recorded(cx.cx.draw_lists[draw_list_id].draw_items.len());
     }
 
     fn get_view_transform(&self, cx: &Cx) -> Mat4f {
@@ -207,6 +208,7 @@ impl DrawListExt for DrawList {
         children
     }
 
+    #[track_caller]
     fn redraw(&self, cx: &mut Cx) {
         cx.redraw_list(self.id());
     }

@@ -2323,25 +2323,25 @@ pub(crate) fn apply_draw_twin<T: ScriptApply + ScriptNew>(
     clock_fn: LiveId,
     twin: &mut T,
 ) {
-    let draw = match vm.bx.heap.value_for_apply(value, field.into(), apply) {
+    let draw = match vm.heap_mut().value_for_apply(value, field.into(), apply) {
         Some(draw) => draw.as_object(),
         // Like the derive, a field the widget never sets comes from its type's default.
         None if apply.is_new() || apply.is_reload() => {
-            vm.bx.heap.type_default_for_id(<T as ScriptNew>::script_type_id_static())
+            vm.heap().type_default_for_id(<T as ScriptNew>::script_type_id_static())
         }
         None => None,
     };
     let Some(draw) = draw else {
         return;
     };
-    let object = vm.bx.heap.new_with_proto(draw.into());
+    let object = vm.heap_mut().new_with_proto(draw.into());
     // An eval only fills a draw's own entries, so the twin needs the eval's own values too.
     if apply.is_eval() {
-        vm.bx.heap.merge_object(object, draw, NoTrap);
+        vm.heap_mut().merge_object(object, draw, NoTrap);
     }
-    let clock = vm.bx.heap.value(draw, clock_fn.into(), NoTrap);
-    if clock.as_object().is_some_and(|f| vm.bx.heap.is_fn(f)) {
-        vm.bx.heap.set_value(object, id!(clock).into(), clock, NoTrap);
+    let clock = vm.heap().value(draw, clock_fn.into(), NoTrap);
+    if clock.as_object().is_some_and(|f| vm.heap().is_fn(f)) {
+        vm.heap_mut().set_value(object, id!(clock).into(), clock, NoTrap);
     }
     twin.script_apply(vm, apply, scope, object.into());
 }

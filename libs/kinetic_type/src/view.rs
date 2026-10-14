@@ -175,6 +175,15 @@ struct Picture {
     depth: Texture,
 }
 
+/// Empty the texture slot the shader named `id` (no-op without it).
+fn unbind_named(cx: &Cx, dv: &mut DrawVars, id: LiveId) {
+    if let Some(sid) = dv.draw_shader_id {
+        if let Some(slot) = cx.draw_shaders[sid.index].mapping.textures.iter().position(|t| t.id == id) {
+            dv.texture_slots[slot] = None;
+        }
+    }
+}
+
 /// Bind `tex` to the texture slot the shader named `id` (no-op without it).
 fn bind_named(cx: &Cx, dv: &mut DrawVars, id: LiveId, tex: &Texture) {
     if let Some(sid) = dv.draw_shader_id {
@@ -761,6 +770,10 @@ impl KineticView {
             if let Some(a) = &frame.audio {
                 bind_audio(cx.cx, &mut self.draw.draw_vars, a);
             }
+            // the frame pass below binds the picture to the glyph draw; drawing INTO the
+            // picture the draw must not sample it (Vulkan refused the draw: the title of a
+            // `picture` kit was missing on Linux)
+            unbind_named(cx.cx, &mut self.draw.draw_vars, live_id!(pic_tex));
             calls += glyphs.draw(cx, &mut self.draw);
             pp.list.end(cx);
             cx.end_pass(&pp.pass);

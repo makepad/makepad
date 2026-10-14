@@ -24,6 +24,7 @@ pub mod picker_parts;
 pub mod radio_group;
 pub mod range_slider;
 pub mod rating;
+pub mod recent_list;
 pub mod tag_field;
 pub mod transfer;
 pub mod tree_select;
@@ -47,6 +48,7 @@ pub fn pickers_mod(vm: &mut ScriptVm) {
     crate::column_picker::script_mod(vm);
     crate::tree_select::script_mod(vm);
     crate::transfer::script_mod(vm);
+    crate::recent_list::script_mod(vm);
 }
 
 // The pooled test contexts and the whole registration the tests build on:

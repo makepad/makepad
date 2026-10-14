@@ -175,6 +175,8 @@ pub struct Layouter {
     /// (font, character) pairs already reported as missing.
     missing_reported: std::collections::HashSet<(FontId, char)>,
     missing_count: usize,
+    /// Moves when a family's faces change (a lazy CJK or emoji face arrives).
+    family_generation: u64,
 }
 
 /// What a font laid out while recording ([`Layouter::record_glyphs`]):
@@ -208,7 +210,16 @@ impl Layouter {
             recorded_glyphs: None,
             missing_reported: Default::default(),
             missing_count: 0,
+            family_generation: 0,
         }
+    }
+
+    /// Moves whenever a font family's faces change, e.g. when a lazy CJK or
+    /// emoji face arrives on a glyph miss. A widget that keeps glyphs of its
+    /// own past a layout (a terminal's per-character cache) drops them when
+    /// it moves: the boxes it kept for the missing glyphs have real faces now.
+    pub fn family_generation(&self) -> u64 {
+        self.family_generation
     }
 
     /// Starts (or stops) keeping every glyph that layouts return, cached
@@ -314,7 +325,9 @@ impl Layouter {
         id: FontFamilyId,
         definition: FontFamilyDefinition,
     ) {
-        self.loader.set_font_family_definition(id, definition);
+        if self.loader.set_font_family_definition(id, definition) {
+            self.family_generation += 1;
+        }
         self.cached_results.clear();
         self.cache_lru_order.clear();
         self.cache_bytes = 0;

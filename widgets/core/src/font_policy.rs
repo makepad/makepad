@@ -328,4 +328,53 @@ mod tests {
             );
         });
     }
+
+    /// The code font, and any family an app picks for its Latin face, falls
+    /// back to the platform's CJK and emoji faces as lazy members; a family
+    /// that names its own CJK or emoji face keeps it and gets no second one.
+    #[test]
+    fn every_family_falls_back_to_the_lazy_cjk_and_emoji_faces() {
+        for set in [FontSet::Latin, FontSet::International] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            assert!(cx.set_font_set(set));
+            cx.with_vm(|vm| {
+                crate::theme_mod(vm);
+                let ids = |vm: &mut ScriptVm, value: ScriptValue| {
+                    crate::TextStyle::script_from_value(vm, value)
+                        .font_family
+                        .member_ids()
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>()
+                };
+                let code = crate::script_eval!(vm, {mod.theme.font_code});
+                assert_eq!(
+                    ids(vm, code),
+                    ["liberation_mono", "lxgw_wenkai_regular", "noto_color_emoji"],
+                    "{set:?}"
+                );
+                let picked = crate::script_eval!(vm, {
+                    use mod.text.*
+                    use mod.res.crate_resource
+                    TextStyle{font_family: FontFamily{
+                        latin := FontMember{res: crate_resource("makepad_widgets:resources/jetbrains_mono_variable.ttf")}
+                    }}
+                });
+                assert_eq!(
+                    ids(vm, picked),
+                    ["latin", "lxgw_wenkai_regular", "noto_color_emoji"],
+                    "{set:?}"
+                );
+                let own = crate::script_eval!(vm, {
+                    use mod.text.*
+                    use mod.res.crate_resource
+                    TextStyle{font_family: FontFamily{
+                        latin := FontMember{res: crate_resource("makepad_widgets:resources/jetbrains_mono_variable.ttf")}
+                        cjk := FontMember{res: crate_resource("makepad_widgets:resources/LXGWWenKaiBold.ttf")}
+                        emoji := FontMember{res: crate_resource("makepad_widgets:resources/NotoColorEmoji.ttf") lazy: 2.0}
+                    }}
+                });
+                assert_eq!(ids(vm, own), ["latin", "cjk", "emoji"], "{set:?}");
+            });
+        }
+    }
 }

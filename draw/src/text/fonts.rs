@@ -5,8 +5,6 @@ use super::{
     rasterizer::{CompletedMsdfJob, QueuedMsdfJob},
     slug_atlas::SlugAtlas,
 };
-#[cfg(not(target_arch = "wasm32"))]
-use super::rasterizer::GlyphClient;
 use {
     super::{
         font::{Font, FontId, GlyphId},
@@ -258,15 +256,11 @@ impl Fonts {
         font: &Font,
         glyph_id: GlyphId,
     ) -> SlugGlyphCacheResult {
-        use super::rasterizer::Lookup;
-        use crate::makepad_platform::hal_font_wire as wire;
+        use super::rasterizer::SlugLookup;
         let mut rasterizer = self.layouter.rasterizer().borrow_mut();
-        match rasterizer.client_mut().lookup(font, glyph_id, 0.0, wire::kind::SLUG) {
-            Lookup::Ready(entry) => SlugGlyphCacheResult::Ready(GlyphClient::slug_info(&entry)),
-            Lookup::Empty => SlugGlyphCacheResult::Unavailable,
-            Lookup::Pending => GlyphClient::unresolved_slug_info(font, glyph_id)
-                .map(SlugGlyphCacheResult::Ready)
-                .unwrap_or(SlugGlyphCacheResult::Unavailable),
+        match rasterizer.client_mut().slug(font, glyph_id) {
+            SlugLookup::Ready(info) => SlugGlyphCacheResult::Ready(info),
+            SlugLookup::Empty => SlugGlyphCacheResult::Unavailable,
         }
     }
 
@@ -418,6 +412,11 @@ impl Fonts {
         self.layouter.define_font_family(id, definition);
     }
 
+    /// See [`layouter::Layouter::family_generation`].
+    pub fn family_generation(&self) -> u64 {
+        self.layouter.family_generation()
+    }
+
     pub fn set_font_family_definition(
         &mut self,
         id: FontFamilyId,
@@ -455,18 +454,23 @@ impl Fonts {
 
     /// The end of a draw: the glyphs it asked for go to the host.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn prepare_textures(&mut self, cx: &mut Cx, full_draw: bool) -> bool {
+    pub fn prepare_textures(&mut self, cx: &mut Cx) -> bool {
         // Frame boundary for the layout cache's working-set protection.
         self.layouter.advance_cache_generation();
-        let (outbox, wants_full_draw) = {
+        let outbox = {
             let mut rasterizer = self.layouter.rasterizer().borrow_mut();
             let client = rasterizer.client_mut();
-            let wants_full_draw = client.end_frame(full_draw);
-            (client.take_outbox(), wants_full_draw)
+            if client.sweep_due() {
+                // what the live draw lists show is in use, redrawn or not
+                for list in cx.draw_lists.iter_live() {
+                    for glyph in &list.glyph_uses {
+                        client.retained(*glyph);
+                    }
+                }
+            }
+            client.end_frame();
+            client.take_outbox()
         };
-        if wants_full_draw {
-            cx.redraw_all();
-        }
         // fonts first: a request for a font names it by the id it was opened under
         for open in &outbox.opens {
             cx.hal_font_open(open.local, open.index, &open.vars, open.source());
@@ -478,12 +482,15 @@ impl Fonts {
         if !outbox.releases.is_empty() {
             cx.hal_glyph_release(&outbox.releases);
         }
+        if !outbox.touches.is_empty() {
+            cx.hal_glyph_touch(&outbox.touches);
+        }
         self.layouter.rasterizer().borrow_mut().client_mut().recycle(outbox);
         true
     }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn prepare_textures(&mut self, cx: &mut Cx, _full_draw: bool) -> bool {
+    pub fn prepare_textures(&mut self, cx: &mut Cx) -> bool {
         assert!(!self.needs_prepare_atlases);
         // Frame boundary for the layout cache's working-set protection.
         self.layouter.advance_cache_generation();

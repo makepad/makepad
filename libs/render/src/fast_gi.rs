@@ -225,8 +225,8 @@ impl FastGi {
         self.scene_key=None;self.scene_center=None;self.pending_scene=None;
         self.meshes.epoch=self.meshes.epoch.wrapping_add(1);
     }
-    /// Drop everything (mode or layout change).
-    fn release(&mut self){
+    /// Drop everything (mode or layout change, a replaced GPU device).
+    pub(crate) fn release(&mut self){
         if let Some(job)=self.voxel_job.take(){job.cancel();}
         self.generation=self.generation.wrapping_add(1);
         self.gpu=None;self.voxels=None;self.scene_key=None;self.scene_center=None;self.pending_scene=None;self.has_scene=false;

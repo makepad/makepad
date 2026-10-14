@@ -18,6 +18,97 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use makepad_platform::remote::synthetic_cursor::{synthetic_cursor, SyntheticCursorStyle};
 
+/// The window chrome a theme declares for its windows (`chrome` on `Window`). A desktop
+/// sheet and the plain theme follow the host; an app's own theme may name its chrome
+/// (Stage's house theme: traffic lights) or draw its own (Amp's skins: a rail with its
+/// own buttons, `set_drag_region`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum WindowChrome {
+    /// The host's: the WM's style under the WM, the OS's natively.
+    #[pick]
+    #[default]
+    Follow = 0,
+    /// Traffic lights at the caption's left (the system's own on macOS).
+    Lights = 1,
+    /// Minimise / maximise / close at the caption's right.
+    Buttons = 2,
+    /// The app draws its chrome and its window buttons (`set_drag_region`).
+    Custom = 3,
+    /// No chrome at all, in any state: a window an app makes chromeless (Stage's program
+    /// output, Amp's party picture).
+    None = 4,
+}
+
+/// Hosted by the window manager (it starts its apps with `MAKEPAD_WM_CAPTION_CONTENT=1`).
+fn under_wm() -> bool {
+    static WM: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *WM.get_or_init(|| std::env::var("MAKEPAD_WM_CAPTION_CONTENT").is_ok_and(|value| value == "1"))
+}
+
+/// Where a window can be dragged from (`drag` on `Window`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum WindowDrag {
+    /// Its caption's empty space (the stock caption, or the app's drag region).
+    #[pick]
+    #[default]
+    Caption = 0,
+    /// Anywhere in the window, its content included: a chromeless picture window (Amp's
+    /// party window, Stage's program output). A double click anywhere does what
+    /// `double_click` says. Not while fullscreen (presenting): then presses are the content's.
+    Window = 1,
+}
+
+/// What a double click on the window's caption does (`double_click` on `Window`): for a
+/// drag-anywhere window (`WindowDrag::Window`), a double click anywhere.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Script, ScriptHook)]
+#[repr(u32)]
+pub enum WindowDoubleClick {
+    /// Maximise to the screen's work area (bars and dock stay); again restores.
+    #[pick]
+    #[default]
+    Maximize = 0,
+    /// Fullscreen on the window's screen, over bars and dock, no caption (a presenter's
+    /// output on a second screen); a double click while fullscreen restores it exactly.
+    Fullscreen = 1,
+}
+
+/// What a window draws for its chrome, decided in one place (`resolve_chrome`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResolvedChrome {
+    /// The stock caption with traffic lights drawn by the window.
+    Lights,
+    /// The stock caption with the Windows buttons.
+    Buttons,
+    /// The app's own chrome (its drag region and its buttons).
+    Custom,
+    /// A caption without window controls: a tiling host has none, and natively the OS
+    /// decorates the window.
+    Bare,
+    /// No caption at all (`WindowChrome::None`).
+    None,
+}
+
+/// The chrome a window draws: what the theme declares, and for `Follow` the host's style
+/// (`host`: the WM's family under a window manager, `None` natively, where the OS path
+/// keeps its own rules and draws no lights of ours).
+pub fn resolve_chrome(declared: WindowChrome, has_drag_region: bool, host: Option<crate::desktop_style::DesktopStyle>) -> ResolvedChrome {
+    use crate::desktop_style::DesktopStyle as S;
+    match declared {
+        WindowChrome::None => ResolvedChrome::None,
+        WindowChrome::Custom => ResolvedChrome::Custom,
+        _ if has_drag_region => ResolvedChrome::Custom,
+        WindowChrome::Lights => ResolvedChrome::Lights,
+        WindowChrome::Buttons => ResolvedChrome::Buttons,
+        WindowChrome::Follow => match host {
+            Some(S::Macos | S::NextStep) => ResolvedChrome::Lights,
+            Some(style) if style.floating() => ResolvedChrome::Buttons,
+            _ => ResolvedChrome::Bare,
+        },
+    }
+}
+
 script_mod! {
     use mod.prelude.widgets_internal.*
     use mod.widgets.View
@@ -166,10 +257,24 @@ script_mod! {
         }
     }
 
+    let WindowChrome = set_type_default() do #(WindowChrome::script_api(vm))
+    mod.widgets.WindowChrome = WindowChrome
+    let WindowDrag = set_type_default() do #(WindowDrag::script_api(vm))
+    mod.widgets.WindowDrag = WindowDrag
+    let WindowDoubleClick = set_type_default() do #(WindowDoubleClick::script_api(vm))
+    mod.widgets.WindowDoubleClick = WindowDoubleClick
     mod.widgets.WindowBase = #(Window::register_widget(vm))
     mod.widgets.Window = set_type_default() do mod.widgets.WindowBase{
         demo: false
         show_caption_bar: true
+        // The window chrome the theme declares (`WindowChrome`): the host's (follow), traffic
+        // lights, the Windows buttons, or the app's own drawn chrome. A theme sets it as
+        // `mod.widgets.Window.chrome = mod.widgets.WindowChrome.Lights`.
+        chrome: WindowChrome.Follow
+        // Where the window drags from (`WindowDrag`): its caption, or anywhere.
+        drag: WindowDrag.Caption
+        // What a double click on the caption does (`WindowDoubleClick`): maximise, or fullscreen.
+        double_click: WindowDoubleClick.Maximize
         pass +: { clear_color: theme.color_bg_app }
         // The window's ground. A window clears to `pass.clear_color` and
         // draws nothing of its own, so today's pixels are the clear. A sheet
@@ -204,6 +309,10 @@ script_mod! {
             // based on window chrome button geometry to ensure the buttons are vertically centered.
             // If you want to override this height with a fixed value, set the `caption_bar_height_override` on the Window itself.
             height: Fit
+            // Under a window manager in a macOS-like style the traffic lights sit over the
+            // left of the caption (`draw_hosted_controls`): their room, as macOS keeps it.
+            // Also the bar's least height there, so a title-only caption is a real bar.
+            hosted_controls_gap := View{visible: false width: 76 height: 28}
             caption_label := View {
                 width: Fill height: Fill flow: Right
                 align: Center
@@ -322,6 +431,11 @@ script_mod! {
         // while off. Without the family it is an empty hidden view.
         tweaker := Tweaker {}
 
+        // Under a window manager in a macOS-like style, the app's own caption carries
+        // these (`hosted_mac_controls`); the WM draws no title bar for it.
+        hosted_close: DesktopButton{width: 20 height: 20 draw_bg.button_type: DesktopButtonType.MacClose}
+        hosted_min: DesktopButton{width: 20 height: 20 draw_bg.button_type: DesktopButtonType.MacMin}
+        hosted_max: DesktopButton{width: 20 height: 20 draw_bg.button_type: DesktopButtonType.MacMax}
         cursor: MouseCursor.Default
         mouse_cursor_size: vec2(24 24)
         draw_cursor: mod.widgets.DrawMouseCursor {}
@@ -351,10 +465,20 @@ pub struct Window {
     demo: bool,
     #[live]
     show_caption_bar: bool,
+    /// The chrome the theme declares (`resolve_chrome`).
+    #[live]
+    chrome: WindowChrome,
+    /// Where the window drags from (`WindowDrag`).
+    #[live]
+    drag: WindowDrag,
+    /// What a double click on the caption does (`WindowDoubleClick`).
+    #[live]
+    double_click: WindowDoubleClick,
+    /// The last press in a drag-anywhere window: when and where, for its double click.
+    #[rust]
+    drag_last_press: Option<(f64, Vec2d)>,
     #[rust]
     caption_has_content: Option<bool>,
-    #[rust]
-    hosted_caption_content: Option<bool>,
     /// Whether this widget should create its native surface during initial
     /// construction. The stable window id and widget tree still exist when
     /// false, so the owner can explicitly create the surface later.
@@ -364,6 +488,21 @@ pub struct Window {
     initial_create_policy_applied: bool,
     #[rust]
     demo_next_frame: NextFrame,
+    /// The window controls an app draws in its own caption under a window manager in a
+    /// macOS-like style (traffic lights, left of the caption, in the gap macOS apps keep
+    /// for them). Other styles use `windows_buttons`.
+    #[live]
+    hosted_close: WidgetRef,
+    #[live]
+    hosted_min: WidgetRef,
+    #[live]
+    hosted_max: WidgetRef,
+    /// Hosted by the WM and drawing its own caption with the traffic lights.
+    #[rust]
+    hosted_mac_controls: bool,
+    /// Where the traffic lights were drawn (the caption's drag query leaves them alone).
+    #[rust]
+    hosted_controls_rect: Rect,
     #[live]
     cursor_draw_list: DrawList2d,
     #[live]
@@ -535,6 +674,8 @@ impl ScriptHook for Window {
     ) {
         self.caption_has_content = None;
         self.caption_centering_inputs = None;
+        // A host window manager reads it from the drag query's answer.
+        self.window.handle.set_double_click_fullscreen(vm.cx_mut(), self.double_click == WindowDoubleClick::Fullscreen);
         if !self.create_on_start && !self.initial_create_policy_applied {
             apply_initial_create_policy(vm.cx_mut(), &self.window.handle, false);
             self.initial_create_policy_applied = true;
@@ -962,7 +1103,7 @@ impl Window {
         });
         let bar_content = self.view(cx, ids!(caption_bar)).borrow().is_some_and(|view| {
             view.children.iter().any(|(id, _)| !matches!(*id,
-                id!(caption_label) | id!(voice_wave) | id!(windows_buttons) | id!(web_fullscreen)))
+                id!(hosted_controls_gap) | id!(caption_label) | id!(voice_wave) | id!(windows_buttons) | id!(web_fullscreen)))
         });
         let content = label_content || bar_content;
         self.caption_has_content = Some(content);
@@ -998,20 +1139,54 @@ impl Window {
     fn sync_caption_bar_state(&mut self, cx: &mut Cx) {
         let has_content = self.caption_contains_app_content(cx);
         if cx.in_makepad_studio() {
-            // The WM allows app-owned caption controls as a toolbar inside
-            // its tile. Other hosts retain their existing caption policy.
-            let enabled = *self.hosted_caption_content.get_or_insert_with(|| {
-                std::env::var("MAKEPAD_WM_CAPTION_CONTENT").is_ok_and(|value| value == "1")
-            });
-            self.view(cx, ids!(caption_bar)).set_visible(cx, self.stock_caption() && enabled && has_content);
-            self.view(cx, ids!(windows_buttons)).set_visible(cx, false);
+            // Under the WM a makepad app draws its own caption, as on macOS: the WM draws
+            // no title bar for it (`HostedChrome`), the app's caption carries the window
+            // controls in the WM's style (traffic lights at the left in a macOS-like
+            // style, the Windows buttons at the right otherwise) and its caption drags and
+            // maximises the window through the WM's drag query. Other hosts keep their
+            // caption policy (no caption).
+            let wm = under_wm();
+            // Under the WM every makepad window draws its own caption, as on macOS: its
+            // theme's chrome (`resolve_chrome`), `Follow` taking the WM's style (the sheet it
+            // hands every app, whatever theme the app picked). The WM draws no title bar for
+            // it. A fullscreen window draws no caption; a chromeless one never does.
+            let host = if wm { crate::desktop_style::system_style(cx) } else { None };
+            let chrome = resolve_chrome(self.chrome, self.drag_region.is_some(), host);
+            let stock = wm && self.show_caption_bar && !cx.hosted_fullscreen(self.window.window_id())
+                && match chrome {
+                    ResolvedChrome::Lights | ResolvedChrome::Buttons => true,
+                    // A tiling host has no window controls: the caption is the app's toolbar.
+                    ResolvedChrome::Bare => has_content,
+                    ResolvedChrome::Custom | ResolvedChrome::None => false,
+                };
+            self.view(cx, ids!(caption_bar)).set_visible(cx, stock);
+            self.view(cx, ids!(windows_buttons)).set_visible(cx, stock && chrome == ResolvedChrome::Buttons);
+            self.hosted_mac_controls = stock && chrome == ResolvedChrome::Lights;
+            self.view(cx, ids!(hosted_controls_gap)).set_visible(cx, self.hosted_mac_controls);
+            // The lights' room is the window's (above): an app's own macOS gap, by the
+            // name apps give it, stands down so the room is not kept twice.
+            if self.hosted_mac_controls {
+                self.view(cx, ids!(caption_window_gap)).set_visible(cx, false);
+            }
+            let _ = has_content;
+            return;
+        }
+        // Natively a theme that names traffic lights gets them where the window draws its
+        // own buttons (Windows, Linux client-side chrome); macOS draws its own.
+        let lights = self.chrome == WindowChrome::Lights;
+        self.hosted_mac_controls = false;
+        // A chromeless window has no caption anywhere.
+        if self.chrome == WindowChrome::None {
+            self.view(cx, ids!(caption_bar)).set_visible(cx, false);
+            self.view(cx, ids!(hosted_controls_gap)).set_visible(cx, false);
             return;
         }
         match cx.os_type() {
             OsType::Windows => {
                 self.view(cx, ids!(caption_bar))
                     .set_visible(cx, self.stock_caption());
-                self.view(cx, ids!(windows_buttons)).set_visible(cx, true);
+                self.view(cx, ids!(windows_buttons)).set_visible(cx, !lights);
+                self.hosted_mac_controls = lights && self.stock_caption();
             }
             OsType::Macos => {
                 // Fullscreen supplies native traffic lights. Keep app controls
@@ -1037,7 +1212,8 @@ impl Window {
                     self.stock_caption() && (custom_chrome || has_content),
                 );
                 self.view(cx, ids!(windows_buttons))
-                    .set_visible(cx, custom_chrome);
+                    .set_visible(cx, custom_chrome && !lights);
+                self.hosted_mac_controls = custom_chrome && lights && self.stock_caption();
             }
             OsType::LinuxDirect | OsType::Android(_) => {
                 //self.frame.get_view(ids!(caption_bar)).set_visible(false);
@@ -1046,6 +1222,10 @@ impl Window {
                 // self.frame.get_view(ids!(caption_bar)).set_visible(false);
             }
             _ => (),
+        }
+        self.view(cx, ids!(hosted_controls_gap)).set_visible(cx, self.hosted_mac_controls);
+        if self.hosted_mac_controls {
+            self.view(cx, ids!(caption_window_gap)).set_visible(cx, false);
         }
     }
 
@@ -1064,7 +1244,31 @@ impl Window {
         } else {
             Rect::default()
         };
+        // The traffic lights an app draws under the WM are its controls, not its caption.
+        let buttons_rect = if self.hosted_mac_controls { self.hosted_controls_rect } else { buttons_rect };
         (visible, caption_rect, buttons_rect, caption_area)
+    }
+
+    /// The traffic lights over the left of the app's caption bar (under the WM, in a
+    /// macOS-like style): where macOS draws its own, so an app that keeps the gap for them
+    /// on macOS has them in the same place here.
+    fn draw_hosted_controls(&mut self, cx: &mut Cx2d) {
+        if !self.hosted_mac_controls {
+            self.hosted_controls_rect = Rect::default();
+            return;
+        }
+        let bar = self.view(cx, ids!(caption_bar)).area().rect(cx);
+        if bar.size.y <= 0.0 {
+            return;
+        }
+        let (size, pitch, left) = (20.0, 20.0, 8.0);
+        let top = bar.pos.y + ((bar.size.y - size) * 0.5).max(0.0);
+        let mut scope = Scope::empty();
+        for (i, button) in [self.hosted_close.clone(), self.hosted_min.clone(), self.hosted_max.clone()].iter().enumerate() {
+            let rect = Rect { pos: dvec2(bar.pos.x + left + i as f64 * pitch, top), size: dvec2(size, size) };
+            let _ = button.draw_walk(cx, &mut scope, Walk::abs_rect(rect));
+        }
+        self.hosted_controls_rect = Rect { pos: dvec2(bar.pos.x, bar.pos.y), size: dvec2(left * 2.0 + pitch * 3.0, bar.size.y) };
     }
 
     /// The rects of what the app put in the caption bar: its children other
@@ -1493,6 +1697,7 @@ impl Window {
     pub fn end(&mut self, cx: &mut Cx2d) {
         // Now that the caption bar's contents are drawn, we know where the title has room to go.
         self.sync_caption_centering(cx);
+        self.draw_hosted_controls(cx);
         //while self.frame.draw_widget_continue(cx).is_not_done() {}
         //self.debug_view.draw(cx);
 
@@ -2347,7 +2552,11 @@ impl WindowRef {
             let changed = inner.drag_region.is_some() != region.is_some();
             inner.drag_region = region;
             if changed {
-                cx.announce_own_chrome(inner.drag_region.is_some());
+                // Natively the platform leaves its decorations off; under the WM every
+                // makepad window draws its own chrome anyway.
+                if !under_wm() {
+                    cx.set_own_window_chrome(inner.drag_region.is_some());
+                }
                 inner.caption_has_content = None;
                 inner.caption_centering_inputs = None;
                 inner.drag_query_cache = None;
@@ -2528,6 +2737,31 @@ impl Widget for Window {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        // A drag-anywhere window's double click toggles maximise or fullscreen (`double_click`).
+        // Under the WM the WM does it (the press is a caption press there), except while the
+        // window is fullscreen: then the press is the content's, so the window restores itself.
+        if self.drag == WindowDrag::Window {
+            if let Event::MouseDown(down) = event {
+                if down.window_id == self.window.window_id() {
+                    let hosted_fullscreen = cx.hosted_fullscreen(self.window.window_id());
+                    if !under_wm() || hosted_fullscreen {
+                        let double = self.drag_last_press.is_some_and(|(at, pos)| down.time - at < 0.4 && (pos - down.abs).length() < 6.0);
+                        self.drag_last_press = if double { None } else { Some((down.time, down.abs)) };
+                        if double {
+                            if hosted_fullscreen || self.window.handle.is_fullscreen(cx) {
+                                self.window.handle.restore(cx)
+                            } else if self.double_click == WindowDoubleClick::Fullscreen {
+                                self.window.handle.fullscreen(cx)
+                            } else {
+                                self.window.handle.maximize(cx)
+                            }
+                        }
+                    } else {
+                        self.drag_last_press = None;
+                    }
+                }
+            }
+        }
         // Before anything under the window can hit-test this event against a
         // lock whose owner no longer exists.
         crate::overlay_place::release_orphaned_sweep_locks(cx);
@@ -2723,6 +2957,17 @@ impl Widget for Window {
             }
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id() { 'dq: {
+                    // Drag anywhere: every point moves the window unless a control holds the press.
+                    // Not while fullscreen: a presenting window (Stage's output on the second
+                    // screen) stays put, and its presses are the content's.
+                    // The whole window is its handle, content included: a picture that
+                    // takes the pointer (Stage's output forwards it to the deck's render)
+                    // still moves the window.
+                    if self.drag == WindowDrag::Window {
+                        let fullscreen = cx.hosted_fullscreen(self.window.window_id()) || self.window.handle.is_fullscreen(cx);
+                        dq.response.set(if fullscreen { WindowDragQueryResponse::Client } else { WindowDragQueryResponse::Caption });
+                        break 'dq;
+                    }
                     // A native query can arrive synchronously after configure but before redraw.
                     // Use live areas for that one query, but only a completed draw may cache them.
                     let cache_ready = self.drag_query_cache.is_some() || self.drag_query_layout_valid;
@@ -2769,12 +3014,17 @@ impl Widget for Window {
                             cx.windows[dq.window_id].window_geom.window_chrome_buttons,
                         )
                     };
-                    let content_toolbar = cx.in_makepad_studio()
+                    // Hosted, the caption is a toolbar the host shows under its own title bar,
+                    // unless the app draws its own chrome under the WM: then its caption's
+                    // empty space moves the window, as a title bar does.
+                    // Under the WM the caption is the window's title bar: its empty space
+                    // moves the window. Under another host it is a toolbar.
+                    let content_toolbar = !under_wm() && (cx.in_makepad_studio()
                         || matches!(cx.os_type(), OsType::LinuxWindow(params) if !params.custom_window_chrome)
                         || (matches!(cx.os_type(), OsType::LinuxWindow(_))
                             && !self.window.handle.uses_wayland_client_side_decorations(cx))
                         || (matches!(cx.os_type(), OsType::Macos)
-                            && self.window.handle.is_fullscreen(cx));
+                            && self.window.handle.is_fullscreen(cx)));
                     // The design overlay's panel is drawn OVER the caption bar, top of the
                     // window down. Answering Caption there hands the press to the OS as a
                     // window drag and the panel never sees it — its filter field could not be
@@ -2884,12 +3134,32 @@ impl Widget for Window {
             let ai_took = !tweaked
                 && WidgetHooks::ai(cx)
                     .is_some_and(|ai| (ai.window_intercept)(cx, event, &mut self.view, window_id));
+            // The traffic lights sit over the caption's content: they take a press first.
+            if self.hosted_mac_controls {
+                let mut scope = Scope::empty();
+                for button in [self.hosted_close.clone(), self.hosted_min.clone(), self.hosted_max.clone()] {
+                    button.handle_event(cx, event, &mut scope);
+                }
+            }
             if !tweaked && !ai_took {
                 self.view.handle_event(cx, event, scope);
             }
         }
 
         if let Event::Actions(actions) = event {
+            if self.hosted_mac_controls {
+                let clicked = |button: &WidgetRef| actions.find_widget_action(button.widget_uid())
+                    .is_some_and(|action| matches!(action.cast(), crate::button::ButtonAction::Clicked(_)));
+                if clicked(&self.hosted_min) {
+                    self.window.handle.minimize(cx);
+                }
+                if clicked(&self.hosted_max) {
+                    self.window.handle.maximize(cx);
+                }
+                if clicked(&self.hosted_close) {
+                    self.close_after_recording(cx);
+                }
+            }
             if let Some(voice) = WidgetHooks::voice(cx) {
                 (voice.window_actions)(cx, actions, &mut self.view, scope);
             }
@@ -2958,5 +3228,31 @@ impl Widget for Window {
         }
 
         DrawStep::done()
+    }
+}
+
+#[cfg(test)]
+mod chrome_tests {
+    use super::*;
+    use crate::desktop_style::DesktopStyle as S;
+
+    /// One decision for the window's chrome: the theme's declaration, `Follow` taking
+    /// the host's style; an app-drawn chrome is the app's on every host.
+    #[test]
+    fn the_theme_declares_the_chrome_and_follow_takes_the_hosts() {
+        assert_eq!(resolve_chrome(WindowChrome::Follow, false, Some(S::Macos)), ResolvedChrome::Lights);
+        assert_eq!(resolve_chrome(WindowChrome::Follow, false, Some(S::NextStep)), ResolvedChrome::Lights);
+        assert_eq!(resolve_chrome(WindowChrome::Follow, false, Some(S::Windows)), ResolvedChrome::Buttons);
+        assert_eq!(resolve_chrome(WindowChrome::Follow, false, Some(S::Omarchy)), ResolvedChrome::Bare);
+        assert_eq!(resolve_chrome(WindowChrome::Follow, false, None), ResolvedChrome::Bare);
+        // A chromeless window (Stage's program output, Amp's party picture): nothing, ever.
+        assert_eq!(resolve_chrome(WindowChrome::None, false, Some(S::Macos)), ResolvedChrome::None);
+        assert_eq!(resolve_chrome(WindowChrome::None, true, Some(S::Macos)), ResolvedChrome::None);
+        // Stage's house theme: lights under any WM style.
+        assert_eq!(resolve_chrome(WindowChrome::Lights, false, Some(S::Windows)), ResolvedChrome::Lights);
+        assert_eq!(resolve_chrome(WindowChrome::Buttons, false, Some(S::Macos)), ResolvedChrome::Buttons);
+        // Amp's skins: their own chrome, declared or by their drag region.
+        assert_eq!(resolve_chrome(WindowChrome::Custom, false, Some(S::Macos)), ResolvedChrome::Custom);
+        assert_eq!(resolve_chrome(WindowChrome::Follow, true, Some(S::Macos)), ResolvedChrome::Custom);
     }
 }

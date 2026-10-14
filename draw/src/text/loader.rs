@@ -65,15 +65,17 @@ impl Loader {
         self.font_family_definitions.insert(id, definition);
     }
 
+    /// Whether the family's faces changed (a lazy face arrived, a member
+    /// became available).
     pub fn set_font_family_definition(
         &mut self,
         id: FontFamilyId,
         definition: FontFamilyDefinition,
-    ) {
+    ) -> bool {
         // Skip cache eviction if the definition is unchanged.
         if let Some(existing) = self.font_family_definitions.get(&id) {
             if *existing == definition {
-                return;
+                return false;
             }
         }
         if let Some(cached) = self.font_family_cache.get(&id) {
@@ -82,11 +84,12 @@ impl Loader {
                 && definition.expected_member_count == definition.font_ids.len()
                 && cached.diagnostics() == &definition.diagnostics
             {
-                return;
+                return false;
             }
         }
         self.font_family_cache.remove(&id);
         self.font_family_definitions.insert(id, definition);
+        true
     }
 
     pub fn define_font(&mut self, id: FontId, definition: FontDefinition) {

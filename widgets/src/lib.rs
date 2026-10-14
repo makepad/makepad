@@ -30,7 +30,8 @@ pub use makepad_widgets_hotkeys::{
 #[cfg(feature = "media")]
 pub use makepad_widgets_media::{
     level_meter, level_meter::*, marquee, marquee::*, media, media::*, placeholder, placeholder::*,
-    playback_bar, playback_bar::*, video, video::*,
+    playback_bar, playback_bar::*, player_controls, player_controls::*, video, video::*,
+    video_player, video_player::*,
 };
 
 #[cfg(feature = "collections")]
@@ -46,7 +47,7 @@ pub use makepad_widgets_pickers::{
     avatar, avatar::*, column_picker, column_picker::*, combo_box, combo_box::*, drop_down2,
     drop_down2::*, drop_toggles, drop_toggles::*, form, form::*, number_field, number_field::*,
     picker_parts, picker_parts::*, radio_group, radio_group::*, range_slider, range_slider::*,
-    rating, rating::*, tag_field, tag_field::*, transfer, transfer::*, tree_select,
+    rating, rating::*, recent_list, recent_list::*, tag_field, tag_field::*, transfer, transfer::*, tree_select,
     tree_select::*, wheel_picker, wheel_picker::*,
 };
 

@@ -83,13 +83,13 @@ fn every_library_draw_shader_compiles_to_valid_spirv() {
         }
         let mut modules = HashSet::new();
         let mut glsl_seen = HashSet::new();
-        let mut glsl_validated = 0;
         let mut hlsl_seen = HashSet::new();
-        let mut hlsl_validated = 0;
         let mut metal_seen = HashSet::new();
-        let mut metal_validated = 0;
-        let (mut skipped, mut lowering_failed, mut validated) = (0, 0, 0);
+        let (mut skipped, mut lowering_failed) = (0, 0);
         let mut failures = Vec::new();
+        // The script VM generates every source on this thread; the compiles and validators
+        // (each distinct source once) run afterwards on all cores.
+        let mut checks: Vec<(String, Check)> = Vec::new();
         for obj in &found {
             let Some(vk) = vulkan_compile(vm, *obj) else {
                 skipped += 1;
@@ -106,11 +106,7 @@ fn every_library_draw_shader_compiles_to_valid_spirv() {
                     if !glsl_seen.insert(text.clone()) {
                         continue;
                     }
-                    match glslang(stage, text) {
-                        Some(Err(e)) => failures.push(format!("{:?}: glslang {stage}: {e}", vm.heap().object_type_name_in_chain(*obj))),
-                        Some(Ok(())) => glsl_validated += 1,
-                        None => {}
-                    }
+                    checks.push((format!("{:?}: glslang {stage}", vm.heap().object_type_name_in_chain(*obj)), Check::Glsl(stage, text.clone())));
                 }
             }
             // HLSL as D3D11 compiles it (D3DCompile, on Windows).
@@ -121,11 +117,7 @@ fn every_library_draw_shader_compiles_to_valid_spirv() {
             } else {
                 let src = hlsl_draw_source(&hl, vm);
                 if hlsl_seen.insert(src.clone()) {
-                    match d3d_compile(&src) {
-                        Some(Err(e)) => failures.push(format!("{:?}: D3DCompile: {e}\n{src}", vm.heap().object_type_name_in_chain(*obj))),
-                        Some(Ok(())) => hlsl_validated += 1,
-                        None => {}
-                    }
+                    checks.push((format!("{:?}: D3DCompile", vm.heap().object_type_name_in_chain(*obj)), Check::Hlsl(src)));
                 }
             }
             // MSL as the Metal backend builds it, and its pick variant
@@ -140,14 +132,7 @@ fn every_library_draw_shader_compiles_to_valid_spirv() {
                     if !metal_seen.insert(src.clone()) {
                         continue;
                     }
-                    match metal_compile(&src) {
-                        Some(Err(e)) => failures.push(format!("{:?}: metal (pick {pick}): {e}\n{src}", vm.heap().object_type_name_in_chain(*obj))),
-                        Some(Ok(())) => metal_validated += 1,
-                        None => {}
-                    }
-                    if let Some(Err(e)) = metal_toolchain_compile(&src) {
-                        failures.push(format!("{:?}: xcrun metal (pick {pick}): {e}\n{src}", vm.heap().object_type_name_in_chain(*obj)));
-                    }
+                    checks.push((format!("{:?}: metal (pick {pick})", vm.heap().object_type_name_in_chain(*obj)), Check::Metal(src)));
                 }
             }
             // The WGSL of the same IR (structure only: no WGSL validator).
@@ -172,17 +157,14 @@ fn every_library_draw_shader_compiles_to_valid_spirv() {
                             if !modules.insert(words.clone()) {
                                 continue;
                             }
-                            match spirv_val(&words) {
-                                Some(Err(e)) => failures.push(format!("{:?}: spirv-val: {e}", vm.heap().object_type_name_in_chain(*obj))),
-                                Some(Ok(())) => validated += 1,
-                                None => {}
-                            }
+                            checks.push((format!("{:?}: spirv-val", vm.heap().object_type_name_in_chain(*obj)), Check::Spirv(words)));
                         }
                     }
                 }
             }
         }
         vm.stop_capturing_errors();
+        let [validated, glsl_validated, hlsl_validated, metal_validated] = run_checks(&checks, &mut failures);
         eprintln!(
             "{} draw shader objects, {} distinct stages, {} passed spirv-val, {} did not compile, {} failed IR/SPIR-V",
             found.len(),
@@ -197,6 +179,56 @@ fn every_library_draw_shader_compiles_to_valid_spirv() {
         assert!(modules.len() > 50, "the walk found only {} modules", modules.len());
         assert!(failures.is_empty(), "{} failures:\n{}", failures.len(), failures.join("\n"));
     });
+}
+
+/// One compile or validation of a distinct generated source.
+enum Check {
+    Glsl(&'static str, String),
+    Hlsl(String),
+    Metal(String),
+    Spirv(Vec<u32>),
+}
+
+/// Runs every check on all cores (each is a separate compile or tool process; the Metal
+/// device compiles are thread-safe) and returns how many passed per kind: SPIR-V, GLSL,
+/// HLSL, Metal. Failures keep the order the checks were made in.
+fn run_checks(checks: &[(String, Check)], failures: &mut Vec<String>) -> [usize; 4] {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let next = AtomicUsize::new(0);
+    let passed: [AtomicUsize; 4] = Default::default();
+    let failed = Mutex::new(Vec::new());
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some((label, check)) = checks.get(i) else { break };
+                let (kind, result) = match check {
+                    Check::Spirv(words) => (0, spirv_val(words)),
+                    Check::Glsl(stage, text) => (1, glslang(stage, text)),
+                    Check::Hlsl(src) => (2, d3d_compile(src).map(|r| r.map_err(|e| format!("{e}\n{src}")))),
+                    Check::Metal(src) => {
+                        if let Some(Err(e)) = metal_toolchain_compile(src) {
+                            failed.lock().unwrap().push((i, format!("{label} (xcrun metal): {e}\n{src}")));
+                        }
+                        (3, metal_compile(src).map(|r| r.map_err(|e| format!("{e}\n{src}"))))
+                    }
+                };
+                match result {
+                    Some(Ok(())) => {
+                        passed[kind].fetch_add(1, Ordering::Relaxed);
+                    }
+                    Some(Err(e)) => failed.lock().unwrap().push((i, format!("{label}: {e}"))),
+                    None => {}
+                }
+            });
+        }
+    });
+    let mut failed = failed.into_inner().unwrap();
+    failed.sort_by_key(|(i, _)| *i);
+    failures.extend(failed.into_iter().map(|(_, f)| f));
+    passed.map(|p| p.into_inner())
 }
 
 /// What can be checked of WGSL text without a WGSL compiler: both entry

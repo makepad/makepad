@@ -363,6 +363,21 @@ struct ThemeMixChoice(Option<String>);
 /// The name a blend is evaluated under: the theme lab's equalized mix.
 pub const THEME_MIX_NAME: &str = "equalized";
 
+/// An app's own theme tokens, laid over the base theme (`set_app_theme_tokens`).
+#[derive(Default)]
+struct AppThemeTokens(Option<String>);
+
+/// The app's own theme in tokens: what an app whose look is its own (Stage's house theme)
+/// says the library's widgets are drawn in -- the menus, popups, drop down lists and
+/// tooltips it opens, the controls' faces -- so they wear the app's look rather than the
+/// plain base theme. Splash assignments to `mod.theme.*`, evaluated by `theme_mod` right
+/// after the base theme on every run (before any widget bakes a token), so like
+/// `set_base_theme` a caller follows it with `cx.request_style_reload()` when it changes.
+/// `None` takes it off (a style sheet worn has tokens of its own).
+pub fn set_app_theme_tokens(cx: &mut Cx, code: Option<String>) {
+    cx.global::<AppThemeTokens>().0 = code;
+}
+
 /// The blend in force, if any: the script `theme_mod` re-emits on every run.
 pub fn theme_mix(cx: &mut Cx) -> Option<String> {
     cx.global::<ThemeMixChoice>().0.clone()
@@ -567,6 +582,10 @@ pub fn theme_mod(vm: &mut ScriptVm) {
                 mod.theme = mod.themes.skeleton
             });
         }
+    }
+    // The app's own tokens over the base, if it has a look of its own.
+    if let Some(code) = vm.cx_mut().global::<AppThemeTokens>().0.clone() {
+        vm.eval(makepad_platform::ScriptMod::new(widgets_dir(), "app_theme_tokens", "app_theme_tokens.splash", 0, 0, &code, &[]));
     }
     // ...and the blend over it, if one is in force. Here, and not in
     // `widgets_mod`, because this is the seam a mix is seen from: after the

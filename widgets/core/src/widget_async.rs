@@ -368,8 +368,11 @@ fn expand_isolate_ui_modules(
             }
             return;
         }
-        if let Some(sheet) = sheet {
-            crate::desktop_style::install(vm, sheet);
+        // The allocating VM's sheet, or its plain theme: never the
+        // environment's sheet over a VM that took it off.
+        match sheet {
+            Some(sheet) => crate::desktop_style::install(vm, sheet),
+            None => crate::desktop_style::uninstall(vm),
         }
         crate::theme_mod(vm);
         match theme {

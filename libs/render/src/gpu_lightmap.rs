@@ -1376,9 +1376,9 @@ impl GpuLightmapBaker {
         self.rt_us = 0;
     }
 
-    /// DEBUG (idempotence probe): re-bake every region of the CURRENT
-    /// layout into the CURRENT targets — no re-plan, no fresh textures.
-    /// This is the exact path the accumulator invariant is about.
+    /// Re-bake every region of the CURRENT layout into the CURRENT targets --
+    /// no re-plan, no fresh textures: the idempotence probe, and a replaced
+    /// GPU device (`Renderer::gpu_reset`), whose targets came back empty.
     pub fn debug_redirty(&mut self) {
         self.dirty = true;
     }
