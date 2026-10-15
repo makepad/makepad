@@ -774,6 +774,9 @@ pub struct SegmentedControl {
     focused: usize,
     #[rust]
     last_time: f64,
+    /// The frame the gliding pill asked for, so the row redraws on it.
+    #[rust]
+    glide_frame: NextFrame,
 }
 
 impl SegmentedControl {
@@ -925,12 +928,18 @@ impl Widget for SegmentedControl {
             // The glide runs in the row's own frame: a new answer slides,
             // but the row moving (a parent re-laid out around it) moves the
             // pill with it at once instead of sending it after the row.
+            let resting = self.pill.progress() >= 1.0;
             self.pill.aim(Rect { pos: target.pos - rect.pos, size: target.size }, self.glide_secs);
             let now = cx.seconds_since_app_start();
-            let dt = if self.last_time > 0.0 { (now - self.last_time).max(0.0) } else { 0.0 };
+            // A glide that starts on this draw runs from its start. The time
+            // since the row was last drawn is no part of it: a row that sat
+            // still was not drawn, and that whole gap used to be stepped at
+            // once, so a pill set going after a pause landed without moving.
+            let starts = resting && self.pill.progress() < 1.0;
+            let dt = if self.last_time > 0.0 && !starts { (now - self.last_time).max(0.0) } else { 0.0 };
             self.last_time = now;
             if self.pill.step(dt) {
-                cx.new_next_frame();
+                self.glide_frame = cx.new_next_frame();
             }
             let pill = self.pill.current();
             let at = |r: Rect| Rect { pos: r.pos + rect.pos, size: r.size };
@@ -974,6 +983,10 @@ impl Widget for SegmentedControl {
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, _scope: &mut Scope) {
         if self.animator_handle_event(cx, event).must_redraw() {
+            self.draw_bg.redraw(cx);
+        }
+        // The glide's next step: the frame it asked for redraws the row.
+        if self.glide_frame.is_event(event).is_some() {
             self.draw_bg.redraw(cx);
         }
         if self.disabled {
