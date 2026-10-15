@@ -4,6 +4,7 @@ use {
         animator::*,
         held_events::HeldEvents,
         gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_gauss},
+        pointer_field::{PointerGlass, PointerGlassSetup},
         makepad_derive_widget::*,
         makepad_draw::*,
         makepad_script::{ScriptFnRef, ScriptIp},
@@ -98,6 +99,42 @@ pub struct View {
     /// view (`optimize`) draws as before. False, the default, binds nothing.
     #[live(false)]
     pub backdrop: bool,
+
+    /// THE POINTER GLASS, a modifier any view can carry: above zero, a
+    /// sheet of glass (`draw_glass`) is drawn over the view and everything
+    /// in it, and answers the pointer within this many points of the
+    /// view's edge. Its shader gets the pointer's field and the trail of
+    /// drops the pointer leaves as it moves across (`pointer_field`,
+    /// `trail_0` to `trail_7` and `trail_life`, see [`PointerGlass`]), for
+    /// glass that rings like water where the pointer passed. Zero, the
+    /// default, draws no glass and costs nothing. A host that draws the
+    /// glass itself (a screen's glass is always there) takes it over.
+    #[live]
+    pub field_reach: f64,
+    /// How far the pointer moves between the trail's drops, in points.
+    #[live(6.0)]
+    pub trail_spacing: f64,
+    /// How long a drop of the trail lives, in seconds: the frames stop when
+    /// the newest drop is this old.
+    #[live(1.3)]
+    pub trail_life: f64,
+    /// While the trail is alive, the glass is drawn over the view on an
+    /// overlay with the window's scene of the frame bound (`has_gauss`,
+    /// slot 0 `scene_texture`, `source_size`, `source_y_flip`), so its
+    /// shader can read what lies under it and draw it displaced. At rest it
+    /// is drawn in place with nothing bound, and the window captures nothing
+    /// for it. False, the default, never lifts it.
+    #[live]
+    pub glass_backdrop: bool,
+    /// The pointer glass's face, drawn over the view while `field_reach` is
+    /// above zero (or always, by a host that draws it).
+    #[live]
+    pub draw_glass: DrawQuad,
+    #[rust]
+    pub pointer_glass: PointerGlass,
+    /// A host widget draws the glass itself and the view leaves it alone.
+    #[rust]
+    pub glass_hosted: bool,
 
     #[layout]
     pub layout: Layout,
@@ -1506,6 +1543,18 @@ impl WidgetNode for View {
     }
 }
 
+impl View {
+    /// The pointer glass's settings, from the view's properties.
+    pub(crate) fn glass_setup(&self) -> PointerGlassSetup {
+        PointerGlassSetup {
+            reach: self.field_reach.max(0.0),
+            spacing: self.trail_spacing,
+            life: self.trail_life,
+            backdrop: self.glass_backdrop,
+        }
+    }
+}
+
 impl Widget for View {
     fn clips_content(&self) -> bool {
         self.scroll_bars_obj.is_some()
@@ -1601,6 +1650,13 @@ impl Widget for View {
             // Shown again: what it waited for while hidden comes first.
             for held in held.take() {
                 self.handle_event(cx, &held, scope);
+            }
+        }
+
+        if self.field_reach > 0.0 {
+            let setup = self.glass_setup();
+            if self.pointer_glass.handle_event(cx, event, &mut self.draw_glass, &setup) {
+                self.redraw(cx);
             }
         }
 
@@ -2028,6 +2084,11 @@ impl Widget for View {
                         cx.set_pass_area(&texture_cache.pass, area);
                         //}
                     }
+                }
+                if self.field_reach > 0.0 && !self.glass_hosted {
+                    let rect = self.area.rect(cx);
+                    let setup = self.glass_setup();
+                    self.pointer_glass.draw(cx, &mut self.draw_glass, rect, &setup);
                 }
                 if std::mem::take(&mut self.backdrop_open) {
                     if let Some(list) = self.backdrop_list.as_mut() {

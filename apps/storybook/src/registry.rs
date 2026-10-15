@@ -179,6 +179,7 @@ pub const MOVED: &[(&str, &str)] = &[
     ("containers/glasssurfaces/popups", "containers/glass/sheets"),
     ("containers/glassfloatingsurface/overview", "containers/glass/floating-surface"),
     ("inputs/glass/controls", "containers/glass/controls"),
+    ("containers/screenview/ripples", "containers/material/pointer-glass"),
     // Text
     ("text/text/overview", "text/label/text-styles"),
     ("text/html/overview", "text/textflow/html"),
@@ -398,8 +399,8 @@ mod tests {
                 ("PageFlip", &["Overview"]),
                 ("MovingPanels", &["Overview"]),
                 ("Glass", &["Overview", "Surfaces", "Sheets", "Floating surface", "Controls"]),
-                ("ScreenView", &["Overview", "Ripples"]),
-                ("Material", &["Overview"]),
+                ("ScreenView", &["Overview"]),
+                ("Material", &["Overview", "Pointer glass"]),
                 ("Splash", &["Overview"]),
             ],
         ),

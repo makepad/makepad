@@ -21,20 +21,16 @@
 //! darker than whatever it is set in, a device pixel of dark at its edge,
 //! and a device pixel of light on the ground under its bottom edge.
 //!
-//! The glass can answer the pointer (`field_reach`): it then carries the
-//! pointer's field and the trail of drops the pointer leaves as it moves
-//! across, as instances of `draw_glass` (see `PointerGlass`), for a glass
-//! that water rings across. With `glass_backdrop` the glass is lifted over
-//! the content while the trail is alive, with the window's scene bound, so
-//! its shader can bend the digits under it. Both are off by default, and a
-//! screen whose pointer is still costs what it always did.
-use crate::{
-    makepad_derive_widget::*,
-    makepad_draw::*,
-    pointer_field::{PointerGlass, PointerGlassSetup},
-    view::View,
-    widget::*,
-};
+//! The glass is the view's pointer glass (`View::draw_glass`), which the
+//! screen draws itself, always, over its children: so it is the same
+//! modifier any view carries, and turned on with `field_reach` it carries
+//! the pointer's field and the trail of drops the pointer leaves as it
+//! moves across (see `PointerGlass`), for a glass that water rings across;
+//! with `glass_backdrop` it is lifted over the content while the trail is
+//! alive, with the window's scene bound, so its shader can bend the digits
+//! under it. Both are off by default, and a screen whose pointer is still
+//! costs what it always did.
+use crate::{makepad_derive_widget::*, makepad_draw::*, view::View, widget::*};
 
 script_mod! {
     use mod.prelude.widgets_internal.*
@@ -166,8 +162,6 @@ pub struct ScreenView {
     source: ScriptObjectRef,
     #[deref]
     view: View,
-    #[live]
-    draw_glass: DrawQuad,
     /// The bezel's width, in points.
     #[live(2.0)]
     pub bezel: f64,
@@ -180,30 +174,6 @@ pub struct ScreenView {
     /// Scan line depth; zero draws none.
     #[live]
     pub scan: f64,
-    /// How far past the screen's edge, in points, the pointer is in reach
-    /// of the glass: above zero, `draw_glass` gets the pointer's field and
-    /// the trail of drops the pointer leaves as it moves (`pointer_field`,
-    /// `trail_0` to `trail_7` and `trail_life`, see [`PointerGlass`]).
-    /// Zero, the default, keeps them off.
-    #[live]
-    pub field_reach: f64,
-    /// How far the pointer moves between the trail's drops, in points.
-    #[live(6.0)]
-    pub trail_spacing: f64,
-    /// How long a drop of the trail lives, in seconds: the frames stop when
-    /// the newest drop is this old.
-    #[live(1.3)]
-    pub trail_life: f64,
-    /// While the trail is alive, the glass is drawn over the content on an
-    /// overlay with the window's scene of the frame bound (`has_gauss`,
-    /// slot 0 `scene_texture`, `source_size`, `source_y_flip`), so its
-    /// shader can read what lies under it and bend it. At rest the glass is
-    /// drawn in place with nothing bound, and the window captures nothing
-    /// for it. False, the default, never lifts it.
-    #[live]
-    pub glass_backdrop: bool,
-    #[rust]
-    pointer_glass: PointerGlass,
     #[rust]
     draw_state: DrawStateWrap<ScreenDraw>,
     #[rust]
@@ -225,15 +195,17 @@ impl Widget for ScreenView {
                 return DrawStep::done();
             }
             cx.begin_turtle(walk, Layout::default());
+            // The screen draws the view's pointer glass itself, always.
+            self.view.glass_hosted = true;
             let bezel = self.bezel.max(0.0) as f32;
             self.view.draw_bg.draw_vars.set_dyn_instance(cx, id!(bezel), &[bezel]);
             self.view.draw_bg.draw_vars.set_dyn_instance(cx, id!(recess), &[self.recess.max(0.0) as f32]);
             self.view.draw_bg.draw_vars.set_dyn_instance(cx, id!(scan), &[self.scan.clamp(0.0, 1.0) as f32]);
-            self.draw_glass.draw_vars.set_dyn_instance(cx, id!(bezel), &[bezel]);
-            self.draw_glass.draw_vars.set_dyn_instance(cx, id!(sheen), &[self.sheen.clamp(0.0, 1.0) as f32]);
+            self.view.draw_glass.draw_vars.set_dyn_instance(cx, id!(bezel), &[bezel]);
+            self.view.draw_glass.draw_vars.set_dyn_instance(cx, id!(sheen), &[self.sheen.clamp(0.0, 1.0) as f32]);
             let mut radius = [0.0f32];
             self.view.draw_bg.get_uniform(cx, id!(border_radius), &mut radius);
-            self.draw_glass.draw_vars.set_dyn_instance(cx, id!(face_radius), &radius);
+            self.view.draw_glass.draw_vars.set_dyn_instance(cx, id!(face_radius), &radius);
         }
         if let Some(ScreenDraw::Content) = self.draw_state.get() {
             // The inner view fills the turtle, or measures it when the walk
@@ -250,8 +222,9 @@ impl Widget for ScreenView {
             // Drawn at any sheen: a sheet may have given the glass a pixel
             // function of its own that does not read it.
             let rect = self.view.area().rect(cx);
-            let setup = self.glass_setup();
-            self.pointer_glass.draw(cx, &mut self.draw_glass, rect, &setup);
+            let setup = self.view.glass_setup();
+            let view = &mut self.view;
+            view.pointer_glass.draw(cx, &mut view.draw_glass, rect, &setup);
             cx.end_turtle_with_area(&mut self.area);
             self.draw_state.end();
         }
@@ -259,24 +232,8 @@ impl Widget for ScreenView {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        if self.field_reach > 0.0 {
-            let setup = self.glass_setup();
-            if self.pointer_glass.handle_event(cx, event, &mut self.draw_glass, &setup) {
-                self.view.redraw(cx);
-            }
-        }
+        // The view answers the pointer for its glass.
         self.view.handle_event(cx, event, scope);
-    }
-}
-
-impl ScreenView {
-    fn glass_setup(&self) -> PointerGlassSetup {
-        PointerGlassSetup {
-            reach: self.field_reach.max(0.0),
-            spacing: self.trail_spacing,
-            life: self.trail_life,
-            backdrop: self.glass_backdrop,
-        }
     }
 }
 
