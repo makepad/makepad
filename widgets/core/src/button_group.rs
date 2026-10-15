@@ -154,6 +154,17 @@ impl SlidingIndicator {
         self.t
     }
 
+    /// The rect the current glide set out from: where the indicator was
+    /// when it was last aimed, or the target itself once it is reached.
+    pub fn start(&self) -> Rect {
+        if self.t >= 1.0 { self.to } else { self.from }
+    }
+
+    /// The rect the current glide is going to.
+    pub fn end(&self) -> Rect {
+        self.to
+    }
+
     /// Land on the target now. For motion that has been switched off: the
     /// next `current` is the target, and `step` asks for no more frames.
     pub fn settle(&mut self) {
@@ -366,6 +377,14 @@ pub enum SegmentedControlAction {
 }
 
 /// The pill behind the current answer, and the row it sits in.
+///
+/// The gliding pill also hands its shader the glide itself, for a face that
+/// draws the move rather than only the rect it has reached: `glide` is how
+/// far along it is, 0 to 1 on the glide's own clock before any easing, and
+/// `glide_from` and `glide_to` are the rects it runs between, as x, y, width
+/// and height in the space the pill is drawn in. At rest, and for the row
+/// and every still pill, `glide` is 1 and both rects are the one drawn, so
+/// a face that does not read them draws exactly what it drew before.
 #[derive(Script, ScriptHook)]
 #[repr(C)]
 pub struct DrawSegmentedBg {
@@ -379,6 +398,22 @@ pub struct DrawSegmentedBg {
     border_size: f32,
     #[live]
     radius: f32,
+    #[live(1.0)]
+    glide: f32,
+    #[live]
+    glide_from: Vec4f,
+    #[live]
+    glide_to: Vec4f,
+}
+
+impl DrawSegmentedBg {
+    /// Hand the shader a glide `progress` of the way from `from` to `to`.
+    fn set_glide(&mut self, progress: f64, from: Rect, to: Rect) {
+        let v = |r: Rect| Vec4f { x: r.pos.x as f32, y: r.pos.y as f32, z: r.size.x as f32, w: r.size.y as f32 };
+        self.glide = progress.clamp(0.0, 1.0) as f32;
+        self.glide_from = v(from);
+        self.glide_to = v(to);
+    }
 }
 
 /// The chevron on a split button's trailing half. Drawn rather than typed:
@@ -882,6 +917,7 @@ impl Widget for SegmentedControl {
         if self.selection == ChipSelection::Multi {
             for (i, seg) in self.segments.clone().iter().enumerate() {
                 if self.is_on(i) {
+                    self.draw_pill.set_glide(1.0, *seg, *seg);
                     self.draw_pill.draw_abs(cx, *seg);
                 }
             }
@@ -897,7 +933,9 @@ impl Widget for SegmentedControl {
                 cx.new_next_frame();
             }
             let pill = self.pill.current();
-            self.draw_pill.draw_abs(cx, Rect { pos: pill.pos + rect.pos, size: pill.size });
+            let at = |r: Rect| Rect { pos: r.pos + rect.pos, size: r.size };
+            self.draw_pill.set_glide(self.pill.progress(), at(self.pill.start()), at(self.pill.end()));
+            self.draw_pill.draw_abs(cx, at(pill));
         }
 
         for (i, seg) in self.segments.clone().iter().enumerate() {
@@ -1300,6 +1338,23 @@ mod tests {
         let mid = pill.current().pos.x;
         pill.aim(c, 0.2);
         assert_eq!(pill.current().pos.x, mid, "the new glide starts where the old one had got to");
+    }
+
+    /// The glide's two ends are where it set out from and where it goes;
+    /// once it has arrived both are the target, which is what a face that
+    /// draws the move reads at rest.
+    #[test]
+    fn sliding_indicator_reports_the_ends_of_its_glide() {
+        let a = Rect { pos: dvec2(0.0, 0.0), size: dvec2(10.0, 4.0) };
+        let b = Rect { pos: dvec2(40.0, 0.0), size: dvec2(14.0, 4.0) };
+        let mut pill = SlidingIndicator::default();
+        pill.aim(a, 0.2);
+        assert_eq!((pill.start(), pill.end()), (a, a), "at rest both ends are the target");
+        pill.aim(b, 0.2);
+        pill.step(0.05);
+        assert_eq!((pill.start(), pill.end()), (a, b), "under way it runs from a to b");
+        pill.step(0.2);
+        assert_eq!((pill.start(), pill.end()), (b, b), "arrived, both ends are b");
     }
 
     /// Progress runs from 0 to 1 over the glide and settling lands at once,
