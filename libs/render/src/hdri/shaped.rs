@@ -117,9 +117,15 @@ impl ShapedLight {
     /// (P1: a picture in stretch or fill, whose border is the light's edge,
     /// `LightImage::edge_inset`): every edge ramp of the shape then runs
     /// from half its band plus `inset` x the depth inside to half its band
-    /// outside, one smoothstep, so the light's reach and its cull stay.
+    /// outside, one smoothstep, so the light's reach and its cull stay. A
+    /// polygon's distance then reaches as deep as its ramp starts
+    /// (`FillLight::widened`); at 0 it is the bare shape, untouched.
     pub fn with_inset(self, inset: f32) -> ShapedLight {
-        ShapedLight { inset, ..self }
+        let kind = match self.kind {
+            ShapedKind::Fill(fill) if inset > 0.0 => ShapedKind::Fill(fill.widened(inset)),
+            kind => kind,
+        };
+        ShapedLight { kind, inset, ..self }
     }
 
     /// The depth the shape's Softness takes, tangent units (a stroke's in
@@ -254,6 +260,9 @@ impl ShapedLight {
 #[derive(Clone, Debug)]
 struct FillLight {
     frame: LightFrame,
+    /// The rounded outline, tangent units, that `shape` is built from: kept
+    /// so `widened` can build it again with more reach.
+    outline: Contours,
     shape: FillShape,
     /// Half extents tan(w/2), tan(h/2): the hotspot's unit radius.
     half: Vec2f,
@@ -287,13 +296,30 @@ impl FillLight {
         Some(FillLight {
             frame: light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg),
             // Past half the band every distance gives the same coverage, so
-            // that is all the reach the shape needs.
+            // that is all the reach the bare shape needs (`widened` for a
+            // picture's Penumbra, whose ramp starts deeper).
             shape: FillShape::new(&outline, edge),
+            outline,
             half: vec2f(hx, hy),
             edge,
             depth,
             hotspot: HOTSPOT_FALLOFF * light.hotspot,
         })
+    }
+
+    /// The fill whose distance reaches as deep as its edge ramp starts once
+    /// a picture's Penumbra widens it inward by `inset` of the depth
+    /// (`ShapedLight::with_inset`, P1). The shape caps every distance at its
+    /// reach, half the band for the bare shape; read through that cap, the
+    /// whole inside sat one value short of the widened ramp's start, so the
+    /// light was dimmed flat, or black at Softness 0. Built to the ramp's
+    /// start, every distance the ramp reads is exact, and a deeper one,
+    /// capped there, is full coverage, as it should be. Only the bins' padding
+    /// grows: the outline, its cull and every distance within the old reach
+    /// (the bare `sample`) stay as they were, bit for bit.
+    fn widened(self, inset: f32) -> FillLight {
+        let shape = FillShape::new(&self.outline, self.edge + inset * self.depth);
+        FillLight { shape, ..self }
     }
 
     fn cull(&self) -> CullCone {
@@ -1084,6 +1110,56 @@ mod tests {
             }
         }
         assert!(lit > 100, "the test must see the light ({lit})");
+    }
+
+    /// P1: a polygon whose soft edge a picture's Penumbra widens inward
+    /// (`with_inset`) ramps over its true signed distance as deep as that
+    /// ramp starts. The drawing's distance is capped at its reach, which for
+    /// the bare shape is half its band: read through that cap, a widened
+    /// polygon's whole inside was one value short of the ramp's start, so
+    /// the light was dimmed flat, or black at Softness 0. A rounded star, so
+    /// the bins are used and the outline is not convex, against the exact
+    /// distance by brute force. Its bare sample (a window's glass,
+    /// `PreparedLight::cover`) stays the bare shape's, bit for bit.
+    #[test]
+    fn a_widened_polygon_ramps_over_its_true_distance() {
+        for softness in [0.0f32, 0.3] {
+            let light = LightParams {
+                softness,
+                corner: 0.3,
+                polygon: Some(PolygonParams { sides: 5, star: 0.5, points: Vec::new() }),
+                ..polygon_light()
+            };
+            let bare = ShapedLight::new(&light).expect("the light builds");
+            let ShapedKind::Fill(fill) = &bare.kind else { panic!("a polygon is a fill") };
+            let shape = fill.shape.clone();
+            assert!(shape.outline().segment_count() > GRID_MIN_SEGMENTS, "the rounded star uses the bins: {} segments", shape.outline().segment_count());
+            let (frame, edge, depth) = (fill.frame, fill.edge, fill.depth);
+            for inset in [0.3f32, 0.6, 1.0] {
+                let widened = bare.clone().with_inset(inset);
+                let mut full = 0;
+                for j in 0..=80 {
+                    for i in 0..=80 {
+                        let unit = [-1.1 + 2.2 * i as f32 / 80.0, -1.1 + 2.2 * j as f32 / 80.0];
+                        let dir = unit_to_dir(&light, unit);
+                        let t = project(&frame, dir).expect("in front of the light");
+                        let exact = shape.outline().exact_distance(t);
+                        let sdf = if shape.winding_brute(t) != 0 { -exact } else { exact };
+                        let want = 1.0 - smoothstep(-edge - inset * depth, edge, sdf);
+                        let got = widened.compose(dir, Vec3f::default(), Vec3f::all(1.0)).x;
+                        assert!(
+                            (got - want).abs() < 1.0e-5,
+                            "softness {softness}, inset {inset}, at {unit:?} (sdf {sdf}): {got}, the ramp over the true distance says {want}"
+                        );
+                        assert_eq!(widened.sample(dir), bare.sample(dir), "softness {softness}, inset {inset}, at {unit:?}: the bare sample moved");
+                        full += (got == 1.0) as usize;
+                    }
+                }
+                // Deeper than the ramp's start the light is whole (the
+                // star's middle, at the smaller insets).
+                assert!(inset == 1.0 || full > 0, "softness {softness}, inset {inset}: nothing is fully lit");
+            }
+        }
     }
 
     /// A hard 4°-wide straight stroke (curviness 0) through `points`.

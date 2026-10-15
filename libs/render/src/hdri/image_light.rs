@@ -1048,15 +1048,26 @@ mod tests {
         }
     }
 
-    /// P1: every shape's own edge widens the same way in stretch: a stroke's
-    /// across its half width (analytically), and a disc's, a ring's, a
-    /// polygon's and a scrim's by the same rule: at Penumbra 0 the light is
-    /// the plain one, and above it never brighter, dimmer inside its edge
-    /// and dark where the plain light is (its reach stays).
+    /// P1: every shape's own edge widens, in stretch and fill, by the one
+    /// ramp a rect's does (`in_stretch_and_fill_penumbra_widens_the_lights_own_edge`):
+    /// 1 - smoothstep(-(S/2 + P) x depth, S/2 x depth, sdf), each shape with
+    /// the depth its Softness takes (`ShapedLight::depth`, studio.rs's
+    /// inradius). It is checked analytically along a line out of the light's
+    /// middle, past its reach, so a light dimmed flat or gone black fails:
+    /// - a stroke across its half width (its depth);
+    /// - a disc (here a circle: |p| - r, depth r);
+    /// - a ring (| |p| - its middle radius | - its half thickness, the depth);
+    /// - the default hexagon, out through the middle of a side (x - its
+    ///   apothem, the depth: how deep its centre sits inside it);
+    /// - a scrim, through the middle of a side (a rect's distance, depth its
+    ///   half side), times its cloth's glow from the middle.
+    /// Over the whole box, at Penumbra 0 each light is the plain one, and
+    /// above it never brighter and dark where the plain light is (its reach
+    /// stays).
     #[test]
-    fn penumbra_widens_every_shapes_own_edge_in_stretch() {
+    fn penumbra_widens_every_shapes_own_edge_in_stretch_and_fill() {
         let flat = set_of("flat", picture(4, 4, |_, _| [1.0, 1.0, 1.0, 1.0]));
-        let pictured = |light: &LightParams, penumbra: f32| LightParams { image: Some(soft_image("flat", "stretch", penumbra)), ..light.clone() };
+        let pictured = |light: &LightParams, fit: &str, penumbra: f32| LightParams { image: Some(soft_image("flat", fit, penumbra)), ..light.clone() };
         // A stroke along the horizon, 6 degrees wide: across it at azimuth
         // 90 the distance from its centre line is the elevation.
         let stroke = LightParams {
@@ -1069,46 +1080,80 @@ mod tests {
         };
         let hw = 3f32.to_radians();
         let edge = 0.5 * 0.4 * hw;
-        for penumbra in [0.0f32, 0.5, 1.0] {
-            let env = Env::new_with(&dark_studio(vec![pictured(&stroke, penumbra)]), &flat);
-            for i in 0..=200 {
-                let elevation = 4.0 * i as f32 / 200.0;
-                let got = luminance(env.radiance(dir_from_az_el(90.0, elevation)));
-                let want = 1.0 - smoothstep(hw - edge - penumbra * hw, hw + edge, elevation.to_radians());
-                assert!((got - want).abs() < 2.0e-3, "a stroke at penumbra {penumbra}, {elevation} degrees off its line: {got}, one ramp says {want}");
+        for fit in ["stretch", "fill"] {
+            for penumbra in [0.0f32, 0.5, 1.0] {
+                let env = Env::new_with(&dark_studio(vec![pictured(&stroke, fit, penumbra)]), &flat);
+                for i in 0..=200 {
+                    let elevation = 4.0 * i as f32 / 200.0;
+                    let got = luminance(env.radiance(dir_from_az_el(90.0, elevation)));
+                    let want = 1.0 - smoothstep(hw - edge - penumbra * hw, hw + edge, elevation.to_radians());
+                    assert!((got - want).abs() < 2.0e-3, "{fit}: a stroke at penumbra {penumbra}, {elevation} degrees off its line: {got}, one ramp says {want}");
+                }
             }
         }
-        let shapes = [
-            LightParams { shape: "disc".to_string(), ..image_light("flat") },
-            LightParams { shape: "ring".to_string(), inner: 0.4, ..image_light("flat") },
-            LightParams { shape: "polygon".to_string(), ..image_light("flat") },
-            LightParams { shape: "scrim".to_string(), ..image_light("flat") },
+        // The 40 x 40 degree box (`image_light`), half side h: a disc in it is
+        // a circle of radius h, and the hexagon's corners lie on that circle.
+        let h = 20f32.to_radians().tan();
+        let apothem = (std::f32::consts::PI / 6.0).cos() * h;
+        // Each shape: the light, its depth, and its signed distance and the
+        // glow that multiplies its ramp, x out along the middle.
+        type AlongX = fn(f32, f32) -> f32;
+        let shapes: [(LightParams, f32, AlongX, AlongX); 4] = [
+            (LightParams { shape: "disc".to_string(), ..image_light("flat") }, h, |x, h| x - h, |_, _| 1.0),
+            (LightParams { shape: "ring".to_string(), inner: 0.4, ..image_light("flat") }, 0.3 * h, |x, h| (x - 0.7 * h).abs() - 0.3 * h, |_, _| 1.0),
+            (
+                LightParams { shape: "polygon".to_string(), ..image_light("flat") },
+                apothem,
+                |x, h| x - (std::f32::consts::PI / 6.0).cos() * h,
+                |_, _| 1.0,
+            ),
+            // The cloth glows with a Gaussian of sigma 0.5 box units (its default).
+            (LightParams { shape: "scrim".to_string(), ..image_light("flat") }, h, |x, h| x - h, |x, h| (-2.0 * (x / h) * (x / h)).exp()),
         ];
-        for shape in shapes {
-            let shape = LightParams { softness: 0.3, rgb: Some([1.0; 3]), intensity_ev: 0.0, ..shape };
+        for (shape, depth, sdf, glow) in &shapes {
             let name = shape.shape.clone();
-            let draw = |penumbra: f32| {
-                let env = Env::new_with(&dark_studio(vec![pictured(&shape, penumbra)]), &flat);
-                (0..=60).flat_map(|j| (0..=60).map(move |i| (i, j))).map(|(i, j)| luminance(env.radiance(box_dir(&shape, -0.2 + 1.4 * i as f32 / 60.0, -0.2 + 1.4 * j as f32 / 60.0)))).collect::<Vec<f32>>()
-            };
-            let plain = {
-                let env = Env::new(&dark_studio(vec![shape.clone()]));
-                (0..=60).flat_map(|j| (0..=60).map(move |i| (i, j))).map(|(i, j)| luminance(env.radiance(box_dir(&shape, -0.2 + 1.4 * i as f32 / 60.0, -0.2 + 1.4 * j as f32 / 60.0)))).collect::<Vec<f32>>()
-            };
-            let zero = draw(0.0);
-            for (k, (z, p)) in zero.iter().zip(&plain).enumerate() {
-                assert!((z - p).abs() < 1.0e-5, "{name} at penumbra 0, sample {k}: {z} vs the plain light's {p}");
-            }
-            let soft = draw(0.6);
-            let mut dimmer = 0;
-            for (k, (s, p)) in soft.iter().zip(&plain).enumerate() {
-                assert!(*s <= p + 1.0e-5, "{name}, sample {k}: {s} is brighter than the plain light's {p}");
-                if *p == 0.0 {
-                    assert_eq!(*s, 0.0, "{name}, sample {k}: lit past the plain light's reach");
+            for fit in ["stretch", "fill"] {
+                for (softness, penumbra) in [(0.0f32, 0.3f32), (0.0, 0.6), (0.0, 1.0), (0.3, 0.0), (0.3, 0.3), (0.3, 0.6), (0.3, 1.0), (0.6, 1.0)] {
+                    let light = LightParams { softness, rgb: Some([1.0; 3]), intensity_ev: 0.0, ..shape.clone() };
+                    let env = Env::new_with(&dark_studio(vec![pictured(&light, fit, penumbra)]), &flat);
+                    let f = light_frame(light.azimuth_deg, light.elevation_deg, light.roll_deg);
+                    let a = 0.5 * (softness * depth).max(1.0e-4);
+                    let b = penumbra * depth;
+                    // From the middle out past the reach (the disc's, the
+                    // farthest, ends at h + a <= 1.3 h).
+                    for i in 0..=400 {
+                        let x = 1.4 * h * i as f32 / 400.0;
+                        let d = (f.center + f.right * x).normalize();
+                        let want = (1.0 - smoothstep(-(a + b), a, sdf(x, h))) * glow(x, h);
+                        let got = luminance(env.radiance(d));
+                        assert!(
+                            (got - want).abs() < 2.0e-4,
+                            "{name} in {fit}, softness {softness}, penumbra {penumbra}, at x {x} (sdf {}): {got}, one ramp says {want}",
+                            sdf(x, h)
+                        );
+                    }
                 }
-                dimmer += (*s < p - 1.0e-3) as usize;
             }
-            assert!(dimmer > 50, "{name}: the edge widened at only {dimmer} samples");
+            let light = LightParams { softness: 0.3, rgb: Some([1.0; 3]), intensity_ev: 0.0, ..shape.clone() };
+            let grid = |env: &Env| {
+                (0..=60)
+                    .flat_map(|j| (0..=60).map(move |i| (i, j)))
+                    .map(|(i, j)| luminance(env.radiance(box_dir(&light, -0.2 + 1.4 * i as f32 / 60.0, -0.2 + 1.4 * j as f32 / 60.0))))
+                    .collect::<Vec<f32>>()
+            };
+            let plain = grid(&Env::new(&dark_studio(vec![light.clone()])));
+            for fit in ["stretch", "fill"] {
+                let draw = |penumbra: f32| grid(&Env::new_with(&dark_studio(vec![pictured(&light, fit, penumbra)]), &flat));
+                for (k, (z, p)) in draw(0.0).iter().zip(&plain).enumerate() {
+                    assert!((z - p).abs() < 1.0e-5, "{name} in {fit} at penumbra 0, sample {k}: {z} vs the plain light's {p}");
+                }
+                for (k, (s, p)) in draw(0.6).iter().zip(&plain).enumerate() {
+                    assert!(*s <= p + 1.0e-5, "{name} in {fit}, sample {k}: {s} is brighter than the plain light's {p}");
+                    if *p == 0.0 {
+                        assert_eq!(*s, 0.0, "{name} in {fit}, sample {k}: lit past the plain light's reach");
+                    }
+                }
+            }
         }
     }
 
