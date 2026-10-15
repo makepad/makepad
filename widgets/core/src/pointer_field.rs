@@ -9,10 +9,12 @@
 //! For a material that answers the pointer's movement rather than its
 //! presence (water that rings where the pointer passed), the trail: the
 //! last few places the pointer moved through, each with its age, alive for
-//! a set time after the pointer last moved. And the glass over a display
-//! that carries both, `PointerGlass`, which lifts itself over the content
-//! under it while the trail is alive, so its shader can read that content
-//! and bend it.
+//! a set time after the pointer last moved. And the glass that carries
+//! both, `PointerGlass`, which lifts itself over the content under it while
+//! the trail is alive, so its shader can read that content and bend it: the
+//! pointer glass modifier, which every view carries (`View::field_reach`,
+//! `draw_glass`; a screen's glass is its view's), and the needle meter
+//! carries over its face.
 use crate::{
     gauss_view::{arm_gauss_capture, bind_gauss_snapshot, request_window_scene},
     *,
