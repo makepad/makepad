@@ -23,9 +23,9 @@ use super::image::mean_luminance;
 use std::borrow::Cow;
 
 /// The dome texture is never wider than this: a 2048 x 1024 RGBA f32 dome
-/// is 32 MB of texels; D3D11 allocates RGBA32F textures at three times the
-/// height (about 100 MB there). The atan2 seam at that size is invisible
-/// at 4K.
+/// is 32 MB of texels, allocated at exactly that size (the HAL pads no
+/// texture; the old D3D11 backend allocated three times the height, about
+/// 100 MB). The atan2 seam at that size is invisible at 4K.
 pub const DOME_MAX_WIDTH: usize = 2048;
 /// The horizon band the fog colour averages: +- this elevation.
 pub const HORIZON_BAND_DEG: f32 = 3.0;

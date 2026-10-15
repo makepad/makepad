@@ -70,8 +70,8 @@ script_mod! {
         // task A7 the meta row is row 0 and the atlas rows start at 1, both
         // addressed absolutely (normalised by size() only at the sample), so
         // spare rows below the data could not hide them; no backend gives a
-        // float texture spare rows now (makepad 9e9a7ee9b: only append-rows
-        // tables keep them). Nothing here overrides them.
+        // float texture spare rows now (the HAL allocates every texture at
+        // exactly its size). Nothing here overrides them.
         mat_ibl_meta: mod.draw.mat_ibl_meta
         mat_ibl_dir: mod.draw.mat_ibl_dir
         mat_ibl_level: mod.draw.mat_ibl_level
@@ -81,7 +81,7 @@ script_mod! {
         // LOGICAL size (bg2.zw) and size() only converts a texel index to
         // the sampler's coordinates (never wraps, clamps or scales by it),
         // so the lookup reads the map's texels whatever the allocation (an
-        // exact one on every backend since 9e9a7ee9b). The test
+        // exact one on every backend under the HAL). The test
         // `the_dome_lookup_never_reads_the_padding_of_a_float_allocation`
         // runs this function's transcription over a NaN-padded allocation.
         env_texel: fn(uv: vec2) -> vec3 {
@@ -1709,14 +1709,14 @@ mod tests {
         [c[0], c[1], c[2]]
     }
 
-    /// The dome is a VecRGBAf32 texture. D3D11 and desktop GL allocated
-    /// such textures with spare rows (`ceil128(max(3 h, 512))`) until
-    /// makepad 9e9a7ee9b, which keeps them for append-rows tables only, and
-    /// `size()` reported the allocation. The lookup addresses texels in the
-    /// logical size and normalises only the sample, so it reads the map
-    /// whatever the allocation: over one whose spare rows are NaN it reads
-    /// exactly the map, `EnvMap::sample_uv`, finite, at the seam, the poles
-    /// and in between.
+    /// The dome is a VecRGBAf32 texture. The old D3D11 and desktop GL
+    /// backends allocated such textures with spare rows (`ceil128(max(3 h,
+    /// 512))`) until makepad 9e9a7ee9b, and `size()` reported the
+    /// allocation; the HAL allocates every texture at exactly its size. The
+    /// lookup addresses texels in the logical size and normalises only the
+    /// sample, so it reads the map whatever the allocation: over one whose
+    /// spare rows are NaN it reads exactly the map, `EnvMap::sample_uv`,
+    /// finite, at the seam, the poles and in between.
     #[test]
     fn the_dome_lookup_never_reads_the_padding_of_a_float_allocation() {
         let map = EnvMap::from_fn(32, |d| [0.5 + 0.5 * d[0], 0.5 + 0.5 * d[1], 0.5 + 0.5 * d[2]]);
