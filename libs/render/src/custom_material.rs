@@ -524,7 +524,7 @@ mod tests {
         } else {
             script_eval!(vm, { mod.shader.test_compile_draw_source(mod.draw.program_under_test, "hlsl", false) })
         };
-        vm.bx.heap.string_with(source, |_, s| s.to_string()).unwrap_or_default()
+        crate::shaders::test_source(&vm.bx.heap.string_with(source, |_, s| s.to_string()).unwrap_or_default())
     }
 
     /// An IBL program (the stock IBL program and the built-in item IBL
@@ -606,11 +606,13 @@ mod tests {
                 // The stock lane: the band it had, every constant of it,
                 // over the reflection it is handed.
                 let band = body(&stock, "the stock PBR program", "coat_treeline");
+                // The tree's share, splat to the colour's three channels.
+                let splat = if glsl { "fog_color * 0.12)), vec3((l_tree * 0.85)));" } else { "fog_color * 0.12)), ((float3)((l_tree * 0.85))));" };
                 for part in [
                     "(p_r.z, p_r.x);",
                     "((0.035 + (0.05 * ", "((l_az * 9", "), 0.5)))) + (0.03 * ", "((l_az * 37", "), 1.5))));",
-                    "((1.0 - smoothstep((l_ridge - 0.01), (l_ridge + 0.01), p_r.y)) * smoothstep((-0.02), 0.0, p_r.y));",
-                    "(p_env, ((", "sun_ground * 0.28) + (", "fog_color * 0.12)), (l_tree * 0.85));",
+                    "((1.0 - smoothstep((l_ridge - 0.01), (l_ridge + 0.01), p_r.y)) * smoothstep(-0.02, 0.0, p_r.y));",
+                    "(p_env, ((", "sun_ground * 0.28) + (", splat,
                 ] {
                     assert!(band.contains(part), "glsl {glsl}: the stock lane's treeline is the band it was, `{part}`: {band}");
                 }
@@ -618,7 +620,8 @@ mod tests {
                 // Car paint only (a toy's rim skips it), and the IBL
                 // program's coat is this coat: only the function differs.
                 let stock_coat = body(&stock, "the stock PBR program", "clear_coat");
-                let call = if glsl { "if((l_rim < 0.5)){\nl_env = io_coat_treeline(l_env, l_r);\n}\n" } else { "if((l_rim < 0.5)){\nl_env = f_io_coat_treeline(l_env, l_r);\n}\n" };
+                // GLSL and HLSL name a shader function alike (`io_<name>`).
+                let call = "if ((l_rim < 0.5)) {\nl_env = io_coat_treeline(l_env, l_r);\n}\n";
                 assert!(stock_coat.contains(call) && !stock_coat.contains("tn_noise("), "glsl {glsl}: the coat paints the band through the function, on car paint: {stock_coat}");
                 assert_eq!(coat, stock_coat, "glsl {glsl}: an IBL program's coat is the stock coat");
             }

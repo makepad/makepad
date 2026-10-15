@@ -1179,14 +1179,14 @@ pub struct DrawLmTopDilate {
 pub const LM_SUN_SOFT: (f32, f32) = (0.2, 0.8);
 
 /// The body of the function `name` in a lowered shader source a compile
-/// test emitted (GLSL defines it as `io_<name>(`, HLSL as `f_io_<name>(`):
-/// the lines between its opening line and its closing brace.
+/// test emitted (GLSL and HLSL both define it as `io_<name>(`): the lines
+/// between its opening line and its closing brace.
 #[cfg(test)]
 pub(crate) fn lowered_fn_body(source: &str, name: &str) -> Option<String> {
-    let (glsl, hlsl) = (format!("io_{name}("), format!("f_io_{name}("));
+    let def = format!("io_{name}(");
     // `<type> <name>(..){` at the start of a line: the definition, not a call.
     let mut lines = source.lines().skip_while(|l| {
-        !(l.trim_end().ends_with('{') && l.split_whitespace().nth(1).is_some_and(|w| w.starts_with(&glsl) || w.starts_with(&hlsl)))
+        !(l.trim_end().ends_with('{') && l.split_whitespace().nth(1).is_some_and(|w| w.starts_with(&def)))
     });
     lines.next()?;
     let (mut depth, mut body) = (1i32, String::new());
@@ -1199,6 +1199,49 @@ pub(crate) fn lowered_fn_body(source: &str, name: &str) -> Option<String> {
         body.push('\n');
     }
     None
+}
+
+/// A lowered shader source as the source-text tests read it: each line
+/// trimmed, and each user local named `l_<name>`. The shader IR writes a
+/// local `l<index>_<name>` (platform/shader, `local_name`), its index in
+/// its function, which moves whenever the function gains or loses a local;
+/// the tests pin statements, not that numbering or the indentation.
+#[cfg(test)]
+pub(crate) fn test_source(source: &str) -> String {
+    let mut out = Vec::with_capacity(source.len());
+    for line in source.lines() {
+        let b = line.trim().as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            let in_word = i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_');
+            if b[i] == b'l' && !in_word {
+                let digits = b[i + 1..].iter().take_while(|c| c.is_ascii_digit()).count();
+                if digits > 0 && b.get(i + 1 + digits) == Some(&b'_') {
+                    out.extend_from_slice(b"l_");
+                    i += digits + 2;
+                    continue;
+                }
+            }
+            out.push(b[i]);
+            i += 1;
+        }
+        out.push(b'\n');
+    }
+    // Only ASCII runs were replaced, so the bytes are still UTF-8.
+    String::from_utf8(out).expect("UTF-8 source")
+}
+
+#[cfg(test)]
+mod lowered_source_tests {
+    use super::test_source;
+
+    #[test]
+    fn a_local_reads_by_its_name_and_a_line_without_its_indent() {
+        let lowered = "    float l14_dither = (((l13_hash - 0.5) * 0.008) * (1.0 - l6_hdr));\n        if ((uni_ibl_ctl.x > 0.5)) {\n    return p_a;";
+        assert_eq!(test_source(lowered), "float l_dither = (((l_hash - 0.5) * 0.008) * (1.0 - l_hdr));\nif ((uni_ibl_ctl.x > 0.5)) {\nreturn p_a;\n");
+        // Not a local: a name with `l<digits>_` inside it, or no `_` after the digits.
+        assert_eq!(test_source("cell2_x + bl3_y + l7 + l_x"), "cell2_x + bl3_y + l7 + l_x\n");
+    }
 }
 
 #[cfg(test)]
@@ -1310,7 +1353,7 @@ mod shader_registration_tests {
             ("env background GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawEnvBackground, "glsl", false)})),
             ("env background HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawEnvBackground, "hlsl", false)})),
         ] {
-            let source = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+            let source = test_source(&vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap());
             assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
             assert!(source.contains("env_tex") && source.contains("detail_map"), "{name}: both textures are sampled");
             // The dome's texel addressing works in its logical size
@@ -1653,7 +1696,7 @@ mod skin_ibl_tests {
                 ("skin GLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "glsl", false)})),
                 ("skin HLSL", script_eval!(vm, {mod.shader.test_compile_draw_source(mod.draw.DrawSceneSkinnedGpu, "hlsl", false)})),
             ] {
-                let source = vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap();
+                let source = test_source(&vm.bx.heap.string_with(result, |_heap, value| value.to_string()).unwrap());
                 assert!(!source.starts_with("ERRORS:"), "{name}: {source}");
                 assert!(source.contains("mat_ibl_sky_env") && source.contains("mat_ibl_ambient"), "{name}: the IBL lookups are in the surface path");
                 assert!(source.contains("detail_map"), "{name}: the atlas is sampled");
@@ -1680,10 +1723,12 @@ mod skin_ibl_tests {
                 // as a lacquer (0.03), and nothing else.
                 let pixel = lowered_fn_body(&source, "pixel").unwrap_or_else(|| panic!("{name}: no pixel function"));
                 let coat = lowered_fn_body(&source, "toy_coat").unwrap_or_else(|| panic!("{name}: no toy coat"));
-                let (switch, f) = if name == "skin GLSL" { ("if((uni_ibl_ctl.x > 0.5)){", "io_") } else { ("if((u_io_ibl_ctl.x > 0.5)){", "f_io_") };
+                // GLSL and HLSL name a uniform and a function alike
+                // (`uni_<name>`, `io_<name>`).
+                let (switch, f) = ("if ((uni_ibl_ctl.x > 0.5)) {", "io_");
                 assert_eq!(source.matches("ibl_ctl.x > 0.5").count(), 2, "{name}: the switch set turns the lookups on, once in the surface path and once in the coat");
-                assert!(pixel.contains(&format!("{switch}\nl_environment = {f}mat_ibl_lane_sky_env(normalize(l_reflection), l_rough);\n")), "{name}: under the switch the surface reflects the map along its reflection, at its roughness");
-                assert!(pixel.contains(&format!("\nl_fill = {f}mat_ibl_lane_ambient(l_n, l_fill);\n}}\n")), "{name}: under the switch the surface fills from the map along its normal, over the fill it had, and the block ends");
+                assert!(pixel.contains(&format!("{switch}\nl_environment = {f}mat_ibl_lane_sky_env(normalize(l_reflection), l_rough);\n")), "{name}: under the switch the surface reflects the map along its reflection, at its roughness: {pixel}");
+                assert!(pixel.contains(&format!("\nl_fill = {f}mat_ibl_lane_ambient(l_n, l_fill);\n}}\n")), "{name}: under the switch the surface fills from the map along its normal, over the fill it had, and the block ends: {pixel}");
                 assert!(coat.contains(&format!("{switch}\nl_env = {f}mat_ibl_lane_sky_env(normalize(l_r), 0.03);\n}}\n")), "{name}: under the switch the coat reflects the map along its own reflection, as a lacquer: {coat}");
                 // Nothing in the lane's pixel stage takes a raw lookup.
                 for (stage, body) in [("pixel", &pixel), ("toy_coat", &coat)] {

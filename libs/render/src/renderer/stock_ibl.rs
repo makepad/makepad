@@ -142,7 +142,7 @@ impl Renderer {
     /// frame's features are known: the PBR lane is enabled, an IBL texture
     /// is bound, the program is installed and its variant for this frame's
     /// features (`CustomMaterial::shaders`, built on first use: a shader of
-    /// its own, whose pipeline Metal compiles apart) is ready. Otherwise the
+    /// its own, whose pipeline the HAL compiles apart) is ready. Otherwise the
     /// models stay on the PBR lane, as `pbr_ready` keeps them on the
     /// diffuse lane while the PBR lane's variant compiles. The variant goes
     /// on the program's draw, where the program's own pass puts it too, so
@@ -405,9 +405,11 @@ mod tests {
         let id = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("the lane on: the program is built");
         let active = renderer.stock_ibl_active();
         assert_eq!(active, cx.draw_shader_ready(id, renderer.hdr_output), "the decision is the program's pipeline");
-        // Every backend but Metal compiles synchronously (window_snapshot.rs).
-        #[cfg(not(target_vendor = "apple"))]
-        assert!(active, "the lane on and a ready program: the frame routes");
+        // Under the HAL a new shader's pipeline is made at the next beat and
+        // compiled off the thread on every backend, so in a test, which runs
+        // no beat, it cannot draw yet: the frame waits for it. The lab's
+        // pixel test (`--scene=ibl`) draws the route once it is ready.
+        assert!(!active, "the lane on and the program's pipeline not made yet: the frame waits for it");
     }
 
     /// The lanes draw the program through its variant for this frame's
@@ -415,10 +417,11 @@ mod tests {
     /// one `prepare_stock_ibl` reads off the draw before the walk (the
     /// stock shader, or last walk's variant). A list's diffuse pass decides
     /// again from that variant and puts it on the draw, so the lanes,
-    /// `stock_ibl_ready` and `items_ready` read one shader. On Metal a
-    /// decision read off the other shader routed the models while their
-    /// variant compiled: the PBR lane had left them and the variant's draw
-    /// was left out of the frame.
+    /// `stock_ibl_ready` and `items_ready` read one shader. Where a
+    /// pipeline compiles apart (every backend under the HAL, Metal before
+    /// it) a decision read off the other shader routed the models while
+    /// their variant compiled: the PBR lane had left them and the variant's
+    /// draw was left out of the frame.
     #[test]
     fn each_list_decides_from_this_frames_variant_and_puts_it_on_the_draw() {
         use makepad_draw::makepad_platform::thread::ShutdownMode;
@@ -449,9 +452,9 @@ mod tests {
         assert_eq!(on_draw(&renderer), Some(variant), "the variant the lanes draw through is on the draw");
         let active = renderer.stock_ibl_active();
         assert_eq!(active, cx.draw_shader_ready(variant, renderer.hdr_output), "the decision is that variant's pipeline");
-        // Every backend but Metal compiles synchronously (window_snapshot.rs).
-        #[cfg(not(target_vendor = "apple"))]
-        assert!(active, "an environment and a ready variant: the frame routes");
+        // No beat has made the variant's pipeline (the HAL makes it at the
+        // next one): the frame waits for it.
+        assert!(!active, "an environment and a variant whose pipeline is not made yet: the frame waits for it");
         assert_eq!(renderer.stock_ibl_ready(&cx), active, "the program is waited for on the shader the lanes draw through");
         assert_eq!(renderer.items_ready(&cx), active, "and items_ready waits for it");
 
@@ -557,9 +560,9 @@ mod tests {
         let id = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("an environment builds the program");
         let active = renderer.stock_ibl_active();
         assert_eq!(active, cx.draw_shader_ready(id, renderer.hdr_output), "the first estimate is the texture plus the pipeline of the shader on the program's draw");
-        // Every backend but Metal compiles synchronously (window_snapshot.rs).
-        #[cfg(not(target_vendor = "apple"))]
-        assert!(active, "an environment and a ready program: the estimate is on");
+        // No beat has made the program's pipeline (the HAL makes it at the
+        // next one): the estimate waits for it.
+        assert!(!active, "an environment and a program whose pipeline is not made yet: the estimate is off");
         let (chrome, matte) = (wants_pbr(&renderer, "test/chrome"), wants_pbr(&renderer, "test/matte"));
         assert_eq!(takes_stock_ibl(active, chrome, false, false), active, "the predicate takes the chrome model's flag");
         assert!(!takes_stock_ibl(active, matte, false, false), "and leaves the matte model's to the diffuse lane");
@@ -883,21 +886,21 @@ mod tests {
             transform: Mat4f::identity(), tint: vec4(1.0, 1.0, 1.0, 1.0), color_adjust: vec4(0.0, 1.0, 1.0, 0.0), dynamic: true, depth_order: 0.0, part_poses: Vec::new(),
         };
         let (stock, missing, own) = (instance("test/chrome", None), instance("test/chrome", Some("replica/paint")), instance("test/chrome", Some("paint")));
-        let active = renderer.stock_ibl_active();
-        // Every backend but Metal compiles synchronously (window_snapshot.rs).
-        #[cfg(not(target_vendor = "apple"))]
-        assert!(active, "premise: the frame routes");
+        let program = renderer.custom_material_shader(STOCK_IBL_MATERIAL).expect("premise: the program is built");
+        assert_eq!(renderer.stock_ibl_active(), cx.draw_shader_ready(program, renderer.hdr_output), "premise: the frame routes once the program can draw");
         let chrome = wants_pbr(&renderer, "test/chrome");
         // Each lane's walk: the stock lanes (no program), the stock IBL
-        // program's own pass and the host material's own pass.
-        for lane in [None, Some(STOCK_IBL_MATERIAL), Some("paint")] {
+        // program's own pass and the host material's own pass, in a frame
+        // that routes and in one that waits for the program's pipeline (a
+        // test runs no beat, so the HAL has made none: this frame waits).
+        for (active, lane) in [true, false].into_iter().flat_map(|active| [None, Some(STOCK_IBL_MATERIAL), Some("paint")].map(|lane| (active, lane))) {
             let walking = lane.and_then(|name| renderer.custom_draws.remove(name).map(|m| (name, m)));
             assert!(!renderer.has_own_material(&stock, lane), "lane {lane:?}: no name, no material of its own");
             assert!(!renderer.has_own_material(&missing, lane), "lane {lane:?}: a name that is not installed is no material of its own");
             assert!(renderer.has_own_material(&own, lane), "lane {lane:?}: an installed material is the model's own");
-            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(&missing, lane), false), active, "lane {lane:?}: the shiny model takes the stock IBL route, as the shiny stock prop beside it");
-            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(&stock, lane), false), active);
-            assert!(!takes_stock_ibl(active, chrome, renderer.has_own_material(&own, lane), false), "lane {lane:?}: the model with its own program keeps it");
+            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(&missing, lane), false), active, "lane {lane:?}, routing {active}: the shiny model takes the stock IBL route, as the shiny stock prop beside it");
+            assert_eq!(takes_stock_ibl(active, chrome, renderer.has_own_material(&stock, lane), false), active, "lane {lane:?}, routing {active}");
+            assert!(!takes_stock_ibl(active, chrome, renderer.has_own_material(&own, lane), false), "lane {lane:?}, routing {active}: the model with its own program keeps it");
             if let Some((name, m)) = walking { renderer.custom_draws.insert(name.to_string(), m); }
         }
         // The program's pass draws when such a model is listed, alone too
